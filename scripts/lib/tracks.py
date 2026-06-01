@@ -23,6 +23,12 @@ _TRACK_EVENTS_FILE = "track_events.ndjson"
 
 VALID_PHASES = frozenset({"queued", "active", "parked", "done"})
 
+VALID_HORIZONS = frozenset({"now", "next", "later"})
+
+
+class InvalidHorizonError(ValueError):
+    pass
+
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued":  frozenset({"active", "parked"}),
     "active":  frozenset({"done", "parked"}),
@@ -119,30 +125,58 @@ def create_track(
     pr_ref: Optional[str] = None,
     trigger_condition: Optional[str] = None,
     metadata_json: Optional[str] = None,
+    horizon: Optional[str] = None,
 ) -> dict[str, Any]:
     if phase not in VALID_PHASES:
         raise InvalidPhaseError(f"Invalid phase: {phase!r}. Must be one of {sorted(VALID_PHASES)}")
+    if horizon is not None and horizon not in VALID_HORIZONS:
+        raise InvalidHorizonError(
+            f"Invalid horizon: {horizon!r}. Must be one of {sorted(VALID_HORIZONS)} or None"
+        )
 
     now = _now_utc()
     _emit_track_event(state_dir, "track_created", track_id, project_id, "system", {"title": title})
     conn = _get_conn(state_dir)
     try:
-        conn.execute(
-            """
-            INSERT INTO tracks (
-                track_id, project_id, title, goal_state, phase, next_up, sort_order, priority,
-                requires_operator_promotion, instruction_template, context_composer_rules,
-                pr_ref, trigger_condition, created_at, phase_changed_at,
-                metadata_json
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                track_id, project_id, title, goal_state, phase, sort_order, priority,
-                requires_operator_promotion, instruction_template, context_composer_rules,
-                pr_ref, trigger_condition, now, now,
-                metadata_json or "{}",
-            ),
+        # horizon (migration 0027) is optional: only reference the column when it
+        # exists, so the DAL stays compatible with pre-0027 (v24-era) databases.
+        has_horizon = any(
+            row[1] == "horizon" for row in conn.execute("PRAGMA table_info('tracks')")
         )
+        if has_horizon:
+            conn.execute(
+                """
+                INSERT INTO tracks (
+                    track_id, project_id, title, goal_state, phase, next_up, sort_order, priority,
+                    requires_operator_promotion, instruction_template, context_composer_rules,
+                    pr_ref, trigger_condition, created_at, phase_changed_at,
+                    metadata_json, horizon
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    track_id, project_id, title, goal_state, phase, sort_order, priority,
+                    requires_operator_promotion, instruction_template, context_composer_rules,
+                    pr_ref, trigger_condition, now, now,
+                    metadata_json or "{}", horizon,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO tracks (
+                    track_id, project_id, title, goal_state, phase, next_up, sort_order, priority,
+                    requires_operator_promotion, instruction_template, context_composer_rules,
+                    pr_ref, trigger_condition, created_at, phase_changed_at,
+                    metadata_json
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    track_id, project_id, title, goal_state, phase, sort_order, priority,
+                    requires_operator_promotion, instruction_template, context_composer_rules,
+                    pr_ref, trigger_condition, now, now,
+                    metadata_json or "{}",
+                ),
+            )
         conn.commit()
         row = conn.execute(
             "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
@@ -152,6 +186,80 @@ def create_track(
     finally:
         conn.close()
     return result
+
+
+def update_authored_fields(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    *,
+    title: Optional[str] = None,
+    goal_state: Optional[str] = None,
+    priority: Optional[str] = None,
+    sort_order: Optional[int] = None,
+    horizon: Optional[str] = None,
+    pr_ref: Optional[str] = None,
+    metadata_json: Optional[str] = None,
+    actor: str = "system",
+) -> dict[str, Any]:
+    """Update ONLY authored-derived fields on an existing track.
+
+    Used by the ROADMAP seeder for idempotent re-runs. Deliberately NEVER
+    touches `phase` (declared status is operator/T0/reconciler territory) or
+    `next_up`. Only the fields passed (non-None) are written. Emits a
+    `track_authored_synced` audit event listing the changed columns.
+
+    Raises TrackNotFoundError if the track does not exist.
+    """
+    if horizon is not None and horizon not in VALID_HORIZONS:
+        raise InvalidHorizonError(
+            f"Invalid horizon: {horizon!r}. Must be one of {sorted(VALID_HORIZONS)} or None"
+        )
+
+    updates: dict[str, Any] = {}
+    if title is not None:
+        updates["title"] = title
+    if goal_state is not None:
+        updates["goal_state"] = goal_state
+    if priority is not None:
+        updates["priority"] = priority
+    if sort_order is not None:
+        updates["sort_order"] = sort_order
+    if horizon is not None:
+        updates["horizon"] = horizon
+    if pr_ref is not None:
+        updates["pr_ref"] = pr_ref
+    if metadata_json is not None:
+        updates["metadata_json"] = metadata_json
+
+    conn = _get_conn(state_dir)
+    try:
+        row = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        if not row:
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+
+        if updates:
+            _emit_track_event(
+                state_dir, "track_authored_synced", track_id, project_id, actor,
+                {"fields": sorted(updates.keys())},
+            )
+            set_clause = ", ".join(f"{col} = ?" for col in updates)
+            conn.execute(
+                f"UPDATE tracks SET {set_clause} WHERE track_id = ? AND project_id = ?",
+                (*updates.values(), track_id, project_id),
+            )
+            conn.commit()
+
+        updated = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return dict(updated)
+    finally:
+        conn.close()
 
 
 def get_track(

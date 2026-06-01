@@ -6,6 +6,8 @@ Steps:
   2. Apply schemas/migrations/0022_track_layer.sql (idempotent via user_version)
   3. PRAGMA pre-flight: assert tracks v22 schema intact before composite-key rebuild
   4. Apply schemas/migrations/0024_tracks_tenant_scoping.sql (idempotent via user_version)
+  5. PRAGMA pre-flight: assert tracks composite-key schema intact before adding horizon
+  6. Apply schemas/migrations/0027_planning_horizon_and_deliverable_view.sql (idempotent)
 """
 
 from __future__ import annotations
@@ -302,6 +304,92 @@ def apply_migration_v24(conn: sqlite3.Connection, project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 5: PRAGMA pre-flight for 0027 — assert composite-key tracks intact
+# ---------------------------------------------------------------------------
+
+def _ensure_dispatches_output_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently ensure dispatches carries output_ref + output_kind columns.
+
+    Migration 0027 creates the deliverables VIEW which reads dispatches.output_ref
+    and dispatches.output_kind. On the live DB these columns were added by the
+    structural-doctor repair step, but a fresh DB that arrives at v24 without the
+    structural-doctor pass (or via tests) will not have them. The VIEW creation
+    does not fail at DDL time (SQLite resolves view columns at query time), but
+    any SELECT from deliverables would fail.
+
+    This preflight adds the columns additively when they are absent, then back-
+    fills output_ref=pr_ref, output_kind='pr' for rows where pr_ref is set.
+    It is idempotent: column-existence checks guard the ALTER TABLE calls so
+    they are never attempted twice, and the UPDATE is a no-op after the first run.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+
+    if "output_ref" not in cols:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
+    if "output_kind" not in cols:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+
+    conn.execute(
+        "UPDATE dispatches SET output_ref = pr_ref, output_kind = 'pr' "
+        "WHERE pr_ref IS NOT NULL AND output_ref IS NULL"
+    )
+
+
+def _assert_tracks_v24_intact(conn: sqlite3.Connection) -> None:
+    """Assert tracks is in the composite-key (v24+) state before adding horizon.
+
+    0027 is purely additive (ALTER TABLE ADD COLUMN + a VIEW), so it only needs
+    the tracks table to exist with its composite-key index. It must NOT run on a
+    pre-v24 single-column-PK tracks table.
+    """
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    if 'tracks' not in tables:
+        raise RuntimeError(
+            "Required table 'tracks' not found. Run migrations 0022 + 0024 before 0027."
+        )
+    indexes = [row[1] for row in conn.execute("PRAGMA index_list('tracks')")]
+    if 'ux_tracks_next_up_per_project' not in indexes:
+        raise RuntimeError(
+            "tracks missing composite-key index 'ux_tracks_next_up_per_project' "
+            "(from 0024). Run migration 0024 before 0027."
+        )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+    if 'horizon' in cols:
+        raise RuntimeError(
+            "tracks already has 'horizon' column. Migration 0027 should be "
+            "skipped (user_version should be >= 27)."
+        )
+
+
+schema_migration.register_preflight(27, _ensure_dispatches_output_columns)
+schema_migration.register_preflight(27, _assert_tracks_v24_intact)
+
+
+# ---------------------------------------------------------------------------
+# Step 6: apply 0027 migration
+# ---------------------------------------------------------------------------
+
+def apply_migration_v27(conn: sqlite3.Connection, project_root: Path) -> None:
+    migration_path = _MIGRATIONS / "0027_planning_horizon_and_deliverable_view.sql"
+    if not migration_path.exists():
+        raise FileNotFoundError(f"Migration not found: {migration_path}")
+
+    sql = migration_path.read_text(encoding="utf-8")
+
+    current_version = schema_migration.get_user_version(conn)
+    if current_version >= 27:
+        print(f"  [skip] migration 0027 already applied (user_version={current_version})")
+        return
+
+    _assert_tracks_v24_intact(conn)
+    print("  [apply] migration 0027_planning_horizon_and_deliverable_view.sql ...")
+    schema_migration.apply_script_if_below(conn, 27, sql)
+    print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -338,6 +426,10 @@ def run(project_root: Path | None = None) -> None:
 
         # Apply 0024 — rebuilds track tables with composite (track_id, project_id) PKs
         apply_migration_v24(conn, project_root)
+        conn.commit()
+
+        # Apply 0027 — additive: tracks.horizon column + deliverables derived view
+        apply_migration_v27(conn, project_root)
         conn.commit()
 
         print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")
