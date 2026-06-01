@@ -2006,12 +2006,16 @@ class TestSubmitVerify(_LaneTestCase):
         self.assertEqual(len(post_paste_enters), 1, "only one Enter expected when working state seen")
 
     def test_retry_enter_sent_when_sentinel_staged(self):
-        """When sentinel is staged after first Enter, exactly one retry Enter is sent."""
+        """When sentinel is staged after first Enter, exactly one retry Enter is sent.
+
+        With the guarded-retry loop, the guard check must also be staged for a retry
+        Enter to fire (the guard prevents stray Enters landing in a running session).
+        """
         fake = FakeTmux(
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
-            # First capture: staged; second: working state (clears staged).
-            post_paste_capture_seq=[self._SENTINEL, self._WORKING],
+            # Fast-path: staged; attempt-0 guard: staged → retry Enter; next check: working.
+            post_paste_capture_seq=[self._SENTINEL, self._SENTINEL, self._WORKING],
         )
         lane = self._make_lane(fake)
         # Dispatch body must contain the sentinel for _still_staged() to trigger.
@@ -2610,6 +2614,278 @@ class TestCaptureNormalizerCloseout(_LaneTestCase):
         self.assertEqual(
             normalizer_calls, [],
             "normalizer must not be called when VNX_TMUX_CAPTURE=0 (no raw_log)",
+        )
+
+
+# ---------------------------------------------------------------------------
+# GAP 6: bounded guarded-retry loop + adaptive paste-settle
+# ---------------------------------------------------------------------------
+
+class _StagedVerifyRunner:
+    """Fake tmux runner for bounded-retry _verify_submit tests.
+
+    Returns ``capture_seq`` items in order for ``capture-pane`` calls.
+    Counts ``send-keys Enter`` calls from within _verify_submit.
+    """
+
+    def __init__(self, capture_seq: list[str]):
+        self._seq = list(capture_seq)
+        self.enter_count = 0
+
+    def available(self) -> bool:
+        return True
+
+    def run(self, args, *, timeout=10, input_text=None) -> TmuxResult:
+        cmd = args[0] if args else ""
+        if cmd == "capture-pane":
+            content = self._seq.pop(0) if self._seq else "? for shortcuts\n> "
+            return TmuxResult(0, content)
+        if cmd == "send-keys" and args and args[-1] == "Enter":
+            self.enter_count += 1
+        return TmuxResult(0)
+
+
+class TestBoundedGuardedRetry(unittest.TestCase):
+    """Bounded guarded-retry loop: VNX_TMUX_SUBMIT_MAX_RETRIES (default 3) retries,
+    each guarded by a _still_staged() check before sending Enter."""
+
+    SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+    WORKING = "esc to interrupt"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def _lane(self, runner):
+        return TmuxInteractiveDispatch(
+            self.state_dir,
+            runner=runner,
+            project_root=self.state_dir,
+        )
+
+    def _verify(self, runner, body, *, timeout="0.5", retry_delay="0", max_retries="3"):
+        env = {
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": timeout,
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": retry_delay,
+            "VNX_TMUX_SUBMIT_MAX_RETRIES": max_retries,
+        }
+        with patch.dict(os.environ, env):
+            return self._lane(runner)._verify_submit("pane-0", body)
+
+    def _staged_pane(self) -> str:
+        """Content that _still_staged() recognizes as staged (bracketed-paste + sentinel)."""
+        return f"[Pasted text (4096 chars)]\n{self.SENTINEL}"
+
+    def _submitted_pane(self) -> str:
+        """Content that _still_staged() recognizes as submitted (working marker visible)."""
+        return f"scrollback...\n{self.WORKING}\n> "
+
+    def _body_with_sentinel(self) -> str:
+        return f"## Context\n\nDo the thing.\n\n{self.SENTINEL}"
+
+    def test_fast_path_sends_no_retry_enter(self):
+        """(a) Fast path: pane already working → no retry Enter, returns True."""
+        runner = _StagedVerifyRunner([self._submitted_pane()])
+        result = self._verify(runner, self._body_with_sentinel())
+        self.assertTrue(result, "fast path must return True when already submitted")
+        self.assertEqual(
+            runner.enter_count, 0,
+            "no retry Enter must be sent on fast path",
+        )
+
+    def test_transient_stage_clears_after_retries_returns_true(self):
+        """(b) Transient stage: staged for first 2 guard-checks, clears on 3rd.
+        Sends >=2 retry Enters, returns True."""
+        # Flow (retry_delay=0 → no poll-loop iterations):
+        #   Fast-path check: staged (capture #1)
+        #   Attempt 0 guard: staged (capture #2) → Enter #1
+        #   Attempt 1 guard: staged (capture #3) → Enter #2
+        #   Attempt 2 guard: submitted (capture #4) → return True
+        seq = [
+            self._staged_pane(),    # fast-path check
+            self._staged_pane(),    # attempt 0 guard
+            self._staged_pane(),    # attempt 1 guard
+            self._submitted_pane(), # attempt 2 guard → clears
+        ]
+        runner = _StagedVerifyRunner(seq)
+        result = self._verify(runner, self._body_with_sentinel(), retry_delay="0")
+        self.assertTrue(result, "must return True when staged clears within retries")
+        self.assertGreaterEqual(
+            runner.enter_count, 2,
+            f"must send >=2 retry Enters; got {runner.enter_count}",
+        )
+
+    def test_permanent_stage_returns_false_after_max_retries(self):
+        """(c) Permanent stage: stays staged through all retries + final check.
+        Returns False after max_retries within verify_timeout. Sends exactly max_retries Enters."""
+        max_retries = 3
+        # Flow (retry_delay=0):
+        #   Fast-path check: staged (#1)
+        #   Attempt 0 guard: staged (#2) → Enter #1
+        #   Attempt 1 guard: staged (#3) → Enter #2
+        #   Attempt 2 guard: staged (#4) → Enter #3
+        #   Final check: staged (#5) → return False
+        seq = [self._staged_pane()] * 6  # 1 extra for safety
+        runner = _StagedVerifyRunner(seq)
+        result = self._verify(
+            runner, self._body_with_sentinel(),
+            retry_delay="0", max_retries=str(max_retries),
+        )
+        self.assertFalse(result, "must return False when staged never clears")
+        self.assertEqual(
+            runner.enter_count, max_retries,
+            f"must send exactly {max_retries} retry Enters; got {runner.enter_count}",
+        )
+
+    def test_max_retries_env_overrides_default(self):
+        """VNX_TMUX_SUBMIT_MAX_RETRIES=5 overrides the default of 3."""
+        max_retries = 5
+        seq = [self._staged_pane()] * 10
+        runner = _StagedVerifyRunner(seq)
+        self._verify(
+            runner, self._body_with_sentinel(),
+            retry_delay="0", max_retries=str(max_retries),
+        )
+        self.assertEqual(
+            runner.enter_count, max_retries,
+            f"must send exactly {max_retries} Enters when env overrides; got {runner.enter_count}",
+        )
+
+    def test_no_stray_enter_when_submitted_between_attempts(self):
+        """Enter is ONLY sent when _still_staged() is True immediately before.
+        If the pane submits between the fast-path check and the first guard check,
+        no retry Enter is sent."""
+        seq = [
+            self._staged_pane(),    # fast-path: still staged → enter loop
+            self._submitted_pane(), # attempt 0 guard: already submitted → return True
+        ]
+        runner = _StagedVerifyRunner(seq)
+        result = self._verify(runner, self._body_with_sentinel(), retry_delay="0")
+        self.assertTrue(result, "must return True when pane submits between checks")
+        self.assertEqual(
+            runner.enter_count, 0,
+            "no retry Enter must be sent — pane was already submitted at guard check",
+        )
+
+    def test_verify_timeout_bounds_retry_loop(self):
+        """A short verify_timeout limits total retries even when max_retries is high.
+
+        With a fake runner all operations are instant, so we mock time.monotonic to
+        simulate wall-clock time passing — each call advances by 0.5s. With a 1.0s
+        deadline, only ~2 calls to monotonic fit before the deadline is exceeded,
+        capping retries far below max_retries=100."""
+        staged = self._staged_pane()
+        runner = _StagedVerifyRunner([staged] * 50)
+        _t = [0.0]
+
+        def fake_monotonic():
+            _t[0] += 0.5
+            return _t[0]
+
+        with patch("time.monotonic", side_effect=fake_monotonic):
+            result = self._verify(
+                runner, self._body_with_sentinel(),
+                timeout="1.0", retry_delay="0", max_retries="100",
+            )
+
+        # deadline = 0.5 + 1.0 = 1.5; each monotonic call steps 0.5s
+        # → attempt 0: 1.0 < 1.5 → guard check → Enter; poll: 1.5+0=1.5→2.0≥1.5 exit
+        # → attempt 1: 2.5 < 1.5 False → break → final check → return False
+        self.assertFalse(result, "must return False when deadline expires while staged")
+        self.assertLess(
+            runner.enter_count, 100,
+            f"deadline must cap retries; got {runner.enter_count} (expected << 100)",
+        )
+
+
+class TestAdaptivePasteSettle(_LaneTestCase):
+    """_deliver_instruction adapts paste-settle to body size."""
+
+    def test_settle_scales_with_body_size(self):
+        """Large body → longer settle. Small body → base settle only."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        # Create a large body (>50k chars).
+        large_body = "x" * 75000 + "\n\n<!-- VNX-END-OF-INSTRUCTION -->"
+        # Expected settle: 0.75 (base) + min(75000/50000, 2.0) = 0.75 + 1.5 = 2.25
+        expected_large_settle = 0.75 + min(75000 / 50000.0, 2.0)
+
+        sleep_calls = []
+
+        def fake_sleep(duration):
+            sleep_calls.append(duration)
+
+        with patch("time.sleep", side_effect=fake_sleep):
+            with patch.dict(os.environ, {"VNX_TMUX_PASTE_SETTLE_SECONDS": "0.75"}):
+                lane._deliver_instruction("pane-0", large_body)
+
+        # Pastes (load-buffer, paste-buffer) + settle sleep + Enter send-keys.
+        # Find the settle sleep: it's the largest sleep since there may be poll sleeps too.
+        self.assertTrue(sleep_calls, "time.sleep must have been called for settle")
+        settle_duration = max(sleep_calls)  # settle is the longest sleep in _deliver_instruction
+        self.assertAlmostEqual(
+            settle_duration, expected_large_settle, places=1,
+            msg=f"settle {settle_duration:.2f}s != expected {expected_large_settle:.2f}s for 75k body",
+        )
+
+    def test_settle_capped_at_two_seconds_extra(self):
+        """Extra settle component is capped at 2.0s regardless of body size."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        # Body > 100k chars (200k) → extra = min(200000/50000, 2.0) = 2.0
+        huge_body = "y" * 200000 + "\n\n<!-- VNX-END-OF-INSTRUCTION -->"
+        expected_settle = 0.75 + 2.0  # capped
+
+        sleep_calls = []
+
+        def fake_sleep(duration):
+            sleep_calls.append(duration)
+
+        with patch("time.sleep", side_effect=fake_sleep):
+            with patch.dict(os.environ, {"VNX_TMUX_PASTE_SETTLE_SECONDS": "0.75"}):
+                lane._deliver_instruction("pane-0", huge_body)
+
+        self.assertTrue(sleep_calls, "time.sleep must have been called")
+        settle_duration = max(sleep_calls)
+        self.assertAlmostEqual(
+            settle_duration, expected_settle, places=1,
+            msg=f"settle {settle_duration:.2f}s != expected {expected_settle:.2f}s (capped at 2.75)",
+        )
+
+    def test_small_body_uses_base_settle_only(self):
+        """Body under 50k chars → no extra settle, uses base only."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        small_body = "Do the thing."  # tiny, << 50k
+        expected_settle = 0.75  # base only
+
+        sleep_calls = []
+
+        def fake_sleep(duration):
+            sleep_calls.append(duration)
+
+        with patch("time.sleep", side_effect=fake_sleep):
+            with patch.dict(os.environ, {"VNX_TMUX_PASTE_SETTLE_SECONDS": "0.75"}):
+                lane._deliver_instruction("pane-0", small_body)
+
+        self.assertTrue(sleep_calls, "time.sleep must have been called")
+        settle_duration = max(sleep_calls)
+        self.assertAlmostEqual(
+            settle_duration, expected_settle, places=1,
+            msg=f"small body settle {settle_duration:.2f}s != expected {expected_settle:.2f}s",
         )
 
 
