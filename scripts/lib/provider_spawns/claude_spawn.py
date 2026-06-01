@@ -100,6 +100,7 @@ def spawn_claude(
     total_deadline: float = 900.0,
     role: Optional[str] = None,
     requires_mcp: bool = False,
+    scrub_env_keys: Optional[frozenset] = None,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -192,6 +193,7 @@ def spawn_claude(
         extra_cli_args=extra_cli_args,
         role=role,
         requires_mcp=requires_mcp,
+        scrub_env_keys=scrub_env_keys,
     )
 
     if not deliver_result.success:

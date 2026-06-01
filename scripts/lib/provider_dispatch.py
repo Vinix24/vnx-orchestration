@@ -1152,10 +1152,14 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
     the lane must never ride the production OAuth account.
     """
     from provider_spawns.deepseek_harness_spawn import (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL,
         DEEPSEEK_API_KEY_ENV,
+        DeepSeekHarnessSpawnResult,
         resolve_harness_model,
         spawn_deepseek_harness,
     )
+
+    start_time = datetime.now(timezone.utc)
 
     if not os.environ.get(DEEPSEEK_API_KEY_ENV):
         print(
@@ -1163,6 +1167,27 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             "(own-key key-auth; OAuth subscription is forbidden for this lane)",
             file=sys.stderr,
         )
+        end_time = datetime.now(timezone.utc)
+        _blocked_result = DeepSeekHarnessSpawnResult(
+            returncode=_EX_USAGE,
+            completion={},
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            error=f"missing {DEEPSEEK_API_KEY_ENV} — blocked before spawn",
+            token_usage=None,
+        )
+        try:
+            _emit_governance(
+                args, "deepseek-harness", DEFAULT_DEEPSEEK_HARNESS_MODEL,
+                _blocked_result, start_time, end_time, "blocked",
+            )
+        except Exception as _eg_exc:
+            logger.error(
+                "_dispatch_deepseek_harness: emit_governance for blocked dispatch failed: %s",
+                _eg_exc,
+            )
         return _EX_USAGE
 
     event_store = None
@@ -1179,7 +1204,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
 
     model = resolve_harness_model(args.model if args.model != "sonnet" else None)
     enriched_instruction = _enrich_instruction(args)
-    start_time = datetime.now(timezone.utc)
+    # start_time already set at top of function (before the missing-key guard).
     try:
         result = spawn_deepseek_harness(
             prompt=enriched_instruction,

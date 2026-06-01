@@ -251,6 +251,7 @@ class SubprocessAdapter:
         extra_cli_args: Optional[List[str]] = None,
         role: Optional[str] = None,
         requires_mcp: bool = False,
+        scrub_env_keys: Optional[frozenset] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -309,9 +310,12 @@ class SubprocessAdapter:
         }
         if cwd is not None:
             popen_kwargs["cwd"] = str(cwd)
-        if extra_env:
+        if extra_env or scrub_env_keys:
             merged_env = os.environ.copy()
-            merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            if extra_env:
+                merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            for _scrub_key in (scrub_env_keys or ()):
+                merged_env.pop(_scrub_key, None)
             popen_kwargs["env"] = merged_env
 
         # Clear stale session_id before spawning; updated when the init event arrives.

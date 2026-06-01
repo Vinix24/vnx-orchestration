@@ -67,6 +67,11 @@ MCP_OFF_CONFIG = '{"mcpServers":{}}'
 # Environment variable that holds the operator's own DeepSeek API key.
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
+# Keys that must be absent from the final child env — specifically the production
+# Anthropic API key which would authenticate against api.anthropic.com and risk
+# account ban (constraint: deepseek-harness-subscription-blocked).
+_HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY"})
+
 
 def resolve_harness_model(model: Optional[str] = None) -> str:
     """Return the DeepSeek model id for the harness lane.
@@ -222,6 +227,7 @@ def spawn_deepseek_harness(
         extra_env=merged_env,
         extra_cli_args=build_harness_cli_args(),
         cwd=cwd,
+        scrub_env_keys=_HARNESS_SCRUB_KEYS,
         **kwargs,
     )
 

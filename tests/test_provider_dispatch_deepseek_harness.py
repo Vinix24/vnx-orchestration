@@ -79,8 +79,35 @@ class TestRouting:
         args = self._args()
         with patch.dict("os.environ", {}, clear=False):
             os.environ.pop("DEEPSEEK_API_KEY", None)
-            rc = pd._dispatch_deepseek_harness(args)
+            with patch.object(pd, "_emit_governance", return_value=None):
+                rc = pd._dispatch_deepseek_harness(args)
         assert rc == pd._EX_USAGE
+
+    def test_handler_missing_key_emits_governance_receipt(self):
+        """Missing DEEPSEEK_API_KEY must still write a governance receipt (audit trail)."""
+        import os
+        args = self._args()
+        emit_calls = []
+
+        def _capture_emit(a, provider, model, result, start, end, status):
+            emit_calls.append({
+                "provider": provider,
+                "model": model,
+                "status": status,
+                "error": getattr(result, "error", None),
+            })
+
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+            with patch.object(pd, "_emit_governance", side_effect=_capture_emit):
+                rc = pd._dispatch_deepseek_harness(args)
+
+        assert rc == pd._EX_USAGE, "must still return non-zero exit code"
+        assert len(emit_calls) == 1, "_emit_governance must be called exactly once"
+        call = emit_calls[0]
+        assert call["provider"] == "deepseek-harness"
+        assert call["status"] == "blocked"
+        assert call["error"] is not None and "DEEPSEEK_API_KEY" in call["error"]
 
 
 # ---------------------------------------------------------------------------

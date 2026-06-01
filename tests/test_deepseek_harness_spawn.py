@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -264,6 +264,72 @@ class TestFailClosedNoKey:
             )
         assert spawn_called["count"] == 0
         assert result.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 regression: ANTHROPIC_API_KEY must not reach the final Popen env
+# ---------------------------------------------------------------------------
+
+class TestFinalPopenEnvScrub:
+    """Verify ANTHROPIC_API_KEY is actively deleted from the child env.
+
+    Mocks subprocess.Popen at the subprocess_adapter layer (not spawn_claude)
+    so the captured env is the FINAL merged dict that reaches the OS process.
+    Also mocks read_events_with_timeout to avoid trying to read from the fake
+    process stdout.
+    """
+
+    def test_anthropic_api_key_absent_from_final_popen_env(self):
+        """ANTHROPIC_API_KEY must be absent even when present in os.environ."""
+        import subprocess_adapter as sa
+
+        captured = {}
+
+        class _FakeProc:
+            pid = 9999
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def _fake_popen(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            proc = _FakeProc()
+            # Provide real pipe fds so Popen tracking code doesn't crash.
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            return proc
+
+        def _empty_events(self_adapter, terminal_id, **kw):
+            return iter([])
+
+        with patch.dict(
+            "os.environ",
+            {"ANTHROPIC_API_KEY": "sk-ant-real-production-key", "DEEPSEEK_API_KEY": _FAKE_KEY},
+        ), patch.object(sa.subprocess, "Popen", _fake_popen), \
+                patch("subprocess_adapter.os.setsid", lambda: None), \
+                patch.object(sa.SubprocessAdapter, "read_events_with_timeout", _empty_events):
+            spawn_deepseek_harness(
+                prompt="Reply OK.",
+                model=None,
+                dispatch_id="d-scrub-test",
+                terminal_id="T1",
+                api_key=_FAKE_KEY,
+            )
+
+        env = captured.get("env")
+        assert env is not None, "Popen must receive an explicit env dict (not None)"
+        assert "ANTHROPIC_API_KEY" not in env, (
+            "ANTHROPIC_API_KEY must be scrubbed from the final Popen env "
+            "(present in os.environ but must not reach the DeepSeek child process)"
+        )
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == _FAKE_KEY, (
+            "ANTHROPIC_AUTH_TOKEN (DeepSeek own key) must be present"
+        )
+        assert env.get("ANTHROPIC_BASE_URL") == DEEPSEEK_ANTHROPIC_BASE_URL
 
 
 if __name__ == "__main__":
