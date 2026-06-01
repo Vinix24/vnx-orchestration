@@ -1,0 +1,181 @@
+# Provider Lanes
+
+VNX drives AI coding CLIs as subprocess workers. It never imports a vendor SDK.
+Every Claude, Codex, Gemini, Kimi, DeepSeek, and Ollama call goes through the
+provider's own binary or a CLI process VNX spawns. The `no-anthropic-sdk`
+constraint in `scripts/lib/providers/provider_constraints.yaml` enforces this in
+CI: any `import anthropic`, `from anthropic import`, or `@anthropic-ai/sdk`
+string fails the grep gate.
+
+This is an account-safety choice, not a stylistic one. Running an OAuth
+subscription token through a provider SDK has gotten accounts banned (the
+opencode and openclaw precedent). VNX stays CLI-driven so my production Claude
+account is never the thing that pays for an SDK shortcut.
+
+The trade is real and worth stating up front: subprocess workers are harder to
+instrument than in-process SDK calls. I recover observability through receipts,
+event streams, and a captured conversation log instead of SDK callbacks. The
+rest of this doc is the map of which lane runs which work, and where the lanes
+do not yet behave identically.
+
+## The lanes
+
+| Lane | Binary / transport | Auth | Primary use | Module |
+|---|---|---|---|---|
+| claude-subprocess | `claude -p` headless | OAuth subscription today; API credits after June 15, 2026 | reference worker (code + commit) | `scripts/lib/subprocess_dispatch.py` |
+| claude-tmux-spawn | interactive `claude` in a tmux session | OAuth subscription (preserved) | worker after June 15; code + commit | `scripts/lib/tmux_interactive_dispatch.py` |
+| codex | `codex exec` CLI | OpenAI CLI auth | strict diff-mode review | `scripts/lib/provider_dispatch.py` (`_dispatch_codex`) |
+| gemini | gemini CLI | Google CLI auth | review | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
+| kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
+| deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
+| ollama | local Ollama resolver | none (local) | privacy-sensitive work, resolver layer | routed via litellm `ollama` sub-provider |
+
+### claude-subprocess
+
+The reference worker lane. `claude -p` runs headless via
+`subprocess_dispatch.py`, enriched with skill context, intelligence injection,
+and the repo map. It is the lane every other lane is measured against, because
+it has the most receipts behind it.
+
+The June 15, 2026 billing change moves headless `claude -p` usage to API
+credits. The lane still works; it just stops being free under a subscription.
+That is the reason the tmux-spawn lane exists.
+
+### claude-tmux-spawn
+
+Interactive `claude` (never `claude -p`) driven inside a fresh, single-shot
+tmux session: spawn, deliver the instruction, wait for the completion receipt,
+tear down. No session reuse, no leases, no fixed terminal identity.
+
+The point of this lane is billing. Interactive Claude Code stays on the
+subscription after June 15, 2026, while headless moves to API credits. The lane
+guards that property: `_assert_no_headless_flags` rejects any `-p`/`--print`
+flag in the assembled launch command, so the lane cannot silently become a
+metered headless call.
+
+The lane is subscription-preserving and works today. The structural work
+(`PREPARE`, `GOVERN`, `RECEIPT`, `CAPTURE`) has shipped, which is what lets it
+emit a receipt and a unified report and normalize the captured conversation
+into the event store. It becomes the default Claude worker lane when the June 15
+billing change takes effect. I am hardening it toward that role; I do not yet
+claim it matches the subprocess lane on every surface.
+
+### codex
+
+`codex exec` for strict diff-mode review. Codex reads a diff and reports
+findings against it. This is the first review gate in the dual-LLM adversarial
+pattern (ADR-008). It wires the event store as its audit sink so a codex
+dispatch leaves the same NDJSON trail as a Claude dispatch.
+
+### gemini
+
+The second review gate. Gemini reviews from a different angle than codex; the
+two together plus deterministic CI form the three-gate review stack. Bound to a
+review contract hash like the codex gate.
+
+### kimi
+
+Kimi runs through the Kimi CLI with `kimi login` OAuth. VNX does not call the
+Moonshot API for this lane (`kimi-via-cli-only`, blocking). Using the CLI keeps
+cost attribution and rate-limit behavior in one place instead of split across an
+API key and a CLI session. Kimi is the synthesis and operational-angle lane:
+where codex finds diff-level defects, kimi reasons about whether the change
+makes operational sense.
+
+### deepseek-harness
+
+DeepSeek run through the Claude harness. The `claude` CLI is pointed at
+DeepSeek's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL`, authenticated
+with my own `DEEPSEEK_API_KEY` in key-auth mode, with telemetry and the updater
+disabled and MCP off. This is an execution lane, not a review lane: it reuses the
+governed Claude spawn path so it emits a receipt and is not the raw `claude -p`
+receipt-bypass.
+
+The hard line: this lane requires the own DeepSeek key. The dispatch fast-fails
+before any subprocess spawn when `DEEPSEEK_API_KEY` is absent. Routing DeepSeek
+through the production OAuth subscription is blocked
+(`deepseek-harness-subscription-blocked`), because that would redirect the
+protected account identity to a third-party endpoint, which is the same ban risk
+as importing the SDK. The keyed lane routes via `claude_harness_keyed` and clears
+the pre-flight; the subscription lane (`claude_harness_subscription`) does not.
+
+Measured on Claude Code 2.1.150 (2026-05-26): with the hardening above, zero
+calls reached `api.anthropic.com` and all inference went to the DeepSeek
+endpoint. That measurement is the basis for allowing the keyed lane at all.
+
+### ollama
+
+Local Ollama for the resolver layer and privacy-sensitive work, where no data
+leaves the machine. Routed through the litellm `ollama` sub-provider.
+
+## Report-writing divergence
+
+This is the most important nuance to get right, because the receipt and report
+are the whole point of the system and the two Claude lanes do not produce them
+the same way.
+
+**tmux-spawn lane: the worker authors its own report.** The completion protocol
+appended to every tmux dispatch instructs the worker to write its unified report
+to `unified_reports/` and then emit the completion receipt as its last step. The
+report body is what the worker actually wrote. `govern()` always runs as a
+backstop: if the worker did not produce a usable report, it emits an honest
+minimal body marked `contract_status="synthesized"` rather than leaving a gap.
+
+**provider_dispatch lanes (codex, gemini, kimi, deepseek-harness, litellm): the
+report is synthesized.** These lanes do not author a report. `_emit_governance`
+builds the unified report from the captured `completion_text` of the spawn
+result. The report body is a synthesis of what the process printed, not a
+document the worker chose to write.
+
+**The known gap.** An analysis-only dispatch on a provider_dispatch lane (review,
+audit, no commit) can yield an empty report body. The synthesized report is
+built from `completion_text`, and for some lanes the substantive output lands in
+the event stream rather than in a single completion string. When that happens the
+text is recoverable from `.vnx-data/events/` (live or archived under
+`.vnx-data/events/archive/`), but the unified report itself reads thin. This is a
+real gap, not a feature. Closing it is the Option B report-parity work targeted
+for 1.1: bring the synthesized-report path up to the same evidence quality as the
+worker-authored path.
+
+If you are debugging a thin report on a review lane, look in the event stream
+before concluding the dispatch did nothing.
+
+## When to use which lane
+
+| Work | Lane | Why |
+|---|---|---|
+| Code change that commits | claude-tmux-spawn (after June 15) or claude-subprocess | Worker authors its own report; this is the most-exercised path |
+| Burst / batch implementation | claude-subprocess | Headless throughput; lowest overhead per dispatch |
+| Strict diff review | codex (`codex exec`) | Reads the diff, reports defects against it |
+| Second-angle review | gemini | Different reviewer, contract-bound, pairs with codex |
+| Synthesis / operational review | kimi | Reasons about whether the change makes sense, not just diff defects |
+| Analysis or implementation on a non-Claude model | deepseek-harness | Governed, own-key, account-safe; never on the OAuth subscription |
+| Privacy-sensitive work, resolver layer | ollama | Local; no data leaves the machine |
+
+Code-and-commit work goes to a Claude lane because that is where report
+authorship and receipt quality are strongest. Review and analysis work goes to
+codex-exec, gemini, kimi, or the harness, with the report-divergence caveat above
+in mind for analysis-only dispatches.
+
+## Lane maturity
+
+I do not claim parity that is not measured.
+
+- **claude-subprocess** is the reference lane. It has the most receipts and is
+  the bar the others are held to.
+- **claude-tmux-spawn** works today and is subscription-preserving. Its
+  structural PREPARE/GOVERN/RECEIPT/CAPTURE work has shipped. It is hardening
+  toward becoming the June 15 default; it is not yet proven equal to the
+  subprocess lane on every surface.
+- **codex / gemini / kimi** are the review lanes. They emit receipts, reports,
+  and an event trail. The synthesized-report thinness on analysis-only dispatches
+  is the open gap (1.1).
+- **deepseek-harness** is governed and account-safe with the own key. Its
+  effectiveness was operator-measured on coding and tool tasks; that measurement
+  is internal, not a published benchmark.
+- **ollama** covers the resolver layer and local privacy work.
+
+The receipt format and the intelligence layer are uniform across all lanes
+today. Per-lane parity on the full PREPARE/GOVERN envelope, and the synthesized-
+report parity for analysis-only dispatches, is the dispatch-unification work
+targeted for the 1.x release.

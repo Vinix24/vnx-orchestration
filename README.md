@@ -1,6 +1,6 @@
 # VNX
 
-VNX runs AI coding CLI workers in tmux, isolated git worktrees, through review gates, with an append-only hash-chained receipt per dispatch.
+VNX runs AI coding CLI workers in tmux, isolated git worktrees, through review gates, with an append-only NDJSON receipt per dispatch.
 
 It is a local control plane for the AI coding CLIs that already sit on your machine. One orchestrator dispatches work to ephemeral workers; each worker runs in its own git worktree; review gates decide what merges; every dispatch leaves a receipt. VNX drives `claude`, `codex`, `gemini`, `kimi`, and local `ollama` with no vendor SDK. It calls the CLIs as subprocesses and never imports a provider library.
 
@@ -42,9 +42,9 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-05-30.
 
-**Tier 1, in production.** Append-only NDJSON receipts with a hash-chained ledger. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane (available and subscription-preserving; works today, is actively being hardened ahead of the June 15 OAuth rollout, and is set to become the production default as of June 15, 2026; the structural refactor toward full maturity is part of the 1.0 scope). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
+**Tier 1, in production.** Append-only NDJSON receipts with hash-chain verification tooling (`audit_chain`); per-append chain enforcement lands in 1.0.1. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane (available and subscription-preserving; works today, is actively being hardened ahead of the June 15 OAuth rollout, and is set to become the production default as of June 15, 2026; its PREPARE/GOVERN/RECEIPT/CAPTURE structural work has shipped). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
 
-**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot, the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
+**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot (FUT-1/FUT-2 shipped and the tracks layer activated for forward-state planning), the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
 
 **Tier 3, designed, not built.** Parallel multi-track execution. The wave scheduler, merge lock, and file-scope derivation are designed, not shipped. Treat it as architecture, not a feature.
 
@@ -83,7 +83,7 @@ VNX uses a T0 orchestrator and ephemeral workers. The old fixed T1-T3 mental mod
           (codex / gemini / CI)   (clean / pushed / dirty)
                      |
                      v
-   append-only NDJSON receipts  (hash-chained, one per dispatch)
+   append-only NDJSON receipts  (one per dispatch; hash-chain verify via audit_chain)
 ```
 
 Claude has two explicit lanes. The reference worker lane is Claude via `claude -p` subprocess in headless mode. The interactive tmux lane runs Claude on subscription; it is available now, subscription-preserving, and set to become the default lane as of the June 15, 2026 billing change — it is still maturing into that role.
@@ -94,11 +94,11 @@ The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interact
 
 Memory is the unsolved problem in agentic AI. Most systems bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
 
-The PAST is append-only NDJSON receipts: a hash-chained ledger of every dispatch, gate, and merge. It is forensic, not lossy. This is in production now, with thousands of receipts behind it.
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with thousands of receipts behind it.
 
 The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness.
 
-The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The autopilot ships opt-in and dark by default. It plans, but a human still approves the last step.
+The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The FUT-1 track schema, DAL, and CLI and the FUT-2 ADR-007 tenant-scoping have shipped, and the tracks layer is now activated for forward-state planning. The autopilot stays opt-in: it plans, but a human still approves the last step.
 
 A learning layer (`quality_intelligence.db`) consolidates the past into patterns and antipatterns that get injected into future dispatch context. The consolidation loop (auto-dream) is shipped and opt-in. It is burning in, not yet on by default.
 
