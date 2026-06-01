@@ -484,7 +484,7 @@ class TestHeadlessGuard(_LaneTestCase):
 
     def test_custom_launch_builder_with_dash_p_rejected(self):
         """Custom launch_builder returning a command with '-p' is blocked by final-command guard."""
-        def bad_builder(model, *, skip_permissions=False, extra_flags=""):
+        def bad_builder(model, *, skip_permissions=False, extra_flags="", **kwargs):
             return "claude -p something"
 
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
@@ -1017,6 +1017,78 @@ class TestUnifiedReportEmission(_LaneTestCase):
         self.assertFalse(result.success)
         self.assertIn("deadline", result.failure_reason)
         mock_emit.assert_called_once()
+
+    def test_report_emit_failure_marks_degraded(self):
+        """When unified_report emit fails, success=False with failure_reason=unified_report_emit_failed.
+
+        Regression for the codex-gate finding: a default-lane dispatch must not
+        claim success while leaving the audit trail without a linked report.
+        """
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch(
+            "governance_emit.emit_unified_report",
+            side_effect=RuntimeError("simulated disk full"),
+        ):
+            result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success, "success must be False when report emit fails")
+        self.assertEqual(
+            result.failure_reason,
+            "unified_report_emit_failed",
+            f"expected 'unified_report_emit_failed', got {result.failure_reason!r}",
+        )
+        # Worker receipt is still present (worker completed OK, only report is missing).
+        self.assertIsNotNone(result.receipt)
+        self.assertEqual(result.receipt.get("status"), "done")
+
+
+class TestCompletionReceiptReportPath(_LaneTestCase):
+    """Completion receipt emitted by the worker must carry report_path (audit linkage)."""
+
+    def test_completion_protocol_receipt_includes_report_path(self):
+        """The receipt JSON in the worker footer must include a non-empty report_path.
+
+        Regression for codex-gate: tmux receipts omitted report_path, breaking the
+        receipt->report linkage on the now-DEFAULT lane.
+        """
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract bash command from completion protocol")
+        argv = shlex.split(m.group(1).strip())
+        receipt = json.loads(argv[argv.index("--receipt") + 1])
+
+        self.assertIn("report_path", receipt, "report_path must be present in the receipt payload")
+        rp = receipt["report_path"]
+        self.assertTrue(rp, "report_path must be non-empty")
+        self.assertIn(self.DISPATCH_ID, rp, "report_path must reference the dispatch_id")
+        self.assertTrue(rp.endswith(".md"), "report_path must point to the .md unified report")
+
+    def test_completion_protocol_report_path_points_to_unified_reports_dir(self):
+        """report_path must be rooted in unified_reports/ relative to data_dir."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+        self.assertIsNotNone(m)
+        argv = shlex.split(m.group(1).strip())
+        receipt = json.loads(argv[argv.index("--receipt") + 1])
+
+        expected_report_path = str(
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        self.assertEqual(
+            receipt["report_path"],
+            expected_report_path,
+            "report_path must be the deterministic unified_reports/<dispatch_id>.md path",
+        )
 
 
 if __name__ == "__main__":
