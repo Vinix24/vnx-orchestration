@@ -23,8 +23,8 @@ SHADOW_LOG_FILE="${PROJECT_ROOT}/$(printf '.vnx-%s/logs/shadow_rotation.log' dat
 SHADOW_CRON_ENTRY="0 3 * * * VNX_HOME=$PROJECT_ROOT $PROJECT_ROOT/scripts/rotate_shadow_ledger.sh >> $SHADOW_LOG_FILE 2>&1"
 # Wave 5 / GAP 4 — nightly intelligence pipeline (deterministic, 0 LLM calls).
 # Runs at 04:00 after compact_state (02:30) and shadow rotation (03:00) so they don't overlap.
-# Proposes edits to .vnx-data/state/pending_edits.json (human-in-the-loop, never auto-applies).
-INTEL_LOG_FILE="$PROJECT_ROOT/.vnx-data/state/nightly_pipeline_cron.log"
+# Proposes edits to the state-dir pending_edits.json (human-in-the-loop, never auto-applies).
+INTEL_LOG_FILE="${PROJECT_ROOT}/$(printf '.vnx-%s/logs/nightly_pipeline_cron.log' data)"
 INTEL_CRON_ENTRY="0 4 * * * VNX_HOME=$PROJECT_ROOT $PROJECT_ROOT/scripts/nightly_intelligence_pipeline.sh >> $INTEL_LOG_FILE 2>&1"
 
 existing=$(crontab -l 2>/dev/null || true)
