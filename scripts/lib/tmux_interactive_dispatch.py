@@ -378,20 +378,67 @@ class TmuxInteractiveDispatch:
             enriched = f"{smart_context}\n\n{enriched}"
         return enriched
 
-    def _emit_unified_report(
+    def _govern_report(
         self,
         dispatch_id: str,
         terminal_id: str,
         instruction: str,
         receipt: "dict | None",
         duration_seconds: float,
+        *,
+        pr_id: "str | None" = None,
+        base_sha: "str | None" = None,
+        worktree_path: "Path | None" = None,
     ) -> "Path | None":
-        """Emit governance unified_report for audit parity with subprocess lane.
+        """Emit governance unified_report via the shared govern() step.
 
         Returns the emitted report path on success, None on failure.
         A None return on a governed-completion path (worker succeeded) is an
         audit-trail gap and must be surfaced by the caller.
+
+        Routes through dispatch_govern.govern() when VNX_SHARED_GOVERN=1,
+        otherwise falls back to the legacy placeholder emit path.
         """
+        shared_govern = os.environ.get("VNX_SHARED_GOVERN", "0").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
+        if shared_govern:
+            try:
+                from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
+                spec = GovernSpec(
+                    dispatch_id=dispatch_id,
+                    terminal_id=terminal_id,
+                    instruction=instruction,
+                    data_dir=self._state_dir.parent,
+                    state_dir=self._state_dir,
+                    pr_id=pr_id,
+                    base_sha=base_sha,
+                    worktree_path=worktree_path,
+                )
+                raw = GovernRaw(receipt=receipt, duration_seconds=duration_seconds)
+                outcome = govern(spec, raw, lane="tmux_interactive")
+                if outcome.report_path:
+                    logger.info(
+                        "interactive: govern() emitted report dispatch=%s "
+                        "contract_status=%s path=%s",
+                        dispatch_id, outcome.contract_status, outcome.report_path,
+                    )
+                else:
+                    logger.warning(
+                        "interactive: govern() returned no report_path for dispatch=%s "
+                        "contract_status=%s error=%s",
+                        dispatch_id, outcome.contract_status, outcome.error,
+                    )
+                return outcome.report_path
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "interactive: govern() failed for %s: %s — falling back to legacy emit",
+                    dispatch_id, exc,
+                )
+                # Fall through to legacy emit below.
+
+        # Legacy path (VNX_SHARED_GOVERN=0 or govern() errored).
         try:
             from governance_emit import emit_unified_report  # noqa: PLC0415
             status = (receipt or {}).get("status", "done")
@@ -1022,12 +1069,14 @@ class TmuxInteractiveDispatch:
             )
 
             if receipt is None:
-                self._emit_unified_report(
+                self._govern_report(
                     dispatch_id=dispatch_id,
                     terminal_id=label,
                     instruction=instruction,
                     receipt=None,
                     duration_seconds=time.monotonic() - start_time,
+                    base_sha=worktree_handle.base_sha if worktree_handle else None,
+                    worktree_path=worktree_handle.path if worktree_handle else None,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -1054,12 +1103,14 @@ class TmuxInteractiveDispatch:
                 "failed",
                 "blocked",
             )
-            emitted_report = self._emit_unified_report(
+            emitted_report = self._govern_report(
                 dispatch_id=dispatch_id,
                 terminal_id=label,
                 instruction=instruction,
                 receipt=receipt,
                 duration_seconds=time.monotonic() - start_time,
+                base_sha=worktree_handle.base_sha if worktree_handle else None,
+                worktree_path=worktree_handle.path if worktree_handle else None,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.

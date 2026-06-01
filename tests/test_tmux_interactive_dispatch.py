@@ -1350,5 +1350,126 @@ class TestFullDeliveredBodyOrder(_LaneTestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# T2: VNX_SHARED_GOVERN wiring on the tmux lane
+# ---------------------------------------------------------------------------
+
+class TestSharedGovernWiringTmux(_LaneTestCase):
+    """_govern_report routing: VNX_SHARED_GOVERN=1 routes through dispatch_govern.govern()."""
+
+    def _run_dispatch_with_govern_flag(self, flag_value: str, *, receipt_status: str = "done"):
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            receipt_status=receipt_status,
+        )
+        lane = self._make_lane(fake)
+
+        govern_calls = []
+
+        def fake_govern(spec, raw, lane):
+            govern_calls.append((spec, raw, lane))
+            from dispatch_govern import GovernedOutcome
+            return GovernedOutcome(
+                report_path=None,
+                contract_status="synthesized",
+                permission_enforcement="soft",
+            )
+
+        with patch.dict(os.environ, {"VNX_SHARED_GOVERN": flag_value}):
+            with patch("dispatch_govern.govern", side_effect=fake_govern):
+                result = self._fast_dispatch(lane)
+
+        return result, govern_calls
+
+    def test_shared_govern_1_routes_through_govern(self):
+        """VNX_SHARED_GOVERN=1: _govern_report calls dispatch_govern.govern()."""
+        _, govern_calls = self._run_dispatch_with_govern_flag("1")
+        self.assertGreaterEqual(
+            len(govern_calls), 1,
+            "dispatch_govern.govern() must be called when VNX_SHARED_GOVERN=1",
+        )
+
+    def test_shared_govern_1_passes_correct_lane(self):
+        """VNX_SHARED_GOVERN=1: govern() is called with lane='tmux_interactive'."""
+        _, govern_calls = self._run_dispatch_with_govern_flag("1")
+        self.assertTrue(govern_calls, "govern() must have been called")
+        _, _, lane_arg = govern_calls[-1]
+        self.assertEqual(lane_arg, "tmux_interactive")
+
+    def test_shared_govern_0_does_not_route_through_govern(self):
+        """VNX_SHARED_GOVERN=0 (default): _govern_report uses legacy emit path."""
+        govern_calls = []
+
+        def fake_govern(spec, raw, lane_name):
+            govern_calls.append((spec, raw, lane_name))
+            from dispatch_govern import GovernedOutcome
+            return GovernedOutcome(report_path=None, contract_status="synthesized")
+
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_SHARED_GOVERN": "0"}):
+            with patch("dispatch_govern.govern", side_effect=fake_govern):
+                with patch("governance_emit.emit_unified_report") as mock_emit:
+                    mock_emit.return_value = self.state_dir / "unified_reports" / f"{self.DISPATCH_ID}.md"
+                    self._fast_dispatch(lane)
+
+        # govern() must NOT be called; emit_unified_report IS called (legacy path).
+        self.assertEqual(len(govern_calls), 0, "govern() must NOT be called when flag=0")
+        mock_emit.assert_called()
+
+    def test_shared_govern_govern_error_falls_back_to_legacy(self):
+        """When govern() raises, _govern_report falls back to legacy emit."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_SHARED_GOVERN": "1"}):
+            with patch("dispatch_govern.govern", side_effect=RuntimeError("govern exploded")):
+                with patch("governance_emit.emit_unified_report") as mock_emit:
+                    mock_emit.return_value = self.state_dir / "unified_reports" / f"{self.DISPATCH_ID}.md"
+                    result = self._fast_dispatch(lane)
+
+        # Fallback succeeded; emit_unified_report was called.
+        mock_emit.assert_called()
+
+    def test_no_placeholder_in_govern_flag_on_reports(self):
+        """VNX_SHARED_GOVERN=1: emitted reports must not contain the legacy placeholder."""
+        placeholder = "Interactive tmux dispatch (lane: tmux_interactive). Status:"
+
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        written_bodies = []
+
+        def capturing_emit(*args, body_override=None, **kwargs):
+            written_bodies.append(body_override or "")
+            reports_dir = self.state_dir.parent / "unified_reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            path = reports_dir / f"{self.DISPATCH_ID}.md"
+            path.write_text(body_override or "fallback", encoding="utf-8")
+            return path
+
+        with patch.dict(os.environ, {"VNX_SHARED_GOVERN": "1"}):
+            with patch("governance_emit.emit_unified_report", side_effect=capturing_emit):
+                with patch("dispatch_govern._git_summary",
+                           return_value="feat: implement GOVERN with enough detail here to pass summary length check"):
+                    with patch("dispatch_govern._git_changes", return_value="scripts/lib/dispatch_govern.py | 5 ++"):
+                        self._fast_dispatch(lane)
+
+        for body in written_bodies:
+            self.assertNotIn(placeholder, body,
+                             f"Legacy placeholder found in governed report body: {body[:300]}")
+
+
 if __name__ == "__main__":
     unittest.main()
