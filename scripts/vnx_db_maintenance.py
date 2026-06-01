@@ -121,6 +121,15 @@ def _estimate_reclaimable(conn: sqlite3.Connection, total_prunable: int, db_size
         return 0
 
 
+def _write_audit_record(audit_path: Path, record: dict) -> None:
+    """Append one JSON line to the durable maintenance audit ledger. Failures surface to stderr, never crash the run."""
+    try:
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception as exc:
+        print(f"[vnx_db_maintenance] Failed to write audit ledger: {exc}", file=sys.stderr)
+
+
 def dry_run(db_path: Optional[str] = None, retention_days: int = DEFAULT_RETENTION_DAYS) -> dict:
     path = _resolve_db_path(db_path)
     if not path.exists():
@@ -184,17 +193,18 @@ def apply(db_path: Optional[str] = None, retention_days: int = DEFAULT_RETENTION
                 if table == "code_snippets":
                     # Prune snippet_metadata first (FK reference to code_snippets.rowid),
                     # then prune the FTS5 table itself.
-                    conn.execute(
+                    cur = conn.execute(
                         "DELETE FROM snippet_metadata WHERE snippet_rowid IN "
                         "(SELECT rowid FROM code_snippets WHERE last_updated IS NOT NULL AND last_updated < ?)",
                         (cutoff,),
                     )
+                    meta_deleted = cur.rowcount
                     cur = conn.execute(
                         "DELETE FROM code_snippets WHERE last_updated IS NOT NULL AND last_updated < ?",
                         (cutoff,),
                     )
                     pruned_counts[table] = cur.rowcount
-                    pruned_counts["snippet_metadata"] = pruned_counts.get("snippet_metadata", 0)
+                    pruned_counts["snippet_metadata"] = meta_deleted
                 elif table == "snippet_metadata":
                     # Already handled above when pruning code_snippets.
                     # Only run standalone if code_snippets was skipped or missing.
@@ -233,11 +243,7 @@ def apply(db_path: Optional[str] = None, retention_days: int = DEFAULT_RETENTION
         "bytes_reclaimed": reclaimed,
         "vacuumed": True,
     }
-    try:
-        with open(audit_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(audit_record, separators=(",", ":")) + "\n")
-    except Exception as exc:
-        print(f"[vnx_db_maintenance] Failed to write audit ledger: {exc}", file=sys.stderr)
+    _write_audit_record(audit_path, audit_record)
 
     return {
         "dry_run": False,

@@ -267,7 +267,7 @@ class TestApply:
         _insert_snippets(conn, ["2099-01-01"])
         conn.close()
 
-        apply(db_path=str(db), retention_days=30)
+        result = apply(db_path=str(db), retention_days=30)
 
         conn = sqlite3.connect(str(db))
         sm_count = conn.execute("SELECT COUNT(*) FROM snippet_metadata").fetchone()[0]
@@ -275,6 +275,10 @@ class TestApply:
         conn.close()
         assert cs_count == 1
         assert sm_count <= 1
+        assert result["pruned"].get("snippet_metadata", 0) > 0, (
+            "snippet_metadata count must be > 0 when metadata rows were pruned"
+        )
+        assert result["pruned"].get("code_snippets", 0) > 0
 
     def test_apply_writes_audit_ledger(self, tmp_path):
         """apply() must write exactly one NDJSON line to db_maintenance_audit.ndjson."""
