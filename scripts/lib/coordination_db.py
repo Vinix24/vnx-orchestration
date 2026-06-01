@@ -33,6 +33,7 @@ DB_FILENAME = "runtime_coordination.db"
 # ---------------------------------------------------------------------------
 
 DISPATCH_STATES = frozenset({
+    "proposed", "ready",
     "queued", "claimed", "delivering", "accepted", "running",
     "completed", "timed_out", "failed_delivery", "expired", "recovered", "dead_letter",
 })
@@ -43,6 +44,10 @@ ACCEPTED_OR_BEYOND_STATES = frozenset({
 LEASE_STATES = frozenset({"idle", "leased", "expired", "recovering", "released"})
 
 DISPATCH_TRANSITIONS: Dict[str, frozenset] = {
+    # Planning gate: proposed (un-approved) -> ready (operator-approved)
+    "proposed":        frozenset({"ready"}),
+    # Execution gate: ready -> claimed (dispatchable once promoted)
+    "ready":           frozenset({"claimed", "expired"}),
     "queued":          frozenset({"claimed", "expired"}),
     "claimed":         frozenset({"delivering", "expired", "recovered"}),
     "delivering":      frozenset({"accepted", "failed_delivery", "timed_out"}),

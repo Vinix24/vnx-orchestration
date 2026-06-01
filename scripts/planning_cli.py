@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""planning_cli.py — read surface for the VNX planning layer (Phase 1).
+"""planning_cli.py — planning layer read/write surface (Phase 1 + Phase 2).
 
 Delegated from `bin/vnx`:
   vnx objective list [--horizon now|next|later] [--phase ...] [--json]
   vnx objective show <track_id> [--json]
+  vnx deliverable add --objective <track_id> --output-kind <kind> --title "..."
+  vnx deliverable list [--objective <track_id>] [--json]
+  vnx deliverable promote <dispatch_id>
 
-Reads the live `tracks` table (the strategic layer of the NO-NODE model) and
-renders feature_id/title/phase/horizon/depends_on/pr_ref, grouped by horizon
-(now/next/later). This is the cold-start "what's next" answer — one query from
-the live DB, no handoff doc.
-
-`vnx promote` is deliberately NOT added here: the top-level `promote` verb is
-already taken by the PR-queue staging command (bin/vnx). The planning promote
-lands in Phase 2 as `vnx deliverable promote`.
+NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
+`vnx deliverable promote` is the human gate (proposed -> ready).
+`vnx promote` (top-level) is the PR-queue command — NOT the same.
 """
 
 from __future__ import annotations
@@ -20,7 +18,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -153,6 +154,299 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     return 0
 
 
+_VALID_OUTPUT_KINDS = ("pr", "post", "deal", "doc")
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _db_conn(state_dir: Path) -> sqlite3.Connection:
+    db = state_dir / tracks_lib.DB_FILENAME
+    conn = sqlite3.connect(str(db), timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def _has_col(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    return any(
+        row[1] == col for row in conn.execute(f"PRAGMA table_info('{table}')")
+    )
+
+
+def _has_table(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone())
+
+
+def _append_coordination_event(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    dispatch_id: str,
+    from_state: Optional[str],
+    to_state: Optional[str],
+    actor: str,
+    reason: Optional[str] = None,
+    project_id: str = "vnx-dev",
+) -> None:
+    if not _has_table(conn, "coordination_events"):
+        return
+    event_id = str(uuid.uuid4()).replace("-", "")[:16]
+    ts = _now_utc()
+    has_pid = _has_col(conn, "coordination_events", "project_id")
+    if has_pid:
+        conn.execute(
+            """
+            INSERT INTO coordination_events
+                (event_id, event_type, entity_type, entity_id,
+                 from_state, to_state, actor, reason, metadata_json, occurred_at, project_id)
+            VALUES (?, ?, 'dispatch', ?, ?, ?, ?, ?, '{}', ?, ?)
+            """,
+            (event_id, event_type, dispatch_id,
+             from_state, to_state, actor, reason, ts, project_id),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO coordination_events
+                (event_id, event_type, entity_type, entity_id,
+                 from_state, to_state, actor, reason, metadata_json, occurred_at)
+            VALUES (?, ?, 'dispatch', ?, ?, ?, ?, ?, '{}', ?)
+            """,
+            (event_id, event_type, dispatch_id,
+             from_state, to_state, actor, reason, ts),
+        )
+
+
+def cmd_deliverable_add(args: argparse.Namespace) -> int:
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.objective
+    output_kind = args.output_kind
+    title = args.title
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"Objective not found: {track_id!r} (project {project_id!r}). "
+            "Create it with `vnx objective add` or seed from ROADMAP first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    dispatch_id = f"dlv-{uuid.uuid4().hex[:12]}"
+    output_ref = f"{output_kind}:{dispatch_id}"
+    metadata = json.dumps({"title": title, "deliverable": True})
+    now = _now_utc()
+
+    conn = _db_conn(state_dir)
+    try:
+        has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
+        has_ok = _has_col(conn, "dispatches", "output_kind")
+        has_or = _has_col(conn, "dispatches", "output_ref")
+
+        cols = ["dispatch_id", "project_id", "state", "track", "metadata_json", "created_at", "updated_at"]
+        vals: list[Any] = [dispatch_id, project_id, "proposed", track_id, metadata, now, now]
+
+        if has_ok:
+            cols.append("output_kind")
+            vals.append(output_kind)
+        if has_or:
+            cols.append("output_ref")
+            vals.append(output_ref)
+        if has_oaa:
+            cols.append("operator_approved_at")
+            vals.append(None)
+
+        placeholders = ", ".join("?" * len(vals))
+        col_list = ", ".join(cols)
+        conn.execute(f"INSERT INTO dispatches ({col_list}) VALUES ({placeholders})", vals)
+
+        _append_coordination_event(
+            conn,
+            event_type="deliverable_created",
+            dispatch_id=dispatch_id,
+            from_state=None,
+            to_state="proposed",
+            actor="operator",
+            reason=f"deliverable add: {title!r}",
+            project_id=project_id,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    print(f"Deliverable created: {dispatch_id}")
+    print(f"  objective  : {track_id}")
+    print(f"  output_kind: {output_kind}")
+    print(f"  output_ref : {output_ref}")
+    print(f"  state      : proposed")
+    print(f"  title      : {title}")
+    print(f"  next       : vnx deliverable promote {dispatch_id}")
+    return 0
+
+
+def cmd_deliverable_list(args: argparse.Namespace) -> int:
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+
+    conn = _db_conn(state_dir)
+    try:
+        has_view = any(
+            row[0] == "deliverables"
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
+        )
+        if has_view:
+            if args.objective:
+                rows = conn.execute(
+                    """
+                    SELECT deliverable_ref, output_kind, track, dispatch_count,
+                           derived_status, last_activity
+                    FROM deliverables
+                    WHERE project_id = ? AND track = ?
+                    ORDER BY last_activity DESC
+                    """,
+                    (project_id, args.objective),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT deliverable_ref, output_kind, track, dispatch_count,
+                           derived_status, last_activity
+                    FROM deliverables
+                    WHERE project_id = ?
+                    ORDER BY track, last_activity DESC
+                    """,
+                    (project_id,),
+                ).fetchall()
+            records = [dict(r) for r in rows]
+        else:
+            # Fallback: read raw dispatches when view hasn't been applied yet
+            filter_clause = "AND track = ?" if args.objective else ""
+            params: list[Any] = [project_id]
+            if args.objective:
+                params.append(args.objective)
+            raw = conn.execute(
+                f"""
+                SELECT dispatch_id, state, track, output_kind, output_ref, metadata_json, updated_at
+                FROM dispatches
+                WHERE project_id = ? AND state IN ('proposed', 'ready') {filter_clause}
+                ORDER BY track, updated_at DESC
+                """,
+                params,
+            ).fetchall()
+            records = []
+            for r in raw:
+                meta = json.loads(r["metadata_json"] or "{}")
+                records.append({
+                    "deliverable_ref": r["output_ref"] or r["dispatch_id"],
+                    "output_kind": r["output_kind"] or "-",
+                    "track": r["track"] or "-",
+                    "dispatch_count": 1,
+                    "derived_status": r["state"],
+                    "last_activity": r["updated_at"],
+                    "title": meta.get("title", ""),
+                })
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps(records, indent=2, default=str))
+        return 0
+
+    if not records:
+        print(f"No deliverables for project '{project_id}'.")
+        if args.objective:
+            print(f"Add one: vnx deliverable add --objective {args.objective} --output-kind post --title '...'")
+        return 0
+
+    print(f"\nVNX deliverables — project '{project_id}'\n")
+    cur_track = None
+    for r in records:
+        track = r.get("track") or "-"
+        if track != cur_track:
+            print(f"  [{track}]")
+            cur_track = track
+        ref = r.get("deliverable_ref") or "-"
+        status = r.get("derived_status") or "-"
+        kind = r.get("output_kind") or "-"
+        count = r.get("dispatch_count", 1)
+        print(f"    {ref:<36} {kind:<6} {status:<12} ({count} dispatch(es))")
+    print()
+    return 0
+
+
+def cmd_deliverable_promote(args: argparse.Namespace) -> int:
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    dispatch_id = args.dispatch_id
+
+    conn = _db_conn(state_dir)
+    try:
+        row = conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+
+        if row is None:
+            print(
+                f"Dispatch not found: {dispatch_id!r} (project {project_id!r})",
+                file=sys.stderr,
+            )
+            return 1
+
+        current_state = row["state"]
+        if current_state != "proposed":
+            print(
+                f"Cannot promote dispatch {dispatch_id!r}: "
+                f"expected state 'proposed', found {current_state!r}",
+                file=sys.stderr,
+            )
+            return 1
+
+        now = _now_utc()
+        has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
+        if has_oaa:
+            conn.execute(
+                """
+                UPDATE dispatches
+                SET state = 'ready', operator_approved_at = ?, updated_at = ?
+                WHERE dispatch_id = ? AND project_id = ?
+                """,
+                (now, now, dispatch_id, project_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE dispatches
+                SET state = 'ready', updated_at = ?
+                WHERE dispatch_id = ? AND project_id = ?
+                """,
+                (now, dispatch_id, project_id),
+            )
+
+        _append_coordination_event(
+            conn,
+            event_type="deliverable_promoted",
+            dispatch_id=dispatch_id,
+            from_state="proposed",
+            to_state="ready",
+            actor="operator",
+            reason="operator gate: proposed -> ready",
+            project_id=project_id,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    print(f"Promoted {dispatch_id}: proposed -> ready")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -175,6 +469,34 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_show)
     p_show.add_argument("track_id")
     p_show.set_defaults(func=cmd_objective_show)
+
+    # ------------------------------------------------------------------
+    # deliverable subcommand (Phase 2)
+    # ------------------------------------------------------------------
+    dlv = sub.add_parser("deliverable", help="deliverable plane (proposed dispatches)")
+    dlv_sub = dlv.add_subparsers(dest="action", required=True)
+
+    p_dadd = dlv_sub.add_parser("add", help="plan a deliverable (proposed dispatch)")
+    _common(p_dadd)
+    p_dadd.add_argument("--objective", required=True, metavar="TRACK_ID",
+                        help="track/objective this deliverable belongs to")
+    p_dadd.add_argument("--output-kind", required=True, choices=_VALID_OUTPUT_KINDS,
+                        metavar="KIND", dest="output_kind")
+    p_dadd.add_argument("--title", required=True)
+    p_dadd.set_defaults(func=cmd_deliverable_add)
+
+    p_dlist = dlv_sub.add_parser("list", help="list deliverables grouped by objective")
+    _common(p_dlist)
+    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.set_defaults(func=cmd_deliverable_list)
+
+    p_dpromote = dlv_sub.add_parser(
+        "promote",
+        help="human gate: promote deliverable from proposed -> ready",
+    )
+    _common(p_dpromote)
+    p_dpromote.add_argument("dispatch_id")
+    p_dpromote.set_defaults(func=cmd_deliverable_promote)
 
     return parser
 
