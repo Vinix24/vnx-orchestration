@@ -140,3 +140,119 @@ class TestCanonicalReceiptPath:
 
         assert result_path == expected_path
         append_mod.append_receipt_payload.assert_called_once()
+
+
+class TestSubprocessReceiptProviderModelLane:
+    """Test that subprocess receipts carry provider/sub_provider/model/lane (uniform receipts)."""
+
+    def test_subprocess_receipt_carries_provider_model_lane(self, tmp_path):
+        """_write_receipt with provider/model/lane kwargs stamps all three fields."""
+        expected_path = tmp_path / "t0_receipts.ndjson"
+        mock_result = _make_append_result(status="appended", path=expected_path)
+
+        append_mod = MagicMock()
+        append_mod.append_receipt_payload.return_value = mock_result
+
+        with patch.dict("sys.modules", {"append_receipt": append_mod}):
+            sd._write_receipt(
+                dispatch_id="test-uniform-001",
+                terminal_id="T1",
+                status="done",
+                provider="claude",
+                sub_provider="anthropic",
+                model="sonnet",
+                lane="subprocess",
+            )
+
+        receipt_arg = append_mod.append_receipt_payload.call_args[0][0]
+        assert receipt_arg["provider"] == "claude"
+        assert receipt_arg["sub_provider"] == "anthropic"
+        assert receipt_arg["model"] == "sonnet"
+        assert receipt_arg["lane"] == "subprocess"
+        assert receipt_arg["source"] == "subprocess"
+
+    def test_subprocess_receipt_no_provider_when_omitted(self, tmp_path):
+        """Without provider/model/lane kwargs, receipt omits those fields (backward compat)."""
+        expected_path = tmp_path / "t0_receipts.ndjson"
+        mock_result = _make_append_result(status="appended", path=expected_path)
+
+        append_mod = MagicMock()
+        append_mod.append_receipt_payload.return_value = mock_result
+
+        with patch.dict("sys.modules", {"append_receipt": append_mod}):
+            sd._write_receipt(
+                dispatch_id="test-uniform-002",
+                terminal_id="T1",
+                status="done",
+            )
+
+        receipt_arg = append_mod.append_receipt_payload.call_args[0][0]
+        assert "provider" not in receipt_arg
+        assert "model" not in receipt_arg
+        assert "lane" not in receipt_arg
+
+    def test_subprocess_receipt_via_fallback_carries_provider_model_lane(self, tmp_path):
+        """Fallback (bare write) path also stamps provider/sub_provider/model/lane."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        receipt_file = state_dir / "t0_receipts.ndjson"
+
+        with patch.dict("sys.modules", {"append_receipt": None}), \
+             patch.object(sd, "_default_state_dir", return_value=state_dir):
+            sd._write_receipt(
+                dispatch_id="test-uniform-003",
+                terminal_id="T1",
+                status="done",
+                provider="claude",
+                sub_provider="anthropic",
+                model="claude-sonnet-4-6",
+                lane="subprocess",
+            )
+
+        assert receipt_file.exists()
+        receipt_data = json.loads(receipt_file.read_text().strip())
+        assert receipt_data["provider"] == "claude"
+        assert receipt_data["sub_provider"] == "anthropic"
+        assert receipt_data["model"] == "claude-sonnet-4-6"
+        assert receipt_data["lane"] == "subprocess"
+
+
+class TestSubprocessReceiptTerminalId:
+    """FIX 2: subprocess receipt must carry terminal_id (+ keep terminal alias)."""
+
+    def test_terminal_id_present_via_canonical_path(self, tmp_path):
+        """_write_receipt must emit terminal_id field equal to terminal_id arg."""
+        expected_path = tmp_path / "t0_receipts.ndjson"
+        mock_result = _make_append_result(status="appended", path=expected_path)
+
+        append_mod = MagicMock()
+        append_mod.append_receipt_payload.return_value = mock_result
+
+        with patch.dict("sys.modules", {"append_receipt": append_mod}):
+            sd._write_receipt(
+                dispatch_id="test-termid-001",
+                terminal_id="T2",
+                status="done",
+            )
+
+        receipt_arg = append_mod.append_receipt_payload.call_args[0][0]
+        assert receipt_arg.get("terminal_id") == "T2", f"terminal_id missing or wrong: {receipt_arg}"
+        assert receipt_arg.get("terminal") == "T2", f"terminal alias missing or wrong: {receipt_arg}"
+
+    def test_terminal_and_terminal_id_both_present_via_fallback(self, tmp_path):
+        """Fallback bare-write path also has both terminal and terminal_id."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        receipt_file = state_dir / "t0_receipts.ndjson"
+
+        with patch.dict("sys.modules", {"append_receipt": None}), \
+             patch.object(sd, "_default_state_dir", return_value=state_dir):
+            sd._write_receipt(
+                dispatch_id="test-termid-002",
+                terminal_id="T3",
+                status="done",
+            )
+
+        receipt_data = json.loads(receipt_file.read_text().strip())
+        assert receipt_data.get("terminal_id") == "T3", f"terminal_id missing: {receipt_data}"
+        assert receipt_data.get("terminal") == "T3", f"terminal alias missing: {receipt_data}"
