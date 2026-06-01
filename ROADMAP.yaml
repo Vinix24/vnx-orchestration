@@ -3,12 +3,12 @@
 #
 # It is the only hand-edited planning surface. Two views are GENERATED from it
 # and must never be hand-edited:
-#   - FEATURE_PLAN.md  <- roadmap/features/roadmap-autopilot/scripts/build_feature_plan.py
-#   - PR_QUEUE.md      <- roadmap/features/roadmap-autopilot/scripts/build_pr_queue.py
+#   - FEATURE_PLAN.md  <- scripts/build_feature_plan.py
+#   - PR_QUEUE.md      <- scripts/build_pr_queue.py
 #
 # After editing this file, regenerate both views and commit them together:
-#   python roadmap/features/roadmap-autopilot/scripts/build_feature_plan.py
-#   python roadmap/features/roadmap-autopilot/scripts/build_pr_queue.py
+#   python3 scripts/build_feature_plan.py
+#   python3 scripts/build_pr_queue.py
 # CI guards this: tests/test_roadmap_consistency.py runs the generators with
 # --check and fails the build if either view drifts from this file.
 #
@@ -31,23 +31,19 @@ title: VNX Multi-Feature Roadmap
 
 launch_state:
   version: "1.0.0"
-  date: "2026-05-31"             # last update to this launch_state block
-  status: "pre-launch"            # in-flight clean-launch queue, NOT shipped
+  date: "2026-06-01"             # last update to this launch_state block
+  status: "pre-launch"            # code queue merged to main; NOT yet published
   target_date: "2026-06-02"       # HN/Reddit launch target
-  last_verified: "2026-05-31"
-  verified_against: "origin/main@7ced5309"
+  last_verified: "2026-06-01"
+  verified_against: "origin/main@c0506771"
   note: >
-    1.0.0 is in pre-launch hardening and is NOT yet published. As of 2026-05-31
-    the clean-launch queue is ten open PRs (#756-#765) plus the ADR-020 contract
-    doc (#751). Pre-publish security hardening already merged on main (#752,
-    #753). The queue is gated, not done: several PRs are CONFLICTING and need
-    rebase onto the freeze trio, and the codex gate is quota-exhausted until
-    ~20:28 on 2026-05-31. The forced merge order is #756 (hygiene) -> #759
-    (renames, alone; grep-zero + 4 runtime smoke-tests + net-deletion sanity
-    check) -> #760 + #761 (freeze trio) -> capability interim (#764; close the
-    #762 duplicate) + #763 (kimi) + #765 (deepseek lane) + #757/#758 (docs/scrub)
-    -> Option B parity (prepare()/govern()) -> LB-3 (rebuild wheel + zero-hit
-    security grep on THAT exact artifact + fresh-venv acceptance + PyPI). LB-3 is
+    1.0.0 code queue is fully merged to main as of 2026-06-01. PRs #756, #759,
+    #758, #757, #760, #761, #763, #764, #765, #751, #766, #767, #769, and fix
+    #770 (dispatch prompt-before-scope-flags lane repair) are all merged.
+    1.0.0 is NOT yet published to PyPI. The only remaining gate is LB-3
+    (operator-gated): rebuild wheel from final main -> zero-hit security grep on
+    that exact artifact -> operator fresh-venv install acceptance ->
+    central-install refresh -> operator PyPI publish go -> tag+release. LB-3 is
     the final immutable gate (PyPI is write-once). Honesty constraint: the
     claude-subprocess lane is the true-honor reference; other lanes are governed
     at soft/conditional enforcement and marked as such in every receipt. No
@@ -57,16 +53,7 @@ launch_state:
     (VNX_AUTO_ROUTE) and pool task consumer (VNX_POOL_TASK_CONSUMER) are shipped
     opt-in. Roadmap autopilot tick (RA-6) ships dark (default off).
   launch_blockers:
-    - "#756 Wave 0 hygiene (untrack .venv, strip slop)"
-    - "#759 renames (merge alone; grep-zero + smoke-tests + net-deletion sanity)"
-    - "#760 role-based manager block + auto-inject footer"
-    - "#761 provider-aware intelligence + receipt token/cost linkage"
-    - "#764 capability-scoping interim (close #762 duplicate; acceptEdits headless no-stall smoke-test)"
-    - "#763 kimi robust spawn + fail-loud"
-    - "#765 governed DeepSeek-harness lane"
-    - "Option B parity: prepare()/govern() uniform across lanes (not yet PR'd)"
-    - "SSOT reconciliation (this file) + regenerated FEATURE_PLAN.md/PR_QUEUE.md"
-    - "LB-3 rebuild + zero-hit grep on the exact wheel + PyPI publish"
+    - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
 
 features:
   # ---- Shipped foundation (pre-1.0) ----
@@ -125,11 +112,11 @@ features:
       - codex_gate
     depends_on: []
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#756"
         title: "chore(wave0): untrack .venv + scratch, strip emoji/buzzwords"
-        status: queued
+        status: merged
         risk_class: low
     notes: "Merge first; unblocks a clean security-grep baseline. #755 lesson: keep FEATURE_PLAN.md + PR_QUEUE.md tracked, clean their content only."
 
@@ -144,17 +131,16 @@ features:
     depends_on:
       - launch-wave0-hygiene
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#759"
         title: "refactor(rename): _vN files -> canonical names + compat shims"
-        status: queued
+        status: merged
         risk_class: high
     notes: >
-      The rebase bomb (60-73 files incl live supervisors + bin/vnx). Merge ALONE,
-      then grep-zero across all filetypes + 4 runtime smoke-tests + net-deletion
-      sanity check (flag deleted/moved count, verify each shim execs its target)
-      before any other PR rebases. The queue serializes behind this.
+      The rebase bomb (60-73 files incl live supervisors + bin/vnx). Merged alone;
+      grep-zero across all filetypes + 4 runtime smoke-tests + net-deletion
+      sanity check verified before subsequent PRs rebased.
 
   - feature_id: launch-scrub
     title: "1.0 launch — Wave 1 scrub: remove residual private-project artifacts from repo + wheel"
@@ -166,11 +152,11 @@ features:
     depends_on:
       - launch-renames
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#758"
         title: "chore(scrub): remove residual private-project artifacts"
-        status: queued
+        status: merged
         risk_class: low
 
   - feature_id: launch-readme
@@ -183,11 +169,11 @@ features:
     depends_on:
       - launch-renames
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#757"
         title: "docs(readme): control-plane repositioning + ADR section + arch diagram"
-        status: queued
+        status: merged
         risk_class: medium
     notes: "Re-scope the headline to what is true: claude-subprocess is the reference lane; do not oversell the tmux-spawn lane as a proven default."
 
@@ -202,11 +188,11 @@ features:
     depends_on:
       - launch-renames
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#760"
         title: "feat(wave1b): role-based manager block + auto-inject T0-action footer"
-        status: queued
+        status: merged
         risk_class: high
     notes: "Freeze trio with #759/#761. Drops Track:/Terminal: for Role:. Ships scripts/lib/dispatch_footer.py (avoid a colliding second footer in parity work)."
 
@@ -221,11 +207,11 @@ features:
     depends_on:
       - launch-renames
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#761"
         title: "feat(wave2): provider-aware intelligence + receipt token/cost"
-        status: queued
+        status: merged
         risk_class: high
     notes: "Freeze trio. Adds provider column (ADR-007 composite-key compliant). Does NOT inject the non-Claude skill body; that gap closes in Option B parity (prepare())."
 
@@ -240,11 +226,11 @@ features:
     depends_on:
       - launch-renames
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#763"
         title: "fix(kimi): robust spawn + fail-loud on empty extraction"
-        status: queued
+        status: merged
         risk_class: medium
     notes: "First instance of the provider-hardening program. Deeper content-block info-bug fix + MAJOR-2 regression test deferred to 1.0.1 (see kimi-deepfix-major2)."
 
@@ -259,18 +245,17 @@ features:
     depends_on:
       - launch-renames
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#764"
         title: "fix(worker): scope capabilities — drop --dangerously-skip-permissions, empty MCP"
-        status: queued
+        status: merged
         risk_class: high
     notes: >
-      Close #762 (mis-titled duplicate, CONFLICTING, edits the same three hot files).
-      Removes the MCP blast radius and the most quotable counter-example to the
-      glass-box claim; does NOT enforce per-profile file-write scope (full binding
-      is 1.1, see capability-binding-full). Gate on the acceptEdits headless
-      no-stall smoke-test before merge.
+      #762 closed as duplicate (same three hot files, conflicting). Removes the
+      MCP blast radius and the most quotable counter-example to the glass-box
+      claim; does NOT enforce per-profile file-write scope (full binding is 1.1,
+      see capability-binding-full).
 
   - feature_id: launch-deepseek-lane
     title: "1.0 launch — governed DeepSeek-harness lane (own-key, key-auth, MCP-off, account-safe)"
@@ -283,11 +268,11 @@ features:
     depends_on:
       - launch-governance-core
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#765"
         title: "feat(providers): governed DeepSeek-harness lane"
-        status: queued
+        status: merged
         risk_class: medium
     notes: "Native Anthropic-compat harness lane; never on the OAuth subscription. Measured 0 calls to api.anthropic.com under key-auth + MCP-off."
 
@@ -300,13 +285,71 @@ features:
       - gemini_review
     depends_on: []
     milestone: "1.0"
-    status: in_progress
+    status: done
     pr_queue:
       - pr_id: "#751"
         title: "docs(adr): ADR-020 parallel multi-track execution contract"
-        status: queued
+        status: merged
         risk_class: low
     notes: "Doc-only. Must read 'design-ratified, implementation 1.2' in-doc so it is not mistaken for shipped behavior. Implementation lives in parallel-track-scheduler (1.2)."
+
+  - feature_id: launch-tmux-spawn-enrichment
+    title: "1.0 launch — fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report (dogfood default lane)"
+    branch_name: fix/tmux-spawn-enrichment
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-governance-core
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#766"
+        title: "fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report"
+        status: merged
+        risk_class: medium
+    notes: "Dogfood fix for the default tmux-spawn lane. Reuses existing enrichment path instead of duplicating."
+
+  - feature_id: launch-tmux-default-routing
+    title: "1.0 launch — feat(dispatch): route default Claude lane through enriched tmux-spawn (dogfood + Wave-1b)"
+    branch_name: feat/tmux-default-routing
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-tmux-spawn-enrichment
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#767"
+        title: "feat(dispatch): route default Claude lane through enriched tmux-spawn"
+        status: merged
+        risk_class: medium
+    notes: "Default Claude lane now routes through the enriched tmux-spawn path. Builds on #766 enrichment."
+
+  - feature_id: launch-readme-honesty
+    title: "1.0 launch — docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope"
+    branch_name: docs/readme-honesty
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-tmux-default-routing
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#769"
+        title: "docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope"
+        status: merged
+        risk_class: low
+    notes: >
+      Removes oversell of tmux-spawn as a proven default. Accurately describes
+      lane maturity tiers and OpenRouter scope. Required before public launch.
+      Fix #770 (dispatch prompt-before-scope-flags lane repair) also merged to
+      main as a 1.0 fix; no separate feature entry (scope: targeted dispatch bug fix).
 
   - feature_id: tmux-lane-structural-refactor
     title: "1.0 launch — June-15-critical: tmux subscription-lane PREPARE+GOVERN structural completion (tmux lane only, strangler-fig)"

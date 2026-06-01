@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-31T15:18:22.509118+00:00
+**Last updated**: 2026-06-01T02:46:13.019489+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
@@ -123,43 +123,12 @@ _Last 14 days — sourced from git merge commits._
 - #604 — fix(centralisatie): project_id scoping audit + critical write-leak fixes (#604) (2026-05-20)
 - #603 — docs: refresh HANDOFF + README status banner (master roadmap link) (#603) (2026-05-20)
 - #588 — feat(schema): idempotent bootstrap with PRAGMA user_version + transaction wrapping (#588) (2026-05-18)
-- #591 — feat(doctor): vnx doctor --strict for central-install pre-flight validation (#591) (2026-05-18)
-- #587 — feat(install): install-central.sh for centralized VNX install with project-pin (#587) (2026-05-18)
-- #600 — feat(intelligence): A/B random-skip framework with weekly lift report (#600) (2026-05-18)
-- #596 — fix(governance): _emit_governance retry-with-backoff instead of SystemExit (Kimi audit) (#596) (2026-05-18)
-- #589 — feat(skill-coverage): pre-flight skill-coverage scanner for central install (#589) (2026-05-18)
-- #593 — fix(intelligence): catalogus-hygiene + recency-decay (audit BLOCKER #2) (#593) (2026-05-18)
-- #595 — refactor(dispatch): shared runtime_overrides module (eliminate delivery/recovery duplicate) (#595) (2026-05-18)
-- #594 — feat(intelligence): fine-grained task_class subclass + scope_tags activation (#594) (2026-05-18)
-- #592 — fix(pool): real-subprocess integration tests for pool spawn (Sonnet audit BLOCKER #1) (#592) (2026-05-18)
-- #586 — feat(vnx_paths): .vnx-overrides resolver for per-project central-install customization (#586) (2026-05-17)
-- #590 — feat(schema): migration 0021 central install metadata + pin tracking (#590) (2026-05-17)
-- #584 — feat(cli): vnx version + vnx update subcommands for central install rollback (#584) (2026-05-17)
-- #585 — feat(pyproject): pipx-installable wheel with vnx console_script (#585) (2026-05-17)
-- #583 — chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (#583) (2026-05-17)
-- #582 — fix(provider_dispatch): rotate per-terminal NDJSON ring buffer post-dispatch (#582) (2026-05-17)
-- #580 — fix(smart-router): end-to-end auto-route wiring + enforcer false-positive on Kimi CLI provider (2 blockers) (#580) (2026-05-17)
-- #578 — fix(governance): atomic OI saves + WAL migrations + closure_verifier self-reference loop (3 blockers + 4 high) (#578) (2026-05-17)
-- #576 — fix(security): PRAGMA allowlist + project_id_fn multi-tenant + missing contracts + dup ImportError (2 blockers + 4 medium) (#576) (2026-05-17)
-- #574 — fix(intelligence): payload 2000 + dead method removal + project_id_fn + silent except logging (3 blockers + dead code) (#574) (2026-05-17)
-- #573 — fix(bench): BENCH terminal-id + stdin judge prompt + anonymized model-id + drop duplicate + count-leak (3 blockers + 2 warns) (#573) (2026-05-17)
-- #572 — fix(wiring-gate): use ${VNX_STATE_DIR} placeholder in docstring (Legacy-path-gate false-positive) (#572) (2026-05-17)
-- #571 — feat(gate): wiring-gate dead-code detection (#571) (2026-05-17)
-- #568 — fix(receipts): persist token_usage + cost_usd + pr_id for subprocess worker dispatches (#568) (2026-05-17)
-- #567 — fix(pool): integration-fix PR-6.5a tests after PR-6.5b worktree-create + e2e integration test (#567) (2026-05-17)
-- #565 — feat(pr-sr-4): smart_router wiring + route_decisions.ndjson (opt-in via --auto-route) (#565) (2026-05-17)
-- #566 — feat(pr-6.5b): per-worker git worktree manager (#566) (2026-05-17)
-- #564 — feat(pr-6.5c): worker heartbeat + PID validation in reaper (#564) (2026-05-17)
 
 **WAVE 5**
 - #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
-- #569 — docs: Wave 5/6/7/8 documentation overhaul (#569) (2026-05-17)
 
 **WAVE 6**
 - #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
-
-**WAVE 8**
-- #570 — fix(wiring): activate 4 dead-code modules from Wave 8 fast-path (auto_apply, validator class, schema-emit, smart_router.route) (#570) (2026-05-17)
 
 **WAVE-5**
 - #680 — feat(int-2): Wave-5 ADR injection in dispatch context (#680) (2026-05-29)
@@ -174,11 +143,6 @@ _Last 14 days — sourced from git merge commits._
 
 **WAVE6**
 - #698 — fix(wave6-pool-lease-spawn): insert terminal_leases row before add_member in pool scale_up (#698) (2026-05-29)
-- #575 — fix(wave6): real spawn impl + config field reads + single heartbeat threshold (3 blockers) (#575) (2026-05-17)
-
-**WAVE7**
-- #579 — fix(wave7): claude cost tracking + kimi audit-gap status + redact prompt in logs (3 blockers) (#579) (2026-05-17)
-- #577 — fix(wave7): claude cost tracking + kimi audit-gap status + redact prompt in logs (3 blockers) (#577) (2026-05-17)
 
 ## Active features
 
@@ -200,36 +164,48 @@ Status: done
 Status: done
 
 ### launch-wave0-hygiene — 1.0 launch — Wave 0 hygiene: untrack .venv + scratch, strip emoji/buzzwords (keep FEATURE_PLAN/PR_QUEUE tracked)
-Status: in_progress
+Status: done
 
 ### launch-renames — 1.0 launch — Wave 1 renames: _vN files -> canonical names + compat shims (remove in 1.0.1)
-Status: in_progress
+Status: done
 
 ### launch-scrub — 1.0 launch — Wave 1 scrub: remove residual private-project artifacts from repo + wheel
-Status: in_progress
+Status: done
 
 ### launch-readme — 1.0 launch — Wave 1 credibility: README control-plane repositioning + ADR section + architecture diagram
-Status: in_progress
+Status: done
 
 ### launch-governance-core — 1.0 launch — Wave 1b: role-based manager block + auto-inject T0-action footer (enforcement, not convention)
-Status: in_progress
+Status: done
 
 ### launch-provider-intel — 1.0 launch — Wave 2: provider-aware intelligence + receipt token/cost + report linkage (ADR-007 provider column)
-Status: in_progress
+Status: done
 
 ### launch-kimi-robust — 1.0 launch — Wave 2: kimi 1.44.0 robust spawn + fail-loud on empty extraction (drop --yolo)
-Status: in_progress
+Status: done
 
 ### launch-capability-interim — 1.0 launch — Wave 2: scope worker capabilities (drop --dangerously-skip-permissions, empty ambient MCP)
-Status: in_progress
+Status: done
 
 ### launch-deepseek-lane — 1.0 launch — governed DeepSeek-harness lane (own-key, key-auth, MCP-off, account-safe)
-Status: in_progress
+Status: done
 
 ### launch-adr020-contract — 1.0 launch — ADR-020 parallel multi-track execution contract (design-ratified; implementation 1.2)
-Status: in_progress
+Status: done
 
-### launch-option-b-parity — 1.0 launch — Option B parity: extract prepare()/govern() so skill+permission+intelligence+footer+report-contract are uniform across all lanes
+### launch-tmux-spawn-enrichment — 1.0 launch — fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report (dogfood default lane)
+Status: done
+
+### launch-tmux-default-routing — 1.0 launch — feat(dispatch): route default Claude lane through enriched tmux-spawn (dogfood + Wave-1b)
+Status: done
+
+### launch-readme-honesty — 1.0 launch — docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope
+Status: done
+
+### tmux-lane-structural-refactor — 1.0 launch — June-15-critical: tmux subscription-lane PREPARE+GOVERN structural completion (tmux lane only, strangler-fig)
+Status: planned
+
+### launch-option-b-parity — Option B parity (all lanes): uniform prepare()/govern() across subprocess + tmux + all provider lanes
 Status: planned
 
 ### kimi-deepfix-major2 — Kimi #763 info-bug deep fix + MAJOR-2 regression test

@@ -26,9 +26,9 @@ You are the guardian and architect of the VNX orchestration infrastructure:
 
 **Core Orchestration**:
 - `vnx_supervisor_simple.sh` - Process health monitoring and singleton enforcement
-- `dispatcher_v8_minimal.sh` - V8 dispatcher with native skills (87% token reduction)
-- `smart_tap_v7_json_translator.sh` - Terminal output parser (Manager Blocks to dispatches)
-- `receipt_processor_v4.sh` - Receipt validation and delivery
+- `dispatcher_minimal.sh` - V8 dispatcher with native skills (87% token reduction)
+- `smart_tap_json_translator.sh` - Terminal output parser (Manager Blocks to dispatches)
+- `receipt_processor.sh` - Receipt validation and delivery
 - `receipt_notifier.sh` - Receipt delivery to terminals
 
 **Intelligence Layer**:
@@ -75,7 +75,7 @@ When making system changes, consider:
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: vnx-manager
+Skill actief: vnx-manager
 ```
 
 No exceptions. This must appear before any other content.

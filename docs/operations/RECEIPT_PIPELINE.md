@@ -44,7 +44,7 @@ Markdown Reports (Terminal) → Automated Parsing → Receipt Generation → T0 
 - **Output**: JSON receipt with task metadata, tags, metrics
 
 #### 3. Processing Layer (Automated)
-- **Receipt Processor V4**: `receipt_processor_v4.sh` - Time-aware processing with flood protection
+- **Receipt Processor V4**: `receipt_processor.sh` - Time-aware processing with flood protection
 - **Monitor Mode**: Only processes reports created after startup (timestamp-based)
 - **Rate Limiting**: Configurable receipts/minute with circuit breaker
 - **Flood Protection**: Prevents processing storms (threshold: 50 reports)
@@ -98,7 +98,7 @@ unified_reports/*.md (persistent)
         ↓
 t0_receipts.ndjson (persistent)
         ↓
-receipt_processor_v4.sh
+receipt_processor.sh
         ↓
     tmux paste-buffer
         ↓
@@ -119,7 +119,7 @@ After report parsing and before receipt storage, the receipt processor runs ligh
 - **Fast checks only**: file_exists, file_changed, pattern_match, no_pattern, bash_check. No test suite execution (that happens at pre-merge gate time).
 - **Results stored**: `.vnx-data/state/verification_results/{dispatch_id}_{timestamp}.json`
 
-**Integration point** (receipt_processor_v4.sh):
+**Integration point** (receipt_processor.sh):
 ```bash
 # Step D2: Contract verification (Phase 2a)
 verify_result=$(python3 "$SCRIPTS_DIR/verify_claims.py" \
@@ -173,7 +173,7 @@ On **every** task completion, `append_receipt.py` now generates a quality adviso
 
 ### Flow
 ```
-Worker writes report → receipt_processor_v4.sh → report_parser.py
+Worker writes report → receipt_processor.sh → report_parser.py
                                                        ↓
                                                 append_receipt.py
                                                   ↓           ↓
@@ -269,13 +269,13 @@ Receipt processor now prefixes the T0 skill invocation (`/t0-orchestrator`) when
 
 ### Receipt Processor V4
 
-**File**: `.claude/vnx-system/scripts/receipt_processor_v4.sh`
+**File**: `.claude/vnx-system/scripts/receipt_processor.sh`
 
 **Key Features** (2026-01-07):
 1. **Monitor Mode** - Only processes NEW reports (timestamp-based cutoff)
 2. **Time-Aware Processing** - Prevents reprocessing of historical reports
 3. **Flood Protection** - Circuit breaker at 50 reports, rate limiting
-4. **Smart Pane Discovery** - Finds T0 pane using pane_manager_v2.sh
+4. **Smart Pane Discovery** - Finds T0 pane using pane_manager.sh
 5. **Bracketed Paste Support** - Double Enter keypress for reliable submission
 
 **Configuration** (Environment Variables):
@@ -392,7 +392,7 @@ fi
 **Diagnostic Steps**:
 ```bash
 # Check processor is running
-ps aux | grep receipt_processor_v4
+ps aux | grep receipt_processor
 
 # Check processing log
 tail -50 $VNX_HOME/state/receipt_processing.log
@@ -418,7 +418,7 @@ rm -f $VNX_HOME/state/receipt_flood.lock
 
 # For old reports, use catchup mode
 VNX_MODE=catchup VNX_MAX_AGE_HOURS=24 \
-    $VNX_HOME/scripts/receipt_processor_v4.sh
+    $VNX_HOME/scripts/receipt_processor.sh
 
 # Check T0 pane exists
 tmux list-panes -a -F "#{pane_id} #{pane_title}" | grep T0
@@ -449,7 +449,7 @@ tail .claude/vnx-system/logs/vnx_supervisor.log
 **Fix**:
 ```bash
 # Kill all instances
-pkill -9 -f receipt_processor_v4
+pkill -9 -f receipt_processor
 
 # Clean lock
 rm -f /tmp/vnx-locks/receipt_processor.lock
@@ -468,7 +468,7 @@ ps aux | grep receipt_processor
 **Cause**: Bracketed paste mode requires double Enter press
 
 **Fix**:
-- Already implemented in receipt_processor_v4.sh (lines 188-192)
+- Already implemented in receipt_processor.sh (lines 188-192)
 - No manual intervention needed
 - If still failing, check tmux version supports bracketed paste
 
@@ -510,11 +510,11 @@ echo "=== EMERGENCY RECOVERY - LEVEL 1 ==="
 rm -f .claude/vnx-system/state/receipt_flood.lock
 
 # 2. Restart receipt processor
-pkill -f receipt_processor_v4
+pkill -f receipt_processor
 sleep 6  # Wait for supervisor restart
 
 # 3. Verify restart
-ps aux | grep receipt_processor_v4
+ps aux | grep receipt_processor
 ```
 
 #### Process Restart (Level 2)
@@ -628,10 +628,10 @@ HEALTH_CHECK_INTERVAL=5         # Process health check interval (seconds)
 ### File Locations
 
 **Scripts**:
-- `.claude/vnx-system/scripts/receipt_processor_v4.sh`
+- `.claude/vnx-system/scripts/receipt_processor.sh`
 - `.claude/vnx-system/scripts/report_parser.py`
 - `.claude/vnx-system/scripts/heartbeat_ack_monitor.py`
-- `.claude/vnx-system/scripts/pane_manager_v2.sh`
+- `.claude/vnx-system/scripts/pane_manager.sh`
 
 **State Files**:
 - `.claude/vnx-system/state/t0_receipts.ndjson` - Production receipts
@@ -706,7 +706,7 @@ HEALTH_CHECK_INTERVAL=5         # Process health check interval (seconds)
 - Parallel PR queue support (in_progress as list)
 
 ### Version 8.0.1 (2026-01-07) - Phase 1B Complete
-- Replaced receipt_notifier.sh with receipt_processor_v4.sh
+- Replaced receipt_notifier.sh with receipt_processor.sh
 - Added monitor mode with timestamp-based cutoff
 - Implemented flood protection and rate limiting
 - Fixed T0 delivery with bracketed paste support

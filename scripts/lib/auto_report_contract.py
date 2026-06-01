@@ -46,7 +46,7 @@ Auto-report pipeline fallback policy (V1):
 
 - PIPELINE FAILURE: If the assembler crashes or writes no output, the worker's
   manually-written report in unified_reports/ is still processed by
-  receipt_processor_v4.sh unchanged. Auto-report is additive, never a blocker.
+  receipt_processor.sh unchanged. Auto-report is additive, never a blocker.
 
 - CODEX/GEMINI GATES: Use a separate report path via gate_artifacts.py and
   write JSON sidecars to $VNX_STATE_DIR/report_pipeline/. Not affected by
@@ -644,7 +644,7 @@ class AutoReport:
 # ─── Receipt Processor Integration Contract ──────────────────────────────────
 #
 # The auto-report pipeline produces a markdown file in unified_reports/ that
-# receipt_processor_v4.sh can parse identically to manual reports. The contract:
+# receipt_processor.sh can parse identically to manual reports. The contract:
 #
 # 1. FILENAME: {YYYYMMDD}-{HHMMSS}-{track}-auto-{short_title}.md
 #    The "auto-" prefix distinguishes auto-generated reports.
@@ -728,7 +728,7 @@ MARKDOWN_TEMPLATE = """\
 
 
 def render_markdown(report: AutoReport) -> str:
-    """Render an AutoReport as markdown compatible with receipt_processor_v4.sh."""
+    """Render an AutoReport as markdown compatible with receipt_processor.sh."""
     meta = report.metadata
     ext = report.extraction
 

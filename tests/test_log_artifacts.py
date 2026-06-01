@@ -24,7 +24,9 @@ SCRIPTS_LIB = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
 if SCRIPTS_LIB not in sys.path:
     sys.path.insert(0, SCRIPTS_LIB)
 
-from log_artifact import write_log_artifact, write_output_artifact, HEADER_DELIM, SECTION_DELIM
+from log_artifact import write_log_artifact, write_output_artifact
+
+_SECTION_DELIM = "──────────────────────────────────────────────────────────────────────────"
 from runtime_coordination import init_schema, get_connection
 from headless_adapter import HeadlessAdapter
 
@@ -153,7 +155,7 @@ class TestLogArtifactStdoutStderr(_TmpDirTestCase):
         stderr_pos = content.index("STDERR")
         self.assertGreater(stderr_pos, stdout_pos)
         # Both sections should be delimited
-        self.assertGreaterEqual(content.count(SECTION_DELIM), 4)
+        self.assertGreaterEqual(content.count(_SECTION_DELIM), 4)
 
 
 class TestLogArtifactFooter(_TmpDirTestCase):

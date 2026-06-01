@@ -1,7 +1,7 @@
 #!/bin/bash
-# receipt_processor_supervisor.sh — Auto-restart supervisor for receipt_processor_v4.sh
+# receipt_processor_supervisor.sh — Auto-restart supervisor for receipt_processor.sh
 #
-# Monitors receipt_processor_v4.sh and restarts it after crashes.
+# Monitors receipt_processor.sh and restarts it after crashes.
 # Uses exponential backoff (BACKOFF_INIT→BACKOFF_MAX) to avoid tight loops on
 # persistent failures. Resets backoff after the receipt processor runs longer
 # than BACKOFF_STABLE seconds. Enforces singleton so only one supervisor runs
@@ -30,18 +30,18 @@ if [ "${VNX_RESUME_IN_PROGRESS:-0}" != "1" ] && [ -f "${VNX_STATE_DIR}/PAUSED" ]
 fi
 
 VNX_DIR="$VNX_HOME"
-RECEIPT_PROCESSOR_SCRIPT="$SCRIPT_DIR/receipt_processor_v4.sh"
+RECEIPT_PROCESSOR_SCRIPT="$SCRIPT_DIR/receipt_processor.sh"
 SUPERVISOR_NAME="receipt_processor_supervisor"
-# Singleton name passed to enforce_singleton in receipt_processor_v4.sh.
-# Must match the argument: enforce_singleton "receipt_processor_v4.sh"
-RECEIPT_PROCESSOR_SINGLETON_NAME="receipt_processor_v4.sh"
+# Singleton name passed to enforce_singleton in receipt_processor.sh.
+# Must match the argument: enforce_singleton "receipt_processor.sh"
+RECEIPT_PROCESSOR_SINGLETON_NAME="receipt_processor.sh"
 
 LOG_FILE="$VNX_LOGS_DIR/receipt_processor_supervisor.log"
 PID_FILE="$VNX_PIDS_DIR/${SUPERVISOR_NAME}.pid"
 # Singleton-managed PID/lock artifacts (named after the singleton key).
 RECEIPT_PROCESSOR_PID_FILE="$VNX_PIDS_DIR/${RECEIPT_PROCESSOR_SINGLETON_NAME}.pid"
 RECEIPT_PROCESSOR_LOCK_DIR="$VNX_LOCKS_DIR/${RECEIPT_PROCESSOR_SINGLETON_NAME}.lock"
-# Script-internal PID file written directly by receipt_processor_v4.sh.
+# Script-internal PID file written directly by receipt_processor.sh.
 RECEIPT_PROCESSOR_APP_PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 
 # Backoff configuration (seconds)

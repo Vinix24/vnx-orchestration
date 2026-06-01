@@ -1,6 +1,6 @@
 #!/bin/bash
 # dispatch_lifecycle.sh — Lifecycle, lease, and runtime-core functions for dispatcher V8.
-# Sourced by dispatcher_v8_minimal.sh.
+# Sourced by dispatcher_minimal.sh.
 # Requires: $STATE_DIR, $VNX_DIR set by orchestrator; dispatch_logging.sh sourced first.
 
 # Map track identifier to canonical terminal id.
@@ -506,8 +506,13 @@ _fdd_log_dispatch_metadata() {
     _dm_instr_chars=${#instruction_content}
     local _dm_target_oi=""
     _dm_target_oi=$(echo "$instruction_content" | grep -oE 'OI-[0-9]{3,}' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
+    # The tmux/interactive delivery lane always targets a claude pane, so the
+    # provider that executes this dispatch is claude. Non-claude providers run
+    # exclusively through provider_dispatch._emit_governance, which stamps their
+    # own provider. (See provider-aware self-learning, Wave 2 core.)
     python3 "$VNX_DIR/scripts/log_dispatch_metadata.py" \
         --dispatch-id "$dispatch_id" --terminal "$terminal_id" --track "$track" \
+        --provider "claude" \
         --role "$agent_role" --skill-name "$agent_role" --gate "$gate" \
         --cognition "$_dm_cognition" --priority "$_dm_priority" --pr-id "${pr_id:-}" \
         --pattern-count "${_dm_pattern_count:-0}" --prevention-rule-count "${_dm_rule_count:-0}" \

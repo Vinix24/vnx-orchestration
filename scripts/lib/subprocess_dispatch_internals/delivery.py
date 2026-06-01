@@ -231,6 +231,7 @@ def deliver_via_subprocess(
     dispatch_id: str,
     *,
     role: str | None = None,
+    requires_mcp: bool = False,
     repo_map: str | None = None,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
@@ -317,6 +318,8 @@ def deliver_via_subprocess(
             resume_session=resume_session,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
+            role=role,
+            requires_mcp=requires_mcp,
         )
 
         if spawn_result.token_usage:

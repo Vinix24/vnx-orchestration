@@ -41,7 +41,7 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 - Validation before queueing.
 
 **Representative implementation** (removed in housekeeping/system-cleanup)
-- `scripts/smart_tap_v7_json_translator.sh` — superseded by pending/ dispatch flow
+- `scripts/smart_tap_json_translator.sh` — superseded by pending/ dispatch flow
 
 **Outcome**
 - More deterministic dispatch ingestion and fewer accidental replays.
@@ -77,7 +77,7 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 **Representative implementation**
 - `.claude/vnx-system/scripts/append_receipt.py`
-- `.claude/vnx-system/scripts/receipt_processor_v4.sh`
+- `.claude/vnx-system/scripts/receipt_processor.sh`
 
 **Outcome**
 - Better auditability and deterministic post-task processing.
@@ -94,7 +94,7 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 - Open-items and advisory signals surfaced to T0.
 
 **Representative implementation**
-- `.claude/vnx-system/scripts/dispatcher_v8_minimal.sh`
+- `.claude/vnx-system/scripts/dispatcher_minimal.sh`
 - `scripts/generate_t0_brief.sh` (removed — replaced by build_t0_state.py)
 - `.claude/vnx-system/scripts/lib/quality_advisory.py`
 

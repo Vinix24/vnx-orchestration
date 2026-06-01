@@ -36,12 +36,15 @@ from failure_classifier import (
     get_retry_decision,
 )
 
-DISPATCHER = SCRIPT_DIR / "dispatcher_v8_minimal.sh"
+DISPATCHER = SCRIPT_DIR / "dispatcher_minimal.sh"
+DISPATCH_LOGGING = SCRIPT_DIR / "lib" / "dispatch_logging.sh"
+DISPATCH_CREATE = SCRIPT_DIR / "lib" / "dispatch_create.sh"
+DISPATCH_LIFECYCLE = SCRIPT_DIR / "lib" / "dispatch_lifecycle.sh"
 CONTRACT = PROJECT_ROOT / "docs" / "core" / "190_RESIDUAL_BUGFIX_SWEEP_CONTRACT.md"
 
 
 def _extract_classify_function() -> str:
-    content = DISPATCHER.read_text(encoding="utf-8")
+    content = DISPATCH_LOGGING.read_text(encoding="utf-8")
     start = content.index("_classify_blocked_dispatch() {")
     brace_depth = 0
     end = start
@@ -133,19 +136,19 @@ class TestClusterBModeControl:
     """Certify all Cluster B residuals are resolved."""
 
     def test_res_b1_pre_lease_probe_exists(self):
-        """RES-B1 (OI-024): Best-effort pane mode check exists before configure_terminal_mode."""
-        content = DISPATCHER.read_text(encoding="utf-8")
-        # Find the pre-lease probe and verify it comes before configure_terminal_mode
+        """RES-B1 (OI-024): Best-effort pane mode check exists before mode_pre_check."""
+        content = DISPATCH_CREATE.read_text(encoding="utf-8")
+        # Find the pre-lease probe and verify it comes before mode_pre_check
         probe_pos = content.find("RES-B1")
-        config_pos = content.find("configure_terminal_mode \"$target_pane\"", probe_pos)
-        assert probe_pos != -1, "RES-B1 pre-lease probe not found in dispatcher"
-        assert config_pos != -1, "configure_terminal_mode call not found after probe"
+        config_pos = content.find("mode_pre_check", probe_pos)
+        assert probe_pos != -1, "RES-B1 pre-lease probe not found in dispatch_create.sh"
+        assert config_pos != -1, "mode_pre_check call not found after probe"
         assert probe_pos < config_pos, \
-            "Pre-lease probe must appear BEFORE configure_terminal_mode"
+            "Pre-lease probe must appear BEFORE mode_pre_check"
 
     def test_res_b1_probe_returns_1_on_blocked(self):
         """RES-B1: Pre-lease probe returns 1 when pane is in copy-mode (no lease to clean up)."""
-        content = DISPATCHER.read_text(encoding="utf-8")
+        content = DISPATCH_CREATE.read_text(encoding="utf-8")
         # Verify the probe checks pane_in_mode == 1 and returns 1
         probe_section = content[content.find("RES-B1"):content.find("RES-B1") + 500]
         assert "return 1" in probe_section, "Pre-lease probe must return 1 on blocked pane"
@@ -154,7 +157,7 @@ class TestClusterBModeControl:
 
     def test_res_b2_mode_config_failure_uses_canonical_code(self):
         """RES-B2: Mode config failure emits pre_mode_configuration failure code."""
-        content = DISPATCHER.read_text(encoding="utf-8")
+        content = DISPATCH_CREATE.read_text(encoding="utf-8")
         assert "pre_mode_configuration" in content, \
             "pre_mode_configuration failure code must be used on mode config failure"
 
@@ -209,7 +212,7 @@ class TestClusterDObservability:
 
     def test_res_d1_empty_attempt_id_logs_failure(self):
         """RES-D1: Empty attempt_id produces structured failure event."""
-        content = DISPATCHER.read_text(encoding="utf-8")
+        content = DISPATCH_LIFECYCLE.read_text(encoding="utf-8")
         assert "delivery_start_no_attempt" in content, \
             "delivery_start_no_attempt structured failure must be logged when attempt_id is empty"
         # Verify it's in a conditional that checks for empty attempt_id
@@ -220,13 +223,13 @@ class TestClusterDObservability:
 
     def test_res_d2_delivery_success_failure_logged(self):
         """RES-D2: delivery_success recording failure produces structured event."""
-        content = DISPATCHER.read_text(encoding="utf-8")
+        content = DISPATCH_LIFECYCLE.read_text(encoding="utf-8")
         assert "delivery_success_record_failed" in content, \
             "delivery_success_record_failed structured failure must be logged"
 
     def test_res_d3_receipt_footer_intentionally_nonfatal(self):
         """RES-D3: Receipt footer generation failure is documented as intentional."""
-        content = DISPATCHER.read_text(encoding="utf-8")
+        content = DISPATCH_CREATE.read_text(encoding="utf-8")
         assert "intentionally non-fatal" in content.lower() or "RES-D3" in content, \
             "Receipt footer failure must be documented as intentionally non-fatal"
 

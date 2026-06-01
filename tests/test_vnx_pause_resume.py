@@ -268,7 +268,7 @@ def test_resume_removes_paused_marker(tmp_path: Path):
         # If it failed because scripts aren't present, verify the marker was
         # removed (it is removed before starting daemons in cmd_resume).
         # Actually in the implementation, marker is removed AFTER daemons start.
-        # If dispatcher_supervisor.sh or dispatcher_v8_minimal.sh is missing, resume fails.
+        # If dispatcher_supervisor.sh or dispatcher_minimal.sh is missing, resume fails.
         # With VNX_HOME pointing to VNX_ROOT, the scripts DO exist, so expect exit 0.
         pytest.fail(f"resume failed unexpectedly\n{result.stderr}")
 

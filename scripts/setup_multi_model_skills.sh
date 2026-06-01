@@ -2,7 +2,7 @@
 # setup_multi_model_skills.sh
 # Symlinks VNX skills to Claude, Codex and Gemini platform folders
 #
-# Run from SEOcrawler project root:
+# Run from your project root:
 #   ./vnx-system/scripts/setup_multi_model_skills.sh
 
 set -euo pipefail
