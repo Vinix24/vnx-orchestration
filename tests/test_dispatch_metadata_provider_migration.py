@@ -787,3 +787,87 @@ def test_build_t0_state_collect_recent_dispatches_migrated_surfaces_provider(tmp
     assert rows, "must return rows from migrated DB"
     assert rows[0]["provider"] == "codex", f"expected 'codex', got {rows[0].get('provider')!r}"
     assert rows[0]["model"] == "gpt-probe", f"expected 'gpt-probe', got {rows[0].get('model')!r}"
+
+
+# ---------------------------------------------------------------------------
+# FIX 3c — provider-only DB (intermediate migration state: provider present, model absent)
+# ---------------------------------------------------------------------------
+
+def test_recent_comparable_provider_only_db_no_crash():
+    """_query_per_project on a DB with provider but NOT model must not crash.
+    Must surface provider; model key absent (None via .get). (#778 guard gap)"""
+    from intelligence_sources.recent_comparable import _query_per_project
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT UNIQUE,
+            terminal TEXT, track TEXT,
+            role TEXT, skill_name TEXT, gate TEXT,
+            outcome_status TEXT, dispatched_at DATETIME,
+            pattern_count INTEGER DEFAULT 0,
+            prevention_rule_count INTEGER DEFAULT 0,
+            provider TEXT
+        );
+    """)
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO dispatch_metadata "
+        "(dispatch_id, skill_name, gate, outcome_status, dispatched_at, provider) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("provider-only-001", "architect", "", "success", ts, "kimi"),
+    )
+    conn.commit()
+
+    def _has_col(table, col):
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(r[1] == col for r in rows)
+
+    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=_has_col)
+    conn.close()
+
+    assert items, "must return items from provider-only DB without crash"
+    assert "provider-only-001" in items[0].source_refs
+    assert "kimi" in items[0].content, f"provider 'kimi' must appear in content: {items[0].content!r}"
+
+
+def test_build_t0_state_provider_only_db_no_crash(tmp_path):
+    """_collect_recent_dispatches_per_project on a DB with provider but NOT model must
+    not crash; must surface provider; model absent from result dict. (#778 guard gap)"""
+    import build_t0_state as BTS
+
+    db_path = tmp_path / "state" / "quality_intelligence.db"
+    db_path.parent.mkdir(parents=True)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            terminal TEXT, track TEXT, role TEXT, gate TEXT,
+            priority TEXT DEFAULT 'P1', pr_id TEXT,
+            provider TEXT,
+            dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME, outcome_status TEXT
+        );
+    """)
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO dispatch_metadata "
+        "(dispatch_id, terminal, track, dispatched_at, provider) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("provider-only-bts-001", "T1", "A", ts, "kimi"),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = BTS._collect_recent_dispatches_per_project("vnx-dev", db_path.parent)
+
+    assert rows, "must return rows from provider-only DB without crash"
+    assert rows[0]["dispatch_id"] == "provider-only-bts-001"
+    assert rows[0].get("provider") == "kimi", f"expected 'kimi', got {rows[0].get('provider')!r}"
+    assert rows[0].get("model") is None, f"model must be absent (None), got {rows[0].get('model')!r}"

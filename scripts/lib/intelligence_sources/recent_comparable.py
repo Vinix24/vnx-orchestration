@@ -87,9 +87,15 @@ def query_recent_comparable(
     return legacy
 
 
-def _dm_has_provider(conn: sqlite3.Connection) -> bool:
-    """Return True if dispatch_metadata has provider/model columns (migration guard)."""
-    return _table_has_column(conn, "dispatch_metadata", "provider")
+def _dm_column_set(conn: sqlite3.Connection) -> frozenset:
+    """Return frozenset of column names present in dispatch_metadata (migration guard)."""
+    try:
+        rows = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
+        return frozenset(
+            (r["name"] if isinstance(r, sqlite3.Row) else r[1]) for r in rows
+        )
+    except Exception:
+        return frozenset()
 
 
 def _query_per_project(
@@ -106,7 +112,11 @@ def _query_per_project(
     dm_scope_clause, dm_scope_params = _project_scope_clause(
         has_column_fn("dispatch_metadata", "project_id")
     )
-    provider_cols = ", provider, model" if _dm_has_provider(db) else ""
+    _dm_cols = _dm_column_set(db)
+    provider_cols = (
+        (", provider" if "provider" in _dm_cols else "")
+        + (", model" if "model" in _dm_cols else "")
+    )
     try:
         rows = db.execute(
             f"""
@@ -195,7 +205,11 @@ def _query_central(
             datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)
         ).isoformat()
         has_project_id = _table_has_column(conn, "dispatch_metadata", "project_id")
-        provider_cols = ", provider, model" if _dm_has_provider(conn) else ""
+        _dm_cols = _dm_column_set(conn)
+        provider_cols = (
+            (", provider" if "provider" in _dm_cols else "")
+            + (", model" if "model" in _dm_cols else "")
+        )
         if has_project_id and project_id:
             rows = conn.execute(
                 f"""SELECT dispatch_id, terminal, track, role, skill_name, gate,

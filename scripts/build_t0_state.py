@@ -751,26 +751,35 @@ def _query_qi_db(db_path: Path, sql: str, params: tuple = ()) -> List[Dict[str, 
         return []
 
 
-def _dm_has_provider_column(db_path: Path) -> bool:
-    """Return True if dispatch_metadata.provider column exists (migration guard)."""
+def _dm_available_columns(db_path: Path) -> frozenset:
+    """Return frozenset of column names in dispatch_metadata (empty if DB absent/error)."""
     if not db_path.exists():
-        return False
+        return frozenset()
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)
         try:
             rows = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
-            return any(r[1] == "provider" for r in rows)
+            return frozenset(r[1] for r in rows)
         finally:
             conn.close()
     except Exception:
-        return False
+        return frozenset()
 
 
 def _collect_recent_dispatches_per_project(
     project_id: str, state_dir: Path
 ) -> List[Dict[str, Any]]:
     db_path = state_dir / "quality_intelligence.db"
-    sql = _RECENT_DISPATCHES_SQL if _dm_has_provider_column(db_path) else _RECENT_DISPATCHES_SQL_NO_PROVIDER
+    cols = _dm_available_columns(db_path)
+    provider_part = ", provider" if "provider" in cols else ""
+    model_part = ", model" if "model" in cols else ""
+    sql = (
+        "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+        f"dispatched_at, completed_at, outcome_status{provider_part}{model_part} "
+        "FROM dispatch_metadata "
+        "ORDER BY dispatched_at DESC "
+        "LIMIT 50"
+    )
     return _query_qi_db(db_path, sql)
 
 
@@ -778,7 +787,17 @@ def _collect_recent_dispatches_central(project_id: str) -> List[Dict[str, Any]]:
     db_path = _central_qi_db_for_project(project_id)
     if db_path is None:
         return []
-    sql = _RECENT_DISPATCHES_CENTRAL_SQL if _dm_has_provider_column(db_path) else _RECENT_DISPATCHES_CENTRAL_SQL_NO_PROVIDER
+    cols = _dm_available_columns(db_path)
+    provider_part = ", provider" if "provider" in cols else ""
+    model_part = ", model" if "model" in cols else ""
+    sql = (
+        "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+        f"dispatched_at, completed_at, outcome_status{provider_part}{model_part} "
+        "FROM dispatch_metadata "
+        "WHERE project_id = ? "
+        "ORDER BY dispatched_at DESC "
+        "LIMIT 50"
+    )
     return _query_qi_db(db_path, sql, (project_id,))
 
 
