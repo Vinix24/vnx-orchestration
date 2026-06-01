@@ -88,7 +88,27 @@ def _assemble_instruction(
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
 ) -> str:
-    """Append repo map, layered skill context, then permission preamble."""
+    """Append repo map, layered skill context, then permission preamble.
+
+    When VNX_SHARED_PREPARE=1, delegates to dispatch_prepare.prepare() so both
+    Claude lanes share identical enrichment. Default ("0") is byte-identical to
+    pre-T1 behavior (subprocess golden guard).
+    """
+    if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
+        "1", "true", "yes", "on"
+    ):
+        from dispatch_prepare import prepare, END_OF_INSTRUCTION_SENTINEL  # scripts/lib/ is on sys.path
+        body = prepare(
+            terminal_id=terminal_id,
+            instruction=instruction,
+            role=role,
+            dispatch_id=dispatch_id,
+            dispatch_paths=dispatch_paths,
+            pr_id=pr_id,
+            model=model,
+            repo_map=repo_map,
+        )
+        return body + f"\n\n{END_OF_INSTRUCTION_SENTINEL}\n"
     import subprocess_dispatch as _sd
     if repo_map:
         instruction = instruction + f"\n\n{repo_map}"
