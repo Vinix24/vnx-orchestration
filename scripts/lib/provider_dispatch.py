@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -165,7 +165,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         usage["cache_hit"] = int(
             raw.get("cache_read_tokens", raw.get("cache_read", raw.get("cache_hit", 0))) or 0
         )
-    elif provider == "claude":
+    elif provider in ("claude", "deepseek-harness"):
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
@@ -187,6 +187,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "codex": "openai",
     "gemini": "google",
     "kimi": "kimi",
+    "deepseek-harness": "deepseek",
 }
 
 
@@ -524,6 +525,10 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
         return os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     if provider == "kimi":
         return os.environ.get("VNX_KIMI_MODEL", "") or _resolve_kimi_model_label()
+    if provider == "deepseek-harness":
+        from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
+
+        return resolve_harness_model(args.model if args.model != "sonnet" else None)
     if provider.startswith("litellm:") or provider == "litellm":
         base_sub, model_alias = _litellm_parts(provider)
         env_model = os.environ.get("VNX_LITELLM_MODEL", "")
@@ -547,6 +552,12 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
 
 
 def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) -> bool:
+    if provider == "deepseek-harness":
+        # The harness lane governs its model via resolve_harness_model (default
+        # deepseek-v4-pro) and the endpoint's authoritative model field — it is
+        # not a litellm-registry-driven route. The forbid_route subscription
+        # block is the real safety gate, not registry membership.
+        return False
     if not (provider.startswith("litellm:") or provider == "litellm"):
         return True
     base_sub, model_alias = _litellm_parts(provider)
@@ -566,6 +577,12 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
     }
     if provider.startswith("litellm:") or provider == "litellm":
         return via_per_sub.get(sub_provider or "", "litellm")
+    if provider == "deepseek-harness":
+        # Own-key KEY-AUTH harness lane. The deepseek-harness-subscription-blocked
+        # constraint forbids via=claude_harness_subscription (the OAuth-subscription
+        # redirect). This measured-safe lane runs the own DeepSeek key in key-auth
+        # mode, so it routes via=claude_harness_keyed and clears pre-flight.
+        return "claude_harness_keyed"
     if provider in ("claude", "codex", "gemini", "kimi"):
         return "cli"
     return None
@@ -616,6 +633,11 @@ def _check_constraints(args: argparse.Namespace, provider: str):
     sub_provider = None
     if provider.startswith("litellm:"):
         sub_provider, _model_alias = _litellm_parts(provider)
+    elif provider == "deepseek-harness":
+        # sub_provider=deepseek lets the deepseek-harness-subscription-blocked
+        # constraint match on forbidden_route.provider=deepseek; the keyed via
+        # (set below) is what keeps this own-key lane clear of the block.
+        sub_provider = "deepseek"
     model = _constraint_model_for_provider(args, provider)
     via = _constraint_via_for_provider(provider, sub_provider)
     violations = check_constraints(
@@ -1117,6 +1139,102 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             _remove_provider_worktree(args.dispatch_id)
 
 
+def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
+    """Route to spawn_deepseek_harness for the governed DeepSeek-harness lane.
+
+    Execution lane (not a review lane): the ``claude`` CLI drives DeepSeek's
+    Anthropic-compatible endpoint with full tool-use, authenticated with the
+    OWN DeepSeek key in KEY-AUTH mode (never the OAuth subscription).  Reuses
+    the governed claude spawn path (SubprocessAdapter) so it emits a receipt and
+    is not the raw ``claude -p`` receipt-bypass the GOV-1 guard targets.
+
+    Fast-fails before any subprocess spawn when DEEPSEEK_API_KEY is absent —
+    the lane must never ride the production OAuth account.
+    """
+    from provider_spawns.deepseek_harness_spawn import (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        DEEPSEEK_API_KEY_ENV,
+        DeepSeekHarnessSpawnResult,
+        resolve_harness_model,
+        spawn_deepseek_harness,
+    )
+
+    start_time = datetime.now(timezone.utc)
+
+    if not os.environ.get(DEEPSEEK_API_KEY_ENV):
+        print(
+            f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} env var "
+            "(own-key key-auth; OAuth subscription is forbidden for this lane)",
+            file=sys.stderr,
+        )
+        end_time = datetime.now(timezone.utc)
+        _blocked_result = DeepSeekHarnessSpawnResult(
+            returncode=_EX_USAGE,
+            completion={},
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            error=f"missing {DEEPSEEK_API_KEY_ENV} — blocked before spawn",
+            token_usage=None,
+        )
+        try:
+            _emit_governance(
+                args, "deepseek-harness", DEFAULT_DEEPSEEK_HARNESS_MODEL,
+                _blocked_result, start_time, end_time, "blocked",
+            )
+        except Exception as _eg_exc:
+            logger.error(
+                "_dispatch_deepseek_harness: emit_governance for blocked dispatch failed: %s",
+                _eg_exc,
+            )
+        return _EX_USAGE
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_deepseek_harness: EventStore init failed; cannot proceed "
+            "without audit sink (ADR-005): %s",
+            _es_exc,
+        )
+        return 1
+
+    model = resolve_harness_model(args.model if args.model != "sonnet" else None)
+    enriched_instruction = _enrich_instruction(args)
+    # start_time already set at top of function (before the missing-key guard).
+    try:
+        result = spawn_deepseek_harness(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+        )
+        end_time = datetime.now(timezone.utc)
+        model_used = result.model or model
+
+        if result.error:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            print(f"spawn_deepseek_harness failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "timeout")
+            print("spawn_deepseek_harness timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            return 1
+        _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success")
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_deepseek_harness: event archive+clear failed: %s", _exc)
+
+
 def _dispatch_gemini(args: argparse.Namespace) -> int:
     """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
 
@@ -1238,7 +1356,7 @@ def main(argv: list[str] | None = None) -> int:
     if provider not in _IMPLEMENTED_PROVIDERS and not provider.startswith("litellm:"):
         parser.error(
             f"Unknown provider '{provider}'. "
-            "Accepted values: claude, codex, gemini, kimi, litellm:<model>."
+            "Accepted values: claude, codex, gemini, kimi, deepseek-harness, litellm:<model>."
         )
 
     # PR-ROUTE-1: enforce provider constraints before any handler runs.
@@ -1271,6 +1389,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if provider == "kimi":
         return _dispatch_kimi(args)
+
+    if provider == "deepseek-harness":
+        return _dispatch_deepseek_harness(args)
 
     if provider.startswith("litellm:") or provider == "litellm":
         return _dispatch_litellm(args)
