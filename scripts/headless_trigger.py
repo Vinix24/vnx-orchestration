@@ -428,17 +428,35 @@ class ReceiptWatcher:
         if not actionable_receipts:
             return
 
-        _LOG.info("Layer 0: %d new actionable receipt(s)", len(actionable_receipts))
+        # Dedup per dispatch_id: authored wins over synthesized; newest timestamp wins within tier.
+        # Prevents a synthesized fallback + a later authored receipt from triggering T0 twice.
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+            from dispatch_govern import dedup_completion_receipts as _dedup_receipts  # noqa: PLC0415
+        except Exception:
+            def _dedup_receipts(receipts):  # type: ignore[misc]
+                return receipts[-1] if receipts else None
+
+        groups: dict = {}
+        for r in actionable_receipts:
+            did = r.get("dispatch_id") or ""
+            groups.setdefault(did, []).append(r)
+        winners = [_dedup_receipts(g) for g in groups.values()]
+        winners = [w for w in winners if w is not None]
+        if not winners:
+            return
+
+        _LOG.info("Layer 0: %d new actionable receipt(s) → %d winner(s) after dedup", len(actionable_receipts), len(winners))
 
         # Refresh state before triggering T0
         _refresh_t0_state(self.state_dir)
 
-        # Trigger T0 with latest receipt as context
-        latest = actionable_receipts[-1]
+        # Trigger T0 with latest winning receipt as context
+        latest = max(winners, key=lambda r: str(r.get("timestamp") or ""))
         trigger_headless_t0(
             reason="receipt",
             context={
-                "receipt_count": len(actionable_receipts),
+                "receipt_count": len(winners),
                 "latest_event": latest.get("event_type") or latest.get("event"),
                 "latest_dispatch_id": latest.get("dispatch_id"),
                 "latest_terminal": latest.get("terminal"),

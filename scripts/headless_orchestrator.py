@@ -146,14 +146,31 @@ class _OrchestratedReceiptWatcher:
         if not actionable:
             return
 
-        logger.info("ReceiptWatcher: %d actionable receipt(s)", len(actionable))
+        # Dedup per dispatch_id: authored wins over synthesized; newest timestamp wins within tier.
+        # Prevents a synthesized fallback + a later authored receipt from triggering the loop twice.
+        try:
+            from dispatch_govern import dedup_completion_receipts as _dedup_receipts  # noqa: PLC0415
+        except Exception:
+            def _dedup_receipts(receipts):  # type: ignore[misc]
+                return receipts[-1] if receipts else None
+
+        groups: dict = {}
+        for r in actionable:
+            did = r.get("dispatch_id") or ""
+            groups.setdefault(did, []).append(r)
+        winners = [_dedup_receipts(g) for g in groups.values()]
+        winners = [w for w in winners if w is not None]
+        if not winners:
+            return
+
+        logger.info("ReceiptWatcher: %d actionable receipt(s) → %d winner(s) after dedup", len(actionable), len(winners))
         self._refresh_t0_state(self._state_dir)
 
-        latest = actionable[-1]
+        latest = max(winners, key=lambda r: str(r.get("timestamp") or ""))
         self._bus.put(LoopEvent(
             reason="receipt",
             context={
-                "receipt_count": len(actionable),
+                "receipt_count": len(winners),
                 "latest_event": latest.get("event_type") or latest.get("event"),
                 "latest_dispatch_id": latest.get("dispatch_id"),
                 "latest_terminal": latest.get("terminal"),
