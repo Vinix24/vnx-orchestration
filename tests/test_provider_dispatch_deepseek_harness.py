@@ -13,6 +13,7 @@ Covers the wiring that turns spawn_deepseek_harness into a governed lane:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -55,6 +56,7 @@ class TestRouting:
         ns.role = "backend-developer"
         ns.dispatch_paths = ""
         ns.auto_route = False
+        ns.pr_id = None
         return ns
 
     def test_main_routes_to_deepseek_harness_handler(self):
@@ -83,31 +85,49 @@ class TestRouting:
                 rc = pd._dispatch_deepseek_harness(args)
         assert rc == pd._EX_USAGE
 
-    def test_handler_missing_key_emits_governance_receipt(self):
-        """Missing DEEPSEEK_API_KEY must still write a governance receipt (audit trail)."""
+    def test_handler_missing_key_emits_governance_receipt(self, tmp_path):
+        """Missing DEEPSEEK_API_KEY must write a real governance receipt (not a mock call).
+
+        Does NOT mock _emit_governance. Points the receipt sink at tmp_path and asserts
+        that t0_receipts.ndjson contains a record with dispatch_id, provider=deepseek-harness,
+        and status=blocked — proving the audit trail is written before the non-zero exit.
+        """
         import os
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
         args = self._args()
-        emit_calls = []
 
-        def _capture_emit(a, provider, model, result, start, end, status):
-            emit_calls.append({
-                "provider": provider,
-                "model": model,
-                "status": status,
-                "error": getattr(result, "error", None),
-            })
-
-        with patch.dict("os.environ", {}, clear=False):
+        with patch.dict(
+            "os.environ",
+            {"VNX_STATE_DIR": str(state_dir), "VNX_DATA_DIR": str(tmp_path)},
+            clear=False,
+        ):
             os.environ.pop("DEEPSEEK_API_KEY", None)
-            with patch.object(pd, "_emit_governance", side_effect=_capture_emit):
+            # emit_provider_cost uses project_root.resolve_data_dir (ignores env vars)
+            # and is fail-loud — mock only this so the test stays isolated.
+            with patch("provider_costs.emit_provider_cost", return_value=None):
                 rc = pd._dispatch_deepseek_harness(args)
 
-        assert rc == pd._EX_USAGE, "must still return non-zero exit code"
-        assert len(emit_calls) == 1, "_emit_governance must be called exactly once"
-        call = emit_calls[0]
-        assert call["provider"] == "deepseek-harness"
-        assert call["status"] == "blocked"
-        assert call["error"] is not None and "DEEPSEEK_API_KEY" in call["error"]
+        assert rc == pd._EX_USAGE, "must return non-zero exit code"
+
+        receipt_file = state_dir / "t0_receipts.ndjson"
+        assert receipt_file.exists(), "t0_receipts.ndjson must be created on missing-key path"
+
+        lines = [ln for ln in receipt_file.read_text().splitlines() if ln.strip()]
+        assert lines, "at least one receipt line must be written"
+
+        receipts = [json.loads(ln) for ln in lines]
+        matching = [r for r in receipts if r.get("dispatch_id") == args.dispatch_id]
+        assert len(matching) == 1, (
+            f"expected exactly 1 receipt for dispatch_id={args.dispatch_id!r}, "
+            f"got {len(matching)}"
+        )
+
+        r = matching[0]
+        assert r["status"] == "blocked", f"expected status=blocked, got {r['status']!r}"
+        assert r["provider"] == "deepseek-harness"
+        assert r["completion_pct"] == 0
 
 
 # ---------------------------------------------------------------------------
