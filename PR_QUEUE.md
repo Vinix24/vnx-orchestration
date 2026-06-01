@@ -8,7 +8,7 @@
 ## Progress Overview
 Launch status: **pre-launch** (version 1.0.0)
 Last verified: 2026-06-01 against origin/main@c0506771
-Merged launch PRs: 13 | Queued: 0
+Merged launch PRs: 23 | Queued: 0
 
 ## Status
 
@@ -26,6 +26,16 @@ Merged launch PRs: 13 | Queued: 0
 - #766 — fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report [feature=launch-tmux-spawn-enrichment]
 - #767 — feat(dispatch): route default Claude lane through enriched tmux-spawn [feature=launch-tmux-default-routing]
 - #769 — docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope [feature=launch-readme-honesty]
+- #771 — feat(tmux): PREPARE structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
+- #772 — feat(tmux): GOVERN structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
+- #773 — feat(tmux): RECEIPT structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
+- #774 — feat(tmux): delivery structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
+- #775 — feat(tmux): CAPTURE structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
+- #776 — feat(tmux): uniform-receipts structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
+- #779 — feat(ops): opt-in DB maintenance for quality_intelligence.db (GAP 3a) [feature=log-rotation]
+- #780 — feat(intelligence): install nightly intelligence pipeline cron (GAP 4 — reactivate self-learning loop) [feature=gap4-self-learning-reactivation]
+- #781 — fix(tmux): bounded guarded-retry + adaptive settle for submit reliability (GAP 6) [feature=gap6-submit-reliability]
+- #782 — feat(doctor): structural-doctor for tracks-layer activation (dry-run default, backup-on-apply) [feature=tracks-layer-activation]
 
 ## Remaining Launch Blockers
 - LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release
