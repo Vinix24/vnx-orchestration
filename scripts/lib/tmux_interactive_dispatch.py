@@ -954,18 +954,35 @@ class TmuxInteractiveDispatch:
             baseline = len(self._matching_receipts(dispatch_id, completion_statuses))
 
             # 6. Assemble body (skill body + intelligence + instruction via enrichers)
-            body = (
-                self._assemble_context(
-                    role=role,
-                    smart_context=smart_context,
-                    terminal_id=label,
-                    dispatch_id=dispatch_id,
-                    instruction=instruction,
-                    dispatch_paths=dispatch_paths,
-                )
-                + self._scope_note(dispatch_paths)
-                + self._build_completion_protocol(dispatch_id, label)
+            _context_body = self._assemble_context(
+                role=role,
+                smart_context=smart_context,
+                terminal_id=label,
+                dispatch_id=dispatch_id,
+                instruction=instruction,
+                dispatch_paths=dispatch_paths,
             )
+            if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
+                "1", "true", "yes", "on"
+            ):
+                # prepare() already includes scope-note; add completion-protocol
+                # then trailer as the ABSOLUTE LAST content.
+                try:
+                    from dispatch_prepare import END_OF_INSTRUCTION_SENTINEL as _TRAILER  # noqa: PLC0415
+                except ImportError:
+                    _TRAILER = "<!-- VNX-END-OF-INSTRUCTION -->"
+                body = (
+                    _context_body
+                    + self._build_completion_protocol(dispatch_id, label)
+                    + f"\n\n{_TRAILER}\n"
+                )
+            else:
+                # Legacy path: scope-note + completion-protocol, no trailer.
+                body = (
+                    _context_body
+                    + self._scope_note(dispatch_paths)
+                    + self._build_completion_protocol(dispatch_id, label)
+                )
 
             # 7. Deliver instruction
             self._emit_event(

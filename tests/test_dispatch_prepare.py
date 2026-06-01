@@ -152,14 +152,14 @@ class TestPrepareOrdering(unittest.TestCase):
 
     def test_prepare_contains_all_required_blocks(self):
         """prepare() output contains: preamble text, skill context, footer sentinel,
-        directive sections, trailer sentinel — all present."""
+        directive sections — trailer is NOT in prepare() (each lane appends it)."""
         result = _patched_prepare()
 
         self.assertIn("## Permission Profile", result, "permission preamble missing")
         self.assertIn("## Skill Context", result, "skill context missing")
         self.assertIn(_WORKER_RULES_FOOTER_SENTINEL, result, "worker-rules footer sentinel missing")
         self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result, "report contract directive missing")
-        self.assertIn(_TRAILER_SENTINEL, result, "trailer sentinel missing")
+        self.assertNotIn(_TRAILER_SENTINEL, result, "trailer sentinel must NOT be in prepare() output")
 
     def test_prepare_ordering_preamble_before_skill(self):
         """Permission preamble appears before skill context in output."""
@@ -182,21 +182,22 @@ class TestPrepareOrdering(unittest.TestCase):
         directive_pos = result.index("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->")
         self.assertLess(footer_pos, directive_pos, "footer must precede directive")
 
-    def test_prepare_ordering_directive_before_trailer(self):
-        """Report-contract directive appears before the trailer sentinel."""
+    def test_prepare_directive_is_last_block(self):
+        """Report-contract directive is the last meaningful block in prepare() output
+        (trailer sentinel is appended by each lane after prepare(), not by prepare() itself)."""
         result = _patched_prepare()
         directive_pos = result.index("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->")
-        trailer_pos = result.index(_TRAILER_SENTINEL)
-        self.assertLess(directive_pos, trailer_pos, "directive must precede trailer")
+        self.assertGreaterEqual(directive_pos, 0, "directive must be present")
+        # Nothing meaningful after the directive (only whitespace)
+        after_directive = result[directive_pos + len("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->"):]
+        self.assertNotIn(_TRAILER_SENTINEL, after_directive,
+                         "trailer must NOT appear in prepare() output")
 
-    def test_prepare_trailer_is_last(self):
-        """Trailer sentinel must be the last non-whitespace content."""
+    def test_prepare_no_trailer(self):
+        """prepare() must NOT append the trailer sentinel — lanes own that step."""
         result = _patched_prepare()
-        stripped = result.rstrip()
-        self.assertTrue(
-            stripped.endswith(_TRAILER_SENTINEL),
-            f"trailer sentinel must be last; ends with: {stripped[-80:]!r}",
-        )
+        self.assertNotIn(_TRAILER_SENTINEL, result,
+                         "prepare() must not include the trailer sentinel")
 
 
 class TestPrepareSubFlags(unittest.TestCase):
@@ -208,9 +209,9 @@ class TestPrepareSubFlags(unittest.TestCase):
                                       "VNX_REPORT_CONTRACT_DIRECTIVE": "1"}):
             result = _patched_prepare()
         self.assertNotIn(_WORKER_RULES_FOOTER_SENTINEL, result, "footer must be absent when flag=0")
-        # Directive and trailer must still be present
+        # Directive must still be present; trailer is not part of prepare()
         self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
-        self.assertIn(_TRAILER_SENTINEL, result)
+        self.assertNotIn(_TRAILER_SENTINEL, result)
 
     def test_directive_omitted_when_flag_off(self):
         """VNX_REPORT_CONTRACT_DIRECTIVE=0 suppresses the report-contract directive."""
@@ -218,18 +219,18 @@ class TestPrepareSubFlags(unittest.TestCase):
                                       "VNX_REPORT_CONTRACT_DIRECTIVE": "0"}):
             result = _patched_prepare()
         self.assertNotIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result, "directive must be absent when flag=0")
-        # Footer and trailer must still be present
+        # Footer must still be present; trailer is not part of prepare()
         self.assertIn(_WORKER_RULES_FOOTER_SENTINEL, result)
-        self.assertIn(_TRAILER_SENTINEL, result)
+        self.assertNotIn(_TRAILER_SENTINEL, result)
 
     def test_both_off_omits_both(self):
-        """Both sub-flags off: neither footer nor directive appears, trailer still present."""
+        """Both sub-flags off: neither footer nor directive nor trailer appears."""
         with patch.dict(os.environ, {"VNX_WORKER_RULES_FOOTER": "0",
                                       "VNX_REPORT_CONTRACT_DIRECTIVE": "0"}):
             result = _patched_prepare()
         self.assertNotIn(_WORKER_RULES_FOOTER_SENTINEL, result)
         self.assertNotIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
-        self.assertIn(_TRAILER_SENTINEL, result)
+        self.assertNotIn(_TRAILER_SENTINEL, result)
 
     def test_both_on_by_default(self):
         """With no env overrides, both footer and directive are present."""

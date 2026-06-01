@@ -97,8 +97,8 @@ def _assemble_instruction(
     if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
         "1", "true", "yes", "on"
     ):
-        from dispatch_prepare import prepare  # scripts/lib/ is on sys.path
-        return prepare(
+        from dispatch_prepare import prepare, END_OF_INSTRUCTION_SENTINEL  # scripts/lib/ is on sys.path
+        body = prepare(
             terminal_id=terminal_id,
             instruction=instruction,
             role=role,
@@ -108,6 +108,7 @@ def _assemble_instruction(
             model=model,
             repo_map=repo_map,
         )
+        return body + f"\n\n{END_OF_INSTRUCTION_SENTINEL}\n"
     import subprocess_dispatch as _sd
     if repo_map:
         instruction = instruction + f"\n\n{repo_map}"

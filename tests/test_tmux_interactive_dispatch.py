@@ -1150,11 +1150,13 @@ class TestSharedPrepareWiringTmux(unittest.TestCase):
         result = self._patched_assemble()
         self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
 
-    def test_shared_prepare_1_contains_trailer(self):
-        """VNX_SHARED_PREPARE=1: assembled context contains trailer sentinel."""
-        from dispatch_prepare import _TRAILER_SENTINEL
+    def test_shared_prepare_1_no_trailer_in_assemble_context(self):
+        """VNX_SHARED_PREPARE=1: _assemble_context does NOT include the trailer sentinel.
+        The trailer is appended by dispatch() after the completion-protocol."""
+        from dispatch_prepare import END_OF_INSTRUCTION_SENTINEL
         result = self._patched_assemble()
-        self.assertIn(_TRAILER_SENTINEL, result)
+        self.assertNotIn(END_OF_INSTRUCTION_SENTINEL, result,
+                         "trailer must not be in _assemble_context — it is added by dispatch()")
 
     def test_shared_prepare_0_default_no_footer_no_trailer(self):
         """VNX_SHARED_PREPARE=0 (default): _assemble_context does not contain footer/trailer."""
@@ -1228,6 +1230,124 @@ class TestSharedPrepareWiringTmux(unittest.TestCase):
         # Must have fallen back to standard enrichment (no footer sentinel from prepare())
         self.assertIn("STANDARD_ENRICHMENT_BODY", result)
         self.assertNotIn(_WORKER_RULES_FOOTER_SENTINEL, result)
+
+
+# ---------------------------------------------------------------------------
+# T1: Full delivered-body order — VNX_SHARED_PREPARE=1 + dispatch_paths
+# ---------------------------------------------------------------------------
+
+class TestFullDeliveredBodyOrder(_LaneTestCase):
+    """Full tmux delivered body with VNX_SHARED_PREPARE=1 must have the exact order:
+    [prepare body incl. scope-note] + [completion-protocol] + [trailer as final content].
+    scope-note must appear EXACTLY ONCE and NOT be duplicated by the lane.
+    """
+
+    DISPATCH_ID_FULL = "20260601-full-body-order"
+
+    def _run_shared_dispatch(self, dispatch_paths=None):
+        """Run dispatch() with VNX_SHARED_PREPARE=1 and return delivered body string."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID_FULL,
+        )
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            runner=fake,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        fake_skill = "## Skill Context\n\nINSTRUCTION"
+        fake_perm = "## Permission Profile\n\n---\n\n" + fake_skill
+
+        env = {"VNX_SHARED_PREPARE": "1"}
+        dispatch_kw = dict(
+            role="backend-developer",
+            model="sonnet",
+            deadline_seconds=5.0,
+            poll_interval=0.01,
+            warmup_timeout=0.5,
+            warmup_poll_interval=0.01,
+            isolated_worktree=False,
+        )
+        if dispatch_paths is not None:
+            dispatch_kw["dispatch_paths"] = dispatch_paths
+
+        with patch.dict(os.environ, env):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                return_value=fake_skill,
+            ):
+                with patch(
+                    "subprocess_dispatch_internals.skill_injection._inject_permission_profile",
+                    return_value=fake_perm,
+                ):
+                    lane.dispatch("Do the thing.", self.DISPATCH_ID_FULL, **dispatch_kw)
+
+        return "\n".join(fake.pasted)
+
+    def test_full_body_trailer_is_absolute_last(self):
+        """VNX_SHARED_PREPARE=1 + dispatch_paths: trailer sentinel is the final non-whitespace content."""
+        from dispatch_prepare import END_OF_INSTRUCTION_SENTINEL
+        body = self._run_shared_dispatch(dispatch_paths=["scripts/", "tests/"])
+        stripped = body.rstrip()
+        self.assertTrue(
+            stripped.endswith(END_OF_INSTRUCTION_SENTINEL),
+            f"trailer must be absolute last non-whitespace; ends with: {stripped[-120:]!r}",
+        )
+
+    def test_full_body_scope_note_exactly_once(self):
+        """VNX_SHARED_PREPARE=1 + dispatch_paths: scope-note appears exactly once (no duplication)."""
+        body = self._run_shared_dispatch(dispatch_paths=["scripts/", "tests/"])
+        count = body.count("Edit ONLY within these paths")
+        self.assertEqual(count, 1,
+                         f"scope-note must appear exactly once; found {count} times")
+
+    def test_full_body_order_scope_before_footer_before_directive_before_protocol_before_trailer(self):
+        """VNX_SHARED_PREPARE=1 + dispatch_paths: exact order — scope-note → footer → directive → completion-protocol → trailer."""
+        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL, END_OF_INSTRUCTION_SENTINEL
+        body = self._run_shared_dispatch(dispatch_paths=["scripts/", "tests/"])
+
+        scope_pos = body.find("Edit ONLY within these paths")
+        footer_pos = body.find(_WORKER_RULES_FOOTER_SENTINEL)
+        directive_pos = body.find("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->")
+        protocol_pos = body.find("Completion Protocol (interactive lane)")
+        trailer_pos = body.find(END_OF_INSTRUCTION_SENTINEL)
+
+        self.assertGreaterEqual(scope_pos, 0, "scope-note must be present")
+        self.assertGreaterEqual(footer_pos, 0, "worker-rules footer must be present")
+        self.assertGreaterEqual(directive_pos, 0, "report-contract directive must be present")
+        self.assertGreaterEqual(protocol_pos, 0, "completion-protocol must be present")
+        self.assertGreaterEqual(trailer_pos, 0, "trailer sentinel must be present")
+
+        self.assertLess(scope_pos, footer_pos,
+                        "scope-note must precede worker-rules footer")
+        self.assertLess(footer_pos, directive_pos,
+                        "worker-rules footer must precede report-contract directive")
+        self.assertLess(directive_pos, protocol_pos,
+                        "report-contract directive must precede completion-protocol")
+        self.assertLess(protocol_pos, trailer_pos,
+                        "completion-protocol must precede trailer sentinel")
+
+    def test_full_body_scope_note_paths_present(self):
+        """VNX_SHARED_PREPARE=1: scope-note lists the exact dispatch_paths."""
+        body = self._run_shared_dispatch(dispatch_paths=["scripts/", "tests/"])
+        self.assertIn("`scripts/`", body)
+        self.assertIn("`tests/`", body)
+
+    def test_full_body_no_scope_note_without_paths(self):
+        """VNX_SHARED_PREPARE=1 + no dispatch_paths: scope-note block is absent."""
+        body = self._run_shared_dispatch(dispatch_paths=None)
+        self.assertNotIn("Edit ONLY within these paths", body)
+
+    def test_full_body_trailer_still_last_without_paths(self):
+        """VNX_SHARED_PREPARE=1 + no dispatch_paths: trailer is still the absolute last content."""
+        from dispatch_prepare import END_OF_INSTRUCTION_SENTINEL
+        body = self._run_shared_dispatch(dispatch_paths=None)
+        stripped = body.rstrip()
+        self.assertTrue(
+            stripped.endswith(END_OF_INSTRUCTION_SENTINEL),
+            f"trailer must be last even without dispatch_paths; ends with: {stripped[-120:]!r}",
+        )
 
 
 if __name__ == "__main__":

@@ -8,9 +8,13 @@ Output order (top to bottom):
   [permission preamble]       _inject_permission_profile  (gap #2)
   ---
   [skill body + instruction]  _inject_skill_context       (+ repo-map prepended)
+  [scope guard]               dispatch_paths, when non-empty
   [worker rules footer]       VNX_WORKER_RULES_FOOTER=1   (gap #3a, default on)
   [report contract directive] VNX_REPORT_CONTRACT_DIRECTIVE=1 (gap #3b, default on)
-  <!-- VNX-END-OF-INSTRUCTION -->
+
+The trailer sentinel (<!-- VNX-END-OF-INSTRUCTION -->) is NOT appended by
+prepare() — each lane appends it as the absolute last step after any
+lane-specific content (e.g. the tmux completion-protocol).
 """
 
 from __future__ import annotations
@@ -24,7 +28,24 @@ if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
 _WORKER_RULES_FOOTER_SENTINEL = "<!-- VNX-WORKER-RULES-FOOTER -->"
-_TRAILER_SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+
+# Public constant — lanes append this as the ABSOLUTE LAST line of the
+# delivered body.  prepare() intentionally does NOT include it so each
+# lane can append lane-specific content (e.g. completion-protocol) before it.
+END_OF_INSTRUCTION_SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+
+# Private alias kept for backward compatibility with existing imports.
+_TRAILER_SENTINEL = END_OF_INSTRUCTION_SENTINEL
+
+
+def _scope_note_block(dispatch_paths: "list[str]") -> str:
+    """Scope guard block forwarded from dispatch_paths — identical to tmux lane text."""
+    paths_str = "\n".join(f"  - `{p}`" for p in dispatch_paths)
+    return (
+        "\n\n---\n\n## Scope Guard\n\n"
+        "**Edit ONLY within these paths.** Do not touch files outside this scope:\n\n"
+        f"{paths_str}\n"
+    )
 
 
 def prepare(
@@ -72,6 +93,10 @@ def prepare(
     # 3. Permission preamble prepended to full body (closes gap #2)
     body = _inject_permission_profile(terminal_id or "", role, body)
 
+    # 3b. Scope guard — only when dispatch_paths is non-empty
+    if dispatch_paths:
+        body = body + _scope_note_block(dispatch_paths)
+
     # 4. Worker rules footer — gated by VNX_WORKER_RULES_FOOTER (default on, gap #3a)
     if os.environ.get("VNX_WORKER_RULES_FOOTER", "1").strip().lower() not in (
         "0", "false", "no", "off"
@@ -85,7 +110,8 @@ def prepare(
     ):
         body = body + "\n\n" + _rbc.build_directive(dispatch_id, pr_id=pr_id)
 
-    # 6. Trailer sentinel — paste-truncation guard
-    body = body + f"\n\n{_TRAILER_SENTINEL}\n"
+    # Trailer sentinel is intentionally NOT appended here.
+    # Each lane (tmux, subprocess) appends END_OF_INSTRUCTION_SENTINEL as its
+    # absolute last step, after any lane-specific content.
 
     return body
