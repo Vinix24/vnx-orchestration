@@ -43,12 +43,22 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 # Receipt dedup — authored > synthesized, newest timestamp wins within tier
 # ---------------------------------------------------------------------------
 
+_AUTHORITATIVE_STATUSES = frozenset({"done", "failed"})
+
+
+def _receipt_authority(receipt: dict) -> int:
+    """Return authority rank: 1 = authoritative (done/failed), 0 = unknown/other."""
+    return 1 if (receipt.get("status") or "") in _AUTHORITATIVE_STATUSES else 0
+
+
 def dedup_completion_receipts(receipts: list) -> "dict | None":
     """Pick the preferred receipt from multiple completion receipts for one dispatch.
 
-    Preference: non-synthesized (worker-authored) receipts always win over
-    synthesized ones. Within the same tier, pick newest by ISO 8601 timestamp
-    (lexicographic sort). Fallback: last entry in list order.
+    Preference order (highest to lowest):
+      1. Authoritative status (done/failed) > unknown/other
+      2. Non-synthesized (worker-authored) > synthesized within the same authority tier
+      3. Newest ISO 8601 timestamp within the same authority+authored tier
+    Fallback: last entry in list order.
 
     Never raises.
     """
@@ -57,9 +67,15 @@ def dedup_completion_receipts(receipts: list) -> "dict | None":
     if len(receipts) == 1:
         return receipts[0]
 
-    authored = [r for r in receipts if not r.get("synthesized")]
-    pool = authored if authored else receipts
+    # Tier 1: authoritative status outranks unknown
+    authoritative = [r for r in receipts if _receipt_authority(r)]
+    pool = authoritative if authoritative else receipts
 
+    # Tier 2: authored (non-synthesized) outranks synthesized within the pool
+    authored = [r for r in pool if not r.get("synthesized")]
+    pool = authored if authored else pool
+
+    # Tier 3: newest timestamp
     try:
         return max(pool, key=lambda r: str(r.get("timestamp") or ""))
     except Exception:  # noqa: BLE001
@@ -108,6 +124,10 @@ def ensure_receipt(
         "contract_status": contract_status,
         "permission_enforcement": permission_enforcement,
         "timestamp": ts,
+        "provider": "claude",
+        "sub_provider": "anthropic",
+        "model": spec.model or "unknown",
+        "lane": lane,
     }
     if report_path is not None:
         synthesized_receipt["report_path"] = str(report_path)
@@ -142,6 +162,7 @@ class GovernSpec:
     pr_id: Optional[str] = None
     base_sha: Optional[str] = None
     worktree_path: Optional[Path] = None
+    model: Optional[str] = None
 
 
 @dataclass

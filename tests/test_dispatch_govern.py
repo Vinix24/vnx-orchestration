@@ -595,6 +595,85 @@ def test_dedup_authored_newest_wins():
 
 
 # ---------------------------------------------------------------------------
+# dedup_completion_receipts — authoritative>unknown ranking (uniform receipts)
+# ---------------------------------------------------------------------------
+
+def test_dedup_authoritative_done_wins_over_unknown():
+    """done receipt outranks status=unknown regardless of timestamp or authored tier."""
+    unknown = {"dispatch_id": "x", "status": "unknown", "lane": None, "timestamp": "2026-06-01T11:00:00Z"}
+    done = {"dispatch_id": "x", "status": "done", "timestamp": "2026-06-01T10:00:00Z"}
+    result = dedup_completion_receipts([unknown, done])
+    assert result is done, "done must win over unknown even when unknown is newer"
+
+
+def test_dedup_authoritative_failed_wins_over_unknown():
+    """failed receipt outranks status=unknown."""
+    unknown = {"dispatch_id": "x", "status": "unknown", "timestamp": "2026-06-01T12:00:00Z"}
+    failed = {"dispatch_id": "x", "status": "failed", "timestamp": "2026-06-01T09:00:00Z"}
+    result = dedup_completion_receipts([unknown, failed])
+    assert result is failed, "failed must win over unknown"
+
+
+def test_dedup_unknown_alone_returns_unknown():
+    """When only an unknown receipt exists, it is returned (no authoritative exists)."""
+    unknown = {"dispatch_id": "x", "status": "unknown", "lane": None, "timestamp": "2026-06-01T10:00:00Z"}
+    result = dedup_completion_receipts([unknown])
+    assert result is unknown
+
+
+def test_dedup_done_authored_wins_over_done_synthesized_and_unknown():
+    """done(authored) beats done(synthesized) beats unknown — full three-tier stack."""
+    unknown = {"dispatch_id": "x", "status": "unknown", "timestamp": "2026-06-01T13:00:00Z"}
+    done_synth = {"dispatch_id": "x", "status": "done", "synthesized": True, "timestamp": "2026-06-01T12:00:00Z"}
+    done_authored = {"dispatch_id": "x", "status": "done", "timestamp": "2026-06-01T10:00:00Z"}
+    result = dedup_completion_receipts([unknown, done_synth, done_authored])
+    assert result is done_authored, "done(authored) must win over done(synthesized) and unknown"
+
+
+def test_dedup_multiple_done_authored_picks_newest():
+    """When two authoritative authored receipts exist, newest timestamp wins."""
+    r1 = {"dispatch_id": "x", "status": "done", "timestamp": "2026-06-01T09:00:00Z"}
+    r2 = {"dispatch_id": "x", "status": "done", "timestamp": "2026-06-01T11:00:00Z"}
+    result = dedup_completion_receipts([r1, r2])
+    assert result is r2
+
+
+# ---------------------------------------------------------------------------
+# ensure_receipt — uniform stamp: provider/sub_provider/model/lane
+# ---------------------------------------------------------------------------
+
+def test_ensure_receipt_carries_provider_model_lane(tmp_data, tmp_state):
+    """Lane-synthesized receipt must carry provider, sub_provider, model, and lane fields."""
+    spec = _make_spec(tmp_data, tmp_state)
+    spec.model = "sonnet"
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    assert receipt.get("provider") == "claude", f"provider missing or wrong: {receipt}"
+    assert receipt.get("sub_provider") == "anthropic", f"sub_provider missing or wrong: {receipt}"
+    assert receipt.get("model") == "sonnet", f"model missing or wrong: {receipt}"
+    assert receipt.get("lane") == "tmux_interactive", f"lane missing or wrong: {receipt}"
+
+
+def test_ensure_receipt_model_unknown_when_not_set(tmp_data, tmp_state):
+    """Lane-synthesized receipt uses 'unknown' for model when spec.model is not set."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    assert receipt.get("provider") == "claude"
+    assert receipt.get("model") == "unknown"
+
+
+# ---------------------------------------------------------------------------
 # ensure_receipt — unit tests
 # ---------------------------------------------------------------------------
 

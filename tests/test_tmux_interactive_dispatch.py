@@ -1594,6 +1594,40 @@ class TestReceiptFallback(_LaneTestCase):
                 f"VNX_RECEIPT_FALLBACK=0 must suppress synthesized receipt: {synthesized}",
             )
 
+    def test_synthesized_receipt_carries_provider_model_lane(self):
+        """Lane-synthesized receipt must carry provider, sub_provider, model, and lane fields."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_RECEIPT_FALLBACK": "1"}):
+            with patch("dispatch_govern._git_summary", return_value="timeout synthesis"):
+                with patch("dispatch_govern._git_changes", return_value="No diff"):
+                    self._fast_dispatch(
+                        lane,
+                        model="sonnet",
+                        deadline_seconds=0.2,
+                        poll_interval=0.02,
+                    )
+
+        self.assertTrue(self.receipts_file.exists())
+        lines = [ln for ln in self.receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        synthesized = [json.loads(ln) for ln in lines
+                       if json.loads(ln).get("source") == "tmux_interactive_lane_synthesized"]
+        self.assertEqual(len(synthesized), 1)
+        rec = synthesized[0]
+        self.assertEqual(rec.get("provider"), "claude",
+                         f"provider missing or wrong in synthesized receipt: {rec}")
+        self.assertEqual(rec.get("sub_provider"), "anthropic",
+                         f"sub_provider missing or wrong: {rec}")
+        self.assertEqual(rec.get("model"), "sonnet",
+                         f"model missing or wrong: {rec}")
+        self.assertEqual(rec.get("lane"), "tmux_interactive",
+                         f"lane missing or wrong: {rec}")
+
 
 # ---------------------------------------------------------------------------
 # RECEIPT step: dedup — authored > synthesized; late worker wins

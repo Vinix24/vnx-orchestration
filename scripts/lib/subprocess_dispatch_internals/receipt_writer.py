@@ -100,6 +100,10 @@ def _write_receipt(
     token_usage: dict | None = None,
     cost_usd: float | None = None,
     pr_id: str | None = None,
+    provider: str | None = None,
+    sub_provider: str | None = None,
+    model: str | None = None,
+    lane: str | None = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -122,6 +126,10 @@ def _write_receipt(
         token_usage=token_usage,
         cost_usd=cost_usd,
         pr_id=pr_id,
+        provider=provider,
+        sub_provider=sub_provider,
+        model=model,
+        lane=lane,
     )
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
 
@@ -144,6 +152,10 @@ def _build_receipt_payload(
     token_usage: dict | None = None,
     cost_usd: float | None = None,
     pr_id: str | None = None,
+    provider: str | None = None,
+    sub_provider: str | None = None,
+    model: str | None = None,
+    lane: str | None = None,
 ) -> dict:
     """Assemble the receipt dict from the named fields."""
     receipt = {
@@ -156,6 +168,14 @@ def _build_receipt_payload(
         "session_id": session_id,
         "source": "subprocess",
     }
+    if provider is not None:
+        receipt["provider"] = provider
+    if sub_provider is not None:
+        receipt["sub_provider"] = sub_provider
+    if model is not None:
+        receipt["model"] = model
+    if lane is not None:
+        receipt["lane"] = lane
     if commit_hash_before:
         receipt["commit_hash_before"] = commit_hash_before
     if commit_hash_after:

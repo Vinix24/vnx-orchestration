@@ -397,6 +397,7 @@ class TmuxInteractiveDispatch:
         pr_id: "str | None" = None,
         base_sha: "str | None" = None,
         worktree_path: "Path | None" = None,
+        model: "str | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -425,6 +426,7 @@ class TmuxInteractiveDispatch:
             pr_id=pr_id,
             base_sha=base_sha,
             worktree_path=worktree_path,
+            model=model,
         )
         raw = GovernRaw(receipt=receipt, duration_seconds=duration_seconds)
         outcome = govern(spec, raw, lane="tmux_interactive")
@@ -1168,6 +1170,7 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -1263,6 +1266,7 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -1295,6 +1299,7 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -1329,6 +1334,7 @@ class TmuxInteractiveDispatch:
                 duration_seconds=time.monotonic() - start_time,
                 base_sha=worktree_handle.base_sha if worktree_handle else None,
                 worktree_path=worktree_handle.path if worktree_handle else None,
+                model=model,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.

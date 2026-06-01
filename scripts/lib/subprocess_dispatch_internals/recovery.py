@@ -189,6 +189,10 @@ def _handle_success(
         token_usage=token_usage,
         cost_usd=cost_usd,
         pr_id=pr_id,
+        provider="claude",
+        sub_provider="anthropic",
+        model=model,
+        lane="subprocess",
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "success", quality_db)
@@ -258,6 +262,10 @@ def _handle_final_failure(
         token_usage=token_usage,
         cost_usd=cost_usd,
         pr_id=pr_id,
+        provider="claude",
+        sub_provider="anthropic",
+        model=model,
+        lane="subprocess",
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "failure", quality_db)
