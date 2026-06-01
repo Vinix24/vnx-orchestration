@@ -44,6 +44,11 @@ class FakeTmux:
     On the first ``send-keys ... Enter`` following a ``paste-buffer``, writes a
     completion receipt to ``receipts_file`` — simulating the worker calling
     ``append_receipt`` directly after finishing work.
+
+    ``post_paste_capture_seq``: optional list of strings consumed (FIFO) by
+    capture-pane calls that happen AFTER the first Enter following paste-buffer.
+    Used to simulate "staged" vs "working" states for submit-verify tests.
+    When the list is exhausted, falls back to ``ready_content``.
     """
 
     def __init__(
@@ -58,6 +63,7 @@ class FakeTmux:
         emit_receipt: bool = True,
         receipt_status: str = "done",
         ready_content: str = "Welcome to Claude\n? for shortcuts",
+        post_paste_capture_seq: "list[str] | None" = None,
     ) -> None:
         self.receipts_file = receipts_file
         self.dispatch_id = dispatch_id
@@ -68,10 +74,12 @@ class FakeTmux:
         self._emit_receipt = emit_receipt
         self._receipt_status = receipt_status
         self._ready_content = ready_content
+        self._post_paste_seq: list[str] = list(post_paste_capture_seq or [])
         self.commands: list[list[str]] = []
         self.pasted: list[str] = []
         self.killed_sessions: list[str] = []
         self._pending_paste = False
+        self._paste_fired = False  # True after first Enter following paste-buffer
         self._literal_send_attempted = False
         self.receipts_written = 0
 
@@ -91,6 +99,9 @@ class FakeTmux:
             return TmuxResult(0, "@1\n")
 
         if cmd == "capture-pane":
+            # Post-paste: consume the staged-response queue (FIFO).
+            if self._paste_fired and self._post_paste_seq:
+                return TmuxResult(0, self._post_paste_seq.pop(0))
             return TmuxResult(0, self._ready_content)
 
         if cmd == "load-buffer":
@@ -115,9 +126,10 @@ class FakeTmux:
                 self._literal_send_attempted = True
                 if not self._launch_ok:
                     return TmuxResult(1, "", "send-keys literal failed")
-            # paste-buffer + Enter → simulate worker completing.
+            # First Enter after paste-buffer → simulate worker completing.
             if args[-1] == "Enter" and self._pending_paste:
                 self._pending_paste = False
+                self._paste_fired = True
                 if self._emit_receipt:
                     self._write_receipt()
             return TmuxResult(0)
@@ -175,7 +187,14 @@ class _LaneTestCase(unittest.TestCase):
             isolated_worktree=False,  # existing tests focus on tmux logic, not worktree
         )
         kwargs.update(overrides)
-        return lane.dispatch("Do the thing.", self.DISPATCH_ID, **kwargs)
+        # Zero-out time-sensitive env vars so tests run fast.
+        _env = {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+        }
+        with patch.dict(os.environ, _env):
+            return lane.dispatch("Do the thing.", self.DISPATCH_ID, **kwargs)
 
 
 class TestSingleShotSuccess(_LaneTestCase):
@@ -1811,6 +1830,499 @@ class TestReceiptDedup(_LaneTestCase):
         self.assertIs(
             winner_synth_first, winner_authored_first,
             "Both orderings must return the SAME authored receipt object",
+        )
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — v2.1.159 readiness markers + VNX_TMUX_READY_STRICT fail-fast
+# ---------------------------------------------------------------------------
+
+class TestReadinessV2(_LaneTestCase):
+    """Readiness marker detection for Claude Code v2.1.159 + STRICT fail-fast guard."""
+
+    def test_v2_ready_marker_detected(self):
+        """'Claude Code v2.1.159' startup banner is detected as ready (no legacy marker needed)."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            ready_content="Claude Code v2.1.159\n> ",
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+        self.assertTrue(result.success, result.failure_reason)
+
+    def test_legacy_ready_marker_still_works(self):
+        """Legacy 'Welcome to Claude' content is still detected as ready."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            ready_content="Welcome to Claude\n? for shortcuts",
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+        self.assertTrue(result.success, result.failure_reason)
+
+    def test_strict_ready_timeout_no_paste_failed_receipt(self):
+        """STRICT=1 + never-ready pane: no paste sent, failure_reason = interactive_ready_timeout."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            # Content with no known readiness marker.
+            ready_content="[no marker here, just a shell prompt $]",
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_READY_STRICT": "1", "VNX_TMUX_PASTE_SETTLE_SECONDS": "0"}):
+            result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "interactive_ready_timeout")
+        # No paste must have happened.
+        self.assertEqual(fake.pasted, [], "instruction must not be pasted when STRICT timeout fires")
+        # Session must be torn down.
+        self.assertTrue(fake.killed_sessions, "session must be killed on ready_timeout teardown")
+
+    def test_strict_1_ready_timeout_emits_coordination_event(self):
+        """STRICT=1 + never-ready: an 'interactive_ready_timeout' coordination event is emitted."""
+        from runtime_coordination import get_connection, get_events
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            ready_content="[no marker]",
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_READY_STRICT": "1", "VNX_TMUX_PASTE_SETTLE_SECONDS": "0"}):
+            self._fast_dispatch(lane)
+
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn("interactive_ready_timeout", {e["event_type"] for e in events})
+
+    def test_strict_0_best_effort_proceeds_even_if_not_ready(self):
+        """VNX_TMUX_READY_STRICT=0: paste happens even when no readiness marker is seen."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            ready_content="[no marker]",
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_READY_STRICT": "0"}):
+            result = self._fast_dispatch(lane)
+
+        # With emit_receipt=True (default), receipt is written on Enter → dispatch succeeds.
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertNotEqual(fake.pasted, [], "instruction must be pasted when STRICT=0 (best-effort)")
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — paste-settle + submit-verify + one-retry path
+# ---------------------------------------------------------------------------
+
+class TestSubmitVerify(_LaneTestCase):
+    """Submit verification: sentinel staged → retry; working state → no retry; timeout → fail."""
+
+    _SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+    _WORKING = "esc to interrupt"
+
+    def _staged_body(self) -> str:
+        """A body string that contains the sentinel so _still_staged() triggers."""
+        return f"Do the thing.\n\n{self._SENTINEL}"
+
+    def test_no_retry_when_pane_shows_working_state(self):
+        """When capture-pane shows 'esc to interrupt' after first Enter, no second Enter is sent."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._WORKING],
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+        # Count Enter keystrokes sent after paste-buffer.
+        paste_idx = next(
+            (i for i, c in enumerate(fake.commands) if c and c[0] == "paste-buffer"), None
+        )
+        self.assertIsNotNone(paste_idx)
+        post_paste_enters = [
+            c for c in fake.commands[paste_idx + 1:]
+            if c and c[0] == "send-keys" and c[-1] == "Enter"
+        ]
+        self.assertEqual(len(post_paste_enters), 1, "only one Enter expected when working state seen")
+
+    def test_retry_enter_sent_when_sentinel_staged(self):
+        """When sentinel is staged after first Enter, exactly one retry Enter is sent."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            # First capture: staged; second: working state (clears staged).
+            post_paste_capture_seq=[self._SENTINEL, self._WORKING],
+        )
+        lane = self._make_lane(fake)
+        # Dispatch body must contain the sentinel for _still_staged() to trigger.
+        with patch.dict(os.environ, {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.5",
+        }):
+            result = lane.dispatch(
+                self._staged_body(),
+                self.DISPATCH_ID,
+                role="backend-developer",
+                model="sonnet",
+                deadline_seconds=5.0,
+                poll_interval=0.01,
+                warmup_timeout=0.5,
+                warmup_poll_interval=0.01,
+                isolated_worktree=False,
+            )
+
+        self.assertTrue(result.success, result.failure_reason)
+        paste_idx = next(
+            (i for i, c in enumerate(fake.commands) if c and c[0] == "paste-buffer"), None
+        )
+        self.assertIsNotNone(paste_idx)
+        post_paste_enters = [
+            c for c in fake.commands[paste_idx + 1:]
+            if c and c[0] == "send-keys" and c[-1] == "Enter"
+        ]
+        self.assertEqual(
+            len(post_paste_enters), 2,
+            f"expected 2 Enters (first + one retry); got {len(post_paste_enters)}",
+        )
+
+    def test_submit_failed_when_sentinel_staged_past_verify_timeout(self):
+        """When sentinel is still staged after verify-timeout, failure_reason=submit_failed."""
+        # 50 staged responses is far more than the verify-timeout loop can consume in 0.1s.
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._SENTINEL] * 50,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+        }):
+            with patch("dispatch_govern.govern") as mock_govern:
+                from dispatch_govern import GovernedOutcome
+                mock_govern.return_value = GovernedOutcome(
+                    report_path=None,
+                    contract_status="synthesized",
+                    permission_enforcement="soft",
+                )
+                result = lane.dispatch(
+                    self._staged_body(),
+                    self.DISPATCH_ID,
+                    role="backend-developer",
+                    model="sonnet",
+                    deadline_seconds=5.0,
+                    poll_interval=0.01,
+                    warmup_timeout=0.5,
+                    warmup_poll_interval=0.01,
+                    isolated_worktree=False,
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "submit_failed")
+        # Session must be killed (no full-deadline wait).
+        self.assertTrue(fake.killed_sessions, "session must be killed on submit_failed teardown")
+
+    def test_submit_failed_emits_coordination_event(self):
+        """submit_failed path emits an 'interactive_submit_failed' coordination event."""
+        from runtime_coordination import get_connection, get_events
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._SENTINEL] * 50,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+        }):
+            with patch("dispatch_govern.govern") as mock_govern:
+                from dispatch_govern import GovernedOutcome
+                mock_govern.return_value = GovernedOutcome(
+                    report_path=None,
+                    contract_status="synthesized",
+                    permission_enforcement="soft",
+                )
+                lane.dispatch(
+                    self._staged_body(),
+                    self.DISPATCH_ID,
+                    role="backend-developer",
+                    model="sonnet",
+                    deadline_seconds=5.0,
+                    poll_interval=0.01,
+                    warmup_timeout=0.5,
+                    warmup_poll_interval=0.01,
+                    isolated_worktree=False,
+                )
+
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn("interactive_submit_failed", {e["event_type"] for e in events})
+
+    def test_settle_and_retry_timeouts_read_from_env(self):
+        """VNX_TMUX_PASTE_SETTLE_SECONDS / SUBMIT_RETRY_DELAY / SUBMIT_VERIFY_TIMEOUT read from env."""
+        import time as _time
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+        )
+        lane = self._make_lane(fake)
+
+        # Use a body without sentinel so _verify_submit returns True immediately.
+        # Settle=0 means no actual sleep; we just verify the dispatch completes.
+        with patch.dict(os.environ, {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.05",
+        }):
+            result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+
+
+# ---------------------------------------------------------------------------
+# PR-TMUX-4: Submit-verify signal fix — input-region scoping, no echo false-positive
+# ---------------------------------------------------------------------------
+
+class _VerifyRunner:
+    """Minimal tmux runner for _verify_submit isolation tests.
+
+    Returns ``capture_seq`` items in order for ``capture-pane`` calls.
+    Counts ``send-keys Enter`` calls from within _verify_submit (retry Enters only).
+    """
+
+    def __init__(self, capture_seq):
+        self._seq = list(capture_seq)
+        self.enter_count = 0
+
+    def available(self):
+        return True
+
+    def run(self, args, *, timeout=10, input_text=None):
+        cmd = args[0] if args else ""
+        if cmd == "capture-pane":
+            content = self._seq.pop(0) if self._seq else "? for shortcuts\n> "
+            return TmuxResult(0, content)
+        if cmd == "send-keys" and args and args[-1] == "Enter":
+            self.enter_count += 1
+        return TmuxResult(0)
+
+
+class TestSubmitVerifySignal(unittest.TestCase):
+    """_verify_submit uses working-state and input-region signals, not sentinel-anywhere.
+
+    Regression for two codex-gate findings:
+    1. Echo false-positive: sentinel appearing in scrollback (Claude's echo after real
+       submit) was treated as "still staged" when no working marker was visible yet.
+    2. Legacy default path (no sentinel in body): no verification at all — new code
+       detects staged paste via [Pasted text annotation and body fingerprint.
+    """
+
+    SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+    WORKING = "esc to interrupt"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def _lane(self, runner):
+        return TmuxInteractiveDispatch(
+            self.state_dir,
+            runner=runner,
+            project_root=self.state_dir,
+        )
+
+    def _verify(self, runner, body, *, timeout="0.05", retry_delay="0"):
+        env = {
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": timeout,
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": retry_delay,
+        }
+        with patch.dict(os.environ, env):
+            return self._lane(runner)._verify_submit("pane-0", body)
+
+    def _scrollback_echoed_pane(self):
+        """Pane where sentinel appears in scrollback (upper 2 lines), bottom 10 are idle.
+
+        Simulates what Claude's TUI shows after a successful submit: the body (including
+        sentinel) is echoed into the conversation history while the input line is cleared.
+        """
+        upper = [self.SENTINEL, "scrollback: assistant starting..."]
+        bottom = ["? for shortcuts"] * 9 + ["> "]
+        return "\n".join(upper + bottom)
+
+    def test_echoed_sentinel_no_working_marker_is_not_staged(self):
+        """Sentinel in scrollback (upper lines), no working marker → NOT staged.
+
+        Core regression test: old code returned True (still staged) here because it
+        checked sentinel-anywhere in the pane without scoping to the input region.
+        """
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        runner = _VerifyRunner([self._scrollback_echoed_pane()])
+        result = self._verify(runner, body)
+
+        self.assertTrue(result, "sentinel in scrollback must NOT be treated as staged")
+
+    def test_echoed_sentinel_no_retry_enter(self):
+        """Sentinel only in scrollback → no retry Enter sent from _verify_submit."""
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        runner = _VerifyRunner([self._scrollback_echoed_pane()])
+        self._verify(runner, body)
+
+        self.assertEqual(
+            runner.enter_count, 0,
+            "no retry Enter must be sent when sentinel is only in the scrollback",
+        )
+
+    def test_sentinel_in_input_region_is_staged(self):
+        """Sentinel in bottom 10 lines (still in input buffer) → still staged."""
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        # Sentinel appears in the last 2 lines (input region).
+        staged_pane = f"scrollback content\nmore content\n{self.SENTINEL}\n> "
+        runner = _VerifyRunner([staged_pane] * 20)
+        result = self._verify(runner, body, timeout="0.05")
+
+        self.assertFalse(result, "sentinel in input region must be treated as staged")
+
+    def test_bracketed_paste_marker_in_input_region_is_staged(self):
+        """[Pasted text in bottom lines → staged. Works on legacy path without sentinel in body."""
+        body = "## Context\n\nInstruction without sentinel"  # legacy path — no sentinel
+        staged_pane = "[Pasted text (2048 chars)]\nsome instruction content here..."
+        runner = _VerifyRunner([staged_pane] * 20)
+        result = self._verify(runner, body, timeout="0.05")
+
+        self.assertFalse(result, "[Pasted text in input region must be detected as staged")
+
+    def test_legacy_path_working_state_is_submitted(self):
+        """No sentinel in body + working marker → submitted (legacy path works correctly)."""
+        body = "## Context\n\nInstruction without sentinel"
+        runner = _VerifyRunner([f"some content\n{self.WORKING}\n> "])
+        result = self._verify(runner, body)
+
+        self.assertTrue(result, "working marker must cause submitted result on legacy path")
+
+    def test_working_marker_overrides_staged_signals(self):
+        """Working marker anywhere overrides bracketed-paste and sentinel staged signals."""
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        pane = f"[Pasted text (100 chars)]\n{self.SENTINEL}\n{self.WORKING}\n> "
+        runner = _VerifyRunner([pane])
+        result = self._verify(runner, body)
+
+        self.assertTrue(result, "working marker must override staged signals")
+        self.assertEqual(runner.enter_count, 0, "no retry Enter when working marker present")
+
+
+class TestSubmitVerifyEchoIntegration(_LaneTestCase):
+    """Integration: echoed sentinel in scrollback must not cause submit_failed or double-Enter."""
+
+    SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+
+    def _echoed_pane(self):
+        """Sentinel in scrollback (upper 2 lines), bottom 10 lines are idle prompt."""
+        upper = [self.SENTINEL, "scrollback: assistant starting..."]
+        bottom = ["? for shortcuts"] * 9 + ["> "]
+        return "\n".join(upper + bottom)
+
+    def test_echoed_sentinel_dispatch_succeeds(self):
+        """Full dispatch: pane shows echoed sentinel in scrollback → success, not submit_failed.
+
+        Regression: old _still_staged() saw sentinel-anywhere and returned True, causing
+        spurious retry Enter and eventually submit_failed on a real submit.
+        """
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._echoed_pane()],
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertTrue(
+            result.success,
+            f"echoed sentinel in scrollback must not cause submit_failed: {result.failure_reason}",
+        )
+        self.assertNotEqual(result.failure_reason, "submit_failed")
+
+    def test_echoed_sentinel_no_spurious_retry_enter(self):
+        """Full dispatch: echoed sentinel → exactly 1 Enter after paste-buffer (no spurious retry)."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._echoed_pane()],
+        )
+        lane = self._make_lane(fake)
+        self._fast_dispatch(lane)
+
+        paste_idx = next(
+            (i for i, c in enumerate(fake.commands) if c and c[0] == "paste-buffer"), None
+        )
+        self.assertIsNotNone(paste_idx, "paste-buffer must have been called")
+        post_paste_enters = [
+            c for c in fake.commands[paste_idx + 1:]
+            if c and c[0] == "send-keys" and c[-1] == "Enter"
+        ]
+        self.assertEqual(
+            len(post_paste_enters), 1,
+            f"spurious retry Enter detected: {len(post_paste_enters)} Enters after paste-buffer "
+            "(expected 1 = initial only, no echo false-positive retry)",
+        )
+
+    def test_legacy_path_staged_paste_causes_submit_failed(self):
+        """Legacy path (no sentinel in body): [Pasted text in pane → submit_failed.
+
+        Regression: old code (sentinel_in_body=False) always returned False from
+        _still_staged(), providing zero verification on the default path. New code
+        detects [Pasted text staging annotation in the input region.
+        """
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=["[Pasted text (4096 chars)]\ninstruction content..."] * 50,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+        }):
+            with patch("dispatch_govern.govern") as mock_govern:
+                from dispatch_govern import GovernedOutcome
+                mock_govern.return_value = GovernedOutcome(
+                    report_path=None,
+                    contract_status="synthesized",
+                    permission_enforcement="soft",
+                )
+                result = lane.dispatch(
+                    "Do the thing.",
+                    self.DISPATCH_ID,
+                    role="backend-developer",
+                    model="sonnet",
+                    deadline_seconds=5.0,
+                    poll_interval=0.01,
+                    warmup_timeout=0.5,
+                    warmup_poll_interval=0.01,
+                    isolated_worktree=False,
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.failure_reason, "submit_failed",
+            f"legacy staged paste must cause submit_failed, got: {result.failure_reason!r}",
         )
 
 
