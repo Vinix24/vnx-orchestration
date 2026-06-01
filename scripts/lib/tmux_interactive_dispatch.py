@@ -303,11 +303,39 @@ class TmuxInteractiveDispatch:
     ) -> str:
         """Build enriched dispatch body: skill body + intelligence + instruction.
 
+        When VNX_SHARED_PREPARE=1, delegates to dispatch_prepare.prepare() so both
+        Claude lanes share identical enrichment (permission preamble + worker-rules
+        footer + report-contract directive + trailer sentinel). Default ("0") is
+        byte-identical to pre-T1 behavior.
+
         Reuses subprocess lane enrichers (_inject_skill_context) so the tmux-spawn
         worker receives the same skill body + intelligence treatment as a headless
         subprocess worker. Falls back to a legacy role label + instruction on failure.
         Always includes *instruction* in the returned string.
         """
+        if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
+            "1", "true", "yes", "on"
+        ):
+            try:
+                from dispatch_prepare import prepare  # noqa: PLC0415
+                body = prepare(
+                    terminal_id=terminal_id,
+                    instruction=instruction,
+                    role=role,
+                    dispatch_id=dispatch_id or "",
+                    dispatch_paths=dispatch_paths,
+                    pr_id=pr_id,
+                )
+                if smart_context:
+                    body = f"{smart_context}\n\n{body}"
+                return body
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_assemble_context: dispatch_prepare.prepare() failed (%s); "
+                    "falling back to standard enrichment",
+                    exc,
+                )
+
         dispatch_metadata: dict = {}
         if dispatch_id:
             dispatch_metadata["dispatch_id"] = dispatch_id

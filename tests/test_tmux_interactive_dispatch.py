@@ -9,6 +9,7 @@ No fixed terminal identities, no warm-open, no leases.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -1089,6 +1090,144 @@ class TestCompletionReceiptReportPath(_LaneTestCase):
             expected_report_path,
             "report_path must be the deterministic unified_reports/<dispatch_id>.md path",
         )
+
+
+# ---------------------------------------------------------------------------
+# T1: VNX_SHARED_PREPARE wiring on the tmux lane
+# ---------------------------------------------------------------------------
+
+class TestSharedPrepareWiringTmux(unittest.TestCase):
+    """_assemble_context wiring: VNX_SHARED_PREPARE=1 delegates to dispatch_prepare.prepare()."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def _make_lane(self) -> TmuxInteractiveDispatch:
+        return TmuxInteractiveDispatch(
+            self.state_dir,
+            project_root=self.state_dir,
+        )
+
+    def _patched_assemble(self, dispatch_id="tmux-shared-test", **extra_env):
+        lane = self._make_lane()
+        fake_skill = "## Skill Context\n\nINSTRUCTION"
+        fake_perm = "## Permission Profile\n\n---\n\n" + fake_skill
+
+        env = {"VNX_SHARED_PREPARE": "1"}
+        env.update(extra_env)
+
+        with patch.dict(os.environ, env):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                return_value=fake_skill,
+            ):
+                with patch(
+                    "subprocess_dispatch_internals.skill_injection._inject_permission_profile",
+                    return_value=fake_perm,
+                ):
+                    return lane._assemble_context(
+                        role="backend-developer",
+                        terminal_id="T1",
+                        dispatch_id=dispatch_id,
+                        instruction="Do the thing.",
+                    )
+
+    def test_shared_prepare_1_contains_permission_preamble(self):
+        """VNX_SHARED_PREPARE=1: assembled context contains permission preamble text."""
+        result = self._patched_assemble()
+        self.assertIn("## Permission Profile", result)
+
+    def test_shared_prepare_1_contains_footer_sentinel(self):
+        """VNX_SHARED_PREPARE=1: assembled context contains worker-rules footer sentinel."""
+        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL
+        result = self._patched_assemble()
+        self.assertIn(_WORKER_RULES_FOOTER_SENTINEL, result)
+
+    def test_shared_prepare_1_contains_directive(self):
+        """VNX_SHARED_PREPARE=1: assembled context contains report-contract directive."""
+        result = self._patched_assemble()
+        self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
+
+    def test_shared_prepare_1_contains_trailer(self):
+        """VNX_SHARED_PREPARE=1: assembled context contains trailer sentinel."""
+        from dispatch_prepare import _TRAILER_SENTINEL
+        result = self._patched_assemble()
+        self.assertIn(_TRAILER_SENTINEL, result)
+
+    def test_shared_prepare_0_default_no_footer_no_trailer(self):
+        """VNX_SHARED_PREPARE=0 (default): _assemble_context does not contain footer/trailer."""
+        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL, _TRAILER_SENTINEL
+        lane = self._make_lane()
+        fake_enriched = "## Skill Context\n\nDo the thing."
+
+        with patch.dict(os.environ, {"VNX_SHARED_PREPARE": "0"}):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                return_value=fake_enriched,
+            ):
+                result = lane._assemble_context(
+                    role="backend-developer",
+                    terminal_id="T1",
+                    dispatch_id="default-path-test",
+                    instruction="Do the thing.",
+                )
+
+        self.assertNotIn(_WORKER_RULES_FOOTER_SENTINEL, result)
+        self.assertNotIn(_TRAILER_SENTINEL, result)
+
+    def test_shared_prepare_1_smart_context_prepended(self):
+        """VNX_SHARED_PREPARE=1: smart_context is prepended before the prepare() body."""
+        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL
+        lane = self._make_lane()
+        fake_skill = "SKILL_BODY"
+        fake_perm = "PREAMBLE\n---\n\n" + fake_skill
+
+        with patch.dict(os.environ, {"VNX_SHARED_PREPARE": "1"}):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                return_value=fake_skill,
+            ):
+                with patch(
+                    "subprocess_dispatch_internals.skill_injection._inject_permission_profile",
+                    return_value=fake_perm,
+                ):
+                    result = lane._assemble_context(
+                        role="backend-developer",
+                        terminal_id="T1",
+                        dispatch_id="smart-ctx-test",
+                        instruction="Do the thing.",
+                        smart_context="SMART_CTX_BLOCK",
+                    )
+
+        preamble_pos = result.find("PREAMBLE")
+        smart_pos = result.find("SMART_CTX_BLOCK")
+        self.assertGreaterEqual(smart_pos, 0, "smart_context must appear in result")
+        self.assertLess(smart_pos, preamble_pos, "smart_context must precede the prepare() body")
+
+    def test_shared_prepare_fallback_on_prepare_error(self):
+        """VNX_SHARED_PREPARE=1: if prepare() raises, falls back to standard enrichment."""
+        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL
+        lane = self._make_lane()
+        fake_enriched = "STANDARD_ENRICHMENT_BODY"
+
+        with patch.dict(os.environ, {"VNX_SHARED_PREPARE": "1"}):
+            with patch("dispatch_prepare.prepare", side_effect=RuntimeError("simulated error")):
+                with patch(
+                    "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                    return_value=fake_enriched,
+                ):
+                    result = lane._assemble_context(
+                        role="backend-developer",
+                        terminal_id="T1",
+                        dispatch_id="fallback-test",
+                        instruction="Do the thing.",
+                    )
+
+        # Must have fallen back to standard enrichment (no footer sentinel from prepare())
+        self.assertIn("STANDARD_ENRICHMENT_BODY", result)
+        self.assertNotIn(_WORKER_RULES_FOOTER_SENTINEL, result)
 
 
 if __name__ == "__main__":
