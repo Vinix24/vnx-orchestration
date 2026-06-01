@@ -25,12 +25,18 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# scripts/ dir resolved from this file's location (scripts/lib/dispatch_govern.py → scripts/).
+# Used to ensure append_receipt (which registers the facade) is importable at runtime,
+# since the tmux dispatch.sh sets PYTHONPATH to scripts/lib only (not scripts/).
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +113,8 @@ def ensure_receipt(
         synthesized_receipt["report_path"] = str(report_path)
 
     try:
+        if _SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, _SCRIPTS_DIR)
         from append_receipt import append_receipt_payload  # noqa: PLC0415
         append_receipt_payload(
             synthesized_receipt,

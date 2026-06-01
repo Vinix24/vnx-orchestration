@@ -1704,6 +1704,68 @@ class TestReceiptDedup(_LaneTestCase):
             "Winner must not have synthesized=True; authored receipt should be selected",
         )
 
+    def test_consumer_path_dedup_authored_wins_exactly_once(self):
+        """Consumer code path (headless_orchestrator._OrchestratedReceiptWatcher) deduplicates
+        by dispatch_id: emits exactly one LoopEvent for the authored receipt when the ledger
+        contains a synthesized receipt first and an authored receipt later for the same dispatch_id.
+        """
+        import queue
+        import threading
+        from headless_orchestrator import _OrchestratedReceiptWatcher, LoopEvent
+
+        synthesized = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T08:00:00Z",
+        }
+        authored = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T09:00:00Z",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(synthesized) + "\n")
+            fh.write(json.dumps(authored) + "\n")
+
+        bus: "queue.Queue[LoopEvent]" = queue.Queue()
+        shutdown = threading.Event()
+        watcher = _OrchestratedReceiptWatcher(
+            self.state_dir,
+            shutdown_event=shutdown,
+            event_bus=bus,
+            dry_run=True,
+        )
+        watcher._refresh_t0_state = lambda state_dir: None
+        watcher._file_pos = 0  # read from the beginning
+
+        watcher._check_new_lines()
+
+        self.assertFalse(bus.empty(), "Consumer must emit a LoopEvent for the actionable receipts")
+        event = bus.get_nowait()
+        self.assertTrue(bus.empty(), "Exactly one LoopEvent expected — not two (no double-count)")
+        self.assertIsInstance(event, LoopEvent)
+        self.assertEqual(event.reason, "receipt")
+        self.assertEqual(
+            event.context.get("latest_dispatch_id"), self.DISPATCH_ID,
+            "LoopEvent must reference the correct dispatch_id",
+        )
+        self.assertEqual(
+            event.context.get("receipt_count"), 1,
+            "Dedup must collapse both receipts to exactly 1 winner per dispatch_id",
+        )
+        self.assertEqual(
+            event.context.get("receipt_status"), "done",
+            "Winner must be the authored receipt (status='done'), not the synthesized one (status='failed')",
+        )
+
     def test_shared_dedup_helper_consumer_level(self):
         """dedup_completion_receipts (shared helper) returns exactly one winner: the authored receipt.
 

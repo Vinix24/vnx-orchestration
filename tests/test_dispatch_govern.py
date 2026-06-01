@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -736,3 +738,76 @@ def test_govern_fallback_disabled_no_receipt_appended(tmp_data, tmp_state, monke
         synthesized = [json.loads(l) for l in lines
                        if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
         assert synthesized == [], "VNX_RECEIPT_FALLBACK=0 must suppress synthesized receipt"
+
+
+# ---------------------------------------------------------------------------
+# Runtime-path regression: ensure_receipt importable under PYTHONPATH=scripts/lib only
+# ---------------------------------------------------------------------------
+
+def test_ensure_receipt_runtime_import_path(tmp_path):
+    """ensure_receipt() must write a synthesized receipt even when scripts/ is NOT on sys.path.
+
+    Replicates the real tmux runtime: dispatch.sh sets PYTHONPATH=scripts/lib only.
+    Before the fix, 'from append_receipt import append_receipt_payload' raised
+    ModuleNotFoundError at runtime (silently caught), so NO receipt was written.
+    The fix adds _SCRIPTS_DIR to sys.path inside dispatch_govern before the import.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_file = state_dir / "t0_receipts.ndjson"
+
+    scripts_lib = str(_SCRIPTS / "lib")
+
+    # Inline script that only has scripts/lib on sys.path — no scripts/
+    inline = f"""
+import sys, json
+from pathlib import Path
+
+state_dir = Path({str(state_dir)!r})
+receipts_file = state_dir / "t0_receipts.ndjson"
+
+from dispatch_govern import GovernSpec, GovernRaw, ensure_receipt
+
+spec = GovernSpec(
+    dispatch_id="runtime-path-test-001",
+    terminal_id="T1",
+    instruction="test",
+    data_dir=state_dir,
+    state_dir=state_dir,
+)
+raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+               contract_status="synthesized", permission_enforcement="soft")
+
+if not receipts_file.exists():
+    print("FAIL:no_receipts_file")
+    sys.exit(1)
+lines = [l.strip() for l in receipts_file.read_text().splitlines() if l.strip()]
+if not lines:
+    print("FAIL:empty_receipts_file")
+    sys.exit(1)
+r = json.loads(lines[-1])
+if r.get("source") != "tmux_interactive_lane_synthesized":
+    print(f"FAIL:wrong_source:{{r.get('source')!r}}")
+    sys.exit(1)
+if r.get("dispatch_id") != "runtime-path-test-001":
+    print(f"FAIL:wrong_dispatch_id:{{r.get('dispatch_id')!r}}")
+    sys.exit(1)
+print("OK")
+"""
+
+    env = {**os.environ, "PYTHONPATH": scripts_lib}
+    # Remove any scripts/ that might be inherited via PYTHONPATH
+    result = subprocess.run(
+        [sys.executable, "-c", inline],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"ensure_receipt failed under PYTHONPATH=scripts/lib only.\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+    assert "OK" in result.stdout, f"Expected OK, got: {result.stdout!r}"
