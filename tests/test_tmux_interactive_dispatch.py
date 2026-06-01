@@ -2326,5 +2326,239 @@ class TestSubmitVerifyEchoIntegration(_LaneTestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# CAPTURE step: pipe-pane wiring + normalizer close-out
+# ---------------------------------------------------------------------------
+
+class TestCapturePipePaneWiring(_LaneTestCase):
+    """pipe-pane is wired at spawn when VNX_TMUX_CAPTURE=1 (default), not when =0."""
+
+    def test_pipe_pane_wired_when_capture_enabled(self):
+        """VNX_TMUX_CAPTURE=1: pipe-pane command recorded after new-session."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+            self._fast_dispatch(lane)
+
+        pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
+        self.assertTrue(pipe_cmds, "pipe-pane must be called when VNX_TMUX_CAPTURE=1")
+
+    def test_pipe_pane_path_contains_dispatch_id(self):
+        """pipe-pane shell command embeds the dispatch_id in the log path."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+            self._fast_dispatch(lane)
+
+        pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
+        self.assertTrue(pipe_cmds)
+        # The shell-command argument (last element) must contain the dispatch_id.
+        shell_arg = pipe_cmds[0][-1]
+        self.assertIn(self.DISPATCH_ID, shell_arg, "pipe-pane shell command must reference dispatch_id in log path")
+
+    def test_pipe_pane_wired_before_launch(self):
+        """pipe-pane must appear in command sequence AFTER new-session and BEFORE send-keys -l."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+            self._fast_dispatch(lane)
+
+        cmds = fake.commands
+        spawn_idx = next((i for i, c in enumerate(cmds) if c and c[0] == "new-session"), None)
+        pipe_idx = next((i for i, c in enumerate(cmds) if c and c[0] == "pipe-pane"), None)
+        launch_idx = next((i for i, c in enumerate(cmds) if c and c[0] == "send-keys" and "-l" in c), None)
+
+        self.assertIsNotNone(spawn_idx, "new-session must be called")
+        self.assertIsNotNone(pipe_idx, "pipe-pane must be called")
+        self.assertIsNotNone(launch_idx, "send-keys -l (launch) must be called")
+        self.assertGreater(pipe_idx, spawn_idx, "pipe-pane must come after new-session")
+        self.assertLess(pipe_idx, launch_idx, "pipe-pane must come before launch send-keys")
+
+    def test_pipe_pane_not_wired_when_capture_disabled(self):
+        """VNX_TMUX_CAPTURE=0: pipe-pane is never called."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "0"}):
+            self._fast_dispatch(lane)
+
+        pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
+        self.assertEqual(pipe_cmds, [], "pipe-pane must NOT be called when VNX_TMUX_CAPTURE=0")
+
+    def test_pipe_pane_flag_off_variants(self):
+        """VNX_TMUX_CAPTURE=false/no/off also disable pipe-pane."""
+        for flag_val in ("false", "no", "off"):
+            with self.subTest(flag=flag_val):
+                did = f"{self.DISPATCH_ID}-{flag_val}"
+                rf = self.state_dir / f"receipts-{flag_val}.ndjson"
+                fake = FakeTmux(receipts_file=rf, dispatch_id=did)
+                lane = TmuxInteractiveDispatch(
+                    self.state_dir,
+                    runner=fake,
+                    receipts_file=rf,
+                    project_root=self.state_dir,
+                )
+                with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": flag_val}):
+                    lane.dispatch(
+                        "Do the thing.", did,
+                        model="sonnet",
+                        deadline_seconds=5.0,
+                        poll_interval=0.01,
+                        warmup_timeout=0.5,
+                        warmup_poll_interval=0.01,
+                        isolated_worktree=False,
+                    )
+                pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
+                self.assertEqual(pipe_cmds, [], f"pipe-pane must not be called with VNX_TMUX_CAPTURE={flag_val}")
+
+    def test_path_traversal_dispatch_id_does_not_write_outside_log_dir(self):
+        """A dispatch_id with '../' must not allow pipe-pane to write outside the log dir.
+
+        The sanitizer must reject the unsafe id (capture skipped) so pipe-pane is
+        never called with a path that escapes .vnx-data/logs/conversations.
+        """
+        traversal_ids = [
+            "../escape",
+            "../../etc/passwd",
+            "foo/../bar",
+            "valid-prefix/../escape",
+            "/absolute/path",
+            "id with spaces",
+            "id;rm -rf /",
+        ]
+        for bad_id in traversal_ids:
+            with self.subTest(dispatch_id=bad_id):
+                rf = self.state_dir / f"receipts-traversal-{hash(bad_id) & 0xFFFF}.ndjson"
+                fake = FakeTmux(receipts_file=rf, dispatch_id=self.DISPATCH_ID)
+                lane = TmuxInteractiveDispatch(
+                    self.state_dir,
+                    runner=fake,
+                    receipts_file=rf,
+                    project_root=self.state_dir,
+                )
+                with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+                    # Directly call _start_pipe_pane with the malicious id.
+                    result = lane._start_pipe_pane("fake-pane", bad_id)
+
+                # Capture must be skipped — no path returned.
+                self.assertIsNone(
+                    result,
+                    f"unsafe dispatch_id {bad_id!r} must cause capture to be skipped (returned {result})",
+                )
+                # pipe-pane must NOT have been called with a path outside the log dir.
+                pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
+                for cmd in pipe_cmds:
+                    shell_arg = cmd[-1] if cmd else ""
+                    log_dir = (self.state_dir.parent / "logs" / "conversations").resolve()
+                    # Any path in the shell command must be a child of log_dir.
+                    for token in shlex.split(shell_arg):
+                        p = Path(token)
+                        if p.is_absolute():
+                            try:
+                                p.relative_to(log_dir)
+                            except ValueError:
+                                self.fail(
+                                    f"pipe-pane shell arg {shell_arg!r} references path outside log_dir: {token}"
+                                )
+
+
+class TestCaptureNormalizerCloseout(_LaneTestCase):
+    """Normalizer is called once at close-out; normalizer errors do not fail dispatch."""
+
+    def test_normalizer_called_at_closeout_on_success(self):
+        """On successful dispatch, _run_capture_normalizer is called once."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        normalizer_calls = []
+
+        def capturing_normalizer(raw_log, terminal_id, dispatch_id, model):
+            normalizer_calls.append((raw_log, terminal_id, dispatch_id, model))
+
+        lane._run_capture_normalizer = capturing_normalizer
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+            result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertEqual(
+            len(normalizer_calls), 1,
+            f"normalizer must be called exactly once on success; called {len(normalizer_calls)} times",
+        )
+
+    def test_normalizer_called_at_closeout_on_timeout(self):
+        """On timeout, _run_capture_normalizer is still called once (best-effort audit)."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+        normalizer_calls = []
+
+        def capturing_normalizer(raw_log, terminal_id, dispatch_id, model):
+            normalizer_calls.append(dispatch_id)
+
+        lane._run_capture_normalizer = capturing_normalizer
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+            result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            len(normalizer_calls), 1,
+            f"normalizer must be called once on timeout; called {len(normalizer_calls)} times",
+        )
+
+    def test_normalizer_error_does_not_fail_dispatch(self):
+        """A normalizer exception must not change dispatch success state."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        def raising_normalizer(raw_log, terminal_id, dispatch_id, model):
+            raise RuntimeError("simulated normalizer failure")
+
+        lane._run_capture_normalizer = raising_normalizer
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+            with patch("dispatch_govern.govern") as mock_govern:
+                from dispatch_govern import GovernedOutcome
+                mock_govern.return_value = GovernedOutcome(
+                    report_path=self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md",
+                    contract_status="authored",
+                    permission_enforcement="soft",
+                )
+                # Ensure the report file exists so govern does not degrade
+                report_dir = self.state_dir.parent / "unified_reports"
+                report_dir.mkdir(parents=True, exist_ok=True)
+                (report_dir / f"{self.DISPATCH_ID}.md").write_text("report")
+                result = self._fast_dispatch(lane)
+
+        # The raising normalizer must not crash the lane.
+        self.assertNotEqual(result.failure_reason, "unexpected_error",
+                            "normalizer exception must not propagate as unexpected_error")
+
+    def test_normalizer_not_called_when_capture_disabled(self):
+        """VNX_TMUX_CAPTURE=0: normalizer is never called (pipe-pane not started)."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        normalizer_calls = []
+
+        def capturing_normalizer(raw_log, terminal_id, dispatch_id, model):
+            normalizer_calls.append(dispatch_id)
+
+        lane._run_capture_normalizer = capturing_normalizer
+
+        with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "0"}):
+            self._fast_dispatch(lane)
+
+        self.assertEqual(
+            normalizer_calls, [],
+            "normalizer must not be called when VNX_TMUX_CAPTURE=0 (no raw_log)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
