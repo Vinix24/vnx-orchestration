@@ -132,12 +132,16 @@ class TestBuildReceiptFromReport:
         assert receipt["event_type"] == "task_complete"
         assert receipt["timestamp"] == "2026-06-01T21:34:16Z"
 
-    def test_falls_back_to_filename_dispatch_id(self, tmp_path):
+    def test_falls_back_to_filename_dispatch_id_as_contract_invalid(self, tmp_path):
+        # Filename-only dispatch_id (no content dispatch_id) is a contract
+        # violation: produces a receipt but NOT as task_complete.
         p = tmp_path / "20260601-fallback-dispatch.md"
         p.write_text("## Summary\n\nNo frontmatter here.\n\n## Changes\n\n-\n\n## Verification\n\n-\n\n## Open Items\n\nNone\n", encoding="utf-8")
         receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
         assert receipt is not None
         assert receipt["dispatch_id"] == "20260601-fallback-dispatch"
+        assert receipt["event_type"] == "report_contract_invalid"
+        assert receipt["status"] == "contract_invalid"
 
     def test_returns_none_for_truly_malformed(self, tmp_path):
         p = tmp_path / "unknown.md"
@@ -357,3 +361,136 @@ class TestReceiptContent:
         # task_id="unknown" aligns with report_parser.py default so
         # append_receipt_payload() idempotency key matches the Bash path's key.
         assert r.get("task_id") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Part 7: contract validation before receipt emission
+# ---------------------------------------------------------------------------
+
+class TestContractValidation:
+    """Report body contract is validated before emitting any receipt.
+
+    Contract-VALID: dispatch_id in content + valid body -> task_complete.
+    Contract-INVALID: missing content dispatch_id OR body violations ->
+      report_contract_invalid (audit breadcrumb, never a clean completion).
+    """
+
+    def test_contract_valid_report_emits_task_complete(self, tmp_path, state_dir):
+        report = tmp_path / "20260601-cv-valid.md"
+        _write_frontmatter_report(report, "20260601-cv-valid")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        assert result.status == "appended"
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_complete"
+        assert r["status"] != "contract_invalid"
+
+    def test_missing_content_dispatch_id_not_task_complete(self, tmp_path, state_dir):
+        """Filename-only dispatch_id is a contract violation: must not be task_complete."""
+        report = tmp_path / "20260601-nodid-content.md"
+        # Full valid body but no frontmatter or bold-field dispatch_id
+        report.write_text(
+            "## Summary\n\n"
+            "Implemented the feature per dispatch specification. All tests pass and coverage is at target.\n\n"
+            "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+            "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        # Must emit an audit breadcrumb — not silently drop
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["status"] == "contract_invalid"
+        # dispatch_id falls back to filename for the audit key
+        assert r["dispatch_id"] == "20260601-nodid-content"
+        assert "missing_content_dispatch_id" in r["contract_violations"]
+
+    def test_body_contract_violations_not_task_complete(self, tmp_path, state_dir):
+        """Content dispatch_id present but body fails contract: must not be task_complete."""
+        report = tmp_path / "20260601-badbody.md"
+        # Has dispatch_id in frontmatter but missing required sections + summary too short
+        report.write_text(
+            "---\ndispatch_id: 20260601-badbody\nterminal: T1\n---\n\n"
+            "## Summary\n\nShort.\n\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["status"] == "contract_invalid"
+        assert r["dispatch_id"] == "20260601-badbody"
+        assert len(r["contract_violations"]) > 0
+
+    def test_missing_sections_and_no_content_dispatch_id_not_task_complete(
+        self, tmp_path, state_dir
+    ):
+        """Both content dispatch_id and body are invalid: must not be task_complete."""
+        report = tmp_path / "20260601-double-invalid.md"
+        report.write_text(
+            "## Summary\n\nShort.\n\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["dispatch_id"] == "20260601-double-invalid"
+        violations = r["contract_violations"]
+        assert "missing_content_dispatch_id" in violations
+
+    def test_idempotency_holds_for_contract_invalid(self, tmp_path, state_dir):
+        """contract_invalid receipts are idempotent: second call returns duplicate."""
+        report = tmp_path / "20260601-idem-invalid.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-idem-invalid\n---\n\n"
+            "## Summary\n\nShort.\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        r1 = convert_report_to_receipt(report, receipts_file=receipts_file, cache_window_seconds=300)
+        r2 = convert_report_to_receipt(report, receipts_file=receipts_file, cache_window_seconds=300)
+
+        assert r1 is not None
+        assert r1.status == "appended"
+        assert r2 is not None
+        assert r2.status == "duplicate"
+        # Only one physical receipt line even for contract_invalid
+        assert _count_receipts(state_dir) == 1
+
+    def test_scan_contract_invalid_not_counted_as_clean_completion(
+        self, reports_dir, state_dir
+    ):
+        """scan_and_convert with a mixed set: contract-invalid reports leave an audit
+        breadcrumb but the clean-completion count only reflects task_complete receipts."""
+        _write_frontmatter_report(reports_dir / "20260601-sc-good.md", "20260601-sc-good")
+        # Invalid report: has dispatch_id in frontmatter, body is missing sections
+        (reports_dir / "20260601-sc-bad.md").write_text(
+            "---\ndispatch_id: 20260601-sc-bad\n---\n\n## Summary\n\nShort.\n",
+            encoding="utf-8",
+        )
+
+        n = scan_and_convert([reports_dir], state_dir)
+
+        # Both get receipts emitted (appended), so n == 2
+        assert n == 2
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 2
+        event_types = {r["event_type"] for r in receipts}
+        assert "task_complete" in event_types
+        assert "report_contract_invalid" in event_types

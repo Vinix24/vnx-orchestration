@@ -92,6 +92,10 @@ def _mark_processed(file_hash: str, watermark_path: Path) -> None:
             fcntl.flock(fh, fcntl.LOCK_EX)
             fh.write(file_hash + "\n")
             fcntl.flock(fh, fcntl.LOCK_UN)
+        logger.info(
+            "report_to_receipt_converter: watermark state mutation hash=%s watermark=%s",
+            file_hash[:16], watermark_path.name,
+        )
     except OSError as exc:
         logger.warning("report_to_receipt_converter: cannot update watermark %s: %s", watermark_path, exc)
 
@@ -159,17 +163,51 @@ def build_receipt_from_report(
 ) -> Optional[Dict[str, Any]]:
     """Build a minimal governed receipt dict from report content.
 
-    Returns None (with a warning logged) when no dispatch_id can be
-    determined — this is the 'malformed report' path.  Never raises.
+    Returns:
+    - event_type="task_complete" when the report passes the body contract AND
+      carries a content-derived dispatch_id (frontmatter or bold-field body).
+    - event_type="report_contract_invalid" when a dispatch_id is resolvable
+      but the report fails the body contract or lacks a content-side
+      dispatch_id.  Filename-only dispatch_id is a contract violation.
+    - None when no dispatch_id can be determined at all (warning logged).
+
+    Never raises.
     """
+    sys.path.insert(0, str(_LIB_DIR))
+    from report_body_contract import validate_body
+    from datetime import datetime, timezone
+
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
     # Frontmatter takes priority over body fields
     merged: Dict[str, Any] = {**body, **fm}
 
-    dispatch_id = (
-        merged.get("dispatch_id")
-        or _dispatch_id_from_filename(report_path)
+    # Check if dispatch_id comes from report content (frontmatter or body fields).
+    # A filename-derived dispatch_id is NOT authoritative and is treated as a
+    # contract violation — it must not produce a clean task_complete receipt.
+    content_dispatch_id: Optional[str] = merged.get("dispatch_id") or None
+    content_id_valid = bool(
+        content_dispatch_id
+        and content_dispatch_id.lower() not in ("unknown", "none", "null")
+    )
+
+    # Validate body against the report body contract.
+    body_result = validate_body(text)
+
+    # Collect all contract violations before deciding the receipt type.
+    contract_violations: List[str] = []
+    if not content_id_valid:
+        contract_violations.append("missing_content_dispatch_id")
+    if not body_result.valid:
+        contract_violations.extend(body_result.missing)
+        if body_result.placeholder:
+            contract_violations.append("placeholder_summary")
+
+    # Resolve the best available dispatch_id.  For contract-invalid receipts
+    # we fall back to the filename so the audit trail has a key.
+    dispatch_id: Optional[str] = (
+        content_dispatch_id if content_id_valid
+        else _dispatch_id_from_filename(report_path)
     )
     if not dispatch_id or dispatch_id.lower() in ("unknown", "none", "null"):
         logger.warning(
@@ -177,8 +215,6 @@ def build_receipt_from_report(
             report_path.name,
         )
         return None
-
-    from datetime import datetime, timezone
 
     timestamp = (
         merged.get("timestamp")
@@ -189,16 +225,33 @@ def build_receipt_from_report(
     # Use "unknown" for task_id so the idempotency key aligns with what
     # report_parser.py produces (it defaults task_id to "unknown").  This lets
     # append_receipt_payload()'s rolling cache deduplicate same-cycle runs.
-    return {
-        "event_type": "task_complete",
+    base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "task_id": merged.get("task_id", "unknown"),
         "terminal": merged.get("terminal", "unknown"),
         "provider": merged.get("provider", "unknown"),
         "model": merged.get("model", ""),
-        "status": merged.get("status", "unknown"),
         "timestamp": timestamp,
         "report_path": str(report_path),
+    }
+
+    if contract_violations:
+        logger.warning(
+            "report_to_receipt_converter: contract violations in %s: %s"
+            " — emitting as report_contract_invalid",
+            report_path.name, contract_violations,
+        )
+        return {
+            **base,
+            "event_type": "report_contract_invalid",
+            "status": "contract_invalid",
+            "contract_violations": contract_violations,
+        }
+
+    return {
+        **base,
+        "event_type": "task_complete",
+        "status": merged.get("status", "unknown"),
     }
 
 
