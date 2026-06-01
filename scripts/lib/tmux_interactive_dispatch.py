@@ -690,6 +690,70 @@ class TmuxInteractiveDispatch:
         )
         return False
 
+    # -- capture (pipe-pane) -----------------------------------------------
+    def _start_pipe_pane(self, pane_id: str, dispatch_id: str) -> "Path | None":
+        """Wire tmux pipe-pane to stream pane output to a raw log file.
+
+        Gate-controlled by VNX_TMUX_CAPTURE (default "1").
+        Creates the log directory if needed.
+        Returns the raw log Path on success, None if disabled or on failure.
+        Never raises.
+        """
+        capture_flag = os.environ.get("VNX_TMUX_CAPTURE", "1").strip().lower()
+        if capture_flag in ("0", "false", "no", "off"):
+            return None
+        try:
+            log_dir = self._state_dir.parent / "logs" / "conversations"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            raw_log = log_dir / f"{dispatch_id}.log"
+            # pipe-pane receives a single shell-command string; use shlex.quote
+            # so paths with spaces or special characters are safe.
+            shell_cmd = f"cat >> {shlex.quote(str(raw_log))}"
+            res = self._runner.run(["pipe-pane", "-o", "-t", pane_id, shell_cmd])
+            if res.returncode != 0:
+                logger.warning(
+                    "interactive: pipe-pane wiring failed pane=%s: %s",
+                    pane_id,
+                    res.stderr.strip(),
+                )
+                return None
+            logger.debug("interactive: pipe-pane wired dispatch=%s log=%s", dispatch_id, raw_log)
+            return raw_log
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("interactive: _start_pipe_pane failed (%s)", exc)
+            return None
+
+    def _run_capture_normalizer(
+        self,
+        raw_log: "Path",
+        terminal_id: str,
+        dispatch_id: str,
+        model: str,
+    ) -> None:
+        """Normalize the raw pipe-pane log into EventStore CanonicalEvents.
+
+        Best-effort — never raises. Errors are logged at DEBUG level.
+        Called at teardown after kill-session so the log is fully flushed.
+        """
+        try:
+            from tmux_conversation_normalizer import normalize_conversation  # noqa: PLC0415
+            from event_store import EventStore  # noqa: PLC0415
+            event_store = EventStore()
+            count = normalize_conversation(raw_log, event_store, terminal_id, dispatch_id, model)
+            if count:
+                logger.info(
+                    "interactive: capture normalized %d events dispatch=%s terminal=%s",
+                    count,
+                    dispatch_id,
+                    terminal_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "interactive: capture normalizer skipped dispatch=%s (%s)",
+                dispatch_id,
+                exc,
+            )
+
     # -- receipt polling ---------------------------------------------------
     def _matching_receipts(
         self,
@@ -856,6 +920,7 @@ class TmuxInteractiveDispatch:
         # never spawns a tmux session with an uncontrolled cwd.
         worktree_handle: "WorktreeHandle | None" = None
         _wt_state: "list[str | None]" = [None]
+        _raw_log: "list[Path | None]" = [None]
 
         if isolated_worktree:
             try:
@@ -892,6 +957,13 @@ class TmuxInteractiveDispatch:
                 self._kill_session(session)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("interactive: teardown kill-session %s: %s", session, exc)
+            # Normalize captured conversation into EventStore (best-effort, after kill
+            # so pipe-pane has flushed its final bytes to the log).
+            if _raw_log[0] is not None:
+                try:
+                    self._run_capture_normalizer(_raw_log[0], label, dispatch_id, model)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("interactive: teardown normalizer dispatch=%s: %s", dispatch_id, exc)
             if worktree_handle is not None:
                 try:
                     cls = classify(worktree_handle)
@@ -983,6 +1055,9 @@ class TmuxInteractiveDispatch:
                 reason=f"spawned interactive claude in {session}",
                 metadata={"session": session, "pane_id": pane_id, "window_id": window_id},
             )
+
+            # 2b. Wire pipe-pane capture (before claude launch so the full session is logged).
+            _raw_log[0] = self._start_pipe_pane(pane_id, dispatch_id)
 
             # 3. Build launch command
             launch_cmd = self._launch_builder(
