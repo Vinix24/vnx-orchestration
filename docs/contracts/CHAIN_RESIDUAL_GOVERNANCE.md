@@ -6,7 +6,7 @@
 **Date**: 2026-04-02
 **Author**: T3 (Track C Quality Engineering)
 
-This document defines how findings, open items, and residual risks are governed across multi-feature chain boundaries. It complements `MULTI_FEATURE_CHAIN_CONTRACT.md` (Section 6) with operational governance rules for chain-level residuals.
+This document defines how findings, open items, and residual risks are governed across track and feature boundaries. It operationalizes invariant P-6 of `MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md` — the canonical carry-forward governance contract for the track-based planning model. (Previously complemented `MULTI_FEATURE_CHAIN_CONTRACT.md` Section 6, which was superseded 2026-05-30.)
 
 ---
 
@@ -109,4 +109,4 @@ The carry-forward ledger serves as the evidence artifact for this certification.
 | `open_items_manager.py` | Single-feature item lifecycle unchanged; chain adds cross-feature accumulation |
 | Review gate results | Gate findings feed into chain carry-forward as findings records |
 | `t0_receipts.ndjson` | Chain events (halt, advance) emit receipts; residual state is in the ledger |
-| `MULTI_FEATURE_CHAIN_CONTRACT.md` | This document operationalizes Section 6 of the chain contract |
+| `MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md` | This document implements P-6 (carry-forward invariant) of the canonical parallel execution contract |
