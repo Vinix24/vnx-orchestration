@@ -575,7 +575,11 @@ class TmuxInteractiveDispatch:
         if not self._paste(pane_id, body):
             return False
         # Settle after bracketed paste so the pane has fully received the content.
-        _settle = float(os.environ.get("VNX_TMUX_PASTE_SETTLE_SECONDS", "0.75"))
+        # Scale with body size: +1s per 50k chars, capped at +2s. Large bodies need
+        # more time for the terminal to process bracketed-paste under load.
+        _base = float(os.environ.get("VNX_TMUX_PASTE_SETTLE_SECONDS", "0.75"))
+        _extra = min(len(body) / 50000.0, 2.0)
+        _settle = _base + _extra
         if _settle > 0:
             time.sleep(_settle)
         # Enter ALWAYS as a separate keystroke.
@@ -605,10 +609,14 @@ class TmuxInteractiveDispatch:
         Works on both paths: VNX_SHARED_PREPARE=1 (body contains sentinel) and the legacy
         default (no sentinel in body, detected via bracketed-paste annotation or fingerprint).
 
-        If still staged, waits VNX_TMUX_SUBMIT_RETRY_DELAY then sends exactly one more
-        separate Enter. Polls until submitted or VNX_TMUX_SUBMIT_VERIFY_TIMEOUT expires.
-        Returns False only when the paste is still staged after that hard timeout.
+        Uses a bounded guarded-retry loop: up to VNX_TMUX_SUBMIT_MAX_RETRIES (default 3)
+        additional Enter keystrokes, each preceded by a _still_staged() check to prevent
+        stray Enters landing in a running session. Each retry polls for up to
+        VNX_TMUX_SUBMIT_RETRY_DELAY seconds. The entire loop is bounded by
+        VNX_TMUX_SUBMIT_VERIFY_TIMEOUT. Returns False only when still staged after all
+        retries are exhausted within the deadline.
         """
+        max_retries = int(os.environ.get("VNX_TMUX_SUBMIT_MAX_RETRIES", "3"))
         retry_delay = float(os.environ.get("VNX_TMUX_SUBMIT_RETRY_DELAY", "0.75"))
         verify_timeout = float(os.environ.get("VNX_TMUX_SUBMIT_VERIFY_TIMEOUT", "5"))
         body_fingerprint = body.strip()[:self._BODY_FINGERPRINT_LEN]
@@ -632,24 +640,38 @@ class TmuxInteractiveDispatch:
                 return True   # leading body text still in input buffer
             return False      # unknown state; assume submitted (conservative)
 
+        # Fast path: already submitted (first Enter from _deliver_instruction worked).
         if not _still_staged():
             return True
 
-        # Retry: wait, then send exactly ONE more separate Enter.
-        if retry_delay > 0:
-            time.sleep(retry_delay)
-        self._runner.run(["send-keys", "-t", pane_id, "Enter"])
-
         deadline = time.monotonic() + verify_timeout
-        while time.monotonic() < deadline:
+
+        for _attempt in range(max_retries):
+            if time.monotonic() >= deadline:
+                break
+
+            # Guard: only send Enter when we confirmed it's still staged right now.
+            # Prevents stray Enters landing in an already-running session.
             if not _still_staged():
                 return True
-            time.sleep(0.1)
+
+            self._runner.run(["send-keys", "-t", pane_id, "Enter"])
+
+            # Poll for up to retry_delay seconds (or until overall deadline).
+            poll_deadline = min(time.monotonic() + retry_delay, deadline)
+            while time.monotonic() < poll_deadline:
+                if not _still_staged():
+                    return True
+                time.sleep(0.1)
+
+        # Final check after all retries exhausted.
+        if not _still_staged():
+            return True
 
         logger.warning(
-            "interactive: submit-verify timeout for pane %s after %.1fs: "
+            "interactive: submit-verify timeout for pane %s after %d retries (%.1fs deadline): "
             "paste still staged in input region",
-            pane_id, verify_timeout,
+            pane_id, max_retries, verify_timeout,
         )
         return False
 
