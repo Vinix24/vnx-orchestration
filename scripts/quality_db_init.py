@@ -741,13 +741,13 @@ def _migrate_v21(conn: sqlite3.Connection) -> None:
     conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
     if "project_id" in cols:
         conn.execute(
-            "CREATE INDEX idx_dispatch_meta_provider "
+            "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
             "ON dispatch_metadata (project_id, provider)"
         )
         log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index (ADR-007)')
     else:
         conn.execute(
-            "CREATE INDEX idx_dispatch_meta_provider "
+            "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
             "ON dispatch_metadata (provider)"
         )
 
@@ -842,7 +842,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
     # _migrate_v21 ran before project_id existed and left a plain (provider) index.
     conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
     conn.execute(
-        "CREATE INDEX idx_dispatch_meta_provider "
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
         "ON dispatch_metadata (project_id, provider)"
     )
     # Recreate other indexes (idempotent IF NOT EXISTS).
@@ -1123,10 +1123,9 @@ def main():
         log('ERROR', 'Prerequisites check failed')
         sys.exit(1)
 
-    # Step 2: Backup existing database
+    # Step 2: Backup existing database (non-fatal — migrations are idempotent)
     if not backup_existing_db():
-        log('ERROR', 'Database backup failed')
-        sys.exit(1)
+        log('WARNING', 'Database backup failed — continuing without backup (migrations are idempotent)')
 
     # Step 3: Initialize database
     if not initialize_database():

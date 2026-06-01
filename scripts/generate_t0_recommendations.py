@@ -131,7 +131,11 @@ class RecommendationEngine:
                     if 'timestamp' in receipt:
                         ts = receipt['timestamp']
                         # Handle different timestamp formats
-                        if 'T' in ts:
+                        if isinstance(ts, (int, float)):
+                            # Numeric epoch: seconds (≤1e10) or milliseconds (>1e10)
+                            epoch_sec = ts / 1000.0 if ts > 1e10 else float(ts)
+                            receipt_time = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
+                        elif isinstance(ts, str) and 'T' in ts:
                             # ISO format
                             ts_clean = ts.replace('Z', '+00:00')
                             if '.' in ts_clean:
@@ -153,10 +157,12 @@ class RecommendationEngine:
                             except:
                                 # Fallback: parse without microseconds
                                 receipt_time = datetime.fromisoformat(ts.split('.')[0] + '+00:00')
-                        else:
-                            # Try parsing as string
+                        elif isinstance(ts, str):
+                            # Non-ISO string (e.g. "2026-04-01 07:45:26")
                             receipt_time = datetime.strptime(ts[:19], '%Y-%m-%d %H:%M:%S')
                             receipt_time = receipt_time.replace(tzinfo=timezone.utc)
+                        else:
+                            continue  # Unrecognised timestamp type — skip
 
                         # Ensure timezone aware
                         if receipt_time.tzinfo is None:
@@ -164,7 +170,7 @@ class RecommendationEngine:
 
                         if receipt_time > cutoff_time:
                             recent_receipts.append(receipt)
-                except (json.JSONDecodeError, ValueError, KeyError) as e:
+                except (json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
                     continue
 
         return recent_receipts

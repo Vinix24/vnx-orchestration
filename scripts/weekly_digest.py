@@ -121,7 +121,7 @@ def collect_metrics(days: int = 7) -> dict:
                 except json.JSONDecodeError:
                     continue
                 ts = rec.get("timestamp", "")
-                if ts and ts[:10] < since:
+                if ts and isinstance(ts, str) and ts[:10] < since:
                     continue
                 metrics["dispatch_outcomes"]["total"] += 1
                 status = (rec.get("status") or rec.get("event_type") or "").lower()
