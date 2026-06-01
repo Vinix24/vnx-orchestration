@@ -54,6 +54,7 @@ FLOOD_LOCKFILE="$STATE_DIR/receipt_flood.lock"
 RECEIPT_FILE="$STATE_DIR/t0_receipts.ndjson"
 WATERMARK_FILE="$STATE_DIR/receipt_processor_watermark"
 PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
+RECEIPT_FILE_SIZE_STATE="$STATE_DIR/receipt_processor_ledger_size"
 
 # Outbox directories for guaranteed receipt delivery (outbox pattern)
 RECEIPTS_PENDING_DIR="${VNX_DATA_DIR}/receipts/pending"
@@ -434,11 +435,43 @@ _rp_apply_bootstrap_protection() {
     fi
 }
 
+# Detect ledger rotation: compare current RECEIPT_FILE size against stored size.
+# If the live file shrank (rotation happened while the processor was away), log
+# an audit event and update the stored size. The processor does not maintain a
+# byte-offset read position into t0_receipts.ndjson (it processes report files
+# and WRITES to the ledger via append_receipt.py), so no read-pointer reset is
+# needed — the detection here is purely observability/audit.
+_rp_detect_ledger_rotation() {
+    local current_size=0
+    if [ -f "$RECEIPT_FILE" ]; then
+        current_size=$(stat -c %s "$RECEIPT_FILE" 2>/dev/null || stat -f %z "$RECEIPT_FILE" 2>/dev/null || echo 0)
+    fi
+
+    local stored_size=0
+    if [ -f "$RECEIPT_FILE_SIZE_STATE" ]; then
+        stored_size=$(cat "$RECEIPT_FILE_SIZE_STATE" 2>/dev/null || echo 0)
+    fi
+
+    if [ -n "$stored_size" ] && [ "$stored_size" -gt 0 ] && [ "$current_size" -lt "$stored_size" ]; then
+        log "INFO" "Ledger rotation detected: size shrank from ${stored_size} to ${current_size} bytes. New live file is in effect."
+        local _events_dir="${VNX_DATA_DIR}/events"
+        local _rotation_event_file="$_events_dir/receipt_processor.ndjson"
+        local _now_iso
+        _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        mkdir -p "$_events_dir" 2>/dev/null && \
+            printf '{"timestamp":"%s","event_type":"ledger_rotation_detected","source":"receipt_processor","previous_size_bytes":%s,"current_size_bytes":%s}\n' \
+                "$_now_iso" "$stored_size" "$current_size" >> "$_rotation_event_file" 2>/dev/null || true
+    fi
+
+    printf '%s\n' "$current_size" > "$RECEIPT_FILE_SIZE_STATE" 2>/dev/null || true
+}
+
 # Watch for new reports via polling. On startup, performs a catchup scan and
 # delivers any receipts pending since the last shutdown.
 monitor_new_reports() {
     log "INFO" "Starting MONITOR mode - only new reports will be processed"
     date '+%Y%m%d-%H%M%S' > "$LAST_PROCESSED"
+    _rp_detect_ledger_rotation
     _rp_apply_bootstrap_protection
     _mnr_startup_catchup
     _retry_pending_receipts

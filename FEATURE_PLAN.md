@@ -1,12 +1,34 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-01T02:46:13.019489+00:00
+**Last updated**: 2026-06-01T12:59:15.727822+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #778 — feat(intelligence): dispatch_metadata provider/model column + idempotent migration (GAP 2) (#778) (2026-06-01)
+- #777 — feat(reports): stamp uniform frontmatter on worker-authored reports (schema-uniform with synthesized) (#777) (2026-06-01)
+- #776 — feat(receipts): uniform provider/model/lane across all lanes + resolve unknown-intermediate (#776) (2026-06-01)
+- #775 — feat(tmux): CAPTURE — tmux-spawn conversation into EventStore (observable + minable, uniform) (#775) (2026-06-01)
+- #774 — fix(tmux): tmux-spawn delivery — v2.1.159 readiness + verified submit (the worker now actually executes) (#774) (2026-06-01)
+- #773 — feat(tmux): RECEIPT step — F1 receipt-presence guarantee (no lost subscription session) + dedup (#773) (2026-06-01)
+- #772 — feat(tmux): GOVERN step — git-derived report synthesis + validate_body (shadow), kill placeholder report (#772) (2026-06-01)
+- #771 — feat(tmux): T1 shared prepare() — permission preamble + worker-rules footer + report-contract directive (June-15 parity) (#771) (2026-06-01)
+- #768 — chore(roadmap): consolidate SSOTs — ROADMAP.yaml current 1.0/1.x state, views derived (S0) (#768) (2026-06-01)
+- #769 — docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope (#769) (2026-06-01)
+- #751 — docs(contract): parallel multi-track execution contract supersedes chain contract (ADR-020) (#751) (2026-06-01)
+- #767 — feat(dispatch): route default Claude lane through enriched tmux-spawn (dogfood + Wave-1b) (#767) (2026-06-01)
+- #766 — fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report (dogfood the default lane) (#766) (2026-06-01)
+- #758 — chore(scrub): remove residual private-project artifacts from repo + wheel (#758) (2026-06-01)
+- #757 — docs(readme): control-plane repositioning + governed-memory + architecture/ADRs + blog series (#757) (2026-06-01)
+- #765 — feat(provider): governed DeepSeek-harness lane (own-key, key-auth, MCP-off — account-safe) (#765) (2026-06-01)
+- #763 — fix(kimi): 1.44.0 content-block stream-json parser + fail-loud on empty extraction (incl. robust spawn) (#763) (2026-06-01)
+- #770 — fix(dispatch): place prompt before variadic scope flags so the worker receives it (#770) (2026-06-01)
+- #764 — fix(security): scope worker capabilities — drop skip-permissions + empty ambient MCP (interim, pre-full-binding) (#764) (2026-06-01)
+- #761 — feat(governance): provider-aware intelligence + receipt token/cost capture (non-Claude parity) (#761) (2026-06-01)
+- #760 — chore(governance): thin-T0 role + role-based manager block + auto-inject footer (packaged/wheel) (#760) (2026-06-01)
+- #759 — refactor(rename): _vN scripts -> canonical names + compat shims (remove in 1.0.1) (#759) (2026-05-31)
 - #753 — chore(security): remove dead prep-applier + de-advertise private products from public wheel (#753) (2026-05-30)
 - #752 — fix(security): pre-publish hardening — bash_check RCE + heartbeat shell-injection + strip private portfolio from wheel (#752) (2026-05-30)
 - #750 — refactor(hygiene): extract _validate_review_evidence helpers (no behavior change) (#750) (2026-05-30)
@@ -122,16 +144,15 @@ _Last 14 days — sourced from git merge commits._
 - #605 — fix(receipts): project_id scoping audit + fixes (Wave 2a prep) (#605) (2026-05-20)
 - #604 — fix(centralisatie): project_id scoping audit + critical write-leak fixes (#604) (2026-05-20)
 - #603 — docs: refresh HANDOFF + README status banner (master roadmap link) (#603) (2026-05-20)
-- #588 — feat(schema): idempotent bootstrap with PRAGMA user_version + transaction wrapping (#588) (2026-05-18)
-
-**WAVE 5**
-- #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
 
 **WAVE 6**
 - #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
 
 **WAVE-5**
 - #680 — feat(int-2): Wave-5 ADR injection in dispatch context (#680) (2026-05-29)
+
+**WAVE0**
+- #756 — chore(wave0): untrack .venv+scratch (keep FEATURE_PLAN/PR_QUEUE), strip emoji/buzzwords (#756) (2026-05-31)
 
 **WAVE4**
 - #633 — docs(wave4): central-install runbook + cutover procedure (PR-WAVE4-6) (#633) (2026-05-25)
@@ -150,7 +171,8 @@ _No active features._
 
 ## Completed
 
-_No completed features found in register or PR history._
+### F1
+All PRs merged. (#773)
 
 ## Planned (from ROADMAP.yaml)
 
