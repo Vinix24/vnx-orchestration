@@ -107,31 +107,11 @@ def ensure_receipt(
         synthesized_receipt["report_path"] = str(report_path)
 
     try:
-        # Use the canonical idempotency + locking layer directly.
-        # append_receipt_payload requires the facade (which calls register_facade in
-        # the CLI entry point), but dispatch_govern is a library module without a CLI
-        # entrypoint, so we go one level deeper: _write_receipt_under_lock + validation.
-        # Idempotency is fully honored; central dual-write is N/A (no project_id on
-        # synthesized receipts — the dual-write guard skips on missing project_id).
-        from append_receipt_internals.idempotency import (  # noqa: PLC0415
-            _cache_file_for,
-            _compute_idempotency_key,
-            _resolve_receipts_file,
-            _write_receipt_under_lock,
-        )
-        from append_receipt_internals.validation import _validate_receipt  # noqa: PLC0415
-
-        receipts_path = _resolve_receipts_file(str(receipts_file)).expanduser().resolve()
-        receipts_path.parent.mkdir(parents=True, exist_ok=True)
-        event_name = _validate_receipt(synthesized_receipt)
-        idempotency_key = _compute_idempotency_key(synthesized_receipt, event_name)
-        cache_path = _cache_file_for(receipts_path)
-        _write_receipt_under_lock(
+        from append_receipt import append_receipt_payload  # noqa: PLC0415
+        append_receipt_payload(
             synthesized_receipt,
-            receipts_path,
-            cache_path,
-            idempotency_key,
-            300,  # cache_window_seconds
+            receipts_file=str(receipts_file),
+            cache_window_seconds=300,
         )
         logger.info(
             "ensure_receipt: appended lane-synthesized receipt for dispatch=%s receipts_file=%s",

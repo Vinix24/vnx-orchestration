@@ -1656,6 +1656,101 @@ class TestReceiptDedup(_LaneTestCase):
 
         self.assertIsInstance(selected, dict, "Must return a single dict, not a list")
 
+    def test_dedup_authored_wins_when_synthesized_last_by_position(self):
+        """Nontrivial case: authored is written FIRST, synthesized LAST.
+
+        Without dedup, [-1] would pick synthesized. With dedup, authored always wins.
+        """
+        authored_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "ephemeral",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T10:00:00Z",
+        }
+        synthesized_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T11:00:00Z",  # later timestamp, last by position
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(authored_receipt) + "\n")
+            fh.write(json.dumps(synthesized_receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        selected = lane._wait_for_receipt(
+            self.DISPATCH_ID, deadline_seconds=0.1, poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES, baseline_count=0,
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(
+            selected.get("source"), "tmux_interactive",
+            f"Authored receipt must win even when synthesized is last by position; "
+            f"got source={selected.get('source')!r}",
+        )
+        self.assertFalse(
+            selected.get("synthesized"),
+            "Winner must not have synthesized=True; authored receipt should be selected",
+        )
+
+    def test_shared_dedup_helper_consumer_level(self):
+        """dedup_completion_receipts (shared helper) returns exactly one winner: the authored receipt.
+
+        Validates the helper used by both lane and consumer sites.
+        """
+        from dispatch_govern import dedup_completion_receipts
+
+        authored = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T09:00:00Z",  # authored is EARLIER in time
+        }
+        synthesized = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T10:00:00Z",  # synthesized is NEWER timestamp
+        }
+
+        # Synthesized written first (earlier position), authored second: authored wins by preference
+        winner_synth_first = dedup_completion_receipts([synthesized, authored])
+        self.assertIsNotNone(winner_synth_first)
+        self.assertEqual(
+            winner_synth_first.get("source"), "tmux_interactive",
+            "Authored must win when synthesized is first in list",
+        )
+        self.assertFalse(winner_synth_first.get("synthesized"))
+
+        # Authored written first (earlier position), synthesized last: authored STILL wins
+        winner_authored_first = dedup_completion_receipts([authored, synthesized])
+        self.assertIsNotNone(winner_authored_first)
+        self.assertEqual(
+            winner_authored_first.get("source"), "tmux_interactive",
+            "Authored must win when authored is first in list (synthesized is last by position AND newer)",
+        )
+        self.assertFalse(winner_authored_first.get("synthesized"))
+
+        # Exactly one winner per dispatch_id — no double processing
+        self.assertIs(
+            winner_synth_first, winner_authored_first,
+            "Both orderings must return the SAME authored receipt object",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
