@@ -23,7 +23,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 22
+HIGHEST_QI_VERSION = 23
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -854,6 +854,25 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
     log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index ensured (ADR-007)')
 
 
+def _migrate_v23(conn: sqlite3.Connection) -> None:
+    """V23: model column on dispatch_metadata (GAP 2 — provider/model-aware intelligence).
+
+    Adds the ``model`` column so the AI model string (e.g. "claude-sonnet-4-6",
+    "codex", "kimi") is recorded alongside the provider. Populating model on
+    write paths closes GAP 2 (POST-TMUX-LANE-GAPS-2026-06-01.md).
+
+    ADR-007 compliance note: the composite UNIQUE (project_id, dispatch_id) is
+    enforced on existing DBs via idx_dispatch_meta_composite_unique (a UNIQUE
+    INDEX added by migrate_dispatch_metadata_provider.py without a table rebuild).
+    Fresh DBs receive it from the base schema (v22 table rebuild runs on user_version
+    < 22 DBs). This migration only adds the model column (ALTER TABLE — no rebuild).
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "model" not in cols:
+        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN model TEXT")
+        log('INFO', 'Migrated dispatch_metadata: added model column (GAP 2, v23)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -878,6 +897,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     20: _migrate_v20,
     21: _migrate_v21,
     22: _migrate_v22,
+    23: _migrate_v23,
 }
 
 

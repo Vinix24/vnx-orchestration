@@ -45,6 +45,8 @@ def main():
     parser.add_argument("--gate", default="")
     parser.add_argument("--provider", default="claude",
                         help="Provider that executed this dispatch (claude/codex/gemini/kimi/litellm:*)")
+    parser.add_argument("--model", default="",
+                        help="AI model used (e.g. claude-sonnet-4-6, codex, kimi)")
     parser.add_argument("--cognition", default="normal")
     parser.add_argument("--priority", default="P1")
     parser.add_argument("--pr-id", default="")
@@ -124,12 +126,13 @@ def main():
             args.target_open_items,
             datetime.utcnow().isoformat(),
         ))
-    # Stamp provider (provider-aware self-learning). Guarded: column lands via
-    # migration v21; older DBs simply skip it. Kept separate from the two INSERT
-    # branches above so the provider stamp applies regardless of project_id state.
+    # Stamp provider + model (provider/model-aware self-learning). Guarded: columns
+    # land via migration v21/v23 (GAP 2); older DBs simply skip them. Kept separate
+    # from the INSERT branches above so stamps apply regardless of project_id state.
     # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
+    has_project = _has_column(conn, "dispatch_metadata", "project_id")
     if _has_column(conn, "dispatch_metadata", "provider"):
-        if _has_column(conn, "dispatch_metadata", "project_id"):
+        if has_project:
             cur.execute(
                 "UPDATE dispatch_metadata SET provider = ? WHERE project_id = ? AND dispatch_id = ?",
                 (args.provider or "claude", current_project_id(), args.dispatch_id),
@@ -138,6 +141,17 @@ def main():
             cur.execute(
                 "UPDATE dispatch_metadata SET provider = ? WHERE dispatch_id = ?",
                 (args.provider or "claude", args.dispatch_id),
+            )
+    if args.model and _has_column(conn, "dispatch_metadata", "model"):
+        if has_project:
+            cur.execute(
+                "UPDATE dispatch_metadata SET model = COALESCE(model, ?) WHERE project_id = ? AND dispatch_id = ?",
+                (args.model, current_project_id(), args.dispatch_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE dispatch_metadata SET model = COALESCE(model, ?) WHERE dispatch_id = ?",
+                (args.model, args.dispatch_id),
             )
 
     conn.commit()
