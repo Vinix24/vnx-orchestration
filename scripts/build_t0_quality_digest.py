@@ -62,12 +62,17 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
                     r = json.loads(line)
                     ts_raw = r.get("timestamp", "")
                     if ts_raw:
-                        # Normalise: strip sub-seconds, ensure UTC
-                        ts_clean = ts_raw.replace("Z", "+00:00").split(".")[0] + "+00:00"
-                        ts = datetime.fromisoformat(ts_clean)
+                        if isinstance(ts_raw, (int, float)):
+                            # Numeric epoch: seconds (≤1e10) or milliseconds (>1e10)
+                            epoch_sec = ts_raw / 1000.0 if ts_raw > 1e10 else float(ts_raw)
+                            ts = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
+                        else:
+                            # Normalise: strip sub-seconds, ensure UTC
+                            ts_clean = str(ts_raw).replace("Z", "+00:00").split(".")[0] + "+00:00"
+                            ts = datetime.fromisoformat(ts_clean)
                         if ts > cutoff:
                             receipts.append(r)
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
                     continue
     except OSError:
         pass
