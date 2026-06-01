@@ -244,3 +244,164 @@ class TestWorkerScopedEnabled:
     def test_truthy_values_enable(self, monkeypatch, val):
         monkeypatch.setenv("VNX_WORKER_SCOPED", val)
         assert worker_scoped_enabled() is True
+
+
+# ---------------------------------------------------------------------------
+# 7. FIX 1: detached tmux spawn must include --allowedTools (no-stall)
+# ---------------------------------------------------------------------------
+
+class TestTmuxDetachedNoStall:
+    """Detached worker gets --allowedTools so it can proceed without TTY prompts."""
+
+    def test_detached_spawn_has_allowed_tools(self):
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        assert "--allowedTools" in cmd
+        assert SKIP_FLAG not in cmd
+
+    def test_detached_spawn_allowed_tools_cover_code_essentials(self):
+        import shlex as _shlex
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        tokens = _shlex.split(cmd)
+        idx = tokens.index("--allowedTools")
+        allowed = set(tokens[idx + 1].split(","))
+        assert CODE_WORKER_ESSENTIALS.issubset(allowed), (
+            f"essentials missing from --allowedTools: {CODE_WORKER_ESSENTIALS - allowed}"
+        )
+
+    def test_detached_spawn_no_dangerously_skip_permissions(self):
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        assert SKIP_FLAG not in cmd
+
+    def test_attached_spawn_no_allowed_tools_injected(self):
+        # Attached (human-in-loop) sessions are unchanged; no allowedTools injected.
+        cmd = _default_launch_command("sonnet", skip_permissions=False)
+        assert "--allowedTools" not in cmd
+        assert SKIP_FLAG not in cmd
+
+
+# ---------------------------------------------------------------------------
+# 8. FIX 2: requires_mcp threading — MCP kept vs force-emptied
+# ---------------------------------------------------------------------------
+
+class TestRequiresMcpScoping:
+    """Dispatches that declare Requires-MCP:true must NOT get force-empty MCP."""
+
+    def test_requires_mcp_false_empties_mcp_in_scope_args(self):
+        args = build_claude_scope_args(default_code_worker_profile(), requires_mcp=False)
+        assert "--strict-mcp-config" in args
+        idx = args.index("--mcp-config")
+        assert json.loads(args[idx + 1]) == {"mcpServers": {}}
+
+    def test_requires_mcp_true_does_not_empty_mcp_in_scope_args(self):
+        args = build_claude_scope_args(default_code_worker_profile(), requires_mcp=True)
+        assert "--strict-mcp-config" not in args
+        assert "--mcp-config" not in args
+
+    def test_requires_mcp_true_still_has_permission_mode_and_tools(self):
+        args = build_claude_scope_args(default_code_worker_profile(), requires_mcp=True)
+        assert "--permission-mode" in args
+        assert "--allowedTools" in args
+
+    def test_adapter_deliver_requires_mcp_false_empties_mcp(self):
+        adapter = SubprocessAdapter()
+        proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            adapter.deliver("T1", "dispatch-mcp-1", instruction="do work", requires_mcp=False)
+        cmd = mock_popen.call_args[0][0]
+        assert "--strict-mcp-config" in cmd
+        idx = cmd.index("--mcp-config")
+        assert json.loads(cmd[idx + 1]) == {"mcpServers": {}}
+
+    def test_adapter_deliver_requires_mcp_true_keeps_mcp(self):
+        adapter = SubprocessAdapter()
+        proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            adapter.deliver("T1", "dispatch-mcp-2", instruction="do work", requires_mcp=True)
+        cmd = mock_popen.call_args[0][0]
+        assert "--strict-mcp-config" not in cmd
+        assert "--mcp-config" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# 9. FIX 3: role forwarded into SubprocessAdapter.deliver on claude_spawn path
+# ---------------------------------------------------------------------------
+
+class TestClaudeSpawnRoleForwarding:
+    """spawn_claude() must forward role into SubprocessAdapter.deliver."""
+
+    def test_role_forwarded_to_deliver(self):
+        # spawn_claude forwards the role kwarg to adapter.deliver; verify that
+        # a named role produces a different (role-scoped) allowedTools than the
+        # default code-worker fallback, proving role is not silently dropped.
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib" / "provider_spawns"))
+        from claude_spawn import spawn_claude
+        from subprocess_adapter import SubprocessAdapter
+
+        role_calls = []
+
+        original_deliver = SubprocessAdapter.deliver
+
+        def capturing_deliver(self, terminal_id, dispatch_id, *args, role=None, **kwargs):
+            role_calls.append(role)
+            # Return a minimal DeliveryResult so spawn_claude doesn't crash.
+            from adapter_types import DeliveryResult
+            return DeliveryResult(
+                success=False,
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                pane_id=None,
+                path_used="none",
+                failure_reason="test-intercept",
+            )
+
+        with patch.object(SubprocessAdapter, "deliver", capturing_deliver):
+            spawn_claude(
+                prompt="test prompt",
+                model="sonnet",
+                dispatch_id="dispatch-role-1",
+                terminal_id="T1",
+                role="backend-developer",
+            )
+
+        assert len(role_calls) == 1
+        assert role_calls[0] == "backend-developer", (
+            f"role was not forwarded to deliver; got {role_calls[0]!r}"
+        )
+
+    def test_none_role_safe_fallback(self):
+        # When role is not provided, spawn_claude must not crash and must still
+        # pass role=None to deliver (triggering the default code-worker fallback).
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib" / "provider_spawns"))
+        from claude_spawn import spawn_claude
+        from subprocess_adapter import SubprocessAdapter
+
+        role_calls = []
+
+        def capturing_deliver(self, terminal_id, dispatch_id, *args, role=None, **kwargs):
+            role_calls.append(role)
+            from adapter_types import DeliveryResult
+            return DeliveryResult(
+                success=False,
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                pane_id=None,
+                path_used="none",
+                failure_reason="test-intercept",
+            )
+
+        with patch.object(SubprocessAdapter, "deliver", capturing_deliver):
+            spawn_claude(
+                prompt="test prompt",
+                model="sonnet",
+                dispatch_id="dispatch-role-2",
+                terminal_id="T1",
+            )
+
+        assert len(role_calls) == 1
+        assert role_calls[0] is None, (
+            f"expected None role for no-role spawn; got {role_calls[0]!r}"
+        )

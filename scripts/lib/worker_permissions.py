@@ -188,6 +188,7 @@ def build_claude_scope_args(
     profile: PermissionProfile,
     *,
     permission_mode: str = "acceptEdits",
+    requires_mcp: bool = False,
 ) -> list[str]:
     """Materialize a PermissionProfile into scoping CLI args for a headless ``claude``.
 
@@ -198,21 +199,19 @@ def build_claude_scope_args(
         no-TTY worker proceeds without prompts, while Bash/MCP stay gated.
       - ``--strict-mcp-config --mcp-config {"mcpServers":{}}`` — ignore every
         ambient MCP source; the default worker reaches ZERO MCP servers.
+        Skipped when ``requires_mcp=True`` so the dispatch can use the project's
+        normal MCP config (e.g. Supabase, n8n) without being force-emptied.
       - ``--allowedTools`` / ``--disallowedTools`` — the profile's tool allow/deny
         lists (the previously-dead :func:`generate_claude_settings`, now live).
 
-    The empty MCP config is the interim default; Wave 2 of the unified-dispatch
-    layer substitutes a populated config when a role declares ``mcp_servers``.
+    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
+    is omitted so the worker's normal ambient MCP config is used instead.
     """
     settings = generate_claude_settings(profile)
     allowed = settings.get("allowedTools", [])
-    args = [
-        "--permission-mode",
-        permission_mode,
-        "--strict-mcp-config",
-        "--mcp-config",
-        EMPTY_MCP_CONFIG,
-    ]
+    args: list[str] = ["--permission-mode", permission_mode]
+    if not requires_mcp:
+        args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
     if allowed:
         args += ["--allowedTools", ",".join(allowed)]
     if profile.denied_tools:

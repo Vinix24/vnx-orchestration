@@ -72,24 +72,35 @@ _FALLBACK_SCOPE_ARGS = [
 ]
 
 
-def _build_worker_scope_args(role: Optional[str]) -> List[str]:
+def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) -> List[str]:
     """Return the capability-scoping argv head for a headless ``claude`` spawn.
 
     Default (``VNX_WORKER_SCOPED`` unset or truthy): drop the blanket
     ``--dangerously-skip-permissions`` for ``--permission-mode acceptEdits`` +
     empty ambient MCP + the role's tool allow-list. Set ``VNX_WORKER_SCOPED=0``
     to restore the legacy skip-permissions posture (emergency rollback only).
+
+    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
+    is forwarded to ``build_claude_scope_args`` so the dispatch retains its normal
+    ambient MCP config instead of being force-emptied.
     """
     if worker_scoped_enabled is not None and not worker_scoped_enabled():
         return [_LEGACY_SKIP_FLAG]
     if resolve_worker_profile is not None and build_claude_scope_args is not None:
         try:
-            return build_claude_scope_args(resolve_worker_profile(role))
+            return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
         except Exception as exc:  # noqa: BLE001 — never fall back to skip-permissions
             logger.warning(
                 "subprocess_adapter: scope-arg build failed (%s); using inline default",
                 exc,
             )
+    if requires_mcp:
+        # Fallback without MCP-clearing flags so Requires-MCP dispatches keep
+        # their ambient config even when worker_permissions is unavailable.
+        return [
+            "--permission-mode", "acceptEdits",
+            "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob",
+        ]
     return list(_FALLBACK_SCOPE_ARGS)
 
 
@@ -238,6 +249,7 @@ class SubprocessAdapter:
         cwd: Optional[Any] = None,
         extra_env: Optional[Dict[str, str]] = None,
         role: Optional[str] = None,
+        requires_mcp: bool = False,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -271,7 +283,7 @@ class SubprocessAdapter:
             "--verbose",
             "--model", effective_model,
         ]
-        cmd.extend(_build_worker_scope_args(effective_role))
+        cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
         if resume_session:
             cmd.extend(["--resume", resume_session])
         cmd.append(effective_instruction)
