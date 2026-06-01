@@ -357,6 +357,10 @@ if __name__ == "__main__":
         "--no-repo-map", action="store_true",
         help="Skip repo map injection for this dispatch (e.g. review/research batches).",
     )
+    parser.add_argument(
+        "--requires-mcp", action="store_true", default=False,
+        help="Preserve ambient MCP config for this dispatch (Requires-MCP: true in dispatch file).",
+    )
     args = parser.parse_args()
 
     # Wave-5 ADR injection opt-out: set env var before instruction assembly (INT-2)
@@ -386,6 +390,19 @@ if __name__ == "__main__":
         _log_mod.getLogger(__name__).warning(
             "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
             _repo_map_exc,
+        )
+
+    # Footer injection: append T0 action-request footer so every dispatch instruction
+    # carries the orchestration prompt that tells T0 what to do after receiving the receipt.
+    # Mode is resolved from VNX_DISPATCH_FOOTER_MODE env var (normal|autonomous|enhanced).
+    try:
+        from dispatch_footer import append_dispatch_footer as _append_footer  # noqa: PLC0415
+        args.instruction = _append_footer(args.instruction)
+    except Exception as _footer_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(
+            "subprocess_dispatch: footer injection failed (%s) — proceeding without",
+            _footer_exc,
         )
 
     _dispatch_paths: "list[str] | None" = None
@@ -526,6 +543,7 @@ if __name__ == "__main__":
             model=_effective_model,
             dispatch_id=args.dispatch_id,
             role=args.role,
+            requires_mcp=args.requires_mcp,
             max_retries=args.max_retries,
             chunk_timeout=_chunk_timeout,
             total_deadline=_total_deadline,

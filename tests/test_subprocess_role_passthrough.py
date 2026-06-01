@@ -34,7 +34,11 @@ from subprocess_dispatch import deliver_via_subprocess  # noqa: E402
 
 @pytest.fixture
 def mock_adapter():
-    with patch("subprocess_dispatch.SubprocessAdapter") as cls:
+    # Patch the SubprocessAdapter binding inside claude_spawn, which is where
+    # deliver_via_subprocess delegates the actual adapter creation and deliver()
+    # call (via spawn_claude).  Patching subprocess_dispatch.SubprocessAdapter
+    # only covers the cleanup/fallback path, not the live spawn.
+    with patch("provider_spawns.claude_spawn.SubprocessAdapter") as cls:
         instance = MagicMock()
         instance.was_timed_out.return_value = False
         instance.deliver.return_value = MagicMock(success=True)

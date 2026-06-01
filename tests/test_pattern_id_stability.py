@@ -31,8 +31,8 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from intelligence_selector import (  # noqa: E402
     IntelligenceSelector,
-    _short_content_hash,
 )
+from pattern_dedup import _short_content_hash  # noqa: E402
 from pattern_dedup import (  # noqa: E402
     CONTENT_HASH_PREFIX_LEN,
     _column_exists,

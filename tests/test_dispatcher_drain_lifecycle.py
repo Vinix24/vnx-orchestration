@@ -4,9 +4,9 @@ Lifecycle regression tests for drain + dead_letter classification fixes.
 Covers all 5 OI-1319 / OI-1323 scenarios from Phase 1.5 PR-4.
 
 Fix inventory:
-  Fix-1 (dispatcher_v8_minimal.sh): mtime-only completed/ promotion removed —
+  Fix-1 (dispatcher_minimal.sh): mtime-only completed/ promotion removed —
          long-running receiptless active dispatches stay in active/.
-  Fix-2 (dispatcher_v8_minimal.sh): MCP-rerouted dispatches release T3, not T1/T2.
+  Fix-2 (dispatcher_minimal.sh): MCP-rerouted dispatches release T3, not T1/T2.
   Fix-3 (check_active_drain.py):    "done" added to SUCCESS_STATUSES.
   Fix-4 (subprocess_dispatch.py):   dispatch_paths plumbed into deliver_with_recovery().
   Fix-5 (delivery.py / recovery.py): dead_letter promotion deferred until retries exhausted.
@@ -173,7 +173,7 @@ class TestLongRunningDispatchStaysActive:
 # ---------------------------------------------------------------------------
 
 class TestMcpReroutedTerminalRelease:
-    """Fix-2 regression: dispatcher_v8_minimal.sh must release T3 (the routed
+    """Fix-2 regression: dispatcher_minimal.sh must release T3 (the routed
     terminal) when Requires-MCP:true is set on a non-C-track dispatch.
     Before the fix the track terminal (T1/T2) was released instead, leaving
     the T3 lease stranded.
