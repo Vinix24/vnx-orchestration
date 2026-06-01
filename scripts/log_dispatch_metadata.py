@@ -43,8 +43,9 @@ def main():
     parser.add_argument("--role", default="")
     parser.add_argument("--skill-name", default="")
     parser.add_argument("--gate", default="")
-    parser.add_argument("--provider", default="claude",
-                        help="Provider that executed this dispatch (claude/codex/gemini/kimi/litellm:*)")
+    parser.add_argument("--provider", default="",
+                        help="Provider that executed this dispatch (claude/codex/gemini/kimi/litellm:*). "
+                             "Leave empty to preserve any existing provider value.")
     parser.add_argument("--model", default="",
                         help="AI model used (e.g. claude-sonnet-4-6, codex, kimi)")
     parser.add_argument("--cognition", default="normal")
@@ -72,9 +73,29 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
+    # INSERT OR IGNORE: only inserts when the row is new so existing provider/model
+    # values are never deleted by a REPLACE. dispatched_at is set on first insert only.
+    # A follow-up UPDATE keeps all other dispatch fields current on re-calls.
+    project_id_val = current_project_id()
+    now_iso = datetime.utcnow().isoformat()
+    _dispatch_vals = (
+        args.role or None,
+        args.skill_name or None,
+        args.gate or None,
+        args.cognition,
+        args.priority,
+        args.pr_id or None,
+        args.pattern_count,
+        args.prevention_rule_count,
+        args.intelligence_json or None,
+        args.instruction_char_count,
+        args.context_file_count,
+        args.target_open_items,
+    )
+
     if _has_column(conn, "dispatch_metadata", "project_id"):
         cur.execute("""
-            INSERT OR REPLACE INTO dispatch_metadata (
+            INSERT OR IGNORE INTO dispatch_metadata (
                 dispatch_id, terminal, track, role, skill_name, gate,
                 cognition, priority, pr_id,
                 pattern_count, prevention_rule_count, intelligence_json,
@@ -82,71 +103,64 @@ def main():
                 dispatched_at, project_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            args.dispatch_id,
-            args.terminal,
-            args.track,
-            args.role or None,
-            args.skill_name or None,
-            args.gate or None,
-            args.cognition,
-            args.priority,
-            args.pr_id or None,
-            args.pattern_count,
-            args.prevention_rule_count,
-            args.intelligence_json or None,
-            args.instruction_char_count,
-            args.context_file_count,
-            args.target_open_items,
-            datetime.utcnow().isoformat(),
-            current_project_id(),
+            args.dispatch_id, args.terminal, args.track,
+            *_dispatch_vals, now_iso, project_id_val,
+        ))
+        cur.execute("""
+            UPDATE dispatch_metadata SET
+                terminal=?, track=?, role=?, skill_name=?, gate=?,
+                cognition=?, priority=?, pr_id=?,
+                pattern_count=?, prevention_rule_count=?, intelligence_json=?,
+                instruction_char_count=?, context_file_count=?, target_open_items=?
+            WHERE project_id=? AND dispatch_id=?
+        """, (
+            args.terminal, args.track, *_dispatch_vals,
+            project_id_val, args.dispatch_id,
         ))
     else:
         cur.execute("""
-            INSERT OR REPLACE INTO dispatch_metadata (
+            INSERT OR IGNORE INTO dispatch_metadata (
                 dispatch_id, terminal, track, role, skill_name, gate,
                 cognition, priority, pr_id,
                 pattern_count, prevention_rule_count, intelligence_json,
                 instruction_char_count, context_file_count, target_open_items, dispatched_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
+            args.dispatch_id, args.terminal, args.track,
+            *_dispatch_vals, now_iso,
+        ))
+        cur.execute("""
+            UPDATE dispatch_metadata SET
+                terminal=?, track=?, role=?, skill_name=?, gate=?,
+                cognition=?, priority=?, pr_id=?,
+                pattern_count=?, prevention_rule_count=?, intelligence_json=?,
+                instruction_char_count=?, context_file_count=?, target_open_items=?
+            WHERE dispatch_id=?
+        """, (
+            args.terminal, args.track, *_dispatch_vals,
             args.dispatch_id,
-            args.terminal,
-            args.track,
-            args.role or None,
-            args.skill_name or None,
-            args.gate or None,
-            args.cognition,
-            args.priority,
-            args.pr_id or None,
-            args.pattern_count,
-            args.prevention_rule_count,
-            args.intelligence_json or None,
-            args.instruction_char_count,
-            args.context_file_count,
-            args.target_open_items,
-            datetime.utcnow().isoformat(),
         ))
     # Stamp provider + model (provider/model-aware self-learning). Guarded: columns
-    # land via migration v21/v23 (GAP 2); older DBs simply skip them. Kept separate
-    # from the INSERT branches above so stamps apply regardless of project_id state.
-    # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
+    # land via migration v21/v23 (GAP 2); older DBs simply skip them. COALESCE keeps
+    # any real value already stamped by provider_dispatch; only fills NULL.
+    # ADR-007: scope by project_id when present to prevent cross-tenant overwrite.
     has_project = _has_column(conn, "dispatch_metadata", "project_id")
-    if _has_column(conn, "dispatch_metadata", "provider"):
+    if args.provider and _has_column(conn, "dispatch_metadata", "provider"):
         if has_project:
             cur.execute(
-                "UPDATE dispatch_metadata SET provider = ? WHERE project_id = ? AND dispatch_id = ?",
-                (args.provider or "claude", current_project_id(), args.dispatch_id),
+                "UPDATE dispatch_metadata SET provider = COALESCE(provider, ?) WHERE project_id = ? AND dispatch_id = ?",
+                (args.provider, project_id_val, args.dispatch_id),
             )
         else:
             cur.execute(
-                "UPDATE dispatch_metadata SET provider = ? WHERE dispatch_id = ?",
-                (args.provider or "claude", args.dispatch_id),
+                "UPDATE dispatch_metadata SET provider = COALESCE(provider, ?) WHERE dispatch_id = ?",
+                (args.provider, args.dispatch_id),
             )
     if args.model and _has_column(conn, "dispatch_metadata", "model"):
         if has_project:
             cur.execute(
                 "UPDATE dispatch_metadata SET model = COALESCE(model, ?) WHERE project_id = ? AND dispatch_id = ?",
-                (args.model, current_project_id(), args.dispatch_id),
+                (args.model, project_id_val, args.dispatch_id),
             )
         else:
             cur.execute(

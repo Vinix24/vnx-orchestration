@@ -8,8 +8,11 @@ Covers:
 - upsert_dispatch_provider_row stamps both provider AND model
 - log_dispatch_metadata --model argument accepted and stamped (compile + arg parse)
 - quality_db_init _migrate_v23 adds model column on a DB at user_version 22
+- log_dispatch_metadata does NOT clobber an existing (codex, gpt-probe) row (#778 FIX 1)
+- v21->v22->v23 migration path preserves model values (#778 FIX 2)
+- recent_comparable and build_t0_state SELECTs surface provider/model (#778 FIX 3)
 
-Dispatch-ID: 20260601-1620-gap2-provider-col
+Dispatch-ID: 20260601-1645-fixgap2
 ADR-007: composite uniqueness on dispatch_metadata enforced via UNIQUE INDEX
          (no table rebuild — 908 existing rows verified unique pre-migration).
 """
@@ -374,5 +377,257 @@ def test_migrate_v23_idempotent():
         cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
         assert "model" in cols
         conn.close()
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — log_dispatch_metadata must NOT clobber an existing provider/model
+# ---------------------------------------------------------------------------
+
+def test_log_dispatch_metadata_no_clobber_existing_provider_model():
+    """Calling log_dispatch_metadata with default/empty provider must not overwrite
+    an existing ('codex', 'gpt-probe') row. (#778 FIX 1)"""
+    import os
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "state" / "quality_intelligence.db"
+        db_path.parent.mkdir(parents=True)
+
+        # Seed DB with a dispatch that has real provider/model already stamped.
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                role TEXT,
+                skill_name TEXT,
+                gate TEXT,
+                pr_id TEXT,
+                dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                target_open_items TEXT,
+                pattern_count INTEGER DEFAULT 0,
+                prevention_rule_count INTEGER DEFAULT 0,
+                intelligence_json TEXT,
+                instruction_char_count INTEGER DEFAULT 0,
+                context_file_count INTEGER DEFAULT 0,
+                cognition TEXT DEFAULT 'normal',
+                priority TEXT DEFAULT 'P1',
+                UNIQUE (project_id, dispatch_id)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO dispatch_metadata "
+            "(dispatch_id, terminal, track, project_id, provider, model) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("clobber-test-001", "T1", "A", "vnx-dev", "codex", "gpt-probe"),
+        )
+        conn.commit()
+        conn.close()
+
+        scripts_dir = ROOT / "scripts"
+        env = os.environ.copy()
+        env["VNX_STATE_DIR"] = str(db_path.parent)
+        env["VNX_DATA_DIR"] = tmpdir
+
+        # Invoke log_dispatch_metadata WITHOUT --provider / --model (defaults to empty).
+        result = subprocess.run(
+            [
+                "python3", str(scripts_dir / "log_dispatch_metadata.py"),
+                "--dispatch-id", "clobber-test-001",
+                "--terminal", "T1",
+                "--track", "A",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"script failed: {result.stderr}"
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT provider, model FROM dispatch_metadata WHERE dispatch_id=?",
+            ("clobber-test-001",),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "codex", (
+            f"provider must not be overwritten with default — expected 'codex', got {row[0]!r}"
+        )
+        assert row[1] == "gpt-probe", (
+            f"model must not be overwritten with NULL — expected 'gpt-probe', got {row[1]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — v21->v22->v23 migration path preserves model values
+# ---------------------------------------------------------------------------
+
+def test_v21_v22_v23_preserves_model_values():
+    """Running v21→v22→v23 on a DB that already has provider+model values must
+    not drop model during the v22 table rebuild. (#778 FIX 2)"""
+    import quality_db_init as QDB
+    import scripts.lib.schema_migration as SM
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = Path(f.name)
+    try:
+        # Simulate a DB at user_version 20 with provider+model already present
+        # (e.g. added by an earlier partial migration run).
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                provider TEXT,
+                model TEXT
+            );
+            PRAGMA user_version = 20;
+        """)
+        conn.execute(
+            "INSERT INTO dispatch_metadata "
+            "(dispatch_id, terminal, track, project_id, provider, model) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("preserve-test-001", "T1", "A", "vnx-dev", "codex", "gpt-probe"),
+        )
+        conn.commit()
+        conn.close()
+
+        # Apply v21, v22, v23 in sequence (simulating fresh migration run).
+        conn = sqlite3.connect(str(db_path))
+        SM.apply_if_below(conn, 21, QDB._migrate_v21)
+        conn.commit()
+        SM.apply_if_below(conn, 22, QDB._migrate_v22)
+        conn.commit()
+        SM.apply_if_below(conn, 23, QDB._migrate_v23)
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT provider, model FROM dispatch_metadata WHERE dispatch_id=?",
+            ("preserve-test-001",),
+        ).fetchone()
+        conn.close()
+        assert row is not None, "row must survive the v22 rebuild"
+        assert row[0] == "codex", f"provider lost through v22 rebuild — got {row[0]!r}"
+        assert row[1] == "gpt-probe", f"model lost through v22 rebuild — got {row[1]!r}"
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — recent_comparable and build_t0_state surface provider/model
+# ---------------------------------------------------------------------------
+
+def test_recent_comparable_select_includes_provider_model():
+    """_query_per_project SELECT must include provider and model columns so
+    _row_to_intelligence_item can surface them in content. (#778 FIX 3)"""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = Path(f.name)
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                role TEXT,
+                skill_name TEXT,
+                gate TEXT,
+                pattern_count INTEGER DEFAULT 0,
+                prevention_rule_count INTEGER DEFAULT 0,
+                dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                outcome_status TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO dispatch_metadata "
+            "(dispatch_id, terminal, track, project_id, provider, model, outcome_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("rc-test-001", "T1", "A", "vnx-dev", "codex", "gpt-probe", "success"),
+        )
+        conn.commit()
+
+        lib_path = str(ROOT / "scripts" / "lib")
+        if lib_path not in sys.path:
+            sys.path.insert(0, lib_path)
+        from intelligence_sources.recent_comparable import _query_per_project
+
+        def _has_col(table, col):
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return any(r[1] == col for r in rows)
+
+        items = _query_per_project(conn, "test", [], has_column_fn=_has_col)
+        assert items, "expected at least one IntelligenceItem"
+        content = items[0].content
+        assert "codex" in content, f"provider 'codex' not surfaced in content: {content!r}"
+        assert "gpt-probe" in content, f"model 'gpt-probe' not surfaced in content: {content!r}"
+        conn.close()
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
+def test_build_t0_state_recent_dispatches_sql_includes_provider_model():
+    """_RECENT_DISPATCHES_SQL must project provider and model. (#778 FIX 3)"""
+    import build_t0_state as BTS
+
+    for attr in ("_RECENT_DISPATCHES_SQL", "_RECENT_DISPATCHES_CENTRAL_SQL"):
+        sql = getattr(BTS, attr)
+        assert "provider" in sql, f"{attr} must SELECT provider"
+        assert "model" in sql, f"{attr} must SELECT model"
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = Path(f.name)
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                role TEXT,
+                gate TEXT,
+                priority TEXT DEFAULT 'P1',
+                pr_id TEXT,
+                provider TEXT,
+                model TEXT,
+                dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME,
+                outcome_status TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO dispatch_metadata "
+            "(dispatch_id, terminal, track, project_id, provider, model) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("t0-test-001", "T1", "A", "vnx-dev", "codex", "gpt-probe"),
+        )
+        conn.commit()
+        conn.close()
+
+        rows = BTS._query_qi_db(db_path, BTS._RECENT_DISPATCHES_SQL)
+        assert rows, "expected at least one row"
+        assert rows[0].get("provider") == "codex", (
+            f"provider not projected — got {rows[0].get('provider')!r}"
+        )
+        assert rows[0].get("model") == "gpt-probe", (
+            f"model not projected — got {rows[0].get('model')!r}"
+        )
     finally:
         db_path.unlink(missing_ok=True)

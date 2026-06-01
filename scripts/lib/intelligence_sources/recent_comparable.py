@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 _RECENT_COMPARABLE_SQL_TEMPLATE = (
     "SELECT dispatch_id, terminal, track, role, skill_name, gate, "
-    "outcome_status, dispatched_at "
+    "outcome_status, dispatched_at, pattern_count, prevention_rule_count, "
+    "provider, model "
     "FROM dispatch_metadata "
     "WHERE dispatched_at >= ? AND outcome_status IS NOT NULL "
     "ORDER BY dispatched_at DESC LIMIT 20"
@@ -105,7 +106,7 @@ def _query_per_project(
             f"""
             SELECT dispatch_id, terminal, track, role, skill_name, gate,
                    outcome_status, dispatched_at, pattern_count,
-                   prevention_rule_count
+                   prevention_rule_count, provider, model
             FROM dispatch_metadata
             WHERE dispatched_at >= ?
               AND outcome_status IS NOT NULL
@@ -143,8 +144,11 @@ def _row_to_intelligence_item(
     outcome = row_d.get("outcome_status", "unknown")
     skill = row_d.get("skill_name") or row_d.get("role") or "unknown"
     gate = row_d.get("gate") or ""
+    provider_str = row_d.get("provider") or ""
+    model_str = row_d.get("model") or ""
+    provider_tag = f" [{provider_str}/{model_str}]" if provider_str else ""
     content = (
-        f"Dispatch {row_d['dispatch_id']} ({skill}, {gate}) "
+        f"Dispatch {row_d['dispatch_id']} ({skill}, {gate}){provider_tag} "
         f"completed with status: {outcome}. "
         f"Patterns used: {row_d.get('pattern_count', 0)}, "
         f"Prevention rules: {row_d.get('prevention_rule_count', 0)}."
@@ -189,7 +193,7 @@ def _query_central(
             rows = conn.execute(
                 """SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
-                       prevention_rule_count
+                       prevention_rule_count, provider, model
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL
@@ -201,7 +205,7 @@ def _query_central(
             rows = conn.execute(
                 """SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
-                       prevention_rule_count
+                       prevention_rule_count, provider, model
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL

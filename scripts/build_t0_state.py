@@ -702,7 +702,7 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
 
 _RECENT_DISPATCHES_SQL = (
     "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status "
+    "dispatched_at, completed_at, outcome_status, provider, model "
     "FROM dispatch_metadata "
     "ORDER BY dispatched_at DESC "
     "LIMIT 50"
@@ -710,7 +710,7 @@ _RECENT_DISPATCHES_SQL = (
 
 _RECENT_DISPATCHES_CENTRAL_SQL = (
     "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status "
+    "dispatched_at, completed_at, outcome_status, provider, model "
     "FROM dispatch_metadata "
     "WHERE project_id = ? "
     "ORDER BY dispatched_at DESC "

@@ -797,6 +797,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
                 terminal TEXT NOT NULL,
                 track TEXT NOT NULL,
                 provider TEXT,
+                model TEXT,
                 role TEXT,
                 skill_name TEXT,
                 gate TEXT,
