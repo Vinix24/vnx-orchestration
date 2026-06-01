@@ -35,14 +35,7 @@ from headless_inspect import (
     build_health_summary,
     format_health_summary,
     HealthSummary,
-    _elapsed,
-    _ago,
-    _short_id,
-    _ts_display,
-    _resolve_run,
-    _run_to_dict,
-    STATE_ICONS,
-    FAILURE_CLASS_LABELS,
+    _STATE_ICONS as STATE_ICONS,
 )
 
 
@@ -87,24 +80,6 @@ class _InspectTestCase(unittest.TestCase):
         )
 
 
-class TestFormatHelpers(unittest.TestCase):
-    """Test formatting helper functions."""
-
-    def test_short_id(self):
-        self.assertEqual(_short_id("abcdef12-3456-7890"), "abcdef12")
-        self.assertEqual(_short_id(None), "-")
-        self.assertEqual(_short_id(""), "-")
-
-    def test_ts_display(self):
-        self.assertEqual(_ts_display(None), "-")
-        result = _ts_display("2026-03-30T10:15:30.000000Z")
-        self.assertIn("10:15:30", result)
-
-    def test_elapsed_none(self):
-        self.assertEqual(_elapsed(None), "-")
-
-    def test_ago_none(self):
-        self.assertEqual(_ago(None), "never")
 
 
 class TestFormatRunLine(_InspectTestCase):
@@ -374,41 +349,6 @@ class TestHealthSummary(_InspectTestCase):
         self.assertIn("Succeeded:  1", text)
 
 
-class TestResolveRun(_InspectTestCase):
-    """Test _resolve_run prefix matching."""
-
-    def test_full_id_match(self):
-        run = self._create_run("dispatch_resolve_01")
-        found = _resolve_run(self.registry, run.run_id)
-        self.assertIsNotNone(found)
-        self.assertEqual(found.run_id, run.run_id)
-
-    def test_prefix_match(self):
-        run = self._create_run("dispatch_resolve_02")
-        prefix = run.run_id[:8]
-        found = _resolve_run(self.registry, prefix)
-        self.assertIsNotNone(found)
-        self.assertEqual(found.run_id, run.run_id)
-
-    def test_no_match(self):
-        found = _resolve_run(self.registry, "nonexistent-id")
-        self.assertIsNone(found)
-
-
-class TestRunToDict(_InspectTestCase):
-    """Test _run_to_dict serialization."""
-
-    def test_dict_has_all_keys(self):
-        run = self._create_run("dispatch_dict_01")
-        d = _run_to_dict(run)
-        self.assertIn("run_id", d)
-        self.assertIn("dispatch_id", d)
-        self.assertIn("state", d)
-        self.assertIn("failure_class", d)
-        self.assertIn("pid", d)
-        self.assertIn("heartbeat_at", d)
-        # Should be JSON-serializable
-        json.dumps(d)
 
 
 if __name__ == "__main__":

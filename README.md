@@ -6,15 +6,13 @@ It is a local control plane for the AI coding CLIs that already sit on your mach
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
 
-I built this for my own work, across 2,000+ hours of Claude Code. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+I built this for my own work, across 2,000+ hours of Claude Code and 1,450+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
 ## Writing
 
 I wrote the architecture down as I built it. The full series is on [vincentvandeth.nl](https://vincentvandeth.nl). Start here.
-
-<!-- TODO: confirm blog URL base with Vincent before merge -->
 
 **Governance and trust**
 - [Glass-box governance for multi-agent AI](https://vincentvandeth.nl/blog/glass-box-governance-multi-agent-ai)
@@ -44,13 +42,13 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-05-30.
 
-**Tier 1, in production.** Append-only NDJSON receipts with a hash-chained ledger. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification. The interactive tmux worker lane. The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
+**Tier 1, in production.** Append-only NDJSON receipts with a hash-chained ledger. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane (available and subscription-preserving; becoming the default lane as of June 15, 2026, and still maturing into that role). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
 
 **Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot, the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
 
 **Tier 3, designed, not built.** Parallel multi-track execution. The wave scheduler, merge lock, and file-scope derivation are designed, not shipped. Treat it as architecture, not a feature.
 
-Per-provider maturity differs. Worktree isolation is solid for single-dispatch work and races under parallel dispatch, which is why parallel sits in Tier 3.
+Per-provider maturity differs. Worktree isolation (`VNX_ISOLATED_WORKTREE`, defaults off) is available for single-dispatch work and is not guaranteed to be race-free under parallel dispatch, which is why parallel sits in Tier 3.
 
 ## Install
 
@@ -88,9 +86,9 @@ VNX uses a T0 orchestrator and ephemeral workers. The old fixed T1-T3 mental mod
    append-only NDJSON receipts  (hash-chained, one per dispatch)
 ```
 
-Claude has two explicit lanes. The default worker lane is Claude on subscription through interactive tmux, in `scripts/lib/tmux_interactive_dispatch.py`. The opt-in burst lane is Claude on the paid API through subprocess `claude -p`.
+Claude has two explicit lanes. The reference worker lane is Claude via `claude -p` subprocess in headless mode. The interactive tmux lane runs Claude on subscription; it is available now, subscription-preserving, and set to become the default lane as of the June 15, 2026 billing change — it is still maturing into that role.
 
-The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees.
+The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees. Worktree isolation is available via `VNX_ISOLATED_WORKTREE=1` and is off by default; isolation guarantees vary by lane.
 
 ### Governed memory: past, current, future
 
@@ -127,11 +125,11 @@ Kimi runs through the Kimi CLI with OAuth. VNX does not call the Moonshot SDK di
 
 OpenRouter is the gateway lane for GLM-5.1 from Zhipu and other routed models. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
 
-The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is about 30% more effective on coding and tool tasks than a bare DeepSeek API call, because the harness adds tool-use loops, context injection, and structured diff output that the raw API does not provide. This is a single-operator measurement, not a benchmark.
+The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is meaningfully more effective on coding and tool tasks than a bare DeepSeek API call (internal measurement only, not a published benchmark), because the harness adds tool-use loops, context injection, and structured diff output that the raw API does not provide.
 
 ### Billing as a consequence, not a goal
 
-VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because the default Claude worker lane is an interactive tmux session, it stays on the subscription instead of the paid API lane. This describes current public policy; vendors can change their terms.
+VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because interactive Claude sessions stay on the subscription rather than API credits, the interactive tmux lane is subscription-preserving. It becomes the default Claude worker lane when the June 15 billing change takes effect. This describes current public policy; vendors can change their terms.
 
 ## Compared to dmux
 

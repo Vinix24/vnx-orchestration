@@ -137,7 +137,7 @@ These items are explicitly deferred beyond this sweep with rationale:
 | DEF-2 | Full input-mode guard before `configure_terminal_mode` | Requires moving the guard before lease acquisition or restructuring the delivery pipeline. Current mitigation (best-effort probe) is sufficient for this sweep. |
 | DEF-3 | OI-048 root cause (Gemini stdout flush, Codex stall) | Provider CLI behavior is upstream of VNX. Contract 180 added stall detection and timeout as mitigation. Root cause fix requires Gemini/Codex CLI changes. |
 | DEF-4 | Worker-side failure detection after accepted state | Contract 90 DFL-6 explicitly scopes this out. TTL + reconciler is the safety net. |
-| DEF-5 | Test file complexity (OI-220 through OI-224) | Test files with comprehensive certification scenarios are expected to be longer. These warnings are informational, not actionable. |
+| DEF-5 | Test file complexity (OI-220 through OI-224) | Test files with multi-scenario certification coverage are expected to be longer. These warnings are informational, not actionable. |
 
 ---
 

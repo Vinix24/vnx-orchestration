@@ -1677,7 +1677,7 @@ def main():
             return EXIT_OK
 
         elif command == "record-adoption":
-            # Called from receipt_processor_v4.sh after task_complete
+            # Called from receipt_processor.sh after task_complete
             # Usage: gather_intelligence.py record-adoption <dispatch_id> <terminal> <report_path>
             if len(argv) < 4:
                 emit_json({"error": "Usage: record-adoption <dispatch_id> <terminal> <report_path>"})

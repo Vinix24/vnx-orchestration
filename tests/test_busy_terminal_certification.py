@@ -381,7 +381,7 @@ class TestC3SkillValidationPreDelivery(unittest.TestCase):
         `continue`s on invalid skill before reaching the function that calls
         rc_check_terminal.
         """
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # Skill validation must exist in the dispatch processing loop
@@ -408,7 +408,7 @@ class TestC3SkillValidationPreDelivery(unittest.TestCase):
 
     def test_skill_invalid_marker_blocks_reprocessing(self):
         """Dispatch with [SKILL_INVALID] marker is skipped on re-processing."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
         self.assertIn("[SKILL_INVALID]", content,
             "Dispatcher must check for [SKILL_INVALID] marker to skip invalid dispatches")
@@ -481,7 +481,7 @@ class TestC4ClearContextExplicitOnly(unittest.TestCase):
 
     def test_dispatcher_verifies_ready_state_after_clear(self):
         """Dispatcher checks terminal ready state after explicit clear-context."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # Verify: after clear context, dispatcher checks for prompt readiness
@@ -492,7 +492,7 @@ class TestC4ClearContextExplicitOnly(unittest.TestCase):
 
     def test_dispatcher_does_not_clear_by_default(self):
         """Clear-context code path is conditional on explicit 'true' value."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # The clear-context block must be guarded by explicit check
@@ -568,7 +568,7 @@ class TestC6ConjunctionRule(unittest.TestCase):
 
     def test_dispatcher_checks_both_layers(self):
         """Dispatcher calls rc_check_terminal AND terminal_lock_allows_dispatch."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # Find the dispatch processing section (after canonical check)
@@ -588,7 +588,7 @@ class TestC6ConjunctionRule(unittest.TestCase):
 
     def test_canonical_block_returns_before_legacy_check(self):
         """When canonical check blocks, dispatcher returns 1 before legacy check."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # After canonical check BLOCK, there's a return 1 within the if-block
@@ -607,7 +607,7 @@ class TestC6ConjunctionRule(unittest.TestCase):
 
     def test_legacy_block_also_returns_failure(self):
         """Legacy lock check failure blocks dispatch with return 1."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # terminal_lock_allows_dispatch failure triggers return 1

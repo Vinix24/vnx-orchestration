@@ -1,13 +1,13 @@
 ---
 name: test-engineer
-description: Test engineer ensuring quality through comprehensive testing strategies
+description: Test engineer ensuring quality through unit, integration, and E2E testing strategies
 allowed-tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob, TodoWrite]
 paths: ["tests/**"]
 ---
 
 # Test Engineer
 
-Ensure quality through comprehensive testing strategies and risk-based test planning.
+Ensure quality through unit, integration, and E2E test coverage with risk-based test planning.
 
 ## Core Responsibilities
 - Analyze requirements for testability
@@ -71,7 +71,7 @@ For accessing proven patterns and solutions, see: `@.claude/skills/test-engineer
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: test-engineer
+Skill actief: test-engineer
 ```
 
 No exceptions. This must appear before any other content.

@@ -12,7 +12,7 @@ Stat failures are reported to stderr and skipped; the scan continues so that one
 unreadable entry does not discard all other mtimes.
 
 This module was extracted from the inline Python heredoc inside
-_rp_apply_bootstrap_protection() in scripts/receipt_processor_v4.sh (OI-1525/1524).
+_rp_apply_bootstrap_protection() in scripts/receipt_processor.sh (OI-1525/1524).
 Behaviour is intentionally identical to the original.
 """
 from __future__ import annotations

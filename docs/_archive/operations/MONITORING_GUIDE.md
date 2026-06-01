@@ -202,8 +202,8 @@ cat .claude/vnx-system/state/dashboard_status.json | jq '._pr_registry'
 
 ```bash
 # Check critical processes individually
-pgrep -f dispatcher_v8_minimal && echo "✓ Dispatcher V8" || echo "✗ Dispatcher"
-pgrep -f receipt_processor_v4 && echo "✓ Receipt Processor V4" || echo "✗ Receipt Processor"
+pgrep -f dispatcher_minimal && echo "✓ Dispatcher V8" || echo "✗ Dispatcher"
+pgrep -f receipt_processor && echo "✓ Receipt Processor V4" || echo "✗ Receipt Processor"
 pgrep -f heartbeat_ack_monitor && echo "✓ Heartbeat Monitor" || echo "✗ Heartbeat Monitor"
 pgrep -f vnx_supervisor_simple && echo "✓ Supervisor" || echo "✗ Supervisor"
 pgrep -f generate_valid_dashboard && echo "✓ Dashboard" || echo "✗ Dashboard"
@@ -386,10 +386,10 @@ cd .claude/vnx-system/scripts
 
 ```bash
 # Check receipt processor status
-pgrep -f receipt_processor_v4 && echo "✓ Running" || echo "✗ Stopped"
+pgrep -f receipt_processor && echo "✓ Running" || echo "✗ Stopped"
 
 # View recent receipt activity
-tail -20 .claude/vnx-system/logs/receipt_processor_v4.log
+tail -20 .claude/vnx-system/logs/receipt_processor.log
 
 # Count receipts today
 grep "$(date +%Y-%m-%d)" .claude/vnx-system/state/t0_receipts.ndjson | wc -l
@@ -418,7 +418,7 @@ jq -r '.event_type' .claude/vnx-system/state/t0_receipts.ndjson | sort | uniq -c
 jq '.t0.pane_id' .claude/vnx-system/state/panes.json
 
 # Verify recent deliveries
-grep "Receipt delivered to T0" .claude/vnx-system/logs/receipt_processor_v4.log | tail -10
+grep "Receipt delivered to T0" .claude/vnx-system/logs/receipt_processor.log | tail -10
 
 # Check receipts visible in T0 terminal
 tmux capture-pane -t %0 -p -S -50 | grep "📨 RECEIPT"
@@ -443,7 +443,7 @@ ls -la /tmp/heartbeat_ack_monitor.sock 2>/dev/null || echo "ACK socket missing"
 
 ```bash
 # Check current processing mode
-grep "MODE=" .claude/vnx-system/logs/receipt_processor_v4.log | tail -1
+grep "MODE=" .claude/vnx-system/logs/receipt_processor.log | tail -1
 
 # Modes:
 # - monitor: Real-time processing of new reports only (default)
@@ -451,8 +451,8 @@ grep "MODE=" .claude/vnx-system/logs/receipt_processor_v4.log | tail -1
 # - manual: Process pending reports once, then exit
 
 # Switch to catchup mode if receipts are missing
-pkill -f receipt_processor_v4
-VNX_MODE=catchup VNX_MAX_AGE_HOURS=24 .claude/vnx-system/scripts/receipt_processor_v4.sh &
+pkill -f receipt_processor
+VNX_MODE=catchup VNX_MAX_AGE_HOURS=24 .claude/vnx-system/scripts/receipt_processor.sh &
 ```
 
 ---
@@ -520,7 +520,7 @@ jq -r '.tracks | to_entries[] | "\(.key): \(.value.pane_id)"' \
 |----------|---------|----------|
 | supervisor.log | Process management | .claude/vnx-system/logs/ |
 | dispatcher.log | Dispatch routing | .claude/vnx-system/logs/ |
-| receipt_processor_v4.log | Receipt processing | .claude/vnx-system/logs/ |
+| receipt_processor.log | Receipt processing | .claude/vnx-system/logs/ |
 | smart_tap.log | Block capture | .claude/vnx-system/logs/ |
 | dashboard_gen.log | Dashboard updates | .claude/vnx-system/logs/ |
 | intelligence_daemon.log | Intelligence system | .claude/vnx-system/logs/ |
@@ -556,10 +556,10 @@ grep "terminated\|died\|killed" .claude/vnx-system/logs/supervisor.log
 grep "failed to send\|dispatch error" .claude/vnx-system/logs/dispatcher.log
 
 # 4. Receipt delivery failures
-grep "failed to deliver\|receipt error" .claude/vnx-system/logs/receipt_processor_v4.log
+grep "failed to deliver\|receipt error" .claude/vnx-system/logs/receipt_processor.log
 
 # 5. Date command errors (macOS)
-grep "illegal option" .claude/vnx-system/logs/receipt_processor_v4.log
+grep "illegal option" .claude/vnx-system/logs/receipt_processor.log
 
 # 6. Template compilation errors
 grep -i "template error\|compilation failed" /tmp/dispatcher_v7_compilation.log
@@ -691,11 +691,11 @@ ps aux | grep smart_tap | grep -v grep
 **Solution**:
 ```bash
 # Kill and restart dispatcher
-pkill -f dispatcher_v8_minimal
-cd .claude/vnx-system && ./scripts/dispatcher_v8_minimal.sh &
+pkill -f dispatcher_minimal
+cd .claude/vnx-system && ./scripts/dispatcher_minimal.sh &
 
 # Verify single instance
-sleep 3 && pgrep -f dispatcher_v8_minimal | wc -l  # Must be 1
+sleep 3 && pgrep -f dispatcher_minimal | wc -l  # Must be 1
 ```
 
 ### Issue: Receipts Not Appearing in T0
@@ -707,28 +707,28 @@ sleep 3 && pgrep -f dispatcher_v8_minimal | wc -l  # Must be 1
 **Diagnosis**:
 ```bash
 # Check receipt processor
-pgrep -f receipt_processor_v4 || echo "Processor not running!"
+pgrep -f receipt_processor || echo "Processor not running!"
 
 # Check T0 pane detection
 jq '.t0.pane_id' .claude/vnx-system/state/panes.json
 
 # Check for time filtering issues
-grep "Report too old" .claude/vnx-system/logs/receipt_processor_v4.log | tail -5
+grep "Report too old" .claude/vnx-system/logs/receipt_processor.log | tail -5
 ```
 
 **Solution**:
 ```bash
 # Solution 1: Switch to catchup mode
-pkill -f receipt_processor_v4
+pkill -f receipt_processor
 VNX_MODE=catchup VNX_MAX_AGE_HOURS=24 \
-  .claude/vnx-system/scripts/receipt_processor_v4.sh &
+  .claude/vnx-system/scripts/receipt_processor.sh &
 
 # Solution 2: Verify T0 pane mapping
 jq '.t0.pane_id' .claude/vnx-system/state/panes.json
 tmux list-panes -aF '#{pane_id}' | grep $(jq -r '.t0.pane_id' .claude/vnx-system/state/panes.json)
 
 # Solution 3: Check receipt delivery
-grep "Receipt delivered to T0" .claude/vnx-system/logs/receipt_processor_v4.log | tail -10
+grep "Receipt delivered to T0" .claude/vnx-system/logs/receipt_processor.log | tail -10
 ```
 
 ### Issue: Dispatches Not Being Delivered
@@ -739,7 +739,7 @@ grep "Receipt delivered to T0" .claude/vnx-system/logs/receipt_processor_v4.log 
 **Diagnosis**:
 ```bash
 # Check dispatcher is running
-pgrep -f dispatcher_v8_minimal || echo "Dispatcher not running!"
+pgrep -f dispatcher_minimal || echo "Dispatcher not running!"
 
 # Check pending/active dispatches
 ls -la .vnx-data/dispatches/pending/
@@ -846,7 +846,7 @@ sleep 2
 > .claude/vnx-system/state/processed_block_hashes.txt
 
 # Restart
-cd .claude/vnx-system && ./scripts/smart_tap_v7_json_translator.sh &
+cd .claude/vnx-system && ./scripts/smart_tap_json_translator.sh &
 ```
 
 **Dispatcher Recovery**:
@@ -874,7 +874,7 @@ echo "0" > .claude/vnx-system/state/.track_c_cursor
 
 # Restart in catchup mode
 VNX_MODE=catchup VNX_MAX_AGE_HOURS=24 \
-  .claude/vnx-system/scripts/receipt_processor_v4.sh &
+  .claude/vnx-system/scripts/receipt_processor.sh &
 ```
 
 ### Intelligence System Recovery
@@ -1012,7 +1012,7 @@ done
 |-----------|----------|
 | Supervisor | `.claude/vnx-system/logs/supervisor.log` |
 | Dispatcher | `.claude/vnx-system/logs/dispatcher.log` |
-| Receipt Processor | `.claude/vnx-system/logs/receipt_processor_v4.log` |
+| Receipt Processor | `.claude/vnx-system/logs/receipt_processor.log` |
 | Smart Tap | `.claude/vnx-system/logs/smart_tap.log` |
 | Dashboard | `.claude/vnx-system/logs/dashboard_gen.log` |
 | Intelligence Daemon | `.claude/vnx-system/logs/intelligence_daemon.log` |
@@ -1128,7 +1128,7 @@ Managed processes now write enhanced `.meta.json` files alongside PID files:
   "ppid": 1001,
   "started_at": "2026-03-23T06:00:00Z",
   "owner": "vincent",
-  "command": "bash /path/to/dispatcher_v8_minimal.sh"
+  "command": "bash /path/to/dispatcher_minimal.sh"
 }
 ```
 

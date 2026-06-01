@@ -45,6 +45,64 @@ from adapter_types import (
 
 logger = logging.getLogger(__name__)
 
+# Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §5):
+# drop --dangerously-skip-permissions for an empty ambient MCP + acceptEdits +
+# profile allow-list. Imported defensively so an import failure never silently
+# re-opens the skip-permissions blast radius — the inline fallback below is still
+# scoped (never skip-permissions).
+try:
+    from worker_permissions import (
+        build_claude_scope_args,
+        resolve_worker_profile,
+        worker_scoped_enabled,
+    )
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    build_claude_scope_args = None
+    resolve_worker_profile = None
+    worker_scoped_enabled = None
+
+_LEGACY_SKIP_FLAG = "--dangerously-skip-permissions"
+# Inline fallback used only if worker_permissions cannot be imported — still
+# scoped (empty MCP + acceptEdits + a functional code-worker allow-list).
+_FALLBACK_SCOPE_ARGS = [
+    "--permission-mode", "acceptEdits",
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob",
+]
+
+
+def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) -> List[str]:
+    """Return the capability-scoping argv head for a headless ``claude`` spawn.
+
+    Default (``VNX_WORKER_SCOPED`` unset or truthy): drop the blanket
+    ``--dangerously-skip-permissions`` for ``--permission-mode acceptEdits`` +
+    empty ambient MCP + the role's tool allow-list. Set ``VNX_WORKER_SCOPED=0``
+    to restore the legacy skip-permissions posture (emergency rollback only).
+
+    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
+    is forwarded to ``build_claude_scope_args`` so the dispatch retains its normal
+    ambient MCP config instead of being force-emptied.
+    """
+    if worker_scoped_enabled is not None and not worker_scoped_enabled():
+        return [_LEGACY_SKIP_FLAG]
+    if resolve_worker_profile is not None and build_claude_scope_args is not None:
+        try:
+            return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
+        except Exception as exc:  # noqa: BLE001 — never fall back to skip-permissions
+            logger.warning(
+                "subprocess_adapter: scope-arg build failed (%s); using inline default",
+                exc,
+            )
+    if requires_mcp:
+        # Fallback without MCP-clearing flags so Requires-MCP dispatches keep
+        # their ambient config even when worker_permissions is unavailable.
+        return [
+            "--permission-mode", "acceptEdits",
+            "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob",
+        ]
+    return list(_FALLBACK_SCOPE_ARGS)
+
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +248,10 @@ class SubprocessAdapter:
         resume_session: Optional[str] = None,
         cwd: Optional[Any] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        extra_cli_args: Optional[List[str]] = None,
+        role: Optional[str] = None,
+        requires_mcp: bool = False,
+        scrub_env_keys: Optional[frozenset] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -204,22 +266,42 @@ class SubprocessAdapter:
         cwd: if provided, the subprocess is started in that directory.  Pass
         the agent's project directory (e.g. agents/{role}/) so the headless
         process has the right working context.
+
+        extra_cli_args: if provided, these flags are inserted into the claude
+        argv after the standard flags and before --resume/instruction.  Used by
+        the DeepSeek-harness lane to force MCP off
+        (``--strict-mcp-config --mcp-config '{"mcpServers":{}}'``).  Default
+        None preserves byte-identical argv for the existing claude lane.
+
+        role: if provided (or present in the stored config), selects the
+        permission profile whose tool allow-list scopes the spawn. Falls back to
+        the default code-worker profile so an unknown role still gets a functional
+        but MCP-isolated worker (see _build_worker_scope_args).
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
         effective_model = model or config.get("model", "sonnet")
+        effective_role = role or config.get("role")
 
+        # Capability scoping (interim): no ambient MCP + no blanket skip-permissions.
         cmd = [
             "claude",
-            "--dangerously-skip-permissions",
             "-p",
             "--output-format", "stream-json",
             "--verbose",
             "--model", effective_model,
         ]
+        if extra_cli_args:
+            cmd.extend(extra_cli_args)
         if resume_session:
             cmd.extend(["--resume", resume_session])
+        # The prompt MUST precede the capability-scoping flags. --allowedTools /
+        # --disallowedTools are variadic (<tools...>); if the instruction is appended
+        # AFTER them it is consumed as a tool value, leaving claude with no prompt
+        # ("Error: Input must be provided ... when using --print" -> exit 1). Placing
+        # the instruction before the scope args keeps it as the -p prompt positional.
         cmd.append(effective_instruction)
+        cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
 
         popen_kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
@@ -228,9 +310,12 @@ class SubprocessAdapter:
         }
         if cwd is not None:
             popen_kwargs["cwd"] = str(cwd)
-        if extra_env:
+        if extra_env or scrub_env_keys:
             merged_env = os.environ.copy()
-            merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            if extra_env:
+                merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            for _scrub_key in (scrub_env_keys or ()):
+                merged_env.pop(_scrub_key, None)
             popen_kwargs["env"] = merged_env
 
         # Clear stale session_id before spawning; updated when the init event arrives.

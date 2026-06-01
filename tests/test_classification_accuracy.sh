@@ -37,7 +37,7 @@ assert_eq() {
 }
 
 # ---------------------------------------------------------------------------
-# Mirror of _classify_blocked_dispatch() from dispatcher_v8_minimal.sh
+# Mirror of _classify_blocked_dispatch() from dispatcher_minimal.sh
 # Must stay in sync. Changes to the dispatcher must be reflected here.
 # ---------------------------------------------------------------------------
 _classify_blocked_dispatch() {

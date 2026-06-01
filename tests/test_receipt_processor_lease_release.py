@@ -17,7 +17,7 @@ LeaseManager.recover() so expired -> recovering -> idle, leaving the
 terminal reusable for the next dispatch.
 
 The shell-level call site (`_auto_release_lease_on_receipt` in
-receipt_processor_v4.sh) drives `runtime_core_cli.py release-on-receipt`,
+receipt_processor.sh) drives `runtime_core_cli.py release-on-receipt`,
 so verifying the Python API also verifies the receipt-processor pipeline
 behavior end-to-end.
 """

@@ -15,7 +15,7 @@ Optimize Python code to meet strict performance requirements: <150MB memory usag
 ## Optimization Principles
 - **Memory First**: Prioritize memory efficiency
 - **Algorithmic Efficiency**: O(n) over O(n²)
-- **Pythonic Code**: Leverage Python's strengths
+- **Pythonic Code**: Use Python's built-in features and idioms
 - **Measurable Impact**: Profile before/after
 
 ## Optimization Workflow
@@ -254,7 +254,7 @@ Generate optimization reports in:
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: python-optimizer
+Skill actief: python-optimizer
 ```
 
 No exceptions. This must appear before any other content.
