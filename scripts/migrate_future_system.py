@@ -392,11 +392,51 @@ def apply_migration_v27(conn: sqlite3.Connection, project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 7: preflight + apply 0028 migration (tracks.derived_status)
+# ---------------------------------------------------------------------------
+
+def _assert_tracks_v27_intact(conn: sqlite3.Connection) -> None:
+    """Assert tracks has horizon column (v27 state) before adding derived_status."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+    if "horizon" not in cols:
+        raise RuntimeError(
+            "tracks missing 'horizon' column (from 0027). "
+            "Run migration 0027 before 0028."
+        )
+    if "derived_status" in cols:
+        raise RuntimeError(
+            "tracks already has 'derived_status' column. Migration 0028 should be "
+            "skipped (user_version should be >= 28)."
+        )
+
+
+schema_migration.register_preflight(28, _assert_tracks_v27_intact)
+
+
+def apply_migration_v28(conn: sqlite3.Connection, project_root: Path) -> None:
+    migration_path = _MIGRATIONS / "0028_tracks_derived_status.sql"
+    if not migration_path.exists():
+        raise FileNotFoundError(f"Migration not found: {migration_path}")
+
+    sql = migration_path.read_text(encoding="utf-8")
+
+    current_version = schema_migration.get_user_version(conn)
+    if current_version >= 28:
+        print(f"  [skip] migration 0028 already applied (user_version={current_version})")
+        return
+
+    _assert_tracks_v27_intact(conn)
+    print("  [apply] migration 0028_tracks_derived_status.sql ...")
+    schema_migration.apply_script_if_below(conn, 28, sql)
+    print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def run(project_root: Path | None = None) -> None:
-    """Apply track layer migrations: 0022 (track tables) + 0024 (tenant-scoping)."""
+    """Apply track layer migrations: 0022, 0024, 0027, 0028."""
     if project_root is None:
         project_root = resolve_project_root(__file__)
 
@@ -432,6 +472,10 @@ def run(project_root: Path | None = None) -> None:
 
         # Apply 0027 — additive: tracks.horizon column + deliverables derived view
         apply_migration_v27(conn, project_root)
+        conn.commit()
+
+        # Apply 0028 — additive: tracks.derived_status advisory column
+        apply_migration_v28(conn, project_root)
         conn.commit()
 
         print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")

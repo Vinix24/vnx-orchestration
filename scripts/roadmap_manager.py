@@ -718,6 +718,38 @@ Implement the minimum blocking fix required before the roadmap may advance.
             "advance": advance_result,
         }
 
+    def reconcile_tracks(self) -> Dict[str, Any]:
+        """Advisory track-layer rollup (Phase 3). Gated by VNX_ROADMAP_AUTOPILOT.
+
+        Calls track_reconciler.reconcile_all_tracks to compute derived_status for
+        every track in the project.
+
+        ADVISORY ONLY: writes tracks.derived_status, NEVER tracks.phase or
+        ROADMAP.yaml. Idempotent and replay-safe.
+
+        Returns {"status": "disabled"} when VNX_ROADMAP_AUTOPILOT is unset/off.
+        """
+        if os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("1", "true", "True"):
+            return {"status": "disabled", "reason": "VNX_ROADMAP_AUTOPILOT not set"}
+
+        from track_reconciler import reconcile_all_tracks  # noqa: PLC0415
+        results = reconcile_all_tracks(self.state_dir, self.project_id)
+        drifted_count = sum(1 for r in results if r.get("drifted"))
+
+        emit_governance_receipt(
+            "track_reconcile_advisory",
+            status="success",
+            project_id=self.project_id,
+            track_count=len(results),
+            drifted_count=drifted_count,
+        )
+        return {
+            "status": "ok",
+            "track_count": len(results),
+            "drifted_count": drifted_count,
+            "results": results,
+        }
+
     def status(self) -> Dict[str, Any]:
         state = self.load_state()
         return {
@@ -765,6 +797,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     autopilot_parser = sub.add_parser("autopilot")
     autopilot_parser.add_argument("--json", action="store_true")
 
+    reconcile_tracks_parser = sub.add_parser("reconcile-tracks")
+    reconcile_tracks_parser.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     manager = RoadmapManager()
 
@@ -784,6 +819,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = manager.run_feature_step()
     elif args.command == "autopilot":
         result = manager.autopilot_tick()
+    elif args.command == "reconcile-tracks":
+        result = manager.reconcile_tracks()
     else:
         raise AssertionError("unreachable")
 
