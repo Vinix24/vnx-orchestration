@@ -884,6 +884,46 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
         return 1
 
 
+def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
+    """Route claude dispatch through the unified envelope (VNX_UNIFIED_ENVELOPE=1, claude-subprocess lane).
+
+    Fail-closed: EnvelopeGovernError → exit code 1. Legacy path (_dispatch_claude)
+    is untouched when the flag is unset.
+
+    Dual-receipt safety: deliver_with_recovery (called from the legacy path) already
+    writes its own receipt internally as a safety net. The envelope GOVERN receipt
+    write checks for an existing receipt via _receipt_exists_for_dispatch and skips
+    if found (idempotent dedup). No double-emit.
+    """
+    from dispatch_envelope import EnvelopeGovernError, EnvelopeSpec, run_envelope  # noqa: PLC0415
+
+    state_dir = _resolve_state_dir()
+    data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+
+    spec = EnvelopeSpec(
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+        provider="claude",
+        model=args.model,
+        instruction=args.instruction,
+        role=getattr(args, "role", None),
+        pr_id=getattr(args, "pr_id", None),
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+
+    try:
+        result = run_envelope(spec, lane="claude-subprocess")
+        return result.returncode
+    except EnvelopeGovernError as exc:
+        logger.error(
+            "envelope: GOVERN fail-closed dispatch=%s: %s",
+            args.dispatch_id,
+            exc,
+        )
+        return 1
+
+
 def _resolve_codex_model() -> str:
     """Load codex model key from registry (openai section), fallback to hardcoded default.
 
@@ -1417,6 +1457,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if provider == "claude":
+        _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"
+        _envelope_lanes = [
+            lane.strip()
+            for lane in (os.environ.get("VNX_UNIFIED_ENVELOPE_LANES") or "").split(",")
+            if lane.strip()
+        ]
+        if _envelope_on and (
+            "claude-subprocess" in _envelope_lanes or "claude" in _envelope_lanes
+        ):
+            return _dispatch_claude_via_envelope(args)
         return _dispatch_claude(args)
 
     if provider == "codex":
