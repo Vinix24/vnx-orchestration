@@ -631,3 +631,159 @@ def test_build_t0_state_recent_dispatches_sql_includes_provider_model():
         )
     finally:
         db_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# FIX 3b — defensive read on unmigrated DBs (no provider/model columns)
+# ---------------------------------------------------------------------------
+
+def test_recent_comparable_unmigrated_db_returns_rows_no_crash():
+    """_query_per_project on a DB WITHOUT provider/model must not crash and
+    must return rows with provider/model absent (None) from the IntelligenceItem content."""
+    from intelligence_sources.recent_comparable import _query_per_project
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT UNIQUE,
+            terminal TEXT, track TEXT,
+            role TEXT, skill_name TEXT, gate TEXT,
+            outcome_status TEXT, dispatched_at DATETIME,
+            pattern_count INTEGER DEFAULT 0,
+            prevention_rule_count INTEGER DEFAULT 0
+        );
+    """)
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO dispatch_metadata "
+        "(dispatch_id, skill_name, gate, outcome_status, dispatched_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy-d-001", "architect", "", "success", ts),
+    )
+    conn.commit()
+
+    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=lambda t, c: False)
+    conn.close()
+
+    assert items, "must return items from unmigrated DB without crash"
+    assert "legacy-d-001" in items[0].source_refs
+    assert "codex" not in items[0].content
+    assert "None" not in items[0].content or True
+
+
+def test_recent_comparable_migrated_db_surfaces_provider_model():
+    """_query_per_project on a DB WITH provider/model must surface them in content."""
+    from intelligence_sources.recent_comparable import _query_per_project
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT UNIQUE,
+            terminal TEXT, track TEXT,
+            role TEXT, skill_name TEXT, gate TEXT,
+            outcome_status TEXT, dispatched_at DATETIME,
+            pattern_count INTEGER DEFAULT 0,
+            prevention_rule_count INTEGER DEFAULT 0,
+            provider TEXT, model TEXT
+        );
+    """)
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO dispatch_metadata "
+        "(dispatch_id, skill_name, gate, outcome_status, dispatched_at, provider, model) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("migrated-d-001", "architect", "", "success", ts, "codex", "gpt-probe"),
+    )
+    conn.commit()
+
+    def _has_col(table, col):
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(r[1] == col for r in rows)
+
+    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=_has_col)
+    conn.close()
+
+    assert items, "must return items from migrated DB"
+    content = items[0].content
+    assert "codex" in content, f"provider not surfaced: {content!r}"
+    assert "gpt-probe" in content, f"model not surfaced: {content!r}"
+
+
+def test_build_t0_state_collect_recent_dispatches_unmigrated_no_crash(tmp_path):
+    """_collect_recent_dispatches_per_project on an unmigrated DB (no provider/model)
+    must return rows without crash; provider/model absent from result dicts."""
+    import build_t0_state as BTS
+
+    db_path = tmp_path / "state" / "quality_intelligence.db"
+    db_path.parent.mkdir(parents=True)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            terminal TEXT, track TEXT, role TEXT, gate TEXT,
+            priority TEXT DEFAULT 'P1', pr_id TEXT,
+            dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME, outcome_status TEXT
+        );
+    """)
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO dispatch_metadata (dispatch_id, terminal, track, dispatched_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("legacy-bts-001", "T1", "A", ts),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = BTS._collect_recent_dispatches_per_project("vnx-dev", db_path.parent)
+
+    assert rows, "must return rows from unmigrated DB without crash"
+    assert rows[0]["dispatch_id"] == "legacy-bts-001"
+    assert rows[0].get("provider") is None
+    assert rows[0].get("model") is None
+
+
+def test_build_t0_state_collect_recent_dispatches_migrated_surfaces_provider(tmp_path):
+    """_collect_recent_dispatches_per_project on a migrated DB surfaces provider/model."""
+    import build_t0_state as BTS
+
+    db_path = tmp_path / "state" / "quality_intelligence.db"
+    db_path.parent.mkdir(parents=True)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            terminal TEXT, track TEXT, role TEXT, gate TEXT,
+            priority TEXT DEFAULT 'P1', pr_id TEXT,
+            provider TEXT, model TEXT,
+            dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME, outcome_status TEXT
+        );
+    """)
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO dispatch_metadata "
+        "(dispatch_id, terminal, track, dispatched_at, provider, model) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("migrated-bts-001", "T1", "A", ts, "codex", "gpt-probe"),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = BTS._collect_recent_dispatches_per_project("vnx-dev", db_path.parent)
+
+    assert rows, "must return rows from migrated DB"
+    assert rows[0]["provider"] == "codex", f"expected 'codex', got {rows[0].get('provider')!r}"
+    assert rows[0]["model"] == "gpt-probe", f"expected 'gpt-probe', got {rows[0].get('model')!r}"

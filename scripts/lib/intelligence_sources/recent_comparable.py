@@ -87,6 +87,11 @@ def query_recent_comparable(
     return legacy
 
 
+def _dm_has_provider(conn: sqlite3.Connection) -> bool:
+    """Return True if dispatch_metadata has provider/model columns (migration guard)."""
+    return _table_has_column(conn, "dispatch_metadata", "provider")
+
+
 def _query_per_project(
     db: sqlite3.Connection,
     task_class: str,
@@ -101,12 +106,13 @@ def _query_per_project(
     dm_scope_clause, dm_scope_params = _project_scope_clause(
         has_column_fn("dispatch_metadata", "project_id")
     )
+    provider_cols = ", provider, model" if _dm_has_provider(db) else ""
     try:
         rows = db.execute(
             f"""
             SELECT dispatch_id, terminal, track, role, skill_name, gate,
                    outcome_status, dispatched_at, pattern_count,
-                   prevention_rule_count, provider, model
+                   prevention_rule_count{provider_cols}
             FROM dispatch_metadata
             WHERE dispatched_at >= ?
               AND outcome_status IS NOT NULL
@@ -189,11 +195,12 @@ def _query_central(
             datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)
         ).isoformat()
         has_project_id = _table_has_column(conn, "dispatch_metadata", "project_id")
+        provider_cols = ", provider, model" if _dm_has_provider(conn) else ""
         if has_project_id and project_id:
             rows = conn.execute(
-                """SELECT dispatch_id, terminal, track, role, skill_name, gate,
+                f"""SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
-                       prevention_rule_count, provider, model
+                       prevention_rule_count{provider_cols}
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL
@@ -203,9 +210,9 @@ def _query_central(
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT dispatch_id, terminal, track, role, skill_name, gate,
+                f"""SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
-                       prevention_rule_count, provider, model
+                       prevention_rule_count{provider_cols}
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL
