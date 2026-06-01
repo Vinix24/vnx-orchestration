@@ -363,7 +363,32 @@ features:
       - launch-governance-core
       - launch-provider-intel
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#771"
+        title: "feat(tmux): PREPARE structural completion (tmux lane)"
+        status: merged
+        risk_class: high
+      - pr_id: "#772"
+        title: "feat(tmux): GOVERN structural completion (tmux lane)"
+        status: merged
+        risk_class: high
+      - pr_id: "#773"
+        title: "feat(tmux): RECEIPT structural completion (tmux lane)"
+        status: merged
+        risk_class: high
+      - pr_id: "#774"
+        title: "feat(tmux): delivery structural completion (tmux lane)"
+        status: merged
+        risk_class: high
+      - pr_id: "#775"
+        title: "feat(tmux): CAPTURE structural completion (tmux lane)"
+        status: merged
+        risk_class: high
+      - pr_id: "#776"
+        title: "feat(tmux): uniform-receipts structural completion (tmux lane)"
+        status: merged
+        risk_class: high
     notes: >
       June-15-critical. The Anthropic OAuth change (June 15, 2026) makes claude-tmux-spawn
       the only subscription-preserving lane and the default (#767). Builds on #766
@@ -375,7 +400,9 @@ features:
       flag-gated + shadow-mode + burn-in before hard-enforce. Scoped to the tmux lane
       ONLY. Full LaneRouter / all-lanes PREPARE/GOVERN unification and legacy deletion
       defer to opt-a-envelope-extraction (1.1) and launch-option-b-parity (1.1). Provider
-      lanes (codex/gemini/kimi/litellm) are NOT June-15-critical.
+      lanes (codex/gemini/kimi/litellm) are NOT June-15-critical. Shipped via #771 PREPARE,
+      #772 GOVERN, #773 RECEIPT, #774 delivery, #775 CAPTURE, #776 uniform-receipts
+      (all merged 2026-06-01).
 
   - feature_id: launch-option-b-parity
     title: "Option B parity (all lanes): uniform prepare()/govern() across subprocess + tmux + all provider lanes"
@@ -424,7 +451,15 @@ features:
     depends_on: []
     milestone: "1.0.1"
     status: planned
-    notes: "Operational hygiene; not a fresh-install blocker."
+    pr_queue:
+      - pr_id: "#779"
+        title: "feat(ops): opt-in DB maintenance for quality_intelligence.db (GAP 3a)"
+        status: merged
+        risk_class: low
+    notes: >
+      Operational hygiene; not a fresh-install blocker. GAP 3a (opt-in DB maintenance,
+      scripts/vnx_db_maintenance.py) shipped as #779 (merged 2026-06-01). GAP 3b (ledger
+      rotation + per-append hash-chain) deferred — see receipt-hashchain-wire.
 
   - feature_id: opt-a-envelope-extraction
     title: "Option A envelope extraction: dispatch_envelope.py + LaneRouter + delete legacy duplicated PREPARE/GOVERN"
@@ -511,3 +546,131 @@ features:
       subscription lanes OBSERVE remaining quota from the CLI's own rate-limit/reset
       responses captured in receipts, never console-scraping. Feeds the smart-router
       (prefer abundant lanes, auto-skip exhausted, re-enable at reset).
+
+  # ---- 2026-06-01 backfill (post-1.0 work) ----
+  - feature_id: gap4-self-learning-reactivation
+    title: "GAP 4: reactivate self-learning loop — nightly intelligence pipeline cron"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on: []
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#780"
+        title: "feat(intelligence): install nightly intelligence pipeline cron (GAP 4 — reactivate self-learning loop)"
+        status: merged
+        risk_class: medium
+    notes: >
+      Installed nightly intelligence pipeline cron (4am, Mac mini), deterministic/0-LLM,
+      human-gated via pending_edits.json. 4 auxiliary pipeline phases regressed during
+      dormancy -> OI-2331.
+
+  - feature_id: gap6-submit-reliability
+    title: "GAP 6: bounded guarded-retry + adaptive settle for tmux submit reliability"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on: []
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#781"
+        title: "fix(tmux): bounded guarded-retry + adaptive settle for submit reliability (GAP 6)"
+        status: merged
+        risk_class: medium
+    notes: "Bounded guarded-retry + adaptive paste-settle in tmux_interactive_dispatch.py; live burn-in 5/5 submits."
+
+  - feature_id: gap5-report-pipeline-decision
+    title: "GAP 5: report_pipeline retention decision (keep — load-bearing)"
+    risk_class: low
+    merge_policy: human
+    review_stack: []
+    depends_on: []
+    milestone: "1.0.1"
+    status: done
+    notes: >
+      Decision: KEEP report_pipeline (load-bearing: active Stop hook +
+      subprocess_adapter.trigger_report_pipeline + gate_artifacts sidecar OI-1066).
+      Future consolidation -> opt-a-envelope-extraction (1.1). No code change.
+
+  - feature_id: tracks-layer-activation
+    title: "Structural-doctor: repair v26-but-absent-tracks divergence + activate dark FUT-1/2 tracks layer"
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - fut-1
+      - fut-2
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#782"
+        title: "feat(doctor): structural-doctor for tracks-layer activation (dry-run default, backup-on-apply)"
+        status: merged
+        risk_class: high
+    notes: >
+      Structural-doctor (scripts/vnx_structural_doctor.py) repaired the
+      v26-but-absent-tracks divergence and activated the dark FUT-1/2 tracks layer
+      on the live coordination DB (4 track tables + dispatches.output_ref/output_kind;
+      291 dispatches preserved; backup + ADR-005 audit). Plan:
+      claudedocs/PLANNING-OBJECT-MODEL-SYNTHESIS-2026-06-01.md.
+
+  - feature_id: planning-future-state-layer
+    title: "Planning object model: TRACK(=feature) -> DISPATCH(execution leaf) -> output+receipt future-state layer"
+    plan_path: claudedocs/PLANNING-OBJECT-MODEL-SYNTHESIS-2026-06-01.md
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - tracks-layer-activation
+    milestone: "1.x"
+    status: planned
+    notes: >
+      4-architect-designed (NO-NODE): TRACK(=feature) -> DISPATCH(execution leaf,
+      output_ref/output_kind pluggable: pr|post|deal|doc) -> output+receipt;
+      deliverable = derived view; OI separate + selectively promoted; rollup = derived
+      idempotent projection via dormant roadmap-autopilot reconciler; horizon as status
+      field; domain-agnostic (Business OS marketing/sales). Fills the empty
+      strategic_state shell + fixes the loader reading the wrong roadmap file.
+      Companion: PLANNING-OBJECT-MODEL-OPUS-REVIEW + DELIVERABLE-NODE-DEBATE docs.
+
+  - feature_id: receipt-hashchain-wire
+    title: "GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests"
+    plan_path: claudedocs/GAP-3b-wire-spec-1.0.1.md
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - log-rotation
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      GAP 3b. Wire per-append hash-chaining into the receipt append (lock-scoped in
+      idempotency.py) + epoch rotation (feat/ledger-rotation-3b) + verify_history +
+      concurrent fork-tests; flag-gated VNX_CHAIN_RECEIPTS. 4-architect-decided
+      DROP-claim-now-wire-1.0.1. README hash-chain claim softened in DOC-PASS.
+
+  - feature_id: provider-lanes-doc-pass
+    title: "Provider-lanes USP doc + README honesty fix + ROADMAP/docs reflect tracks-activation"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      Operator-wanted BEFORE publish. NEW provider-lanes USP doc
+      (claude-subprocess/claude-tmux-subscription/codex/gemini/kimi/deepseek-harness +
+      ollama-resolver; no SDK; June-15 driver; when-which-lane incl. analysis-vs-commit
+      lane behavior) + README honesty fix (hash-chain claim -> verification-tooling) +
+      ROADMAP/docs reflect tracks-activation. Relates to OI for analysis-lane report
+      capture.
