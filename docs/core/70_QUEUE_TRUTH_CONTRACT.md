@@ -256,7 +256,7 @@ PR-1 will implement the reconciliation path. This contract does not require rewr
 
 The closure verifier checks gate evidence and review contract integrity. Under this contract, closure verification must also confirm that the queue state for the PR being closed matches derived state, not just projected state. PR-2 will integrate reconciliation into the closure path.
 
-### 6.3 receipt_processor_v4.sh
+### 6.3 receipt_processor.sh
 
 The receipt processor generates receipts from unified reports. It does not need modification. Receipts are a source in the hierarchy (Priority 3), not a consumer. The reconciliation path reads receipts; it does not write them.
 

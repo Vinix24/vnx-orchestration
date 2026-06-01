@@ -5,7 +5,7 @@
 **Purpose**: Documentation for JSON Dispatch Format for VNX Orchestration V7.
 
 ## Overview
-Smart Tap V7 introduces comprehensive JSON dispatch support with automatic Markdown translation. T0 can create dispatches in structured JSON format for machine-readable precision while maintaining optimal human readability through automatic translation.
+Smart Tap V7 adds JSON dispatch support with automatic Markdown translation. T0 can create dispatches in structured JSON format for machine-readable precision while maintaining optimal human readability through automatic translation.
 
 **Key Features**:
 - **Dual Format Support**: Both JSON and Markdown dispatches fully supported

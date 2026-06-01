@@ -169,17 +169,18 @@ class TestAdapterArgvInjection:
         # model flag present with deepseek model
         model_idx = cmd.index("--model")
         assert cmd[model_idx + 1] == "deepseek-v4-pro"
-        # MCP flags come after --model; instruction stays last and is NOT slurped
+        # MCP flags come after --model; instruction appears after MCP-off flags (#770 invariant)
         assert model_idx < mcp_idx
-        assert strict_idx < len(cmd) - 1
-        assert cmd[-1] == "Reply OK."
+        instr_idx = cmd.index("Reply OK.")
+        assert instr_idx > strict_idx, "instruction must follow the MCP-off flags"
+        assert instr_idx < len(cmd) - 1, "scope args must follow instruction (#770 invariant)"
         # key-auth env reached Popen
         assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
         assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == _FAKE_KEY
         assert captured["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
 
     def test_default_claude_argv_unchanged_without_extra_cli_args(self):
-        """Backward-compat: no extra_cli_args => no MCP flags in argv."""
+        """Backward-compat: no extra_cli_args => no extra flags between --model and instruction."""
         adapter = SubprocessAdapter()
         captured = {}
 
@@ -201,9 +202,12 @@ class TestAdapterArgvInjection:
             adapter.deliver("T1", "d-plain", instruction="hi", model="sonnet")
 
         cmd = captured["cmd"]
-        assert "--strict-mcp-config" not in cmd
-        assert "--mcp-config" not in cmd
-        assert cmd[-1] == "hi"
+        instr_idx = cmd.index("hi")
+        model_idx = cmd.index("--model")
+        # no extra flags injected between --model value and instruction without extra_cli_args
+        assert instr_idx == model_idx + 2, "no extra flags between --model and instruction"
+        # instruction precedes scope flags (#770 invariant)
+        assert instr_idx < len(cmd) - 1, "scope args must follow instruction (#770 invariant)"
 
 
 if __name__ == "__main__":

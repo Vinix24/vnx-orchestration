@@ -98,6 +98,8 @@ def spawn_claude(
     skip_permissions: bool = False,
     chunk_timeout: float = 300.0,
     total_deadline: float = 900.0,
+    role: Optional[str] = None,
+    requires_mcp: bool = False,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -145,6 +147,13 @@ def spawn_claude(
     skip_permissions:
         Forwarded for interface parity with future providers; currently unused
         because SubprocessAdapter always passes ``--dangerously-skip-permissions``.
+    role:
+        Dispatch role forwarded to SubprocessAdapter.deliver so role-specific
+        capability scoping is applied (tool allow-list, MCP isolation). Falls
+        back to the default code-worker profile when None.
+    requires_mcp:
+        When True, the worker retains its normal ambient MCP config instead of
+        the default force-empty posture. Forwarded to SubprocessAdapter.deliver.
     chunk_timeout:
         Max seconds to wait for the next output chunk.  Override with
         ``VNX_CHUNK_TIMEOUT`` env var.
@@ -181,6 +190,8 @@ def spawn_claude(
         resume_session=resume_session,
         extra_env=extra_env,
         extra_cli_args=extra_cli_args,
+        role=role,
+        requires_mcp=requires_mcp,
     )
 
     if not deliver_result.success:

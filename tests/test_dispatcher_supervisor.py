@@ -157,7 +157,7 @@ printf '%s\\n' "${{result[@]}}"
 class TestOnceMode:
     def _make_always_exit_script(self, tmp_dir: str, exit_code: int = 0) -> str:
         """Write a fake dispatcher script that exits immediately."""
-        path = os.path.join(tmp_dir, "fake_dispatcher_v8_minimal.sh")
+        path = os.path.join(tmp_dir, "fake_dispatcher_minimal.sh")
         with open(path, "w") as f:
             f.write(f"#!/bin/bash\nexit {exit_code}\n")
         os.chmod(path, 0o755)
@@ -212,8 +212,8 @@ class TestStaleLockCleanup:
         os.makedirs(locks_dir, exist_ok=True)
         os.makedirs(pids_dir, exist_ok=True)
 
-        dispatcher_lock_dir = os.path.join(locks_dir, "dispatcher_v8_minimal.lock")
-        dispatcher_pid_file = os.path.join(pids_dir, "dispatcher_v8_minimal.pid")
+        dispatcher_lock_dir = os.path.join(locks_dir, "dispatcher_minimal.lock")
+        dispatcher_pid_file = os.path.join(pids_dir, "dispatcher_minimal.pid")
 
         if lock_pid is not None:
             os.makedirs(dispatcher_lock_dir, exist_ok=True)
@@ -259,7 +259,7 @@ _clear_stale_dispatcher_lock
         with tempfile.TemporaryDirectory() as tmp_dir:
             locks_dir = os.path.join(tmp_dir, "locks")
             result = self._run_clear_stale_snippet(tmp_dir, lock_pid="999999")
-            lock_dir = os.path.join(locks_dir, "dispatcher_v8_minimal.lock")
+            lock_dir = os.path.join(locks_dir, "dispatcher_minimal.lock")
             assert result.returncode == 0, result.stderr
             assert not os.path.exists(lock_dir), "Stale lock dir should have been removed"
 
@@ -269,7 +269,7 @@ _clear_stale_dispatcher_lock
             locks_dir = os.path.join(tmp_dir, "locks")
             live_pid = str(os.getpid())
             result = self._run_clear_stale_snippet(tmp_dir, lock_pid=live_pid)
-            lock_dir = os.path.join(locks_dir, "dispatcher_v8_minimal.lock")
+            lock_dir = os.path.join(locks_dir, "dispatcher_minimal.lock")
             assert result.returncode == 0, result.stderr
             assert os.path.exists(lock_dir), "Live lock dir should have been preserved"
 
@@ -278,7 +278,7 @@ _clear_stale_dispatcher_lock
         with tempfile.TemporaryDirectory() as tmp_dir:
             pids_dir = os.path.join(tmp_dir, "pids")
             result = self._run_clear_stale_snippet(tmp_dir, pid_file_pid="999999")
-            pid_file = os.path.join(pids_dir, "dispatcher_v8_minimal.pid")
+            pid_file = os.path.join(pids_dir, "dispatcher_minimal.pid")
             assert result.returncode == 0, result.stderr
             assert not os.path.exists(pid_file), "Stale PID file should have been removed"
 

@@ -2,7 +2,7 @@
 """Auto-Report Assembler — PR-3 (F37 Auto-Report Pipeline).
 
 Combines extraction results with dispatch metadata to produce structured
-JSON and readable markdown reports compatible with receipt_processor_v4.sh.
+JSON and readable markdown reports compatible with receipt_processor.sh.
 
 Public API:
     assemble_from_trigger(trigger_path)  → AssemblyResult

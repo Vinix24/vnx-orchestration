@@ -254,7 +254,7 @@ def test_append_receipt_concurrent_writers_no_corruption(tmp_path: Path):
 
 def test_runtime_writers_use_append_receipt_helper_and_no_direct_append():
     script_expectations = {
-        "receipt_processor_v4.sh": {
+        "receipt_processor.sh": {
             "must_contain": ["append_receipt.py"],
             "must_not_contain": [">> \"$RECEIPTS_FILE\""],
         },

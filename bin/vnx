@@ -886,11 +886,11 @@ vnx_kill_all_orchestration() {
     # Kill each known orchestration process by its script name
     local fp
     for fp in \
-      "smart_tap_v7_json_translator.sh" \
-      "dispatcher_v8_minimal.sh" \
-      "receipt_processor_v4.sh" \
+      "smart_tap_json_translator.sh" \
+      "dispatcher_minimal.sh" \
+      "receipt_processor.sh" \
       "vnx_supervisor_simple.sh" \
-      "unified_state_manager_v2.py" \
+      "unified_state_manager.py" \
       "generate_valid_dashboard.sh" \
       "intelligence_daemon.py" \
       "heartbeat_ack_monitor.py" \
@@ -1106,7 +1106,7 @@ SMOKE_USAGE
   local smoke_reports_dir="$smoke_data_dir/unified_reports"
   local smoke_db_dir="$smoke_data_dir/database"
   local smoke_receipts_file="$smoke_state_dir/t0_receipts.ndjson"
-  local processor_script="$VNX_HOME/scripts/receipt_processor_v4.sh"
+  local processor_script="$VNX_HOME/scripts/receipt_processor.sh"
 
   mkdir -p "$smoke_state_dir" \
     "$smoke_logs_dir" \
@@ -1155,7 +1155,7 @@ One-shot smoke test report to validate receipt generation.
 - Executed one-shot receipt processing.
 
 ## Technical Details
-- Uses receipt_processor_v4 in manual mode.
+- Uses receipt_processor in manual mode.
 
 ## Evidence
 - Receipt line should be appended to t0_receipts.ndjson.

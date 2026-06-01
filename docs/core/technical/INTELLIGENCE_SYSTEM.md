@@ -889,7 +889,7 @@ Tracks when injected intelligence patterns are offered to terminals and whether 
 
 2. Dispatch Executes    Terminal works on task with injected patterns
 
-3. Receipt Arrives      receipt_processor_v4.sh → record_adoption_from_receipt()
+3. Receipt Arrives      receipt_processor.sh → record_adoption_from_receipt()
    (correlation)        Compares receipt file changes with offered patterns
 
 4. Adoption Recorded    Matching file changes → record_pattern_adoption()
@@ -1003,7 +1003,7 @@ Delivers task-relevant intelligence to all terminals (T0-T3), replacing the prev
 ### Implementation
 
 **Version**: 2.0 (PR-2, Self-Learning Pipeline)
-**T0 Hook**: `scripts/userpromptsubmit_intelligence_inject_v5.sh` (recommendations + quality hotspots)
+**T0 Hook**: `scripts/userpromptsubmit_intelligence_inject.sh` (recommendations + quality hotspots)
 **Worker Hook**: `scripts/userpromptsubmit_worker_intelligence_inject.sh` (dispatch-specific patterns)
 **Registration**: Hooks registered via `vnx regen-settings --merge` (A-9)
 
@@ -1164,7 +1164,7 @@ spc_alerts (alert_type, metric, scope, observed, limit, severity)
 
 ### Integration
 
-- **Receipt-time**: CQS computed in `append_receipt.py` and `receipt_processor_v4.sh` (C3b)
+- **Receipt-time**: CQS computed in `append_receipt.py` and `receipt_processor.sh` (C3b)
 - **Nightly**: Phase 2.5 in `conversation_analyzer_nightly.sh`
 - **Weekly**: governance reports generated via nightly pipeline
 

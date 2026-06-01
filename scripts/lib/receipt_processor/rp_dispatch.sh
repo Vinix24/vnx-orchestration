@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_dispatch.sh - Dispatch lifecycle helpers (move-to-completed, lease release, PR evidence)
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $VNX_DISPATCH_DIR, $SCRIPTS_DIR, $PROCESSING_LOG,
 #           and _rf_* fields populated by extract_receipt_fields()
 

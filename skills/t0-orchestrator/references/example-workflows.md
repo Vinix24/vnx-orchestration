@@ -50,12 +50,11 @@
 Manager Block
 
 Role: backend-developer
-Track: A
 Terminal: T1
 PR-ID: PR-5
 Priority: P1
 Cognition: normal
-Dispatch-ID: 20260210-143000-pr5-dead-code-A
+Dispatch-ID: 20260210-143000-pr5-dead-code
 Parent-Dispatch: none
 Reason: Remove dead code flagged by quality advisory (OI-PR5-003)
 

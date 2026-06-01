@@ -105,6 +105,24 @@ def _compute_cost_from_rates(
     return round(cost, 8), False
 
 
+def resolve_cost_usd(
+    provider: str,
+    model: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+) -> float | None:
+    """Public cost resolver from the rate table.
+
+    Returns the metered cost in USD, or ``None`` for subscription/OAuth flat
+    lanes (legitimately $0) AND for provider+model pairs absent from the rate
+    table. Used as the fallback when the wave7 provider-registry lookup misses,
+    so cost_usd resolves to real dollars for API lanes (deepseek/openrouter/
+    codex-API) instead of silently landing at 0.
+    """
+    cost, _is_flat = _compute_cost_from_rates(provider, model, input_tokens, output_tokens)
+    return cost
+
+
 def _make_record_id(
     dispatch_id: str | None,
     timestamp: str,
