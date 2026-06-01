@@ -397,6 +397,7 @@ class TmuxInteractiveDispatch:
         pr_id: "str | None" = None,
         base_sha: "str | None" = None,
         worktree_path: "Path | None" = None,
+        model: "str | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -425,6 +426,7 @@ class TmuxInteractiveDispatch:
             pr_id=pr_id,
             base_sha=base_sha,
             worktree_path=worktree_path,
+            model=model,
         )
         raw = GovernRaw(receipt=receipt, duration_seconds=duration_seconds)
         outcome = govern(spec, raw, lane="tmux_interactive")
@@ -442,7 +444,9 @@ class TmuxInteractiveDispatch:
             )
         return outcome.report_path
 
-    def _build_completion_protocol(self, dispatch_id: str, label: str) -> str:
+    def _build_completion_protocol(
+        self, dispatch_id: str, label: str, model: str = "unknown"
+    ) -> str:
         """Footer instructing the worker to emit a clean receipt directly.
 
         The path to ``append_receipt.py`` is ABSOLUTE so it resolves correctly
@@ -459,10 +463,15 @@ class TmuxInteractiveDispatch:
             "event_type": "subprocess_completion",
             "dispatch_id": dispatch_id,
             "terminal": label,
+            "terminal_id": label,
             "status": "done",
             "source": "tmux_interactive",
             "timestamp": ts,
             "report_path": report_path,
+            "provider": "claude",
+            "sub_provider": "anthropic",
+            "model": model,
+            "lane": "tmux_interactive",
         }
         state_dir = shlex.quote(str(self._state_dir))
         data_dir = shlex.quote(str(self._state_dir.parent))
@@ -1168,6 +1177,7 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -1207,7 +1217,7 @@ class TmuxInteractiveDispatch:
                     _TRAILER = "<!-- VNX-END-OF-INSTRUCTION -->"
                 body = (
                     _context_body
-                    + self._build_completion_protocol(dispatch_id, label)
+                    + self._build_completion_protocol(dispatch_id, label, model=model)
                     + f"\n\n{_TRAILER}\n"
                 )
             else:
@@ -1215,7 +1225,7 @@ class TmuxInteractiveDispatch:
                 body = (
                     _context_body
                     + self._scope_note(dispatch_paths)
-                    + self._build_completion_protocol(dispatch_id, label)
+                    + self._build_completion_protocol(dispatch_id, label, model=model)
                 )
 
             # 7. Deliver instruction
@@ -1263,6 +1273,7 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -1295,6 +1306,7 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -1329,6 +1341,7 @@ class TmuxInteractiveDispatch:
                 duration_seconds=time.monotonic() - start_time,
                 base_sha=worktree_handle.base_sha if worktree_handle else None,
                 worktree_path=worktree_handle.path if worktree_handle else None,
+                model=model,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.

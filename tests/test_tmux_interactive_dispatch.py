@@ -233,6 +233,25 @@ class TestSingleShotSuccess(_LaneTestCase):
             "absolute path to append_receipt.py must appear in the delivered body",
         )
 
+    def test_worker_receipt_carries_provider_model_lane(self):
+        """FIX 1: completion protocol receipt (WORKER path) must carry provider/sub_provider/model/lane."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        self._fast_dispatch(lane, model="sonnet")
+
+        delivered = "\n".join(fake.pasted)
+        m = re.search(r"```bash\n(.+?)\n```", delivered, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract bash command from delivered body")
+        argv = shlex.split(m.group(1).strip())
+        receipt_idx = argv.index("--receipt")
+        receipt = json.loads(argv[receipt_idx + 1])
+        self.assertEqual(receipt.get("provider"), "claude", f"provider missing/wrong: {receipt}")
+        self.assertEqual(receipt.get("sub_provider"), "anthropic", f"sub_provider missing/wrong: {receipt}")
+        self.assertEqual(receipt.get("model"), "sonnet", f"model missing/wrong: {receipt}")
+        self.assertEqual(receipt.get("lane"), "tmux_interactive", f"lane missing/wrong: {receipt}")
+        # terminal_id alias also present
+        self.assertIn("terminal_id", receipt, f"terminal_id missing from worker receipt: {receipt}")
+
     def test_enter_is_separate_keystroke(self):
         """Launch cmd and body paste each submit Enter as a standalone send-keys call."""
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
@@ -1593,6 +1612,40 @@ class TestReceiptFallback(_LaneTestCase):
                 len(synthesized), 0,
                 f"VNX_RECEIPT_FALLBACK=0 must suppress synthesized receipt: {synthesized}",
             )
+
+    def test_synthesized_receipt_carries_provider_model_lane(self):
+        """Lane-synthesized receipt must carry provider, sub_provider, model, and lane fields."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_RECEIPT_FALLBACK": "1"}):
+            with patch("dispatch_govern._git_summary", return_value="timeout synthesis"):
+                with patch("dispatch_govern._git_changes", return_value="No diff"):
+                    self._fast_dispatch(
+                        lane,
+                        model="sonnet",
+                        deadline_seconds=0.2,
+                        poll_interval=0.02,
+                    )
+
+        self.assertTrue(self.receipts_file.exists())
+        lines = [ln for ln in self.receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        synthesized = [json.loads(ln) for ln in lines
+                       if json.loads(ln).get("source") == "tmux_interactive_lane_synthesized"]
+        self.assertEqual(len(synthesized), 1)
+        rec = synthesized[0]
+        self.assertEqual(rec.get("provider"), "claude",
+                         f"provider missing or wrong in synthesized receipt: {rec}")
+        self.assertEqual(rec.get("sub_provider"), "anthropic",
+                         f"sub_provider missing or wrong: {rec}")
+        self.assertEqual(rec.get("model"), "sonnet",
+                         f"model missing or wrong: {rec}")
+        self.assertEqual(rec.get("lane"), "tmux_interactive",
+                         f"lane missing or wrong: {rec}")
 
 
 # ---------------------------------------------------------------------------
