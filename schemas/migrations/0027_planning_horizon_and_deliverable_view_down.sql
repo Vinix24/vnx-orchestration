@@ -9,8 +9,16 @@
 -- (the v24 composite-key schema, which v25/v26 did not alter). Composite PK
 -- (track_id, project_id) and all data are preserved via INSERT ... SELECT.
 --
+-- FK safety: the ALTER TABLE RENAME retargets child FKs (track_dependencies,
+-- track_phase_history, track_open_items) to the renamed table. PRAGMA
+-- foreign_keys=OFF is required to DROP the renamed table without SQLite
+-- rejecting it due to those still-present FK references. This is the standard
+-- SQLite table-rebuild guard (same pattern as the 0024 up-migration).
+--
 -- Idempotency: guarded by the runner, which only invokes this when stepping
---          user_version 27 -> 26. SAVEPOINT atomicity applies.
+--          user_version 27 -> 26.
+
+PRAGMA foreign_keys = OFF;
 
 -- ============================================================================
 -- STEP 1: drop the derived view + horizon index (additive surfaces)
@@ -69,3 +77,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_tracks_next_up_per_project
 
 -- Step schema version back down
 PRAGMA user_version = 26;
+
+PRAGMA foreign_keys = ON;

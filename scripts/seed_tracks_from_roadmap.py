@@ -163,7 +163,11 @@ def _row_matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
     """True if the existing track already reflects the authored fields.
 
     Compares only the authored-derived fields (NOT phase — phase drift is
-    reported separately, never auto-synced).
+    reported separately, never auto-synced). Also deliberately excludes
+    `depends_on`: dependencies live in a separate table and are always
+    reconciled unconditionally (via _seed_dependencies), even for rows that
+    are otherwise unchanged. This prevents dependency-only changes from being
+    silently ignored.
     """
     for col in ("title", "goal_state", "priority", "sort_order", "horizon", "pr_ref", "metadata_json"):
         if (existing.get(col) or None) != (desired.get(col) or None):
@@ -241,6 +245,8 @@ def seed(
             })
 
         if _row_matches(existing, desired):
+            if apply:
+                _seed_dependencies(state_dir, track_id, project_id, desired["depends_on"])
             report["unchanged"].append(track_id)
             continue
 

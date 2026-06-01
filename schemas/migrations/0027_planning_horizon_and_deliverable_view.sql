@@ -3,14 +3,17 @@
 -- Purpose: Phase 1 of the planning layer ("future-state flow", NO-NODE model).
 --          Adds the strategic-layer `horizon` field to tracks (now|next|later)
 --          and a derived `deliverables` VIEW that rolls dispatches up by their
---          pluggable output identity (output_ref/output_kind already on dispatches).
+--          pluggable output identity (output_ref/output_kind).
 --
 -- Design: claudedocs/FSF-BUILDPLAN-opus.md §7 + §4,
 --         claudedocs/PLANNING-OBJECT-MODEL-SYNTHESIS-2026-06-01.md
 --
--- Pre-migration state (v26, after 0026): tracks has no `horizon`; dispatches
---          carries output_ref/output_kind (added by vnx_structural_doctor) but
---          no derived rollup view exists.
+-- Pre-migration state (v24-v26): tracks has no `horizon`; dispatches may or
+--          may not carry output_ref/output_kind (added by structural-doctor on
+--          live DBs, absent on fresh DBs that only have the 0024 schema).
+--          A preflight hook in migrate_future_system.py idempotently adds
+--          output_ref + output_kind (+ backfill from pr_ref) before this SQL
+--          runs, so the deliverables VIEW always sees those columns.
 -- Post-migration state (v27): tracks.horizon TEXT CHECK(now|next|later);
 --          deliverables VIEW (GROUP BY project_id, output_ref).
 --
@@ -27,6 +30,10 @@
 --          user_version >= 27. ALTER TABLE ADD COLUMN is additive (no rebuild).
 --          The view uses CREATE VIEW IF NOT EXISTS. SAVEPOINT wraps all
 --          statements in apply_script_if_below.
+--
+-- Self-contained: works on a fresh DB that only has the 0024 schema — the
+--          preflight hook _ensure_dispatches_output_columns adds output_ref +
+--          output_kind if absent (no dependency on vnx_structural_doctor).
 --
 -- Applied by: scripts/migrate_future_system.py
 -- Tested by:  tests/test_migrate_0027_planning_horizon.py

@@ -1,13 +1,16 @@
 """tests/test_migrate_0027_planning_horizon.py — migration 0027 up/down validation.
 
 Verifies:
-- 0027 applies cleanly on a v24-equivalent DB (tracks composite key + dispatches
-  with output_ref/output_kind, mirroring the live v26 state)
+- 0027 applies cleanly on a v24-equivalent DB (tracks composite key + dispatches)
+- Preflight adds output_ref + output_kind to dispatches when absent (self-contained
+  on fresh DBs that never ran the structural-doctor)
+- deliverables VIEW created and queryable on a fresh DB (no structural-doctor pass)
 - tracks.horizon column added with the now|next|later CHECK
-- deliverables VIEW created and rolls dispatches up by output_ref
+- deliverables VIEW rolls dispatches up by output_ref
 - derived_status computed correctly across mixed dispatch states
 - migration is idempotent (second apply is a no-op, version unchanged)
 - the _down migration removes horizon + the view and preserves track data
+- down migration succeeds when track_dependencies rows reference tracks (FK-safety)
 """
 
 from __future__ import annotations
@@ -20,11 +23,15 @@ import pytest
 
 _LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 _MIGRATIONS = Path(__file__).resolve().parent.parent / "schemas" / "migrations"
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
 
 import schema_migration
+import migrate_future_system  # noqa: F401 — registers preflight hooks for v27
 
 
 def _base_v26_db(tmp_path: Path) -> sqlite3.Connection:
@@ -82,6 +89,132 @@ def _apply_0027(conn: sqlite3.Connection) -> bool:
 
 def _cols(conn: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _fresh_v24_db(tmp_path: Path) -> sqlite3.Connection:
+    """Build a DB at v24 WITHOUT structural-doctor output_ref/output_kind additions.
+
+    Simulates a fresh DB that only went through 0022+0024, never ran the
+    structural-doctor. The 0027 preflight must add those columns itself.
+    """
+    db_path = tmp_path / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("""
+        CREATE TABLE dispatches (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id     TEXT    NOT NULL,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+            state           TEXT    NOT NULL DEFAULT 'queued',
+            terminal_id     TEXT,
+            track           TEXT,
+            priority        TEXT    DEFAULT 'P2',
+            pr_ref          TEXT,
+            gate            TEXT,
+            attempt_count   INTEGER NOT NULL DEFAULT 0,
+            bundle_path     TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            expires_after   TEXT,
+            metadata_json   TEXT    DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
+        )
+    """)
+    conn.commit()
+    schema_migration.apply_script_if_below(
+        conn, 22, (_MIGRATIONS / "0022_track_layer.sql").read_text(encoding="utf-8")
+    )
+    conn.commit()
+    schema_migration.apply_script_if_below(
+        conn, 24, (_MIGRATIONS / "0024_tracks_tenant_scoping.sql").read_text(encoding="utf-8")
+    )
+    conn.commit()
+    conn.execute("PRAGMA user_version = 26")
+    conn.commit()
+    return conn
+
+
+def _apply_0027_down(conn: sqlite3.Connection) -> None:
+    sql = (_MIGRATIONS / "0027_planning_horizon_and_deliverable_view_down.sql").read_text(encoding="utf-8")
+    for stmt in schema_migration._split_sql_statements(sql):
+        conn.execute(stmt)
+    conn.commit()
+
+
+def test_deliverables_view_queryable_on_fresh_db(tmp_path):
+    """BLOCKER-1: deliverables VIEW must be queryable on a fresh DB where
+    output_ref/output_kind do NOT exist before 0027 runs. The preflight
+    in migrate_future_system.py adds them idempotently.
+    """
+    conn = _fresh_v24_db(tmp_path)
+    assert "output_ref" not in _cols(conn, "dispatches")
+    assert "output_kind" not in _cols(conn, "dispatches")
+
+    applied = _apply_0027(conn)
+    assert applied is True
+
+    # Columns added by preflight before the view was created.
+    assert "output_ref" in _cols(conn, "dispatches")
+    assert "output_kind" in _cols(conn, "dispatches")
+
+    # Insert a dispatch and verify the view is queryable (no column-not-found).
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track, output_ref, output_kind) "
+        "VALUES ('d1', 'vnx-dev', 'completed', 'feat-x', 'pr:#100', 'pr')"
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT deliverable_ref, output_kind, derived_status FROM deliverables WHERE project_id='vnx-dev'"
+    ).fetchone()
+    assert row[0] == "pr:#100"
+    assert row[1] == "pr"
+    assert row[2] == "done"
+
+
+def test_0027_down_succeeds_with_track_dependencies(tmp_path):
+    """BLOCKER-2: down migration must succeed when track_dependencies has rows
+    referencing tracks via FK. PRAGMA foreign_keys=OFF guards the rebuild.
+    """
+    conn = _base_v26_db(tmp_path)
+    _apply_0027(conn)
+
+    # Seed two tracks and a dependency edge (FK to tracks).
+    conn.executemany(
+        "INSERT INTO tracks (track_id, project_id, title, goal_state, phase, horizon) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("dep-from", "vnx-dev", "From", "goal", "active", "now"),
+            ("dep-to", "vnx-dev", "To", "goal", "active", "now"),
+        ],
+    )
+    conn.commit()
+    conn.execute(
+        "INSERT INTO track_dependencies "
+        "(from_track_id, from_project_id, to_track_id, to_project_id, kind, derivation_source) "
+        "VALUES ('dep-from', 'vnx-dev', 'dep-to', 'vnx-dev', 'hard', 'manual')"
+    )
+    conn.commit()
+
+    # Verify FK is active before the down migration.
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+    # Apply down — must NOT raise an FK constraint error. The PRAGMA
+    # foreign_keys=OFF guard in the down SQL prevents the DROP TABLE from
+    # failing when child FKs are retargeted by the ALTER TABLE RENAME.
+    _apply_0027_down(conn)
+    assert schema_migration.get_user_version(conn) == 26
+
+    # Tracks data preserved (horizon column gone).
+    assert "horizon" not in _cols(conn, "tracks")
+    row = conn.execute(
+        "SELECT track_id, title FROM tracks WHERE track_id='dep-from' AND project_id='vnx-dev'"
+    ).fetchone()
+    assert row == ("dep-from", "From")
+
+    # track_dependencies rows survived the rebuild.
+    deps = conn.execute("SELECT * FROM track_dependencies").fetchone()
+    assert deps is not None
 
 
 def test_0027_applies_and_bumps_version(tmp_path):

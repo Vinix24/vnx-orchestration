@@ -190,6 +190,74 @@ def test_phase_drift_reported_not_synced(tmp_path, roadmap):
     assert tracks_lib.get_track(state_dir, "feat-b", "vnx-dev")["phase"] == "active"
 
 
+def test_dependency_only_change_reseeded(tmp_path, roadmap):
+    """ADVISORY: when a ROADMAP feature's ONLY change is depends_on,
+    the seeder must re-seed the track_dependencies row (not skip as
+    'unchanged').
+    """
+    state_dir = _make_db(tmp_path)
+    seeder.seed(state_dir, roadmap, "vnx-dev", apply=True)
+
+    # feat-b depends on feat-a initially.
+    db = state_dir / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        edges = conn.execute(
+            "SELECT from_track_id, to_track_id FROM track_dependencies"
+        ).fetchall()
+        assert ("feat-b", "feat-a") in edges
+    finally:
+        conn.close()
+
+    # Modify ROADMAP: feat-b now also depends on feat-c (no other field changes).
+    modified = """
+roadmap_id: test-roadmap
+title: Test
+features:
+  - feature_id: feat-a
+    title: Feature A
+    risk_class: high
+    depends_on: []
+    milestone: "1.0"
+    status: done
+    notes: Feature A is shipped.
+    pr_queue:
+      - pr_id: "#10"
+        title: a
+        status: merged
+        risk_class: high
+  - feature_id: feat-b
+    title: Feature B
+    risk_class: low
+    depends_on: [feat-a, feat-c]
+    milestone: "1.0"
+    status: planned
+  - feature_id: feat-c
+    title: Feature C (no notes, future)
+    risk_class: medium
+    depends_on: []
+    milestone: "1.x"
+    status: planned
+"""
+    modified_path = tmp_path / "ROADMAP_modified.yaml"
+    modified_path.write_text(modified, encoding="utf-8")
+
+    report = seeder.seed(state_dir, modified_path, "vnx-dev", apply=True)
+    # feat-b row is otherwise unchanged — but dependencies were reconciled.
+    assert "feat-b" in report["unchanged"]
+
+    # Verify the new dependency edge was added.
+    conn = sqlite3.connect(str(db))
+    try:
+        edges = conn.execute(
+            "SELECT from_track_id, to_track_id FROM track_dependencies ORDER BY from_track_id, to_track_id"
+        ).fetchall()
+        assert ("feat-b", "feat-a") in edges
+        assert ("feat-b", "feat-c") in edges
+    finally:
+        conn.close()
+
+
 def test_events_emitted(tmp_path, roadmap):
     state_dir = _make_db(tmp_path)
     seeder.seed(state_dir, roadmap, "vnx-dev", apply=True)

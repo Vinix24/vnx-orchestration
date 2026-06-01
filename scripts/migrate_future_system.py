@@ -307,6 +307,34 @@ def apply_migration_v24(conn: sqlite3.Connection, project_root: Path) -> None:
 # Step 5: PRAGMA pre-flight for 0027 — assert composite-key tracks intact
 # ---------------------------------------------------------------------------
 
+def _ensure_dispatches_output_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently ensure dispatches carries output_ref + output_kind columns.
+
+    Migration 0027 creates the deliverables VIEW which reads dispatches.output_ref
+    and dispatches.output_kind. On the live DB these columns were added by the
+    structural-doctor repair step, but a fresh DB that arrives at v24 without the
+    structural-doctor pass (or via tests) will not have them. The VIEW creation
+    does not fail at DDL time (SQLite resolves view columns at query time), but
+    any SELECT from deliverables would fail.
+
+    This preflight adds the columns additively when they are absent, then back-
+    fills output_ref=pr_ref, output_kind='pr' for rows where pr_ref is set.
+    It is idempotent: column-existence checks guard the ALTER TABLE calls so
+    they are never attempted twice, and the UPDATE is a no-op after the first run.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+
+    if "output_ref" not in cols:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
+    if "output_kind" not in cols:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+
+    conn.execute(
+        "UPDATE dispatches SET output_ref = pr_ref, output_kind = 'pr' "
+        "WHERE pr_ref IS NOT NULL AND output_ref IS NULL"
+    )
+
+
 def _assert_tracks_v24_intact(conn: sqlite3.Connection) -> None:
     """Assert tracks is in the composite-key (v24+) state before adding horizon.
 
@@ -335,6 +363,7 @@ def _assert_tracks_v24_intact(conn: sqlite3.Connection) -> None:
         )
 
 
+schema_migration.register_preflight(27, _ensure_dispatches_output_columns)
 schema_migration.register_preflight(27, _assert_tracks_v24_intact)
 
 
