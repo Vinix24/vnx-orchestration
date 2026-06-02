@@ -4,6 +4,8 @@
 Delegated from `bin/vnx`:
   vnx objective list [--horizon now|next|later] [--phase ...] [--json]
   vnx objective show <track_id> [--json]
+  vnx objective sync [--apply] [--roadmap PATH] [--json]
+  vnx objective drift [--json]
   vnx deliverable add --objective <track_id> --output-kind <kind> --title "..."
   vnx deliverable list [--objective <track_id>] [--json]
   vnx deliverable promote <dispatch_id>
@@ -11,6 +13,16 @@ Delegated from `bin/vnx`:
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
 `vnx deliverable promote` is the human gate (proposed -> ready).
 `vnx promote` (top-level) is the PR-queue command — NOT the same.
+
+Planning turn-on (auto-seed + advisory drift):
+  `objective sync` re-projects ROADMAP.yaml -> tracks via the shipped seeder.
+    Default = CHECK (dry-run): report would-change set, write nothing.
+    --apply  = idempotent projection of ROADMAP onto tracks. NEVER writes
+               ROADMAP.yaml and NEVER promotes deliverables (human gate kept).
+  `objective drift` runs the advisory reconciler and reports tracks whose
+    declared phase != derived_status. ADVISORY: always exits 0, writes
+    planning_drift.json for the dashboard / T0. Never writes ROADMAP.
+  `maybe_auto_seed()` is the flag-gated prelude hook (VNX_AUTO_SEED_TRACKS=1).
 """
 
 from __future__ import annotations
@@ -27,10 +39,13 @@ from typing import Any, Optional
 
 _HERE = Path(__file__).resolve().parent
 _LIB = _HERE / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
+for _p in (_LIB, _HERE):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 import tracks as tracks_lib  # noqa: E402
+import seed_tracks_from_roadmap as seeder  # noqa: E402
+import track_reconciler  # noqa: E402
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -44,6 +59,33 @@ def _resolve_state_dir(explicit: str) -> Path:
         return Path(env)
     from project_root import resolve_project_root
     return resolve_project_root(__file__) / ".vnx-data" / "state"
+
+
+def _resolve_roadmap_path(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    env = os.environ.get("VNX_ROADMAP_PATH", "")
+    if env:
+        return Path(env)
+    from project_root import resolve_project_root
+    return resolve_project_root(__file__) / "ROADMAP.yaml"
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON atomically: temp file in the same dir + os.replace."""
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _dependencies_for(state_dir: Path, track_id: str, project_id: str) -> list[str]:
@@ -155,6 +197,209 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  depends  : {', '.join(deps) if deps else '(none)'}")
     print()
     return 0
+
+
+def cmd_objective_sync(args: argparse.Namespace) -> int:
+    """Re-project ROADMAP.yaml -> tracks via the shipped idempotent seeder.
+
+    CHECK mode (default): dry-run — report the would-change set, write nothing.
+    --apply: idempotent projection. NEVER writes ROADMAP.yaml, NEVER promotes
+    deliverables (the human gate is preserved).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    roadmap_path = _resolve_roadmap_path(args.roadmap)
+    project_id = args.project_id
+
+    if not roadmap_path.exists():
+        print(f"ROADMAP not found: {roadmap_path}", file=sys.stderr)
+        return 1
+
+    # Pure reuse: the seeder owns all projection logic. Dry-run writes nothing.
+    report = seeder.seed(state_dir, roadmap_path, project_id, apply=args.apply)
+
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+
+    s = report["summary"]
+    mode = "APPLY (idempotent)" if args.apply else "CHECK (dry-run, no writes)"
+    print(f"\nvnx objective sync — {mode}")
+    print(f"  project_id : {project_id}")
+    print(f"  roadmap    : {roadmap_path}")
+    print(
+        f"  created={s['created']}  updated={s['updated']}  unchanged={s['unchanged']}"
+        f"  phase_drift={s['phase_drift']}  orphan={s['orphan']}"
+    )
+    if report["created"]:
+        verb = "+ created" if args.apply else "+ would create"
+        print(f"  {verb} : {', '.join(report['created'])}")
+    if report["updated"]:
+        verb = "~ updated" if args.apply else "~ would update"
+        print(f"  {verb} : {', '.join(report['updated'])}")
+    if report["phase_drift"]:
+        print("  ! phase drift (declared status differs — reported, NOT synced):")
+        for d in report["phase_drift"]:
+            print(f"      {d['track_id']}: db={d['db_phase']} roadmap={d['roadmap_phase']}")
+    if report["orphan"]:
+        print(f"  ? orphan (in DB, gone from ROADMAP — not deleted): {', '.join(report['orphan'])}")
+    if not args.apply and (report["created"] or report["updated"]):
+        print("  (check mode: re-run with --apply to project onto tracks)")
+    print()
+    return 0
+
+
+def _drift_reason(
+    state_dir: Path,
+    track_id: str,
+    project_id: str,
+    declared: Optional[str],
+    derived: str,
+) -> str:
+    """Best-effort explanation for why derived_status diverges from declared phase.
+
+    Mirrors the reconciler's decision order (blocker OI -> unmet dep -> dispatch
+    evidence) without duplicating its computation — purely for operator-readable
+    signal. Falls back to a generic message when no specific cause is found.
+    """
+    conn = _db_conn(state_dir)
+    try:
+        if derived == "blocked":
+            if _has_table(conn, "track_open_items"):
+                has_pid = _has_col(conn, "track_open_items", "project_id")
+                if has_pid:
+                    blocker = conn.execute(
+                        "SELECT 1 FROM track_open_items WHERE track_id = ? AND project_id = ? "
+                        "AND link_type = 'blocks' LIMIT 1",
+                        (track_id, project_id),
+                    ).fetchone()
+                else:
+                    blocker = conn.execute(
+                        "SELECT 1 FROM track_open_items WHERE track_id = ? AND link_type = 'blocks' LIMIT 1",
+                        (track_id,),
+                    ).fetchone()
+                if blocker:
+                    return "blocked by open item"
+            unmet = conn.execute(
+                """
+                SELECT td.to_track_id
+                FROM track_dependencies td
+                JOIN tracks t ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
+                WHERE td.from_track_id = ? AND td.from_project_id = ? AND t.phase != 'done'
+                LIMIT 1
+                """,
+                (track_id, project_id),
+            ).fetchone()
+            if unmet:
+                return f"blocked by dependency: {unmet[0]}"
+            return "blocked"
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM dispatches WHERE track = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()[0]
+        if count == 0:
+            return "no linked dispatch/PR evidence"
+        if derived == "in_progress":
+            return "dispatches complete; PR merge not yet confirmed" \
+                if (declared or "") == "done" else "linked dispatches in flight"
+        if derived == "done" and (declared or "") != "done":
+            return "all linked work terminal/merged; declared phase lags"
+    finally:
+        conn.close()
+    return "derived from linked dispatch/event state"
+
+
+def cmd_objective_drift(args: argparse.Namespace) -> int:
+    """ADVISORY drift-gate: report tracks where declared phase != derived_status.
+
+    Runs the shipped reconciler (advisory; writes only tracks.derived_status,
+    never ROADMAP, never tracks.phase). Writes a drift summary to
+    planning_drift.json for the dashboard / T0. ALWAYS exits 0 — this is a
+    planning signal, not a CI gate.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+
+    results = track_reconciler.reconcile_all_tracks(state_dir, project_id)
+
+    divergent = []
+    for r in results:
+        if r["drifted"]:
+            divergent.append({
+                "track_id": r["track_id"],
+                "declared_phase": r["declared_phase"],
+                "derived_status": r["derived_status"],
+                "reason": _drift_reason(
+                    state_dir, r["track_id"], project_id,
+                    r["declared_phase"], r["derived_status"],
+                ),
+            })
+
+    note = (
+        "Advisory only. Many initial divergences reflect historical dispatches "
+        "not yet linked to tracks (linkage backfill is a separate step). Read "
+        "this as a planning signal, not a failure."
+    )
+    summary = {
+        "generated_at": _now_utc(),
+        "project_id": project_id,
+        "total_tracks": len(results),
+        "divergent_count": len(divergent),
+        "divergent": divergent,
+        "note": note,
+    }
+
+    # Persist for the dashboard / T0 (atomic). Never blocks on write failure.
+    drift_path = state_dir / "planning_drift.json"
+    _atomic_write_json(drift_path, summary)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, default=str))
+        return 0
+
+    print(f"\nvnx objective drift — ADVISORY (project '{project_id}')\n")
+    print(f"  tracks reconciled : {len(results)}")
+    print(f"  divergent         : {len(divergent)}")
+    if divergent:
+        print()
+        for d in divergent:
+            print(
+                f"  ~ {d['track_id']:<28} declared={d['declared_phase'] or '-':<7} "
+                f"derived={d['derived_status']:<12} ({d['reason']})"
+            )
+    print(f"\n  note: {note}")
+    print(f"  written: {drift_path}\n")
+    return 0
+
+
+def maybe_auto_seed(
+    state_dir: str | Path | None = None,
+    roadmap_path: str | Path | None = None,
+    project_id: Optional[str] = None,
+    env: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Flag-gated prelude hook: idempotent `objective sync --apply` when opted in.
+
+    Wired into the dispatcher prelude (where lease_sweep is ticked). Default
+    (VNX_AUTO_SEED_TRACKS unset/!=1) is a no-op. When set, projects ROADMAP onto
+    tracks idempotently. NEVER writes ROADMAP.yaml; NEVER promotes deliverables.
+
+    Returns a result dict: {"skipped": True, ...} when disabled, else
+    {"skipped": False, "summary": {...}}.
+    """
+    env = env if env is not None else os.environ
+    if env.get("VNX_AUTO_SEED_TRACKS", "") != "1":
+        return {"skipped": True, "reason": "VNX_AUTO_SEED_TRACKS not set"}
+
+    s_dir = _resolve_state_dir(str(state_dir) if state_dir else env.get("VNX_STATE_DIR", ""))
+    r_path = _resolve_roadmap_path(str(roadmap_path) if roadmap_path else None)
+    pid = project_id or env.get("VNX_PROJECT_ID", "vnx-dev")
+
+    if not Path(r_path).exists():
+        return {"skipped": True, "reason": f"ROADMAP not found: {r_path}"}
+
+    report = seeder.seed(s_dir, r_path, pid, apply=True)
+    return {"skipped": False, "summary": report.get("summary", {})}
 
 
 _VALID_OUTPUT_KINDS = ("pr", "post", "deal", "doc")
@@ -472,6 +717,23 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_show)
     p_show.add_argument("track_id")
     p_show.set_defaults(func=cmd_objective_show)
+
+    p_sync = obj_sub.add_parser(
+        "sync",
+        help="re-project ROADMAP.yaml -> tracks (CHECK by default; --apply to write)",
+    )
+    _common(p_sync)
+    p_sync.add_argument("--apply", action="store_true",
+                        help="apply the idempotent projection (default: dry-run check)")
+    p_sync.add_argument("--roadmap", default=None, help="path to ROADMAP.yaml (default: project root)")
+    p_sync.set_defaults(func=cmd_objective_sync)
+
+    p_drift = obj_sub.add_parser(
+        "drift",
+        help="advisory drift-gate: report declared-vs-derived divergence (exit 0)",
+    )
+    _common(p_drift)
+    p_drift.set_defaults(func=cmd_objective_drift)
 
     # ------------------------------------------------------------------
     # deliverable subcommand (Phase 2)
