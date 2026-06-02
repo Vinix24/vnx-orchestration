@@ -592,6 +592,7 @@ process_dispatches() {
     _maybe_runtime_supervise
     _cleanup_stuck_dispatches
     _unified_supervisor_lease_sweep_tick
+    _maybe_auto_seed_tracks
 
     for dispatch in "$PENDING_DIR"/*.md; do
         [ -f "$dispatch" ] || continue

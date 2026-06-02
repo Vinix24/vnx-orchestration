@@ -66,6 +66,31 @@ def _load_open_items_index(state_dir: Path) -> dict[str, dict]:
         return {}
 
 
+def _load_planning_drift(state_dir: Path) -> dict:
+    """Read the advisory drift summary written by `vnx objective drift`.
+
+    Read-only: returns {} when the file is absent or unreadable. Surfaced as an
+    advisory panel; never blocks the planning view.
+    """
+    path = state_dir / "planning_drift.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        _logger.debug("Failed to load planning_drift.json: %s", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "generated_at": raw.get("generated_at"),
+        "divergent_count": raw.get("divergent_count", 0),
+        "total_tracks": raw.get("total_tracks", 0),
+        "divergent": raw.get("divergent", []),
+        "note": raw.get("note", ""),
+    }
+
+
 def _fetch_tracks(conn: sqlite3.Connection, project_id: str, has_horizon: bool) -> list[dict]:
     if has_horizon:
         rows = conn.execute(
@@ -309,4 +334,5 @@ def _operator_get_planning(state_dir: Path | None = None) -> dict[str, Any]:
         "horizons": horizons,
         "total_tracks": total,
         "schema_v27": has_horizon and has_del_view,
+        "drift": _load_planning_drift(s_dir),
     }
