@@ -312,6 +312,14 @@ Pool commands (elastic worker pool management):
   pool config --project <id> [--min N] [--max N] [--policy <name>] [--cooldown <s>]
   pool reap --project <id> [--pool-id <p>] [--force]     Reap stale workers
 
+Permission relay (detached-worker prompt governance):
+  permission window-open --minutes N [--reason ...]  Open operator auto-accept window
+  permission window-close                            Close the auto-accept window
+  permission window-status                           Show window state
+  permission escalations [--all] [--json]            List pending escalations
+  permission approve <dispatch_id>                   Approve + relay "1" to the worker
+  permission deny <dispatch_id>                      Deny an escalation
+
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
@@ -2121,6 +2129,9 @@ main() {
       ;;
     pool)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
+      ;;
+    permission)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 "$VNX_HOME/scripts/permission_relay_cli.py" "$@"
       ;;
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main dream "$@"
