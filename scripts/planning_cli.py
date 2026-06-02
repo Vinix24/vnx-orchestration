@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -36,6 +37,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 _HERE = Path(__file__).resolve().parent
 _LIB = _HERE / "lib"
@@ -349,9 +352,13 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
         "note": note,
     }
 
-    # Persist for the dashboard / T0 (atomic). Never blocks on write failure.
+    # Persist for the dashboard / T0 (atomic, best-effort). Write failure must
+    # not break the advisory exit-0 contract.
     drift_path = state_dir / "planning_drift.json"
-    _atomic_write_json(drift_path, summary)
+    try:
+        _atomic_write_json(drift_path, summary)
+    except Exception as exc:
+        logger.warning("drift: could not persist state file %s: %s", drift_path, exc)
 
     if args.json:
         print(json.dumps(summary, indent=2, default=str))

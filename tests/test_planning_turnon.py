@@ -257,6 +257,28 @@ def test_drift_exit_zero_when_divergent(seeded_state):
     assert rc == 0
 
 
+def test_drift_exit_zero_and_stdout_even_when_state_write_fails(seeded_state, monkeypatch, capsys):
+    """Advisory contract: drift must exit 0 and emit its report even if the
+    planning_drift.json write fails (permissions error, disk full, etc.)."""
+    state_dir, _ = seeded_state
+
+    def _raise(*_a, **_kw):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(planning_cli, "_atomic_write_json", _raise)
+
+    rc = planning_cli.main([
+        "objective", "drift", "--project-id", "vnx-dev",
+        "--state-dir", str(state_dir), "--json",
+    ])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    summary = json.loads(out)
+    assert "divergent_count" in summary
+    assert "total_tracks" in summary
+
+
 def test_drift_never_writes_roadmap_or_calls_seeder(seeded_state, monkeypatch):
     state_dir, roadmap = seeded_state
     before_roadmap = roadmap.read_text(encoding="utf-8")
