@@ -25,6 +25,41 @@ cat .vnx-data/state/t0_state.json | python3 -m json.tool
 
 For crash recovery or if state appears stale, run the individual repair tools below.
 
+## Planning / Future-State (tracks layer)
+
+T0 reads "what's next" from the tracks layer, not by hand-parsing ROADMAP.yaml.
+
+ROADMAP.yaml is the authored input (human-only). Tracks are its queryable projection, seeded by `scripts/seed_tracks_from_roadmap.py` -- idempotent, dry-run by default, `--apply` to write. The planning kanban dashboard lives at `/operator/planning`.
+
+**Query the tracks layer:**
+
+```bash
+# List objectives grouped by horizon (now / next / later)
+vnx objective list
+
+# Filter to a specific horizon
+vnx objective list --horizon now
+
+# Show one objective in detail (dependencies, PR ref, goal)
+vnx objective show <track_id>
+```
+
+**Object model (NO-NODE):**
+
+OBJECTIVE -- a ROADMAP feature, one track row, horizon now|next|later. Each objective maps to DISPATCH (execution leaf, `output_ref`/`output_kind`: pr|post|deal|doc), which produces output + receipt.
+
+DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective X --output-kind ... --title "..."`. ISSUE/OI is separate (open-items plane, not a deliverable).
+
+**Human gate:** deliverables stay `proposed` until `vnx deliverable promote <id>` (proposed -> ready). Un-promoted deliverables are NOT dispatchable. T0 proposes deliverables; the human promotes.
+
+**Rollup (advisory):** `scripts/lib/track_reconciler.py` computes `tracks.derived_status` from merged PRs and receipts. It NEVER auto-writes ROADMAP.yaml or the authoritative phase. T0 surfaces declared-vs-derived divergence as a planning signal -- the reconciler reports drift, it does not resolve it.
+
+**Worker dispatch policy:**
+
+- Claude workers run via tmux-spawn (`scripts/lib/tmux_interactive_dispatch.py`): interactive, subscription-preserving. NEVER `claude -p`.
+- Default model: sonnet. For complex reasoning: `--model opus` with `VNX_OVERRIDE_WORKERS_SONNET_PINNED=1`.
+- All work flows through governed lanes (tmux-spawn / provider_dispatch). No Claude Code subagents (Task tool).
+
 ## Crash Recovery (on-demand only)
 
 Follow the full procedure in `@t0-orchestrator` §6.2 Post-Crash Startup.
