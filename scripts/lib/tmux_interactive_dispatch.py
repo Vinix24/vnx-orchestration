@@ -552,10 +552,31 @@ class TmuxInteractiveDispatch:
         ready_markers: "tuple[str, ...]",
         warmup_timeout: float,
         poll_interval: float,
+        signal_dir: "Path | None" = None,
     ) -> bool:
-        """Poll capture-pane until a readiness marker appears or timeout."""
+        """Wait until the worker session is ready, or timeout.
+
+        PRIMARY signal: the SessionStart hook sentinel ("<signal_dir>/session_ready").
+        It is checked first on every poll and confirms readiness via the stable hook
+        contract — version-agnostic, independent of any TUI banner wording. The
+        capture-pane marker scan is only a tolerant fallback for when the sentinel is
+        unavailable.
+        """
+        ready_sentinel = (signal_dir / "session_ready") if signal_dir else None
         deadline = time.monotonic() + warmup_timeout
         while time.monotonic() < deadline:
+            # PRIMARY: SessionStart hook fired → session is ready.
+            if ready_sentinel is not None:
+                try:
+                    if ready_sentinel.exists():
+                        logger.info(
+                            "interactive: readiness via SessionStart sentinel for %s",
+                            pane_id,
+                        )
+                        return True
+                except OSError:
+                    pass
+            # FALLBACK: tolerant TUI marker scan.
             cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
             content = cap.stdout if cap.returncode == 0 else ""
             if content and any(m in content for m in ready_markers):
@@ -587,14 +608,40 @@ class TmuxInteractiveDispatch:
 
     # Sentinel appended to every dispatch body (END_OF_INSTRUCTION_SENTINEL from dispatch_prepare).
     _END_SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
-    # Pane content that proves Claude is actively running (not idle at the input box).
-    _WORKING_MARKER = "esc to interrupt"
+    # ── Tolerant TUI fallback heuristics — NOT the primary signal ──────────────
+    # Hooks are PRIMARY (SessionStart ready / UserPromptSubmit submit) and the
+    # receipt is AUTHORITATIVE for completion. The pane-scrape below is only a
+    # backstop for when the hook sentinels are unavailable, and MUST stay
+    # version-robust: never hard-depend on a Claude Code version's exact wording.
+    #
+    # Evidence: claude 2.1.160 dropped "esc to interrupt" in favour of a
+    # random-gerund spinner + token-counter, e.g. "✢ Smooshing… (18s · ↓ 739 tokens)".
+    # So the working-detector matches the STRUCTURAL token-counter shape
+    # ("(<n>s · ↓/↑ <n> tokens)"), OR a tolerant set of legacy literals.
+    _WORKING_TOKEN_RE = re.compile(r"\(\s*\d+\s*s\b[^)\n]*tokens?\b", re.IGNORECASE)
+    _WORKING_LITERALS = ("esc to interrupt", "to interrupt")
     # Bottom N lines of the pane constitute the "input region" for staged-paste detection.
     _INPUT_REGION_LINES = 10
     # Leading chars of the body used as a fingerprint to detect it in the input region.
     _BODY_FINGERPRINT_LEN = 80
 
-    def _verify_submit(self, pane_id: str, body: str) -> bool:
+    def _looks_working(self, content: str) -> bool:
+        """Version-robust "Claude is actively working" detector (tolerant fallback).
+
+        Returns True if the pane content shows the structural token-counter the TUI
+        prints while a turn is running ("(18s · ↓ 739 tokens)", "(3s · ↑ 12 tokens)")
+        OR any tolerant legacy literal ("esc to interrupt", "to interrupt"). This is
+        only a backstop to the hook sentinels — never a hard dependency on a specific
+        Claude Code version's wording.
+        """
+        if not content:
+            return False
+        if self._WORKING_TOKEN_RE.search(content):
+            return True
+        lowered = content.lower()
+        return any(lit in lowered for lit in self._WORKING_LITERALS)
+
+    def _verify_submit(self, pane_id: str, body: str, *, signal_dir: "Path | None" = None) -> bool:
         """Confirm the instruction was actually submitted, not left staged in the input box.
 
         Submitted = working indicator present anywhere in the pane, OR the input region
@@ -609,6 +656,10 @@ class TmuxInteractiveDispatch:
         Works on both paths: VNX_SHARED_PREPARE=1 (body contains sentinel) and the legacy
         default (no sentinel in body, detected via bracketed-paste annotation or fingerprint).
 
+        PRIMARY signal: the UserPromptSubmit hook sentinel ("<signal_dir>/prompt_received").
+        When present, submission is confirmed via the stable hook contract and the
+        TUI-scrape fallback below is skipped entirely. The pane scrape is only a backstop.
+
         Uses a bounded guarded-retry loop: up to VNX_TMUX_SUBMIT_MAX_RETRIES (default 3)
         additional Enter keystrokes, each preceded by a _still_staged() check to prevent
         stray Enters landing in a running session. Each retry polls for up to
@@ -620,12 +671,22 @@ class TmuxInteractiveDispatch:
         retry_delay = float(os.environ.get("VNX_TMUX_SUBMIT_RETRY_DELAY", "0.75"))
         verify_timeout = float(os.environ.get("VNX_TMUX_SUBMIT_VERIFY_TIMEOUT", "5"))
         body_fingerprint = body.strip()[:self._BODY_FINGERPRINT_LEN]
+        _prompt_sentinel = (signal_dir / "prompt_received") if signal_dir else None
+
+        def _sentinel_submitted() -> bool:
+            try:
+                return _prompt_sentinel is not None and _prompt_sentinel.exists()
+            except OSError:
+                return False
 
         def _still_staged() -> bool:
+            # PRIMARY: UserPromptSubmit hook fired → instruction was submitted.
+            if _sentinel_submitted():
+                return False
             cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
             content = cap.stdout if cap.returncode == 0 else ""
             # Working indicator anywhere in pane → Claude is running → submitted.
-            if self._WORKING_MARKER in content:
+            if self._looks_working(content):
                 return False
             # Scope staged-paste check to the input region (bottom lines only).
             # Sentinel/instruction text in the scrollback (upper area) means Claude already
@@ -641,6 +702,12 @@ class TmuxInteractiveDispatch:
             return False      # unknown state; assume submitted (conservative)
 
         # Fast path: already submitted (first Enter from _deliver_instruction worked).
+        if _sentinel_submitted():
+            logger.info(
+                "interactive: submission confirmed via UserPromptSubmit sentinel for %s",
+                pane_id,
+            )
+            return True
         if not _still_staged():
             return True
 
@@ -922,10 +989,13 @@ class TmuxInteractiveDispatch:
         warmup_timeout: float = 30.0,
         warmup_poll_interval: float = 1.0,
         ready_markers: "tuple[str, ...]" = (
+            # Tolerant TUI-fallback markers only — the SessionStart hook sentinel is
+            # the primary readiness signal. Deliberately NOT pinned to a version
+            # banner ("Claude Code vX.Y.Z" was removed: it breaks on every bump).
             "for shortcuts",
             "? for shortcuts",
             "Welcome to Claude",
-            "Claude Code v",    # v2.1.159+ banner (additive — legacy markers kept above)
+            "❯",                # input prompt glyph (idle, ready for input)
         ),
         completion_statuses: frozenset = DEFAULT_COMPLETION_STATUSES,
         dispatch_paths: "list[str] | str | None" = None,
@@ -995,6 +1065,16 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                 )
 
+        # Per-dispatch hook signal dir: the SessionStart / UserPromptSubmit / Stop
+        # hooks (guarded by VNX_TMUX_SIGNAL_DIR + VNX_DISPATCH_ID) drop sentinels
+        # here. Best-effort: if mkdtemp fails the lane silently degrades to the
+        # TUI-marker fallback (sentinel checks just never fire).
+        signal_dir: "Path | None" = None
+        try:
+            signal_dir = Path(tempfile.mkdtemp(prefix="vnx-tmux-sig-"))
+        except OSError as exc:
+            logger.debug("interactive: signal dir mkdtemp failed (%s); TUI fallback only", exc)
+
         # Idempotency guard: teardown runs exactly once across all exit paths.
         _torn_down = False
 
@@ -1003,6 +1083,11 @@ class TmuxInteractiveDispatch:
             if _torn_down:
                 return
             _torn_down = True
+            if signal_dir is not None:
+                try:
+                    shutil.rmtree(signal_dir, ignore_errors=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("interactive: signal dir cleanup failed (%s)", exc)
             try:
                 self._kill_session(session)
             except Exception as exc:  # noqa: BLE001
@@ -1153,6 +1238,17 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                 )
 
+            # Inject hook-signal env so the worker's SessionStart/UserPromptSubmit/Stop
+            # hooks fire (they are guarded by these two vars). Prepended as an export
+            # so it applies across the whole compound command (source …; claude …),
+            # not just the first segment. Validated after the headless guard so the
+            # guard only ever inspects the pure builder output.
+            if signal_dir is not None:
+                launch_cmd = (
+                    f"export VNX_TMUX_SIGNAL_DIR={shlex.quote(str(signal_dir))} "
+                    f"VNX_DISPATCH_ID={shlex.quote(dispatch_id)}; {launch_cmd}"
+                )
+
             if not self._launch_claude(pane_id, launch_cmd):
                 self._emit_event(
                     "interactive_launch_failed",
@@ -1179,6 +1275,7 @@ class TmuxInteractiveDispatch:
                 ready_markers=ready_markers,
                 warmup_timeout=warmup_timeout,
                 poll_interval=warmup_poll_interval,
+                signal_dir=signal_dir,
             )
             _strict = os.environ.get("VNX_TMUX_READY_STRICT", "1").strip().lower() not in (
                 "0", "false", "no", "off"
@@ -1279,7 +1376,7 @@ class TmuxInteractiveDispatch:
                 )
 
             # 7b. Verify the instruction was actually submitted (not left staged).
-            if not self._verify_submit(pane_id, body):
+            if not self._verify_submit(pane_id, body, signal_dir=signal_dir):
                 self._emit_event(
                     "interactive_submit_failed",
                     dispatch_id=dispatch_id,
