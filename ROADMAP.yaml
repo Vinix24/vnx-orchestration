@@ -688,7 +688,7 @@ features:
     depends_on:
       - log-rotation
     milestone: "1.0.1"
-    status: done
+    status: in-progress
     pr_queue:
       - pr_id: "#786"
         title: "feat(receipts): per-append hash-chain wiring, flag-gated VNX_CHAIN_RECEIPTS (GAP 3b)"
@@ -696,8 +696,8 @@ features:
         risk_class: high
     notes: >
       GAP 3b. Per-append hash-chain wired into the receipt append (lock-scoped in
-      idempotency.py), flag-gated VNX_CHAIN_RECEIPTS default-off. Merged #786 on
-      2026-06-02. Epoch-rotation of the live ledger + verify_history + concurrent
+      idempotency.py), flag-gated VNX_CHAIN_RECEIPTS default-off (#786 merged
+      2026-06-02). Epoch-rotation of the live ledger + verify_history + concurrent
       fork-tests still pending (1.0.1 remainder). 4-architect-decided
       DROP-claim-now-wire-1.0.1. README hash-chain claim softened in DOC-PASS.
 

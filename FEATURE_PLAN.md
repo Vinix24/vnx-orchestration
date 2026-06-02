@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-02T04:10:20.064667+00:00
+**Last updated**: 2026-06-02T04:14:04.742791+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
@@ -286,7 +286,7 @@ Status: done
 Status: planned
 
 ### receipt-hashchain-wire — GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests
-Status: done
+Status: in-progress
 
 ### provider-lanes-doc-pass — Provider-lanes USP doc + README honesty fix + ROADMAP/docs reflect tracks-activation
 Status: done
