@@ -7,8 +7,8 @@
 
 ## Progress Overview
 Launch status: **pre-launch** (version 1.0.0)
-Last verified: 2026-06-01 against origin/main@c0506771
-Merged launch PRs: 23 | Queued: 0
+Last verified: 2026-06-02 against origin/main@54ad9df6
+Merged launch PRs: 33 | Queued: 0
 
 ## Status
 
@@ -33,9 +33,19 @@ Merged launch PRs: 23 | Queued: 0
 - #775 — feat(tmux): CAPTURE structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
 - #776 — feat(tmux): uniform-receipts structural completion (tmux lane) [feature=tmux-lane-structural-refactor]
 - #779 — feat(ops): opt-in DB maintenance for quality_intelligence.db (GAP 3a) [feature=log-rotation]
+- #789 — feat(dispatch): PR-1 flag-gated dispatch envelope (codex lane, VNX_UNIFIED_ENVELOPE, legacy default) [feature=opt-a-envelope-extraction]
 - #780 — feat(intelligence): install nightly intelligence pipeline cron (GAP 4 — reactivate self-learning loop) [feature=gap4-self-learning-reactivation]
 - #781 — fix(tmux): bounded guarded-retry + adaptive settle for submit reliability (GAP 6) [feature=gap6-submit-reliability]
 - #782 — feat(doctor): structural-doctor for tracks-layer activation (dry-run default, backup-on-apply) [feature=tracks-layer-activation]
+- #787 — feat(planning): Phase 1 — tracks seeder + horizon + deliverables view + vnx objective list [feature=planning-future-state-layer]
+- #790 — feat(planning): Phase 2 — deliverable plane + proposed->ready human gate (vnx deliverable add/list/promote) [feature=planning-future-state-layer]
+- #791 — feat(dashboard): planning kanban — objectives/deliverables/open-items by horizon (reuses design system) [feature=planning-future-state-layer]
+- #793 — feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP) [feature=planning-future-state-layer]
+- #786 — feat(receipts): per-append hash-chain wiring, flag-gated VNX_CHAIN_RECEIPTS (GAP 3b) [feature=receipt-hashchain-wire]
+- #785 — docs: provider-lanes USP doc + README hash-chain honesty fix [feature=provider-lanes-doc-pass]
+- #788 — feat(governance): unified_report as universal interface — AGENTS.md report-contract + generic report->receipt conversion (no hooks) [feature=report-to-receipt-converter]
+- #792 — fix(intelligence): repair 4 regressed nightly pipeline phases (OI-2331) [feature=oi-2331-intelligence-repair]
+- #794 — fix(db-maintenance): atomic prune transaction (OI-2328) [feature=oi-2328-atomic-prune]
 
 ## Remaining Launch Blockers
 - LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release
