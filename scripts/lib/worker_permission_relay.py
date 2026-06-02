@@ -53,6 +53,32 @@ WINDOW_FILENAME = "permission_window.json"
 ESCALATIONS_DIRNAME = "permission_escalations"
 RELAY_DIRNAME = "permission_relay"
 
+# dispatch_id becomes a filesystem path segment (escalation record + fingerprint
+# file). It MUST be validated before any path use: a traversal id ("../../etc/x",
+# "a/b", an absolute path) would let an attacker-controlled dispatch id escape the
+# state dir and read/write arbitrary files. Strict allow-list: one or more of
+# [A-Za-z0-9._-], and never the dot-only ids "." / ".." (which match the class).
+_SAFE_DISPATCH_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_dispatch_id(dispatch_id: str) -> str:
+    """Return *dispatch_id* unchanged if safe as a path segment, else raise ValueError.
+
+    Rejects empty / non-string ids, path separators, '..', '.', and absolute paths.
+    Called by EVERY function that turns a dispatch_id into a filesystem path so a
+    traversal id can never escape the state dir.
+    """
+    if not isinstance(dispatch_id, str) or not dispatch_id:
+        raise ValueError("dispatch_id must be a non-empty string")
+    if dispatch_id in (".", ".."):
+        raise ValueError(f"unsafe dispatch_id {dispatch_id!r}: '.'/'..' are path-traversal segments")
+    if not _SAFE_DISPATCH_ID.match(dispatch_id):
+        raise ValueError(
+            f"unsafe dispatch_id {dispatch_id!r}: must match [A-Za-z0-9._-]+ "
+            "(no path separators, '..', or absolute paths)"
+        )
+    return dispatch_id
+
 # Prompt markers the Claude Code TUI prints when it needs confirmation. Matched
 # case-insensitively and kept tolerant: never pinned to one Claude Code version's
 # exact wording (the lane has been burned by version-specific TUI scraping before).
@@ -370,7 +396,7 @@ def _escalations_dir(state_dir: Path) -> Path:
 
 
 def _escalation_path(state_dir: Path, dispatch_id: str) -> Path:
-    return _escalations_dir(state_dir) / f"{dispatch_id}.json"
+    return _escalations_dir(state_dir) / f"{_safe_dispatch_id(dispatch_id)}.json"
 
 
 def write_escalation(
@@ -386,6 +412,7 @@ def write_escalation(
     Idempotent: if a pending record for the same command already exists it is
     left untouched (so a repeated tick does not churn captured_at).
     """
+    _safe_dispatch_id(dispatch_id)
     sd = _coerce_state_dir(state_dir)
     path = _escalation_path(sd, dispatch_id)
     existing = read_escalation(dispatch_id, state_dir=sd)
@@ -410,6 +437,7 @@ def write_escalation(
 def read_escalation(
     dispatch_id: str, *, state_dir: "str | Path | None" = None
 ) -> "dict | None":
+    _safe_dispatch_id(dispatch_id)
     sd = _coerce_state_dir(state_dir)
     path = _escalation_path(sd, dispatch_id)
     if not path.exists():
@@ -450,6 +478,7 @@ def resolve_escalation(
     now: "float | None" = None,
 ) -> "dict | None":
     """Update a pending escalation to approved/denied. Returns the updated record."""
+    _safe_dispatch_id(dispatch_id)
     sd = _coerce_state_dir(state_dir)
     record = read_escalation(dispatch_id, state_dir=sd)
     if record is None:
@@ -464,7 +493,7 @@ def resolve_escalation(
 # Fingerprint persistence (idempotency)
 # ---------------------------------------------------------------------------
 def _fingerprint_path(state_dir: Path, dispatch_id: str) -> Path:
-    return state_dir / RELAY_DIRNAME / f"{dispatch_id}.last"
+    return state_dir / RELAY_DIRNAME / f"{_safe_dispatch_id(dispatch_id)}.last"
 
 
 def _fingerprint(command: str) -> str:
@@ -533,16 +562,20 @@ def relay_tick(
     """Inspect the worker pane once and act on any pending permission prompt.
 
     Returns one of:
-      - "idle"           — no prompt on the pane
-      - "auto_approve"    — routine prompt inside an open window; sent option 1+Enter
-      - "escalate"        — catastrophic or window-closed; wrote escalation record
-      - "already_handled" — same prompt already actioned this run (idempotent)
+      - "idle"               — no prompt on the pane
+      - "auto_approve"        — routine prompt inside an open window; option 1+Enter delivered
+      - "auto_approve_failed" — window open + routine, but the send-keys did NOT land;
+                                NOT marked handled, so the next tick retries
+      - "escalate"            — catastrophic or window-closed; wrote escalation record
+      - "already_handled"     — same prompt already actioned this run (idempotent)
 
     Idempotent: the last-handled prompt fingerprint is persisted, so a prompt
     still visible on the next tick (before the TUI clears it) is not re-actioned.
+    A failed auto-approve send is deliberately NOT fingerprinted so it can retry.
     """
     if not session_id:
         raise ValueError("relay_tick requires an explicit session id")
+    _safe_dispatch_id(dispatch_id)
     sd = _coerce_state_dir(state_dir)
     win = window if window is not None else PermissionWindow(sd)
 
@@ -557,7 +590,17 @@ def relay_tick(
 
     action = decide(command, win)
     if action == "auto_approve":
-        _send_approval(runner, session_id)
+        delivered = _send_approval(runner, session_id)
+        if not delivered:
+            # The send-keys did NOT land. Do NOT mark the prompt handled — leave the
+            # fingerprint unset so the next tick re-attempts delivery instead of
+            # silently treating a failed send as approved.
+            logger.warning(
+                "permission_relay: auto-approve send-keys FAILED dispatch=%s session=%s "
+                "cmd=%r — NOT marked handled, will retry next tick",
+                dispatch_id, session_id, command,
+            )
+            return "auto_approve_failed"
         _write_fingerprint(sd, dispatch_id, fp)
         logger.info(
             "permission_relay: auto-approved routine prompt dispatch=%s cmd=%r",

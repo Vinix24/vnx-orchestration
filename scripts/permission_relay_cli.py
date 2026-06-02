@@ -14,16 +14,22 @@ All subcommands accept ``--json`` for machine-readable output.
 
 The relay model: outside an open window every worker permission prompt escalates;
 inside the window routine prompts auto-approve; catastrophic ops always escalate.
-``approve`` resolves the escalation record AND best-effort relays the approval
-keystroke ("1" + a SEPARATE Enter) into the worker's tmux session.
+``approve`` relays the approval keystroke ("1" + a SEPARATE Enter) into the worker's
+tmux session and marks the escalation resolved=approved ONLY on confirmed delivery.
+If the keystroke does not land (no live session / send failure) the escalation is
+left pending and ``approve`` exits non-zero with a clear message, so a failed relay
+is never silently recorded as approved.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -101,56 +107,137 @@ def _cmd_escalations(args, sd: Path) -> int:
     return 0
 
 
-def _relay_keystroke_to_worker(dispatch_id: str, sd: Path) -> "str | None":
+def _relay_keystroke_to_worker(
+    dispatch_id: str, sd: Path, *, runner=None
+) -> "tuple[str, str | None]":
     """Best-effort: send "1"+Enter into the escalated worker's tmux session.
 
     Reads the lane handle (state/tmux_interactive/<dispatch_id>.json) for the
-    session id. Returns the session id on success, None if no session/tmux.
+    session id and relays the approval keystroke ("1" + a SEPARATE Enter) to the
+    EXPLICIT session. Returns a ``(status, session)`` tuple:
+
+      - ("sent", session)        approval keystroke confirmed delivered
+      - ("no_session", None)     no live worker session found (handle / session field absent)
+      - ("send_failed", session) session exists but the send-keys did not land
+      - ("error", session|None)  operational failure (handle read / tmux / send raised)
+
+    Distinguishing a genuine "no live session" from an operational failure lets the
+    caller avoid marking an escalation approved when nothing was delivered. Never
+    raises — but, unlike before, the actual exception is logged with context so a
+    swallowed tmux/read/send failure is observable.
     """
-    handle_path = sd / "tmux_interactive" / f"{dispatch_id}.json"
+    handle_path = sd / "tmux_interactive" / f"{relay._safe_dispatch_id(dispatch_id)}.json"
     if not handle_path.exists():
-        return None
+        return ("no_session", None)
     try:
         handle = json.loads(handle_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "permission approve: handle read failed dispatch=%s path=%s (%s)",
+            dispatch_id, handle_path, exc,
+        )
+        return ("error", None)
     session = (handle or {}).get("session")
     if not session:
-        return None
+        return ("no_session", None)
     try:
-        from tmux_interactive_dispatch import TmuxCommandRunner  # noqa: PLC0415
+        if runner is None:
+            from tmux_interactive_dispatch import TmuxCommandRunner  # noqa: PLC0415
 
-        runner = TmuxCommandRunner()
+            runner = TmuxCommandRunner()
         if not runner.available():
-            return None
-        relay._send_approval(runner, session)
-        return session
-    except Exception:  # noqa: BLE001 — relay is best-effort
-        return None
+            logger.warning(
+                "permission approve: tmux unavailable, cannot relay dispatch=%s session=%s",
+                dispatch_id, session,
+            )
+            return ("error", session)
+        delivered = relay._send_approval(runner, session)
+        if not delivered:
+            logger.warning(
+                "permission approve: send-keys did NOT land dispatch=%s session=%s",
+                dispatch_id, session,
+            )
+            return ("send_failed", session)
+        return ("sent", session)
+    except Exception as exc:  # noqa: BLE001 — best-effort, but now observable
+        logger.warning(
+            "permission approve: relay to worker failed dispatch=%s session=%s (%s)",
+            dispatch_id, session, exc, exc_info=True,
+        )
+        return ("error", session)
 
 
 def _cmd_approve(args, sd: Path) -> int:
-    record = relay.resolve_escalation(args.dispatch_id, approved=True, state_dir=sd)
-    if record is None:
+    try:
+        relay._safe_dispatch_id(args.dispatch_id)
+    except ValueError as exc:
+        _emit(
+            {"error": "invalid_dispatch_id", "dispatch_id": args.dispatch_id, "detail": str(exc)},
+            args.json,
+            f"[x] invalid dispatch_id {args.dispatch_id!r}: {exc}",
+        )
+        return 2
+
+    existing = relay.read_escalation(args.dispatch_id, state_dir=sd)
+    if existing is None:
         _emit(
             {"error": "no_escalation", "dispatch_id": args.dispatch_id},
             args.json,
             f"[x] no escalation found for {args.dispatch_id}",
         )
         return 1
-    session = _relay_keystroke_to_worker(args.dispatch_id, sd)
-    record["relayed_session"] = session
-    human = f"[ok] approved {args.dispatch_id}"
-    human += (
-        f" — relayed approval to session {session}"
-        if session
-        else " — no live worker session found (record updated only)"
-    )
-    _emit(record, args.json, human)
-    return 0
+
+    # Relay FIRST; only mark the escalation approved on confirmed keystroke delivery.
+    # A failed/absent relay must NOT silently flip the record to approved.
+    status, session = _relay_keystroke_to_worker(args.dispatch_id, sd)
+
+    if status == "sent":
+        record = relay.resolve_escalation(args.dispatch_id, approved=True, state_dir=sd) or existing
+        record["relayed_session"] = session
+        _emit(
+            record,
+            args.json,
+            f"[ok] approved {args.dispatch_id} — relayed approval to session {session}",
+        )
+        return 0
+
+    # Delivery did not land — leave the escalation PENDING so it can be retried,
+    # and surface a clear failure (non-zero exit) distinguishing the cause.
+    if status == "no_session":
+        human = (
+            f"[x] approve {args.dispatch_id} NOT applied — no live worker session found; "
+            "escalation left pending (use `deny` to clear, or retry once the worker is up)"
+        )
+    elif status == "send_failed":
+        human = (
+            f"[x] approve {args.dispatch_id} FAILED — send-keys to session {session} did not land; "
+            "escalation left pending (retry)"
+        )
+    else:  # "error"
+        human = (
+            f"[x] approve {args.dispatch_id} FAILED — relay error reaching the worker "
+            "(see logs); escalation left pending"
+        )
+    payload = {
+        "error": status,
+        "dispatch_id": args.dispatch_id,
+        "approved": False,
+        "relayed_session": session,
+    }
+    _emit(payload, args.json, human)
+    return 1
 
 
 def _cmd_deny(args, sd: Path) -> int:
+    try:
+        relay._safe_dispatch_id(args.dispatch_id)
+    except ValueError as exc:
+        _emit(
+            {"error": "invalid_dispatch_id", "dispatch_id": args.dispatch_id, "detail": str(exc)},
+            args.json,
+            f"[x] invalid dispatch_id {args.dispatch_id!r}: {exc}",
+        )
+        return 2
     record = relay.resolve_escalation(args.dispatch_id, approved=False, state_dir=sd)
     if record is None:
         _emit(

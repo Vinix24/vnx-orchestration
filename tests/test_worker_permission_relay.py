@@ -7,17 +7,20 @@ escalate / idempotency with a fake tmux runner asserting the SEPARATE-Enter +
 EXPLICIT-session send-keys contract.
 """
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
+sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 import worker_permission_relay as relay  # noqa: E402
 from worker_permission_relay import (  # noqa: E402
     PermissionWindow,
+    _safe_dispatch_id,
     decide,
     is_catastrophic,
     list_escalations,
@@ -27,6 +30,8 @@ from worker_permission_relay import (  # noqa: E402
     resolve_escalation,
     write_escalation,
 )
+
+import permission_relay_cli as cli  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -40,17 +45,29 @@ class _FakeResult:
 
 
 class FakeRunner:
-    """Records every tmux invocation; returns a scripted pane for capture-pane."""
+    """Records every tmux invocation; returns a scripted pane for capture-pane.
 
-    def __init__(self, pane_text=""):
+    ``send_fail`` makes every ``send-keys`` invocation return a non-zero rc so the
+    relay's send-keys-success gating can be exercised. ``capture-pane`` still
+    succeeds so the prompt is parsed normally.
+    """
+
+    def __init__(self, pane_text="", *, send_fail=False, tmux_available=True):
         self.pane_text = pane_text
+        self.send_fail = send_fail
+        self._tmux_available = tmux_available
         self.calls = []  # list[list[str]]
 
     def run(self, args, **kwargs):
         self.calls.append(list(args))
         if args[:1] == ["capture-pane"]:
             return _FakeResult(returncode=0, stdout=self.pane_text)
+        if args[:1] == ["send-keys"] and self.send_fail:
+            return _FakeResult(returncode=1)
         return _FakeResult(returncode=0)
+
+    def available(self):
+        return self._tmux_available
 
     def send_key_calls(self):
         return [c for c in self.calls if c[:1] == ["send-keys"]]
@@ -340,3 +357,187 @@ class TestEscalationLifecycle:
         rec2 = read_escalation("d3", state_dir=tmp_path)
         assert rec1["captured_at"] == rec2["captured_at"]
         assert p1.exists()
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 — path-traversal: dispatch_id must be sanitized before path use
+# ---------------------------------------------------------------------------
+class TestSafeDispatchId:
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "../../etc/x",      # classic traversal
+            "a/b",              # path separator
+            "..",               # parent-dir segment (matches the char class!)
+            ".",                # current-dir segment
+            "/etc/passwd",      # absolute path
+            "x/../../y",        # embedded traversal
+            "a b",              # space (outside the allow-list)
+            "name;rm",          # shell metachar
+            "",                 # empty
+        ],
+    )
+    def test_rejects_unsafe(self, bad):
+        with pytest.raises(ValueError):
+            _safe_dispatch_id(bad)
+
+    @pytest.mark.parametrize(
+        "good",
+        [
+            "20260602-173238-relay-fix",
+            "disp_1",
+            "a.b.c",
+            "T1-track-A",
+        ],
+    )
+    def test_accepts_safe(self, good):
+        assert _safe_dispatch_id(good) == good
+
+    def test_write_escalation_rejects_traversal(self, tmp_path):
+        with pytest.raises(ValueError):
+            write_escalation("../../etc/x", "rm -rf /x", "catastrophic", state_dir=tmp_path)
+        # And nothing was written outside the escalations dir.
+        assert not (tmp_path.parent / "x.json").exists()
+
+    def test_read_escalation_rejects_traversal(self, tmp_path):
+        with pytest.raises(ValueError):
+            read_escalation("a/b", state_dir=tmp_path)
+
+    def test_resolve_escalation_rejects_traversal(self, tmp_path):
+        with pytest.raises(ValueError):
+            resolve_escalation("../../etc/x", approved=True, state_dir=tmp_path)
+
+    def test_relay_tick_rejects_traversal(self, tmp_path):
+        runner = FakeRunner(pane_text=ROUTINE_PROMPT_PANE)
+        with pytest.raises(ValueError):
+            relay_tick("vnx-sess", "../../etc/x", runner, state_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Finding 2 — auto-approve must NOT mark handled when the send-keys fails
+# ---------------------------------------------------------------------------
+class TestAutoApproveGatesOnSendResult:
+    def test_failed_send_not_marked_handled(self, tmp_path):
+        win = PermissionWindow(tmp_path)
+        win.open(10)  # window OPEN — routine prompt would auto-approve
+        runner = FakeRunner(pane_text=ROUTINE_PROMPT_PANE, send_fail=True)
+        action = relay_tick("vnx-disp-f", "disp-f", runner, state_dir=tmp_path, window=win)
+        # Send failed -> explicit failure status, NOT "auto_approve".
+        assert action == "auto_approve_failed"
+        # Fingerprint NOT persisted -> a retry next tick is still possible.
+        assert relay._read_fingerprint(tmp_path, "disp-f") is None
+        # The "1" keystroke was attempted (returned rc!=0), so the first send-keys
+        # is present; Enter is short-circuited because rc1 failed.
+        sends = runner.send_key_calls()
+        assert sends[0] == ["send-keys", "-t", "vnx-disp-f", "1"]
+
+    def test_retry_after_failed_send_then_success(self, tmp_path):
+        win = PermissionWindow(tmp_path)
+        win.open(10)
+        # First tick: send fails -> not handled.
+        failing = FakeRunner(pane_text=ROUTINE_PROMPT_PANE, send_fail=True)
+        assert relay_tick("vnx-r", "disp-r", failing, state_dir=tmp_path, window=win) == "auto_approve_failed"
+        assert relay._read_fingerprint(tmp_path, "disp-r") is None
+        # Second tick (same prompt still on pane): send succeeds -> handled now.
+        ok = FakeRunner(pane_text=ROUTINE_PROMPT_PANE, send_fail=False)
+        assert relay_tick("vnx-r", "disp-r", ok, state_dir=tmp_path, window=win) == "auto_approve"
+        assert relay._read_fingerprint(tmp_path, "disp-r") is not None
+        sends = ok.send_key_calls()
+        assert sends == [
+            ["send-keys", "-t", "vnx-r", "1"],
+            ["send-keys", "-t", "vnx-r", "Enter"],
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 — manual `approve` must surface send failure + gate resolved=approved
+# ---------------------------------------------------------------------------
+class _Args:
+    def __init__(self, dispatch_id, as_json=False):
+        self.dispatch_id = dispatch_id
+        self.json = as_json
+
+
+def _write_handle(sd: Path, dispatch_id: str, session: str) -> None:
+    hdir = sd / "tmux_interactive"
+    hdir.mkdir(parents=True, exist_ok=True)
+    (hdir / f"{dispatch_id}.json").write_text(
+        json.dumps({"dispatch_id": dispatch_id, "session": session}), encoding="utf-8"
+    )
+
+
+class TestManualApproveSurfacesSendFailure:
+    def test_approve_send_failure_leaves_pending_and_exits_nonzero(self, tmp_path, monkeypatch):
+        write_escalation("d-app", "pytest -q", "window_closed", state_dir=tmp_path)
+        _write_handle(tmp_path, "d-app", "vnx-d-app")
+        # Inject a runner whose send-keys fails. Capture the ORIGINAL fn first so the
+        # wrapper does not recurse into itself after monkeypatching.
+        failing = FakeRunner(send_fail=True)
+        orig = cli._relay_keystroke_to_worker
+        monkeypatch.setattr(
+            cli, "_relay_keystroke_to_worker",
+            lambda did, sd: orig(did, sd, runner=failing),
+        )
+        rc = cli._cmd_approve(_Args("d-app"), tmp_path)
+        assert rc == 1  # non-zero: send did not land
+        # Escalation MUST remain pending (NOT flipped to approved).
+        rec = read_escalation("d-app", state_dir=tmp_path)
+        assert rec["status"] == "pending"
+
+    def test_approve_no_session_leaves_pending_and_exits_nonzero(self, tmp_path):
+        write_escalation("d-nos", "pytest -q", "window_closed", state_dir=tmp_path)
+        # No handle written -> no live session.
+        rc = cli._cmd_approve(_Args("d-nos"), tmp_path)
+        assert rc == 1
+        rec = read_escalation("d-nos", state_dir=tmp_path)
+        assert rec["status"] == "pending"
+
+    def test_approve_success_marks_approved_and_exits_zero(self, tmp_path, monkeypatch):
+        write_escalation("d-ok", "pytest -q", "window_closed", state_dir=tmp_path)
+        _write_handle(tmp_path, "d-ok", "vnx-d-ok")
+        ok = FakeRunner(send_fail=False)
+        orig = cli._relay_keystroke_to_worker
+        monkeypatch.setattr(
+            cli, "_relay_keystroke_to_worker",
+            lambda did, sd: orig(did, sd, runner=ok),
+        )
+        rc = cli._cmd_approve(_Args("d-ok"), tmp_path)
+        assert rc == 0
+        rec = read_escalation("d-ok", state_dir=tmp_path)
+        assert rec["status"] == "approved"
+
+    def test_approve_missing_escalation_exits_one(self, tmp_path):
+        rc = cli._cmd_approve(_Args("ghost"), tmp_path)
+        assert rc == 1
+
+    def test_approve_rejects_traversal_dispatch_id(self, tmp_path):
+        rc = cli._cmd_approve(_Args("../../etc/x"), tmp_path)
+        assert rc == 2  # invalid dispatch_id, rejected before any path use
+
+    def test_deny_rejects_traversal_dispatch_id(self, tmp_path):
+        rc = cli._cmd_deny(_Args("a/b"), tmp_path)
+        assert rc == 2
+
+    def test_relay_keystroke_distinguishes_statuses(self, tmp_path):
+        # no handle -> no_session
+        assert cli._relay_keystroke_to_worker("none", tmp_path)[0] == "no_session"
+        # handle + failing send -> send_failed
+        _write_handle(tmp_path, "sf", "vnx-sf")
+        status, session = cli._relay_keystroke_to_worker(
+            "sf", tmp_path, runner=FakeRunner(send_fail=True)
+        )
+        assert status == "send_failed"
+        assert session == "vnx-sf"
+        # handle + ok send -> sent
+        _write_handle(tmp_path, "okk", "vnx-okk")
+        status, session = cli._relay_keystroke_to_worker(
+            "okk", tmp_path, runner=FakeRunner(send_fail=False)
+        )
+        assert status == "sent"
+        assert session == "vnx-okk"
+        # tmux unavailable -> error (operational, not "no session")
+        _write_handle(tmp_path, "noux", "vnx-noux")
+        status, session = cli._relay_keystroke_to_worker(
+            "noux", tmp_path, runner=FakeRunner(tmux_available=False)
+        )
+        assert status == "error"
