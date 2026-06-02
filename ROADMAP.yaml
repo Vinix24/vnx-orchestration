@@ -31,11 +31,11 @@ title: VNX Multi-Feature Roadmap
 
 launch_state:
   version: "1.0.0"
-  date: "2026-06-01"             # last update to this launch_state block
+  date: "2026-06-02"             # last update to this launch_state block
   status: "pre-launch"            # code queue merged to main; NOT yet published
-  target_date: "2026-06-02"       # HN/Reddit launch target
-  last_verified: "2026-06-01"
-  verified_against: "origin/main@c0506771"
+  target_date: "2026-06-09"       # HN/Reddit launch target (postponed ~1 week)
+  last_verified: "2026-06-02"
+  verified_against: "origin/main@54ad9df6"
   note: >
     1.0.0 code queue is fully merged to main as of 2026-06-01. PRs #756, #759,
     #758, #757, #760, #761, #763, #764, #765, #751, #766, #767, #769, and fix
@@ -52,6 +52,10 @@ launch_state:
     trigger and central-path unification stay dormant. Smart routing
     (VNX_AUTO_ROUTE) and pool task consumer (VNX_POOL_TASK_CONSUMER) are shipped
     opt-in. Roadmap autopilot tick (RA-6) ships dark (default off).
+    Launch postponed ~1 week on 2026-06-02 (operator decision, competing
+    priorities); 1.0.1/1.x post-launch work pulled forward as the active queue.
+    1.0 code remains frozen + launch-ready; LB-3 still the only launch gate when
+    ready.
   launch_blockers:
     - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
 
@@ -472,8 +476,20 @@ features:
     depends_on:
       - launch-option-b-parity
     milestone: "1.1"
-    status: planned
-    notes: "Code-organization payoff (no duplication), not new behavior. Strangler-fig behind VNX_UNIFIED_ENVELOPE=1, legacy default until burn-in; delete legacy blocks only after."
+    status: in-progress
+    pr_queue:
+      - pr_id: "#789"
+        title: "feat(dispatch): PR-1 flag-gated dispatch envelope (codex lane, VNX_UNIFIED_ENVELOPE, legacy default)"
+        status: merged
+        risk_class: high
+    notes: >
+      Code-organization payoff (no duplication), not new behavior. Strangler-fig
+      behind VNX_UNIFIED_ENVELOPE=1, legacy default until burn-in; delete legacy
+      blocks only after. Flag-gated default-off. PR-1 codex-lane merged (#789,
+      2026-06-02). PR-2 claude-subprocess lane open (role-forward blocker). PR-3
+      tmux adapter + PR-9 /pending routing remain. ~20k total (dispatch
+      unification). Previously: Option A envelope extraction; the merge of #789 is
+      the first codex-lane PR for the unified envelope.
 
   - feature_id: capability-binding-full
     title: "Full role->capability binding: mcp_servers allowlist + permission_mode per role + un-dead generate_claude_settings + per-adapter materialization + permission_enforcement receipt field"
@@ -631,6 +647,23 @@ features:
       - tracks-layer-activation
     milestone: "1.x"
     status: planned
+    pr_queue:
+      - pr_id: "#787"
+        title: "feat(planning): Phase 1 — tracks seeder + horizon + deliverables view + vnx objective list"
+        status: merged
+        risk_class: high
+      - pr_id: "#790"
+        title: "feat(planning): Phase 2 — deliverable plane + proposed->ready human gate (vnx deliverable add/list/promote)"
+        status: merged
+        risk_class: high
+      - pr_id: "#791"
+        title: "feat(dashboard): planning kanban — objectives/deliverables/open-items by horizon (reuses design system)"
+        status: merged
+        risk_class: high
+      - pr_id: "#793"
+        title: "feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP)"
+        status: merged
+        risk_class: high
     notes: >
       4-architect-designed (NO-NODE): TRACK(=feature) -> DISPATCH(execution leaf,
       output_ref/output_kind pluggable: pr|post|deal|doc) -> output+receipt;
@@ -639,6 +672,10 @@ features:
       field; domain-agnostic (Business OS marketing/sales). Fills the empty
       strategic_state shell + fixes the loader reading the wrong roadmap file.
       Companion: PLANNING-OBJECT-MODEL-OPUS-REVIEW + DELIVERABLE-NODE-DEBATE docs.
+      Build merged 2026-06-02: Phase 1 (#787) tracks seeder + horizon + objectives
+      view, Phase 2 (#790) deliverable plane + human gate, dashboard kanban (#791),
+      Phase 3 (#793) advisory rollup reconciler. Layer is build-complete pending
+      live activation (migrate 0027 + seed_tracks --apply) + envelope unification.
 
   - feature_id: receipt-hashchain-wire
     title: "GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests"
@@ -651,11 +688,17 @@ features:
     depends_on:
       - log-rotation
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#786"
+        title: "feat(receipts): per-append hash-chain wiring, flag-gated VNX_CHAIN_RECEIPTS (GAP 3b)"
+        status: merged
+        risk_class: high
     notes: >
-      GAP 3b. Wire per-append hash-chaining into the receipt append (lock-scoped in
-      idempotency.py) + epoch rotation (feat/ledger-rotation-3b) + verify_history +
-      concurrent fork-tests; flag-gated VNX_CHAIN_RECEIPTS. 4-architect-decided
+      GAP 3b. Per-append hash-chain wired into the receipt append (lock-scoped in
+      idempotency.py), flag-gated VNX_CHAIN_RECEIPTS default-off. Merged #786 on
+      2026-06-02. Epoch-rotation of the live ledger + verify_history + concurrent
+      fork-tests still pending (1.0.1 remainder). 4-architect-decided
       DROP-claim-now-wire-1.0.1. README hash-chain claim softened in DOC-PASS.
 
   - feature_id: provider-lanes-doc-pass
@@ -666,11 +709,74 @@ features:
       - codex_gate
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#785"
+        title: "docs: provider-lanes USP doc + README hash-chain honesty fix"
+        status: merged
+        risk_class: low
     notes: >
       Operator-wanted BEFORE publish. NEW provider-lanes USP doc
       (claude-subprocess/claude-tmux-subscription/codex/gemini/kimi/deepseek-harness +
       ollama-resolver; no SDK; June-15 driver; when-which-lane incl. analysis-vs-commit
       lane behavior) + README honesty fix (hash-chain claim -> verification-tooling) +
-      ROADMAP/docs reflect tracks-activation. Relates to OI for analysis-lane report
-      capture.
+      ROADMAP/docs reflect tracks-activation. Merged #785 on 2026-06-01.
+
+  # ---- 2026-06-02 overnight merges (post-backfill work) ----
+  - feature_id: report-to-receipt-converter
+    title: "Universal report->receipt converter: validates report_body_contract, no hooks, generic conversion"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on: []
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#788"
+        title: "feat(governance): unified_report as universal interface — AGENTS.md report-contract + generic report->receipt conversion (no hooks)"
+        status: merged
+        risk_class: medium
+    notes: >
+      Universal report->receipt converter. Validates the report_body_contract
+      (scripts/lib/report_body_contract.py) and converts any compliant unified_report
+      to a receipt without hooks or side effects. Merged #788 on 2026-06-02.
+
+  - feature_id: oi-2331-intelligence-repair
+    title: "OI-2331: repair 4 regressed nightly intelligence pipeline phases after GAP 4 reactivation dormancy"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - gap4-self-learning-reactivation
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#792"
+        title: "fix(intelligence): repair 4 regressed nightly pipeline phases (OI-2331)"
+        status: merged
+        risk_class: medium
+    notes: >
+      4 auxiliary intelligence pipeline phases regressed during the self-learning
+      loop dormancy period (GAP 4). Repaired and verified. Merged #792 on 2026-06-02.
+
+  - feature_id: oi-2328-atomic-prune
+    title: "OI-2328: atomic prune transaction for DB maintenance (vnx_db_maintenance.py)"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - log-rotation
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#794"
+        title: "fix(db-maintenance): atomic prune transaction (OI-2328)"
+        status: merged
+        risk_class: low
+    notes: >
+      Atomic prune transaction for the DB maintenance script
+      (scripts/vnx_db_maintenance.py). Ensures transactional safety on prune
+      operations. Merged #794 on 2026-06-02.

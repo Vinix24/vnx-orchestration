@@ -1,12 +1,24 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-01T17:35:11.460558+00:00
+**Last updated**: 2026-06-02T04:10:20.064667+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #794 — fix(db-maintenance): atomic prune transaction (OI-2328) (#794) (2026-06-01)
+- #793 — feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP) (#793) (2026-06-01)
+- #792 — fix(intelligence): repair 4 regressed nightly pipeline phases (OI-2331) (#792) (2026-06-01)
+- #791 — feat(dashboard): planning kanban — objectives/deliverables/open-items by horizon (reuses design system) (#791) (2026-06-01)
+- #790 — feat(planning): Phase 2 — deliverable plane + proposed->ready human gate (vnx deliverable add/list/promote) (#790) (2026-06-01)
+- #789 — feat(dispatch): PR-1 flag-gated dispatch envelope (codex lane, VNX_UNIFIED_ENVELOPE, legacy default) (#789) (2026-06-01)
+- #788 — feat(governance): unified_report as universal interface — AGENTS.md report-contract + generic report->receipt conversion (no hooks) (#788) (2026-06-01)
+- #787 — feat(planning): Phase 1 — tracks seeder + horizon + deliverables view + vnx objective list (#787) (2026-06-01)
+- #786 — feat(receipts): per-append hash-chain wiring, flag-gated VNX_CHAIN_RECEIPTS (GAP 3b) (#786) (2026-06-01)
+- #785 — docs: provider-lanes USP doc + README hash-chain honesty fix (#785) (2026-06-01)
+- #784 — feat(strategy): project ROADMAP -> strategy/roadmap.yaml + seed decisions (light up strategic_state boot surface) (#784) (2026-06-01)
+- #783 — chore(roadmap): backfill 2026-06-01 work + fix tmux-lane drift (SSOT reconcile) (#783) (2026-06-01)
 - #782 — feat(doctor): structural-doctor for tracks-layer activation (dry-run default, backup-on-apply) (#782) (2026-06-01)
 - #781 — fix(tmux): bounded guarded-retry + adaptive settle for submit reliability (GAP 6) (#781) (2026-06-01)
 - #780 — feat(intelligence): install nightly intelligence pipeline cron (GAP 4 — reactivate self-learning loop) (#780) (2026-06-01)
@@ -241,7 +253,7 @@ Status: planned
 Status: planned
 
 ### opt-a-envelope-extraction — Option A envelope extraction: dispatch_envelope.py + LaneRouter + delete legacy duplicated PREPARE/GOVERN
-Status: planned
+Status: in-progress
 
 ### capability-binding-full — Full role->capability binding: mcp_servers allowlist + permission_mode per role + un-dead generate_claude_settings + per-adapter materialization + permission_enforcement receipt field
 Status: planned
@@ -274,8 +286,17 @@ Status: done
 Status: planned
 
 ### receipt-hashchain-wire — GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests
-Status: planned
+Status: done
 
 ### provider-lanes-doc-pass — Provider-lanes USP doc + README honesty fix + ROADMAP/docs reflect tracks-activation
-Status: planned
+Status: done
+
+### report-to-receipt-converter — Universal report->receipt converter: validates report_body_contract, no hooks, generic conversion
+Status: done
+
+### oi-2331-intelligence-repair — OI-2331: repair 4 regressed nightly intelligence pipeline phases after GAP 4 reactivation dormancy
+Status: done
+
+### oi-2328-atomic-prune — OI-2328: atomic prune transaction for DB maintenance (vnx_db_maintenance.py)
+Status: done
 
