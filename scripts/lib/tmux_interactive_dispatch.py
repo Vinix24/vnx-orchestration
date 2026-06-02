@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sqlite3
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -766,6 +767,44 @@ class TmuxInteractiveDispatch:
             return False
         return self._runner.run(["paste-buffer", "-t", pane_id]).returncode == 0
 
+    # -- worker-permission relay (governance, flag-gated) ------------------
+    def _maybe_start_permission_relay(self, session: str, dispatch_id: str):
+        """Start the worker-permission relay thread when VNX_PERMISSION_RELAY=1.
+
+        Governance relay (see scripts/lib/worker_permission_relay.py): a DETACHED
+        worker has no human to answer a Claude Code permission prompt, so it would
+        silently hang. The relay polls the pane on a short interval and, per the
+        operator-controlled auto-accept WINDOW + CATASTROPHIC hard-list, either
+        auto-approves a routine prompt (send-keys "1" + a SEPARATE Enter to the
+        EXPLICIT session) or writes an escalation record for the operator (T0) to
+        surface in chat. Default off = no behavior change. Returns a RelayHandle
+        or None (disabled / unavailable). Never raises.
+        """
+        flag = os.environ.get("VNX_PERMISSION_RELAY", "0").strip().lower()
+        if flag in ("0", "false", "no", "off", ""):
+            return None
+        try:
+            from worker_permission_relay import RelayHandle, run_relay_loop  # noqa: PLC0415
+
+            interval = float(os.environ.get("VNX_PERMISSION_RELAY_INTERVAL", "3"))
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=run_relay_loop,
+                args=(session, dispatch_id, self._runner, stop_event),
+                kwargs={"state_dir": self._state_dir, "interval": interval},
+                name=f"perm-relay-{dispatch_id}",
+                daemon=True,
+            )
+            thread.start()
+            logger.info(
+                "interactive: permission relay started dispatch=%s session=%s interval=%.1fs",
+                dispatch_id, session, interval,
+            )
+            return RelayHandle(thread=thread, stop_event=stop_event)
+        except Exception as exc:  # noqa: BLE001 — relay is best-effort, never blocks dispatch
+            logger.debug("interactive: permission relay start skipped (%s)", exc)
+            return None
+
     def _kill_session(self, session: str) -> bool:
         """Kill the dispatch session. Idempotent — absent session is success."""
         res = self._runner.run(["kill-session", "-t", session])
@@ -1041,6 +1080,8 @@ class TmuxInteractiveDispatch:
         worktree_handle: "WorktreeHandle | None" = None
         _wt_state: "list[str | None]" = [None]
         _raw_log: "list[Path | None]" = [None]
+        # Worker-permission relay handle (flag-gated); stopped in _teardown.
+        _relay_handle: "list[object | None]" = [None]
 
         if isolated_worktree:
             try:
@@ -1083,6 +1124,13 @@ class TmuxInteractiveDispatch:
             if _torn_down:
                 return
             _torn_down = True
+            # Stop the worker-permission relay thread (flag-gated; may be None).
+            if _relay_handle[0] is not None:
+                try:
+                    _relay_handle[0].stop_event.set()
+                    _relay_handle[0].thread.join(timeout=5)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("interactive: relay stop failed (%s)", exc)
             if signal_dir is not None:
                 try:
                     shutil.rmtree(signal_dir, ignore_errors=True)
@@ -1406,6 +1454,11 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     worktree_state=_wt_state[0],
                 )
+
+            # 7c. Start the governance permission relay (flag-gated, default off)
+            # so a permission prompt raised DURING the run is auto-approved (open
+            # window) or escalated to the operator instead of silently hanging.
+            _relay_handle[0] = self._maybe_start_permission_relay(session, dispatch_id)
 
             # 8. Wait for receipt
             receipt = self._wait_for_receipt(
