@@ -1887,18 +1887,24 @@ class TestReceiptDedup(_LaneTestCase):
 
 
 # ---------------------------------------------------------------------------
-# FIX 1 — v2.1.159 readiness markers + VNX_TMUX_READY_STRICT fail-fast
+# Version-robust readiness markers + VNX_TMUX_READY_STRICT fail-fast
 # ---------------------------------------------------------------------------
 
 class TestReadinessV2(_LaneTestCase):
-    """Readiness marker detection for Claude Code v2.1.159 + STRICT fail-fast guard."""
+    """Version-agnostic TUI-fallback readiness markers + STRICT fail-fast guard.
 
-    def test_v2_ready_marker_detected(self):
-        """'Claude Code v2.1.159' startup banner is detected as ready (no legacy marker needed)."""
+    The hook sentinel (SessionStart) is the PRIMARY readiness signal; these tests
+    cover the tolerant TUI fallback. The "Claude Code vX.Y.Z" banner is
+    deliberately NOT a marker anymore — pinning to it broke on every Claude Code
+    bump (e.g. 2.1.160 dropped "esc to interrupt").
+    """
+
+    def test_prompt_glyph_marker_detected(self):
+        """The idle input-prompt glyph '❯' is detected as ready (version-agnostic)."""
         fake = FakeTmux(
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
-            ready_content="Claude Code v2.1.159\n> ",
+            ready_content="some banner\n❯ ",
         )
         lane = self._make_lane(fake)
         result = self._fast_dispatch(lane)

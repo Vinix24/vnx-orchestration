@@ -10,6 +10,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/pretooluse_block_subagent.sh\"'",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -32,6 +42,28 @@
             "command": "python3 scripts/build_t0_state.py --output .vnx-data/state/t0_state.json 2>/dev/null; exit 0"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_session_ready.sh\"'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_prompt_received.sh\"'",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "Stop": [
@@ -41,6 +73,16 @@
           {
             "type": "command",
             "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel)/scripts/hooks/stop_report_hook.sh\"'"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_stop_receipt.sh\"'",
+            "timeout": 5000
           }
         ]
       }
