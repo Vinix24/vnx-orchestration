@@ -8,6 +8,10 @@ Steps:
   4. Apply schemas/migrations/0024_tracks_tenant_scoping.sql (idempotent via user_version)
   5. PRAGMA pre-flight: assert tracks composite-key schema intact before adding horizon
   6. Apply schemas/migrations/0027_planning_horizon_and_deliverable_view.sql (idempotent)
+  7. PRAGMA pre-flight: assert tracks has horizon (v27) before adding derived_status
+  8. Apply schemas/migrations/0028_tracks_derived_status.sql (idempotent)
+  9. PRAGMA pre-flight: assert tracks has derived_status (v28) before adding track_type
+  10. Apply schemas/migrations/0029_track_type_discriminator.sql (idempotent)
 """
 
 from __future__ import annotations
@@ -432,11 +436,56 @@ def apply_migration_v28(conn: sqlite3.Connection, project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 8: preflight + apply 0029 migration (tracks.track_type + next_action_owner)
+# ---------------------------------------------------------------------------
+
+def _assert_tracks_v28_intact(conn: sqlite3.Connection) -> None:
+    """Assert tracks has derived_status (v28 state) before adding track_type.
+
+    Also guards against double-apply by rejecting if track_type already exists.
+    Column-presence check via PRAGMA table_info provides a secondary idempotency
+    guard beyond the user_version check in apply_script_if_below.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+    if "derived_status" not in cols:
+        raise RuntimeError(
+            "tracks missing 'derived_status' column (from 0028). "
+            "Run migration 0028 before 0029."
+        )
+    if "track_type" in cols:
+        raise RuntimeError(
+            "tracks already has 'track_type' column. Migration 0029 should be "
+            "skipped (user_version should be >= 29)."
+        )
+
+
+schema_migration.register_preflight(29, _assert_tracks_v28_intact)
+
+
+def apply_migration_v29(conn: sqlite3.Connection, project_root: Path) -> None:
+    migration_path = _MIGRATIONS / "0029_track_type_discriminator.sql"
+    if not migration_path.exists():
+        raise FileNotFoundError(f"Migration not found: {migration_path}")
+
+    sql = migration_path.read_text(encoding="utf-8")
+
+    current_version = schema_migration.get_user_version(conn)
+    if current_version >= 29:
+        print(f"  [skip] migration 0029 already applied (user_version={current_version})")
+        return
+
+    _assert_tracks_v28_intact(conn)
+    print("  [apply] migration 0029_track_type_discriminator.sql ...")
+    schema_migration.apply_script_if_below(conn, 29, sql)
+    print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def run(project_root: Path | None = None) -> None:
-    """Apply track layer migrations: 0022, 0024, 0027, 0028."""
+    """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029."""
     if project_root is None:
         project_root = resolve_project_root(__file__)
 
@@ -476,6 +525,10 @@ def run(project_root: Path | None = None) -> None:
 
         # Apply 0028 — additive: tracks.derived_status advisory column
         apply_migration_v28(conn, project_root)
+        conn.commit()
+
+        # Apply 0029 — additive: tracks.track_type + tracks.next_action_owner
+        apply_migration_v29(conn, project_root)
         conn.commit()
 
         print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")
