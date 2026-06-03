@@ -20,6 +20,7 @@ from smart_router import (
     classify_task,
     decide,
     recommend,
+    _compute_quality_tier,
     _cost_aware_sort_key,
     _load_recommendations,
     TASK_CLASSES,
@@ -441,3 +442,81 @@ class TestNullCostSortKey:
         assert decision.primary is not None
         assert decision.primary.model_id == "claude-opus-4-6"
         assert decision.primary.composite_score == 10.0
+
+
+# ---------------------------------------------------------------------------
+# quality_tier — computation, filtering, and receipt stamping (PR-SR-FIX-3)
+# ---------------------------------------------------------------------------
+
+class TestQualityTier:
+
+    def test_quality_tier_computation_from_score(self):
+        """Boundary cases: 4.9→1, 5.0→2, 7.4→2, 7.5→3."""
+        assert _compute_quality_tier(4.9, None) == 1
+        assert _compute_quality_tier(5.0, None) == 2
+        assert _compute_quality_tier(7.4, None) == 2
+        assert _compute_quality_tier(7.5, None) == 3
+
+    def test_cost_tier_zero_still_tier_1(self):
+        """cost_tier=0 (local/free) forces quality_tier=1 regardless of score."""
+        assert _compute_quality_tier(6.0, 0) == 1
+        assert _compute_quality_tier(9.0, 0) == 1
+        assert _compute_quality_tier(1.0, 0) == 1
+
+    def test_min_tier_filter_excludes_lower(self, tmp_path):
+        """min_quality_tier=2 removes tier-1 candidates, keeps tier-2 and tier-3."""
+        data = {
+            "routing_by_task": {
+                "01_code_generation": {
+                    "min_quality_tier": 2,
+                    "candidates": [
+                        {"model_id": "tier3-model", "composite_score": 8.0, "avg_duration_seconds": 100.0},
+                        {"model_id": "tier2-model", "composite_score": 6.0, "avg_duration_seconds": 50.0},
+                        {"model_id": "tier1-model", "composite_score": 3.0, "avg_duration_seconds": 10.0},
+                    ],
+                }
+            }
+        }
+        p = tmp_path / "recs.yaml"
+        p.write_text(yaml.dump(data), encoding="utf-8")
+        candidates = recommend("01_code_generation", recommendations_path=p)
+        model_ids = [c.model_id for c in candidates]
+        assert "tier1-model" not in model_ids
+        assert "tier2-model" in model_ids
+        assert "tier3-model" in model_ids
+
+    def test_max_tier_filter_caps_premium(self, tmp_path):
+        """max_quality_tier=2 removes tier-3 candidates, keeps tier-1 and tier-2."""
+        data = {
+            "routing_by_task": {
+                "01_code_generation": {
+                    "max_quality_tier": 2,
+                    "candidates": [
+                        {"model_id": "tier3-model", "composite_score": 8.0, "avg_duration_seconds": 100.0},
+                        {"model_id": "tier2-model", "composite_score": 6.0, "avg_duration_seconds": 50.0},
+                        {"model_id": "tier1-model", "composite_score": 3.0, "avg_duration_seconds": 10.0},
+                    ],
+                }
+            }
+        }
+        p = tmp_path / "recs.yaml"
+        p.write_text(yaml.dump(data), encoding="utf-8")
+        candidates = recommend("01_code_generation", recommendations_path=p)
+        model_ids = [c.model_id for c in candidates]
+        assert "tier3-model" not in model_ids
+        assert "tier2-model" in model_ids
+
+    def test_no_filter_no_regression(self, recommendations_yaml):
+        """Without min/max set, sort output is identical to pre-FIX-3 _cost_aware_sort_key."""
+        candidates = recommend("01_code_generation", recommendations_path=recommendations_yaml)
+        expected_order = sorted(candidates, key=_cost_aware_sort_key)
+        assert [c.model_id for c in candidates] == [c.model_id for c in expected_order]
+
+    def test_recommend_returns_tier_on_candidate(self):
+        """recommend() populates quality_tier (1, 2, or 3) on every returned candidate."""
+        candidates = recommend("01_code_generation")
+        assert len(candidates) > 0
+        for c in candidates:
+            assert c.quality_tier in (1, 2, 3), (
+                f"{c.model_id} has unexpected quality_tier={c.quality_tier}"
+            )

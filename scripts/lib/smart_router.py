@@ -32,6 +32,7 @@ class RouteCandidate:
     avg_duration_seconds: float
     cost_usd_per_call: Optional[float] = None
     cost_tier: Optional[int] = None  # 0 = local/free; None = standard billing
+    quality_tier: int = 1  # 1=cheap (<5.0), 2=mid (5.0-7.49), 3=premium (>=7.5); computed at load
 
 
 @dataclass
@@ -172,6 +173,22 @@ def classify_task(
 _INCAPABLE_SCORE_FLOOR = 1.0
 
 
+def _compute_quality_tier(composite_score: float, cost_tier: Optional[int]) -> int:
+    """Derive coarse 3-level quality tier from composite_score and cost_tier.
+
+    cost_tier=0 (local/free) always maps to tier 1 regardless of score,
+    because local models are bench-v2 unproven until measurements say otherwise.
+    Boundaries: <5.0→1, 5.0-7.49→2, >=7.5→3.
+    """
+    if cost_tier == 0:
+        return 1
+    if composite_score >= 7.5:
+        return 3
+    if composite_score >= 5.0:
+        return 2
+    return 1
+
+
 def _cost_aware_sort_key(c: "RouteCandidate") -> tuple:
     """Sort key for cost-aware candidate ranking.
 
@@ -252,19 +269,56 @@ def _load_recommendations(
         )
 
     result: Dict[str, List[RouteCandidate]] = {}
-    for task_class, entries in raw["routing_by_task"].items():
+    for task_class, task_data in raw["routing_by_task"].items():
+        # Support old list format and new dict format with optional tier gates.
+        if isinstance(task_data, list):
+            entries: list = task_data or []
+            min_tier: Optional[int] = None
+            max_tier: Optional[int] = None
+        elif isinstance(task_data, dict):
+            entries = task_data.get("candidates") or []
+            raw_min = task_data.get("min_quality_tier")
+            raw_max = task_data.get("max_quality_tier")
+            min_tier = int(raw_min) if raw_min is not None else None
+            max_tier = int(raw_max) if raw_max is not None else None
+        else:
+            entries = []
+            min_tier = None
+            max_tier = None
+
         candidates = []
-        for entry in (entries or []):
-            raw_tier = entry.get("cost_tier")
+        for entry in entries:
+            raw_ct = entry.get("cost_tier")
+            ct = int(raw_ct) if raw_ct is not None else None
+            score = float(entry["composite_score"])
+            raw_qt = entry.get("quality_tier")
+            qt = int(raw_qt) if raw_qt is not None else _compute_quality_tier(score, ct)
             candidates.append(RouteCandidate(
                 model_id=str(entry["model_id"]),
-                composite_score=float(entry["composite_score"]),
+                composite_score=score,
                 avg_duration_seconds=float(entry["avg_duration_seconds"]),
                 cost_usd_per_call=entry.get("cost_usd_per_call"),
-                cost_tier=int(raw_tier) if raw_tier is not None else None,
+                cost_tier=ct,
+                quality_tier=qt,
             ))
         _enrich(candidates)
-        candidates.sort(key=_cost_aware_sort_key)
+
+        has_tier_filter = min_tier is not None or max_tier is not None
+        if has_tier_filter:
+            candidates = [
+                c for c in candidates
+                if (min_tier is None or c.quality_tier >= min_tier)
+                and (max_tier is None or c.quality_tier <= max_tier)
+            ]
+            # Tier is primary sort axis so explicit quality_tier overrides rank correctly.
+            candidates.sort(key=lambda c: (
+                (0, -c.quality_tier, -c.composite_score, c.cost_usd_per_call or 0.0)
+                if c.composite_score > _INCAPABLE_SCORE_FLOOR
+                else (1, -c.quality_tier, -c.composite_score, float("inf"))
+            ))
+        else:
+            candidates.sort(key=_cost_aware_sort_key)
+
         result[task_class] = candidates
 
     return result
@@ -409,6 +463,7 @@ def write_route_decision(
         } if decision.fallback else None,
         "constraints_applied": decision.constraints_applied,
         "cost_estimate": decision.cost_estimate,
+        "chosen_quality_tier": decision.primary.quality_tier if decision.primary else None,
         "outcome": None,
     }
     append_locked(state_dir / "route_decisions.ndjson", record)
