@@ -32,6 +32,7 @@ class RouteCandidate:
     avg_duration_seconds: float
     cost_usd_per_call: Optional[float] = None
     cost_tier: Optional[int] = None  # 0 = local/free; None = standard billing
+    quality_tier: Optional[int] = None  # 1=low, 2=mid, 3=premium capability
 
 
 @dataclass
@@ -172,6 +173,21 @@ def classify_task(
 _INCAPABLE_SCORE_FLOOR = 1.0
 
 
+def _compute_quality_tier(composite_score: float, cost_tier: Optional[int]) -> int:
+    """Derive quality tier (1-3) from composite_score and cost_tier.
+
+    cost_tier=0 (local/free) is locked to tier 1 regardless of score.
+    Otherwise: score >= 7.5 → 3, score >= 5.0 → 2, else → 1.
+    """
+    if cost_tier == 0:
+        return 1
+    if composite_score >= 7.5:
+        return 3
+    if composite_score >= 5.0:
+        return 2
+    return 1
+
+
 def _cost_aware_sort_key(c: "RouteCandidate") -> tuple:
     """Sort key for cost-aware candidate ranking.
 
@@ -252,18 +268,44 @@ def _load_recommendations(
         )
 
     result: Dict[str, List[RouteCandidate]] = {}
-    for task_class, entries in raw["routing_by_task"].items():
+    for task_class, task_node in raw["routing_by_task"].items():
+        # Support new dict shape: {candidates: [...], min_quality_tier: N, max_quality_tier: N}
+        # Plain-list shape (legacy) passes through unchanged — fully backward compatible.
+        if isinstance(task_node, dict) and "candidates" in task_node:
+            entries = task_node.get("candidates") or []
+            min_qt: Optional[int] = task_node.get("min_quality_tier")
+            max_qt: Optional[int] = task_node.get("max_quality_tier")
+        else:
+            entries = task_node or []
+            min_qt = None
+            max_qt = None
+
         candidates = []
-        for entry in (entries or []):
+        for entry in entries:
             raw_tier = entry.get("cost_tier")
+            cost_tier = int(raw_tier) if raw_tier is not None else None
+            score = float(entry["composite_score"])
+            if "quality_tier" in entry:
+                qt = int(entry["quality_tier"])
+                if qt not in (1, 2, 3):
+                    raise ValueError(
+                        f"quality_tier must be 1-3, got {qt} for {entry.get('model_id')}"
+                    )
+            else:
+                qt = _compute_quality_tier(score, cost_tier)
             candidates.append(RouteCandidate(
                 model_id=str(entry["model_id"]),
-                composite_score=float(entry["composite_score"]),
+                composite_score=score,
                 avg_duration_seconds=float(entry["avg_duration_seconds"]),
                 cost_usd_per_call=entry.get("cost_usd_per_call"),
-                cost_tier=int(raw_tier) if raw_tier is not None else None,
+                cost_tier=cost_tier,
+                quality_tier=qt,
             ))
         _enrich(candidates)
+        if min_qt is not None:
+            candidates = [c for c in candidates if (c.quality_tier or 0) >= min_qt]
+        if max_qt is not None:
+            candidates = [c for c in candidates if (c.quality_tier or 0) <= max_qt]
         candidates.sort(key=_cost_aware_sort_key)
         result[task_class] = candidates
 
