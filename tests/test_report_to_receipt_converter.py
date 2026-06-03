@@ -28,6 +28,7 @@ sys.path.insert(0, str(SCRIPTS_LIB))
 from report_to_receipt_converter import (
     _WATERMARK_FILENAME,
     _compute_sha256,
+    _load_route_decision,
     _load_watermark,
     build_receipt_from_report,
     convert_report_to_receipt,
@@ -529,3 +530,83 @@ class TestContractValidation:
         event_types = {r["event_type"] for r in receipts}
         assert "task_complete" in event_types
         assert "report_contract_invalid" in event_types
+
+
+# ---------------------------------------------------------------------------
+# Part 8: smart_router strategy-tag detection (PR-SR-FIX-1)
+# ---------------------------------------------------------------------------
+
+class TestSmartRouterStrategyTag:
+    """Receipt gets route_decision enrichment when per-dispatch JSON exists.
+
+    smart_router.write_route_decision() writes
+    state_dir/route_decisions/<dispatch_id>.json with strategy='smart_router'.
+    The converter reads it back so the receipt reflects the actual routing
+    strategy instead of the default 'default' tag from governance_emit.
+    """
+
+    def _write_route_decision_json(
+        self, state_dir: Path, dispatch_id: str, task_class: str, model_id: str
+    ) -> None:
+        """Write a per-dispatch route decision JSON as smart_router would."""
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / f"{dispatch_id}.json").write_text(
+            json.dumps({
+                "strategy": "smart_router",
+                "task_class": task_class,
+                "selected_model": model_id,
+                "timestamp": "2026-06-03T19:45:00Z",
+            }),
+            encoding="utf-8",
+        )
+
+    def test_receipt_contains_smart_router_strategy_when_route_decision_exists(
+        self, tmp_path, state_dir
+    ):
+        """Converting a report where a route decision JSON exists sets strategy=smart_router."""
+        dispatch_id = "20260603-sr-strategy-test"
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+        self._write_route_decision_json(
+            state_dir, dispatch_id, "02_code_review", "claude-opus-4-6"
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        assert result.status == "appended"
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_complete"
+        assert "route_decision" in r
+        assert r["route_decision"]["strategy"] == "smart_router"
+        assert r["route_decision"]["task_class"] == "02_code_review"
+        assert r["route_decision"]["selected_model"] == "claude-opus-4-6"
+
+    def test_receipt_has_no_route_decision_when_json_absent(self, tmp_path, state_dir):
+        """When no route decision JSON exists, receipt must not have route_decision key."""
+        dispatch_id = "20260603-sr-no-decision"
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert "route_decision" not in r
+
+    def test_load_route_decision_returns_none_for_missing_file(self, state_dir):
+        """_load_route_decision returns None gracefully when no file exists."""
+        result = _load_route_decision("nonexistent-dispatch", state_dir)
+        assert result is None
+
+    def test_load_route_decision_returns_none_for_malformed_json(self, state_dir):
+        """_load_route_decision returns None without raising on corrupt JSON."""
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / "bad-dispatch.json").write_text("not valid json{{", encoding="utf-8")
+
+        result = _load_route_decision("bad-dispatch", state_dir)
+        assert result is None

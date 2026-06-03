@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import logging
 import os
 import re
@@ -158,8 +159,23 @@ def _dispatch_id_from_filename(path: Path) -> Optional[str]:
     return None if stem.lower() in ("", "unknown", "none", "null") else stem
 
 
+def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str, Any]]:
+    """Load per-dispatch route decision JSON written by smart_router.write_route_decision().
+
+    Returns the parsed dict (with strategy/task_class/selected_model) or None when
+    the file does not exist or cannot be parsed.
+    """
+    path = state_dir / "route_decisions" / f"{dispatch_id}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def build_receipt_from_report(
-    report_path: Path, text: str
+    report_path: Path, text: str, *, state_dir: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
     """Build a minimal governed receipt dict from report content.
 
@@ -248,11 +264,16 @@ def build_receipt_from_report(
             "contract_violations": contract_violations,
         }
 
-    return {
+    receipt: Dict[str, Any] = {
         **base,
         "event_type": "task_complete",
         "status": merged.get("status", "unknown"),
     }
+    if state_dir and dispatch_id:
+        route_dec = _load_route_decision(dispatch_id, state_dir)
+        if route_dec:
+            receipt["route_decision"] = route_dec
+    return receipt
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +308,8 @@ def convert_report_to_receipt(
         logger.warning("report_to_receipt_converter: cannot read %s: %s", report_path.name, exc)
         return None
 
-    receipt = build_receipt_from_report(report_path, text)
+    state_dir_for_route = Path(receipts_file).parent if receipts_file else None
+    receipt = build_receipt_from_report(report_path, text, state_dir=state_dir_for_route)
     if receipt is None:
         return None
 
