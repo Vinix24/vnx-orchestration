@@ -1,7 +1,8 @@
-"""dispatch_envelope.py — Flag-gated unified dispatch envelope (PR-1, codex lane only).
+"""dispatch_envelope.py — Flag-gated unified dispatch envelope (PR-1 codex, PR-2 claude-subprocess).
 
-Strangler-fig approach: legacy default OFF, codex-lane only in this PR.
-Activate with VNX_UNIFIED_ENVELOPE=1 and VNX_UNIFIED_ENVELOPE_LANES containing "codex".
+Strangler-fig approach: legacy default OFF, each lane activated per VNX_UNIFIED_ENVELOPE_LANES.
+Activate with VNX_UNIFIED_ENVELOPE=1 and VNX_UNIFIED_ENVELOPE_LANES containing "codex"
+and/or "claude-subprocess".
 
 Seams: PREPARE -> ROUTE -> EXECUTE -> GOVERN
 
@@ -9,8 +10,14 @@ GOVERN is fail-closed: a missing receipt_path raises EnvelopeGovernError — nev
 silently loses a receipt. Report is emitted before the receipt so the receipt carries
 the linkage even when the report file is new (ADR-005).
 
+Per-lane dual-receipt safety: GOVERN emits both report AND receipt. When the
+receipt NDJSON already contains a line for this dispatch_id (e.g. written by
+deliver_with_recovery's internal close-out), the GOVERN receipt write is skipped
+(idempotent dedup). No double-emit.
+
 Reuses:
   - spawn_codex from provider_spawns.codex_spawn (no reimplementation)
+  - spawn_claude from provider_spawns.claude_spawn (no reimplementation)
   - emit_dispatch_receipt + emit_unified_report from governance_emit
 
 No new hooks. Idempotent receipts (governance_emit uses fcntl.flock).
@@ -165,12 +172,94 @@ class CodexAdapter:
         )
 
 
+class ClaudeSubprocessAdapter:
+    """Wraps spawn_claude — reuses existing spawn without reimplementation.
+
+    Maps ClaudeSpawnResult fields to _AdapterResult for the envelope GOVERN
+    phase.  completion_text is left empty (matching legacy _dispatch_claude
+    behavior) because the worker writes its own report via _ensure_unified_report;
+    the envelope report is a governance wrapper, not the worker's full output.
+
+    event_writer is not wired in PR-2 (SubprocessAdapter handles EventStore
+    internally); the audit stream gap is documented in Open Items.
+    """
+
+    def run(
+        self,
+        spec: EnvelopeSpec,
+        event_writer: Optional[Callable] = None,
+        cwd: Optional[Path] = None,
+    ) -> _AdapterResult:
+        from provider_spawns.claude_spawn import spawn_claude  # noqa: PLC0415
+
+        try:
+            result = spawn_claude(
+                prompt=spec.instruction,
+                model=spec.model,
+                dispatch_id=spec.dispatch_id,
+                terminal_id=spec.terminal_id,
+                event_writer=event_writer,
+                cwd=cwd,
+                role=spec.role,
+            )
+        except BrokenPipeError as exc:
+            return _AdapterResult(
+                returncode=1,
+                completion_text="",
+                status="failure",
+                error=f"claude spawn BrokenPipeError: {exc}",
+            )
+
+        token_usage: Dict[str, int] = {}
+        raw_usage = result.token_usage
+        if isinstance(raw_usage, dict) and raw_usage:
+            token_usage = {
+                "input": int(raw_usage.get("input_tokens", 0) or 0),
+                "output": int(raw_usage.get("output_tokens", 0) or 0),
+                "cache_hit": int(
+                    raw_usage.get("cache_read_input_tokens", 0) or 0
+                ),
+            }
+
+        if result.error:
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text="",
+                status="failure",
+                token_usage=token_usage,
+                error=result.error,
+            )
+        if result.timed_out:
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text="",
+                status="timeout",
+                token_usage=token_usage,
+                timed_out=True,
+            )
+        if result.stopped_early:
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text="",
+                status="success",
+                token_usage=token_usage,
+            )
+        status = "success" if result.returncode == 0 else "failure"
+        return _AdapterResult(
+            returncode=result.returncode,
+            completion_text="",
+            status=status,
+            token_usage=token_usage,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Lane router
 # ---------------------------------------------------------------------------
 
 _LANE_REGISTRY: Dict[str, type] = {
     "codex": CodexAdapter,
+    "claude-subprocess": ClaudeSubprocessAdapter,
 }
 
 
@@ -209,7 +298,9 @@ def _prepare(spec: EnvelopeSpec) -> str:
             dispatch_paths=None,
         )
     except ImportError:
-        pass
+        logger.debug(
+            "envelope._prepare: intelligence_injection not available — skipping"
+        )
     except Exception as exc:
         logger.warning(
             "envelope._prepare: intelligence injection failed (%s) — skipping", exc
@@ -232,6 +323,32 @@ def _prepare(spec: EnvelopeSpec) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _receipt_exists_for_dispatch(receipt_path: Path, dispatch_id: str) -> bool:
+    """Check whether the NDJSON receipt file already contains a line for dispatch_id.
+
+    Used for idempotent dedup: when the legacy path (deliver_with_recovery) already
+    wrote a receipt for this dispatch, the envelope GOVERN skips its own receipt
+    write to avoid double-emit.
+    """
+    if not receipt_path.exists():
+        return False
+    target = f'"dispatch_id":"{dispatch_id}"'
+    try:
+        with open(receipt_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if target in line:
+                    return True
+    except OSError as exc:
+        logger.warning(
+            "envelope._receipt_exists_for_dispatch: cannot read receipt ledger %s: %s — "
+            "treating as unreadable (fail-closed: will skip emit to avoid double-receipt)",
+            receipt_path,
+            exc,
+        )
+        return True
+    return False
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -243,6 +360,11 @@ def _govern(
     Fail-closed contract: raises EnvelopeGovernError when receipt_path is None or
     absent on disk after emit — never silently loses a receipt.
     Report is emitted first so the receipt can carry the linkage (ADR-005 ordering).
+
+    Idempotent dedup: when the receipt NDJSON already contains a line for this
+    dispatch_id (written by deliver_with_recovery's internal close-out as a safety
+    net), the GOVERN receipt write is skipped.  This avoids double-emit during the
+    migration period where both legacy and envelope paths may run.
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: PLC0415
 
@@ -268,40 +390,48 @@ def _govern(
             exc,
         )
 
-    # RECEIPT second — fail-closed
+    # RECEIPT second — fail-closed, with idempotent dedup
     receipt_path: Optional[Path] = None
-    try:
-        receipt_path = emit_dispatch_receipt(
-            dispatch_id=spec.dispatch_id,
-            terminal_id=spec.terminal_id,
-            provider=spec.provider,
-            model=spec.model,
-            pr_id=spec.pr_id,
-            status=adapter_result.status,
-            completion_pct=100 if adapter_result.status == "success" else 0,
-            risk=0.0,
-            findings=[],
-            duration_seconds=duration,
-            token_usage=adapter_result.token_usage,
-            cost_usd=None,
-            state_dir=spec.state_dir,
-            report_path=str(report_path) if report_path else None,
+    ndjson_path = spec.state_dir / "t0_receipts.ndjson"
+    if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
+        logger.info(
+            "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
+            spec.dispatch_id,
         )
-    except Exception as exc:
-        raise EnvelopeGovernError(
-            f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
-        ) from exc
+        receipt_path = ndjson_path
+    else:
+        try:
+            receipt_path = emit_dispatch_receipt(
+                dispatch_id=spec.dispatch_id,
+                terminal_id=spec.terminal_id,
+                provider=spec.provider,
+                model=spec.model,
+                pr_id=spec.pr_id,
+                status=adapter_result.status,
+                completion_pct=100 if adapter_result.status == "success" else 0,
+                risk=0.0,
+                findings=[],
+                duration_seconds=duration,
+                token_usage=adapter_result.token_usage,
+                cost_usd=None,
+                state_dir=spec.state_dir,
+                report_path=str(report_path) if report_path else None,
+            )
+        except Exception as exc:
+            raise EnvelopeGovernError(
+                f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
+            ) from exc
 
-    if receipt_path is None:
-        raise EnvelopeGovernError(
-            f"envelope._govern: receipt_path is None after emit "
-            f"(fail-closed) dispatch={spec.dispatch_id}"
-        )
-    if not receipt_path.exists():
-        raise EnvelopeGovernError(
-            f"envelope._govern: receipt file absent on disk after emit "
-            f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
-        )
+        if receipt_path is None:
+            raise EnvelopeGovernError(
+                f"envelope._govern: receipt_path is None after emit "
+                f"(fail-closed) dispatch={spec.dispatch_id}"
+            )
+        if not receipt_path.exists():
+            raise EnvelopeGovernError(
+                f"envelope._govern: receipt file absent on disk after emit "
+                f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
+            )
 
     logger.info(
         "envelope._govern: dispatch=%s status=%s report=%s receipt=%s",
