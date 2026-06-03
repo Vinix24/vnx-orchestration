@@ -30,6 +30,9 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+from model_inference_guard import evaluate_activity_routing, HINT
+from digest_text import smart_truncate, decision_grade, dedup_suggestions
+
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 VNX_HOME = Path(PATHS["VNX_HOME"])
@@ -87,115 +90,61 @@ def _is_already_suggested_or_applied(
 
 
 def generate_memory_suggestions(conn: sqlite3.Connection, since: str) -> List[dict]:
-    """Generate MEMORY.md suggestions from model performance patterns."""
+    """Generate MEMORY.md suggestions from difficulty-controlled model performance.
+
+    Model-vs-model comparisons run through model_inference_guard so that a "prefer
+    model X for task Y" suggestion is only emitted when the two models share a
+    task-difficulty bucket with a sufficient sample AND an infra-excluded reasoning
+    signal shows a meaningful gap. Confounded comparisons (the orchestrator model gets
+    the hard tasks; error-recovery is resilience, not failure) are dropped.
+
+    The bare per-model token-profile dump is intentionally NOT emitted: it is a
+    non-actionable raw internal, not a decision the operator can accept or reject.
+    """
     cur = conn.cursor()
 
-    # Model comparison: which model performs better for which task type
     cur.execute("""
         SELECT
             session_model,
             primary_activity,
-            COUNT(*) as total,
-            SUM(CASE WHEN has_error_recovery = 0 THEN 1 ELSE 0 END) as success_count,
-            AVG(total_output_tokens) as avg_tokens,
-            SUM(cache_read_tokens) as cache_read,
-            SUM(cache_creation_tokens) as cache_create
+            total_output_tokens,
+            duration_minutes,
+            has_error_recovery
         FROM session_analytics
         WHERE session_date >= ?
           AND session_model != 'unknown'
-        GROUP BY session_model, primary_activity
-        HAVING COUNT(*) >= ?
-        ORDER BY session_model
-    """, (since, MIN_SESSIONS_FOR_SUGGESTION))
+          AND primary_activity IS NOT NULL
+    """, (since,))
 
-    model_activity = {}
+    from collections import defaultdict as _dd
+    activity_sessions = _dd(lambda: _dd(list))
     for row in cur.fetchall():
-        model, activity, total, success, avg_tok, cache_r, cache_c = row
-        key = (model, activity)
-        model_activity[key] = {
-            "total": total, "success": success,
-            "rate": round(success / total, 2) if total > 0 else 0,
-            "avg_tokens": round(avg_tok),
-            "cache_read": cache_r, "cache_create": cache_c,
-        }
+        model, activity, tokens, duration, err = row
+        activity_sessions[activity][model].append({
+            "total_output_tokens": tokens or 0,
+            "duration_minutes": duration,
+            "has_error_recovery": bool(err),
+            "reasoning_error": None,  # no infra-excluded signal in session_analytics
+        })
 
     suggestions = []
-
-    # Find activities where models differ significantly
-    activities = set(a for _, a in model_activity.keys())
-    for activity in activities:
-        models_for_activity = {
-            m: model_activity[(m, activity)]
-            for m, a in model_activity.keys()
-            if a == activity
-        }
-        if len(models_for_activity) < 2:
+    for activity, sessions_by_model in activity_sessions.items():
+        result = evaluate_activity_routing(activity, sessions_by_model)
+        if result.get("status") != HINT:
             continue
-
-        sorted_models = sorted(models_for_activity.items(),
-                               key=lambda x: x[1]["rate"], reverse=True)
-        best, best_stats = sorted_models[0]
-        worst, worst_stats = sorted_models[-1]
-
-        rate_diff = best_stats["rate"] - worst_stats["rate"]
-        if rate_diff < 0.20:
-            continue
-
-        confidence = round(min(0.95, MIN_CONFIDENCE + rate_diff * 0.5), 2)
-        best_pct = round(best_stats["rate"] * 100)
-        worst_pct = round(worst_stats["rate"] * 100)
-
+        best = result["recommended_model"]
+        worst = result["avoid_model"]
         suggestions.append({
             "category": "memory",
             "target": "MEMORY.md",
             "section": "## Geleerde Patronen",
             "action": "append",
             "content": (
-                f"- {best}: {activity} taken {best_pct}% first-try success "
-                f"vs {worst} {worst_pct}%. Prefer {best} voor {activity}."
+                f"- Prefer {best} boven {worst} voor {activity} taken "
+                f"(vergelijkbare moeilijkheid, {result['bucket']} bucket)."
             ),
-            "evidence": (
-                f"{best_stats['success']}/{best_stats['total']} {best} vs "
-                f"{worst_stats['success']}/{worst_stats['total']} {worst} "
-                f"(afgelopen {LOOKBACK_DAYS}d)"
-            ),
-            "confidence": confidence,
-        })
-
-    # Token profile per model
-    cur.execute("""
-        SELECT
-            session_model,
-            COUNT(*) as total,
-            AVG(total_output_tokens) as avg_tokens,
-            SUM(cache_read_tokens) as cache_read,
-            SUM(cache_creation_tokens) as cache_create
-        FROM session_analytics
-        WHERE session_date >= ?
-          AND session_model != 'unknown'
-        GROUP BY session_model
-        HAVING COUNT(*) >= ?
-    """, (since, MIN_SESSIONS_FOR_SUGGESTION))
-
-    token_parts = []
-    total_sessions = 0
-    for row in cur.fetchall():
-        model, count, avg_tok, cache_r, cache_c = row
-        total_cache = (cache_r or 0) + (cache_c or 0)
-        cache_pct = round((cache_r or 0) / total_cache * 100) if total_cache > 0 else 0
-        avg_k = round((avg_tok or 0) / 1000)
-        token_parts.append(f"{model} avg={avg_k}K/sess cache={cache_pct}%")
-        total_sessions += count
-
-    if token_parts and total_sessions >= MIN_SESSIONS_FOR_SUGGESTION:
-        suggestions.append({
-            "category": "memory",
-            "target": "MEMORY.md",
-            "section": "## Geleerde Patronen",
-            "action": "append",
-            "content": f"- Model token profiel ({LOOKBACK_DAYS}d): {' | '.join(token_parts)}",
-            "evidence": f"Aggregatie van {total_sessions} sessies over {LOOKBACK_DAYS} dagen",
-            "confidence": 0.95,
+            "evidence": result["evidence"],
+            "confidence": result["confidence"],
         })
 
     return suggestions
@@ -327,6 +276,12 @@ def generate_digest_section(edits: list) -> str:
     if not pending:
         return ""
 
+    # Decision-grade: collapse near-duplicate suggestions and drop non-actionable raw
+    # internal dumps so the digest surfaces decisions, not raw rows.
+    pending = decision_grade(pending)
+    if not pending:
+        return ""
+
     lines = [
         f"## Voorgestelde Wijzigingen ({len(pending)} pending)",
         "",
@@ -355,7 +310,7 @@ def generate_digest_section(edits: list) -> str:
         evidence = edit.get("evidence", "")
 
         action_label = "Toevoegen" if action in ("append", "append_section") else "Wijzigen"
-        content_preview = content.split("\n")[0][:80]
+        content_preview = smart_truncate(content.split("\n")[0], 80)
 
         lines.append(f"### #{eid} [{cat}] {target}")
         lines.append(f"**{action_label}**: {content_preview}")
@@ -409,9 +364,11 @@ def main():
         if len(new_edits) >= MAX_SUGGESTIONS_PER_RUN:
             break
 
-    # Merge: keep existing non-applied pending edits + add new ones
+    # Merge: keep existing non-applied pending edits + add new ones, then collapse
+    # near-duplicate suggestions (same target+intent) so the persisted queue and every
+    # downstream digest carry one row per decision, not three at different sample sizes.
     kept_edits = [e for e in existing_edits if e.get("status") in ("pending", "accepted")]
-    final_edits = kept_edits + new_edits
+    final_edits = dedup_suggestions(kept_edits + new_edits)
 
     output = {
         "generated_at": datetime.now(tz=_UTC).isoformat().replace("+00:00", "Z"),

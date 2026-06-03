@@ -35,6 +35,8 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+from digest_text import smart_truncate, decision_grade
+
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 BRIEF_PATH = STATE_DIR / "t0_session_brief.json"
@@ -118,6 +120,11 @@ def _format_pending_edits(edits_data: dict) -> str:
     if not pending:
         return "Geen pending suggesties.\n"
 
+    # Decision-grade: dedup near-identical suggestions and drop raw internal dumps.
+    pending = decision_grade(pending)
+    if not pending:
+        return "Geen pending suggesties.\n"
+
     cat_labels = {
         "memory": "MEMORY",
         "rule": "RULE",
@@ -131,7 +138,7 @@ def _format_pending_edits(edits_data: dict) -> str:
         eid = edit.get("id", "?")
         cat = cat_labels.get(edit.get("category", ""), edit.get("category", "").upper())
         target = Path(edit.get("target", "")).name
-        content = edit.get("content", "").split("\n")[0][:80]
+        content = smart_truncate(edit.get("content", "").split("\n")[0], 80)
         confidence = edit.get("confidence", 0)
         evidence = edit.get("evidence", "")
         action = edit.get("action", "append")
