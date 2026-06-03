@@ -10,7 +10,7 @@ import fcntl
 import os
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import List, Optional, Literal, Tuple
 import sys
@@ -696,6 +696,105 @@ def rescan_items(args):
         generate_digest()
 
 
+def _filter_items_by_pattern(
+    items: list,
+    title_match: str,
+    severity: Optional[str] = None,
+    older_than_days: Optional[int] = None,
+) -> list:
+    """Filter items by regex title, optional severity, and optional age."""
+    try:
+        pattern = re.compile(title_match, re.IGNORECASE)
+    except re.error as exc:
+        raise SystemExit(f"Invalid regex '{title_match}': {exc}")
+
+    result = [i for i in items if pattern.search(i.get("title", ""))]
+
+    if severity:
+        result = [i for i in result if i.get("severity") == severity]
+
+    if older_than_days is not None:
+        cutoff = datetime.now() - timedelta(days=older_than_days)
+        result = [
+            i for i in result
+            if datetime.fromisoformat(i["created_at"]) < cutoff
+        ]
+
+    return result
+
+
+def _apply_pattern(args, new_status: str) -> int:
+    """Bulk-close open items matching a title regex.
+
+    Dry-run (default): print count + sample, no mutation.
+    --apply: mutate items and write audit entries.
+    """
+    title_match = args.title_match
+    severity_filter = getattr(args, "severity", None)
+    older_than_days = getattr(args, "older_than_days", None)
+    apply = getattr(args, "apply", False)
+    reason = args.reason
+
+    # Load once for preview (no lock needed for read)
+    data = load_items()
+    preview = _filter_items_by_pattern(
+        [i for i in data["items"] if i["status"] == "open"],
+        title_match,
+        severity_filter,
+        older_than_days,
+    )
+
+    if not apply:
+        print(f"[DRY RUN] {new_status}: {len(preview)} items match '{title_match}'")
+        for item in preview[:5]:
+            print(f"  {item['id']} [{item['severity']}]: {item['title'][:72]}")
+        if len(preview) > 5:
+            print(f"  ... and {len(preview) - 5} more")
+        return 0
+
+    mutated_ids = []
+    with _with_items_lock():
+        data = load_items()
+        for item in data["items"]:
+            if item["status"] != "open":
+                continue
+            if not _filter_items_by_pattern(
+                [item], title_match, severity_filter, older_than_days
+            ):
+                continue
+            item["status"] = new_status
+            item["closed_reason"] = reason
+            item["closed_at"] = datetime.now().isoformat()
+            item["updated_at"] = datetime.now().isoformat()
+            item["closed_by"] = f"pattern:{title_match}"
+            mutated_ids.append(item["id"])
+
+        if mutated_ids:
+            save_items(data)
+
+        for item_id in mutated_ids:
+            audit_log_entry(
+                "pattern_close",
+                item_id=item_id,
+                to_status=new_status,
+                reason=reason,
+                pattern=title_match,
+            )
+
+    print(f"[OK] {new_status}: {len(mutated_ids)} items closed (pattern: '{title_match}')")
+    if mutated_ids:
+        generate_digest()
+    return 0
+
+
+def defer_pattern(args) -> int:
+    return _apply_pattern(args, "deferred")
+
+
+def wontfix_pattern(args) -> int:
+    return _apply_pattern(args, "wontfix")
+
+
 def count_items_closed_by_dispatch(dispatch_id: str) -> int:
     """Count items where closed_by_dispatch_id matches."""
     data = load_items()
@@ -768,6 +867,56 @@ def main():
     rescan_parser.add_argument('--dry-run', action='store_true', dest='dry_run',
                               help='Show what would be closed without closing')
 
+    # defer-pattern command
+    defer_pattern_parser = subparsers.add_parser(
+        'defer-pattern',
+        help='Defer all open items whose title matches a regex'
+    )
+    defer_pattern_parser.add_argument(
+        '--title-match', required=True, dest='title_match', metavar='REGEX',
+        help='Regex matched against item title (case-insensitive)'
+    )
+    defer_pattern_parser.add_argument(
+        '--severity', choices=['blocker', 'warn', 'info'],
+        help='Optional: only affect items with this severity'
+    )
+    defer_pattern_parser.add_argument(
+        '--older-than-days', type=int, dest='older_than_days', metavar='N',
+        help='Optional: only affect items older than N days'
+    )
+    defer_pattern_parser.add_argument(
+        '--reason', required=True, help='Deferral reason recorded in item'
+    )
+    defer_pattern_parser.add_argument(
+        '--apply', action='store_true', default=False,
+        help='Apply mutation (omit for dry-run preview)'
+    )
+
+    # wontfix-pattern command
+    wontfix_pattern_parser = subparsers.add_parser(
+        'wontfix-pattern',
+        help='Mark as wontfix all open items whose title matches a regex'
+    )
+    wontfix_pattern_parser.add_argument(
+        '--title-match', required=True, dest='title_match', metavar='REGEX',
+        help='Regex matched against item title (case-insensitive)'
+    )
+    wontfix_pattern_parser.add_argument(
+        '--severity', choices=['blocker', 'warn', 'info'],
+        help='Optional: only affect items with this severity'
+    )
+    wontfix_pattern_parser.add_argument(
+        '--older-than-days', type=int, dest='older_than_days', metavar='N',
+        help='Optional: only affect items older than N days'
+    )
+    wontfix_pattern_parser.add_argument(
+        '--reason', required=True, help='Wontfix reason recorded in item'
+    )
+    wontfix_pattern_parser.add_argument(
+        '--apply', action='store_true', default=False,
+        help='Apply mutation (omit for dry-run preview)'
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -795,6 +944,10 @@ def main():
         generate_digest()
     elif args.command == 'rescan':
         rescan_items(args)
+    elif args.command == 'defer-pattern':
+        defer_pattern(args)
+    elif args.command == 'wontfix-pattern':
+        wontfix_pattern(args)
 
     return 0
 
