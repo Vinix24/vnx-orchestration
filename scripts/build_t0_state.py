@@ -999,6 +999,15 @@ def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
 # Recent receipts (last N lines from t0_receipts.ndjson)
 # ---------------------------------------------------------------------------
 
+_STATUS_PRIORITY: Dict[str, int] = {
+    "done": 0, "success": 0, "completed": 0, "pass": 0,
+    "failed": 1, "failure": 1, "timeout": 1, "blocked": 1,
+    "running": 2, "queued": 2, "requested": 2,
+    "not_configured": 3, "not_executable": 3,
+    "unknown": 9, "": 9, None: 9,  # type: ignore[misc]
+}
+
+
 def _infer_next_action(r: Dict[str, Any]) -> str:
     s = (r.get("status") or "").lower()
     if s in ("done", "success"):
@@ -1032,7 +1041,9 @@ def _build_recent_receipts(
     except OSError:
         return []
 
-    recs: List[Dict[str, Any]] = []
+    best_by_dispatch: Dict[str, Dict[str, Any]] = {}
+    no_dispatch_recs: List[Dict[str, Any]] = []
+
     for line in lines[-2000:]:
         line = line.strip()
         if not line:
@@ -1048,7 +1059,7 @@ def _build_recent_receipts(
         pid = (r.get("project_id") or "").strip()
         if project_id and pid and pid != project_id:
             continue
-        recs.append({
+        view: Dict[str, Any] = {
             "timestamp": r.get("timestamp"),
             "dispatch_id": r.get("dispatch_id"),
             "status": r.get("status"),
@@ -1057,8 +1068,26 @@ def _build_recent_receipts(
             "pr_id": r.get("pr_id") or r.get("pr"),
             "report_evidence_path": r.get("report_path") or r.get("evidence"),
             "next_action": _infer_next_action(r),
-        })
+        }
+        did = (view.get("dispatch_id") or "").strip()
+        if not did or did in ("?", "unknown"):
+            no_dispatch_recs.append(view)
+            continue
+        cur_best = best_by_dispatch.get(did)
+        if cur_best is None:
+            best_by_dispatch[did] = view
+            continue
+        new_prio = _STATUS_PRIORITY.get(view.get("status"), 9)
+        cur_prio = _STATUS_PRIORITY.get(cur_best.get("status"), 9)
+        if new_prio < cur_prio:
+            best_by_dispatch[did] = view
+        elif new_prio == cur_prio:
+            new_terminal_known = bool(view.get("terminal") and view.get("terminal") != "unknown")
+            cur_terminal_known = bool(cur_best.get("terminal") and cur_best.get("terminal") != "unknown")
+            if new_terminal_known and not cur_terminal_known:
+                best_by_dispatch[did] = view
 
+    recs = list(best_by_dispatch.values()) + no_dispatch_recs
     return sorted(recs, key=lambda x: str(x.get("timestamp") or ""), reverse=True)[:limit]
 
 
