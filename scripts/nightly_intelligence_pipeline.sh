@@ -243,6 +243,9 @@ else
     log_msg "Phase 11 (email): skipped — VNX_DIGEST_EMAIL or VNX_SMTP_PASS not set"
 fi
 
+# ── Phase 20: Decisions digest render ────────────────────────────────────────
+run_phase "20-digest-decisions-render" python3 "$SCRIPT_DIR/build_decisions_digest.py"
+
 # ── Write pipeline health summary ─────────────────────────────────────────────
 FAILED_CSV="$(IFS=','; printf '%s' "${PHASES_FAILED[*]:-}")"
 OVERALL_STATUS="ok"
