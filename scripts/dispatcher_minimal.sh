@@ -382,19 +382,28 @@ _validate_dispatch_fields() {
     _PD_GATE=$(extract_new_gate "$dispatch")
     _PD_DISPATCH_ID="$(basename "$dispatch" .md)"
 
+    # Observable rejection: a structurally-invalid dispatch (no track, T0 target,
+    # or an unknown track) is moved to rejected/ with a single-line reason so it is
+    # NOT re-scanned every 2s. `mv` is guarded with `|| true` so a stat race (file
+    # already moved by a concurrent path) can never bubble a non-zero out of this
+    # function in a way that feeds the daemon-loop set -e leak; the explicit
+    # `return 1` below still signals the caller to skip this dispatch.
     if [ -z "$_PD_TRACK" ]; then
-        log "V8 WARNING: No track found in dispatch, skipping"
-        mv "$dispatch" "$REJECTED_DIR/"; return 1
+        log "V8 REJECT: No track found in $(basename "$dispatch") — structurally invalid, moved to rejected/"
+        mv "$dispatch" "$REJECTED_DIR/" 2>/dev/null || true
+        return 1
     fi
     if [ "$_PD_TRACK" = "0" ] || [ "$_PD_TRACK" = "T0" ]; then
-        log "V8 ERROR: Attempting to dispatch to T0 - BLOCKED"
-        mv "$dispatch" "$REJECTED_DIR/"; return 1
+        log "V8 REJECT: Track '$_PD_TRACK' targets T0 in $(basename "$dispatch") — BLOCKED, moved to rejected/"
+        mv "$dispatch" "$REJECTED_DIR/" 2>/dev/null || true
+        return 1
     fi
 
     _PD_TARGET_TERMINAL="$(track_to_terminal "$_PD_TRACK")"
     if [ -z "$_PD_TARGET_TERMINAL" ]; then
-        log "V8 ERROR: Invalid track '$_PD_TRACK' for dispatch $(basename "$dispatch")"
-        mv "$dispatch" "$REJECTED_DIR/"; return 1
+        log "V8 REJECT: Invalid track '$_PD_TRACK' in $(basename "$dispatch") — no terminal mapping, moved to rejected/"
+        mv "$dispatch" "$REJECTED_DIR/" 2>/dev/null || true
+        return 1
     fi
 
     if ! terminal_lock_allows_dispatch "$_PD_TARGET_TERMINAL" "$_PD_DISPATCH_ID"; then
@@ -612,7 +621,19 @@ process_dispatches() {
         sleep 1  # Small delay between dispatches
     done
 
-    [ $count -gt 0 ] && log "V8: Processed $count dispatches"
+    if [ "$count" -gt 0 ]; then
+        log "V8: Processed $count dispatches"
+    fi
+
+    # Always return success. A scan that delivers 0 dispatches — every dispatch
+    # rejected (project_id guard), every dispatch skipped (no track / locked
+    # terminal / cooldown), or an empty pending glob — is a NORMAL outcome, not
+    # an error. Returning the non-zero status of `[ $count -gt 0 ]` (the prior
+    # tail command when count==0) would propagate to the bare `process_dispatches`
+    # call in the daemon loop and, under `set -euo pipefail`, abort the entire
+    # daemon after a single quiet scan. Same set -e leak class as the documented
+    # `((count++))` -> `count=$((count+1))` fix above.
+    return 0
 }
 
 # Main loop
@@ -629,6 +650,12 @@ while true; do
     if ! get_pane_ids; then
         log_structured_failure "pane_refresh_failed" "Periodic pane ID refresh failed" "phase=loop"
     fi
-    process_dispatches
+    # Defense in depth: never let a single scan abort the daemon. process_dispatches
+    # already returns 0 on every normal outcome, but guard the call site so that any
+    # future non-zero leak inside the per-scan path (arithmetic eval landing on 0,
+    # an unmatched grep, a failed `[ ]` test, an unguarded `local x=$(cmd)`) cannot
+    # kill the `while true` loop under `set -euo pipefail`. The daemon MUST survive
+    # scans where 0 dispatches are delivered, all are rejected, or pending is empty.
+    process_dispatches || log "V8 WARN: process_dispatches returned non-zero ($?); daemon continuing"
     sleep 2
 done
