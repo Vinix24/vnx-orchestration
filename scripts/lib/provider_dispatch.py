@@ -541,7 +541,7 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
     if provider == "codex":
         return os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     if provider == "gemini":
-        return os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+        return args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     if provider == "kimi":
         return os.environ.get("VNX_KIMI_MODEL", "") or _resolve_kimi_model_label()
     if provider == "deepseek-harness":
@@ -1359,7 +1359,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    model = args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     enriched_instruction = _enrich_instruction(args)
     isolation_cwd_gemini: Optional[Path] = None
     if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
