@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # _dispatch_claude in provider_dispatch.py immediately after deliver_with_recovery.
 _dispatch_token_usage: dict = {}
 
+# Side-channel for completion_text from spawn_claude — keyed by dispatch_id.
+# Parallel to _dispatch_token_usage; lets _dispatch_claude surface model text
+# to _emit_governance for receipt/report without threading it through deliver_with_recovery.
+_dispatch_completion_text: dict = {}
+
 
 def _build_worker_identity_env(terminal_id: str) -> dict[str, str]:
     """Resolve the orchestrator's identity and project it onto the worker env.
@@ -344,6 +349,8 @@ def deliver_via_subprocess(
 
         if spawn_result.token_usage:
             _dispatch_token_usage[dispatch_id] = spawn_result.token_usage
+        if spawn_result.completion_text:
+            _dispatch_completion_text[dispatch_id] = spawn_result.completion_text
 
         # --- completion classification (mirrors _classify_completion) ---
         session_id = spawn_result.session_id

@@ -176,9 +176,9 @@ class ClaudeSubprocessAdapter:
     """Wraps spawn_claude — reuses existing spawn without reimplementation.
 
     Maps ClaudeSpawnResult fields to _AdapterResult for the envelope GOVERN
-    phase.  completion_text is left empty (matching legacy _dispatch_claude
-    behavior) because the worker writes its own report via _ensure_unified_report;
-    the envelope report is a governance wrapper, not the worker's full output.
+    phase.  Worker reports remain the primary audit artifact; completion_text
+    is now also captured from spawn_claude for benchmark and utility callers
+    that need the model's raw text output.
 
     event_writer is not wired in PR-2 (SubprocessAdapter handles EventStore
     internally); the audit stream gap is documented in Open Items.
@@ -224,7 +224,7 @@ class ClaudeSubprocessAdapter:
         if result.error:
             return _AdapterResult(
                 returncode=result.returncode,
-                completion_text="",
+                completion_text=(result.completion_text or ""),
                 status="failure",
                 token_usage=token_usage,
                 error=result.error,
@@ -232,7 +232,7 @@ class ClaudeSubprocessAdapter:
         if result.timed_out:
             return _AdapterResult(
                 returncode=result.returncode,
-                completion_text="",
+                completion_text=(result.completion_text or ""),
                 status="timeout",
                 token_usage=token_usage,
                 timed_out=True,
@@ -240,14 +240,14 @@ class ClaudeSubprocessAdapter:
         if result.stopped_early:
             return _AdapterResult(
                 returncode=result.returncode,
-                completion_text="",
+                completion_text=(result.completion_text or ""),
                 status="success",
                 token_usage=token_usage,
             )
         status = "success" if result.returncode == 0 else "failure"
         return _AdapterResult(
             returncode=result.returncode,
-            completion_text="",
+            completion_text=(result.completion_text or ""),
             status=status,
             token_usage=token_usage,
         )

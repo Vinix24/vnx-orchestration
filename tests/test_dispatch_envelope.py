@@ -71,6 +71,7 @@ class _FakeClaudeResult:
     stopped_early: bool = False
     token_usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    completion_text: str = ""
 
     def __post_init__(self):
         if self.token_usage is None:
@@ -719,3 +720,42 @@ class TestClaudeAdapterForwardsRoleToSpawn:
         assert result.status == "success"
         assert "role" in captured_kwargs
         assert captured_kwargs["role"] is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: ClaudeSubprocessAdapter captures completion_text from spawn result
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeAdapterCapturesCompletionText:
+    """ClaudeSubprocessAdapter.run() must propagate completion_text from ClaudeSpawnResult.
+
+    Regression for bench-v4 finding (2026-06-03): claude lane returned empty
+    completion_text for all outcomes, causing receipt 'Response: (no response captured)'
+    and benchmark scores of 0/1 for codegen tasks.
+    """
+
+    def test_claude_subprocess_adapter_captures_completion_text_from_assistant_events(
+        self, spec_claude
+    ):
+        """Adapter result.completion_text matches the text captured by spawn_claude."""
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec_claude)
+
+        claude_result = _FakeClaudeResult(
+            returncode=0,
+            completion_text="def foo(): pass",
+        )
+
+        with patch(
+            "provider_spawns.claude_spawn.spawn_claude",
+            return_value=claude_result,
+        ), patch("governance_emit.emit_unified_report", mock_report), patch(
+            "governance_emit.emit_dispatch_receipt", mock_receipt
+        ):
+            from dispatch_envelope import ClaudeSubprocessAdapter
+            adapter = ClaudeSubprocessAdapter()
+            adapter_result = adapter.run(spec_claude)
+
+        assert adapter_result.completion_text == "def foo(): pass", (
+            f"Expected 'def foo(): pass', got {adapter_result.completion_text!r}"
+        )
