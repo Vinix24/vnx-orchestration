@@ -1,12 +1,25 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-02T04:14:04.742791+00:00
+**Last updated**: 2026-06-03T12:00:38.162440+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #808 — fix(receipts): dedup recent_receipts per dispatch_id (keep best status) (#808) (2026-06-03)
+- #795 — feat(dispatch): PR-2 envelope claude-subprocess adapter (flag-gated, dual-receipt-safe) (#795) (2026-06-03)
+- #806 — fix(dispatcher): survive scans that skip/reject all dispatches (set -e leak) + observable rejection (#806) (2026-06-03)
+- #805 — fix(selflearn): control-for-difficulty model inference + decision-grade digest (no harmful routing, no truncation/dups) (#805) (2026-06-03)
+- #804 — feat(governance): activate profile-gate resolver in request_reviews() (#804) (2026-06-03)
+- #803 — feat(tracks): track_type + next_action_owner discriminator (additive, SQLite, 1.0.1) (#803) (2026-06-03)
+- #802 — fix(reconciler): derive done from track.pr_ref + merged-state (decouple from legacy A/B/C dispatch.track join) (#802) (2026-06-02)
+- #801 — feat(planning): dispatch->track linkage backfill (dry-run default, backup-on-apply) (#801) (2026-06-02)
+- #800 — feat(planning): turn-on — vnx objective sync (auto-seed, human-gated) + advisory drift-gate (#800) (2026-06-02)
+- #799 — feat(governance): worker-permission relay — auto-accept window + catastrophic hard-list + escalation (no silent hangs) (#799) (2026-06-02)
+- #798 — fix(tmux): hook-driven version-agnostic lane signals + wire subagent-block (#798) (2026-06-02)
+- #797 — docs(t0): document the live planning/tracks method + worker-dispatch policy in T0 CLAUDE.md (#797) (2026-06-02)
+- #796 — chore(roadmap): postpone launch +1 week + reflect 2026-06-02 overnight merges + activate 1.x queue (#796) (2026-06-02)
 - #794 — fix(db-maintenance): atomic prune transaction (OI-2328) (#794) (2026-06-01)
 - #793 — feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP) (#793) (2026-06-01)
 - #792 — fix(intelligence): repair 4 regressed nightly pipeline phases (OI-2331) (#792) (2026-06-01)
