@@ -37,6 +37,12 @@ except Exception as exc:
 
 from digest_text import smart_truncate, decision_grade
 
+try:
+    from build_decisions_digest import render_decisions_digest as _render_decisions_digest
+    _DECISIONS_DIGEST_AVAILABLE = True
+except Exception:
+    _DECISIONS_DIGEST_AVAILABLE = False
+
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 BRIEF_PATH = STATE_DIR / "t0_session_brief.json"
@@ -175,15 +181,28 @@ def _get_log_tail(max_lines: int = 15) -> str:
 def build_digest() -> tuple[str, str]:
     """Build the digest email subject and body.
 
+    Uses the decisions-first template from build_decisions_digest when available,
+    falling back to the legacy model-performance format.
+
     Returns:
         (subject, body) tuple.
     """
     now = datetime.now(tz=_UTC)
     date_str = now.strftime("%Y-%m-%d")
 
-    brief = _load_json(BRIEF_PATH)
     edits_data = _load_json(PENDING_PATH)
+    pending_count = len([e for e in edits_data.get("edits", []) if e.get("status") == "pending"])
 
+    if _DECISIONS_DIGEST_AVAILABLE:
+        body = _render_decisions_digest()
+        subject = (
+            f"VNX Beslissings-Digest {date_str} -- "
+            f"{pending_count} pending suggesties | vnx digest decide"
+        )
+        return subject, body
+
+    # Legacy fallback: model-performance digest
+    brief = _load_json(BRIEF_PATH)
     model_perf = brief.get("model_performance", {})
     hints = brief.get("model_routing_hints", [])
     concerns = brief.get("active_concerns", [])
@@ -191,40 +210,36 @@ def build_digest() -> tuple[str, str]:
     total_sessions = volume.get("total_7d", 0)
     lookback = brief.get("lookback_days", 7)
 
-    pending_count = len([e for e in edits_data.get("edits", []) if e.get("status") == "pending"])
-
-    # Subject
     model_count = len(model_perf)
     concern_icon = " ⚠" if concerns else ""
     subject = (
-        f"VNX Digest {date_str} — "
+        f"VNX Digest {date_str} -- "
         f"{total_sessions} sessies, {model_count} models, "
         f"{pending_count} suggesties{concern_icon}"
     )
 
-    # Body
     sections = [
-        f"VNX Nightly Digest — {date_str}",
-        f"{'=' * 50}",
+        f"VNX Nightly Digest -- {date_str}",
+        "=" * 50,
         "",
         f"Periode: afgelopen {lookback} dagen | {total_sessions} sessies geanalyseerd",
         "",
-        "─── Model Performance ───",
+        "--- Model Performance ---",
         "",
         _format_model_performance(model_perf),
-        "─── Routing Hints ───",
+        "--- Routing Hints ---",
         "",
         _format_routing_hints(hints),
-        "─── Waarschuwingen ───",
+        "--- Waarschuwingen ---",
         "",
         _format_concerns(concerns),
-        "─── Voorgestelde Wijzigingen ───",
+        "--- Voorgestelde Wijzigingen ---",
         "",
         _format_pending_edits(edits_data),
-        "─── Analyzer Log (laatste regels) ───",
+        "--- Analyzer Log (laatste regels) ---",
         "",
         _get_log_tail(),
-        "─────────────────────────────",
+        "-" * 29,
         f"Gegenereerd: {now.isoformat().replace('+00:00', 'Z')}",
         "VNX Orchestration System",
     ]
@@ -303,10 +318,9 @@ def send_email(subject: str, body: str, dry_run: bool = False) -> bool:
 
 def main():
     dry_run = "--dry-run" in sys.argv
-
+    # --decisions flag explicitly requests the decisions digest (same as default now)
     subject, body = build_digest()
     success = send_email(subject, body, dry_run=dry_run)
-
     return 0 if success else 1
 
 
