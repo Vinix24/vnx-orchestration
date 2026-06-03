@@ -175,15 +175,15 @@ _INCAPABLE_SCORE_FLOOR = 1.0
 def _cost_aware_sort_key(c: "RouteCandidate") -> tuple:
     """Sort key for cost-aware candidate ranking.
 
-    Capable models (score > _INCAPABLE_SCORE_FLOOR) are ranked first, sorted by
-    cost ascending. Null cost is treated as infinity within the capable tier;
-    secondary tiebreak by score descending preserves stable ordering when costs
-    are equal or both unknown. Incapable models trail, sorted by score descending.
+    Capable models (score > _INCAPABLE_SCORE_FLOOR) are ranked first by composite_score
+    DESC, with cost ASC as a secondary tiebreaker. Null cost is treated as 0 (sort-neutral)
+    so models without measured cost never collapse behind the single cheapest entry.
+    Incapable models trail, sorted by score descending.
     """
     if c.composite_score > _INCAPABLE_SCORE_FLOOR:
-        cost = c.cost_usd_per_call if c.cost_usd_per_call is not None else float("inf")
-        return (0, cost, -c.composite_score)
-    return (1, float("inf"), -c.composite_score)
+        cost = c.cost_usd_per_call if c.cost_usd_per_call is not None else 0.0
+        return (0, -c.composite_score, cost)
+    return (1, -c.composite_score, float("inf"))
 
 
 def _filter_by_constraints(
@@ -383,14 +383,20 @@ def write_route_decision(
     decision: RouteDecision,
     state_dir: Path,
 ) -> None:
-    """Append route decision to route_decisions.ndjson (fcntl-locked via state_writer)."""
+    """Append route decision to route_decisions.ndjson and write per-dispatch JSON.
+
+    The per-dispatch JSON at state_dir/route_decisions/<dispatch_id>.json is used
+    by report_to_receipt_converter to set strategy='smart_router' on the receipt
+    instead of the default 'default' tag written by governance_emit.
+    """
+    import json as _json
     from datetime import datetime, timezone
 
     from state_writer import append_locked
 
-    path = state_dir / "route_decisions.ndjson"
+    timestamp = datetime.now(timezone.utc).isoformat()
     record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp,
         "dispatch_id": dispatch_id,
         "task_class": decision.task_class,
         "chosen_route": {
@@ -405,7 +411,21 @@ def write_route_decision(
         "cost_estimate": decision.cost_estimate,
         "outcome": None,
     }
-    append_locked(path, record)
+    append_locked(state_dir / "route_decisions.ndjson", record)
+
+    # Write per-dispatch JSON for strategy-tag lookup in receipt converter.
+    per_dispatch_dir = state_dir / "route_decisions"
+    per_dispatch_dir.mkdir(parents=True, exist_ok=True)
+    per_dispatch_path = per_dispatch_dir / f"{dispatch_id}.json"
+    per_dispatch_data = {
+        "strategy": "smart_router",
+        "task_class": decision.task_class,
+        "selected_model": decision.primary.model_id if decision.primary else None,
+        "timestamp": timestamp,
+    }
+    tmp = per_dispatch_path.with_suffix(".tmp")
+    tmp.write_text(_json.dumps(per_dispatch_data), encoding="utf-8")
+    tmp.replace(per_dispatch_path)
 
 
 # ---------------------------------------------------------------------------
