@@ -10,20 +10,39 @@ Closes the T0 direct-call bypass tracked in issue #17.
 """
 from __future__ import annotations
 
+import getpass
+import json
 import logging
+import os
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Allowlist: alphanumeric start, then alphanumeric/underscore/dot/hyphen, max 128 chars total.
+# Rejects slashes, backslashes, null bytes, shell metacharacters, and relative traversal.
+_DISPATCH_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+
 
 def _exists_in_dir(base: Path, dispatch_id: str) -> bool:
-    """True if dispatch_id is present under *base* as a directory, bare file, or <id>.md."""
+    """True if dispatch_id is present under *base* as a directory, bare file, or <id>.md.
+
+    Includes defense-in-depth: the resolved candidate path must stay within base.
+    """
+    candidate = base / dispatch_id
+    # Defense-in-depth: resolved path must not escape base (belt + regex suspenders).
+    try:
+        if not candidate.resolve().is_relative_to(base.resolve()):
+            return False
+    except (OSError, ValueError):
+        return False
     return (
-        (base / dispatch_id / "dispatch.json").exists()
-        or (base / dispatch_id).is_dir()
-        or (base / dispatch_id).is_file()
+        (candidate / "dispatch.json").exists()
+        or candidate.is_dir()
+        or candidate.is_file()
         or (base / f"{dispatch_id}.md").is_file()
     )
 
@@ -52,10 +71,15 @@ def validate_staging_path(
         logger.warning(
             "staging_validator: unstaged dispatch override — reason=%r", reason
         )
+        _data = _resolve_data_dir(data_dir)
+        _write_audit_event(_data, from_staging_id, reason)
         return
 
     if from_staging_id and from_staging_id.strip():
         sid = from_staging_id.strip()
+        # PATH TRAVERSAL FIX — validate format before any path join
+        if not _DISPATCH_ID_RE.match(sid):
+            _reject("staging-pending-flow violated: invalid dispatch_id format")
         _data = _resolve_data_dir(data_dir)
         dispatches = _data / "dispatches"
         if _exists_in_dir(dispatches / "pending", sid) or _exists_in_dir(
@@ -88,3 +112,25 @@ def _resolve_data_dir(data_dir: Optional[Path]) -> Path:
     except Exception as exc:
         _reject(f"Cannot resolve VNX data dir: {exc}")
         raise  # unreachable; _reject exits
+
+
+def _write_audit_event(
+    data_dir: Path,
+    dispatch_id: Optional[str],
+    reason: str,
+) -> None:
+    """Append NDJSON audit event for unstaged override (ADR-005)."""
+    events_dir = data_dir / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "dispatch_id": dispatch_id,
+        "reason": reason,
+        "event_type": "unstaged_override",
+        "actor": getpass.getuser(),
+        "pid": os.getpid(),
+    }
+    audit_file = events_dir / "staging_validator.ndjson"
+    with audit_file.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event) + "\n")
+    logger.debug("staging_validator: ADR-005 audit event written to %s", audit_file)
