@@ -463,3 +463,29 @@ class TestStrictModeDispatch:
                 "--model", "sonnet",
             ])
         assert result == 0
+
+
+class TestRegistryKeyNormalization:
+    """Fix 1: _registry_key_for normalizes hyphens to underscores for provider lookup."""
+
+    def test_local_gemma_hyphen_resolves_to_underscore_key(self):
+        from providers.constraint_enforcer import _registry_key_for
+
+        key = _registry_key_for("local-gemma", None)
+        assert key == "local_gemma"
+
+    def test_known_providers_unchanged(self):
+        from providers.constraint_enforcer import _registry_key_for
+
+        assert _registry_key_for("claude", None) == "anthropic"
+        assert _registry_key_for("codex", None) == "openai"
+        assert _registry_key_for("gemini", None) == "google"
+        assert _registry_key_for("kimi", None) == "kimi_cli"
+
+    def test_no_violation_for_local_gemma_provider(self, real_enforcer):
+        violations = real_enforcer.check_constraints(
+            provider="local-gemma",
+            model="gemma-4b-local",
+        )
+        blocking = [v for v in violations if v.severity == "blocking"]
+        assert not blocking, f"unexpected blocking violations: {blocking}"

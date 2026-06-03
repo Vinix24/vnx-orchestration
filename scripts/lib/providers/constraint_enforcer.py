@@ -149,7 +149,7 @@ def _registry_key_for(provider: Optional[str], sub_provider: Optional[str]) -> O
         return "kimi_cli"
     if base_norm == "litellm":
         return sub_norm or None
-    return base_norm or None
+    return base_norm.replace("-", "_") or None
 
 
 def _load_registry() -> dict[str, Any]:

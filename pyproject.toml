@@ -23,6 +23,16 @@ dependencies = [
 [project.optional-dependencies]
 quality = ["vulture>=2.10", "ruff>=0.6"]
 
+# Smart Lanes — modular provider submodules for local/cost-zero inference.
+# Install individual lanes: pip install vnx-orchestration[local-gemma]
+# Install full Smart Lanes stack: pip install vnx-orchestration[smart-lanes]
+local-gemma = [
+    "mlx-lm>=0.20",  # Apple Silicon optimized LLM runtime
+]
+provider-lanes = []    # internal subset; wrappers for codex/kimi/gemini/deepseek
+smart-router = []      # task classifier + cost-aware routing
+smart-lanes = ["vnx-orchestration[local-gemma]"]  # full Smart Lanes stack
+
 [project.scripts]
 vnx = "vnx_cli.main:main"
 

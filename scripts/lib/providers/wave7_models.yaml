@@ -116,6 +116,28 @@ providers:
         deprecated_models:  # explicit guard against legacy
           - "glm-4.5"
           - "glm-4.6"
+  local_gemma:
+    enabled: true
+    api_key_env: ""  # no API key; runs entirely on-device via MLX or Ollama
+    models:
+      gemma-4b-local:
+        litellm_name: ""  # local only; not via LiteLLM
+        cost_input_per_mtok: 0.0
+        cost_output_per_mtok: 0.0
+        max_tokens: 8192
+        context_window: 8192
+        supports_streaming: false
+        supports_tool_calls: false
+        task_classes: ["simple_synthesis", "classification", "documentation", "translation"]
+        runtime: mlx
+        fallback_runtime: ollama
+        fallback_model: "gemma3:4b"
+        cost_tier: 0   # local inference, zero API cost
+        capability_score:
+          simple_synthesis: 0.85
+          classification: 0.80
+          complex_reasoning: 0.40
+          code_edit: 0.50
   kimi_cli:
     enabled: true
     api_key_env: ""  # no API key; OAuth via `kimi login`

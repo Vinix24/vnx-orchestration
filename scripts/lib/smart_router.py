@@ -31,6 +31,7 @@ class RouteCandidate:
     composite_score: float
     avg_duration_seconds: float
     cost_usd_per_call: Optional[float] = None
+    cost_tier: Optional[int] = None  # 0 = local/free; None = standard billing
 
 
 @dataclass
@@ -254,11 +255,13 @@ def _load_recommendations(
     for task_class, entries in raw["routing_by_task"].items():
         candidates = []
         for entry in (entries or []):
+            raw_tier = entry.get("cost_tier")
             candidates.append(RouteCandidate(
                 model_id=str(entry["model_id"]),
                 composite_score=float(entry["composite_score"]),
                 avg_duration_seconds=float(entry["avg_duration_seconds"]),
                 cost_usd_per_call=entry.get("cost_usd_per_call"),
+                cost_tier=int(raw_tier) if raw_tier is not None else None,
             ))
         _enrich(candidates)
         candidates.sort(key=_cost_aware_sort_key)
@@ -284,10 +287,23 @@ def recommend(
 # Full decision
 # ---------------------------------------------------------------------------
 
+def _promote_cost_tier_zero(candidates: List[RouteCandidate]) -> List[RouteCandidate]:
+    """Promote cost_tier=0 candidates to the front when present.
+
+    Preserves relative order within the cost_tier=0 group and within the
+    remaining group. Called when a dispatch carries the 'cost-tier-zero' or
+    'privacy-required' tag so local models are preferred without re-scoring.
+    """
+    zero_tier = [c for c in candidates if c.cost_tier == 0]
+    others = [c for c in candidates if c.cost_tier != 0]
+    return zero_tier + others
+
+
 def decide(
     instruction: str,
     role: Optional[str] = None,
     dispatch_paths: Optional[Sequence[str]] = None,
+    tags: Optional[Sequence[str]] = None,
     *,
     recommendations_path: Optional[Path] = None,
 ) -> RouteDecision:
@@ -296,12 +312,21 @@ def decide(
     Combines classify_task and recommend into a single call that returns a
     RouteDecision with the top-scoring candidate as primary and the second-best
     as fallback.
+
+    tags: when 'cost-tier-zero' or 'privacy-required' is present, cost_tier=0
+    candidates (e.g. gemma-4b-local) are promoted to the front of the ranking.
     """
     task_class = classify_task(instruction, role=role, dispatch_paths=dispatch_paths)
     candidates = recommend(task_class, recommendations_path=recommendations_path)
 
     # G8: filter constraint-violating candidates before picking primary/fallback.
     candidates, _constraints_applied = _filter_by_constraints(candidates)
+
+    # Cost-tier-zero / privacy promotion: when the operator requests free/local
+    # inference, re-rank so cost_tier=0 candidates appear first.
+    _tags = [t.lower() for t in (tags or [])]
+    if any(t in _tags for t in ("cost-tier-zero", "privacy-required")):
+        candidates = _promote_cost_tier_zero(candidates)
 
     primary = candidates[0] if candidates else None
     fallback = candidates[1] if len(candidates) > 1 else None
@@ -335,6 +360,8 @@ def parse_route_model_id(model_id: str) -> tuple[str, str]:
 
     Returns values suitable for --provider and --model in provider_dispatch.py.
     """
+    if model_id == "gemma-4b-local":
+        return "local-gemma", "gemma-4b-local"
     if model_id.startswith("claude-"):
         variant = model_id.split("-")[1]
         return "claude", variant

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "local-gemma"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -169,6 +169,10 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
+    elif provider == "local-gemma":
+        usage["input"] = int(raw.get("input", raw.get("input_tokens", 0)) or 0)
+        usage["output"] = int(raw.get("output", raw.get("output_tokens", 0)) or 0)
+        usage["cache_hit"] = 0
     else:
         usage["input"] = int(raw.get("input_tokens", raw.get("prompt_tokens", raw.get("input", 0))) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("completion_tokens", raw.get("output", 0))) or 0)
@@ -188,6 +192,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "gemini": "google",
     "kimi": "kimi",
     "deepseek-harness": "deepseek",
+    "local-gemma": "local_gemma",
 }
 
 
@@ -587,6 +592,8 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
         return "claude_harness_keyed"
     if provider in ("claude", "codex", "gemini", "kimi"):
         return "cli"
+    if provider == "local-gemma":
+        return "local"
     return None
 
 
@@ -691,6 +698,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-route", action="store_true",
         help="Use smart_router to auto-select provider+model (opt-in, default off).",
+    )
+    parser.add_argument(
+        "--tags", action="append", default=[],
+        help="Routing tags forwarded to smart_router.decide() (e.g. cost-tier-zero, privacy-required).",
     )
     parser.add_argument(
         "--no-repo-map", action="store_true", dest="no_repo_map",
@@ -1377,6 +1388,50 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             _remove_provider_worktree(args.dispatch_id)
 
 
+_MLX_MODEL_MAP: dict[str, str] = {
+    "gemma-4b-local": "mlx-community/gemma-3-4b-it-4bit",
+}
+
+
+def _dispatch_local_gemma(args: argparse.Namespace) -> int:
+    """Route to spawn_local_gemma for local-gemma provider dispatches (Smart Lanes PR-1).
+
+    Runs Gemma e4b via MLX (primary) or Ollama (fallback).
+    cost_usd=0.0: local inference, no API cost.
+    Emits governance receipt + unified report via _emit_governance.
+    """
+    from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415
+
+    model = args.model if (args.model and args.model != "sonnet") else "gemma-4b-local"
+    canonical_model = _MLX_MODEL_MAP.get(model, model)
+    enriched_instruction = _enrich_instruction(args)
+    start_time = datetime.now(timezone.utc)
+
+    result = spawn_local_gemma(
+        instruction=enriched_instruction,
+        model=canonical_model,
+        role=getattr(args, "role", None),
+        deadline_seconds=300,
+        dispatch_id=args.dispatch_id,
+        project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+    )
+    end_time = datetime.now(timezone.utc)
+
+    if result.error and result.returncode != 0:
+        _emit_governance(args, "local-gemma", result.model_used, result, start_time, end_time, "failure")
+        print(f"spawn_local_gemma failed: {result.error}", file=sys.stderr)
+        return 1
+
+    if result.timed_out:
+        _emit_governance(args, "local-gemma", result.model_used, result, start_time, end_time, "timeout")
+        print("spawn_local_gemma timed out", file=sys.stderr)
+        return 1
+
+    status = "success" if result.returncode == 0 else "failure"
+    _emit_governance(args, "local-gemma", result.model_used, result, start_time, end_time, status)
+    return 0 if result.returncode == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args, route to the correct provider handler, return exit code."""
     from env_loader import load_env
@@ -1406,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
                 instruction=args.instruction,
                 role=args.role,
                 dispatch_paths=_dp,
+                tags=getattr(args, "tags", []),
             )
 
             if _route_decision.primary:
@@ -1488,6 +1544,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if provider == "deepseek-harness":
         return _dispatch_deepseek_harness(args)
+
+    if provider == "local-gemma":
+        return _dispatch_local_gemma(args)
 
     if provider.startswith("litellm:") or provider == "litellm":
         return _dispatch_litellm(args)
