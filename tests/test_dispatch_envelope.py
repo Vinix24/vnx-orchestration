@@ -639,3 +639,83 @@ class TestFlagGateClaude:
         mock_legacy.assert_called_once()
         mock_via_envelope.assert_not_called()
         assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# Role-forwarding: ClaudeSubprocessAdapter must forward spec.role to spawn_claude
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeAdapterForwardsRoleToSpawn:
+    """ClaudeSubprocessAdapter.run() must forward spec.role to spawn_claude.
+
+    Without role forwarding, SubprocessAdapter.deliver() falls back to the
+    default capability profile — too restrictive for specialised workers
+    (backend-developer, reviewer, etc.). This test ensures role is passed through.
+    """
+
+    def test_dispatch_envelope_forwards_role_to_spawn(self, spec_claude):
+        """spawn_claude is called with role=spec.role (not None / missing)."""
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec_claude)
+
+        claude_result = _FakeClaudeResult(returncode=0)
+        captured_kwargs: dict = {}
+
+        def _capturing_spawn_claude(**kwargs):
+            captured_kwargs.update(kwargs)
+            return claude_result
+
+        with patch(
+            "provider_spawns.claude_spawn.spawn_claude",
+            side_effect=_capturing_spawn_claude,
+        ), patch("governance_emit.emit_unified_report", mock_report), patch(
+            "governance_emit.emit_dispatch_receipt", mock_receipt
+        ):
+            result = run_envelope(spec_claude, lane="claude-subprocess")
+
+        assert result.status == "success"
+        assert "role" in captured_kwargs, (
+            "spawn_claude was not called with a 'role' kwarg — role is not forwarded"
+        )
+        assert captured_kwargs["role"] == spec_claude.role, (
+            f"spawn_claude got role={captured_kwargs['role']!r}, "
+            f"expected {spec_claude.role!r}"
+        )
+
+    def test_none_role_forwarded_as_none(self, tmp_path):
+        """When spec.role is None, spawn_claude receives role=None (not absent)."""
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir(parents=True)
+        (data_dir / "unified_reports").mkdir(parents=True)
+
+        spec_no_role = EnvelopeSpec(
+            dispatch_id="env-role-none-test",
+            terminal_id="T1",
+            provider="claude",
+            model="sonnet",
+            instruction="do something",
+            role=None,
+            pr_id=None,
+            state_dir=state_dir,
+            data_dir=data_dir,
+        )
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec_no_role)
+        claude_result = _FakeClaudeResult(returncode=0)
+        captured_kwargs: dict = {}
+
+        def _capturing_spawn_claude(**kwargs):
+            captured_kwargs.update(kwargs)
+            return claude_result
+
+        with patch(
+            "provider_spawns.claude_spawn.spawn_claude",
+            side_effect=_capturing_spawn_claude,
+        ), patch("governance_emit.emit_unified_report", mock_report), patch(
+            "governance_emit.emit_dispatch_receipt", mock_receipt
+        ):
+            result = run_envelope(spec_no_role, lane="claude-subprocess")
+
+        assert result.status == "success"
+        assert "role" in captured_kwargs
+        assert captured_kwargs["role"] is None

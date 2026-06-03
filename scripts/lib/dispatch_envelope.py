@@ -200,6 +200,7 @@ class ClaudeSubprocessAdapter:
                 terminal_id=spec.terminal_id,
                 event_writer=event_writer,
                 cwd=cwd,
+                role=spec.role,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
