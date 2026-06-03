@@ -4,6 +4,11 @@ routing_by_task:
     composite_score: 8.0
     cost_usd_per_call: null
     model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 5.2
+    composite_score: 6.0
+    cost_usd_per_call: null
+    cost_tier: 0
+    model_id: gemma-4b-local
   - avg_duration_seconds: 330.317
     composite_score: 7.5
     cost_usd_per_call: null
@@ -99,6 +104,11 @@ routing_by_task:
     cost_usd_per_call: null
     model_id: kimi-k2-6
   04_documentation:
+  - avg_duration_seconds: 4.8
+    composite_score: 8.5
+    cost_usd_per_call: null
+    cost_tier: 0
+    model_id: gemma-4b-local
   - avg_duration_seconds: 12.627
     composite_score: 8.5
     cost_usd_per_call: null
@@ -198,6 +208,11 @@ routing_by_task:
     cost_usd_per_call: null
     model_id: kimi-k2-6
   07_translation:
+  - avg_duration_seconds: 4.1
+    composite_score: 8.5
+    cost_usd_per_call: null
+    cost_tier: 0
+    model_id: gemma-4b-local
   - avg_duration_seconds: 4.251
     composite_score: 8.5
     cost_usd_per_call: null
