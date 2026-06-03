@@ -66,15 +66,27 @@ _SUB_PROVIDER_DEFAULT_ALIAS: dict = {
 }
 
 
+def _resolve_data_dir() -> Path:
+    """Resolve VNX data directory: CENTRAL ($HOME/.vnx-data/<project_id>) by default.
+
+    VNX_DATA_DIR override is honored ONLY when VNX_DATA_DIR_EXPLICIT=1 is also set
+    (same guard as project_root.resolve_data_dir) to prevent cross-project pollution
+    from inherited shell environments. Fixes OI-126.
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    explicit_val = os.environ.get("VNX_DATA_DIR", "")
+    if explicit_flag and explicit_val:
+        return Path(explicit_val).resolve()
+    project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    return Path.home() / ".vnx-data" / project_id
+
+
 def _resolve_state_dir() -> Path:
-    """Resolve VNX state directory from environment."""
+    """Resolve VNX state directory: CENTRAL by default; VNX_STATE_DIR honored when set."""
     env = os.environ.get("VNX_STATE_DIR", "")
     if env:
         return Path(env)
-    data_dir = os.environ.get("VNX_DATA_DIR", "")
-    if data_dir:
-        return Path(data_dir) / "state"
-    return Path(".vnx-data") / "state"
+    return _resolve_data_dir() / "state"
 
 
 def _resolve_dispatch_paths(raw: str) -> "list[str] | None":
@@ -404,8 +416,8 @@ def _emit_governance(
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report
 
-    state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
-    data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+    state_dir = _resolve_state_dir()
+    data_dir = _resolve_data_dir()
     duration = (end_time - start_time).total_seconds()
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
@@ -604,7 +616,7 @@ def _emit_constraint_failure_receipt(
     failure_reason: str,
 ) -> None:
     """Record fail-closed pre-flight failures before any provider spawn."""
-    state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+    state_dir = _resolve_state_dir()
     receipt_path = state_dir / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -869,7 +881,7 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     state_dir = _resolve_state_dir()
-    data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+    data_dir = _resolve_data_dir()
 
     spec = EnvelopeSpec(
         dispatch_id=args.dispatch_id,
@@ -909,7 +921,7 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
     from dispatch_envelope import EnvelopeGovernError, EnvelopeSpec, run_envelope  # noqa: PLC0415
 
     state_dir = _resolve_state_dir()
-    data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+    data_dir = _resolve_data_dir()
 
     spec = EnvelopeSpec(
         dispatch_id=args.dispatch_id,
