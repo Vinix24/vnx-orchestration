@@ -25,6 +25,8 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+from model_inference_guard import evaluate_activity_routing, HINT
+
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 DB_PATH = STATE_DIR / "quality_intelligence.db"
@@ -104,89 +106,93 @@ def get_model_performance(conn: sqlite3.Connection, since: str) -> dict:
     return result
 
 
-def get_model_routing_hints(conn: sqlite3.Connection, since: str) -> list:
-    """Generate task-type routing hints based on model success patterns."""
-    cur = conn.cursor()
+def _activity_sessions(conn: sqlite3.Connection, since: str) -> dict:
+    """Load per-session rows grouped by activity -> model -> [session dicts].
 
-    # Get activity success rates per model (error_recovery = proxy for difficulty)
+    Returns raw per-session records (not pre-aggregated) so the inference guard can
+    bucket by task-difficulty before any model-vs-model comparison. ``has_error_recovery``
+    is loaded but deliberately NOT mapped to a reasoning-error signal — it conflates
+    resilience / infra recovery with model errors (see model_inference_guard).
+    """
+    cur = conn.cursor()
     cur.execute("""
         SELECT
             session_model,
             primary_activity,
-            COUNT(*) as total,
-            SUM(CASE WHEN has_error_recovery = 0 THEN 1 ELSE 0 END) as success_count
+            total_output_tokens,
+            duration_minutes,
+            has_error_recovery
         FROM session_analytics
         WHERE session_date >= ?
           AND session_model != 'unknown'
           AND primary_activity IS NOT NULL
-        GROUP BY session_model, primary_activity
-        HAVING COUNT(*) >= 3
-        ORDER BY primary_activity, success_count DESC
     """, (since,))
 
-    activity_model_stats = defaultdict(dict)
+    activity_sessions: dict = defaultdict(lambda: defaultdict(list))
     for row in cur.fetchall():
-        model, activity, total, success = row[0], row[1], row[2], row[3]
-        rate = success / total if total > 0 else 0
-        activity_model_stats[activity][model] = {
-            "total": total,
-            "success": success,
-            "rate": rate,
-        }
+        model, activity, tokens, duration, err = row[0], row[1], row[2], row[3], row[4]
+        activity_sessions[activity][model].append({
+            "total_output_tokens": tokens or 0,
+            "duration_minutes": duration,
+            "has_error_recovery": bool(err),
+            # No infra-excluded reasoning-error signal exists in session_analytics;
+            # the guard treats this as non-diagnostic rather than blaming a model.
+            "reasoning_error": None,
+        })
+    return activity_sessions
+
+
+def get_model_routing_hints(conn: sqlite3.Connection, since: str) -> list:
+    """Generate task-type routing hints, difficulty-controlled and infra-excluded.
+
+    Routes through model_inference_guard: a hint is only emitted when two models share
+    a task-difficulty bucket with >= MIN_COMPARABLE_SAMPLE sessions each AND a clean
+    (infra-excluded) reasoning-error signal shows a meaningful gap. Otherwise the
+    activity is dropped — the loop prefers no hint over a confounded one.
+    """
+    activity_sessions = _activity_sessions(conn, since)
 
     hints = []
-    for activity, models in activity_model_stats.items():
-        if len(models) < 2:
+    for activity, sessions_by_model in activity_sessions.items():
+        result = evaluate_activity_routing(activity, sessions_by_model)
+        if result.get("status") != HINT:
             continue
-
-        sorted_models = sorted(models.items(), key=lambda x: x[1]["rate"], reverse=True)
-        best_model, best_stats = sorted_models[0]
-        second_model, second_stats = sorted_models[1]
-
-        if best_stats["rate"] - second_stats["rate"] < 0.15:
-            continue
-
-        confidence = round(min(0.95, 0.5 + (best_stats["total"] / 20) * 0.3 +
-                              (best_stats["rate"] - second_stats["rate"]) * 0.5), 2)
-
         hints.append({
-            "task_type": activity,
-            "recommended_model": best_model,
-            "confidence": confidence,
-            "evidence": (
-                f"{best_stats['success']}/{best_stats['total']} succesvol op {best_model}, "
-                f"{second_stats['success']}/{second_stats['total']} op {second_model}"
-            ),
+            "task_type": result["task_type"],
+            "recommended_model": result["recommended_model"],
+            "confidence": result["confidence"],
+            "evidence": result["evidence"],
         })
 
     return sorted(hints, key=lambda x: x["confidence"], reverse=True)
 
 
 def get_active_concerns(conn: sqlite3.Connection, since: str) -> list:
-    """Identify models with concerning error patterns."""
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            session_model,
-            primary_activity,
-            COUNT(*) as total,
-            SUM(CASE WHEN has_error_recovery = 1 THEN 1 ELSE 0 END) as err_count
-        FROM session_analytics
-        WHERE session_date >= ?
-          AND session_model != 'unknown'
-        GROUP BY session_model, primary_activity
-        HAVING COUNT(*) >= 3
-          AND (CAST(SUM(CASE WHEN has_error_recovery = 1 THEN 1 ELSE 0 END) AS REAL) / COUNT(*)) > 0.30
-    """, (since,))
+    """Identify models with a defensible, difficulty-controlled quality concern.
+
+    A concern is only raised when the inference guard yields a real routing hint —
+    i.e. within a comparable difficulty bucket, on an infra-excluded reasoning-error
+    signal, with a meaningful gap. A high ``has_error_recovery`` rate alone is NOT a
+    concern: it is usually resilience (the model recovered from an infra/tool failure
+    it diagnosed), so it never triggers a "switch model" recommendation here.
+    """
+    activity_sessions = _activity_sessions(conn, since)
 
     concerns = []
-    for row in cur.fetchall():
-        model, activity, total, err_count = row[0], row[1], row[2], row[3]
-        rate = round(err_count / total * 100)
+    for activity, sessions_by_model in activity_sessions.items():
+        result = evaluate_activity_routing(activity, sessions_by_model)
+        if result.get("status") != HINT:
+            continue
         concerns.append({
-            "model": model,
-            "concern": f"Hoge error recovery rate bij {activity} taken ({rate}%)",
-            "recommendation": f"Overweeg een ander model voor complexe {activity} taken",
+            "model": result["avoid_model"],
+            "concern": (
+                f"Lagere reasoning-success bij {activity} taken binnen vergelijkbare "
+                f"moeilijkheid ({result['bucket']} bucket)"
+            ),
+            "recommendation": (
+                f"Overweeg {result['recommended_model']} voor {activity} taken — "
+                f"{result['evidence']}"
+            ),
         })
 
     return concerns
