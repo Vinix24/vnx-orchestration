@@ -27,6 +27,7 @@ def _build_args(**overrides):
         "pr_id": None,
         "role": "classifier",
         "no_repo_map": False,
+        "tags": [],
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -125,6 +126,84 @@ class TestExtractTokenUsageLocalGemma(unittest.TestCase):
         cost = pd._compute_cost("local-gemma", "gemma-4b-local", {"input": 100, "output": 50})
         # Either None (registry miss + provider_costs miss) or 0.0
         self.assertIn(cost, (None, 0.0))
+
+
+class TestDispatchPassesCanonicalMlxId(unittest.TestCase):
+    """Fix 4: _dispatch_local_gemma maps alias to canonical HF model id before spawn."""
+
+    def _make_success_result(self, model_used: str):
+        from providers.local_gemma.spawn import LocalGemmaSpawnResult
+        return LocalGemmaSpawnResult(
+            returncode=0,
+            completion_text="ok",
+            runtime_used="mlx",
+            duration_seconds=2.0,
+            timed_out=False,
+            error=None,
+            token_usage={"input": 10, "output": 5},
+            model_used=model_used,
+        )
+
+    def test_dispatch_passes_canonical_mlx_id(self):
+        import provider_dispatch as pd
+
+        args = _build_args(model="gemma-4b-local")
+        canonical = "mlx-community/gemma-3-4b-it-4bit"
+        result = self._make_success_result(canonical)
+
+        with patch("provider_spawns.local_gemma_spawn.spawn_local_gemma", return_value=result) as mock_spawn, \
+             patch.object(pd, "_emit_governance"), \
+             patch.object(pd, "_enrich_instruction", return_value=args.instruction):
+            pd._dispatch_local_gemma(args)
+
+        call_kwargs = mock_spawn.call_args
+        self.assertEqual(call_kwargs.kwargs.get("model") or call_kwargs.args[0] if call_kwargs.args else call_kwargs.kwargs["model"], canonical)
+
+    def test_mlx_model_map_has_gemma_4b_local(self):
+        import provider_dispatch as pd
+        self.assertIn("gemma-4b-local", pd._MLX_MODEL_MAP)
+        self.assertEqual(pd._MLX_MODEL_MAP["gemma-4b-local"], "mlx-community/gemma-3-4b-it-4bit")
+
+    def test_unknown_alias_passes_through_unchanged(self):
+        import provider_dispatch as pd
+        args = _build_args(model="some-custom-model")
+        result = self._make_success_result("some-custom-model")
+
+        with patch("provider_spawns.local_gemma_spawn.spawn_local_gemma", return_value=result) as mock_spawn, \
+             patch.object(pd, "_emit_governance"), \
+             patch.object(pd, "_enrich_instruction", return_value=args.instruction):
+            pd._dispatch_local_gemma(args)
+
+        call_kwargs = mock_spawn.call_args
+        self.assertEqual(call_kwargs.kwargs["model"], "some-custom-model")
+
+
+class TestAutoRouteForwardsTags(unittest.TestCase):
+    """Fix 3: --tags are forwarded to smart_router.decide() in the auto-route branch."""
+
+    def test_tags_in_argparser(self):
+        import provider_dispatch as pd
+        parser = pd._build_parser()
+        args = parser.parse_args([
+            "--provider", "local-gemma",
+            "--terminal-id", "T1",
+            "--dispatch-id", "d1",
+            "--instruction", "test",
+            "--tags", "cost-tier-zero",
+            "--tags", "privacy-required",
+        ])
+        self.assertEqual(args.tags, ["cost-tier-zero", "privacy-required"])
+
+    def test_tags_default_empty_list(self):
+        import provider_dispatch as pd
+        parser = pd._build_parser()
+        args = parser.parse_args([
+            "--provider", "claude",
+            "--terminal-id", "T1",
+            "--dispatch-id", "d2",
+            "--instruction", "test",
+        ])
+        self.assertEqual(args.tags, [])
 
 
 if __name__ == "__main__":

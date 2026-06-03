@@ -700,6 +700,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use smart_router to auto-select provider+model (opt-in, default off).",
     )
     parser.add_argument(
+        "--tags", action="append", default=[],
+        help="Routing tags forwarded to smart_router.decide() (e.g. cost-tier-zero, privacy-required).",
+    )
+    parser.add_argument(
         "--no-repo-map", action="store_true", dest="no_repo_map",
         help="Skip repo map injection (mirrors --no-repo-map in subprocess_dispatch).",
     )
@@ -1384,6 +1388,11 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             _remove_provider_worktree(args.dispatch_id)
 
 
+_MLX_MODEL_MAP: dict[str, str] = {
+    "gemma-4b-local": "mlx-community/gemma-3-4b-it-4bit",
+}
+
+
 def _dispatch_local_gemma(args: argparse.Namespace) -> int:
     """Route to spawn_local_gemma for local-gemma provider dispatches (Smart Lanes PR-1).
 
@@ -1394,12 +1403,13 @@ def _dispatch_local_gemma(args: argparse.Namespace) -> int:
     from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415
 
     model = args.model if (args.model and args.model != "sonnet") else "gemma-4b-local"
+    canonical_model = _MLX_MODEL_MAP.get(model, model)
     enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
 
     result = spawn_local_gemma(
         instruction=enriched_instruction,
-        model=model,
+        model=canonical_model,
         role=getattr(args, "role", None),
         deadline_seconds=300,
         dispatch_id=args.dispatch_id,
@@ -1451,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
                 instruction=args.instruction,
                 role=args.role,
                 dispatch_paths=_dp,
+                tags=getattr(args, "tags", []),
             )
 
             if _route_decision.primary:

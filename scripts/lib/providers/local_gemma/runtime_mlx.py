@@ -6,9 +6,12 @@ BILLING SAFETY: subprocess only. No Anthropic SDK, no direct API calls.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 2048
 _DEFAULT_TEMP = 0.7
@@ -69,5 +72,6 @@ def mlx_available() -> bool:
             timeout=10.0,
         )
         return result.returncode == 0
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.debug("mlx not available: %s: %s", type(e).__name__, e)
         return False

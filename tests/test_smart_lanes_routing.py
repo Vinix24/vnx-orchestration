@@ -197,5 +197,35 @@ class TestPromoteCostTierZeroHelper(unittest.TestCase):
         self.assertEqual(_promote_cost_tier_zero([]), [])
 
 
+class TestAutoRouteForwardsTagsToDecide(unittest.TestCase):
+    """Fix 3: smart_router.decide() receives tags from --auto-route dispatch path."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._tmp_path = Path(self._tmp)
+        self._yaml_path = _make_yaml_with_gemma(self._tmp_path)
+
+    def test_tags_forwarded_select_gemma(self):
+        from smart_router import decide
+
+        decision = decide(
+            "implement something",
+            tags=["cost-tier-zero"],
+            recommendations_path=self._yaml_path,
+        )
+        self.assertEqual(decision.primary.model_id, "gemma-4b-local")
+
+    def test_no_tags_does_not_select_gemma_for_code_gen(self):
+        from smart_router import decide
+
+        decision = decide(
+            "implement something",
+            tags=[],
+            recommendations_path=self._yaml_path,
+        )
+        self.assertNotEqual(decision.primary.model_id, "gemma-4b-local")
+
+
 if __name__ == "__main__":
     unittest.main()
