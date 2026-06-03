@@ -20,6 +20,7 @@ from smart_router import (
     classify_task,
     decide,
     recommend,
+    _cost_aware_sort_key,
     _load_recommendations,
     TASK_CLASSES,
     ROLE_TO_TASK_CLASS,
@@ -377,3 +378,66 @@ class TestDataclasses:
         )
         assert d.constraints_applied == []
         assert d.cost_estimate is None
+
+
+# ---------------------------------------------------------------------------
+# _cost_aware_sort_key — null-cost handling (PR-SR-FIX-1)
+# ---------------------------------------------------------------------------
+
+class TestNullCostSortKey:
+
+    def _make(self, score: float, cost=None, cost_tier=None) -> RouteCandidate:
+        return RouteCandidate(
+            model_id=f"model-score-{score}",
+            composite_score=score,
+            avg_duration_seconds=10.0,
+            cost_usd_per_call=cost,
+            cost_tier=cost_tier,
+        )
+
+    def test_null_cost_high_score_wins_over_measured_cost_lower_score(self):
+        """A null-cost candidate with higher score beats a cost-bearing lower-score one.
+
+        Before the fix, null-cost sorted as float('inf'), so any measured-cost
+        candidate would win even if its score was much lower.
+        """
+        high_score_null = self._make(score=9.5, cost=None)
+        low_score_cheap = self._make(score=5.5, cost=0.00126)
+        assert _cost_aware_sort_key(high_score_null) < _cost_aware_sort_key(low_score_cheap)
+
+    def test_equal_score_lower_cost_wins(self):
+        """When two capable candidates have the same score, lower cost wins as tiebreaker."""
+        c_cheap = self._make(score=9.5, cost=0.001)
+        c_expensive = self._make(score=9.5, cost=0.050)
+        assert _cost_aware_sort_key(c_cheap) < _cost_aware_sort_key(c_expensive)
+
+    def test_equal_score_null_cost_treated_as_zero_beats_positive_cost(self):
+        """Null cost is treated as 0, so a null-cost candidate ties on score but
+        sorts before a positive-cost candidate of the same score."""
+        c_null = self._make(score=9.5, cost=None)
+        c_with_cost = self._make(score=9.5, cost=0.001)
+        assert _cost_aware_sort_key(c_null) < _cost_aware_sort_key(c_with_cost)
+
+    def test_incapable_candidates_always_trail_capable(self):
+        """Incapable candidates (score <= 1.0) must sort after all capable candidates
+        regardless of cost."""
+        capable_low_score = self._make(score=1.1, cost=None)
+        incapable_high_implied = self._make(score=1.0, cost=0.0)
+        assert _cost_aware_sort_key(capable_low_score) < _cost_aware_sort_key(incapable_high_implied)
+
+    def test_real_yaml_02_code_review_not_collapsed_to_deepseek(self, recommendations_yaml):
+        """Regression: decide() for code_review must return claude-opus-4-6, not deepseek-v4-flash.
+
+        The recommendations_yaml fixture has 02_code_review with claude-opus-4-6 at
+        composite_score=10.0 and claude-sonnet-4-6 at 9.5 — both null-cost. Before the
+        null-cost fix, any model with a measured cost would collapse the null-cost majority.
+        """
+        decision = decide(
+            "Code review: audit security",
+            role="security-engineer",
+            recommendations_path=recommendations_yaml,
+        )
+        assert decision.task_class == "02_code_review"
+        assert decision.primary is not None
+        assert decision.primary.model_id == "claude-opus-4-6"
+        assert decision.primary.composite_score == 10.0
