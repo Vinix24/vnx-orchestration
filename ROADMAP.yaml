@@ -538,6 +538,29 @@ features:
     status: planned
     notes: "Systematizes the kimi #763 point fix: every provider fails loud on empty extraction; a CI canary dispatches a trivial task through each lane per CLI version; CLI versions pinned in provider_constraints.yaml."
 
+  - feature_id: bench-v2-smart-lanes
+    title: 'Smart Lanes Benchmark v2 — internal calibration + marketing publication'
+    plan_path: claudedocs/BENCHMARK-V2-DESIGN-2026-06-03.md
+    risk_class: low
+    merge_policy: human
+    review_stack: []
+    depends_on:
+      - PR-SR-CAPTURE
+      - OI-155
+    milestone: "1.1"
+    status: planned
+    notes: >
+      Bench-v1 (2026-06-03 20:50) insufficient: 1 trivial task per class, N=1,
+      capture-bug polluted all Claude lane scores (completion_text="" by design).
+      V2: 9 lanes × 5 task-classes × 3 complexity × N=3 = 405 dispatches.
+      Dependencies: PR-SR-CAPTURE (claude completion_text capture-bug fix) +
+      OI-155 (gemini default-credential timeout). Deliverables:
+      claudedocs/bench-v2-results.csv + bench-v2-summary.md; PR-SR-FIX-2
+      calibrates routing_recommendations.yaml from data; public marketing
+      comparison published on vincentvandeth.nl. Estimated effort: 1-2 dev-days
+      (2026-06-04/-05). Owner: operator. Priority: P1. Post-1.0 — not blocking
+      2026-06-09 HN/Reddit launch.
+
   - feature_id: usage-aware-routing
     title: "Usage/budget aggregator + usage-aware routing (clean-API + admin-API + receipt-OBSERVE) + Mission Control widget"
     risk_class: medium
