@@ -7,7 +7,7 @@
 #           get_pane_id_smart() from pane_manager,
 #           _rf_* fields, $RECEIPTS_PENDING_DIR, $RECEIPTS_PROCESSED_DIR
 
-# Section F (inner): Build enriched receipt message and paste to T0 tmux pane.
+# Section F (inner): Build v2 enriched receipt message and paste to T0 tmux pane.
 # Returns 0 on success, 1 if pane unreachable or paste failed.
 # Reads _rf_* variables set by extract_receipt_fields().
 _deliver_receipt_to_t0_pane() {
@@ -17,10 +17,6 @@ _deliver_receipt_to_t0_pane() {
     local dispatch_id="${_rf_dispatch_id:-no-id}"
 
     # Ghost-receipt filter: skip pastes for stop-hook triggers without real dispatch context.
-    # Prevents flooding T0 pane when long-running sessions emit interim Stop events.
-    # Pattern covers: bare 'unknown', 'unknown-*' variants, 'no-id', and empty string.
-    # Primary fix is filename-based dispatch_id extraction in report_parser.py; this
-    # is the vangnet for any residual cases where no real id can be derived at all.
     case "$dispatch_id" in
         unknown-*|unknown|no-id|"")
             log "INFO" "Skipping ghost receipt paste: dispatch_id=$dispatch_id"
@@ -35,19 +31,66 @@ _deliver_receipt_to_t0_pane() {
         return 1
     fi
 
-    local report_path="${_rf_report_path:-no-report}"
-    local next_action
-    next_action=$(_drtp_get_next_action "$_rf_status")
-    local footer_status="$_rf_status"
-    [ "$footer_status" = "success" ] && footer_status="done"
+    # --- v2 header line ---
+    local status_upper pr_id pr_slug header_line
+    pr_id="${_rf_pr_id:-}"
+    pr_slug="${_rf_pr_title_slug:-$dispatch_id}"
+    local exit_raw="${_rf_exit_code:-}"
 
-    local state_line quality_line git_line
-    state_line=$(_build_state_line "$terminal")
-    quality_line=$(_build_quality_line "$dispatch_id")
-    git_line=$(_drtp_build_git_line "$receipt_json")
+    if [ -n "$exit_raw" ] && [ "$exit_raw" != "0" ]; then
+        status_upper="FAILED (exit ${exit_raw})"
+    else
+        status_upper="DONE"
+    fi
 
-    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${footer_status} | ID: ${dispatch_id} | Next: ${next_action}${quality_line}${state_line}${git_line}
-Report: ${report_path}"
+    if [ -n "$pr_id" ] && [ "$pr_id" != "none" ] && [ "$pr_id" != "None" ]; then
+        header_line="📨 #${pr_id} PR-${pr_slug} — ${status_upper}"
+    else
+        header_line="📨 ${pr_slug} — ${status_upper}"
+    fi
+
+    # --- provider / lane line ---
+    local provider_line="   Provider: ${_rf_provider:-?}-${_rf_model:-?}  |  Lane: ${_rf_lane:-?} (${_rf_isolation_mode:-?})"
+
+    # --- files / tests line (omit tests if empty) ---
+    local files_tests_line=""
+    if [ -n "${_rf_files_changed}" ] || [ -n "${_rf_insertions}" ] || [ -n "${_rf_deletions}" ]; then
+        local fc="${_rf_files_changed:-?}" ins="${_rf_insertions:-0}" del="${_rf_deletions:-0}"
+        files_tests_line="   Files: ${fc} changed, +${ins}/-${del}"
+        if [ -n "${_rf_tests_passed}" ]; then
+            files_tests_line="${files_tests_line}  |  Tests: ${_rf_tests_passed} passed"
+        fi
+    fi
+
+    # --- smart-context line (omit when empty) ---
+    local smart_line=""
+    [ -n "${_rf_smart_context}" ] && smart_line="   Smart-context: ${_rf_smart_context}"
+
+    # --- gate line ---
+    local gate_line
+    if [ -n "${_rf_gate_name}" ]; then
+        local top_adv="${_rf_gate_top_advisory:-}"
+        local adv_part=""
+        [ -n "$top_adv" ] && adv_part=" (${top_adv})"
+        gate_line="   Gate: ${_rf_gate_name} → ${_rf_gate_blockers:-0} blockers / ${_rf_gate_advisories:-0} advisories${adv_part}"
+    else
+        gate_line="   Gate: pending"
+    fi
+
+    # --- next / report line ---
+    local next_report_line="   Next: ${_rf_next_action:-verify}  |  Report: ${_rf_report_path:-no-report}"
+
+    # Assemble full message (skip empty optional lines)
+    local receipt_msg="/t0-orchestrator ${header_line}
+${provider_line}"
+    [ -n "$files_tests_line" ] && receipt_msg="${receipt_msg}
+${files_tests_line}"
+    [ -n "$smart_line" ] && receipt_msg="${receipt_msg}
+${smart_line}"
+    receipt_msg="${receipt_msg}
+${gate_line}
+${next_report_line}"
+
     echo "$receipt_msg" | tmux load-buffer -
     if ! tmux paste-buffer -t "$t0_pane" 2>/dev/null; then
         log "ERROR" "Failed to paste receipt to T0 pane $t0_pane"

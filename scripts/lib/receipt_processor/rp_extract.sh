@@ -3,17 +3,46 @@
 # Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $STATE_DIR
 # Sets module-scope: _rf_status, _rf_event_type, _rf_dispatch_id, _rf_timestamp,
-#                    _rf_pr_id, _rf_report_path
+#                    _rf_pr_id, _rf_report_path, _rf_provider, _rf_model,
+#                    _rf_lane, _rf_isolation_mode, _rf_files_changed,
+#                    _rf_insertions, _rf_deletions, _rf_tests_passed,
+#                    _rf_smart_context, _rf_gate_name, _rf_gate_blockers,
+#                    _rf_gate_advisories, _rf_gate_top_advisory,
+#                    _rf_next_action, _rf_pr_title_slug, _rf_exit_code
 
-# Extract common receipt fields into module scope (one jq call batch).
+_RP_ENRICH_PY="$(dirname "${BASH_SOURCE[0]}")/rp_enrich_fields.py"
+_RP_GATE_DIR="${STATE_DIR:-}/review_gates/results"
+
+# Extract common receipt fields into module scope.
+# Core fields via jq; enrichment fields via Python helper (YAML + body regex).
 extract_receipt_fields() {
     local json="$1"
     _rf_status=$(echo "$json" | jq -r '.status // "unknown"' 2>/dev/null)
     _rf_event_type=$(echo "$json" | jq -r '.event_type // .event // ""' 2>/dev/null)
     _rf_dispatch_id=$(echo "$json" | jq -r '.dispatch_id // ""' 2>/dev/null)
     _rf_timestamp=$(echo "$json" | jq -r '.timestamp // ""' 2>/dev/null)
-    _rf_pr_id=$(echo "$json" | jq -r '.pr_id // ""' 2>/dev/null)
+    _rf_pr_id=$(echo "$json" | jq -r '.pr_id // .pr_number // ""' 2>/dev/null)
     _rf_report_path=$(echo "$json" | jq -r '.report_path // ""' 2>/dev/null)
+
+    # v2 enrichment: Python helper populates provider/model/lane/diff/tests/gate/next-action
+    # Defaults guard legacy receipts that pre-date the helper.
+    _rf_provider="?" ; _rf_model="?" ; _rf_lane="?" ; _rf_isolation_mode="?"
+    _rf_files_changed="" ; _rf_insertions="" ; _rf_deletions=""
+    _rf_tests_passed="" ; _rf_smart_context=""
+    _rf_gate_name="" ; _rf_gate_blockers="0" ; _rf_gate_advisories="0"
+    _rf_gate_top_advisory="" ; _rf_next_action="verify"
+    _rf_pr_title_slug="" ; _rf_exit_code=""
+
+    if [ -f "$_RP_ENRICH_PY" ]; then
+        local _enrich_out
+        _enrich_out=$(python3 "$_RP_ENRICH_PY" \
+            "$json" \
+            "${_rf_report_path:-}" \
+            "${_RP_GATE_DIR}" 2>/dev/null) || true
+        if [ -n "$_enrich_out" ]; then
+            eval "$_enrich_out" 2>/dev/null || true
+        fi
+    fi
 }
 
 # Sub-helper: Build state line from t0_brief.json

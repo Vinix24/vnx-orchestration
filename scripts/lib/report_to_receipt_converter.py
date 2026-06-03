@@ -222,15 +222,37 @@ def build_receipt_from_report(
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
 
+    # terminal: prefer terminal_id (written by governance_emit) over legacy terminal key.
+    terminal = merged.get("terminal_id") or merged.get("terminal") or "?"
+
+    # status: derive from exit_code when no explicit status key in frontmatter.
+    raw_status = merged.get("status", "")
+    if not raw_status or raw_status.lower() in ("unknown", "none"):
+        raw_exit = merged.get("exit_code")
+        if raw_exit is not None:
+            try:
+                raw_status = "done" if int(raw_exit) == 0 else "failed"
+            except (ValueError, TypeError):
+                raw_status = "?"
+        else:
+            raw_status = "?"
+
     # Use "unknown" for task_id so the idempotency key aligns with what
     # report_parser.py produces (it defaults task_id to "unknown").  This lets
     # append_receipt_payload()'s rolling cache deduplicate same-cycle runs.
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "task_id": merged.get("task_id", "unknown"),
-        "terminal": merged.get("terminal", "unknown"),
-        "provider": merged.get("provider", "unknown"),
-        "model": merged.get("model", ""),
+        "terminal": terminal,
+        "terminal_id": terminal,
+        "provider": merged.get("provider") or "?",
+        "sub_provider": merged.get("sub_provider") or "",
+        "model": merged.get("model") or "?",
+        "lane": merged.get("lane") or "?",
+        "pool_id": merged.get("pool_id") or "",
+        "role": merged.get("role") or "",
+        "exit_code": merged.get("exit_code"),
+        "pr_id": merged.get("pr_id") or "",
         "timestamp": timestamp,
         "report_path": str(report_path),
     }
@@ -251,7 +273,7 @@ def build_receipt_from_report(
     return {
         **base,
         "event_type": "task_complete",
-        "status": merged.get("status", "unknown"),
+        "status": raw_status,
     }
 
 
