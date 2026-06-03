@@ -121,3 +121,44 @@ def test_audit_event_creates_dir_if_missing(tmp_path: Path) -> None:
     audit_event_append(events_dir, "boot", {"msg": "hello"})
 
     assert (events_dir / "boot.ndjson").exists()
+
+
+# ---------------------------------------------------------------------------
+# Path traversal / reserved-field security tests
+# ---------------------------------------------------------------------------
+
+
+def test_audit_event_rejects_event_type_with_dotdot(tmp_path: Path) -> None:
+    """event_type containing .. must raise ValueError before any path join."""
+    events_dir = tmp_path / "events"
+    with pytest.raises(ValueError, match="invalid event_type"):
+        audit_event_append(events_dir, "test/../escape", {"x": 1})
+
+
+def test_audit_event_rejects_event_type_with_slashes(tmp_path: Path) -> None:
+    """event_type containing path separators must raise ValueError."""
+    events_dir = tmp_path / "events"
+    with pytest.raises(ValueError, match="invalid event_type"):
+        audit_event_append(events_dir, "foo/bar", {"x": 1})
+
+
+def test_audit_event_rejects_event_type_with_special_chars(tmp_path: Path) -> None:
+    """event_type with shell-special characters must raise ValueError."""
+    events_dir = tmp_path / "events"
+    with pytest.raises(ValueError, match="invalid event_type"):
+        audit_event_append(events_dir, "evt; rm -rf", {"x": 1})
+
+
+def test_audit_event_reserved_fields_not_overridable(tmp_path: Path) -> None:
+    """Caller-supplied reserved keys (pid, event_type) must be overwritten by authoritative values."""
+    events_dir = tmp_path / "events"
+    real_pid = os.getpid()
+
+    audit_event_append(events_dir, "realtype", {"pid": 999, "event_type": "fake", "data": "ok"})
+
+    target = events_dir / "realtype.ndjson"
+    record = json.loads(target.read_text().strip())
+
+    assert record["event_type"] == "realtype", "event_type must be authoritative, not payload value"
+    assert record["pid"] == real_pid, "pid must be authoritative, not payload value"
+    assert record["data"] == "ok", "non-reserved payload fields must survive"

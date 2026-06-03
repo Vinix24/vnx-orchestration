@@ -19,12 +19,15 @@ import fcntl
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -75,22 +78,35 @@ def audit_event_append(events_dir: Path, event_type: str, payload: dict) -> None
     fcntl.flock(LOCK_EX) for concurrent-writer safety. Creates the events
     directory if absent.
 
+    Reserved keys event_type, timestamp, pid, actor cannot be overridden by payload.
+
     ADR-005: raises OSError on write failure — never silently drops events.
 
     Args:
         events_dir: directory for event NDJSON files (e.g. .vnx-data/events/)
-        event_type: determines the filename (<event_type>.ndjson)
+        event_type: determines the filename (<event_type>.ndjson); must match
+            [A-Za-z0-9_][A-Za-z0-9_-]{0,63}
         payload: caller-supplied fields merged into the event record
     """
+    if not _EVENT_TYPE_RE.match(event_type):
+        raise ValueError(
+            f"atomic_io: invalid event_type {event_type!r} — must match {_EVENT_TYPE_RE.pattern}"
+        )
+
     events_dir.mkdir(parents=True, exist_ok=True)
     target = events_dir / f"{event_type}.ndjson"
 
+    # Defense-in-depth: assert resolved target stays under events_dir.
+    if not target.resolve().is_relative_to(events_dir.resolve()):
+        raise ValueError(f"atomic_io: event_type {event_type!r} escapes events_dir")
+
+    # payload merged first so authoritative audit fields always win.
     record: dict = {
+        **payload,
         "event_type": event_type,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pid": os.getpid(),
         "actor": os.environ.get("VNX_ACTOR", "system"),
-        **payload,
     }
 
     with open(target, "a", encoding="utf-8") as fh:
