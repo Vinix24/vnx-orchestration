@@ -30,6 +30,8 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+from digest_text import smart_truncate
+
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 QUALITY_DB = STATE_DIR / "quality_intelligence.db"
@@ -208,7 +210,7 @@ def build_prompt_config_tuning(
             "severity": "high" if is_stale else "medium",
             "detail": (
                 f"{'[STALE >7d] ' if is_stale else ''}#{item.get('id', '?')}: "
-                f"{str(item.get('description', item.get('symptom', 'no description')))[:120]}"
+                f"{smart_truncate(str(item.get('description', item.get('symptom', 'no description'))), 120)}"
             ),
             "action": "Review and accept/reject via `vnx suggested-edits review`",
             "evidence": {
@@ -244,7 +246,7 @@ def build_prompt_config_tuning(
                     "title": f"Prevention rule: [{tag_str}]",
                     "severity": "high" if float(confidence or 0) > 0.7 else "medium",
                     "detail": (
-                        f"{rule_type}: {str(recommendation or '')[:150]}"
+                        f"{rule_type}: {smart_truncate(str(recommendation or ''), 150)}"
                     ),
                     "action": "Review rule and promote to active via operator confirmation",
                     "evidence": {
