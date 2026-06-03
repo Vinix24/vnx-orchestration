@@ -38,38 +38,40 @@ routing_by_task:
     cost_usd_per_call: null
     model_id: kimi-k2-6
   02_code_review:
-  - avg_duration_seconds: 90.934
-    composite_score: 10.0
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 72.516
-    composite_score: 9.5
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 29.571
-    composite_score: 9.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 152.5
-    composite_score: 9.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 25.713
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 0.775
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.163
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.121
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
+    min_quality_tier: 3
+    candidates:
+    - avg_duration_seconds: 90.934
+      composite_score: 10.0
+      cost_usd_per_call: null
+      model_id: claude-opus-4-6
+    - avg_duration_seconds: 72.516
+      composite_score: 9.5
+      cost_usd_per_call: null
+      model_id: claude-sonnet-4-6
+    - avg_duration_seconds: 29.571
+      composite_score: 9.5
+      cost_usd_per_call: null
+      model_id: deepseek-v4-flash
+    - avg_duration_seconds: 152.5
+      composite_score: 9.5
+      cost_usd_per_call: null
+      model_id: deepseek-v4-pro
+    - avg_duration_seconds: 25.713
+      composite_score: 1.0
+      cost_usd_per_call: null
+      model_id: claude-haiku-4-5
+    - avg_duration_seconds: 0.775
+      composite_score: 1.0
+      cost_usd_per_call: null
+      model_id: glm-5-1
+    - avg_duration_seconds: 1.163
+      composite_score: 1.0
+      cost_usd_per_call: null
+      model_id: kimi-k2-0905
+    - avg_duration_seconds: 1.121
+      composite_score: 1.0
+      cost_usd_per_call: null
+      model_id: kimi-k2-6
   03_refactoring:
   - avg_duration_seconds: 209.001
     composite_score: 8.5
