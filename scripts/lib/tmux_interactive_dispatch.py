@@ -1611,8 +1611,30 @@ def main(argv: "list[str] | None" = None) -> int:
         help="spawn worker in the main repo checkout (opt-out of isolation)",
     )
     parser.add_argument("--base-ref", default="origin/main")
+    # ADR-006: staging→pending→promote gate enforcement.
+    parser.add_argument(
+        "--from-staging-id", default=None, dest="from_staging_id",
+        help="Dispatch ID that exists in .vnx-data/dispatches/pending/ or /staging/.",
+    )
+    parser.add_argument(
+        "--allow-unstaged", action="store_true", default=False,
+        help="Bypass staging gate (requires --reason for audit trail).",
+    )
+    parser.add_argument(
+        "--reason", default=None,
+        help="Audit reason required when --allow-unstaged is set.",
+    )
 
     args = parser.parse_args(argv)
+
+    # ADR-006: staging→pending→promote gate — must pass before any dispatch work.
+    from staging_validator import validate_staging_path as _validate_staging  # noqa: PLC0415
+    _validate_staging(
+        getattr(args, "from_staging_id", None),
+        getattr(args, "allow_unstaged", False),
+        getattr(args, "reason", None),
+    )
+
     lane = TmuxInteractiveDispatch(_resolve_state_dir())
 
     result = lane.dispatch(

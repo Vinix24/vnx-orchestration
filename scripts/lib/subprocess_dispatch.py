@@ -361,7 +361,28 @@ if __name__ == "__main__":
         "--requires-mcp", action="store_true", default=False,
         help="Preserve ambient MCP config for this dispatch (Requires-MCP: true in dispatch file).",
     )
+    # ADR-006: staging→pending→promote gate enforcement.
+    parser.add_argument(
+        "--from-staging-id", default=None, dest="from_staging_id",
+        help="Dispatch ID that exists in .vnx-data/dispatches/pending/ or /staging/.",
+    )
+    parser.add_argument(
+        "--allow-unstaged", action="store_true", default=False,
+        help="Bypass staging gate (requires --reason for audit trail).",
+    )
+    parser.add_argument(
+        "--reason", default=None,
+        help="Audit reason required when --allow-unstaged is set.",
+    )
     args = parser.parse_args()
+
+    # ADR-006: staging→pending→promote gate — must pass before any dispatch work.
+    from staging_validator import validate_staging_path as _validate_staging  # noqa: PLC0415
+    _validate_staging(
+        getattr(args, "from_staging_id", None),
+        getattr(args, "allow_unstaged", False),
+        getattr(args, "reason", None),
+    )
 
     # Wave-5 ADR injection opt-out: set env var before instruction assembly (INT-2)
     if getattr(args, "no_adr_inject", False):
