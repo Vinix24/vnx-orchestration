@@ -1,12 +1,20 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-03T12:00:38.162440+00:00
+**Last updated**: 2026-06-03T19:04:32.341342+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #818 — fix(smart-router): null-cost sort + strategy-tag (cost-collapse bug) (#818) (2026-06-03)
+- #817 — feat(digest): D2 — progress_table + minimal digest skeleton (Phase-1) (#817) (2026-06-03)
+- #816 — feat(infra): atomic_io.py + ADR-021 — digest D1 per architecture V2 (#816) (2026-06-03)
+- #815 — docs(digest): architecture v2 — redesign per B3.1 trigger on PR #814 (#815) (2026-06-03)
+- #811 — feat(governance): enforce /pending dispatch path (close T0 direct-call bypass) (#811) (2026-06-03)
+- #812 — feat(oi): bulk pattern subcommands + 1.0 closing sprint (96→48 open) (#812) (2026-06-03)
+- #813 — feat(smart-lanes): PR-2 Smart Router cost-tier classifier (flag-gated, default-off) (#813) (2026-06-03)
+- #810 — chore(roadmap): refresh launch_state.note for 2026-06-03 scope-pull (9-juni launch) (#810) (2026-06-03)
 - #808 — fix(receipts): dedup recent_receipts per dispatch_id (keep best status) (#808) (2026-06-03)
 - #795 — feat(dispatch): PR-2 envelope claude-subprocess adapter (flag-gated, dual-receipt-safe) (#795) (2026-06-03)
 - #806 — fix(dispatcher): survive scans that skip/reject all dispatches (set -e leak) + observable rejection (#806) (2026-06-03)
@@ -164,15 +172,6 @@ _Last 14 days — sourced from git merge commits._
 - #614 — fix(resume): VNX_RESUME_IN_PROGRESS bypass for PAUSED-guards (#614) (2026-05-21)
 - #612 — feat(safety): PAUSED marker guards in daemon scripts (#612) (2026-05-21)
 - #613 — fix(singleton): atomic flock(2) replaces mkdir-race (closes OI-1518) (#613) (2026-05-21)
-- #611 — feat(centralisatie): vnx pause/resume + partial-failure cleanup runbook (Dag 2 PR C) (#611) (2026-05-20)
-- #610 — feat(benchmark): FTS5 rebuild benchmark for SEOcrawler maintenance window (Dag 2 PR B) (#610) (2026-05-20)
-- #609 — feat(centralisatie): dispatch_id collision resolver + schema-prep migrations (Dag 2 PR A) (#609) (2026-05-20)
-- #608 — feat(wave2a): bump 1.0.0-rc3 + dry-run tests against 3 projects (#608) (2026-05-20)
-- #607 — feat(migration): schema versioning + rollback playbook (Wave 2a prep) (#607) (2026-05-20)
-- #606 — fix(dashboard): bundle OI-1494 fixes (5 items) + agent-stream archive replay (#606) (2026-05-20)
-- #605 — fix(receipts): project_id scoping audit + fixes (Wave 2a prep) (#605) (2026-05-20)
-- #604 — fix(centralisatie): project_id scoping audit + critical write-leak fixes (#604) (2026-05-20)
-- #603 — docs: refresh HANDOFF + README status banner (master roadmap link) (#603) (2026-05-20)
 
 **WAVE 6**
 - #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)

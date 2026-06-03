@@ -24,7 +24,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Ensure scripts/lib/ is on sys.path so sibling modules are importable regardless
 # of whether this module is loaded via subprocess_dispatch or directly in tests.
@@ -62,6 +62,10 @@ class ClaudeSpawnResult:
     # cache_read_input_tokens). None when the stream never emitted a result event
     # with usage data or when the SubprocessAdapter version does not forward it.
     token_usage: Optional[Dict[str, Any]] = None
+    # Accumulated text output from the model. Populated from stream-json 'text'
+    # events (incremental chunks); falls back to result event 'text' field.
+    # Workers write their own reports; this field is additive for benchmark/utility callers.
+    completion_text: str = ""
     # Internal: the SubprocessAdapter instance used for this spawn.
     # Callers may use this for post-spawn cleanup (event_store.clear,
     # trigger_report_pipeline) to ensure the same session_id and state are
@@ -223,6 +227,7 @@ def spawn_claude(
     stopped_early = False
     last_stuck_log = 0.0
     token_usage: Optional[Dict[str, Any]] = None
+    text_parts: List[str] = []
 
     try:
         for event in adapter.read_events_with_timeout(
@@ -231,6 +236,12 @@ def spawn_claude(
             total_deadline=total_deadline,
         ):
             events_written += 1
+
+            # Accumulate incremental text output for completion_text.
+            if event.type == "text":
+                chunk = (event.data or {}).get("text", "") if isinstance(event.data, dict) else ""
+                if chunk:
+                    text_parts.append(chunk)
 
             # Capture final result event (agent_message + metadata + usage).
             if event.type == "result":
@@ -298,6 +309,7 @@ def spawn_claude(
             session_id=adapter.get_session_id(terminal_id),
             timed_out=False,
             error=str(e),
+            completion_text="".join(text_parts),
         )
 
     timed_out = adapter.was_timed_out(terminal_id)
@@ -308,6 +320,7 @@ def spawn_claude(
     if returncode is None:
         returncode = 1
 
+    completion_text = "".join(text_parts) or (completion.get("text", "") if isinstance(completion, dict) else "")
     return ClaudeSpawnResult(
         returncode=returncode,
         completion=completion,
@@ -316,5 +329,6 @@ def spawn_claude(
         timed_out=timed_out,
         stopped_early=stopped_early,
         token_usage=token_usage,
+        completion_text=completion_text,
         _adapter=adapter,
     )
