@@ -999,39 +999,67 @@ def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
 # Recent receipts (last N lines from t0_receipts.ndjson)
 # ---------------------------------------------------------------------------
 
-def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
-    # Phase 6 P3: prefer central receipts when available (derived from state_dir, not module global)
+def _infer_next_action(r: Dict[str, Any]) -> str:
+    s = (r.get("status") or "").lower()
+    if s in ("done", "success"):
+        return "review" if r.get("pr_id") or r.get("pr") else "merge_ready"
+    if s in ("failed", "failure"):
+        return "fix_needed"
+    if s in ("requested", "queued", "running"):
+        return "wait"
+    return "verify"
+
+
+def _build_recent_receipts(
+    state_dir: Path,
+    project_id: str = "",
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Top-N most recent receipts (any status), with T0-view filter.
+
+    Filters by project_id when provided; accepts receipts with no project_id
+    for backward compat. Returns T0-relevant fields only — token_usage and
+    contract_hash are intentionally excluded to keep the snapshot lean.
+    """
+    # Phase 6 P3: prefer central receipts when available
     _central = _central_state_dir_for(state_dir)
     receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
     if not receipts_path.exists():
         return []
 
     try:
-        raw_lines = receipts_path.read_bytes().splitlines()
-
-        events: List[Dict[str, Any]] = []
-        for raw_line in raw_lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line.decode("utf-8"))
-                if e.get("event_type") == "state_mutation":
-                    continue
-                events.append({
-                    "terminal": e.get("terminal"),
-                    "status": e.get("status"),
-                    "event_type": e.get("event_type") or e.get("event"),
-                    "timestamp": e.get("timestamp"),
-                    "dispatch_id": e.get("dispatch_id"),
-                    "gate": e.get("gate"),
-                })
-            except Exception:
-                continue
-
-        return events[-100:][-n:]
-    except Exception:
+        lines = receipts_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
         return []
+
+    recs: List[Dict[str, Any]] = []
+    for line in lines[-2000:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        # Skip internal bookkeeping events — T0 wants worker completion signals
+        if r.get("event_type") == "state_mutation":
+            continue
+        # Project-id filter: accept matching project OR no project_id (backward compat)
+        pid = (r.get("project_id") or "").strip()
+        if project_id and pid and pid != project_id:
+            continue
+        recs.append({
+            "timestamp": r.get("timestamp"),
+            "dispatch_id": r.get("dispatch_id"),
+            "status": r.get("status"),
+            "terminal": r.get("terminal"),
+            "commit_hash": r.get("commit_hash") or r.get("commit"),
+            "pr_id": r.get("pr_id") or r.get("pr"),
+            "report_evidence_path": r.get("report_path") or r.get("evidence"),
+            "next_action": _infer_next_action(r),
+        })
+
+    return sorted(recs, key=lambda x: str(x.get("timestamp") or ""), reverse=True)[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -1330,7 +1358,7 @@ def build_t0_state(
     recent_dispatches = _collect_recent_dispatches(project_id, state_dir)
     intelligence_brief = _collect_intelligence_brief(project_id, state_dir)
     active_work = _build_active_work(dispatch_dir)
-    recent_receipts = _build_recent_receipts(state_dir)
+    recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
     register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
     pr_queue: Dict[str, Any] = {

@@ -103,8 +103,9 @@ def resolve_project_id(project_dir: str | Path | None = None) -> str:
 
     Resolution order:
       1. VNX_PROJECT_ID env var (explicit override)
-      2. git remote 'origin' URL → last path component, stripped of .git suffix
-      3. Raise RuntimeError — no silent 'vnx-dev' default (ADR-007)
+      2. .vnx-project-id file in project dir or CWD (canonical per ADR-007)
+      3. git remote 'origin' URL → last path component, stripped of .git suffix
+      4. Raise RuntimeError — no silent default (ADR-007)
 
     Raises RuntimeError if project_id cannot be determined.
     """
@@ -117,6 +118,21 @@ def resolve_project_id(project_dir: str | Path | None = None) -> str:
         start_dirs.append(Path(project_dir).resolve())
     start_dirs.append(Path.cwd().resolve())
 
+    # Priority 2: .vnx-project-id marker file (same contract as vnx_paths.py)
+    for start in start_dirs:
+        for ancestor in [start, *start.parents]:
+            marker = ancestor / ".vnx-project-id"
+            if not marker.is_file():
+                continue
+            try:
+                first_line = marker.read_text(encoding="utf-8").splitlines()[0].strip()
+                if first_line:
+                    return first_line
+            except (OSError, IndexError):
+                pass
+            break  # found marker but couldn't read it — don't keep walking
+
+    # Priority 3: git remote URL → repo name
     for start in start_dirs:
         try:
             out = subprocess.check_output(
@@ -134,7 +150,8 @@ def resolve_project_id(project_dir: str | Path | None = None) -> str:
             continue
 
     raise RuntimeError(
-        "Cannot resolve project_id. Set VNX_PROJECT_ID env var or run from a git "
+        "Cannot resolve project_id. Set VNX_PROJECT_ID env var, add a "
+        ".vnx-project-id file in the project root, or run from a git "
         "repository with a configured 'origin' remote. "
-        "No silent 'vnx-dev' default — explicit project_id required (ADR-007)."
+        "No silent default — explicit project_id required (ADR-007)."
     )
