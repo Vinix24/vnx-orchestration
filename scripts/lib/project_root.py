@@ -86,6 +86,17 @@ def resolve_data_dir(caller_file: str | None = None) -> Path:
     return root / ".vnx-data"
 
 
+def resolve_central_data_dir(project_id: str) -> Path:
+    """Resolve the CENTRAL VNX data directory for a project.
+
+    Returns $HOME/.vnx-data/<project_id> — the same root watched by the
+    receipt processor and subprocess_dispatch.py (consistent with ADR-007).
+    Distinct from resolve_data_dir() which returns the local
+    $PROJECT_ROOT/.vnx-data for the current git worktree.
+    """
+    return Path.home() / ".vnx-data" / project_id
+
+
 def resolve_state_dir(caller_file: str | None = None) -> Path:
     """Resolve VNX_STATE_DIR: $VNX_DATA_DIR/state by default."""
     data = resolve_data_dir(caller_file)
