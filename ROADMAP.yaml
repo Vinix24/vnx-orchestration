@@ -31,31 +31,25 @@ title: VNX Multi-Feature Roadmap
 
 launch_state:
   version: "1.0.0"
-  date: "2026-06-02"             # last update to this launch_state block
+  date: "2026-06-03"             # last update to this launch_state block
   status: "pre-launch"            # code queue merged to main; NOT yet published
   target_date: "2026-06-09"       # HN/Reddit launch target (postponed ~1 week)
-  last_verified: "2026-06-02"
+  last_verified: "2026-06-03"
   verified_against: "origin/main@54ad9df6"
   note: >
-    1.0.0 code queue is fully merged to main as of 2026-06-01. PRs #756, #759,
-    #758, #757, #760, #761, #763, #764, #765, #751, #766, #767, #769, and fix
-    #770 (dispatch prompt-before-scope-flags lane repair) are all merged.
-    1.0.0 is NOT yet published to PyPI. The only remaining gate is LB-3
-    (operator-gated): rebuild wheel from final main -> zero-hit security grep on
-    that exact artifact -> operator fresh-venv install acceptance ->
-    central-install refresh -> operator PyPI publish go -> tag+release. LB-3 is
-    the final immutable gate (PyPI is write-once). Honesty constraint: the
-    claude-subprocess lane is the true-honor reference; other lanes are governed
-    at soft/conditional enforcement and marked as such in every receipt. No
-    "worker-authored on every lane" or "as good as Sonnet" claim ships until
-    measured. Self-learning loop is runnable (auto-dream shipped) but its nightly
-    trigger and central-path unification stay dormant. Smart routing
-    (VNX_AUTO_ROUTE) and pool task consumer (VNX_POOL_TASK_CONSUMER) are shipped
-    opt-in. Roadmap autopilot tick (RA-6) ships dark (default off).
-    Launch postponed ~1 week on 2026-06-02 (operator decision, competing
-    priorities); 1.0.1/1.x post-launch work pulled forward as the active queue.
-    1.0 code remains frozen + launch-ready; LB-3 still the only launch gate when
-    ready.
+    2026-06-03 scope pull: operator pulled Smart Lanes umbrella (Provider Lanes +
+    Smart Router + local Gemma e4b via MLX), receipt-view filter, nightly digest
+    redesign, OI closing sprint, /pending governance enforcement, and envelope
+    chain back INTO 1.0 scope. Launch target 2026-06-09 (HN + Reddit cross-post).
+    7 PRs merged 2026-06-03: #809 Smart Lanes PR-1 (Gemma e4b + MLX + package
+    structure), #808 receipt dedup (per dispatch_id, keep best status), #806
+    dispatcher set-e leak fix + observable rejection, #805 self-learn
+    control-for-difficulty + decision-grade digest, #804 governance profile-gate,
+    #803 track_type + next_action_owner event, #795 envelope PR-2 + receipt
+    T0-view filter. Only remaining launch blocker: LB-3 (operator-driven) —
+    rebuild wheel from final main + zero-hit security grep on that artifact +
+    fresh-venv install acceptance + central-install refresh + PyPI publish go +
+    tag+release. LB-3 is the final immutable gate (PyPI is write-once).
   launch_blockers:
     - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
 
