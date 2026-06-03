@@ -68,6 +68,7 @@ def patch_env_dirs(tmp_path, monkeypatch):
     data_dir.mkdir()
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     return state_dir, data_dir
 
 
@@ -407,3 +408,48 @@ def test_unified_report_uses_clean_md_suffix(tmp_path):
     legacy_path = data_dir / "unified_reports" / "suffix-check-001_report.md"
     assert clean_path.exists(), f"Expected {clean_path} to exist"
     assert not legacy_path.exists(), f"Legacy path {legacy_path} must not exist"
+
+
+# ---------------------------------------------------------------------------
+# OI-126: central-path resolution (no explicit override → uses CENTRAL)
+# ---------------------------------------------------------------------------
+
+def test_resolve_data_dir_uses_central_when_no_explicit_flag(monkeypatch):
+    """_resolve_data_dir must return $HOME/.vnx-data/<project_id> when VNX_DATA_DIR_EXPLICIT is unset.
+
+    Regression for OI-126: previously fell back to local .vnx-data when VNX_DATA_DIR
+    was unset, making kimi/codex/gemini reports invisible to the receipt processor
+    which watches the CENTRAL path.
+    """
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.setenv("VNX_PROJECT_ID", "test-project-oi126")
+
+    result = provider_dispatch._resolve_data_dir()
+
+    expected = Path.home() / ".vnx-data" / "test-project-oi126"
+    assert result == expected, (
+        f"Expected central path {expected}, got {result}. "
+        "OI-126: provider_dispatch must route reports to the CENTRAL store."
+    )
+
+
+def test_resolve_data_dir_explicit_flag_honors_vnx_data_dir(tmp_path, monkeypatch):
+    """When VNX_DATA_DIR_EXPLICIT=1, _resolve_data_dir uses VNX_DATA_DIR override."""
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "override"))
+
+    result = provider_dispatch._resolve_data_dir()
+
+    assert result == (tmp_path / "override").resolve()
+
+
+def test_resolve_data_dir_default_project_id(monkeypatch):
+    """_resolve_data_dir defaults to project_id='vnx-dev' when VNX_PROJECT_ID unset."""
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+
+    result = provider_dispatch._resolve_data_dir()
+
+    assert result == Path.home() / ".vnx-data" / "vnx-dev"
