@@ -105,8 +105,14 @@ class GateRequestHandlerMixin:
     ) -> Dict[str, Any]:
         from review_gate_manager import DEFAULT_REVIEW_STACK, _utc_now, emit_governance_receipt
 
-        review_stack_list = [item.strip() for item in (review_stack or DEFAULT_REVIEW_STACK) if str(item).strip()]
         changed_files = [str(path).strip() for path in changed_files if str(path).strip()]
+
+        if review_stack is not None:
+            review_stack_list = [item.strip() for item in review_stack if str(item).strip()]
+        else:
+            from profile_gate_resolver import resolve_gate_stack as _resolve_gate_stack
+            _profile_stack = _resolve_gate_stack(changed_files)
+            review_stack_list = _profile_stack if _profile_stack is not None else list(DEFAULT_REVIEW_STACK)
         requested: List[Dict[str, Any]] = []
 
         for gate in review_stack_list:
