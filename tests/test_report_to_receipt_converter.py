@@ -602,6 +602,33 @@ class TestSmartRouterStrategyTag:
         result = _load_route_decision("nonexistent-dispatch", state_dir)
         assert result is None
 
+    def test_malformed_route_decision_json_logs_warning(self, tmp_path, state_dir, caplog):
+        """Malformed route decision JSON triggers logger.warning (ADR-021 no silent swallow)."""
+        import logging
+        dispatch_id = "20260603-sr-malformed-json"
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / f"{dispatch_id}.json").write_text("{not valid json", encoding="utf-8")
+
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        assert result.status == "appended"
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_complete"
+        assert "route_decision" not in r
+        assert any(
+            "route_decision lookup failed" in rec.message
+            and dispatch_id in rec.message
+            for rec in caplog.records
+        )
+
     def test_load_route_decision_returns_none_for_malformed_json(self, state_dir):
         """_load_route_decision returns None without raising on corrupt JSON."""
         rd_dir = state_dir / "route_decisions"

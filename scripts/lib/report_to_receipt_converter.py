@@ -170,7 +170,11 @@ def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "route_decision lookup failed for dispatch_id=%s: type=%s err=%s; falling back to default strategy",
+            dispatch_id, type(exc).__name__, exc,
+        )
         return None
 
 
