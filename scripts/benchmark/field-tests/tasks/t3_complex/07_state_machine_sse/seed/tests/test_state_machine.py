@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from persistence import get_audit_trail, load_document, save_document
 from state_machine import InvalidTransition, ReviewableDocument
 
+MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "001_state_machine.sql"
+
 
 @pytest.fixture()
 def conn() -> sqlite3.Connection:
-    """In-memory SQLite connection with schema applied."""
+    """In-memory SQLite connection with the migration applied."""
     db = sqlite3.connect(":memory:")
     db.execute("PRAGMA foreign_keys = ON")
-    with open("migrations/001_state_machine.sql") as f:
-        db.executescript(f.read())
+    db.executescript(MIGRATION.read_text())
     return db
 
 
@@ -63,8 +65,12 @@ def test_resubmit_from_changes_requested() -> None:
 
 def test_invalid_transition_from_draft_approve_raises() -> None:
     doc = ReviewableDocument(doc_id=1)
-    with pytest.raises(InvalidTransition):
+    with pytest.raises(InvalidTransition) as excinfo:
         doc.transition("approve", actor="alice")
+    # Message names both the current state and the attempted action.
+    message = str(excinfo.value)
+    assert "DRAFT" in message
+    assert "approve" in message
 
 
 def test_terminal_approved_rejects_all_actions() -> None:
@@ -75,6 +81,8 @@ def test_terminal_approved_rejects_all_actions() -> None:
     for action in ("submit", "approve", "request_changes", "reject"):
         with pytest.raises(InvalidTransition):
             doc.transition(action, actor="alice")
+    # State is unchanged after every rejected action.
+    assert doc.state == "APPROVED"
 
 
 def test_terminal_rejected_rejects_all_actions() -> None:
@@ -85,6 +93,7 @@ def test_terminal_rejected_rejects_all_actions() -> None:
     for action in ("submit", "approve", "request_changes", "reject"):
         with pytest.raises(InvalidTransition):
             doc.transition(action, actor="alice")
+    assert doc.state == "REJECTED"
 
 
 # ── Persistence + audit tests ──────────────────────────────────────────
@@ -123,7 +132,8 @@ def test_audit_from_state_matches_pre_transition(conn: sqlite3.Connection) -> No
 
     trail = get_audit_trail(conn, doc_id=1)
     assert len(trail) == 2
-    # The second entry's from_state must be the state right before that transition
+    # The second entry's from_state is the state right before that transition,
+    # proving no audit row was written for a state that was skipped.
     assert trail[1]["from_state"] == "PENDING_REVIEW"
     assert trail[1]["to_state"] == "CHANGES_REQUESTED"
 

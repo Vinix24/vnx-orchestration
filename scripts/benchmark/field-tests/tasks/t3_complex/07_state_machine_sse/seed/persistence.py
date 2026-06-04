@@ -7,39 +7,53 @@ from state_machine import ReviewableDocument
 
 
 def save_document(conn: sqlite3.Connection, doc: ReviewableDocument) -> None:
-    """Persist document state and flush audit entries to state_transitions."""
+    """Persist the document's state and flush its pending audit entries.
+
+    The state upsert and every audit insert run inside a single transaction
+    (``with conn:``). Either all of it commits or none does, so the persisted
+    state can never disagree with the audit trail. ``created_at`` is set only
+    on first insert and preserved on update; ``updated_at`` tracks the latest
+    write. Each audit row keeps the timestamp captured when the transition
+    actually happened, not the moment of persistence.
+    """
     now = datetime.now(timezone.utc).isoformat()
+    pending = doc.drain_pending()
 
-    conn.execute(
-        """INSERT INTO documents (id, project_id, state, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT (id, project_id) DO UPDATE SET
-               state = excluded.state,
-               updated_at = excluded.updated_at""",
-        (doc.doc_id, doc.project_id, doc.state, now, now),
-    )
-
-    for entry in doc.flush_audit():
+    with conn:
         conn.execute(
-            """INSERT INTO state_transitions
-               (document_id, project_id, from_state, to_state, actor, reason, occurred_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                doc.doc_id,
-                doc.project_id,
-                entry["from_state"],
-                entry["to_state"],
-                entry["actor"],
-                entry["reason"],
-                now,
-            ),
+            """INSERT INTO documents (id, project_id, state, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (id, project_id) DO UPDATE SET
+                   state = excluded.state,
+                   updated_at = excluded.updated_at""",
+            (doc.doc_id, doc.project_id, doc.state, now, now),
         )
+
+        if pending:
+            conn.executemany(
+                """INSERT INTO state_transitions
+                       (document_id, project_id, from_state, to_state,
+                        actor, reason, occurred_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        doc.doc_id,
+                        doc.project_id,
+                        entry["from_state"],
+                        entry["to_state"],
+                        entry["actor"],
+                        entry["reason"],
+                        entry["occurred_at"],
+                    )
+                    for entry in pending
+                ],
+            )
 
 
 def load_document(
     conn: sqlite3.Connection, doc_id: int, project_id: str = "default"
 ) -> ReviewableDocument | None:
-    """Load a document from the database, or return None if not found."""
+    """Reconstruct a document from storage, or ``None`` if it does not exist."""
     row = conn.execute(
         "SELECT id, project_id, state FROM documents WHERE id = ? AND project_id = ?",
         (doc_id, project_id),
@@ -56,22 +70,22 @@ def load_document(
 def get_audit_trail(
     conn: sqlite3.Connection, doc_id: int, project_id: str = "default"
 ) -> list[dict]:
-    """Return all audit rows for a document, ordered by occurrence."""
+    """Return the append-only audit rows for a document in insertion order."""
     rows = conn.execute(
         """SELECT from_state, to_state, actor, reason, occurred_at
-           FROM state_transitions
-           WHERE document_id = ? AND project_id = ?
+               FROM state_transitions
+              WHERE document_id = ? AND project_id = ?
            ORDER BY id ASC""",
         (doc_id, project_id),
     ).fetchall()
 
     return [
         {
-            "from_state": r[0],
-            "to_state": r[1],
-            "actor": r[2],
-            "reason": r[3],
-            "occurred_at": r[4],
+            "from_state": from_state,
+            "to_state": to_state,
+            "actor": actor,
+            "reason": reason,
+            "occurred_at": occurred_at,
         }
-        for r in rows
+        for (from_state, to_state, actor, reason, occurred_at) in rows
     ]
