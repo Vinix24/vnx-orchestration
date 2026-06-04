@@ -1,0 +1,14 @@
+{
+  "expected_files": ["migrate.sql"],
+  "expected_checks_pass": 5,
+  "expected_style": {
+    "language": "sql",
+    "idempotency": "must use CREATE INDEX IF NOT EXISTS, ALTER TABLE ... ADD COLUMN with existence check (DROP/CREATE acceptable if data preserved)",
+    "anti_patterns": [
+      "no DROP TABLE without backup-and-restore",
+      "no losing the 3 original rows",
+      "no PRIMARY KEY change that orphans the id column"
+    ]
+  },
+  "rubric_for_llm_judge": "Code quality is high when: migration is idempotent (running twice is safe), data is preserved via DEFAULT 'default' on the new column, composite UNIQUE uses CREATE UNIQUE INDEX (not ALTER TABLE which SQLite cannot do post-create), and the index on project_id is a separate index (not just the composite). Low quality includes: dropping data, using ALTER TABLE ADD CONSTRAINT (unsupported in SQLite), missing IF NOT EXISTS guards."
+}

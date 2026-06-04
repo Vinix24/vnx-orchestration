@@ -1,0 +1,85 @@
+# Scoring config — per-task verify rules + LLM-judge dimensions
+# Composite score 0-5 per cell, weighted across dimensions
+
+version: 1
+
+# Dimensions all tasks score on (composite weights)
+dimensions:
+  - id: correctness
+    description: "Does the work meet the explicit success criteria?"
+    weight: 0.40
+    verify_source: "verify.py"
+
+  - id: completeness
+    description: "Are all required files written + tests added?"
+    weight: 0.20
+    verify_source: "verify.py"
+
+  - id: cost_efficiency
+    description: "Cost USD per quality-point earned"
+    weight: 0.15
+    verify_source: "models.yaml + token-usage from receipt"
+
+  - id: wallclock_efficiency
+    description: "Wallclock seconds against tier deadline"
+    weight: 0.15
+    verify_source: "dispatch start/end timestamps"
+
+  - id: code_quality
+    description: "Style, idiomatic patterns, no dead code (LLM-judge)"
+    weight: 0.10
+    verify_source: "llm_judge"
+
+# LLM-judge config
+llm_judge:
+  model: claude-opus-4-8
+  fallback_model: claude-opus-4-7
+  rubric_file: "expected.json"
+  prompt_template: |
+    You are scoring a worker's response to a benchmark task.
+
+    Task instruction: {instruction}
+
+    Worker output (files modified + final response):
+    {worker_output}
+
+    Programmatic verify result: {verify_result}
+
+    Score 0-5 on code_quality dimension based on:
+    - Idiomatic patterns for the language/framework
+    - No dead code, no TODO comments, no placeholders
+    - Reasonable function/file size
+    - Matches expected_style if defined in rubric: {expected_style}
+
+    Respond with JSON: {"code_quality": <0-5>, "reasoning": "<one sentence>"}
+
+# Per-task verify rule details
+verify_rules:
+  test_pass_count:
+    runner: "pytest"
+    args: ["-x", "--tb=no", "-q"]
+    pass_threshold: "all_expected_pass"
+
+  sql_constraint_check:
+    runner: "python3 -c 'import sqlite3; ...'"
+    pass_threshold: "constraint_validated"
+
+  runtime_smoke:
+    runner: "python3 <target_script>"
+    pass_threshold: "exit_code_zero"
+
+  test_no_timeout:
+    runner: "pytest --timeout={timeout_seconds}"
+    pass_threshold: "no_timeout_error"
+
+  endpoint_coverage_state_matrix:
+    runner: "pytest tests/test_state_machine.py -v"
+    pass_threshold: "coverage>=0.8 AND all_state_transitions_tested"
+
+  adversarial_test_pass:
+    runner: "pytest tests/test_adversarial_redirects.py"
+    pass_threshold: "all_attack_vectors_rejected"
+
+  iterations_and_hang_detection:
+    runner: "custom: count tool_call iterations + watch for >hang_threshold_minutes silence"
+    pass_threshold: "fix_in_under_5_iterations AND no_hang"

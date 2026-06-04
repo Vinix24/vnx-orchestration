@@ -1,0 +1,4 @@
+# field-tests/results/ is gitignored
+# Run-archive is local only; copy to claudedocs/ for marketing snapshots
+*
+!.gitignore

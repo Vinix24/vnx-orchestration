@@ -1,0 +1,134 @@
+# field-tests task registry
+# Each task lives in tasks/<tier>/<NN_slug>/ with instruction.md + verify.py
+# Inspiratie-bron in `source` field — citeerbaar in marketing output
+
+version: 1
+
+tiers:
+  t1_trivial:
+    description: "Mechanical refactor, single/few-file, ~5 min wallclock"
+    lanes:
+      - claude-opus-4-8
+      - claude-opus-4-7
+      - claude-opus-4-6
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+      - deepseek-v4-pro-harness
+      - deepseek-v4-pro-bare
+      - deepseek-v4-flash-harness
+      - deepseek-v4-flash-bare
+      - kimi-k2-6
+      - kimi-k2-0905
+      - local-gemma-4b
+    n_replications: 3
+
+  t2_medium:
+    description: "Multi-file refactor + tests + migration, bounded scope, ~15-25 min"
+    lanes:
+      - claude-opus-4-8
+      - claude-opus-4-7
+      - claude-opus-4-6
+      - claude-sonnet-4-6
+      - deepseek-v4-pro-harness
+      - deepseek-v4-pro-bare
+      - deepseek-v4-flash-harness
+      - kimi-k2-6
+      - kimi-k2-0905
+    n_replications: 3
+
+  t3_complex:
+    description: "Cross-module state, security boundaries, introspection-heavy, >1h"
+    lanes:
+      - claude-opus-4-8
+      - claude-opus-4-7
+      - claude-sonnet-4-6
+      - deepseek-v4-pro-harness
+    n_replications: 2
+
+tasks:
+  - id: "01_yaml_config_refactor"
+    tier: t1_trivial
+    folder: "tasks/t1_trivial/01_yaml_config_refactor"
+    source: "MC PR #236 worker queues YAML"
+    target_loc: 60
+    deadline_seconds: 600
+    pattern: "pattern-match-bounded"
+    verify_type: "test_pass_count"
+    expected_tests: 5
+
+  - id: "02_rls_policy"
+    tier: t1_trivial
+    folder: "tasks/t1_trivial/02_rls_policy"
+    source: "SEOcrawler PR #125 enable RLS on scan_quota"
+    target_loc: 30
+    deadline_seconds: 600
+    pattern: "pattern-match-bounded"
+    verify_type: "sql_constraint_check"
+
+  - id: "03_dotenv_script"
+    tier: t1_trivial
+    folder: "tasks/t1_trivial/03_dotenv_script"
+    source: "SEOcrawler PR #119 add load_dotenv()"
+    target_loc: 15
+    deadline_seconds: 300
+    pattern: "pattern-match-bounded"
+    verify_type: "runtime_smoke"
+
+  - id: "04_scorer_task"
+    tier: t2_medium
+    folder: "tasks/t2_medium/04_scorer_task"
+    source: "MC PR #244 visibility_comment_scorer"
+    target_loc: 350
+    deadline_seconds: 1800
+    pattern: "pattern-match-bounded"
+    verify_type: "test_pass_count"
+    expected_tests: 15
+
+  - id: "05_extractor_subclass"
+    tier: t2_medium
+    folder: "tasks/t2_medium/05_extractor_subclass"
+    source: "SEOcrawler new BaseExtractor pattern"
+    target_loc: 250
+    deadline_seconds: 1800
+    pattern: "pattern-match-bounded"
+    verify_type: "test_pass_count"
+    expected_tests: 5
+
+  - id: "06_flaky_mock_fix"
+    tier: t2_medium
+    folder: "tasks/t2_medium/06_flaky_mock_fix"
+    source: "SEOcrawler PR #123 mock-paginatie fix"
+    target_loc: 80
+    deadline_seconds: 1200
+    pattern: "introspection-heavy"
+    verify_type: "test_no_timeout"
+    timeout_seconds: 5
+
+  - id: "07_state_machine_sse"
+    tier: t3_complex
+    folder: "tasks/t3_complex/07_state_machine_sse"
+    source: "MC PR #239 HITL state-machine + SSE"
+    target_loc: 1200
+    deadline_seconds: 14400
+    pattern: "introspection-heavy"
+    verify_type: "endpoint_coverage_state_matrix"
+
+  - id: "08_ssrf_async_fetch"
+    tier: t3_complex
+    folder: "tasks/t3_complex/08_ssrf_async_fetch"
+    source: "SEOcrawler PR #100 SSRF-safe async fetch + DNS-pinning"
+    target_loc: 800
+    deadline_seconds: 10800
+    pattern: "introspection-heavy"
+    verify_type: "adversarial_test_pass"
+    expected_tests: 9
+
+  - id: "09_mock_introspection_trap"
+    tier: t3_complex
+    folder: "tasks/t3_complex/09_mock_introspection_trap"
+    source: "MC WH-01 Kimi-hang inspect.getsource() pollution"
+    target_loc: 100
+    deadline_seconds: 1800
+    pattern: "introspection-heavy"
+    verify_type: "iterations_and_hang_detection"
+    hang_threshold_minutes: 10
