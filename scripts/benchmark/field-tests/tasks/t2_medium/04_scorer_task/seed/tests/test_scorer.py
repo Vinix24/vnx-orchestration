@@ -1,12 +1,14 @@
 """Tests for the document scoring layer.
 
-7 formula cases (pure compute_score), 5 persistence cases (score_document /
+7 pure-formula cases (compute_score), 5 persistence cases (score_document /
 score_all), and 3 edge cases (migration idempotency, project isolation,
-concurrent access).
+concurrent access), plus a CLI smoke test.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -47,7 +49,9 @@ def conn(seeded_db: Path):
         connection.close()
 
 
-def _insert_doc(conn: sqlite3.Connection, *, word_count: int, status: str, days_old: int) -> int:
+def _insert_doc(
+    conn: sqlite3.Connection, *, word_count: int, status: str, days_old: int
+) -> int:
     created = datetime.now(timezone.utc).replace(
         hour=12, minute=0, second=0, microsecond=0
     ) - timedelta(days=days_old)
@@ -181,8 +185,6 @@ def test_score_all_handles_db_lock(seeded_db: Path):
 
 
 def test_cli_exit_zero_on_success(seeded_db: Path):
-    import subprocess
-
     proc = subprocess.run(
         [sys.executable, str(SEED_DIR / "cli.py"), "--db", str(seeded_db), "--project-id", "default"],
         capture_output=True,
@@ -191,7 +193,5 @@ def test_cli_exit_zero_on_success(seeded_db: Path):
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    import json
-
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
     assert payload == {"scored": 49, "skipped": 1}
