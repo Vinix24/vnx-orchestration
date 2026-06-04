@@ -29,4 +29,13 @@ VNX coordinates work across 4 terminals (T0-T3) with human gates at every step:
 - `.vnx-data/` is runtime state — never commit it.
 - Read your terminal's CLAUDE.md for role-specific instructions.
 
+### Dispatch lanes (default tmux-spawn, subprocess for terminal-pinned work)
+
+Two lanes ship on main; T0 picks per task:
+
+- **`scripts/lib/tmux_interactive_dispatch.py`** (default) — leaseless ephemeral, isolated worktree per dispatch, subscription-safe. Use for parallel/independent feature work.
+- **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (T1/T2/T3), Wave 5 smart-context, lease management, triple-gate contract_hash binding. Use for single-worker PRs that benefit from prior-round findings or for work expected to run >30 min (tmux-spawn has receipt-deadline failures on long workers).
+
+Full decision rule + known reliability gaps: t0-orchestrator skill §9.2 and `docs/operations/TMUX_SPAWN_LANE.md`.
+
 For full documentation: `.vnx/docs/`
