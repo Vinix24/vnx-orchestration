@@ -1,0 +1,16 @@
+{
+  "expected_files": ["tests/conftest.py"],
+  "expected_checks_pass": 3,
+  "expected_style": {
+    "language": "python",
+    "mock_pattern": "stateful — uses side_effect (list of responses OR callable with closure state)",
+    "must_preserve": "the chained-call API .table().select().range().execute()",
+    "anti_patterns": [
+      "no pytest.skip / pytest.xfail",
+      "no monkeypatching the system-under-test",
+      "no global state",
+      "no random in mock"
+    ]
+  },
+  "rubric_for_llm_judge": "High quality: uses Mock(side_effect=[r1, r2, r3]) cleanly OR a small closure that tracks call count. Each response is constructed once, not per-call. Code clearly documents the page-by-page progression. Low quality: monkey-patching globals, using a counter on the module-level mock instance, hand-rolling __call__ on a custom class when side_effect suffices."
+}
