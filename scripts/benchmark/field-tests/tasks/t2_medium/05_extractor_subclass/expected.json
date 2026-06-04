@@ -1,0 +1,16 @@
+{
+  "expected_files": ["email_link_extractor.py", "tests/test_email_link_extractor.py"],
+  "expected_checks_pass": 3,
+  "expected_style": {
+    "language": "python",
+    "inheritance": "EmailLinkExtractor(BaseExtractor) — direct subclass",
+    "name_attribute": "email_link",
+    "must_import": ["from bs4 import BeautifulSoup", "from base_extractor import BaseExtractor"],
+    "anti_patterns": [
+      "no regex-only HTML parsing",
+      "no bypass of BaseExtractor envelope contract",
+      "no leaking unhandled exceptions"
+    ]
+  },
+  "rubric_for_llm_judge": "Code quality is high when: subclass uses BeautifulSoup correctly, handles missing href gracefully, strips subject suffix idiomatically (urlparse or split on '?'), envelope is built once at return, errors collected in list. Low quality: hand-rolled HTML regex, missing href guard, side-effects in __init__, mutating class-level state."
+}

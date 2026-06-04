@@ -1,0 +1,21 @@
+{
+  "expected_files": [
+    "migrations/001_add_document_scores.sql",
+    "scorer.py",
+    "cli.py",
+    "tests/test_scorer.py"
+  ],
+  "expected_checks_pass": 4,
+  "expected_style": {
+    "language": "python+sql",
+    "module_layout": "scorer.py has compute_score / score_document / score_all callables",
+    "must_use": ["sqlite3 context managers", "UPSERT via ON CONFLICT clause"],
+    "anti_patterns": [
+      "no string-concat SQL with user input",
+      "no shared cursors across functions",
+      "no bare except clauses",
+      "no print-debug left behind"
+    ]
+  },
+  "rubric_for_llm_judge": "Code quality is high when: scorer.py separates pure compute_score (formula) from score_document (persistence), uses sqlite3 context managers, UPSERT uses real ON CONFLICT(project_id, document_id) clause (not 2-step SELECT+INSERT/UPDATE), tests cover all 7 formula cases + 5 persistence cases + 3 edge cases. Low quality includes: untyped float math without rounding, string-built SQL with user input, missing UPSERT (does DELETE+INSERT instead), tests that share state."
+}

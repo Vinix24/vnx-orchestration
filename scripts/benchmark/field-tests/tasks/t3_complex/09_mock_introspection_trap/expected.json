@@ -1,0 +1,15 @@
+{
+  "expected_files": ["tests/test_query_inspector.py"],
+  "expected_checks_pass": 4,
+  "expected_style": {
+    "language": "python",
+    "diagnosis_pattern": "rewrite test to call real function, no mock.patch on the introspected fn",
+    "anti_patterns": [
+      "modifying query_inspector.py — auto-fail",
+      "try/except TypeError swallow — auto-fail",
+      "mock.patch(spec=callable) workaround — auto-fail",
+      "no diagnosis comment explaining the mock-pollution root cause"
+    ]
+  },
+  "rubric_for_llm_judge": "High quality: clear comment in rewritten test stating 'mock.patch breaks inspect.getsource because MagicMock has no source', test now calls detect_unsafe(builders.build_user_query) WITHOUT patching, 2 added tests cover real function + parameterized-safe paths. Low quality: surface-fix that swallows TypeError, missing diagnosis, kept mock with workaround instead of removing."
+}

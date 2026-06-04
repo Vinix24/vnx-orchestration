@@ -1,0 +1,19 @@
+{
+  "expected_files": [
+    "state_machine.py", "persistence.py",
+    "tests/test_state_machine.py", "migrations/001_state_machine.sql"
+  ],
+  "expected_checks_pass": 3,
+  "expected_style": {
+    "language": "python+sql",
+    "transition_pattern": "transition table OR match/case dispatcher, both acceptable; must be data-driven (no nested ifs per state)",
+    "audit_pattern": "audit row written ATOMICALLY with state change (single transaction)",
+    "anti_patterns": [
+      "no bare except",
+      "no nested if-elif chains for state transitions (use mapping or match-case)",
+      "no audit-write-then-state-change race window",
+      "no bypass-audit transition() shortcut"
+    ]
+  },
+  "rubric_for_llm_judge": "High quality: transition table as a dict[tuple[from,action], to] OR explicit match-case statement, atomic transaction wraps audit+state, InvalidTransition has clear message including current state + attempted action. Low quality: hand-rolled if-elif ladder, audit written before state change without transaction, missing terminal-state guards, persistence and state-machine logic mixed in one class."
+}

@@ -1,0 +1,15 @@
+{
+  "expected_files": ["url_policy.py", "tests/test_url_policy.py"],
+  "expected_checks_pass": 3,
+  "expected_style": {
+    "language": "python",
+    "must_use": ["ipaddress.ip_address (decode decimal/hex)", "urllib.parse.urlparse", "socket.getaddrinfo (for DNS resolve)"],
+    "anti_patterns": [
+      "no string-match-only on hostname (must decode to ip)",
+      "no requests/urllib3 HTTP call in validator",
+      "no bare except clauses",
+      "no pre-resolved IP cache without TTL (TOCTOU window)"
+    ]
+  },
+  "rubric_for_llm_judge": "High quality: lexical + DNS-resolution layers separated, ipaddress module used for IP-range classification, URLPolicyViolation has clear reason taxonomy (scheme/private_ip/metadata/localhost/encoded/dns_private/no_host/crlf/userinfo), test monkeypatches socket.getaddrinfo for the DNS-resolves-to-private case. Low quality: regex-only hostname check, hand-rolled IP-range comparison via string-prefix, missing IPv6 case, missing userinfo evasion check."
+}
