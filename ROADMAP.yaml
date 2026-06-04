@@ -561,6 +561,74 @@ features:
       (2026-06-04/-05). Owner: operator. Priority: P1. Post-1.0 — not blocking
       2026-06-09 HN/Reddit launch.
 
+  - feature_id: gemma-4-12b-integration
+    title: "Gemma 4 12B Unified — local worker lane upgrade + smart-router + enrichment-engine (multimodal, 256K, Apache-2.0)"
+    risk_class: low
+    merge_policy: human
+    review_stack: []
+    depends_on:
+      - bench-v2-smart-lanes
+    milestone: "1.1"
+    status: planned
+    notes: >
+      Released 2026-06-03 by Google DeepMind via Unsloth day-zero access.
+      Encoder-free multimodal (text/image/audio/ASR/STT), Apache-2.0, 12B dense,
+      256K context, runs on 8GB RAM 4-bit / 14GB 8-bit. LiveCodeBench 72 (between
+      Haiku ~70-75 and Sonnet ~80-85), MMLU-Pro 77.2, GPQA Diamond 78.8. Weak
+      spot: MRCR v2 8-needle 128k = 43.4 (long-context recall poor; chunk before
+      summarization beyond ~32K).
+      Four integration tracks, gated on bench-v2 results:
+      (1) Worker lane upgrade — replace current local-gemma-4b-e4b in
+      providers/wave7_models.yaml; benchmark against Haiku/Sonnet on T1 pattern-
+      bounded tasks first.
+      (2) Smart-router classifier — ideal fit (short text->label JSON, 256K
+      context, zero API cost, multi-token prediction for routing-token latency).
+      Replaces or augments LaneRouter heuristics.
+      (3) Receipt/dispatch summarizer — works within 16-32K context; not for
+      >128K archive summarization.
+      (4) Context-enrichment agent — multimodal opens screenshot->test-expectation
+      extraction (UI work) and voice-dictated dispatch capture (sales-copilot
+      raakvlak). Feeds [[aef-style-enrichment-layer]] in 1.2.
+      Fine-tuning via Unsloth deferred to 2.x (12B LoRA needs 24GB+ VRAM, cloud
+      A100 ~$6-12 per run, requires >=5K labeled dispatch->outcome pairs).
+      Owner: operator. Priority: P2. Post-1.0, post-bench-v2.
+
+  - feature_id: aef-style-enrichment-layer
+    title: "Dispatch enrichment layer between staging and pending (AEF-inspired inception phase)"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - gemma-4-12b-integration
+    milestone: "1.2"
+    status: planned
+    notes: >
+      Inspired by Dimitri Geelen's agentic-engineering-framework
+      (DimitriGeelen/agentic-engineering-framework on GitHub) — specifically
+      `fw inception start` exploration phase before task-create. VNX staging
+      ->pending->promote flow currently has nothing between staging and pending;
+      dispatches go in as-is. AEF-style enrichment adds a discovery loop that
+      materializes context, scope, and acceptance criteria onto the dispatch
+      before it becomes promotable.
+      Three sub-features, build in order:
+      (1) Auto-attach memory context — semantic search over .claude/memory/ +
+      claudedocs/ + recent receipts; attach relevant snippets to staged dispatch
+      as additional context. Smallest win, largest payoff.
+      (2) Auto-resolve scope/blast-radius — fabric-style topology check: which
+      files this dispatch actually touches, which downstream tests/CI must run,
+      which other staged dispatches overlap (lease-conflict detection). Maps
+      onto VNX worktree-isolation gap memory.
+      (3) Auto-extract test-expectations + acceptance criteria — read related
+      code-snippets and existing tests; generate expected test-deltas as YAML
+      frontmatter on the dispatch. Gemma 4 12B (multimodal, 256K context) is
+      the natural enrichment-engine; depends on
+      [[gemma-4-12b-integration]] landing first.
+      Note: VNX is already further than AEF on orchestration (AEF is governance-
+      only, not execution); this entry borrows AEF's inception-phase concept,
+      not AEF's framework itself.
+      Owner: operator. Priority: P3. Post-1.1.
+
   - feature_id: usage-aware-routing
     title: "Usage/budget aggregator + usage-aware routing (clean-API + admin-API + receipt-OBSERVE) + Mission Control widget"
     risk_class: medium
