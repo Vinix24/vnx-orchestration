@@ -1,0 +1,16 @@
+{
+  "expected_files": ["worker_runner.py", "config/worker_queues.yaml"],
+  "expected_tests_pass": 5,
+  "expected_style": {
+    "language": "python",
+    "function_signatures": ["load_queues() -> list[str]"],
+    "must_import": ["yaml"],
+    "must_handle_exceptions": ["yaml.YAMLError", "FileNotFoundError"],
+    "anti_patterns": [
+      "no TODO comments",
+      "no commented-out code",
+      "no print() debugging left behind"
+    ]
+  },
+  "rubric_for_llm_judge": "Code quality is high when: load_queues() handles all 3 resolution paths (env, yaml, default) explicitly, exception handling is targeted (not bare except), the module-level QUEUES is assigned from load_queues() at import time, and code is idiomatic Python (type hints, no magic literals). Low quality includes: bare except clauses, hardcoded paths, missing fallback handling, copy-paste from instruction.md."
+}
