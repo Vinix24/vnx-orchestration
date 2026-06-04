@@ -507,18 +507,42 @@ If any terminal pane is missing, escalate before dispatching — do not send a d
 
 If panes.json contains stale IDs, update it manually or delete it and let path-based discovery take over on next delivery.
 
-### 9.2 Dispatch-routing — required via subprocess_dispatch.py
+### 9.2 Dispatch-routing — tmux-spawn default, subprocess-dispatch for terminal-pinned work
 
-Per ADR-010 (subprocess adapter as canonical Claude routing) and ADR-005 (NDJSON ledger as primary observability):
+Two lanes ship on main. Pick the right one per task; both produce receipts via the receipt processor.
 
-For any feature work (code edit + PR + tests), dispatches to T1/T2/T3 MUST go via subprocess_dispatch.py. This path delivers Wave 5 smart-context injection (+30pp dispatch quality lift), Wave 1 shadow logging, receipt processor audit trail, lease management, and triple-gate contract_hash binding.
+#### Decision rule
 
-#### Canonical dispatch command
+| Task | Lane | Why |
+|---|---|---|
+| Parallel / independent feature work | **tmux_interactive_dispatch.py** (default) | Leaseless ephemeral, isolated worktree, subscription-safe, fresh git checkout per dispatch |
+| Terminal-pinned single-worker PR (Wave 5 smart-context) | subprocess_dispatch.py | Wave 5 +30pp quality lift, lease management, triple-gate contract_hash binding |
+| Burn-in measurement work | subprocess_dispatch.py | Wave 1 shadow logging pinned to terminal |
+| PR review gate (codex_gate, gemini_review) | scripts/review_gate_manager.py request-and-execute (or scripts/t0_gate_enforcement.sh) | Creates the canonical review_gates request/result artifacts |
+| Utility script (transcribe, parse) | direct Bash (no claude needed) | No PR outcome |
+| Ad-hoc claude-as-utility | direct Bash claude --print | No PR outcome, no Wave 1/5 contribution |
+
+#### Canonical tmux-spawn dispatch (default)
 
 ```bash
 export VNX_STATE_DIR=.vnx-data/state VNX_DATA_DIR=.vnx-data VNX_DISPATCH_DIR=.vnx-data/dispatches
 
-python3 .claude/vnx-system/scripts/lib/subprocess_dispatch.py \
+python3 scripts/lib/tmux_interactive_dispatch.py \
+  --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
+  --role backend-developer \
+  --model sonnet \
+  --dispatch-paths "<comma-separated-paths>" \
+  --from-staging-id "<dispatch-id>" \
+  --deadline-seconds 2400 \
+  --instruction "<inline instruction text>"
+```
+
+Required: --dispatch-id, --instruction. Defaults: --isolated-worktree on, --model sonnet, --base-ref origin/main. Staging gate enforced via --from-staging-id (per ADR-006).
+
+#### Canonical subprocess-dispatch (terminal-pinned)
+
+```bash
+python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
   --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
   --model sonnet \
@@ -528,7 +552,12 @@ python3 .claude/vnx-system/scripts/lib/subprocess_dispatch.py \
   --instruction "<inline instruction text>"
 ```
 
-Required flags: --terminal-id, --dispatch-id, --instruction. Strongly recommended: --role (skill injection), --pr-id (Wave 5 prior-round findings keyed by pr_id), --dispatch-paths (scope guard).
+Required: --terminal-id, --dispatch-id, --instruction. Strongly recommended: --role, --pr-id (Wave 5 prior-round findings keyed by pr_id), --dispatch-paths.
+
+#### Known reliability gaps
+
+- tmux-spawn lane has receipt-deadline failures on long-running workers (memory `tmux-spawn-regression-dogfood-gap`). If the work is reasonably expected to take >30 min, prefer subprocess_dispatch.
+- Neither lane reliably edits files under `.claude/skills/` — Claude treats the loaded skill directory as read-only meta-path (observed 2026-06-03, OI-188). Edit those files manually from T0 or operator.
 
 #### FORBIDDEN for feature work
 
@@ -540,25 +569,14 @@ Bash(claude -p "...")
 
 Direct claude --print is acceptable ONLY for pure utility invocations (parsing, ad-hoc analysis, debug checks) that have no PR outcome and do not contribute to Wave 1/5 burn-in metrics.
 
-#### Decision rule
-
-| Task | Path |
-|---|---|
-| Code edit + PR + tests | subprocess_dispatch.py |
-| PR review gate (codex_gate, gemini_review) | scripts/review_gate_manager.py request-and-execute (or scripts/t0_gate_enforcement.sh wrapper) |
-| Burn-in measurement work | subprocess_dispatch.py REQUIRED |
-| Utility script (transcribe, parse) | direct Bash (no claude needed) |
-| Ad-hoc claude-as-utility | direct Bash claude --print acceptable |
-
-Gate execution (codex_gate, gemini_review) uses `scripts/review_gate_manager.py request-and-execute` OR `scripts/t0_gate_enforcement.sh` — these create the canonical `review_gates/requests` and `review_gates/results` artifacts that closure verification depends on. `subprocess_dispatch.py` dispatches feature work to T1/T2/T3 workers; its `--gate` flag is metadata for auto-commit tagging, not gate execution.
-
-Rule of thumb: Does the work produce a PR or a measurement? Then subprocess_dispatch.py. Does the work produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
+Rule of thumb: Does the work produce a PR? Then tmux_interactive_dispatch.py (default) or subprocess_dispatch.py (when terminal-pinning matters). Does it produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
 
 ### 9.3 Elastic worker pool (Wave 6, ADR-018)
 
 VNX has an elastic worker pool system shipped 2026-05-16 (ADR-018, PR-6.0 through PR-6.8).
-For parallel dispatches and high-throughput scenarios, prefer pool tooling over direct
-subprocess_dispatch.py terminal-pinning.
+For sustained throughput and burn-in batches, prefer pool tooling. For ad-hoc one-shot
+parallelism that doesn't fit a terminal pin, tmux_interactive_dispatch.py is the lightweight
+alternative.
 
 **Existing CLI:** `bin/vnx pool {status,scale,config,reap}`
 
