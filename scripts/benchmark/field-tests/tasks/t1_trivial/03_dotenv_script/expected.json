@@ -1,0 +1,15 @@
+{
+  "expected_files": ["backfill_check.py"],
+  "expected_checks_pass": 3,
+  "expected_style": {
+    "language": "python",
+    "diff_size_loc": "1-3 lines added, nothing removed",
+    "must_import": ["dotenv.load_dotenv"],
+    "anti_patterns": [
+      "no os.system/eval-based dotenv parsing",
+      "no rewriting the whole script",
+      "no removing the runtime check"
+    ]
+  },
+  "rubric_for_llm_judge": "Code quality is high when: change is minimal (1-2 lines), uses python-dotenv standard API, preserves the RuntimeError fallback for genuine missing env. Low quality includes: hand-rolled dotenv parser, removing the env-check, importing dotenv but not calling load_dotenv()."
+}
