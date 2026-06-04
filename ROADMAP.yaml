@@ -785,3 +785,13 @@ features:
       Atomic prune transaction for the DB maintenance script
       (scripts/vnx_db_maintenance.py). Ensures transactional safety on prune
       operations. Merged #794 on 2026-06-02.
+
+  - feature_id: sales-copilot-vnx-upgrade
+    title: "Sales-copilot project — VNX install upgrade to post-1.0"
+    risk_class: low
+    merge_policy: human
+    review_stack: []
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: "Bring sales-copilot's VNX install current with main (~3 weken gap, MC-cutover shape)."
