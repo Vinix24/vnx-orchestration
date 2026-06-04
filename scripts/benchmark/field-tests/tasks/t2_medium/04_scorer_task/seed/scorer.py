@@ -1,13 +1,13 @@
 """Per-document scoring layer.
 
-Separates the pure scoring formula (`compute_score`) from persistence
-(`score_document`, `score_all`). The formula is:
+Splits the pure formula (`compute_score`) from persistence (`score_document`,
+`score_all`) so the formula can be unit-tested without a database. The score is::
 
     score = base * status_multiplier * age_decay
 
-where base is the word count clamped to [0, 1000] and scaled to [0, 10],
-status_multiplier weights the document lifecycle stage, and age_decay damps
-older documents. Unknown statuses yield no score and are skipped.
+base scales clamped word count to a 0-10 range, status_multiplier weights the
+lifecycle stage, and age_decay damps older documents. An unrecognized status
+yields no score and the document is skipped (nothing persisted).
 """
 from __future__ import annotations
 
@@ -24,17 +24,14 @@ STATUS_MULTIPLIERS: dict[str, float] = {
     "archived": 0.25,
 }
 
-# Number of times an UPSERT retries when the database is transiently locked.
-_LOCK_RETRIES = 3
-_LOCK_RETRY_SLEEP = 0.1
+# A concurrent writer can briefly hold the write lock; retry the UPSERT a few
+# times before surfacing the OperationalError.
+_LOCK_RETRIES = 5
+_LOCK_RETRY_SLEEP = 0.05
 
 
 def compute_score(word_count: int, status: str, days_since_created: int) -> float | None:
-    """Compute a document score, or return None for an unrecognized status.
-
-    base scales clamped word count to a 0-10 range, status_multiplier weights
-    the lifecycle stage, and age_decay damps the score for older documents.
-    """
+    """Return the document score, or None when ``status`` is unrecognized."""
     multiplier = STATUS_MULTIPLIERS.get(status)
     if multiplier is None:
         return None
@@ -45,19 +42,20 @@ def compute_score(word_count: int, status: str, days_since_created: int) -> floa
 
 
 def _days_since(created_at: str) -> int:
-    """Whole days between `created_at` (ISO 8601) and now, floored at 0."""
+    """Whole days between ``created_at`` (ISO 8601) and now, floored at 0."""
     created = datetime.fromisoformat(created_at)
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
-    delta = datetime.now(timezone.utc) - created
-    return max(0, delta.days)
+    return max(0, (datetime.now(timezone.utc) - created).days)
 
 
-def score_document(conn: sqlite3.Connection, document_id: int, project_id: str = "default") -> float | None:
+def score_document(
+    conn: sqlite3.Connection, document_id: int, project_id: str = "default"
+) -> float | None:
     """Read one document, compute its score, and UPSERT it into document_scores.
 
-    Returns the score, or None if the document is missing or its status is
-    unrecognized (in which case nothing is persisted).
+    Returns the score, or None when the document is missing or its status is
+    unrecognized — in either case nothing is persisted.
     """
     row = conn.execute(
         "SELECT word_count, status, created_at FROM documents WHERE id = ?",
@@ -74,7 +72,7 @@ def score_document(conn: sqlite3.Connection, document_id: int, project_id: str =
         return None
 
     last_error: sqlite3.OperationalError | None = None
-    for attempt in range(_LOCK_RETRIES):
+    for _ in range(_LOCK_RETRIES):
         try:
             with conn:
                 conn.execute(
@@ -98,15 +96,15 @@ def score_document(conn: sqlite3.Connection, document_id: int, project_id: str =
 
 
 def score_all(conn: sqlite3.Connection, project_id: str = "default") -> dict:
-    """Score every document, returning {"scored": N, "skipped": M}.
+    """Score every document, returning ``{"scored": N, "skipped": M}``.
 
-    A document is skipped when its status is not one of the recognized
-    lifecycle stages.
+    A document is skipped when its status is not a recognized lifecycle stage.
     """
-    document_ids = [r[0] for r in conn.execute("SELECT id FROM documents ORDER BY id").fetchall()]
+    document_ids = [
+        r[0] for r in conn.execute("SELECT id FROM documents ORDER BY id").fetchall()
+    ]
 
-    scored = 0
-    skipped = 0
+    scored = skipped = 0
     for document_id in document_ids:
         if score_document(conn, document_id, project_id) is None:
             skipped += 1

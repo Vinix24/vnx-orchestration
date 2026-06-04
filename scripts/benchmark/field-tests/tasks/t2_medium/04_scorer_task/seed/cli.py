@@ -1,10 +1,10 @@
-"""CLI entry point: score every document in a SQLite database.
+"""CLI entry point — score every document in a SQLite database.
 
     python3 cli.py --db documents.db --project-id default
 
-Applies the document_scores migration (idempotent), runs score_all, prints the
-{"scored": N, "skipped": M} result as JSON, and exits 0 on success or 1 on any
-uncaught error.
+Applies the idempotent document_scores migration, runs score_all, prints the
+``{"scored": N, "skipped": M}`` result as JSON on stdout, and exits 0 on success
+or 1 on any uncaught error.
 """
 from __future__ import annotations
 
@@ -25,9 +25,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Score all documents in a SQLite database.")
+    parser = argparse.ArgumentParser(
+        description="Score all documents in a SQLite database."
+    )
     parser.add_argument("--db", required=True, help="Path to the documents SQLite database.")
-    parser.add_argument("--project-id", default="default", help="Project scope for the scores.")
+    parser.add_argument(
+        "--project-id", default="default", help="Project scope for the scores."
+    )
     args = parser.parse_args(argv)
 
     with sqlite3.connect(args.db, timeout=30) as conn:
