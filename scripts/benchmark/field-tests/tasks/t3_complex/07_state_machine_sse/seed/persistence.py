@@ -1,3 +1,14 @@
+"""SQLite persistence for ``ReviewableDocument`` + append-only audit trail.
+
+``save_document`` writes the document row and every buffered audit entry
+inside a single ``with conn:`` transaction. Either everything commits or
+nothing does — the state row and the audit rows can never diverge on a
+crash mid-flush.
+
+Composite ``(id, project_id)`` keys per ADR-007 isolate tenants: two
+documents with the same numeric ``id`` but different ``project_id`` are
+fully independent rows in both tables.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -6,35 +17,41 @@ from datetime import datetime, timezone
 from state_machine import ReviewableDocument
 
 
-def save_document(conn: sqlite3.Connection, doc: ReviewableDocument) -> None:
-    """Persist the document's state and flush its pending audit entries.
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    The state upsert and every audit insert run inside a single transaction
-    (``with conn:``). Either all of it commits or none does, so the persisted
-    state can never disagree with the audit trail. ``created_at`` is set only
-    on first insert and preserved on update; ``updated_at`` tracks the latest
-    write. Each audit row keeps the timestamp captured when the transition
-    actually happened, not the moment of persistence.
+
+def save_document(conn: sqlite3.Connection, doc: ReviewableDocument) -> None:
+    """Upsert state and flush buffered audit entries atomically.
+
+    ``created_at`` is only set on first insert; ``updated_at`` always tracks
+    the most recent write. Audit rows preserve the ``occurred_at`` timestamp
+    captured by ``ReviewableDocument.transition`` (the moment of the state
+    change), not the moment of persistence.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = _now_iso()
     pending = doc.drain_pending()
 
     with conn:
         conn.execute(
-            """INSERT INTO documents (id, project_id, state, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT (id, project_id) DO UPDATE SET
-                   state = excluded.state,
-                   updated_at = excluded.updated_at""",
+            """
+            INSERT INTO documents (id, project_id, state, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (id, project_id) DO UPDATE SET
+                state      = excluded.state,
+                updated_at = excluded.updated_at
+            """,
             (doc.doc_id, doc.project_id, doc.state, now, now),
         )
 
         if pending:
             conn.executemany(
-                """INSERT INTO state_transitions
-                       (document_id, project_id, from_state, to_state,
-                        actor, reason, occurred_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """
+                INSERT INTO state_transitions
+                    (document_id, project_id, from_state, to_state,
+                     actor, reason, occurred_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
                 [
                     (
                         doc.doc_id,
@@ -53,9 +70,10 @@ def save_document(conn: sqlite3.Connection, doc: ReviewableDocument) -> None:
 def load_document(
     conn: sqlite3.Connection, doc_id: int, project_id: str = "default"
 ) -> ReviewableDocument | None:
-    """Reconstruct a document from storage, or ``None`` if it does not exist."""
+    """Return the document for ``(doc_id, project_id)`` or ``None`` if absent."""
     row = conn.execute(
-        "SELECT id, project_id, state FROM documents WHERE id = ? AND project_id = ?",
+        "SELECT id, project_id, state FROM documents "
+        "WHERE id = ? AND project_id = ?",
         (doc_id, project_id),
     ).fetchone()
 
@@ -70,12 +88,14 @@ def load_document(
 def get_audit_trail(
     conn: sqlite3.Connection, doc_id: int, project_id: str = "default"
 ) -> list[dict]:
-    """Return the append-only audit rows for a document in insertion order."""
+    """Return audit rows for ``(doc_id, project_id)`` in insertion order."""
     rows = conn.execute(
-        """SELECT from_state, to_state, actor, reason, occurred_at
-               FROM state_transitions
-              WHERE document_id = ? AND project_id = ?
-           ORDER BY id ASC""",
+        """
+        SELECT from_state, to_state, actor, reason, occurred_at
+          FROM state_transitions
+         WHERE document_id = ? AND project_id = ?
+         ORDER BY id ASC
+        """,
         (doc_id, project_id),
     ).fetchall()
 
