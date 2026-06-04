@@ -416,14 +416,7 @@ features:
       - launch-provider-intel
     milestone: "1.1"
     status: planned
-    notes: >
-      Not yet PR'd. Extends the tmux-only PREPARE/GOVERN work (tmux-lane-structural-refactor,
-      1.0) to all remaining lanes: subprocess + provider lanes (codex/gemini/kimi/litellm).
-      Delivers Option A's BEHAVIOR (uniform enforcement) without its STRUCTURE (the
-      LaneRouter/envelope, deferred to opt-a-envelope-extraction). Build the contract body
-      BEFORE emit_unified_report (idempotency reorder). Distinct module names from
-      auto_report_contract.py and dispatch_footer.py. Provider lanes are NOT June-15-critical
-      and land here, post-launch.
+    notes: "Extends PREPARE/GOVERN uniformity to subprocess + provider lanes (post-1.0)."
 
   # ---- Post-1.0 roadmap (planned; ordered with dependencies) ----
   - feature_id: kimi-deepfix-major2
@@ -539,8 +532,7 @@ features:
     notes: "Systematizes the kimi #763 point fix: every provider fails loud on empty extraction; a CI canary dispatches a trivial task through each lane per CLI version; CLI versions pinned in provider_constraints.yaml."
 
   - feature_id: bench-v2-smart-lanes
-    title: 'Smart Lanes Benchmark v2 — internal calibration + marketing publication'
-    plan_path: claudedocs/BENCHMARK-V2-DESIGN-2026-06-03.md
+    title: "Smart Lanes field-tests benchmark"
     risk_class: low
     merge_policy: human
     review_stack: []
@@ -549,20 +541,33 @@ features:
       - OI-155
     milestone: "1.1"
     status: planned
-    notes: >
-      Bench-v1 (2026-06-03 20:50) insufficient: 1 trivial task per class, N=1,
-      capture-bug polluted all Claude lane scores (completion_text="" by design).
-      V2: 9 lanes × 5 task-classes × 3 complexity × N=3 = 405 dispatches.
-      Dependencies: PR-SR-CAPTURE (claude completion_text capture-bug fix) +
-      OI-155 (gemini default-credential timeout). Deliverables:
-      claudedocs/bench-v2-results.csv + bench-v2-summary.md; PR-SR-FIX-2
-      calibrates routing_recommendations.yaml from data; public marketing
-      comparison published on vincentvandeth.nl. Estimated effort: 1-2 dev-days
-      (2026-06-04/-05). Owner: operator. Priority: P1. Post-1.0 — not blocking
-      2026-06-09 HN/Reddit launch.
+    notes: "Realistic-bench suite at scripts/benchmark/field-tests/ for lane calibration."
+
+  - feature_id: gemma-4-12b-integration
+    title: "Gemma 4 12B local-lane evaluation"
+    risk_class: low
+    merge_policy: human
+    review_stack: []
+    depends_on:
+      - bench-v2-smart-lanes
+    milestone: "1.1"
+    status: planned
+    notes: "Evaluate Gemma 4 12B as local worker / router / enrichment-engine, gated on bench-v2."
+
+  - feature_id: aef-style-enrichment-layer
+    title: "Dispatch enrichment between staging and pending"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - gemma-4-12b-integration
+    milestone: "1.2"
+    status: planned
+    notes: "Discovery/enrichment loop before dispatch promotion."
 
   - feature_id: usage-aware-routing
-    title: "Usage/budget aggregator + usage-aware routing (clean-API + admin-API + receipt-OBSERVE) + Mission Control widget"
+    title: "Usage/budget aggregator + usage-aware routing"
     risk_class: medium
     merge_policy: human
     review_stack:
@@ -572,13 +577,7 @@ features:
       - provider-hardening
     milestone: "1.2"
     status: planned
-    notes: >
-      ADR-007: usage_state is a new central-DB table -> composite UNIQUE/PK over
-      project_id (cite in the review-gate prompt). Clean-API tier (DeepSeek balance,
-      OpenRouter credits) and admin-API tier (Anthropic/OpenAI usage) are exact;
-      subscription lanes OBSERVE remaining quota from the CLI's own rate-limit/reset
-      responses captured in receipts, never console-scraping. Feeds the smart-router
-      (prefer abundant lanes, auto-skip exhausted, re-enable at reset).
+    notes: "Centralize quota state, feed smart-router to skip exhausted lanes."
 
   # ---- 2026-06-01 backfill (post-1.0 work) ----
   - feature_id: gap4-self-learning-reactivation
@@ -681,18 +680,7 @@ features:
         title: "feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP)"
         status: merged
         risk_class: high
-    notes: >
-      4-architect-designed (NO-NODE): TRACK(=feature) -> DISPATCH(execution leaf,
-      output_ref/output_kind pluggable: pr|post|deal|doc) -> output+receipt;
-      deliverable = derived view; OI separate + selectively promoted; rollup = derived
-      idempotent projection via dormant roadmap-autopilot reconciler; horizon as status
-      field; domain-agnostic (Business OS marketing/sales). Fills the empty
-      strategic_state shell + fixes the loader reading the wrong roadmap file.
-      Companion: PLANNING-OBJECT-MODEL-OPUS-REVIEW + DELIVERABLE-NODE-DEBATE docs.
-      Build merged 2026-06-02: Phase 1 (#787) tracks seeder + horizon + objectives
-      view, Phase 2 (#790) deliverable plane + human gate, dashboard kanban (#791),
-      Phase 3 (#793) advisory rollup reconciler. Layer is build-complete pending
-      live activation (migrate 0027 + seed_tracks --apply) + envelope unification.
+    notes: "Build-complete pending live activation + envelope unification."
 
   - feature_id: receipt-hashchain-wire
     title: "GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests"
