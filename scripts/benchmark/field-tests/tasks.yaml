@@ -43,6 +43,8 @@ tiers:
       - claude-opus-4-7
       - claude-sonnet-4-6
       - deepseek-v4-pro-harness
+      - kimi-k2-6
+      - kimi-k2-0905
     n_replications: 2
 
 tasks:

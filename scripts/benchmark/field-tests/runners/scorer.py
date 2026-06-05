@@ -165,7 +165,31 @@ def score_cell(
     instruction: str, expected_files: list[str],
     expected_rubric: Optional[dict] = None, run_judge: bool = True,
 ) -> CellScore:
-    """Score a completed dispatch against a task. Returns CellScore."""
+    """Score a completed dispatch against a task. Returns CellScore.
+
+    Dispatch-failure handling: if the dispatcher itself failed (success=False),
+    record a DNF cell with composite=0. Without this guard, verify.py would run
+    against the seed/ reference solution and award partial credit (3.50 baseline)
+    for cells where the worker did literally nothing — inflating failed cells
+    above the no-show-deserves-zero line.
+    """
+    if not dispatch_result.success:
+        return CellScore(
+            lane_id=dispatch_result.lane_id,
+            task_id=dispatch_result.task_id,
+            replication=dispatch_result.replication,
+            correctness=0.0,
+            completeness=0.0,
+            cost_efficiency=0.0,
+            wallclock_efficiency=0.0,
+            code_quality=0.0,
+            composite=0.0,
+            verify_evidence=f"DNF: {dispatch_result.error or 'dispatch_failed'}"[:500],
+            judge_reasoning="skipped (dispatch failed)",
+            cost_usd=0.0,
+            wallclock_seconds=dispatch_result.wallclock_seconds,
+        )
+
     workdir = REPO_ROOT
     verify_mod = _load_verify_module(task_folder)
     try:
