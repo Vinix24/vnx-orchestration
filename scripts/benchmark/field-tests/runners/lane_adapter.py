@@ -31,7 +31,15 @@ from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 TMUX_INTERACTIVE_DISPATCH = REPO_ROOT / "scripts" / "lib" / "tmux_interactive_dispatch.py"
+SUBPROCESS_DISPATCH = REPO_ROOT / "scripts" / "lib" / "subprocess_dispatch.py"
 PROVIDER_DISPATCH = REPO_ROOT / "scripts" / "lib" / "provider_dispatch.py"
+
+# Models where the interactive Claude Code lane is known-broken (hidden-thinking
+# loops + interactive-session hangs per Anthropic GitHub #63390 and #64153).
+# Route these via headless subprocess_dispatch instead, which exercises the same
+# subscription pre-15-juni and bypasses the interactive-session bug. See
+# claudedocs/CLAUDE_OPUS_48_KNOWN_BUGS.md for evidence and the 15-juni cutover plan.
+HEADLESS_FORCED_MODELS = {"claude-opus-4-8"}
 # Report-dir search order: project-local (tmux-spawn writes here) first, central second.
 # tmux_interactive_dispatch uses resolve_state_dir which lands on <REPO_ROOT>/.vnx-data/.
 # provider_dispatch can write to central or project-local depending on install mode.
@@ -56,6 +64,43 @@ class DispatchResult:
     stdout: str
     stderr: str
     error: Optional[str] = None
+
+
+def _claude_subprocess_headless(
+    lane: dict, dispatch_id: str, instruction: str,
+    dispatch_paths: str, deadline_seconds: int,
+) -> tuple[int, str, str]:
+    """Route a Claude lane via subprocess_dispatch.py (headless `claude -p`).
+
+    Used for models where the interactive lane is known-broken (see
+    HEADLESS_FORCED_MODELS). Pre-15-juni-2026 the headless `claude -p` path
+    still runs on the subscription per the June-15 escape window; post-cutover
+    it routes to API credits and SHOULD NOT be used for cost-sensitive bench runs.
+    """
+    env = {
+        **os.environ,
+        "VNX_STATE_DIR": ".vnx-data/state",
+        "VNX_DATA_DIR": ".vnx-data",
+        "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
+        "VNX_WORKER_SCOPED": "0",
+    }
+    cmd = [
+        sys.executable, str(SUBPROCESS_DISPATCH),
+        "--terminal-id", "T1",
+        "--dispatch-id", dispatch_id,
+        "--model", lane["model_arg"],
+        "--role", "backend-developer",
+        "--pr-id", f"BENCH-{lane['id']}",
+        "--dispatch-paths", dispatch_paths,
+        "--instruction", instruction,
+        "--allow-unstaged",
+        "--reason", f"benchmark headless (opus-4-8 interactive-hang workaround) {dispatch_id}",
+    ]
+    proc = subprocess.run(
+        cmd, env=env, capture_output=True, text=True,
+        timeout=deadline_seconds + 60, check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def _claude_tmux_spawn(
@@ -145,9 +190,14 @@ def dispatch(
 
     try:
         if lane["provider"] == "claude":
-            rc, out, err = _claude_tmux_spawn(
-                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
-            )
+            if lane["model_arg"] in HEADLESS_FORCED_MODELS:
+                rc, out, err = _claude_subprocess_headless(
+                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                )
+            else:
+                rc, out, err = _claude_tmux_spawn(
+                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                )
         else:
             rc, out, err = _provider_dispatch(
                 lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
