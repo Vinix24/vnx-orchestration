@@ -91,10 +91,15 @@ def run_one_cell(
     dispatch_paths = str(seed_dir.relative_to(REPO_ROOT)) if seed_dir.exists() else ""
 
     deadline = deadline_override if deadline_override is not None else task.get("deadline_seconds", 600)
+    # Skill-binding: tasks.yaml may declare `skill: <name>` or `skills: [a, b]`.
+    # Provider-agnostic plain-prepend handled in lane_adapter.dispatch().
+    raw_skills = task.get("skill") or task.get("skills") or []
+    skill_names = [raw_skills] if isinstance(raw_skills, str) else list(raw_skills)
     result = lane_dispatch(
         lane=lane, task_id=task["id"], replication=rep,
         instruction=instruction, dispatch_paths=dispatch_paths,
         deadline_seconds=deadline,
+        skill_names=skill_names,
     )
 
     expected_files = []
@@ -141,7 +146,11 @@ def _load_dnf_cells_from_csv(csv_path: Path) -> set[tuple[str, str, int]]:
             if ev.startswith("dnf:"):
                 dnf.add((row["lane_id"], row["task_id"], int(row["replication"])))
                 continue
-            if wall > 14000 and comp < 4.0:
+            # Deadline-equivalent: wallclock > 5000s (1h23m) AND composite < 4.5
+            # catches both 4-hour-deadline-hits AND 3-hour-pre-deadline-hangs.
+            # 2026-06-04 bench had opus-4-7 T3-08 at 10806s composite=3.75 that
+            # the earlier >14000s threshold missed.
+            if wall > 5000 and comp < 4.5:
                 dnf.add((row["lane_id"], row["task_id"], int(row["replication"])))
                 continue
 

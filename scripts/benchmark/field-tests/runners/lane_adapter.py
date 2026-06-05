@@ -33,6 +33,14 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 TMUX_INTERACTIVE_DISPATCH = REPO_ROOT / "scripts" / "lib" / "tmux_interactive_dispatch.py"
 SUBPROCESS_DISPATCH = REPO_ROOT / "scripts" / "lib" / "subprocess_dispatch.py"
 PROVIDER_DISPATCH = REPO_ROOT / "scripts" / "lib" / "provider_dispatch.py"
+SKILLS_ROOT = REPO_ROOT / ".claude" / "skills"
+
+# Skill-prefix injection lives in scripts/lib/skill_prefix.py — provider-agnostic
+# plain-text prepend. Used here for non-claude lanes (kimi/codex/deepseek-bare)
+# that lack a native skill-loading mechanism. Claude lanes already inject skills
+# via their dispatcher's _inject_skill_context — we don't double-inject.
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+from skill_prefix import inject_skill_prefix_into_instruction  # noqa: E402
 
 # Models where the interactive Claude Code lane is known-broken (hidden-thinking
 # loops + interactive-session hangs per Anthropic GitHub #63390 and #64153).
@@ -191,11 +199,26 @@ def dispatch(
     instruction: str,
     dispatch_paths: str,
     deadline_seconds: int,
+    skill_names: Optional[list[str]] = None,
 ) -> DispatchResult:
-    """Run a single (lane, task, replication) dispatch and return result."""
+    """Run a single (lane, task, replication) dispatch and return result.
+
+    If skill_names is provided, the skill body + auto-generated resource-index
+    is plain-text-prepended to the instruction for non-claude lanes
+    (kimi/codex/deepseek-bare). Claude lanes already inject skills via their
+    dispatcher's _inject_skill_context — skipping here avoids double-injection.
+    See scripts/lib/skill_prefix.py for the architecture rationale.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dispatch_id = f"bench-{lane['id']}-{task_id}-r{replication}-{ts}"
     start = time.monotonic()
+
+    # Plain-prepend skill prefix for non-claude lanes. Claude lanes get skills
+    # via their native injection — we skip the prepend there to avoid doubling.
+    if skill_names and lane["provider"] != "claude":
+        instruction = inject_skill_prefix_into_instruction(
+            instruction, skill_names, SKILLS_ROOT,
+        )
 
     try:
         if lane["provider"] == "claude":
