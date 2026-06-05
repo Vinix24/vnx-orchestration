@@ -35,12 +35,15 @@ SUBPROCESS_DISPATCH = REPO_ROOT / "scripts" / "lib" / "subprocess_dispatch.py"
 PROVIDER_DISPATCH = REPO_ROOT / "scripts" / "lib" / "provider_dispatch.py"
 SKILLS_ROOT = REPO_ROOT / ".claude" / "skills"
 
-# Skill-prefix injection lives in scripts/lib/skill_prefix.py — provider-agnostic
-# plain-text prepend. Used here for non-claude lanes (kimi/codex/deepseek-bare)
-# that lack a native skill-loading mechanism. Claude lanes already inject skills
-# via their dispatcher's _inject_skill_context — we don't double-inject.
+# Skill injection lives in scripts/lib/skill_prefix.py — provider-agnostic.
+# Used for ALL lanes (claude/kimi/codex/deepseek) so every worker gets the
+# same structured prompt: role → assignment → resources → closing.
+# Claude lanes may have their dispatcher's _inject_skill_context also fire
+# — token-cost of doubling is ~1000 extra tokens on subscription = $0,
+# resolved Sunday during skill-aware re-bench by disabling dispatcher-side
+# injection when our structured prompt is already in place.
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
-from skill_prefix import inject_skill_prefix_into_instruction  # noqa: E402
+from skill_prefix import build_structured_prompt  # noqa: E402
 
 # Models where the interactive Claude Code lane is known-broken (hidden-thinking
 # loops + interactive-session hangs per Anthropic GitHub #63390 and #64153).
@@ -203,21 +206,20 @@ def dispatch(
 ) -> DispatchResult:
     """Run a single (lane, task, replication) dispatch and return result.
 
-    If skill_names is provided, the skill body + auto-generated resource-index
-    is plain-text-prepended to the instruction for non-claude lanes
-    (kimi/codex/deepseek-bare). Claude lanes already inject skills via their
-    dispatcher's _inject_skill_context — skipping here avoids double-injection.
-    See scripts/lib/skill_prefix.py for the architecture rationale.
+    If skill_names is provided, the instruction is wrapped in a structured
+    prompt (role → assignment → resources → closing) for EVERY lane —
+    claude, kimi, codex, deepseek alike. Provider-agnostic single source of
+    truth. See scripts/lib/skill_prefix.py for the architecture rationale.
     """
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dispatch_id = f"bench-{lane['id']}-{task_id}-r{replication}-{ts}"
     start = time.monotonic()
 
-    # Plain-prepend skill prefix for non-claude lanes. Claude lanes get skills
-    # via their native injection — we skip the prepend there to avoid doubling.
-    if skill_names and lane["provider"] != "claude":
-        instruction = inject_skill_prefix_into_instruction(
-            instruction, skill_names, SKILLS_ROOT,
+    # Uniform skill injection for ALL lanes (per Vincent 2026-06-05).
+    # Place T0's instruction in the middle of the role/SOP/resources frame.
+    if skill_names:
+        instruction = build_structured_prompt(
+            skill_names, instruction, SKILLS_ROOT,
         )
 
     try:
