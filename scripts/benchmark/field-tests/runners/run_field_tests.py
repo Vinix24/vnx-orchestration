@@ -73,7 +73,10 @@ def filter_cells(
     return cells
 
 
-def run_one_cell(lane: dict, task: dict, rep: int, run_judge: bool) -> dict:
+def run_one_cell(
+    lane: dict, task: dict, rep: int, run_judge: bool,
+    deadline_override: int | None = None,
+) -> dict:
     """Dispatch + score one cell. Returns dict with dispatch + score."""
     task_folder = FIELD_TESTS / task["folder"]
     instruction_path = task_folder / "instruction.md"
@@ -87,10 +90,11 @@ def run_one_cell(lane: dict, task: dict, rep: int, run_judge: bool) -> dict:
     seed_dir = task_folder / "seed"
     dispatch_paths = str(seed_dir.relative_to(REPO_ROOT)) if seed_dir.exists() else ""
 
+    deadline = deadline_override if deadline_override is not None else task.get("deadline_seconds", 600)
     result = lane_dispatch(
         lane=lane, task_id=task["id"], replication=rep,
         instruction=instruction, dispatch_paths=dispatch_paths,
-        deadline_seconds=task.get("deadline_seconds", 600),
+        deadline_seconds=deadline,
     )
 
     expected_files = []
@@ -109,6 +113,59 @@ def run_one_cell(lane: dict, task: dict, rep: int, run_judge: bool) -> dict:
     return {"dispatch": result, "score": score}
 
 
+def _load_dnf_cells_from_csv(csv_path: Path) -> set[tuple[str, str, int]]:
+    """Read a prior raw.csv and return (lane, task, rep) tuples that are DNF/invalid.
+
+    DNF criteria (must match scorer.py + lane_adapter.py policy):
+      - verify_evidence starts with "DNF:" (scorer marked it as failed dispatch)
+      - hit the hard deadline AND scored < 4.0 (4-hour cells with no real result)
+      - report missing in both candidate dirs (immediate-exit no-report cell)
+
+    Note: short wallclock alone is NOT enough — Kimi can legitimately finish in 2-3s
+    if the worker is fast and the task is bounded. The discriminator is report-presence.
+    """
+    import csv as _csv
+    from lane_adapter import REPORT_DIR_CANDIDATES  # local import to avoid cycle
+    dnf: set[tuple[str, str, int]] = set()
+    with csv_path.open(encoding="utf-8") as fh:
+        reader = _csv.DictReader(fh)
+        for row in reader:
+            try:
+                wall = float(row["wallclock_seconds"])
+                comp = float(row["composite"])
+                ev = (row.get("verify_evidence") or "").lower()
+            except (KeyError, ValueError):
+                continue
+
+            # Hard signals.
+            if ev.startswith("dnf:"):
+                dnf.add((row["lane_id"], row["task_id"], int(row["replication"])))
+                continue
+            if wall > 14000 and comp < 4.0:
+                dnf.add((row["lane_id"], row["task_id"], int(row["replication"])))
+                continue
+
+            # Soft signal: report-missing for any cell with wallclock < 5s.
+            # Check filesystem for both report-naming conventions in both candidate dirs.
+            if wall < 5.0:
+                prefix = f"bench-{row['lane_id']}-{row['task_id']}-r{row['replication']}-"
+                found = False
+                for d in REPORT_DIR_CANDIDATES:
+                    if not d.exists():
+                        continue
+                    for p in d.iterdir():
+                        if p.name.startswith(prefix) and (
+                            p.name.endswith(".md") or p.name.endswith("_report.md")
+                        ):
+                            found = True
+                            break
+                    if found:
+                        break
+                if not found:
+                    dnf.add((row["lane_id"], row["task_id"], int(row["replication"])))
+    return dnf
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run field-tests benchmark suite")
     parser.add_argument("--lane", action="append", default=None, help="filter to lane id(s)")
@@ -118,10 +175,49 @@ def main() -> int:
     parser.add_argument("--parallel", type=int, default=6, help="concurrent dispatches (default 6)")
     parser.add_argument("--no-judge", action="store_true", help="skip LLM-judge step")
     parser.add_argument("--results-dir", type=Path, default=None, help="override results dir")
+    parser.add_argument(
+        "--retry-from", type=Path, default=None,
+        help="re-run only DNF cells from a prior raw.csv; output replaces those rows",
+    )
+    parser.add_argument(
+        "--claude-serial", action="store_true",
+        help="serialize claude lanes (parallel=1 for claude, --parallel for others) "
+             "to avoid subscription rate-limit cliff observed in 2026-06-04 bench",
+    )
+    parser.add_argument(
+        "--max-retries", type=int, default=2,
+        help="if a cell DNFs, retry up to N more times with exponential back-off (default 2)",
+    )
+    parser.add_argument(
+        "--deadline-override", type=int, default=None,
+        help="override task deadline_seconds (e.g. 1800 to fail-fast on retry-run)",
+    )
     args = parser.parse_args()
 
     cfg = load_tasks_config()
     cells = filter_cells(cfg, args.lane, args.tier, args.task, args.n)
+
+    # Retry-from mode: filter the cells to only those that DNFed in the prior run.
+    retry_csv: Path | None = None
+    dnf_filter: set[tuple[str, str, int]] | None = None
+    if args.retry_from:
+        retry_csv = args.retry_from.resolve()
+        if not retry_csv.exists():
+            print(f"--retry-from: file not found: {retry_csv}", file=sys.stderr)
+            return 2
+        dnf_filter = _load_dnf_cells_from_csv(retry_csv)
+        if not dnf_filter:
+            print(f"--retry-from: no DNF cells found in {retry_csv}", file=sys.stderr)
+            return 0
+        cells = [
+            (lane, task, rep) for (lane, task, rep) in cells
+            if (lane["id"], task["id"], rep) in dnf_filter
+        ]
+        print(
+            f"[run_field_tests] --retry-from {retry_csv.name}: {len(cells)} DNF cells to re-run",
+            file=sys.stderr,
+        )
+
     if not cells:
         print("No cells to run after filtering.", file=sys.stderr)
         return 2
@@ -137,10 +233,41 @@ def main() -> int:
     failures = []
     run_judge = not args.no_judge
 
-    with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+    # Partition cells if --claude-serial: claude lanes run sequentially (parallel=1)
+    # to avoid subscription rate-limit hit observed on 2026-06-04. Provider lanes
+    # (kimi/deepseek) keep --parallel.
+    claude_cells = [c for c in cells if c[0]["provider"] == "claude"]
+    other_cells = [c for c in cells if c[0]["provider"] != "claude"]
+
+    def _run_with_retry(lane, task, rep):
+        """Run one cell with up to args.max_retries retries on DNF."""
+        attempt = 0
+        last_res = None
+        while attempt <= args.max_retries:
+            res = run_one_cell(lane, task, rep, run_judge, deadline_override=args.deadline_override)
+            if "error" in res:
+                return res
+            score = res["score"]
+            # Real success: real wallclock + non-zero composite OR judge-skipped-but-cost-paid
+            if score.composite > 0.0 and score.wallclock_seconds >= 5.0:
+                return res
+            attempt += 1
+            if attempt > args.max_retries:
+                return res
+            back_off = min(60 * (2 ** (attempt - 1)), 600)
+            print(
+                f"  ↻ ({lane['id']},{task['id']},r{rep}) DNF (wall={score.wallclock_seconds:.1f}s "
+                f"comp={score.composite:.2f}); retry {attempt}/{args.max_retries} after {back_off}s",
+                file=sys.stderr,
+            )
+            time.sleep(back_off)
+            last_res = res
+        return last_res
+
+    def _drain_pool(pool, cells_to_run):
         futures = {
-            pool.submit(run_one_cell, lane, task, rep, run_judge): (lane["id"], task["id"], rep)
-            for lane, task, rep in cells
+            pool.submit(_run_with_retry, lane, task, rep): (lane["id"], task["id"], rep)
+            for lane, task, rep in cells_to_run
         }
         for fut in as_completed(futures):
             key = futures[fut]
@@ -159,6 +286,20 @@ def main() -> int:
             except Exception as exc:
                 failures.append({"key": key, "error": f"crash: {exc}"})
                 print(f"  ✗ {key}: crash {exc}", file=sys.stderr)
+
+    if args.claude_serial and claude_cells:
+        print(
+            f"[run_field_tests] --claude-serial: running {len(claude_cells)} claude cells "
+            f"sequentially, then {len(other_cells)} other cells at parallel={args.parallel}",
+            file=sys.stderr,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            _drain_pool(pool, claude_cells)
+        with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+            _drain_pool(pool, other_cells)
+    else:
+        with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+            _drain_pool(pool, cells)
 
     finished_at = datetime.now(timezone.utc)
     write_raw_csv(scores, results_dir / "raw.csv")
