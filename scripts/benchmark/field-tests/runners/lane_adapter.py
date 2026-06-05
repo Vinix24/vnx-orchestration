@@ -37,9 +37,18 @@ PROVIDER_DISPATCH = REPO_ROOT / "scripts" / "lib" / "provider_dispatch.py"
 # Models where the interactive Claude Code lane is known-broken (hidden-thinking
 # loops + interactive-session hangs per Anthropic GitHub #63390 and #64153).
 # Route these via headless subprocess_dispatch instead, which exercises the same
-# subscription pre-15-juni and bypasses the interactive-session bug. See
-# claudedocs/CLAUDE_OPUS_48_KNOWN_BUGS.md for evidence and the 15-juni cutover plan.
-HEADLESS_FORCED_MODELS = {"claude-opus-4-8"}
+# subscription pre-15-juni and bypasses the interactive-session bug.
+#
+# Expanded 2026-06-05 after retry-run observed opus-4-7 + sonnet-4-6 hitting
+# the same 0.1s immediate-exit pattern on T3-09 instruction content. Issue
+# #63390 explicitly names "Opus 4.8, Sonnet 4.6"; opus-4-7 hit it empirically
+# on identical content. Safer to route all three through headless until
+# Anthropic ships the fix (currently #63390 + #64153 open as of 2026-06-05).
+HEADLESS_FORCED_MODELS = {
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+}
 # Report-dir search order: project-local (tmux-spawn writes here) first, central second.
 # tmux_interactive_dispatch uses resolve_state_dir which lands on <REPO_ROOT>/.vnx-data/.
 # provider_dispatch can write to central or project-local depending on install mode.

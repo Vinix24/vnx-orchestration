@@ -102,12 +102,12 @@ def _compute_wallclock_efficiency(wallclock_seconds: float, deadline_seconds: in
     return round(5.0 * (1.0 - wallclock_seconds / deadline_seconds), 2)
 
 
-def _llm_judge_code_quality(
+def _build_judge_prompt(
     instruction: str, worker_output: str, verify_evidence: str,
     expected_style: Optional[dict] = None,
-) -> tuple[float, str]:
-    """Spawn Opus subprocess to judge code_quality 0-5. Returns (score, reasoning)."""
-    prompt = (
+) -> str:
+    """Single prompt for all judge providers — kept identical for fair cross-comparison."""
+    return (
         f"You are scoring a worker's response to a benchmark task.\n\n"
         f"Task: {instruction[:1500]}\n\n"
         f"Worker output excerpt:\n{worker_output[:3000]}\n\n"
@@ -120,6 +120,23 @@ def _llm_judge_code_quality(
         f'Respond with ONLY this JSON line:\n'
         f'{{"code_quality": <0-5>, "reasoning": "<one sentence>"}}'
     )
+
+
+def _parse_judge_json(out: str) -> Optional[tuple[float, str]]:
+    """Extract (score, reasoning) from a judge's stdout. Returns None on parse-fail."""
+    for line in out.strip().splitlines():
+        line = line.strip()
+        if line.startswith("{") and "code_quality" in line:
+            try:
+                parsed = json.loads(line)
+                return float(parsed["code_quality"]), str(parsed.get("reasoning", ""))
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+    return None
+
+
+def _judge_claude(prompt: str) -> Optional[tuple[float, str]]:
+    """Opus subprocess judge. Returns (score, reasoning) or None on all-fallbacks-failed."""
     for model in (JUDGE_MODEL, JUDGE_FALLBACK):
         try:
             proc = subprocess.run(
@@ -128,18 +145,72 @@ def _llm_judge_code_quality(
             )
             if proc.returncode != 0:
                 continue
-            out = proc.stdout.strip()
-            for line in out.splitlines():
-                line = line.strip()
-                if line.startswith("{") and "code_quality" in line:
-                    try:
-                        parsed = json.loads(line)
-                        return float(parsed["code_quality"]), str(parsed.get("reasoning", ""))
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        continue
+            result = _parse_judge_json(proc.stdout)
+            if result is not None:
+                return result
         except (subprocess.TimeoutExpired, FileNotFoundError):
             continue
-    return 0.0, "judge_unavailable"
+    return None
+
+
+def _judge_kimi(prompt: str) -> Optional[tuple[float, str]]:
+    """Kimi CLI subprocess judge (cross-model verification of claude-judge)."""
+    try:
+        proc = subprocess.run(
+            ["kimi", "--print", "--prompt", prompt],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if proc.returncode != 0:
+            # Common transient failures: quota exhausted, auth expired.
+            # Logged but not raised — panel falls back to claude-only.
+            return None
+        return _parse_judge_json(proc.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _llm_judge_code_quality(
+    instruction: str, worker_output: str, verify_evidence: str,
+    expected_style: Optional[dict] = None,
+) -> tuple[float, str]:
+    """Cross-provider judge panel. Returns (avg_score, combined_reasoning).
+
+    Runs claude (Opus) + kimi in parallel; averages scores; flags disagreement.
+    Falls back to single-judge if one provider unavailable. If both fail,
+    returns 0.0 with "judge_unavailable" so the scorer can distinguish from
+    a real "0/5" verdict.
+
+    Disagreement threshold: score-spread > 1.5 between judges. Flagged in
+    reasoning so the operator can spot-check on aggregate review.
+    """
+    prompt = _build_judge_prompt(instruction, worker_output, verify_evidence, expected_style)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_claude = pool.submit(_judge_claude, prompt)
+        f_kimi = pool.submit(_judge_kimi, prompt)
+        claude_result = f_claude.result()
+        kimi_result = f_kimi.result()
+
+    scores: list[float] = []
+    reasonings: list[str] = []
+    if claude_result is not None:
+        scores.append(claude_result[0])
+        reasonings.append(f"opus={claude_result[0]:.1f}: {claude_result[1]}")
+    if kimi_result is not None:
+        scores.append(kimi_result[0])
+        reasonings.append(f"kimi={kimi_result[0]:.1f}: {kimi_result[1]}")
+
+    if not scores:
+        return 0.0, "judge_unavailable (both opus and kimi failed)"
+
+    avg_score = round(sum(scores) / len(scores), 2)
+    disagreement_flag = ""
+    if len(scores) == 2 and abs(scores[0] - scores[1]) > 1.5:
+        disagreement_flag = f" [DISAGREEMENT spread={abs(scores[0] - scores[1]):.1f}]"
+
+    combined = " | ".join(reasonings) + disagreement_flag
+    return avg_score, combined
 
 
 def _extract_cost_from_report(report_path: Path) -> float:
