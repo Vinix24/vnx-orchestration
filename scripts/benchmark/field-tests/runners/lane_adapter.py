@@ -199,7 +199,10 @@ def dispatch(
 
     try:
         if lane["provider"] == "claude":
-            if lane["model_arg"] in HEADLESS_FORCED_MODELS:
+            # Check BOTH lane id and model_arg — models.yaml uses short aliases
+            # for some lanes (e.g. claude-sonnet-4-6's model_arg is "sonnet"),
+            # so a model_arg-only check missed sonnet on the 2026-06-05 retry.
+            if lane["id"] in HEADLESS_FORCED_MODELS or lane["model_arg"] in HEADLESS_FORCED_MODELS:
                 rc, out, err = _claude_subprocess_headless(
                     lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
                 )
