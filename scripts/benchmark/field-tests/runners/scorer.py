@@ -261,7 +261,11 @@ def score_cell(
             wallclock_seconds=dispatch_result.wallclock_seconds,
         )
 
-    workdir = REPO_ROOT
+    # Verify in the checkout the worker actually wrote to. Headless/provider
+    # lanes work in the repo root; tmux lanes provide their (preserved or
+    # branch-restored) worktree via DispatchResult.workdir. Scoring the repo
+    # root for a tmux cell measures the wrong checkout (codex-gate PR #831).
+    workdir = getattr(dispatch_result, "workdir", None) or REPO_ROOT
     verify_mod = _load_verify_module(task_folder)
     try:
         verify_result = verify_mod.verify(workdir, task_meta)

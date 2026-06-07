@@ -15,7 +15,7 @@ This is not a security sandbox; it isolates work with tmux sessions and git work
 - **pip-installable.** `pip install vnx-orchestration`, then `vnx init`, `vnx migrate`, `vnx doctor`. No repo clone required to scaffold a governed project.
 - **Provider-agnostic skill injection.** One skill folder, one structured prompt (role, assignment, resource index), identical for claude, kimi, codex, and deepseek workers. [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md).
 - **Realistic benchmark suite.** Field-tests derived from production PRs, programmatic verification per task, LLM-judge fallback, cost per quality-point. Seven lanes measured on the complex tier; methodology ships with every run.
-- **SSRF-safe URL policy.** Two-phase validator with an adversarial test suite for the fetch paths workers touch.
+- **SSRF-safe URL policy.** Two-phase validator (lexical + DNS-resolution range-check, fail-closed) with an adversarial test suite. Ships as a governed building block in `scripts/lib/url_policy.py`; wiring into worker fetch paths is 1.0.1.
 - **Headless review gates in the audit trail.** Gate results land as normalized reports plus structured result records; a required gate is not complete until both exist.
 - **Receipt hash-chain verification.** `audit_chain` tooling verifies the append-only NDJSON ledger end-to-end.
 

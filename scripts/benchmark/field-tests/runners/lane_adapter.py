@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -85,6 +86,14 @@ class DispatchResult:
     stdout: str
     stderr: str
     error: Optional[str] = None
+    # Where the worker's output lives for verify.py. None = repo root
+    # (headless/provider lanes run in the main checkout). tmux-spawn lanes
+    # work in an isolated worktree — scoring the repo root there yields
+    # false positives/negatives (codex-gate PR #831 finding).
+    workdir: Optional[Path] = None
+    # Temp checkout created purely for scoring (branch survived, worktree
+    # reaped). The runner must remove it after score_cell.
+    scoring_worktree: Optional[Path] = None
 
 
 def _claude_subprocess_headless(
@@ -159,6 +168,51 @@ def _claude_tmux_spawn(
         timeout=deadline_seconds + 120, check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _resolve_tmux_workdir(
+    dispatch_id: str,
+) -> tuple[Optional[Path], Optional[Path], Optional[str]]:
+    """Locate a tmux-spawn worker's output for scoring.
+
+    tmux workers run in an ephemeral isolated worktree. After teardown
+    (tmux_worktree.reap) the output lives in one of two places:
+
+      dirty     → worktree preserved on disk           → score there
+      committed → worktree gone, branch dispatch/<id>  → temp checkout
+      clean     → nothing survived                     → unscorable
+
+    Returns (workdir, temp_scoring_worktree, error). temp_scoring_worktree
+    is set when this function created a checkout the caller must remove
+    after scoring. On error the cell must be marked unscorable — falling
+    back to the repo root would score the wrong checkout (PR #831).
+    """
+    wt = REPO_ROOT / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
+    if wt.is_dir():
+        return wt, None, None
+
+    branch = f"dispatch/{dispatch_id}"
+    probe = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", "--quiet", branch],
+        capture_output=True, text=True, check=False,
+    )
+    if probe.returncode == 0:
+        tmp = Path(tempfile.mkdtemp(prefix=f"score-{dispatch_id[:48]}-"))
+        added = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "worktree", "add", "--detach", str(tmp), branch],
+            capture_output=True, text=True, check=False,
+        )
+        if added.returncode == 0:
+            return tmp, tmp, None
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, (
+            f"scoring-worktree add failed for {branch}: "
+            f"{(added.stderr or '').strip()[:200]}"
+        )
+
+    return None, None, (
+        "tmux worker output unlocatable (no preserved worktree, no dispatch branch)"
+    )
 
 
 def _resolve_codex_bin_dir() -> Optional[str]:
@@ -253,6 +307,7 @@ def dispatch(
             skill_names, instruction, SKILLS_ROOT,
         )
 
+    via_tmux = False
     try:
         if lane["provider"] == "claude":
             # Check BOTH lane id and model_arg — models.yaml uses short aliases
@@ -263,6 +318,7 @@ def dispatch(
                     lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
                 )
             else:
+                via_tmux = True
                 rc, out, err = _claude_tmux_spawn(
                     lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
                 )
@@ -310,6 +366,15 @@ def dispatch(
     elif report_path is None:
         failure_reason = "no_report (worker rc=0 but never emitted unified_report)"
 
+    # tmux lanes: locate the worker's actual output for verify.py. Headless
+    # and provider lanes work in the main checkout (workdir=None → repo root).
+    workdir: Optional[Path] = None
+    scoring_worktree: Optional[Path] = None
+    if via_tmux and failure_reason is None:
+        workdir, scoring_worktree, workdir_err = _resolve_tmux_workdir(dispatch_id)
+        if workdir_err:
+            failure_reason = f"unscorable: {workdir_err}"
+
     success = failure_reason is None
 
     return DispatchResult(
@@ -318,6 +383,8 @@ def dispatch(
         report_path=report_path,
         stdout=out[-2000:], stderr=err[-2000:],
         error=failure_reason,
+        workdir=workdir,
+        scoring_worktree=scoring_worktree,
     )
 
 

@@ -1,8 +1,0 @@
-# Worker queue configuration.
-# Operators can edit this list without touching code.
-# Overridden at runtime by the WORKER_QUEUES env var (comma-separated).
-queues:
-  - default
-  - scoring
-  - ingestion
-  - indexing
