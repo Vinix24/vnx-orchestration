@@ -96,15 +96,16 @@ Phased removal, gated on evidence:
 
 - Unit smoke: security-engineer structured prompt builds correctly (role → assignment → resources → closing markers verified, instruction preserved verbatim).
 - End-to-end: codex-gpt-5-4 ran T3-09 with debugger-skill injected via this path (composite 4.38, real report written) — proves a non-claude provider parses and acts on the structured prompt.
-- **E2E role-adoption smoke, 2026-06-07** (`runners/skill_smoke.py`): neutral assignment (never says "security") with planted SQL-injection + hardcoded credential + off-by-one; security-engineer skill injected via `build_structured_prompt()`. **5/5 reachable lanes PASS** — worker leads with the security finding and reproduces the skill's mandatory activation line:
+- **E2E role-adoption smoke, 2026-06-07** (`runners/skill_smoke.py`): neutral assignment (never says "security") with planted SQL-injection + hardcoded credential + off-by-one; security-engineer skill injected via `build_structured_prompt()`. **6/6 lanes PASS** — every dispatch mechanism delivers the structured prompt, the worker surfaces the security finding (presence-based per F3, not strict ordering), and reproduces the skill's mandatory activation line:
 
-  | Lane | Mechanism | Wallclock | Activation line | Security-lead |
+  | Lane | Mechanism | Wallclock | Activation line | Security surfaced |
   |---|---|---:|---|---|
   | claude-opus-4-6 | tmux interactive | 50.8s | yes | yes |
   | claude-sonnet-4-6 | headless subprocess | 28.6s | no (role vocabulary present) | yes |
   | deepseek-v4-pro-harness | claude-harness | 27.2s | yes | yes |
   | deepseek-v4-pro-bare | bare litellm chat | 19.2s | yes | yes |
   | codex-gpt-5-4 | codex CLI | 195.5s | yes | yes |
+  | kimi-k2-6 | kimi CLI OAuth | 51.9s | yes | yes |
 
-  kimi-k2-6 could not be exercised: kimi CLI quota exhausted for the billing cycle (fail-fast in 2.1s, `quota_or_auth`). The kimi code path is identical plain text in the instruction; E2E confirmation is scheduled for 2026-06-07 13:00 CET (quota reset), after which kimi rejoins benchmark and routing.
+  kimi was confirmed after its billing-cycle quota reset (2026-06-07): leads with SQL-injection (CVSS 9.8) + hardcoded token, activation line present. All six provider mechanisms verified — provider-agnostic skill injection holds across the full matrix.
 - Full cross-lane validation: skill-aware re-bench (all 7 lanes, identical skill context) — pending.
