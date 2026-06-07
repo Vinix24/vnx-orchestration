@@ -24,6 +24,13 @@ python3 scripts/benchmark/field-tests/runners/run_field_tests.py \
   --n 1
 ```
 
+Skill-injection E2E smoke (run before any skill-aware bench; verifies every dispatch mechanism delivers the structured skill prompt and the worker adopts the role):
+```bash
+python3 scripts/benchmark/field-tests/runners/skill_smoke.py                 # all 6 lanes
+python3 scripts/benchmark/field-tests/runners/skill_smoke.py --lane kimi-k2-6
+```
+The smoke dispatches a neutral review assignment (never says "security") with a planted SQL injection, hardcoded credential, and off-by-one. PASS = the worker surfaces the security vocabulary AND a planted vuln (presence-based, not strict ordering — see the module docstring); the skill's mandatory activation line is reported as extra evidence. It is a dev smoke, not a governed gate. Last verified 2026-06-07: 5/5 reachable lanes PASS (kimi blocked on quota) — see ADR-022 Validation.
+
 ## What this measures
 
 For each (lane, task, replication) cell:
@@ -49,15 +56,16 @@ Each task has its own folder with `instruction.md`, `seed/` (starting files), `v
 
 ## Lane coverage
 
-Defined in `scripts/benchmark/models.yaml` (root). 10 lanes:
+Defined in `scripts/benchmark/models.yaml` (root). 11 lanes:
 
 - `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`
 - `claude-sonnet-4-6`, `claude-haiku-4-5`
 - `deepseek-v4-pro`, `deepseek-v4-flash`
 - `kimi-k2-6`, `kimi-k2-0905`
+- `codex-gpt-5-4` (added 2026-06-06, T3 only)
 - `local-gemma-4b` (free, MLX on Mac)
 
-T1 runs all 10. T2 runs 8 (drop haiku + local-gemma — known too thin). T3 runs 4 (opus + sonnet + ds-pro + kimi-k2-6 only — proven cost-tier threshold).
+T1 runs the 10 non-codex lanes. T2 runs 8 (drop haiku + local-gemma — known too thin). T3 runs 7 (opus-4-8/4-7 + sonnet + ds-pro-harness + both kimi + codex — see `tasks.yaml`). Latest consolidated T3 leaderboard: `claudedocs/T3-LEADERBOARD-FINAL-2026-06-06.md`.
 
 ## Output
 

@@ -2,13 +2,16 @@
 
 Each lane in `models.yaml` maps to an existing VNX dispatcher:
 
-| provider          | dispatcher                              | notes                          |
-|-------------------|-----------------------------------------|--------------------------------|
-| claude            | subprocess_dispatch.py (T1/T2/T3 pin)   | --model accepts opus/sonnet/haiku + explicit ids |
-| litellm:deepseek  | provider_dispatch.py                    | provider=litellm:deepseek      |
-| litellm:moonshot  | provider_dispatch.py                    | provider=kimi (CLI OAuth)      |
-| litellm:zai       | provider_dispatch.py                    | provider=litellm:zai           |
-| local-gemma       | provider_dispatch.py                    | provider=local-gemma           |
+| provider          | dispatcher                              | notes                                            |
+|-------------------|-----------------------------------------|--------------------------------------------------|
+| claude            | tmux_interactive_dispatch.py            | interactive `claude` on subscription (June-15 escape); isolated worktree per dispatch |
+| litellm:deepseek  | provider_dispatch.py                    | provider=litellm:deepseek                        |
+| litellm:moonshot  | provider_dispatch.py                    | provider=kimi (CLI OAuth)                        |
+| litellm:zai       | provider_dispatch.py                    | provider=litellm:zai                             |
+| local-gemma       | provider_dispatch.py                    | provider=local-gemma                             |
+
+Claude lanes MUST route via tmux-spawn — `subprocess_dispatch.py` runs `claude -p`
+which bills API credits instead of the subscription (CLAUDE.md "June-15 escape").
 
 Returns a DispatchResult dataclass with the receipt path + timing + raw stdout/stderr.
 No mocking; if the dispatcher binary or credentials are missing the call fails loudly.
@@ -17,8 +20,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,11 +31,47 @@ from pathlib import Path
 from typing import Optional
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-SUBPROCESS_DISPATCH = REPO_ROOT / "scripts" / "lib" / "subprocess_dispatch.py"
+REPO_ROOT = Path(__file__).resolve().parents[4]
 TMUX_INTERACTIVE_DISPATCH = REPO_ROOT / "scripts" / "lib" / "tmux_interactive_dispatch.py"
+SUBPROCESS_DISPATCH = REPO_ROOT / "scripts" / "lib" / "subprocess_dispatch.py"
 PROVIDER_DISPATCH = REPO_ROOT / "scripts" / "lib" / "provider_dispatch.py"
-CENTRAL_REPORT_DIR = Path.home() / ".vnx-data" / "vnx-dev" / "unified_reports"
+SKILLS_ROOT = REPO_ROOT / ".claude" / "skills"
+
+# Skill injection lives in scripts/lib/skill_prefix.py — provider-agnostic.
+# Used for ALL lanes (claude/kimi/codex/deepseek) so every worker gets the
+# same structured prompt: role → assignment → resources → closing.
+# Claude lanes may have their dispatcher's _inject_skill_context also fire
+# — token-cost of doubling is ~1000 extra tokens on subscription = $0,
+# resolved Sunday during skill-aware re-bench by disabling dispatcher-side
+# injection when our structured prompt is already in place.
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+from skill_prefix import build_structured_prompt  # noqa: E402
+
+# Models where the interactive Claude Code lane is known-broken (hidden-thinking
+# loops + interactive-session hangs per Anthropic GitHub #63390 and #64153).
+# Route these via headless subprocess_dispatch instead, which exercises the same
+# subscription pre-15-juni and bypasses the interactive-session bug.
+#
+# Expanded 2026-06-05 after retry-run observed opus-4-7 + sonnet-4-6 hitting
+# the same 0.1s immediate-exit pattern on T3-09 instruction content. Issue
+# #63390 explicitly names "Opus 4.8, Sonnet 4.6"; opus-4-7 hit it empirically
+# on identical content. Safer to route all three through headless until
+# Anthropic ships the fix (currently #63390 + #64153 open as of 2026-06-05).
+HEADLESS_FORCED_MODELS = {
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+}
+# Report-dir search order: project-local (tmux-spawn writes here) first, central second.
+# tmux_interactive_dispatch uses resolve_state_dir which lands on <REPO_ROOT>/.vnx-data/.
+# provider_dispatch can write to central or project-local depending on install mode.
+REPORT_DIR_CANDIDATES = (
+    REPO_ROOT / ".vnx-data" / "unified_reports",
+    Path.home() / ".vnx-data" / "vnx-dev" / "unified_reports",
+)
+# Minimum plausible wallclock for a real worker run. Anything under this is an
+# immediate-exit pattern (subscription rate-limit, tmux session-create fail, etc.).
+MIN_REAL_WALLCLOCK_SECONDS = 5.0
 
 
 @dataclass
@@ -45,18 +86,33 @@ class DispatchResult:
     stdout: str
     stderr: str
     error: Optional[str] = None
+    # Where the worker's output lives for verify.py. None = repo root
+    # (headless/provider lanes run in the main checkout). tmux-spawn lanes
+    # work in an isolated worktree — scoring the repo root there yields
+    # false positives/negatives (codex-gate PR #831 finding).
+    workdir: Optional[Path] = None
+    # Temp checkout created purely for scoring (branch survived, worktree
+    # reaped). The runner must remove it after score_cell.
+    scoring_worktree: Optional[Path] = None
 
 
-def _claude_subprocess(
+def _claude_subprocess_headless(
     lane: dict, dispatch_id: str, instruction: str,
     dispatch_paths: str, deadline_seconds: int,
 ) -> tuple[int, str, str]:
-    """Route a Claude lane via subprocess_dispatch.py on T1 (pinned)."""
+    """Route a Claude lane via subprocess_dispatch.py (headless `claude -p`).
+
+    Used for models where the interactive lane is known-broken (see
+    HEADLESS_FORCED_MODELS). Pre-15-juni-2026 the headless `claude -p` path
+    still runs on the subscription per the June-15 escape window; post-cutover
+    it routes to API credits and SHOULD NOT be used for cost-sensitive bench runs.
+    """
     env = {
         **os.environ,
         "VNX_STATE_DIR": ".vnx-data/state",
         "VNX_DATA_DIR": ".vnx-data",
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
+        "VNX_WORKER_SCOPED": "0",
     }
     cmd = [
         sys.executable, str(SUBPROCESS_DISPATCH),
@@ -68,13 +124,116 @@ def _claude_subprocess(
         "--dispatch-paths", dispatch_paths,
         "--instruction", instruction,
         "--allow-unstaged",
-        "--reason", f"benchmark run {dispatch_id}",
+        "--reason", f"benchmark headless (opus-4-8 interactive-hang workaround) {dispatch_id}",
     ]
     proc = subprocess.run(
         cmd, env=env, capture_output=True, text=True,
         timeout=deadline_seconds + 60, check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _claude_tmux_spawn(
+    lane: dict, dispatch_id: str, instruction: str,
+    dispatch_paths: str, deadline_seconds: int,
+) -> tuple[int, str, str]:
+    """Route a Claude lane via tmux_interactive_dispatch.py on the subscription.
+
+    Each dispatch gets a fresh ephemeral tmux session in an isolated git worktree
+    (default). Interactive `claude` (never `claude -p`) keeps billing on the
+    subscription per the June-15 escape (see CLAUDE.md "Tmux-Spawn Dispatch Lane").
+    """
+    env = {
+        **os.environ,
+        "VNX_STATE_DIR": ".vnx-data/state",
+        "VNX_DATA_DIR": ".vnx-data",
+        "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
+        # Bench workers need full tool surface (Skill, etc.) for representativity.
+        # Ephemeral isolated worktree = bounded blast radius; safe to drop scoping.
+        "VNX_WORKER_SCOPED": "0",
+    }
+    cmd = [
+        sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
+        "--dispatch-id", dispatch_id,
+        "--model", lane["model_arg"],
+        "--role", "backend-developer",
+        "--dispatch-paths", dispatch_paths,
+        "--instruction", instruction,
+        "--deadline-seconds", str(deadline_seconds),
+        "--allow-unstaged",
+        "--reason", f"benchmark run {dispatch_id}",
+    ]
+    proc = subprocess.run(
+        cmd, env=env, capture_output=True, text=True,
+        timeout=deadline_seconds + 120, check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _resolve_tmux_workdir(
+    dispatch_id: str,
+) -> tuple[Optional[Path], Optional[Path], Optional[str]]:
+    """Locate a tmux-spawn worker's output for scoring.
+
+    tmux workers run in an ephemeral isolated worktree. After teardown
+    (tmux_worktree.reap) the output lives in one of two places:
+
+      dirty     → worktree preserved on disk           → score there
+      committed → worktree gone, branch dispatch/<id>  → temp checkout
+      clean     → nothing survived                     → unscorable
+
+    Returns (workdir, temp_scoring_worktree, error). temp_scoring_worktree
+    is set when this function created a checkout the caller must remove
+    after scoring. On error the cell must be marked unscorable — falling
+    back to the repo root would score the wrong checkout (PR #831).
+    """
+    wt = REPO_ROOT / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
+    if wt.is_dir():
+        return wt, None, None
+
+    branch = f"dispatch/{dispatch_id}"
+    probe = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", "--quiet", branch],
+        capture_output=True, text=True, check=False,
+    )
+    if probe.returncode == 0:
+        tmp = Path(tempfile.mkdtemp(prefix=f"score-{dispatch_id[:48]}-"))
+        added = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "worktree", "add", "--detach", str(tmp), branch],
+            capture_output=True, text=True, check=False,
+        )
+        if added.returncode == 0:
+            return tmp, tmp, None
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, (
+            f"scoring-worktree add failed for {branch}: "
+            f"{(added.stderr or '').strip()[:200]}"
+        )
+
+    return None, None, (
+        "tmux worker output unlocatable (no preserved worktree, no dispatch branch)"
+    )
+
+
+def _resolve_codex_bin_dir() -> Optional[str]:
+    """Find the dir containing the `codex` binary.
+
+    codex is npm-global-installed under a specific nvm node version; an nvm
+    default-switch (v20 -> v22) drops it from the active PATH. We probe known
+    nvm node-version bins so the bench works regardless of which node is
+    currently default. Returns the dir to prepend to PATH, or None if codex
+    is already resolvable.
+    """
+    if shutil.which("codex"):
+        return None
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_root.is_dir():
+        # Newest version first, but any with codex wins.
+        for version_dir in sorted(nvm_root.iterdir(), reverse=True):
+            candidate = version_dir / "bin" / "codex"
+            if candidate.exists():
+                return str(candidate.parent)
+    return None
 
 
 def _provider_dispatch(
@@ -95,6 +254,15 @@ def _provider_dispatch(
         "local-gemma": "local-gemma",
     }
     provider = provider_map.get(lane["provider"], lane["provider"])
+
+    # Codex specifics: _dispatch_codex reads VNX_CODEX_MODEL (it ignores
+    # --model), and codex_wrapper invokes bare "codex" (PATH-dependent).
+    # Pin the model from the lane and ensure the binary resolves.
+    if provider == "codex":
+        env["VNX_CODEX_MODEL"] = lane["model_arg"]
+        codex_bin_dir = _resolve_codex_bin_dir()
+        if codex_bin_dir:
+            env["PATH"] = codex_bin_dir + os.pathsep + env.get("PATH", "")
     cmd = [
         sys.executable, str(PROVIDER_DISPATCH),
         "--provider", provider,
@@ -119,17 +287,41 @@ def dispatch(
     instruction: str,
     dispatch_paths: str,
     deadline_seconds: int,
+    skill_names: Optional[list[str]] = None,
 ) -> DispatchResult:
-    """Run a single (lane, task, replication) dispatch and return result."""
+    """Run a single (lane, task, replication) dispatch and return result.
+
+    If skill_names is provided, the instruction is wrapped in a structured
+    prompt (role → assignment → resources → closing) for EVERY lane —
+    claude, kimi, codex, deepseek alike. Provider-agnostic single source of
+    truth. See scripts/lib/skill_prefix.py for the architecture rationale.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dispatch_id = f"bench-{lane['id']}-{task_id}-r{replication}-{ts}"
     start = time.monotonic()
 
+    # Uniform skill injection for ALL lanes (per Vincent 2026-06-05).
+    # Place T0's instruction in the middle of the role/SOP/resources frame.
+    if skill_names:
+        instruction = build_structured_prompt(
+            skill_names, instruction, SKILLS_ROOT,
+        )
+
+    via_tmux = False
     try:
         if lane["provider"] == "claude":
-            rc, out, err = _claude_subprocess(
-                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
-            )
+            # Check BOTH lane id and model_arg — models.yaml uses short aliases
+            # for some lanes (e.g. claude-sonnet-4-6's model_arg is "sonnet"),
+            # so a model_arg-only check missed sonnet on the 2026-06-05 retry.
+            if lane["id"] in HEADLESS_FORCED_MODELS or lane["model_arg"] in HEADLESS_FORCED_MODELS:
+                rc, out, err = _claude_subprocess_headless(
+                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                )
+            else:
+                via_tmux = True
+                rc, out, err = _claude_tmux_spawn(
+                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                )
         else:
             rc, out, err = _provider_dispatch(
                 lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
@@ -144,17 +336,55 @@ def dispatch(
         )
 
     wallclock = time.monotonic() - start
-    report_path = CENTRAL_REPORT_DIR / f"{dispatch_id}.md"
-    if not report_path.exists():
-        report_path = CENTRAL_REPORT_DIR / f"{dispatch_id}_report.md"
-    success = rc == 0 and report_path.exists()
+
+    # Search for the worker-emitted report across known locations.
+    report_path: Optional[Path] = None
+    for candidate_dir in REPORT_DIR_CANDIDATES:
+        for suffix in (".md", "_report.md"):
+            p = candidate_dir / f"{dispatch_id}{suffix}"
+            if p.exists():
+                report_path = p
+                break
+        if report_path is not None:
+            break
+
+    # Distinguish three failure modes so the scorer can apply the right verdict:
+    #   - immediate_exit: wallclock < threshold and no report (rate-limit, tmux fail)
+    #   - no_report: ran for real but never produced report (lane bug)
+    #   - rc_nonzero: dispatcher itself returned non-zero
+    failure_reason: Optional[str] = None
+    if rc != 0 and report_path is None:
+        if wallclock < MIN_REAL_WALLCLOCK_SECONDS:
+            failure_reason = (
+                f"immediate_exit (wall={wallclock:.2f}s, rc={rc}); "
+                "likely subscription rate-limit or session-create failure"
+            )
+        else:
+            failure_reason = f"rc={rc} report_exists=False"
+    elif rc != 0:
+        failure_reason = f"rc={rc} (report present)"
+    elif report_path is None:
+        failure_reason = "no_report (worker rc=0 but never emitted unified_report)"
+
+    # tmux lanes: locate the worker's actual output for verify.py. Headless
+    # and provider lanes work in the main checkout (workdir=None → repo root).
+    workdir: Optional[Path] = None
+    scoring_worktree: Optional[Path] = None
+    if via_tmux and failure_reason is None:
+        workdir, scoring_worktree, workdir_err = _resolve_tmux_workdir(dispatch_id)
+        if workdir_err:
+            failure_reason = f"unscorable: {workdir_err}"
+
+    success = failure_reason is None
 
     return DispatchResult(
         lane_id=lane["id"], task_id=task_id, replication=replication,
         dispatch_id=dispatch_id, success=success, wallclock_seconds=wallclock,
-        report_path=report_path if report_path.exists() else None,
+        report_path=report_path,
         stdout=out[-2000:], stderr=err[-2000:],
-        error=None if success else f"rc={rc} report_exists={report_path.exists()}",
+        error=failure_reason,
+        workdir=workdir,
+        scoring_worktree=scoring_worktree,
     )
 
 

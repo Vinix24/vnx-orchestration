@@ -22,6 +22,10 @@ orchestration/
 database/*.db
 ledger/storage/*.db
 
+# Benchmark field-tests: generated seed DBs (rebuilt per run)
+scripts/benchmark/field-tests/tasks/**/seed/*.db
+scripts/benchmark/field-tests/tasks/**/seed/*.db.stale
+
 # Archive and backup directories (not part of current system)
 archive/
 backup_*/

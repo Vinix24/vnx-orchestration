@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for _inject_skill_context() in subprocess_dispatch.py (F32)."""
+"""Tests for _inject_skill_context() in subprocess_dispatch.py (F32).
+
+These tests cover the LEGACY 3-tier CLAUDE.md fallback. Since the
+PromptAssembler refactor, _inject_skill_context tries the assembler first
+and only falls back to CLAUDE.md resolution when the assembler is
+unavailable. The helper below forces the fallback path deterministically
+(assembler patched to None, intelligence section patched to empty) so the
+tests are independent of whether prompt_assembler imports in this env.
+"""
 
 import sys
 import tempfile
@@ -29,24 +37,6 @@ class TestInjectSkillContext:
 
         instruction = "Implement feature X"
 
-        with patch(
-            "subprocess_dispatch.Path.__file__",
-            create=True,
-        ):
-            # Patch the path resolution to point at our tmp_path
-            fake_file = tmp_path / "scripts" / "lib" / "subprocess_dispatch.py"
-            fake_file.parent.mkdir(parents=True, exist_ok=True)
-            fake_file.touch()
-
-            with patch("subprocess_dispatch.Path") as MockPath:
-                # Make Path(__file__).resolve().parents[2] return tmp_path
-                mock_resolved = MockPath.return_value.resolve.return_value
-                mock_resolved.parents.__getitem__ = lambda self, idx: tmp_path if idx == 2 else None
-                # But we also need Path / ".claude" / "terminals" / ... to work
-                # Simpler: just patch at function level
-                pass
-
-        # Direct approach: call function with patched __file__ location
         result = _call_with_fake_root(tmp_path, terminal_id, instruction)
 
         assert result.startswith("# Agent Context")
@@ -84,13 +74,22 @@ class TestInjectSkillContext:
 
 
 def _call_with_fake_root(fake_root: Path, terminal_id: str, instruction: str) -> str:
-    """Call _inject_skill_context with a patched repo root path."""
+    """Call _inject_skill_context with a patched repo root, forced onto the
+    legacy CLAUDE.md fallback path (assembler off, intelligence empty)."""
     import subprocess_dispatch
 
-    original_file = subprocess_dispatch.__file__
     fake_file = fake_root / "scripts" / "lib" / "subprocess_dispatch.py"
     fake_file.parent.mkdir(parents=True, exist_ok=True)
     fake_file.touch()
 
-    with patch.object(subprocess_dispatch, "__file__", str(fake_file)):
+    with (
+        patch.object(subprocess_dispatch, "__file__", str(fake_file)),
+        patch(
+            "subprocess_dispatch_internals.skill_injection._try_prompt_assembler",
+            return_value=None,
+        ),
+        patch.object(
+            subprocess_dispatch, "_build_intelligence_section", return_value="",
+        ),
+    ):
         return _inject_skill_context(terminal_id, instruction)

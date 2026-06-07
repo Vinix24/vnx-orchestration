@@ -1,14 +1,11 @@
 """worker_runner — minimal queue runner for benchmark task 01.
 
-The hardcoded QUEUES list below must be refactored to load from a YAML
-config file (`config/worker_queues.yaml`) with env-var override
-(`WORKER_QUEUES` comma-separated) and a safe fallback.
-
-Public contract:
-    worker_runner.QUEUES  -> list[str]  (resolved at import time)
+Seed state: queue names are hardcoded below. The assignment (see
+instruction.md) is to move them to config/worker_queues.yaml with an
+env-var override and a graceful default — tests/test_worker_runner.py
+encodes that contract and fails against this seed.
 """
 from __future__ import annotations
-
 
 QUEUES = ["default", "scoring", "ingestion", "indexing"]
 

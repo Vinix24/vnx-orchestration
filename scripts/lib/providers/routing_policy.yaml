@@ -50,3 +50,95 @@ fallback_chain:
   "litellm:zai:*": ["litellm:moonshot:kimi-k2-0905-default", "claude/sonnet-4-6"]
   "claude/haiku-4-5": ["claude/sonnet-4-6"]
   # Sonnet and Opus have no fallback (they are the safety net)
+
+# Lane-safety rules — ADVISORY, NOT YET ENFORCED IN CODE.
+#
+# STATUS (2026-06-07, codex-gate PR #831 finding F6): these entries are
+# DECLARATIVE. No runner or dispatcher currently reads this block. They
+# document measured lane behaviour and the intended guard so the evidence
+# is findable, but they do NOT change routing on their own. Do not rely on
+# them as live guards.
+#
+# The ONE rule that IS live (force_headless) is enforced separately as a
+# hardcoded set in scripts/benchmark/field-tests/runners/lane_adapter.py
+# (HEADLESS_FORCED_MODELS) — kept in sync by hand, not read from here.
+#
+# Wiring a loader so the dispatcher reads these rules is tracked as a 1.0.1
+# open item (see PR #831 deferred-findings). Until then: advisory only,
+# every entry carries measured evidence but inert enforcement.
+lane_safety:
+  # Anthropic Claude Code interactive-session hang (Issues #63390 + #64153).
+  # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-4-6 hang for hours or exit
+  # in 0.1s on complex content via the interactive tmux lane. The headless
+  # `claude -p` path is unaffected. Force these models to the headless lane
+  # until Anthropic ships a fix.
+  force_headless:
+    models:
+      - claude-opus-4-8
+      - claude-opus-4-7
+      - claude-sonnet-4-6
+    reason: "Anthropic interactive-hang (#63390 + #64153)"
+    review_trigger: "Anthropic fix-release OR 2026-06-15 billing cutover"
+    monitored_by: "OI-215 (weekly GitHub issue check)"
+
+  # Subscription per-prompt-complexity throttle observed under parallel claude
+  # load: many sequential complex dispatches exhaust capacity mid-run. Pace
+  # claude lanes serially; provider lanes (kimi/deepseek/codex) stay parallel.
+  claude_serial_under_load:
+    enabled: true
+    reason: "Subscription complexity-throttle measured 2026-06-04 parallel=3 bench"
+
+  # Codex lane flakiness: 2 DNFs over 8 T3 cell-attempts on 2026-06-06
+  # (1 instant lane-launch failure at 0.1s, 1 mid-run rc=1 after 196s WITH a
+  # report on disk). Clean cells score top-cluster (4.79-4.93), so the lane is
+  # worth keeping — but a single attempt is not a verdict. Retry once before
+  # scoring a codex cell or dispatch as DNF.
+  codex_retry_once:
+    models:
+      - codex-gpt-5-4
+    max_retries: 1
+    reason: "Measured 2/8 DNF-rate 2026-06-06; clean-cell quality top-cluster"
+    review_trigger: "skill-aware re-bench 2026-06-08 DNF-rate"
+
+  # Kimi CLI quota exhausts mid-billing-cycle (measured 2026-06-07: quota_or_auth
+  # 'usage limit for this billing cycle' on first dispatch attempt). Retrying a
+  # quota-exhausted lane burns wallclock for guaranteed failure. On the
+  # quota_or_auth signature: skip retries entirely, go straight to the
+  # fallback_chain entry for litellm:moonshot:*.
+  kimi_quota_fail_fast:
+    providers:
+      - litellm:moonshot
+    on_error_reason: "quota_or_auth"
+    max_retries: 0
+    reason: "Quota-exhaustion measured 2026-06-07; deterministic failure until cycle reset"
+
+  # tmux-spawn has receipt-deadline failures on long-running workers (documented
+  # lane gap, t0-orchestrator skill §9.2). Workers with an expected runtime
+  # over 30 min must route via subprocess_dispatch instead.
+  tmux_spawn_max_runtime:
+    lane: "tmux-spawn"
+    max_expected_runtime_seconds: 1800
+    overflow_route: "subprocess"
+    reason: "Receipt-deadline failures on >30min workers; known lane gap"
+
+  # Haiku on trivial tasks via tmux-spawn produced receipts non-deterministically
+  # (measured 2026-06: 10-worker load test, 10/10 clean teardown but 5/10
+  # receipts). Receipt-critical dispatches on haiku need a receipt-presence
+  # check + one redispatch, or route headless.
+  haiku_receipt_nondeterminism:
+    models:
+      - claude-haiku-4-5
+    receipt_verify: true
+    max_redispatch: 1
+    reason: "5/10 receipts on trivial tmux-spawn tasks, 10-worker load test"
+
+# Provider cost reference (2026-06-06 measured, per-dispatch on T3 cells):
+#   kimi-k2-6 / kimi-k2-0905 : $0       (subscription/OAuth; quota-capped per cycle)
+#   claude-* (subscription)  : $0       (interactive/headless pre-2026-06-15)
+#   deepseek-v4-pro-harness  : ~$0.02-0.03  (own API key)
+#   codex-gpt-5-4            : ~$1.58 avg/cell over 6 T3 cells ($9.46 total),
+#                              typical $0.91-1.46, p95 outlier $4.51 — budget on
+#                              p95, not median ($1.25/$10 per Mtok)
+# Task-pattern routing (Kimi=refactor, DeepSeek=debug, Opus=architecture) is
+# DEFERRED to the skill-aware re-bench (OI-221) — current T3 data was not
+# apples-to-apples on skill context. Do not encode pattern-routing until then.
