@@ -43,6 +43,9 @@ tiers:
       - claude-opus-4-7
       - claude-sonnet-4-6
       - deepseek-v4-pro-harness
+      - kimi-k2-6
+      - kimi-k2-0905
+      - codex-gpt-5-4
     n_replications: 2
 
 tasks:
@@ -50,6 +53,7 @@ tasks:
     tier: t1_trivial
     folder: "tasks/t1_trivial/01_yaml_config_refactor"
     source: "MC PR #236 worker queues YAML"
+    skill: backend-developer
     target_loc: 60
     deadline_seconds: 600
     pattern: "pattern-match-bounded"
@@ -60,6 +64,7 @@ tasks:
     tier: t1_trivial
     folder: "tasks/t1_trivial/02_rls_policy"
     source: "SEOcrawler PR #125 enable RLS on scan_quota"
+    skill: database-engineer
     target_loc: 30
     deadline_seconds: 600
     pattern: "pattern-match-bounded"
@@ -69,6 +74,7 @@ tasks:
     tier: t1_trivial
     folder: "tasks/t1_trivial/03_dotenv_script"
     source: "SEOcrawler PR #119 add load_dotenv()"
+    skill: backend-developer
     target_loc: 15
     deadline_seconds: 300
     pattern: "pattern-match-bounded"
@@ -78,6 +84,7 @@ tasks:
     tier: t2_medium
     folder: "tasks/t2_medium/04_scorer_task"
     source: "MC PR #244 visibility_comment_scorer"
+    skill: backend-developer
     target_loc: 350
     deadline_seconds: 1800
     pattern: "pattern-match-bounded"
@@ -88,6 +95,7 @@ tasks:
     tier: t2_medium
     folder: "tasks/t2_medium/05_extractor_subclass"
     source: "SEOcrawler new BaseExtractor pattern"
+    skill: backend-developer
     target_loc: 250
     deadline_seconds: 1800
     pattern: "pattern-match-bounded"
@@ -98,6 +106,7 @@ tasks:
     tier: t2_medium
     folder: "tasks/t2_medium/06_flaky_mock_fix"
     source: "SEOcrawler PR #123 mock-paginatie fix"
+    skill: debugger
     target_loc: 80
     deadline_seconds: 1200
     pattern: "introspection-heavy"
@@ -108,6 +117,7 @@ tasks:
     tier: t3_complex
     folder: "tasks/t3_complex/07_state_machine_sse"
     source: "MC PR #239 HITL state-machine + SSE"
+    skill: backend-developer
     target_loc: 1200
     deadline_seconds: 14400
     pattern: "introspection-heavy"
@@ -117,6 +127,7 @@ tasks:
     tier: t3_complex
     folder: "tasks/t3_complex/08_ssrf_async_fetch"
     source: "SEOcrawler PR #100 SSRF-safe async fetch + DNS-pinning"
+    skill: security-engineer
     target_loc: 800
     deadline_seconds: 10800
     pattern: "introspection-heavy"
@@ -127,6 +138,7 @@ tasks:
     tier: t3_complex
     folder: "tasks/t3_complex/09_mock_introspection_trap"
     source: "MC WH-01 Kimi-hang inspect.getsource() pollution"
+    skill: debugger
     target_loc: 100
     deadline_seconds: 1800
     pattern: "introspection-heavy"
