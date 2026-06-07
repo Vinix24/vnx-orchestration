@@ -1,5 +1,0 @@
-queues:
-  - default
-  - scoring
-  - ingestion
-  - indexing
