@@ -24,6 +24,16 @@ Threats covered (SSRF taxonomy):
   trailing host correctly; we then range-check the IP)
 - CRLF / NUL injection in the raw URL string
 - Missing-host URLs: http:///path
+
+Known gaps (codex-gate PR #831, deferred to 1.0.1 SSRF-hardening OI):
+- F1: the final range check uses ``ip.is_private``, which does NOT reject
+  CGNAT (100.64.0.0/10) or other non-global-but-not-private ranges. A
+  stricter ``not ip.is_global`` check is the planned fix.
+- F2: DNS rebinding. This validator resolves and range-checks, then returns;
+  a later fetch re-resolves the hostname and could hit a rebound private IP.
+  Closing this requires the fetch path to pin the validated IP (connection-
+  level), which is the 1.0.1 wiring step — this module is policy-only and is
+  not yet wired into any production fetch path, so the gap has no live exposure.
 """
 
 from __future__ import annotations

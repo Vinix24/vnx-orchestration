@@ -15,9 +15,16 @@ the worker ADOPTS the injected specialist role, on every dispatch mechanism:
 Design: the instruction is deliberately NEUTRAL (never says "security") and
 contains an inline snippet with two planted flaws — a SQL injection +
 hardcoded credential (security lens) and an off-by-one slice (generic lens).
-A worker that received and adopted the security-engineer role leads with the
-injection/credential; a worker without the role tends to lead with the slice
-bug. Role-adoption is judged by security-vocabulary markers in the report.
+A worker that received and adopted the security-engineer role surfaces the
+injection/credential, which a worker without the role typically does not.
+
+SCOPE (codex-gate PR #831 finding F3): this is a presence-based smoke, not a
+strict "security-lead" gate. PASS = the security vocabulary AND a planted
+vuln marker appear in the worker's response (after the CLOSING block), which
+is strong evidence the role arrived and was acted on. It does NOT assert the
+security finding is stated FIRST — ordering-strictness is deferred to the
+skill-aware re-bench scorer. This is a dev smoke (printed PASS/FAIL), not a
+governed gate; it is intentionally not routed through gate_recorder (F7).
 
 Usage:
     python3 skill_smoke.py                      # all 6 lanes, parallel

@@ -120,12 +120,20 @@ def run_one_cell(
     finally:
         # lane_adapter may have created a temp checkout purely for scoring
         # (tmux cell whose worktree was reaped but whose branch survived).
+        # F8 (PR #831, deferred 1.0.1): a removal failure here is logged but
+        # not surfaced as a structured result — a leaked worktree is possible.
         if result.scoring_worktree is not None:
-            subprocess.run(
+            rm = subprocess.run(
                 ["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force",
                  str(result.scoring_worktree)],
                 capture_output=True, text=True, check=False,
             )
+            if rm.returncode != 0:
+                print(
+                    f"  ⚠ scoring-worktree removal failed for {result.scoring_worktree}: "
+                    f"{(rm.stderr or '').strip()[:200]}",
+                    file=sys.stderr,
+                )
     return {"dispatch": result, "score": score}
 
 
@@ -174,6 +182,11 @@ def _load_dnf_cells_from_csv(
 
             # Soft signal: report-missing for any cell with wallclock < 5s.
             # Check filesystem for both report-naming conventions in both candidate dirs.
+            # KNOWN LIMITATION (F5, PR #831, deferred 1.0.1): the prefix match
+            # below has a per-cell timestamp suffix, so ANY historical report
+            # for this lane/task/rep counts as "present" — a short failed cell
+            # whose only report is from an earlier run is wrongly excluded from
+            # retry. Fix is to match the row's own dispatch_id; deferred.
             if wall < 5.0:
                 prefix = f"bench-{row['lane_id']}-{row['task_id']}-r{row['replication']}-"
                 found = False
@@ -267,6 +280,12 @@ def _run_with_retry(lane, task, rep, args, run_judge):
     is deliberately NOT part of the condition: fast lanes legitimately finish
     bounded tasks in 2-3s, and a >=5s floor re-ran those healthy cells
     (codex-gate PR #831 finding).
+
+    KNOWN LIMITATION (F4, PR #831, deferred 1.0.1): headless/provider lanes
+    write to the shared main checkout; a retry after a partial failed attempt
+    does not reset that checkout, so leftover edits could inflate the retry
+    score. tmux lanes are unaffected (each dispatch gets a fresh worktree).
+    Until the reset lands, prefer tmux lanes for retry-sensitive cells.
     """
     attempt = 0
     last_res = None

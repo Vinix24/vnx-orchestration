@@ -29,7 +29,7 @@ Skill-injection E2E smoke (run before any skill-aware bench; verifies every disp
 python3 scripts/benchmark/field-tests/runners/skill_smoke.py                 # all 6 lanes
 python3 scripts/benchmark/field-tests/runners/skill_smoke.py --lane kimi-k2-6
 ```
-The smoke dispatches a neutral review assignment (never says "security") with a planted SQL injection, hardcoded credential, and off-by-one. PASS requires the worker to lead with the security finding; the skill's mandatory activation line is reported as extra evidence. Last verified 2026-06-07: 5/5 reachable lanes PASS (kimi blocked on quota) — see ADR-022 Validation.
+The smoke dispatches a neutral review assignment (never says "security") with a planted SQL injection, hardcoded credential, and off-by-one. PASS = the worker surfaces the security vocabulary AND a planted vuln (presence-based, not strict ordering — see the module docstring); the skill's mandatory activation line is reported as extra evidence. It is a dev smoke, not a governed gate. Last verified 2026-06-07: 5/5 reachable lanes PASS (kimi blocked on quota) — see ADR-022 Validation.
 
 ## What this measures
 

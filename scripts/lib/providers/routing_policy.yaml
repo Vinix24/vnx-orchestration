@@ -51,9 +51,21 @@ fallback_chain:
   "claude/haiku-4-5": ["claude/sonnet-4-6"]
   # Sonnet and Opus have no fallback (they are the safety net)
 
-# Lane-safety hard rules — meet-onafhankelijk, gemeten evidence, niet hypothetisch.
-# These override any rule/lane choice above; they are about HOW a model runs,
-# not WHICH model. Applied by the dispatcher, not the cost-router.
+# Lane-safety rules — ADVISORY, NOT YET ENFORCED IN CODE.
+#
+# STATUS (2026-06-07, codex-gate PR #831 finding F6): these entries are
+# DECLARATIVE. No runner or dispatcher currently reads this block. They
+# document measured lane behaviour and the intended guard so the evidence
+# is findable, but they do NOT change routing on their own. Do not rely on
+# them as live guards.
+#
+# The ONE rule that IS live (force_headless) is enforced separately as a
+# hardcoded set in scripts/benchmark/field-tests/runners/lane_adapter.py
+# (HEADLESS_FORCED_MODELS) — kept in sync by hand, not read from here.
+#
+# Wiring a loader so the dispatcher reads these rules is tracked as a 1.0.1
+# open item (see PR #831 deferred-findings). Until then: advisory only,
+# every entry carries measured evidence but inert enforcement.
 lane_safety:
   # Anthropic Claude Code interactive-session hang (Issues #63390 + #64153).
   # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-4-6 hang for hours or exit
