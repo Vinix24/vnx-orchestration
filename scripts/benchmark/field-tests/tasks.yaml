@@ -45,6 +45,7 @@ tiers:
       - deepseek-v4-pro-harness
       - kimi-k2-6
       - kimi-k2-0905
+      - codex-gpt-5-4
     n_replications: 2
 
 tasks:

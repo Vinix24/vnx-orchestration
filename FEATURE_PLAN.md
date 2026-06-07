@@ -1,12 +1,23 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-03T19:04:32.341342+00:00
+**Last updated**: 2026-06-05T08:25:24.024766+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #830 — feat(benchmark): field-tests T2 medium + T3 complex task-definitions (#830) (2026-06-04)
+- #829 — feat(roadmap): park sales-copilot VNX upgrade (1.0.1, post-launch) (#829) (2026-06-04)
+- #828 — feat(benchmark): field-tests realistic-bench suite — infrastructure + T1 task-defs (#828) (2026-06-04)
+- #827 — chore(roadmap): privacy trim — slim public notes, move details to private state (#827) (2026-06-04)
+- #825 — docs(bootstrap): tmux-spawn lane in CLAUDE bootstrap snippet + ops doc (#825) (2026-06-04)
+- #824 — docs(t0-skill): tmux-spawn dispatch as default; subprocess-dispatch for terminal-pinned work (#824) (2026-06-04)
+- #823 — fix(provider-dispatch): _dispatch_gemini respects args.model (OI-155) (#823) (2026-06-03)
+- #822 — feat(smart-router): quality_tier discriminator + per-task min/max gates (PR-SR-FIX-3) (#822) (2026-06-03)
+- #821 — fix(claude-spawn): capture completion_text from stream-json assistant events (#821) (2026-06-03)
+- #820 — feat(roadmap): add bench-v2 smart-lanes benchmark to 1.1 milestone (#820) (2026-06-03)
+- #819 — fix(provider-dispatch): uniform central-path resolution (OI-126) (#819) (2026-06-03)
 - #818 — fix(smart-router): null-cost sort + strategy-tag (cost-collapse bug) (#818) (2026-06-03)
 - #817 — feat(digest): D2 — progress_table + minimal digest skeleton (Phase-1) (#817) (2026-06-03)
 - #816 — feat(infra): atomic_io.py + ADR-021 — digest D1 per architecture V2 (#816) (2026-06-03)
@@ -168,10 +179,6 @@ _Last 14 days — sourced from git merge commits._
 - #618 — docs(wave2a): robust pipeline architecture blueprint (PR-WAVE2A-BLUEPRINT) (#618) (2026-05-25)
 - #617 — fix(migrator): canonical bootstrap dispatch_experiments + rollback exception masking (PR-MIGRATOR-FIX-V2) (#617) (2026-05-24)
 - #616 — fix(migrator): canonical bootstrap schema-order for --fresh-central (PR-MIGRATOR-FIX) (#616) (2026-05-24)
-- #615 — feat(dashboard): VNX-branded light theme (PR-DASH-V2) (#615) (2026-05-21)
-- #614 — fix(resume): VNX_RESUME_IN_PROGRESS bypass for PAUSED-guards (#614) (2026-05-21)
-- #612 — feat(safety): PAUSED marker guards in daemon scripts (#612) (2026-05-21)
-- #613 — fix(singleton): atomic flock(2) replaces mkdir-race (closes OI-1518) (#613) (2026-05-21)
 
 **WAVE 6**
 - #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
@@ -279,7 +286,16 @@ Status: planned
 ### provider-hardening — Provider hardening: fail-loud on empty extraction + CI-canary per CLI version + version-pin
 Status: planned
 
-### usage-aware-routing — Usage/budget aggregator + usage-aware routing (clean-API + admin-API + receipt-OBSERVE) + Mission Control widget
+### bench-v2-smart-lanes — Smart Lanes field-tests benchmark
+Status: planned
+
+### gemma-4-12b-integration — Gemma 4 12B local-lane evaluation
+Status: planned
+
+### aef-style-enrichment-layer — Dispatch enrichment between staging and pending
+Status: planned
+
+### usage-aware-routing — Usage/budget aggregator + usage-aware routing
 Status: planned
 
 ### gap4-self-learning-reactivation — GAP 4: reactivate self-learning loop — nightly intelligence pipeline cron
@@ -311,4 +327,7 @@ Status: done
 
 ### oi-2328-atomic-prune — OI-2328: atomic prune transaction for DB maintenance (vnx_db_maintenance.py)
 Status: done
+
+### sales-copilot-vnx-upgrade — Sales-copilot project — VNX install upgrade to post-1.0
+Status: planned
 

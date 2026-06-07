@@ -80,3 +80,9 @@ models:
     model_arg: glm-5
     cost_input_mtok: 0.50
     cost_output_mtok: 2.50
+
+  - id: codex-gpt-5-4
+    provider: codex
+    model_arg: gpt-5.4
+    cost_input_mtok: 1.25
+    cost_output_mtok: 10.00

@@ -209,8 +209,14 @@ def _legacy_claude_md_resolution(
     role: str | None,
     intelligence_section: str,
 ) -> str:
-    """3-tier CLAUDE.md resolution fallback."""
-    project_root = Path(__file__).resolve().parents[3]
+    """3-tier CLAUDE.md resolution fallback.
+
+    Resolves project root via the facade's ``__file__`` (same pattern as
+    ``_resolve_agent_cwd``) so tests that patch ``subprocess_dispatch.__file__``
+    can intercept the resolution (test_skill_context_injection).
+    """
+    import subprocess_dispatch as _sd
+    project_root = Path(_sd.__file__).resolve().parents[2]
 
     candidates: list[Path] = []
     if role:

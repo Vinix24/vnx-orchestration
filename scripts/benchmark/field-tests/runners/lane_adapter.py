@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -160,6 +161,27 @@ def _claude_tmux_spawn(
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _resolve_codex_bin_dir() -> Optional[str]:
+    """Find the dir containing the `codex` binary.
+
+    codex is npm-global-installed under a specific nvm node version; an nvm
+    default-switch (v20 -> v22) drops it from the active PATH. We probe known
+    nvm node-version bins so the bench works regardless of which node is
+    currently default. Returns the dir to prepend to PATH, or None if codex
+    is already resolvable.
+    """
+    if shutil.which("codex"):
+        return None
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_root.is_dir():
+        # Newest version first, but any with codex wins.
+        for version_dir in sorted(nvm_root.iterdir(), reverse=True):
+            candidate = version_dir / "bin" / "codex"
+            if candidate.exists():
+                return str(candidate.parent)
+    return None
+
+
 def _provider_dispatch(
     lane: dict, dispatch_id: str, instruction: str,
     dispatch_paths: str, deadline_seconds: int,
@@ -178,6 +200,15 @@ def _provider_dispatch(
         "local-gemma": "local-gemma",
     }
     provider = provider_map.get(lane["provider"], lane["provider"])
+
+    # Codex specifics: _dispatch_codex reads VNX_CODEX_MODEL (it ignores
+    # --model), and codex_wrapper invokes bare "codex" (PATH-dependent).
+    # Pin the model from the lane and ensure the binary resolves.
+    if provider == "codex":
+        env["VNX_CODEX_MODEL"] = lane["model_arg"]
+        codex_bin_dir = _resolve_codex_bin_dir()
+        if codex_bin_dir:
+            env["PATH"] = codex_bin_dir + os.pathsep + env.get("PATH", "")
     cmd = [
         sys.executable, str(PROVIDER_DISPATCH),
         "--provider", provider,

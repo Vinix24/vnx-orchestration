@@ -45,6 +45,15 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding", "review"]
+      gpt-5.4:
+        litellm_name: "openai/gpt-5.4"
+        cost_input_per_mtok: 1.25
+        cost_output_per_mtok: 10.00
+        max_tokens: 32000
+        context_window: 128000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review"]
   google:
     enabled: true
     api_key_env: GEMINI_API_KEY

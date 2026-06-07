@@ -10,6 +10,15 @@ I built this for my own work, across 2,000+ hours of Claude Code and 1,450+ test
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
+## What's new in 1.0
+
+- **pip-installable.** `pip install vnx-orchestration`, then `vnx init`, `vnx migrate`, `vnx doctor`. No repo clone required to scaffold a governed project.
+- **Provider-agnostic skill injection.** One skill folder, one structured prompt (role, assignment, resource index), identical for claude, kimi, codex, and deepseek workers. [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md).
+- **Realistic benchmark suite.** Field-tests derived from production PRs, programmatic verification per task, LLM-judge fallback, cost per quality-point. Seven lanes measured on the complex tier; methodology ships with every run.
+- **SSRF-safe URL policy.** Two-phase validator with an adversarial test suite for the fetch paths workers touch.
+- **Headless review gates in the audit trail.** Gate results land as normalized reports plus structured result records; a required gate is not complete until both exist.
+- **Receipt hash-chain verification.** `audit_chain` tooling verifies the append-only NDJSON ledger end-to-end.
+
 ## Writing
 
 I wrote the architecture down as I built it. The full series is on [vincentvandeth.nl](https://vincentvandeth.nl). Start here.
@@ -106,7 +115,7 @@ The point is not that the AI remembers. The point is that what it remembers is g
 
 ## Architecture decisions
 
-The decisions behind VNX are written down, not implied. There are 19 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+The decisions behind VNX are written down, not implied. There are 22 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
@@ -114,6 +123,7 @@ The decisions behind VNX are written down, not implied. There are 19 Architectur
 - [ADR-011](docs/governance/decisions/ADR-011-manager-worker-hierarchy.md): manager plus worker hierarchy with explicit depth, not depth-1 subagents
 - [ADR-012](docs/governance/decisions/ADR-012-hybrid-interactive-headless.md): hybrid interactive and headless execution, no retire-interactive
 - [ADR-014](docs/governance/decisions/ADR-014-autonomous-chain-dispatch.md): autonomous mode is pre-approved chain dispatch, never gate bypass
+- [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md): one structured plain-text skill prompt for every provider lane, no per-CLI mechanisms
 
 For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/manifesto/EVOLUTION_TIMELINE.md) reconstructs the technical evolution over roughly six months, including the private incubation provenance. The public repository is the extraction, hardening, and packaging of work that started inside a private product.
 
@@ -128,6 +138,8 @@ Kimi runs through the Kimi CLI with OAuth. VNX does not call the Moonshot SDK di
 OpenRouter is the gateway lane for GLM-5.1 from Zhipu today; arbitrary OpenAI-compatible models via the proxy lane are planned for a later release. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
 
 The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is meaningfully more effective on coding and tool tasks than a bare DeepSeek API call (internal measurement only, not a published benchmark), because the harness adds tool-use loops, context injection, and structured diff output that the raw API does not provide.
+
+Skills reach every lane the same way. Rather than depend on per-CLI mechanisms (`/skill`, `--skills-dir`, runtime tools that differ per provider), VNX composes the skill content into a structured plain-text prompt — role and methodology, then the assignment, then an on-demand index of the skill's reference and script files — and applies it uniformly to claude, kimi, codex, and deepseek workers from one source-of-truth skill folder. A skill edit propagates to all providers with no per-provider sync. See [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md).
 
 ### Billing as a consequence, not a goal
 
