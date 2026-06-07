@@ -1,6 +1,27 @@
 import { test, expect } from '@playwright/test';
 
+// Lanes are discovered from /api/agent-stream/status (no fixed T0-T3 tabs).
+// Mock it so the dropdown populates deterministically; T1 is newest → default.
+const STATUS_BODY = {
+  lanes: [
+    { id: 'T1', event_count: 5, last_timestamp: '2026-04-06T12:00:10Z', provider: 'claude' },
+    { id: 'T2', event_count: 2, last_timestamp: '2026-04-06T11:00:00Z', provider: 'claude' },
+    { id: 'T3', event_count: 1, last_timestamp: '2026-04-06T10:00:00Z', provider: 'kimi' },
+  ],
+  terminals: {
+    T1: { event_count: 5, last_timestamp: '2026-04-06T12:00:10Z' },
+    T2: { event_count: 2, last_timestamp: '2026-04-06T11:00:00Z' },
+    T3: { event_count: 1, last_timestamp: '2026-04-06T10:00:00Z' },
+  },
+};
+
 test.describe('Agent Stream Page', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/agent-stream/status', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(STATUS_BODY) });
+    });
+  });
+
   test('page loads with correct heading', async ({ page }) => {
     await page.goto('/agent-stream');
     const heading = page.locator('h2');
@@ -9,29 +30,28 @@ test.describe('Agent Stream Page', () => {
 
   test('shows subtitle text', async ({ page }) => {
     await page.goto('/agent-stream');
-    await expect(page.getByText('Real-time event stream from worker terminals')).toBeVisible();
+    await expect(page.getByText('Real-time event stream from worker lanes')).toBeVisible();
   });
 
-  test('terminal selector buttons T1 T2 T3 exist', async ({ page }) => {
+  test('lane selector lists discovered lanes as options', async ({ page }) => {
     await page.goto('/agent-stream');
+    const select = page.locator('[data-testid="agent-selector"] select');
+    await expect(select).toBeVisible();
     for (const t of ['T1', 'T2', 'T3']) {
-      const btn = page.locator('button', { hasText: t });
-      await expect(btn).toBeVisible();
+      await expect(select.locator('option', { hasText: t })).toHaveCount(1);
     }
   });
 
-  test('terminal selector switches active terminal', async ({ page }) => {
+  test('lane selector switches active lane', async ({ page }) => {
     await page.goto('/agent-stream');
-    // T1 is default — click T2
-    const t2Btn = page.locator('button', { hasText: 'T2' }).first();
-    await t2Btn.click();
-    // T2 button should become active (fontWeight 600)
-    await expect(t2Btn).toHaveCSS('font-weight', '600');
+    const select = page.locator('[data-testid="agent-selector"] select');
+    // T1 is the default (newest); switch to T2
+    await select.selectOption('T2');
+    await expect(select).toHaveValue('T2');
   });
 
   test('shows empty state when no events', async ({ page }) => {
     await page.goto('/agent-stream');
-    // The empty state shows either "Waiting for events..." or "No events for T1"
     const emptyMsg = page.getByText(/Waiting for events|No events for/);
     await expect(emptyMsg).toBeVisible();
   });
@@ -49,13 +69,12 @@ test.describe('Agent Stream Page', () => {
 
   test('connection status indicator is visible', async ({ page }) => {
     await page.goto('/agent-stream');
-    // Either "Connected" or "Disconnected" should display
     const status = page.getByText(/Connected|Disconnected/);
     await expect(status).toBeVisible();
   });
 
   test('event type badges render with correct colors', async ({ page }) => {
-    // Mock the SSE endpoint to return fixture events
+    // T1 is the default lane (newest in STATUS_BODY) → SSE connects to it.
     await page.route('**/api/agent-stream/T1', async (route) => {
       const events = [
         { type: 'init', timestamp: '2026-04-06T12:00:00Z', terminal: 'T1', sequence: 1, dispatch_id: 'test-001', data: { session_id: 'test-123' } },
@@ -74,7 +93,6 @@ test.describe('Agent Stream Page', () => {
 
     await page.goto('/agent-stream');
 
-    // Wait for events to render
     await expect(page.getByText('INIT')).toBeVisible({ timeout: 5000 });
     await expect(page.getByText('THINKING')).toBeVisible();
     await expect(page.getByText('TOOL_USE')).toBeVisible();

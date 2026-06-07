@@ -4,9 +4,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Archive, Circle, Pause, Play, Radio } from 'lucide-react';
 import { fetchAgentStreamArchiveList, fetchAgentStreamArchive, type ArchiveEntry } from '@/lib/api';
 
-const TERMINALS = ['T1', 'T2', 'T3'] as const;
-type Terminal = (typeof TERMINALS)[number];
+// A "lane" is any event-producing source: terminals (T0-T3), provider lanes,
+// or tmux-spawn dispatch ids. The list is discovered at runtime from
+// /api/agent-stream/status — never hardcoded — so the selector reflects what
+// actually produced events (the old fixed T1-T3 tabs were stale).
+type Terminal = string;
 type StreamMode = 'live' | 'archive';
+
+interface LaneInfo {
+  id: string;
+  event_count: number;
+  last_timestamp: string | null;
+  provider?: string | null;
+  dispatch_id?: string | null;
+}
 
 interface StreamEvent {
   type: string;
@@ -144,10 +155,12 @@ function EventRow({ event }: { event: StreamEvent }) {
 }
 
 export default function AgentStreamPage() {
-  const [terminal, setTerminal] = useState<Terminal>('T1');
+  const [terminal, setTerminal] = useState<Terminal>('');
   const [mode, setMode] = useState<StreamMode>('live');
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [status, setStatus] = useState<Record<string, TerminalStatus>>({});
+  // Ordered lane list (most-recently-active first) from the status endpoint.
+  const [lanes, setLanes] = useState<LaneInfo[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
@@ -196,6 +209,14 @@ export default function AgentStreamPage() {
         const data = await res.json();
         if (!isNavigatingAwayRef.current) {
           setStatus(data.terminals ?? {});
+          // Prefer the ordered `lanes` array (recency-sorted); fall back to
+          // deriving from the terminals map for older backends.
+          const laneList: LaneInfo[] = Array.isArray(data.lanes)
+            ? data.lanes
+            : Object.entries((data.terminals ?? {}) as Record<string, TerminalStatus>).map(
+                ([id, s]) => ({ id, event_count: s.event_count, last_timestamp: s.last_timestamp }),
+              );
+          setLanes(laneList);
         }
       }
     } catch {
@@ -345,6 +366,15 @@ export default function AgentStreamPage() {
     }
   }, [events, paused]);
 
+  // Default the selected lane to the most-recently-active one once lanes load,
+  // and recover if the current selection disappears from the list.
+  useEffect(() => {
+    if (lanes.length === 0) return;
+    if (!terminal || !lanes.some((l) => l.id === terminal)) {
+      setTerminal(lanes[0].id);
+    }
+  }, [lanes, terminal]);
+
   const terminalStatus = status[terminal];
 
   return (
@@ -365,7 +395,7 @@ export default function AgentStreamPage() {
               Agent Stream
             </h2>
             <p style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 2 }}>
-              {mode === 'live' ? 'Real-time event stream from worker terminals' : 'Archived dispatch replay'}
+              {mode === 'live' ? 'Real-time event stream from worker lanes' : 'Archived dispatch replay'}
             </p>
           </div>
         </div>
@@ -430,56 +460,38 @@ export default function AgentStreamPage() {
             </button>
           )}
 
-          {/* Terminal selector */}
-          <div data-testid="agent-selector" style={{ display: 'flex', gap: 4 }}>
-            {TERMINALS.map((t) => {
-              const active = t === terminal;
-              const ts = status[t];
-              const hasEvents = !!ts;
-              const label = ts?.agent_name || t;
-              return (
-                <button
-                  key={t}
-                  onClick={() => setTerminal(t)}
-                  title={ts?.domain ? `${label} (${ts.domain})` : label}
-                  style={{
-                    padding: '7px 16px',
-                    borderRadius: 8,
-                    background: active ? 'var(--color-accent-soft)' : 'var(--color-card-hover)',
-                    border: `1px solid ${active ? 'rgba(46, 134, 193, 0.3)' : 'var(--color-border)'}`,
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    fontWeight: active ? 600 : 400,
-                    color: active ? 'var(--color-accent)' : 'var(--color-muted)',
-                    position: 'relative',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 2,
-                  }}
-                >
-                  <span>{label}</span>
-                  {ts?.domain && (
-                    <span style={{ fontSize: 9, opacity: 0.6, textTransform: 'capitalize' }}>
-                      {ts.domain}
-                    </span>
-                  )}
-                  {hasEvents && (
-                    <span
-                      style={{
-                        position: 'absolute',
-                        top: 4,
-                        right: 4,
-                        width: 6,
-                        height: 6,
-                        borderRadius: '50%',
-                        background: '#27ae60',
-                      }}
-                    />
-                  )}
-                </button>
-              );
-            })}
+          {/* Lane selector — discovered at runtime, most-recently-active first.
+              A dropdown (not fixed tabs) because there can be many lanes:
+              terminals, provider lanes, and one entry per tmux-spawn dispatch. */}
+          <div data-testid="agent-selector" className="flex items-center gap-2">
+            <select
+              value={terminal}
+              onChange={(e) => setTerminal(e.target.value)}
+              title="Select lane"
+              style={{
+                background: '#ffffff',
+                border: '1px solid var(--color-border)',
+                borderRadius: 8,
+                color: 'var(--color-foreground)',
+                fontSize: 12,
+                fontWeight: 500,
+                padding: '7px 12px',
+                cursor: 'pointer',
+                maxWidth: 360,
+              }}
+            >
+              {lanes.length === 0 && <option value="">No lanes with events</option>}
+              {lanes.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.id}
+                  {l.provider ? ` · ${l.provider}` : ''}
+                  {` (${l.event_count})`}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 11, color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+              {lanes.length} {lanes.length === 1 ? 'lane' : 'lanes'}
+            </span>
           </div>
         </div>
       </div>
