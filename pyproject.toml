@@ -90,7 +90,14 @@ vnx_orchestration = [
     "**/__pycache__",
     "**/*.pyc",
     "**/*.pyo",
-    "scripts/benchmark/results/**",
+    # Benchmark suite is dev/research tooling, not runtime: the harness is
+    # generalised into a shippable feature in 1.1 (OI-225). Until then it stays
+    # in the repo only — shipping it bundles repo-specific task seeds, a binary
+    # fixture (scan_quota.db), and a planted-flaw fixture string in skill_smoke
+    # that trips downstream secret scanners on install.
+    "scripts/benchmark/**",
+    "scripts/benchmarks/**",
+    "scripts/llm_benchmark.py",
     "**/*.log",
     "tests/**",
     "dist/**",
