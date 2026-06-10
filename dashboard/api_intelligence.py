@@ -1402,9 +1402,11 @@ def handle_events_stream(handler: "BaseHTTPRequestHandler", terminal: str) -> No
     Seeks to end of file on connect, then tails new lines.
     Sends a keep-alive comment every 15 seconds.
     """
-    valid_terminals = frozenset({"T0", "T1", "T2", "T3"})
-    if terminal not in valid_terminals:
-        _send_sse_error(handler, f"invalid terminal: {terminal}")
+    # Lane-aware: lanes are discovered from the events directory, not pinned to
+    # T0-T3. Mirror api_agent_stream._LANE_RE — the regex is the path-safety
+    # boundary (the lane name lands in a filename below).
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", terminal):
+        _send_sse_error(handler, f"invalid lane: {terminal}")
         return
 
     sd = _sd()
