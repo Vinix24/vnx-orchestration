@@ -1,7 +1,7 @@
 # Reference Mapping for t0-orchestrator
 
-These references are project-specific and created during deployment.
-Below is the recommended mapping for SEOcrawler:
+These references are project-specific and mapped during deployment.
+Recommended mapping for a typical project:
 
 | Reference | Target |
 |-----------|--------|
