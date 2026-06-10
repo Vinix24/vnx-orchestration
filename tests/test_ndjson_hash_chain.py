@@ -284,6 +284,26 @@ def test_verify_chain_partial_chain_is_broken(tmp_path):
     assert len(violations) >= 1
 
 
+def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
+    """LOAD-BEARING guard case (kimi-gate PR #840 F1): first entry has no
+    prev_hash (allowed by the first-entry branch), later entries hash-link
+    correctly to their predecessor. The verify loop produces zero violations
+    here — only the chained_count < total guard catches the partial chain."""
+    p = tmp_path / "first-unchained.ndjson"
+    first = {"seq": 0, "id": "plain-0"}
+    with p.open("a") as f:
+        f.write(json.dumps(first, sort_keys=True, separators=(",", ":")) + "\n")
+    # Second entry links CORRECTLY to the first entry's computed hash.
+    second = {"seq": 1, "id": "chained-1", "prev_hash": compute_entry_hash(first)}
+    with p.open("a") as f:
+        f.write(json.dumps(second, sort_keys=True, separators=(",", ":")) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is False
+    assert status == "broken"
+    assert any("partial chain" in str(v) for v in violations)
+
+
 def test_verify_chain_missing_file_is_unchained(tmp_path):
     """Non-existent ledger file is treated as unchained (nothing written yet)."""
     p = tmp_path / "nonexistent.ndjson"

@@ -198,11 +198,11 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
 
     # All parseable entries chained and intact.
     if chained_count < total:
-        # Partial chain detected even with no hash mismatches — entries that
-        # lack prev_hash were skipped above but their absence is itself a
-        # structural violation.  This guard covers the edge case where the
-        # first entry has no prev_hash but later entries do; the loop above
-        # already catches this as a mismatch.  Kept for completeness.
+        # Partial chain detected even with no hash mismatches.  This guard is
+        # LOAD-BEARING for the edge case where the FIRST entry carries no
+        # prev_hash (allowed by the first-entry branch) while later entries
+        # hash-link correctly to their predecessor — the loop produces zero
+        # violations there; only this count check catches the partial chain.
         return (False, [{
             "note": (
                 f"partial chain: {chained_count}/{total} entries carry prev_hash; "
