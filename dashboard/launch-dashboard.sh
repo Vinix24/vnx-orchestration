@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 SERVICE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Port 4174 matches the Next.js rewrite target in token-dashboard/next.config.ts
-PORT="${PORT:-4174}"
+# Port 4174 matches the Next.js rewrite target in token-dashboard/next.config.ts.
+# export is required: serve_dashboard.py reads PORT from the child environment;
+# without it python3 falls back to 4173 while the Next.js proxy targets 4174.
+export PORT="${PORT:-4174}"
 
 if command -v python3 >/dev/null 2>&1; then
   echo "Serving dashboard from $SERVICE_DIR on http://localhost:$PORT (dashboard asset at /dashboard/index.html)"

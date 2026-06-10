@@ -65,11 +65,11 @@ quality_intelligence.db (SQLite)
         |
         v
 serve_dashboard.py ---------- /api/token-stats
-   port 4173                  /api/token-stats/sessions
+   port 4174                  /api/token-stats/sessions
         |
         v
 React app (Next.js 15)
-   port 5173 (dev)
+   port 3100 (dev)
    dist/ (production)
 ```
 
