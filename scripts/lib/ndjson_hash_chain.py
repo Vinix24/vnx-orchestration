@@ -106,14 +106,33 @@ def _read_last_hash(path: Path) -> str | None:
         return None
 
 
-def verify_chain(path: Path) -> tuple[bool, list[dict]]:
+def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
     """Verify the hash-chain integrity for an NDJSON file.
 
-    Returns (is_valid, violations_list).
-    violations_list contains dicts with: line_number, expected_prev_hash, actual_prev_hash
+    Returns (is_valid, violations_list, status) where status is one of:
+
+    - "unchained": no entry in the file carries a prev_hash field; chaining
+      was never enabled (VNX_CHAIN_RECEIPTS is off by default).  Integrity
+      cannot be verified — this is NOT an error.  is_valid is True.
+    - "verified": every entry carries prev_hash and the chain is intact.
+      is_valid is True.
+    - "broken": chain is present but has integrity violations (tampered,
+      inserted, or partially chained — some entries carry prev_hash while
+      others do not).  is_valid is False.
+
+    A partially-chained ledger (some entries with prev_hash, some without)
+    is classified as "broken", not "unchained".  A ledger must be either
+    fully unchained or fully chained to be considered healthy.
+
+    violations_list contains dicts with: line_number, expected_prev_hash,
+    actual_prev_hash (and optionally 'error' or 'note').
     """
-    violations = []
-    expected_prev = GENESIS_HASH
+    entries: list[tuple[int, dict]] = []
+
+    if not path.exists() or path.stat().st_size == 0:
+        return (True, [], "unchained")
+
+    parse_errors: list[dict] = []
 
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -123,32 +142,75 @@ def verify_chain(path: Path) -> tuple[bool, list[dict]]:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError as e:
-                violations.append({
+                parse_errors.append({
                     "line_number": line_no,
                     "error": f"invalid JSON: {e}",
                 })
                 continue
+            entries.append((line_no, entry))
 
-            actual_prev = entry.get("prev_hash")
+    # Unparseable lines are always a violation regardless of chain status.
+    if parse_errors and not entries:
+        return (False, parse_errors, "broken")
 
-            if line_no == 1:
-                if actual_prev is not None and actual_prev != GENESIS_HASH:
-                    violations.append({
-                        "line_number": line_no,
-                        "expected_prev_hash": GENESIS_HASH,
-                        "actual_prev_hash": actual_prev,
-                        "note": "first entry: prev_hash must be GENESIS or absent",
-                    })
-            elif actual_prev != expected_prev:
+    if not entries:
+        return (True, [], "unchained")
+
+    # Determine whether any entry carries prev_hash.
+    chained_count = sum(1 for _, e in entries if "prev_hash" in e)
+    total = len(entries)
+
+    if chained_count == 0 and not parse_errors:
+        # No entry has prev_hash — ledger is fully unchained.  Chaining was
+        # not enabled (VNX_CHAIN_RECEIPTS default off).  Not an error.
+        return (True, [], "unchained")
+
+    # At least one entry has prev_hash (or there are parse errors mixed in).
+    # Enforce full-chain integrity.  A partially-chained ledger (some entries
+    # lack prev_hash while others have it) is a real violation — broken.
+    violations: list[dict] = list(parse_errors)
+    expected_prev = GENESIS_HASH
+
+    for line_no, entry in entries:
+        actual_prev = entry.get("prev_hash")
+
+        if line_no == entries[0][0]:
+            # First entry in the file.
+            if actual_prev is not None and actual_prev != GENESIS_HASH:
+                violations.append({
+                    "line_number": line_no,
+                    "expected_prev_hash": GENESIS_HASH,
+                    "actual_prev_hash": actual_prev,
+                    "note": "first entry: prev_hash must be GENESIS or absent",
+                })
+        else:
+            if actual_prev != expected_prev:
                 violations.append({
                     "line_number": line_no,
                     "expected_prev_hash": expected_prev,
                     "actual_prev_hash": actual_prev,
                 })
 
-            expected_prev = compute_entry_hash(entry)
+        expected_prev = compute_entry_hash(entry)
 
-    return (len(violations) == 0, violations)
+    if violations:
+        return (False, violations, "broken")
+
+    # All parseable entries chained and intact.
+    if chained_count < total:
+        # Partial chain detected even with no hash mismatches.  This guard is
+        # LOAD-BEARING for the edge case where the FIRST entry carries no
+        # prev_hash (allowed by the first-entry branch) while later entries
+        # hash-link correctly to their predecessor — the loop produces zero
+        # violations there; only this count check catches the partial chain.
+        return (False, [{
+            "note": (
+                f"partial chain: {chained_count}/{total} entries carry prev_hash; "
+                "ledger must be fully unchained or fully chained"
+            )
+        }], "broken")
+
+    return (True, [], "verified")
 
 
 def walk_chain(path: Path) -> Iterator[tuple[int, dict, str]]:

@@ -22,12 +22,31 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "verify":
-        ok, violations = verify_chain(args.path)
-        if ok:
-            print(json.dumps({"verified": True, "path": str(args.path)}))
+        ok, violations, status = verify_chain(args.path)
+        if status == "unchained":
+            print(json.dumps({
+                "verified": True,
+                "status": "unchained",
+                "path": str(args.path),
+                "warning": (
+                    "Hash-chain verification not possible: no entries carry prev_hash. "
+                    "Enable chaining by setting VNX_CHAIN_RECEIPTS=1."
+                ),
+            }, indent=2))
+            sys.exit(0)
+        elif status == "verified":
+            print(json.dumps({
+                "verified": True,
+                "status": "verified",
+                "path": str(args.path),
+            }))
             sys.exit(0)
         else:
-            print(json.dumps({"verified": False, "violations": violations[:20]}, indent=2))
+            print(json.dumps({
+                "verified": False,
+                "status": "broken",
+                "violations": violations[:20],
+            }, indent=2))
             sys.exit(1)
     elif args.cmd == "walk":
         for line_no, entry, hash_ in walk_chain(args.path):

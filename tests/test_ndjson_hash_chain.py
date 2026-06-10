@@ -8,6 +8,7 @@ Covers:
   - Walk chain generator
   - Empty file trivially valid
   - Backward-compat: plain NDJSON append without hash-chain
+  - LB-5: unchained vs broken distinction (verify_chain three-status contract)
 """
 
 import json
@@ -81,9 +82,10 @@ def test_verify_chain_valid_passes(tmp_path):
     p = tmp_path / "chain.ndjson"
     for i in range(5):
         append_chained_entry(p, {"seq": i, "ts": "2026-01-01"})
-    ok, violations = verify_chain(p)
+    ok, violations, status = verify_chain(p)
     assert ok is True
     assert violations == []
+    assert status == "verified"
 
 
 def test_verify_chain_tampered_entry_fails(tmp_path):
@@ -99,8 +101,9 @@ def test_verify_chain_tampered_entry_fails(tmp_path):
     lines[1] = json.dumps(tampered)
     p.write_text("\n".join(lines) + "\n")
 
-    ok, violations = verify_chain(p)
+    ok, violations, status = verify_chain(p)
     assert ok is False
+    assert status == "broken"
     # Line 3's prev_hash now points to old line 2 hash — mismatch
     assert any(v.get("line_number") == 3 for v in violations)
 
@@ -116,8 +119,9 @@ def test_verify_chain_inserted_entry_fails(tmp_path):
     lines.insert(1, json.dumps(fake))
     p.write_text("\n".join(lines) + "\n")
 
-    ok, violations = verify_chain(p)
+    ok, violations, status = verify_chain(p)
     assert ok is False
+    assert status == "broken"
     assert len(violations) >= 1
 
 
@@ -184,9 +188,10 @@ def test_walk_chain_yields_all_entries(tmp_path):
 def test_verify_empty_file_returns_valid(tmp_path):
     p = tmp_path / "empty.ndjson"
     p.touch()
-    ok, violations = verify_chain(p)
+    ok, violations, status = verify_chain(p)
     assert ok is True
     assert violations == []
+    assert status == "unchained"
 
 
 def test_chain_survives_normal_append(tmp_path):
@@ -203,3 +208,107 @@ def test_chain_survives_normal_append(tmp_path):
     # Plain entries have no prev_hash — backward-compat preserved
     _, entry0, _ = entries[0]
     assert "prev_hash" not in entry0
+
+
+# ---------------------------------------------------------------------------
+# LB-5: unchained vs broken distinction
+# ---------------------------------------------------------------------------
+
+
+def test_verify_chain_unchained_no_prev_hash_is_ok(tmp_path):
+    """Plain NDJSON without any prev_hash → status 'unchained', exit 0 equivalent.
+
+    This is the default state when VNX_CHAIN_RECEIPTS is off.  Must NOT be
+    reported as broken or verified — it is simply not chained.
+    """
+    p = tmp_path / "plain.ndjson"
+    for i in range(4):
+        with p.open("a") as f:
+            f.write(json.dumps({"seq": i, "event": "dispatch", "id": f"d{i}"}) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is True
+    assert violations == []
+    assert status == "unchained"
+
+
+def test_verify_chain_chained_intact_is_verified(tmp_path):
+    """Fully chained ledger with correct hashes → status 'verified'."""
+    p = tmp_path / "chained.ndjson"
+    for i in range(5):
+        append_chained_entry(p, {"seq": i, "event": "dispatch"})
+
+    ok, violations, status = verify_chain(p)
+    assert ok is True
+    assert violations == []
+    assert status == "verified"
+
+
+def test_verify_chain_tampered_chained_is_broken(tmp_path):
+    """Tampered entry in a chained ledger → status 'broken', exit 1 equivalent."""
+    p = tmp_path / "tampered.ndjson"
+    append_chained_entry(p, {"event": "e1", "id": "1"})
+    append_chained_entry(p, {"event": "e2", "id": "2"})
+    append_chained_entry(p, {"event": "e3", "id": "3"})
+
+    lines = p.read_text().splitlines()
+    tampered = json.loads(lines[1])
+    tampered["id"] = "TAMPERED"
+    lines[1] = json.dumps(tampered)
+    p.write_text("\n".join(lines) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is False
+    assert status == "broken"
+    assert len(violations) >= 1
+
+
+def test_verify_chain_partial_chain_is_broken(tmp_path):
+    """Partial chain — some entries have prev_hash, some do not — is 'broken'.
+
+    A partially-chained ledger is NOT 'unchained'.  The presence of any
+    prev_hash field means chaining was attempted; missing ones are violations.
+    """
+    p = tmp_path / "partial.ndjson"
+    # First two entries: plain NDJSON, no prev_hash
+    with p.open("a") as f:
+        f.write(json.dumps({"seq": 0, "id": "plain-0"}) + "\n")
+        f.write(json.dumps({"seq": 1, "id": "plain-1"}) + "\n")
+    # Third entry: manually inject a prev_hash to simulate partial chaining
+    with p.open("a") as f:
+        f.write(json.dumps({"seq": 2, "id": "chained-2", "prev_hash": GENESIS_HASH}) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is False
+    assert status == "broken"
+    assert len(violations) >= 1
+
+
+def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
+    """LOAD-BEARING guard case (kimi-gate PR #840 F1): first entry has no
+    prev_hash (allowed by the first-entry branch), later entries hash-link
+    correctly to their predecessor. The verify loop produces zero violations
+    here — only the chained_count < total guard catches the partial chain."""
+    p = tmp_path / "first-unchained.ndjson"
+    first = {"seq": 0, "id": "plain-0"}
+    with p.open("a") as f:
+        f.write(json.dumps(first, sort_keys=True, separators=(",", ":")) + "\n")
+    # Second entry links CORRECTLY to the first entry's computed hash.
+    second = {"seq": 1, "id": "chained-1", "prev_hash": compute_entry_hash(first)}
+    with p.open("a") as f:
+        f.write(json.dumps(second, sort_keys=True, separators=(",", ":")) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is False
+    assert status == "broken"
+    assert any("partial chain" in str(v) for v in violations)
+
+
+def test_verify_chain_missing_file_is_unchained(tmp_path):
+    """Non-existent ledger file is treated as unchained (nothing written yet)."""
+    p = tmp_path / "nonexistent.ndjson"
+    assert not p.exists()
+    ok, violations, status = verify_chain(p)
+    assert ok is True
+    assert violations == []
+    assert status == "unchained"
