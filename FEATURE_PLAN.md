@@ -1,12 +1,14 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-05T08:25:24.024766+00:00
+**Last updated**: 2026-06-10T00:58:11.977479+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #832 — fix(packaging): exclude benchmark dev-tooling from wheel (LB-3 artifact grep) (#832) (2026-06-09)
+- #831 — feat(bench): codex lane + 6/6 skill-injection E2E + seed-decontaminatie + 1.0 docs (#831) (2026-06-07)
 - #830 — feat(benchmark): field-tests T2 medium + T3 complex task-definitions (#830) (2026-06-04)
 - #829 — feat(roadmap): park sales-copilot VNX upgrade (1.0.1, post-launch) (#829) (2026-06-04)
 - #828 — feat(benchmark): field-tests realistic-bench suite — infrastructure + T1 task-defs (#828) (2026-06-04)
@@ -144,41 +146,6 @@ _Last 14 days — sourced from git merge commits._
 - #669 — fix(obs): codex_spawn model-default to gpt-5.5 + token-usage extraction (PR-OBS-1) (#669) (2026-05-28)
 - #668 — chore(hygiene): remove schraplijst-Phase-1 dead modules (~4.1k LOC, fresh-verified) (PR-HYG-2B) (#668) (2026-05-28)
 - #667 — chore(hygiene): remove audit-identified dead code (unused imports, unreachable bin/vnx cases, ongebruikte helpers) (PR-HYG-2A) (#667) (2026-05-28)
-- #659 — refactor(migrate-central): split main into _parse_args + _run_apply (OI-1540/1532, part 3/3) (#659) (2026-05-26)
-- #658 — docs(rc9): changelog + readme sync (cheap-lanes, constraint-rename, OI-refactors, governance fixes) (#658) (2026-05-26)
-- #657 — refactor(migrate-central): extract migrate_schema module (OI-1536/1533, part 2/3) (#657) (2026-05-26)
-- #655 — feat(governance): traceability_audit tool — cross-ref PRs/commits/dispatches/receipts, report gaps (#655) (2026-05-26)
-- #654 — feat(governance): emit pr_merged receipt linking pr_number on merge/closure (fixes FPY/history gap) (#654) (2026-05-26)
-- #653 — refactor(migrate-central): extract migrate_import module (OI-1537/1539, part 1/3) (#653) (2026-05-26)
-- #652 — feat(subprocess-dispatch): execute cheap-lane via provider_dispatch instead of Claude fallback (CL2) (#652) (2026-05-26)
-- #650 — refactor(install-central): move shim content to template file (OI-1562) (#650) (2026-05-26)
-- #649 — refactor(doctor): extract worktree + settings checks from cmd_doctor (OI-1573) (#649) (2026-05-26)
-- #648 — refactor(receipt-proc): extract mtime-calc python from bootstrap-protection (OI-1525/1524) (#648) (2026-05-26)
-- #643 — refactor(providers): rename deepseek-path-d-blocked -> deepseek-harness-subscription-blocked; allow own-key+hardening, block subscription-redirect (#643) (2026-05-26)
-- #644 — fix(provider-dispatch): non-claude (kimi/codex) receipt captures correct status + output + tokens (#644) (2026-05-26)
-- #647 — refactor(dispatcher): extract stuck-cleanup python + supervisor-ticks (OI-1521/1523) (#647) (2026-05-26)
-- #646 — refactor(benchmark): extract source-info + report-writers from main (OI-1510) (#646) (2026-05-26)
-- #645 — refactor(quality-db): bootstrap_qi_db migration registry (OI-1542/1544/1541) (#645) (2026-05-26)
-- #642 — fix(quality-advisory): relax shell size thresholds (func 50->60, file 500->600) to cut false-positive OIs (#642) (2026-05-26)
-- #640 — fix(install): preserve project worker_permissions overrides across cutover (#640) (2026-05-26)
-- #638 — docs(strategy): three-tier public/private layering model (#638) (2026-05-26)
-- #639 — feat(supervisor): flood-safe crash-recovery sweep for orphaned active dispatches (#639) (2026-05-26)
-- #641 — fix(migration): 0017 dispatches/terminal_leases rebuild preserves all columns dynamically (unblocks build_t0_state) (#641) (2026-05-26)
-- #637 — fix(dispatch): complexity-scaled chunk_timeout / total_deadline defaults (#637) (2026-05-26)
-- #636 — fix(runtime-coord): add terminal_leases.worker_pid + schema-drift regression guard (#636) (2026-05-26)
-- #635 — fix(runtime-coord): self-heal worker_states.project_id in init (OI-095) (#635) (2026-05-26)
-- #627 — fix(install-central): shim exec bin/vnx not vnx-cli (was typo) (#627) (2026-05-25)
-- #626 — feat(wave2a-8): housekeeping — stale session cleanup + runbook D3/D4 (#626) (2026-05-25)
-- #625 — fix(wave2a-7): T0 template legacy path + doctor cross-platform glob (#625) (2026-05-25)
-- #624 — fix(wave2a-6): installer template-leak — no developer paths in install output (#624) (2026-05-25)
-- #623 — fix(wave2a): env isolation check + runbook v3 (PR-WAVE2A-5) (#623) (2026-05-25)
-- #622 — fix(wave2a): test-mode apply --test-apply flag (PR-WAVE2A-4) (#622) (2026-05-25)
-- #621 — fix(wave2a): backup retention policy --cleanup-backups (PR-WAVE2A-3) (#621) (2026-05-25)
-- #620 — fix(wave2a): per-project migrator mode --project flag (PR-WAVE2A-2) (#620) (2026-05-25)
-- #619 — fix(wave2a): TCC pre-flight check + per-project backup access probe (PR-WAVE2A-1) (#619) (2026-05-25)
-- #618 — docs(wave2a): robust pipeline architecture blueprint (PR-WAVE2A-BLUEPRINT) (#618) (2026-05-25)
-- #617 — fix(migrator): canonical bootstrap dispatch_experiments + rollback exception masking (PR-MIGRATOR-FIX-V2) (#617) (2026-05-24)
-- #616 — fix(migrator): canonical bootstrap schema-order for --fresh-central (PR-MIGRATOR-FIX) (#616) (2026-05-24)
 
 **WAVE 6**
 - #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
@@ -188,14 +155,6 @@ _Last 14 days — sourced from git merge commits._
 
 **WAVE0**
 - #756 — chore(wave0): untrack .venv+scratch (keep FEATURE_PLAN/PR_QUEUE), strip emoji/buzzwords (#756) (2026-05-31)
-
-**WAVE4**
-- #633 — docs(wave4): central-install runbook + cutover procedure (PR-WAVE4-6) (#633) (2026-05-25)
-- #632 — test(wave4): central-install e2e integration tests (PR-WAVE4-5) (#632) (2026-05-25)
-- #631 — fix(regen-settings): guard against central-install write; detect pre-fix contamination (PR-WAVE4-4) (#631) (2026-05-25)
-- #630 — fix(bin): preserve VNX_PROJECT_ROOT across env reset; add write guard; redirect cmd_update (PR-WAVE4-3) (#630) (2026-05-25)
-- #629 — fix(install-central): write install-mode marker, export VNX_PROJECT_ROOT from shim, fix verify_install (PR-WAVE4-2) (#629) (2026-05-25)
-- #628 — fix(install-central): separate PROJECT_ROOT from VNX_HOME in central-install mode (PR-WAVE4-1) (#628) (2026-05-25)
 
 **WAVE6**
 - #698 — fix(wave6-pool-lease-spawn): insert terminal_leases row before add_member in pool scale_up (#698) (2026-05-29)
@@ -311,7 +270,7 @@ Status: done
 Status: done
 
 ### planning-future-state-layer — Planning object model: TRACK(=feature) -> DISPATCH(execution leaf) -> output+receipt future-state layer
-Status: planned
+Status: shipped-dark
 
 ### receipt-hashchain-wire — GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests
 Status: in-progress
@@ -329,5 +288,44 @@ Status: done
 Status: done
 
 ### sales-copilot-vnx-upgrade — Sales-copilot project — VNX install upgrade to post-1.0
+Status: planned
+
+### launch-sweep-blockers — 1.0 pre-publish blocker fix-set: wheel client-data scrub, audit_chain unchained-status, init hooks-wiring, CHANGELOG 1.0.0
+Status: planned
+
+### oi-222-ssrf-hardening — OI-222: SSRF hardening — is_global instead of is_private (CGNAT 100.64/10) + DNS-rebinding IP-pinning, then wire url_policy into fetch paths
+Status: planned
+
+### oi-223-lane-safety-loader — OI-223: lane_safety loader — make routing_policy.yaml lane_safety block live (force_headless now hardcoded in lane_adapter.HEADLESS_FORCED_MODELS)
+Status: planned
+
+### oi-224-bench-runner-edges — OI-224: bench-runner edge-cases — retry isolation (headless shared checkout), stale-report prefix match, worktree-removal result
+Status: planned
+
+### oi-225-bench-harness-generalize — OI-225: generalize bench harness into a shippable feature (seeds-free, token-free, bring-your-own-tasks)
+Status: planned
+
+### nightly-pipeline-python-compat — Nightly pipeline phase 0-schema-init: Python 3.9 crash fix (Path | None at quality_db_init.py:905) + crontab PATH + version guard
+Status: planned
+
+### outcome-normalization — Dispatch-outcome integrity: weekly_digest classifier vocab + event-type filter, status-default policy, dispatch_metadata backfill (73% unknown root-caused)
+Status: planned
+
+### adr007-composite-keys-batch — ADR-007 batch: project_id + composite UNIQUE on SPC/intelligence tables (governance_metrics, spc_*, success_patterns, antipatterns, prevention_rules, dispatch_experiments, retry_budgets, dream_pattern_archives)
+Status: planned
+
+### dashboard-ops-completion — Dashboard operational completion: launch-script PORT export, /api/events/stream lane-aware migration, README port truth
+Status: planned
+
+### oi-lifecycle-closure — Track/OI lifecycle closure path: vnx track done, oi-close/unlink_open_item, dispatch<->track linkage migration, vnx status --tracks, queue hygiene
+Status: planned
+
+### otel-wire-or-degrade — OTel decision: wire OTEL_EXPORTER_OTLP_ENDPOINT (+ tmux-lane callpoints) or degrade otel deps to [observability] extra
+Status: planned
+
+### sweep-hardening-batch1 — Sweep hardening batch 1: state-dir guard, routing-policy conflict, tmux receipt truth, extra-flags quoting, broker atomicity, stderr drain, provider-CLI bypass guard
+Status: planned
+
+### roadmap-governance-hygiene — Roadmap/docs governance hygiene: PM-mutator enforcement, drift-snapshot freshness, stale ROADMAP docs archive, docs-truth pass
 Status: planned
 
