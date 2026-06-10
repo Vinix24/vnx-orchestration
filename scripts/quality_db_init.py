@@ -5,6 +5,8 @@ Version: 8.0.2 (Phase 2)
 Purpose: Initialize SQLite Quality Intelligence Database from schema
 """
 
+from __future__ import annotations  # PEP 563: lazy annotation evaluation — Python 3.9 compat
+
 import sqlite3
 import sys
 from pathlib import Path
