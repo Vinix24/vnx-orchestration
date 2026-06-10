@@ -470,3 +470,162 @@ class TestBootstrapFailLoud:
         assert "error" in captured.err.lower(), (
             "vnx init must print 'error' to stderr on bootstrap failure, not a silent warning"
         )
+
+
+# ---------------------------------------------------------------------------
+# LB-6: governance hooks wired in scaffolded settings.json
+# ---------------------------------------------------------------------------
+
+class TestInitHooksWiring:
+    """LB-6 / sweep A3: vnx init must scaffold .claude/settings.json with the
+    Stop and PreToolUse governance hooks so the report→receipt→audit-trail
+    loop is active out-of-the-box.
+
+    Hook script paths must be absolute (resolved from engine_root) so they
+    work in a pip-install where scripts/ lives in site-packages, not in the
+    project directory.
+    """
+
+    @pytest.mark.parametrize("template", ["default", "minimal"])
+    def test_hooks_block_present(self, tmp_path, monkeypatch, template):
+        """settings.json must contain a top-level 'hooks' key after vnx init."""
+        import json
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        rc = vnx_init(_init_args(tmp_path, template=template))
+        assert rc == 0, f"vnx init (template={template!r}) must exit 0"
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        assert settings_path.exists(), ".claude/settings.json must be created by vnx init"
+
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert "hooks" in settings, (
+            f"settings.json (template={template!r}) must contain a 'hooks' block — "
+            "governance loop (report→receipt→audit-trail) is dead without it (LB-6)"
+        )
+
+    @pytest.mark.parametrize("template", ["default", "minimal"])
+    def test_stop_hook_wired(self, tmp_path, monkeypatch, template):
+        """settings.json must wire a Stop hook pointing to stop_report_hook.sh."""
+        import json
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        vnx_init(_init_args(tmp_path, template=template))
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        stop_hooks = settings.get("hooks", {}).get("Stop", [])
+        assert stop_hooks, (
+            f"settings.json (template={template!r}) must have at least one Stop hook"
+        )
+        commands = [
+            h.get("command", "")
+            for entry in stop_hooks
+            for h in entry.get("hooks", [])
+        ]
+        assert any("stop_report_hook.sh" in cmd for cmd in commands), (
+            f"Stop hook must reference stop_report_hook.sh (template={template!r}). "
+            f"Found commands: {commands}"
+        )
+
+    @pytest.mark.parametrize("template", ["default", "minimal"])
+    def test_pretooluse_guard_wired(self, tmp_path, monkeypatch, template):
+        """settings.json must wire a PreToolUse Bash hook for the raw-spawn guard."""
+        import json
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        vnx_init(_init_args(tmp_path, template=template))
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        pretooluse_hooks = settings.get("hooks", {}).get("PreToolUse", [])
+        assert pretooluse_hooks, (
+            f"settings.json (template={template!r}) must have at least one PreToolUse hook"
+        )
+        commands = [
+            h.get("command", "")
+            for entry in pretooluse_hooks
+            for h in entry.get("hooks", [])
+        ]
+        assert any("pretooluse_block_raw_claude_spawn.sh" in cmd for cmd in commands), (
+            f"PreToolUse hook must reference pretooluse_block_raw_claude_spawn.sh "
+            f"(template={template!r}). Found commands: {commands}"
+        )
+
+    @pytest.mark.parametrize("template", ["default", "minimal"])
+    def test_hook_script_paths_are_absolute(self, tmp_path, monkeypatch, template):
+        """Hook script paths must be absolute so they work from a pip-install.
+
+        In a pip install, scripts/ is in site-packages, not in the project
+        directory. git rev-parse from the worker cwd would resolve the project
+        root, NOT the site-packages location. Absolute paths are the only
+        reliable mechanism for cross-environment hook delivery.
+        """
+        import json
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        vnx_init(_init_args(tmp_path, template=template))
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        hooks_block = settings.get("hooks", {})
+        for hook_type, entries in hooks_block.items():
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    # Extract the script path from commands like:
+                    # bash -c 'exec bash "/abs/path/to/hook.sh"'
+                    import re
+                    # Match any .sh path in the command string
+                    sh_paths = re.findall(r'"(/[^"]+\.sh)"', cmd)
+                    for sh_path in sh_paths:
+                        assert sh_path.startswith("/"), (
+                            f"Hook script path must be absolute (template={template!r}, "
+                            f"hook_type={hook_type!r}): {sh_path!r}"
+                        )
+
+    @pytest.mark.parametrize("template", ["default", "minimal"])
+    def test_hook_script_paths_exist_on_disk(self, tmp_path, monkeypatch, template):
+        """Every hook script path in the scaffolded settings.json must exist on disk."""
+        import json
+        import re
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        vnx_init(_init_args(tmp_path, template=template))
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        hooks_block = settings.get("hooks", {})
+        missing = []
+        for hook_type, entries in hooks_block.items():
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    sh_paths = re.findall(r'"(/[^"]+\.sh)"', cmd)
+                    for sh_path in sh_paths:
+                        if not Path(sh_path).exists():
+                            missing.append(f"{hook_type}: {sh_path}")
+
+        assert not missing, (
+            f"Hook script(s) referenced in settings.json do not exist on disk "
+            f"(template={template!r}): {missing}"
+        )

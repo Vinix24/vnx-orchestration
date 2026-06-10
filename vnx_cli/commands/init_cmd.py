@@ -509,6 +509,7 @@ def vnx_init(args) -> int:
         "project_name": project_dir.name,
         "project_id": project_id,
         "vnx_version": __version__,
+        "engine_root": str(_engine.engine_root()),
     }
     _scaffold_claude_dir(project_dir, tmpl_root, ctx, force)
     # Only create the project-local .vnx-data/ scaffold when the resolved
