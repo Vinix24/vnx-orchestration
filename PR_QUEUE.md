@@ -7,8 +7,8 @@
 
 ## Progress Overview
 Launch status: **pre-launch** (version 1.0.0)
-Last verified: 2026-06-10 against origin/main@40b2d3cd
-Merged launch PRs: 33 | Queued: 0
+Last verified: 2026-06-10 against origin/main@bfe37501
+Merged launch PRs: 39 | Queued: 0
 
 ## Status
 
@@ -46,10 +46,12 @@ Merged launch PRs: 33 | Queued: 0
 - #788 — feat(governance): unified_report as universal interface — AGENTS.md report-contract + generic report->receipt conversion (no hooks) [feature=report-to-receipt-converter]
 - #792 — fix(intelligence): repair 4 regressed nightly pipeline phases (OI-2331) [feature=oi-2331-intelligence-repair]
 - #794 — fix(db-maintenance): atomic prune transaction (OI-2328) [feature=oi-2328-atomic-prune]
+- #836 — fix(scrub): remove client project data from wheel + docs index path (LB-4) [feature=launch-sweep-blockers]
+- #840 — fix(audit-chain): distinguish unchained from broken ledger in verify (LB-5) [feature=launch-sweep-blockers]
+- #835 — fix(init): wire governance hooks block into scaffolded settings.json (LB-6) [feature=launch-sweep-blockers]
+- #839 — docs(changelog): add [1.0.0] release entry (LB-7) [feature=launch-sweep-blockers]
+- #837 — fix(digest): event-type filter + canonical outcome vocabulary (fix A + event_type fallback) [feature=outcome-normalization]
+- #833 — feat(dashboard): lane-aware agent stream (incl. ops-completion commit 54b96194) [feature=dashboard-ops-completion]
 
 ## Remaining Launch Blockers
-- LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact (extended: secrets AND client-data patterns) + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release
-- LB-4: private SEOcrawler feature-plan ships in the wheel (skills/t0-orchestrator/references/feature-plan.md) + client fragment in docs/core/00_GETTING_STARTED.md:156+ — scrub/exclude, then grep the unpacked artifact (sweep A1+A4b, confirmed in wheel)
-- LB-5: audit_chain verify reports verified:false on every clean unchained ledger (ndjson_hash_chain.py:132-147) — add 'unchained' status, do NOT default-enable chaining (sweep A2, panel unanimous)
-- LB-6: vnx init writes no hooks block in settings.json — governance loop dead out-of-the-box for pip users (templates/init/default/settings.json.j2; sweep A3, panel unanimous, verified on live scaffold)
-- LB-7: CHANGELOG.md has no [1.0.0] entry, top is 1.0.0-rc9 (sweep A4)
+- LB-3 (operator): PyPI publish go (artifacts verified + staged) -> pip install from PyPI check -> git tag v1.0.0 + GitHub release. Optional: central-install refresh + TestPyPI dry-run first. LB-4..LB-7 resolved 2026-06-10 (#833/#835/#836/#839/#840, see launch-sweep-blockers).

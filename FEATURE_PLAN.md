@@ -1,12 +1,20 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-10T00:58:11.977479+00:00
+**Last updated**: 2026-06-10T03:21:39.595476+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #833 — feat(dashboard): lane-aware agent stream (replace fixed T0-T3) (#833) (2026-06-10)
+- #840 — fix(audit-chain): distinguish unchained from broken ledger in verify (LB-5) (#840) (2026-06-10)
+- #837 — fix(digest): event-type filter + canonical outcome vocabulary (#837) (2026-06-10)
+- #838 — fix(nightly): Python 3.9 compat — lazy annotations in quality_db_init + version guard in pipeline (#838) (2026-06-10)
+- #835 — fix(init): wire governance hooks block into scaffolded settings.json (LB-6) (#835) (2026-06-10)
+- #839 — docs(changelog): add [1.0.0] release entry (LB-7) (#839) (2026-06-10)
+- #836 — fix(scrub): remove client project data from wheel + docs index path (LB-4) (#836) (2026-06-10)
+- #834 — chore(roadmap): PM-reconcile — sweep-blockers LB-4..7, 13 new features, status/freshness fixes (#834) (2026-06-10)
 - #832 — fix(packaging): exclude benchmark dev-tooling from wheel (LB-3 artifact grep) (#832) (2026-06-09)
 - #831 — feat(bench): codex lane + 6/6 skill-injection E2E + seed-decontaminatie + 1.0 docs (#831) (2026-06-07)
 - #830 — feat(benchmark): field-tests T2 medium + T3 complex task-definitions (#830) (2026-06-04)
@@ -291,7 +299,7 @@ Status: done
 Status: planned
 
 ### launch-sweep-blockers — 1.0 pre-publish blocker fix-set: wheel client-data scrub, audit_chain unchained-status, init hooks-wiring, CHANGELOG 1.0.0
-Status: planned
+Status: done
 
 ### oi-222-ssrf-hardening — OI-222: SSRF hardening — is_global instead of is_private (CGNAT 100.64/10) + DNS-rebinding IP-pinning, then wire url_policy into fetch paths
 Status: planned
@@ -309,13 +317,13 @@ Status: planned
 Status: planned
 
 ### outcome-normalization — Dispatch-outcome integrity: weekly_digest classifier vocab + event-type filter, status-default policy, dispatch_metadata backfill (73% unknown root-caused)
-Status: planned
+Status: in-progress
 
 ### adr007-composite-keys-batch — ADR-007 batch: project_id + composite UNIQUE on SPC/intelligence tables (governance_metrics, spc_*, success_patterns, antipatterns, prevention_rules, dispatch_experiments, retry_budgets, dream_pattern_archives)
 Status: planned
 
 ### dashboard-ops-completion — Dashboard operational completion: launch-script PORT export, /api/events/stream lane-aware migration, README port truth
-Status: planned
+Status: done
 
 ### oi-lifecycle-closure — Track/OI lifecycle closure path: vnx track done, oi-close/unlink_open_item, dispatch<->track linkage migration, vnx status --tracks, queue hygiene
 Status: planned
