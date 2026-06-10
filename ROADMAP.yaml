@@ -31,27 +31,32 @@ title: VNX Multi-Feature Roadmap
 
 launch_state:
   version: "1.0.0"
-  date: "2026-06-03"             # last update to this launch_state block
+  date: "2026-06-10"             # last update to this launch_state block
   status: "pre-launch"            # code queue merged to main; NOT yet published
-  target_date: "2026-06-09"       # HN/Reddit launch target (postponed ~1 week)
-  last_verified: "2026-06-03"
-  verified_against: "origin/main@54ad9df6"
+  target_date: "2026-06-09"       # slipped: pre-publish sweep found 4 new blockers; new date = operator call
+  last_verified: "2026-06-10"
+  verified_against: "origin/main@40b2d3cd"
   note: >
-    2026-06-03 scope pull: operator pulled Smart Lanes umbrella (Provider Lanes +
-    Smart Router + local Gemma e4b via MLX), receipt-view filter, nightly digest
-    redesign, OI closing sprint, /pending governance enforcement, and envelope
-    chain back INTO 1.0 scope. Launch target 2026-06-09 (HN + Reddit cross-post).
-    7 PRs merged 2026-06-03: #809 Smart Lanes PR-1 (Gemma e4b + MLX + package
-    structure), #808 receipt dedup (per dispatch_id, keep best status), #806
-    dispatcher set-e leak fix + observable rejection, #805 self-learn
-    control-for-difficulty + decision-grade digest, #804 governance profile-gate,
-    #803 track_type + next_action_owner event, #795 envelope PR-2 + receipt
-    T0-view filter. Only remaining launch blocker: LB-3 (operator-driven) —
-    rebuild wheel from final main + zero-hit security grep on that artifact +
-    fresh-venv install acceptance + central-install refresh + PyPI publish go +
-    tag+release. LB-3 is the final immutable gate (PyPI is write-once).
+    2026-06-09/10 pre-publish sweep (10 readers + 3-seat cross-provider panel,
+    rundown: claudedocs/2026-06-09-RUNDOWN-1.0-PREPYPI-SWEEP.md): PyPI push ON
+    HOLD. #832 merged (wheel-exclude); initial LB-3 run was green on
+    secrets/size, but the sweep found 4 ship-blockers in the same artifact —
+    see LB-4..LB-7 below and feature launch-sweep-blockers. The built wheel is
+    therefore INVALID for publish; after the fixes LB-3 must be re-run with the
+    artifact grep extended to client-data patterns
+    (ActiveCampaign/SEOcrawler/Mollie/KvK), not just secrets. Ops-sweep
+    (claudedocs/2026-06-09-OPS-SWEEP-DASHBOARD-OBS-ROADMAP-OI.md) plus two
+    root-cause analyses landed as new 1.0.1 features: nightly pipeline ran 9
+    nights on system Python 3.9 (migrations v22/v23 skipped, self-heals after
+    fix), and 73% "unknown" dispatch-outcomes traced to three classifier/writer
+    gaps. History of the 2026-06-03 scope pull lives in git (this block,
+    54ad9df6).
   launch_blockers:
-    - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
+    - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact (extended: secrets AND client-data patterns) + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
+    - "LB-4: private SEOcrawler feature-plan ships in the wheel (skills/t0-orchestrator/references/feature-plan.md) + client fragment in docs/core/00_GETTING_STARTED.md:156+ — scrub/exclude, then grep the unpacked artifact (sweep A1+A4b, confirmed in wheel)"
+    - "LB-5: audit_chain verify reports verified:false on every clean unchained ledger (ndjson_hash_chain.py:132-147) — add 'unchained' status, do NOT default-enable chaining (sweep A2, panel unanimous)"
+    - "LB-6: vnx init writes no hooks block in settings.json — governance loop dead out-of-the-box for pip users (templates/init/default/settings.json.j2; sweep A3, panel unanimous, verified on live scaffold)"
+    - "LB-7: CHANGELOG.md has no [1.0.0] entry, top is 1.0.0-rc9 (sweep A4)"
 
 features:
   # ---- Shipped foundation (pre-1.0) ----
@@ -662,7 +667,7 @@ features:
     depends_on:
       - tracks-layer-activation
     milestone: "1.x"
-    status: planned
+    status: shipped-dark
     pr_queue:
       - pr_id: "#787"
         title: "feat(planning): Phase 1 — tracks seeder + horizon + deliverables view + vnx objective list"
@@ -680,7 +685,12 @@ features:
         title: "feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP)"
         status: merged
         risk_class: high
-    notes: "Build-complete pending live activation + envelope unification."
+    notes: >
+      Build-complete pending live activation + envelope unification. Status
+      corrected to shipped-dark on 2026-06-10 (PM-reconcile): all 4 PRs
+      (#787/#790/#791/#793) merged, reconciler reported declared 'planned' vs
+      derived 'done' drift for 7 days. Live activation (dispatch<->track
+      linkage, vnx track done, oi-close) tracked in oi-lifecycle-closure.
 
   - feature_id: receipt-hashchain-wire
     title: "GAP 3b: per-append hash-chain wire + epoch rotation + verify_history + fork-tests"
@@ -795,3 +805,260 @@ features:
     milestone: "1.0.1"
     status: planned
     notes: "Bring sales-copilot's VNX install current with main (~3 weken gap, MC-cutover shape)."
+
+  # ---- 2026-06-10 PM-reconcile: pre-publish sweep + ops-sweep + root-causes ----
+  # Source docs: claudedocs/2026-06-09-RUNDOWN-1.0-PREPYPI-SWEEP.md and
+  # claudedocs/2026-06-09-OPS-SWEEP-DASHBOARD-OBS-ROADMAP-OI.md.
+
+  - feature_id: launch-sweep-blockers
+    title: "1.0 pre-publish blocker fix-set: wheel client-data scrub, audit_chain unchained-status, init hooks-wiring, CHANGELOG 1.0.0"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      LB-4..LB-7 (see launch_state). Four small PRs: (1) scrub/exclude
+      skills/t0-orchestrator/references/feature-plan.md + GETTING_STARTED
+      client fragment, gate on unpacked-artifact grep; (2)
+      ndjson_hash_chain.py verify: distinguish 'unchained' (exit 0 + warning)
+      from 'broken' (exit 1), one test per branch, chaining stays opt-in; (3)
+      hooks block in templates/init/default/settings.json.j2 + fresh-init
+      smoke (init -> dispatch -> receipt lands); (4) CHANGELOG [1.0.0] entry.
+      Panel: A2/A3 unanimous ship-blockers (Opus + Kimi-op + Kimi-sec);
+      A1/A4 T0-verified on the artifact. After merge: re-run LB-3 with
+      extended grep.
+
+  - feature_id: oi-222-ssrf-hardening
+    title: "OI-222: SSRF hardening — is_global instead of is_private (CGNAT 100.64/10) + DNS-rebinding IP-pinning, then wire url_policy into fetch paths"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      url_policy.py ships unwired (honestly documented, no live exposure).
+      F1: ip.is_private misses CGNAT -> use not ip.is_global
+      (url_policy.py:180). F2: validate-then-fetch window -> pin resolved IP
+      at connection level when wiring. Sweep R8 re-confirmed both gaps.
+
+  - feature_id: oi-223-lane-safety-loader
+    title: "OI-223: lane_safety loader — make routing_policy.yaml lane_safety block live (force_headless now hardcoded in lane_adapter.HEADLESS_FORCED_MODELS)"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      lane_safety + fallback_chain blocks in routing_policy.yaml are advisory;
+      no dispatcher reads them. Also add the missing STATUS comment on
+      fallback_chain (sweep R5) and fix the review-analysis lane conflict with
+      kimi-via-cli-only (covered in sweep-hardening-batch1, keep in sync).
+
+  - feature_id: oi-224-bench-runner-edges
+    title: "OI-224: bench-runner edge-cases — retry isolation (headless shared checkout), stale-report prefix match, worktree-removal result"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: "Carried from 2026-06-09 handoff; formal registration was pending until this PM-reconcile."
+
+  - feature_id: oi-225-bench-harness-generalize
+    title: "OI-225: generalize bench harness into a shippable feature (seeds-free, token-free, bring-your-own-tasks)"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.1"
+    status: planned
+    notes: "Benchmark stays repo-only in 1.0 (#832 excluded it from the wheel). This is the 1.1 path back to a package feature."
+
+  - feature_id: nightly-pipeline-python-compat
+    title: "Nightly pipeline phase 0-schema-init: Python 3.9 crash fix (Path | None at quality_db_init.py:905) + crontab PATH + version guard"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Root-caused 2026-06-10: cron runs without PATH -> /usr/bin/python3 =
+      3.9.6 -> 'Path | None' annotation TypeError on module load, phase 0
+      failed 9 consecutive nights (Jun 1-9); migrations v22/v23 (ADR-007
+      composite UNIQUE + project_id/model columns on dispatch_metadata)
+      skipped, user_version stuck at 21. Fix S: Optional[Path] + crontab
+      PATH=/opt/homebrew/bin:... + python>=3.10 guard in
+      nightly_intelligence_pipeline.sh. Migrations self-heal on next run. No
+      data corruption (phase failed before any DB write).
+
+  - feature_id: outcome-normalization
+    title: "Dispatch-outcome integrity: weekly_digest classifier vocab + event-type filter, status-default policy, dispatch_metadata backfill (73% unknown root-caused)"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Root-caused 2026-06-10, three layered gaps: RC-1 (62%)
+      report_parser.py:251,257 defaults status='unknown' for tmux reports
+      without a status line; RC-2 (14%) state_mutation infra events counted as
+      dispatch outcomes; RC-3 (23%) 'contract_invalid' missing from failure
+      vocabulary. Fix A (S, ready): weekly_digest.py:127-133 event-type skip
+      set + canonical status sets (mirror check_active_drain.py:79-80);
+      recovers ~37% immediately and moves contract_invalid to failure. Fix B
+      (OPERATOR POLICY DECISION): default tmux-report status to 'done' instead
+      of 'unknown' = 'no explicit failure -> inferred success'; do not
+      implement without explicit sign-off. Backfill (M): 568 receipts with
+      real dispatch_id insertable into dispatch_metadata (which holds only 23
+      rows -> FPY/rework currently rest on a 23-row sample); 830
+      dispatch_id='unknown' records are unfixable without report re-parse.
+
+  - feature_id: adr007-composite-keys-batch
+    title: "ADR-007 batch: project_id + composite UNIQUE on SPC/intelligence tables (governance_metrics, spc_*, success_patterns, antipatterns, prevention_rules, dispatch_experiments, retry_budgets, dream_pattern_archives)"
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on:
+      - nightly-pipeline-python-compat
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Sweep R6 (verdict not-ready) + panel arbitration 2:1 deferred to 1.0.1
+      with release note (Kimi-security dissented: ship-blocker). Single-project
+      is the supported 1.0 mode; this is first-batch 1.0.1 work done as a real
+      database-engineer-led migration, not under launch pressure. Includes:
+      governance_metrics/spc_control_limits/spc_alerts have NO project_id at
+      all (quality_intelligence.sql:614-658); success_patterns cluster has
+      project_id without composite UNIQUE; dispatch_experiments
+      UNIQUE(dispatch_id) single-tenant (quality_db_init.py:606);
+      retry_budgets absent from 0010 migration list; dream_pattern_archives
+      no composite. Depends on nightly fix so v22/v23 have applied first.
+
+  - feature_id: dashboard-ops-completion
+    title: "Dashboard operational completion: launch-script PORT export, /api/events/stream lane-aware migration, README port truth"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Ops-sweep RA + T0-verified: launch-dashboard.sh:5 sets PORT without
+      export -> backend binds 4173 while next.config.ts proxies 4174 -> all
+      API calls fail on fresh start via the script (one-word fix).
+      api_intelligence.py:1405 still has hardcoded T0-T3 frozenset (missed by
+      #833's lane-aware migration). README claims three different ports
+      (4173/4174/5173), none fully right; 5 pages hardcode the wrong port in
+      error messages. Ideally lands with/right after PR #833. Also:
+      list_lanes() O(2N) scan-per-poll noted as scale watch-item.
+
+  - feature_id: oi-lifecycle-closure
+    title: "Track/OI lifecycle closure path: vnx track done, oi-close/unlink_open_item, dispatch<->track linkage migration, vnx status --tracks, queue hygiene"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Ops-sweep RD: the parent-child chain (track -> dispatch -> receipt ->
+      closure) is broken at every joint. Zero dispatch<->track linkage (all
+      291 dispatches on legacy A/B/C letters); no 'vnx track done' CLI
+      (transition_phase exists at tracks.py:338, unbound; zero
+      track_phase_transition events ever); link_open_item without
+      unlink/close (blocked-status only resettable by manual row delete —
+      explains oi-2328 done-but-blocked); 13/36 tracks phase/derived drift;
+      235 stale files in dispatches/active/ (oldest April) vs t0_state
+      active_count: 0; live vnx-dev runtime DB lacks track tables entirely
+      (migrations only in worktree DB — must land centrally); open_items.json
+      (154 open) not bridged to track_open_items (0 rows). Scope: linkage
+      migration, track done CLI (mandatory --reason), vnx track oi-close,
+      vnx status --tracks, doctor stale-queue check, central-DB track
+      migrations. This is the 'future state works like clockwork' feature.
+
+  - feature_id: otel-wire-or-degrade
+    title: "OTel decision: wire OTEL_EXPORTER_OTLP_ENDPOINT (+ tmux-lane callpoints) or degrade otel deps to [observability] extra"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Ops-sweep RB: otel_emitter.py:8 is a no-op without
+      OTEL_EXPORTER_OTLP_ENDPOINT (set nowhere); only callsite is the
+      subprocess lane (recovery.py:221,298), tmux lane has none; the three
+      hard-pinned otel deps (pyproject.toml:15) currently buy zero
+      observability for pip users (sweep R1 flagged install-footprint).
+      Decide: local OTLP backend + tmux callpoints, OR move deps to an extra
+      with lazy import. Half-state is the worst option. Also: smart_tap daemon
+      not running (decide: required or retire); kimi receipts record
+      token_usage 0/0 instead of explicitly-unavailable (silent-zero
+      antipattern, T0-observed on live ledger 2026-06-09).
+
+  - feature_id: sweep-hardening-batch1
+    title: "Sweep hardening batch 1: state-dir guard, routing-policy conflict, tmux receipt truth, extra-flags quoting, broker atomicity, stderr drain, provider-CLI bypass guard"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Top non-blocker fixes from the pre-publish sweep, Kimi-sec risk-ranked:
+      (1) _resolve_state_dir ignores VNX_DATA_DIR_EXPLICIT guard
+      (provider_dispatch.py:84) — panel-rated most underestimated: stale env
+      silently misdirects receipts cross-project; (2) routing_policy.yaml:36
+      review-analysis lane litellm:moonshot conflicts with blocking
+      kimi-via-cli-only under VNX_AUTO_ROUTE=1 (one-line fix to kimi CLI
+      lane); (3) tmux completion receipt hardcodes status=done + build-time
+      timestamp (tmux_interactive_dispatch.py:457-468) — lying receipts on
+      failed/long workers; (4) --extra-flags shell injection
+      (tmux_interactive_dispatch.py:218, shlex allowlist; panel-rated most
+      overestimated but fix is S); (5) dispatch_broker bundle-before-DB-row
+      orphan window + claim() TOCTOU without BEGIN IMMEDIATE
+      (dispatch_broker.py:252,345); (6) SubprocessAdapter stderr=PIPE never
+      drained -> >64KB deadlock (subprocess_adapter.py:308); (7) generalize
+      the raw-spawn receipt-bypass guard beyond claude -p to kimi/codex CLIs
+      (T0 live-observed: raw kimi call passed the hook unlogged on
+      2026-06-09).
+
+  - feature_id: roadmap-governance-hygiene
+    title: "Roadmap/docs governance hygiene: PM-mutator enforcement, drift-snapshot freshness, stale ROADMAP docs archive, docs-truth pass"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      Ops-sweep RC: PM-skill-sole-mutator is prose only — add a guard
+      (commit touching ROADMAP.yaml must reference a dispatch-ID, or
+      explicitly document it as convention); planning_drift.json was 7 days
+      stale with 13 divergences — run track_reconciler in the nightly
+      pipeline; archive claudedocs/strategy/ROADMAP.md (May, refers to
+      nonexistent companion SSOT) and update docs/manifesto/ROADMAP.md
+      (unaware of 1.0.1/1.1 cuts). Docs-truth pass from sweep R10/K4:
+      GETTING_STARTED post-line-130 V8.2-era content (client fragment already
+      in LB-4), 00_VNX_ARCHITECTURE.md 'Version 12.0.0/V8.2', ADR-015 Path-D
+      amendment (CL3 relaxation), manifesto 'prototype' disclaimer, QUICKSTART
+      /MIGRATION_GUIDE pip-surface list sync (add migrate/track/dream).

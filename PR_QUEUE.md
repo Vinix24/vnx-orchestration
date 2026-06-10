@@ -7,7 +7,7 @@
 
 ## Progress Overview
 Launch status: **pre-launch** (version 1.0.0)
-Last verified: 2026-06-02 against origin/main@54ad9df6
+Last verified: 2026-06-10 against origin/main@40b2d3cd
 Merged launch PRs: 33 | Queued: 0
 
 ## Status
@@ -48,4 +48,8 @@ Merged launch PRs: 33 | Queued: 0
 - #794 — fix(db-maintenance): atomic prune transaction (OI-2328) [feature=oi-2328-atomic-prune]
 
 ## Remaining Launch Blockers
-- LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release
+- LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact (extended: secrets AND client-data patterns) + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release
+- LB-4: private SEOcrawler feature-plan ships in the wheel (skills/t0-orchestrator/references/feature-plan.md) + client fragment in docs/core/00_GETTING_STARTED.md:156+ — scrub/exclude, then grep the unpacked artifact (sweep A1+A4b, confirmed in wheel)
+- LB-5: audit_chain verify reports verified:false on every clean unchained ledger (ndjson_hash_chain.py:132-147) — add 'unchained' status, do NOT default-enable chaining (sweep A2, panel unanimous)
+- LB-6: vnx init writes no hooks block in settings.json — governance loop dead out-of-the-box for pip users (templates/init/default/settings.json.j2; sweep A3, panel unanimous, verified on live scaffold)
+- LB-7: CHANGELOG.md has no [1.0.0] entry, top is 1.0.0-rc9 (sweep A4)
