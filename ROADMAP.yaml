@@ -32,31 +32,26 @@ title: VNX Multi-Feature Roadmap
 launch_state:
   version: "1.0.0"
   date: "2026-06-10"             # last update to this launch_state block
-  status: "pre-launch"            # code queue merged to main; NOT yet published
-  target_date: "2026-06-09"       # slipped: pre-publish sweep found 4 new blockers; new date = operator call
+  status: "pre-launch"            # all blockers resolved; awaiting operator publish-go
+  target_date: "2026-06-09"       # slipped 1 day by the pre-publish sweep; publish-ready since 2026-06-10
   last_verified: "2026-06-10"
-  verified_against: "origin/main@40b2d3cd"
+  verified_against: "origin/main@bfe37501"
   note: >
-    2026-06-09/10 pre-publish sweep (10 readers + 3-seat cross-provider panel,
-    rundown: claudedocs/2026-06-09-RUNDOWN-1.0-PREPYPI-SWEEP.md): PyPI push ON
-    HOLD. #832 merged (wheel-exclude); initial LB-3 run was green on
-    secrets/size, but the sweep found 4 ship-blockers in the same artifact —
-    see LB-4..LB-7 below and feature launch-sweep-blockers. The built wheel is
-    therefore INVALID for publish; after the fixes LB-3 must be re-run with the
-    artifact grep extended to client-data patterns
-    (ActiveCampaign/SEOcrawler/Mollie/KvK), not just secrets. Ops-sweep
-    (claudedocs/2026-06-09-OPS-SWEEP-DASHBOARD-OBS-ROADMAP-OI.md) plus two
-    root-cause analyses landed as new 1.0.1 features: nightly pipeline ran 9
-    nights on system Python 3.9 (migrations v22/v23 skipped, self-heals after
-    fix), and 73% "unknown" dispatch-outcomes traced to three classifier/writer
-    gaps. History of the 2026-06-03 scope pull lives in git (this block,
-    54ad9df6).
+    2026-06-10 (night): the 2026-06-09/10 pre-publish sweep found 4
+    ship-blockers (LB-4..LB-7); all four were fixed, kimi-gated, and merged
+    the same night (#834-#840 + dashboard-ops on #833). LB-3 was RE-RUN GREEN
+    on main@bfe37501: wheel 2.42MB/861 files, extended artifact grep (secrets
+    AND client-data patterns) zero-hit on the blocker class, LB-5 proven on
+    the artifact (audit_chain verify -> status unchained, exit 0), LB-6 proven
+    (fresh scaffold wires Stop + PreToolUse hooks with valid site-packages
+    paths), fresh-venv init/migrate/doctor 14/2/0. Artifacts staged in
+    /tmp/vnx-lb3-final/dist/. Crontab PATH line applied 2026-06-10 (nightly
+    runs Homebrew Python again; migrations v22/v23 self-heal at next 04:00
+    run). Remaining: the operator-only publish set in LB-3. Sweep history:
+    claudedocs/2026-06-09-RUNDOWN-1.0-PREPYPI-SWEEP.md + this block's git
+    history (40b2d3cd).
   launch_blockers:
-    - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact (extended: secrets AND client-data patterns) + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
-    - "LB-4: private SEOcrawler feature-plan ships in the wheel (skills/t0-orchestrator/references/feature-plan.md) + client fragment in docs/core/00_GETTING_STARTED.md:156+ — scrub/exclude, then grep the unpacked artifact (sweep A1+A4b, confirmed in wheel)"
-    - "LB-5: audit_chain verify reports verified:false on every clean unchained ledger (ndjson_hash_chain.py:132-147) — add 'unchained' status, do NOT default-enable chaining (sweep A2, panel unanimous)"
-    - "LB-6: vnx init writes no hooks block in settings.json — governance loop dead out-of-the-box for pip users (templates/init/default/settings.json.j2; sweep A3, panel unanimous, verified on live scaffold)"
-    - "LB-7: CHANGELOG.md has no [1.0.0] entry, top is 1.0.0-rc9 (sweep A4)"
+    - "LB-3 (operator): PyPI publish go (artifacts verified + staged) -> pip install from PyPI check -> git tag v1.0.0 + GitHub release. Optional: central-install refresh + TestPyPI dry-run first. LB-4..LB-7 resolved 2026-06-10 (#833/#835/#836/#839/#840, see launch-sweep-blockers)."
 
 features:
   # ---- Shipped foundation (pre-1.0) ----
@@ -818,18 +813,33 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#836"
+        title: "fix(scrub): remove client project data from wheel + docs index path (LB-4)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#840"
+        title: "fix(audit-chain): distinguish unchained from broken ledger in verify (LB-5)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#835"
+        title: "fix(init): wire governance hooks block into scaffolded settings.json (LB-6)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#839"
+        title: "docs(changelog): add [1.0.0] release entry (LB-7)"
+        status: merged
+        risk_class: low
     notes: >
-      LB-4..LB-7 (see launch_state). Four small PRs: (1) scrub/exclude
-      skills/t0-orchestrator/references/feature-plan.md + GETTING_STARTED
-      client fragment, gate on unpacked-artifact grep; (2)
-      ndjson_hash_chain.py verify: distinguish 'unchained' (exit 0 + warning)
-      from 'broken' (exit 1), one test per branch, chaining stays opt-in; (3)
-      hooks block in templates/init/default/settings.json.j2 + fresh-init
-      smoke (init -> dispatch -> receipt lands); (4) CHANGELOG [1.0.0] entry.
-      Panel: A2/A3 unanimous ship-blockers (Opus + Kimi-op + Kimi-sec);
-      A1/A4 T0-verified on the artifact. After merge: re-run LB-3 with
-      extended grep.
+      CLOSED 2026-06-10: all four LB-fixes merged the same night, each
+      kimi-gated (governed lane, receipts 20260610-gate-kimi-pr835/836/837/
+      838/840 in t0_receipts.ndjson; two gate findings fixed forward, one
+      false-positive FAIL overruled with empirical proof on #838). LB-3
+      re-run GREEN on main@bfe37501 proved all four on the artifact:
+      client-data grep zero-hit, audit_chain 'unchained' exit 0, hooks wired
+      in fresh scaffold, [1.0.0] changelog present. Panel attribution: A2/A3
+      unanimous ship-blockers (Opus + Kimi-op + Kimi-sec); A1/A4 T0-verified.
 
   - feature_id: oi-222-ssrf-hardening
     title: "OI-222: SSRF hardening — is_global instead of is_private (CGNAT 100.64/10) + DNS-rebinding IP-pinning, then wire url_policy into fetch paths"
@@ -893,14 +903,16 @@ features:
     milestone: "1.0.1"
     status: planned
     notes: >
-      Root-caused 2026-06-10: cron runs without PATH -> /usr/bin/python3 =
-      3.9.6 -> 'Path | None' annotation TypeError on module load, phase 0
-      failed 9 consecutive nights (Jun 1-9); migrations v22/v23 (ADR-007
-      composite UNIQUE + project_id/model columns on dispatch_metadata)
-      skipped, user_version stuck at 21. Fix S: Optional[Path] + crontab
-      PATH=/opt/homebrew/bin:... + python>=3.10 guard in
-      nightly_intelligence_pipeline.sh. Migrations self-heal on next run. No
-      data corruption (phase failed before any DB write).
+      CLOSED 2026-06-10: #838 merged (from __future__ import annotations +
+      python>=3.10 warn-guard in the pipeline; kimi-gate FAIL was a false
+      positive, overruled with empirical guard-proof in the PR comments) and
+      the crontab PATH line (/opt/homebrew/bin first) applied by T0 on
+      operator instruction, backup at /tmp/crontab-backup-20260610.txt.
+      Verified: env -i with the new PATH resolves python3 -> 3.12.11.
+      Migrations v22/v23 self-heal at the next 04:00 run. Root-cause history:
+      cron without PATH -> system Python 3.9.6 -> 'Path | None' TypeError on
+      module load, phase 0 failed 9 nights (Jun 1-9), user_version stuck at
+      21, no data corruption.
 
   - feature_id: outcome-normalization
     title: "Dispatch-outcome integrity: weekly_digest classifier vocab + event-type filter, status-default policy, dispatch_metadata backfill (73% unknown root-caused)"
@@ -910,7 +922,12 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: in-progress
+    pr_queue:
+      - pr_id: "#837"
+        title: "fix(digest): event-type filter + canonical outcome vocabulary (fix A + event_type fallback)"
+        status: merged
+        risk_class: medium
     notes: >
       Root-caused 2026-06-10, three layered gaps: RC-1 (62%)
       report_parser.py:251,257 defaults status='unknown' for tmux reports
@@ -925,6 +942,11 @@ features:
       real dispatch_id insertable into dispatch_metadata (which holds only 23
       rows -> FPY/rework currently rest on a 23-row sample); 830
       dispatch_id='unknown' records are unfixable without report re-parse.
+      STATUS 2026-06-10: fix A MERGED (#837, kimi-gated; gate finding F1 —
+      lost event_type fallback for status-less receipts — was real and fixed
+      forward with 4 extra tests, 41/41 green). Still open: fix B (operator
+      policy decision), the dispatch_metadata backfill, and gate-F2
+      (contract_invalid in receipt_classifier.py/payload.py failure sets).
 
   - feature_id: adr007-composite-keys-batch
     title: "ADR-007 batch: project_id + composite UNIQUE on SPC/intelligence tables (governance_metrics, spc_*, success_patterns, antipatterns, prevention_rules, dispatch_experiments, retry_budgets, dream_pattern_archives)"
@@ -956,16 +978,21 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#833"
+        title: "feat(dashboard): lane-aware agent stream (incl. ops-completion commit 54b96194)"
+        status: merged
+        risk_class: low
     notes: >
-      Ops-sweep RA + T0-verified: launch-dashboard.sh:5 sets PORT without
-      export -> backend binds 4173 while next.config.ts proxies 4174 -> all
-      API calls fail on fresh start via the script (one-word fix).
-      api_intelligence.py:1405 still has hardcoded T0-T3 frozenset (missed by
-      #833's lane-aware migration). README claims three different ports
-      (4173/4174/5173), none fully right; 5 pages hardcode the wrong port in
-      error messages. Ideally lands with/right after PR #833. Also:
-      list_lanes() O(2N) scan-per-poll noted as scale watch-item.
+      CLOSED 2026-06-10: landed as commit 54b96194 on PR #833 (merged).
+      export PORT in launch-dashboard.sh; handle_events_stream migrated to
+      the lane-aware _LANE_RE validation (regex = path-safety boundary); 5
+      pages' error messages + README diagram corrected to real ports
+      (backend 4174, Next.js dev 3100). Verified: py_compile + bash -n clean,
+      test_api_intelligence 25 passed (2 pre-existing failures confirmed on
+      clean tree via stash). Still open as watch-item (not blocking):
+      list_lanes() O(2N) scan-per-poll at scale.
 
   - feature_id: oi-lifecycle-closure
     title: "Track/OI lifecycle closure path: vnx track done, oi-close/unlink_open_item, dispatch<->track linkage migration, vnx status --tracks, queue hygiene"
