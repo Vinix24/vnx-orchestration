@@ -320,7 +320,7 @@ export default function UsagePage() {
             fontSize: 14,
           }}
         >
-          Failed to load data. Ensure the API server is running at localhost:4173.
+          Failed to load data. Ensure the API server is running at localhost:4174.
         </div>
       )}
 

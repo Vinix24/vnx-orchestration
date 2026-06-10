@@ -232,3 +232,50 @@ class EventStore:
                 except json.JSONDecodeError:
                     continue
         return last
+
+    @staticmethod
+    def _is_agent_event(event: Dict[str, Any]) -> bool:
+        """True if a record is an agent-conversation event (CanonicalEvent
+        envelope), not a domain/system stream record.
+
+        Agent events carry ``type`` + ``dispatch_id`` + ``sequence``; system
+        streams (decisions, provider_costs, schema_migrations, ...) live in the
+        same directory but use domain-specific shapes without those fields.
+        """
+        return (
+            "type" in event
+            and "dispatch_id" in event
+            and "sequence" in event
+        )
+
+    def list_lanes(self) -> list[Dict[str, Any]]:
+        """Discover agent-conversation lanes from the events directory.
+
+        A "lane" is any ``{id}.ndjson`` whose last record is an agent event.
+        Returns one dict per lane with id, event_count, last_timestamp, and the
+        provider/dispatch_id of the most recent event — so the dashboard can
+        render whatever lanes actually produced events (terminals T0-T3,
+        provider lanes, tmux-spawn dispatch ids) instead of a fixed set.
+
+        Domain/system streams (decisions.ndjson, provider_costs.ndjson, ...) are
+        skipped via the agent-envelope check.
+        """
+        if not self._events_dir.exists():
+            return []
+        lanes: list[Dict[str, Any]] = []
+        for path in self._events_dir.glob("*.ndjson"):
+            lane_id = path.stem
+            last = self.last_event(lane_id)
+            if last is None or not self._is_agent_event(last):
+                continue
+            lanes.append(
+                {
+                    "id": lane_id,
+                    "event_count": self.event_count(lane_id),
+                    "last_timestamp": last.get("timestamp"),
+                    "provider": last.get("provider"),
+                    "dispatch_id": last.get("dispatch_id"),
+                }
+            )
+        lanes.sort(key=lambda x: x.get("last_timestamp") or "", reverse=True)
+        return lanes

@@ -61,10 +61,23 @@ async function getEsInstances(page: Page): Promise<EsEntry[]> {
 async function stubSseEndpoints(page: Page): Promise<void> {
   await page.route('**/api/agent-stream/**', async (route) => {
     if (route.request().url().includes('/status')) {
+      // Lanes are discovered from status; provide T1-T3 so the selector
+      // populates and a default lane is chosen (newest first).
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ terminals: {} }),
+        body: JSON.stringify({
+          lanes: [
+            { id: 'T1', event_count: 1, last_timestamp: '2026-04-06T12:00:03Z' },
+            { id: 'T2', event_count: 1, last_timestamp: '2026-04-06T12:00:02Z' },
+            { id: 'T3', event_count: 1, last_timestamp: '2026-04-06T12:00:01Z' },
+          ],
+          terminals: {
+            T1: { event_count: 1, last_timestamp: '2026-04-06T12:00:03Z' },
+            T2: { event_count: 1, last_timestamp: '2026-04-06T12:00:02Z' },
+            T3: { event_count: 1, last_timestamp: '2026-04-06T12:00:01Z' },
+          },
+        }),
       });
       return;
     }
@@ -139,16 +152,14 @@ test.describe('SSE + timer unmount lifecycle', () => {
     await page.goto('/agent-stream');
     await page.waitForLoadState('domcontentloaded');
 
-    // Switch terminal: T1 → T2 → T3
-    const t2Btn = page.locator('[data-testid="agent-selector"] button', { hasText: 'T2' }).first();
-    await t2Btn.click();
+    // Switch lane via the dropdown: T1 → T2 → T3
+    const laneSelect = page.locator('[data-testid="agent-selector"] select');
+    await laneSelect.selectOption('T2');
+    await page.waitForTimeout(200);
+    await laneSelect.selectOption('T3');
     await page.waitForTimeout(200);
 
-    const t3Btn = page.locator('[data-testid="agent-selector"] button', { hasText: 'T3' }).first();
-    await t3Btn.click();
-    await page.waitForTimeout(200);
-
-    // After switching terminals, only one connection should be open
+    // After switching lanes, only one connection should be open
     const midInstances = await getEsInstances(page);
     const openMid = midInstances.filter((es) => !es.closed);
     expect(
