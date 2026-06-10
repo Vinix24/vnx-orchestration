@@ -134,6 +134,24 @@ echo $$ > "$LOCK_FILE"
 cleanup() { rm -f "$LOCK_FILE"; }
 trap cleanup EXIT
 
+# ── Python version guard ──────────────────────────────────────────────────────
+# Warns when python3 resolves to < 3.10 so crontab PATH issues surface clearly.
+# Does NOT abort: from __future__ import annotations in quality_db_init.py
+# and other pipeline scripts covers the X|Y union-syntax crash on Python 3.9.
+_py3_path="$(command -v python3 2>/dev/null || echo "(not found)")"
+_py3_version="$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo "unknown")"
+_py3_major="$(python3 -c 'import sys; print(sys.version_info.major)' 2>/dev/null || echo "0")"
+_py3_minor="$(python3 -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo "0")"
+if [ "$_py3_major" -lt 3 ] || { [ "$_py3_major" -eq 3 ] && [ "$_py3_minor" -lt 10 ]; }; then
+    log_msg "WARN: python3 at '$_py3_path' is version $_py3_version (< 3.10)."
+    log_msg "WARN: This is typically /usr/bin/python3 (system Python) because crontab"
+    log_msg "WARN: does not inherit the Homebrew PATH. Scripts use 'from __future__ import"
+    log_msg "WARN: annotations' to avoid X|Y union-syntax crashes on 3.9, but full 3.10+"
+    log_msg "WARN: features are unavailable. Fix: add the following line above your nightly"
+    log_msg "WARN: crontab entry:  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+fi
+unset _py3_path _py3_version _py3_major _py3_minor
+
 # ── Start ─────────────────────────────────────────────────────────────────────
 
 log_msg "=== VNX Nightly Intelligence Pipeline starting (PID $$) ==="
