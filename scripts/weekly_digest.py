@@ -143,9 +143,23 @@ def collect_metrics(days: int = 7) -> dict:
                     continue
                 metrics["dispatch_outcomes"]["total"] += 1
                 status = (rec.get("status") or "").lower()
-                if status in _SUCCESS_STATUSES:
+                # Empty status falls back to event_type for classification —
+                # preserves pre-vocab recall for e.g. status-less task_complete
+                # receipts (the old code classified on status OR event_type).
+                classify = status or event_type
+                if (
+                    classify in _SUCCESS_STATUSES
+                    or "success" in classify
+                    or "complete" in classify
+                    or "done" in classify
+                ):
                     metrics["dispatch_outcomes"]["success"] += 1
-                elif status in _FAILURE_STATUSES or "fail" in status or "error" in status:
+                elif (
+                    classify in _FAILURE_STATUSES
+                    or "fail" in classify
+                    or "error" in classify
+                    or "timeout" in classify
+                ):
                     metrics["dispatch_outcomes"]["failure"] += 1
                 else:
                     metrics["dispatch_outcomes"]["unknown"] += 1

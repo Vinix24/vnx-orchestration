@@ -196,6 +196,34 @@ class TestUnknownClassification:
         assert out["unknown"] == 1
 
 
+class TestEventTypeFallback:
+    """Empty status falls back to event_type — preserves pre-vocab recall
+    (the old classifier read `status or event_type`); kimi-gate PR #837 F1."""
+
+    def test_statusless_task_complete_is_success(self, tmp_path: Path) -> None:
+        records = [{"status": "", "event_type": "task_complete", "timestamp": _RECENT}]
+        out = _run_outcome_classifier(records, tmp_path=tmp_path)
+        assert out["success"] == 1
+        assert out["unknown"] == 0
+
+    def test_statusless_task_failed_is_failure(self, tmp_path: Path) -> None:
+        records = [{"status": "", "event_type": "task_failed", "timestamp": _RECENT}]
+        out = _run_outcome_classifier(records, tmp_path=tmp_path)
+        assert out["failure"] == 1
+
+    def test_statusless_task_timeout_is_failure(self, tmp_path: Path) -> None:
+        records = [{"status": "", "event_type": "task_timeout", "timestamp": _RECENT}]
+        out = _run_outcome_classifier(records, tmp_path=tmp_path)
+        assert out["failure"] == 1
+
+    def test_explicit_status_wins_over_event_type(self, tmp_path: Path) -> None:
+        # status="unknown" is an explicit (non-empty) value: no fallback,
+        # stays unknown even when event_type says task_complete (RC-1 class).
+        records = [{"status": "unknown", "event_type": "task_complete", "timestamp": _RECENT}]
+        out = _run_outcome_classifier(records, tmp_path=tmp_path)
+        assert out["unknown"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Timestamp filtering
 # ---------------------------------------------------------------------------
