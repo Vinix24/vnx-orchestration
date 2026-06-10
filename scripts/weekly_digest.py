@@ -109,6 +109,20 @@ def collect_metrics(days: int = 7) -> dict:
             log.debug("Failed to read intelligence DB metrics: %s", e)
 
     # --- Receipts outcomes ---
+    # Infrastructure events that carry no dispatch-outcome signal — excluded
+    # from total before classification so they don't inflate the unknown bucket.
+    # Keep in sync with check_active_drain.py FAILURE_STATUSES / SUCCESS_STATUSES.
+    _SKIP_EVENT_TYPES: frozenset[str] = frozenset({"state_mutation", "review_gate_request"})
+
+    # Canonical outcome vocabularies (sync with check_active_drain.py lines ~79-80).
+    # "contract_invalid" = report-body-contract failure → semantically a failure.
+    _SUCCESS_STATUSES: frozenset[str] = frozenset(
+        {"success", "completed", "complete", "ok", "done"}
+    )
+    _FAILURE_STATUSES: frozenset[str] = frozenset(
+        {"failed", "failure", "error", "blocked", "timeout", "contract_invalid"}
+    )
+
     if RECEIPTS_PATH.exists():
         try:
             lines = RECEIPTS_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -123,11 +137,15 @@ def collect_metrics(days: int = 7) -> dict:
                 ts = rec.get("timestamp", "")
                 if ts and isinstance(ts, str) and ts[:10] < since:
                     continue
+                # Skip infra events before counting totals.
+                event_type = (rec.get("event_type") or "").lower()
+                if event_type in _SKIP_EVENT_TYPES:
+                    continue
                 metrics["dispatch_outcomes"]["total"] += 1
-                status = (rec.get("status") or rec.get("event_type") or "").lower()
-                if "success" in status or "complete" in status or "done" in status:
+                status = (rec.get("status") or "").lower()
+                if status in _SUCCESS_STATUSES:
                     metrics["dispatch_outcomes"]["success"] += 1
-                elif "fail" in status or "error" in status:
+                elif status in _FAILURE_STATUSES or "fail" in status or "error" in status:
                     metrics["dispatch_outcomes"]["failure"] += 1
                 else:
                     metrics["dispatch_outcomes"]["unknown"] += 1
