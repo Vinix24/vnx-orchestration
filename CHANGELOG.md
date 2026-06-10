@@ -4,6 +4,30 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.0.0] — 2026-06-10
+
+First public release. Everything below is the rc9 → 1.0.0 delta; the rc-series
+entries that follow document the road there.
+
+### Added
+
+- **Realistic benchmark methodology (repo-only)** — field-tests harness with production-derived tasks, programmatic verification per task, LLM-judge fallback, and cost per quality-point; codex lane added and provider-agnostic skill injection verified end-to-end on all 6 lanes (#828, #830, #831). Lives under `scripts/benchmark/field-tests/`; deliberately **excluded from the wheel** (#832) — task seeds are repo-specific, a generalised bring-your-own-tasks version is planned for 1.1 (OI-225).
+- **Smart Lanes foundation** — local Gemma e4b via MLX with package structure (`[local-gemma]` extra), Smart Router cost-tier classifier (flag-gated, default-off) (#813), `quality_tier` discriminator with per-task min/max gates (#822).
+- **Planning / future-state layer (ships dark)** — tracks seeder + horizon views + `vnx objective list` (#787), deliverable plane with proposed→ready human gate (#790), planning kanban in the dashboard (#791), advisory rollup reconciler that never auto-writes ROADMAP (#793), dispatch→track linkage backfill (#801), human-gated objective sync (#800), `track_type` + `next_action_owner` discriminator (#803).
+- **Governance hardening** — `/pending` dispatch-path enforcement closes the T0 direct-call bypass (#811), profile-gate resolver active in `request_reviews()` (#804), worker-permission relay with operator auto-accept window + catastrophic hard-list (#799), OI bulk pattern subcommands + 1.0 closing sprint (96→48 open items) (#812).
+- **Digest architecture V2** — `atomic_io.py` + ADR-021 exception discipline (#816), progress-table + minimal digest skeleton (#817).
+
+### Fixed
+
+- **Bench seed decontamination** (#831) — task seeds no longer contain solutions and the scorer no longer reads repo-root state; `tests/test_bench_seed_integrity.py` guards that every verifier fails on the bare repo.
+- **Wheel hygiene** (#832) — benchmark dev-tooling (incl. a planted-flaw `sk-live` fixture string and a binary DB fixture) excluded from the artifact: 0 benchmark files, 2.3 MB, fresh-venv install verified.
+- Receipt dedup per dispatch_id keeps best status (#808); dispatcher survives scans that reject all dispatches (`set -e` leak) with observable rejection (#806); self-learning loop controls for task difficulty in model inference (#805); claude-spawn captures `completion_text` from stream-json (#821); smart-router null-cost sort collapse (#818); `_dispatch_gemini` respects `--model` (OI-155, #823); uniform central-path resolution (OI-126, #819); four regressed nightly intelligence phases repaired (OI-2331, #792); hook-driven version-agnostic tmux lane signals (#798); reconciler derives done from `track.pr_ref` instead of the legacy A/B/C join (#802).
+
+### Changed
+
+- tmux-spawn documented as the default dispatch lane for parallel independent work; subprocess-dispatch reserved for terminal-pinned work (#824, #825).
+- README benchmark claim rewritten from package feature to repo methodology (#832); roadmap privacy trim moved operational detail to private state (#827).
+
 ## [1.0.0-rc9] — 2026-05-26
 
 ### Added
