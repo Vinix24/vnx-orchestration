@@ -105,8 +105,9 @@ def test_flag_on_chains_and_verifies(tmp_path, monkeypatch):
     for idx in range(1, len(entries)):
         assert entries[idx]["prev_hash"] == compute_entry_hash(entries[idx - 1])
 
-    is_valid, violations = verify_chain(receipt_path)
+    is_valid, violations, status = verify_chain(receipt_path)
     assert is_valid, f"chain should verify, violations: {violations}"
+    assert status == "verified"
 
 
 def test_flag_on_genesis_only_first_line(tmp_path, monkeypatch):
@@ -167,8 +168,9 @@ def test_concurrent_appends_no_fork(tmp_path, n_workers):
     assert len(entries) == n_workers, "every worker must have appended exactly once"
 
     # 1. verify_chain passes — the single source of truth for "no fork".
-    is_valid, violations = verify_chain(receipt_path)
+    is_valid, violations, status = verify_chain(receipt_path)
     assert is_valid, f"CHAIN FORKED under concurrency, violations: {violations}"
+    assert status == "verified"
 
     # 2. Exactly one GENESIS, on line 1.
     assert entries[0]["prev_hash"] == GENESIS_HASH
@@ -197,4 +199,5 @@ def test_verify_is_stable_on_replay(tmp_path, monkeypatch):
     second = verify_chain(receipt_path)
     third = verify_chain(receipt_path)
     assert first[0] is True
+    assert first[2] == "verified"
     assert first == second == third, "verify must be deterministic across replays"
