@@ -75,9 +75,11 @@ class DrainResult(NamedTuple):
 # Receipt index
 # ---------------------------------------------------------------------------
 
-# Canonical status sets (kept in sync with scripts/append_receipt.py).
+# Canonical status sets (kept in sync with scripts/append_receipt.py and
+# scripts/weekly_digest.py _FAILURE_STATUSES).
+# "contract_invalid" = report-body-contract failure → semantically a failure.
 SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", "", "done"})
-FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "timeout"})
+FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "timeout", "contract_invalid"})
 
 
 def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
