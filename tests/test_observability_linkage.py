@@ -352,3 +352,55 @@ class TestEmitDispatchReceiptEventsPath:
         receipt_path = self.state_dir / "t0_receipts.ndjson"
         receipt = json.loads(receipt_path.read_text().strip())
         assert receipt.get("events_path") is None
+
+
+# ---------------------------------------------------------------------------
+# Safety net: unexpected spawn exception must still archive + clear (gate F1/F3)
+# ---------------------------------------------------------------------------
+
+class TestEventStoreSafetyNet:
+    """An UNEXPECTED exception in the spawn path bypasses _emit_governance;
+    the finally-block safety net must archive + truncate the live stream."""
+
+    def _store_with_live_events(self, monkeypatch, tmp_path) -> EventStore:
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        store = EventStore()
+        store.append("T9", {"type": "worker_stdout", "dispatch_id": "d-net-1", "text": "x"})
+        return store
+
+    def test_safety_net_archives_and_clears(self, monkeypatch, tmp_path):
+        store = self._store_with_live_events(monkeypatch, tmp_path)
+        live = tmp_path / "events" / "T9.ndjson"
+        assert live.stat().st_size > 0
+
+        args = MagicMock()
+        args.terminal_id = "T9"
+        args.dispatch_id = "d-net-1"
+        provider_dispatch._event_store_safety_net(store, args)
+
+        assert live.stat().st_size == 0, "live stream must be truncated"
+        archived = tmp_path / "events" / "archive" / "T9" / "d-net-1.ndjson"
+        assert archived.exists(), "events must be archived before truncation"
+
+    def test_safety_net_idempotent_after_normal_emit(self, monkeypatch, tmp_path):
+        store = self._store_with_live_events(monkeypatch, tmp_path)
+        args = MagicMock()
+        args.terminal_id = "T9"
+        args.dispatch_id = "d-net-2"
+        # Simulate _emit_governance's authoritative archive+clear:
+        store.clear("T9", archive_dispatch_id="d-net-2")
+        first = (tmp_path / "events" / "archive" / "T9" / "d-net-2.ndjson").read_text()
+        # Finally-path safety net runs afterwards — must not re-archive or fail.
+        provider_dispatch._event_store_safety_net(store, args)
+        second = (tmp_path / "events" / "archive" / "T9" / "d-net-2.ndjson").read_text()
+        assert first == second, "second clear must not overwrite the archive"
+
+    def test_safety_net_never_raises(self, monkeypatch):
+        args = MagicMock()
+        args.terminal_id = "T9"
+        args.dispatch_id = "d-net-3"
+        broken = MagicMock()
+        broken.clear.side_effect = OSError("disk gone")
+        provider_dispatch._event_store_safety_net(broken, args)  # must not raise
+        provider_dispatch._event_store_safety_net(None, args)    # None is a no-op

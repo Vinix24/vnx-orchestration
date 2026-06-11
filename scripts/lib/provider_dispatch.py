@@ -104,7 +104,9 @@ def _resolve_state_dir() -> Path:
             env,
         )
     if explicit_flag and env:
-        return Path(env).resolve()
+        # expanduser() before resolve() mirrors event_store._events_dir() so the
+        # two OI-126 guards normalise "~"-paths identically (gate F4).
+        return Path(env).expanduser().resolve()
     return _resolve_data_dir() / "state"
 
 
@@ -413,6 +415,28 @@ def _record_provider_metadata(
         logger.warning(
             "_record_provider_metadata: failed for dispatch=%s provider=%s (non-fatal): %s",
             getattr(args, "dispatch_id", "?"), provider, exc,
+        )
+
+
+def _event_store_safety_net(event_store: Any, args: argparse.Namespace) -> None:
+    """Finally-path safety net: archive + clear the live event stream when an
+    UNEXPECTED exception bypassed _emit_governance (which normally owns the
+    archive → receipt-pointer → clear sequence).
+
+    Idempotent by construction: after a normal _emit_governance the live file
+    is already truncated, so EventStore.archive() no-ops (empty file) and the
+    truncate is harmless.  Never raises — cleanup must not mask the original
+    error from the spawn path.
+    """
+    if event_store is None:
+        return
+    try:
+        event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+    except Exception:  # noqa: BLE001 — safety net must never mask the spawn error
+        logger.warning(
+            "_event_store_safety_net: archive/clear failed for %s",
+            getattr(args, "dispatch_id", "?"),
+            exc_info=True,
         )
 
 
@@ -924,7 +948,9 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         _emit_governance(args, "codex", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
+        # Safety net: archive+clear when an unexpected exception bypassed
+        # _emit_governance (idempotent after a normal emit — see helper).
+        _event_store_safety_net(event_store, args)
         if isolation_cwd is not None:
             _remove_provider_worktree(args.dispatch_id)
 
@@ -1223,7 +1249,9 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
+        # Safety net: archive+clear when an unexpected exception bypassed
+        # _emit_governance (idempotent after a normal emit — see helper).
+        _event_store_safety_net(event_store, args)
         if isolation_cwd_litellm is not None:
             _remove_provider_worktree(args.dispatch_id)
 
@@ -1287,7 +1315,9 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
+        # Safety net: archive+clear when an unexpected exception bypassed
+        # _emit_governance (idempotent after a normal emit — see helper).
+        _event_store_safety_net(event_store, args)
         if isolation_cwd_kimi is not None:
             _remove_provider_worktree(args.dispatch_id)
 
@@ -1382,8 +1412,9 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
-        pass
+        # Safety net: archive+clear when an unexpected exception bypassed
+        # _emit_governance (idempotent after a normal emit — see helper).
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -1442,7 +1473,9 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         _emit_governance(args, "gemini", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
+        # Safety net: archive+clear when an unexpected exception bypassed
+        # _emit_governance (idempotent after a normal emit — see helper).
+        _event_store_safety_net(event_store, args)
         if isolation_cwd_gemini is not None:
             _remove_provider_worktree(args.dispatch_id)
 
