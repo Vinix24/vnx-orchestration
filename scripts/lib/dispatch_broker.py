@@ -355,12 +355,16 @@ class DispatchBroker:
             attempt_number.
 
         Raises:
-            BrokerError: If the dispatch does not exist or is not in queued state.
-            InvalidTransitionError: If the state transition is not permitted.
-                This is the expected signal for a concurrent claim race: when two
-                callers race on the same dispatch_id, exactly one wins the write
-                lock and the other receives InvalidTransitionError (state will
-                already be 'claimed' rather than 'queued'/'ready').
+            BrokerError: If the dispatch does not exist or is not in a claimable
+                state. This is the expected signal for a concurrent claim race:
+                with BEGIN IMMEDIATE the losing claimer blocks until the winner
+                commits, then reads state 'claimed' and fails the state guard
+                with BrokerError.
+            InvalidTransitionError: If the state transition itself is rejected
+                by the state machine (defense-in-depth; not reachable via the
+                claim race under BEGIN IMMEDIATE).
+            sqlite3.OperationalError: "database is locked" when the write lock
+                stays held beyond the connection busy-timeout.
         """
         with get_connection(self._state_dir) as conn:
             # BEGIN IMMEDIATE acquires a write lock immediately, preventing a
