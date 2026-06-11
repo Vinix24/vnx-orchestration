@@ -88,6 +88,20 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
 # Only simple identifiers are valid model names (no whitespace or shell metacharacters).
 _SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# Allowlist for extra_flags tokens: long flags (--foo, --foo=bar, --foo=bar.baz-qux),
+# short flags (-f), and short flags with values (-f val treated as two tokens).
+# Rejects shell metacharacters, subshell expansion, backticks, semicolons, etc.
+_SAFE_FLAG_RE = re.compile(
+    r"^(?:"
+    r"--[a-zA-Z][a-zA-Z0-9_-]+"            # --long-flag
+    r"(?:=[a-zA-Z0-9][a-zA-Z0-9._:/@-]*)?" # optional =value (simple chars only)
+    r"|"
+    r"-[a-zA-Z]"                             # -f
+    r"|"
+    r"[a-zA-Z0-9][a-zA-Z0-9._:/@-]*"       # bare value token (for -f value pairs)
+    r")$"
+)
+
 
 def _assert_no_headless_flags(launch_cmd: str) -> None:
     """Raise ValueError if the assembled launch command contains -p/--print/--print=…
@@ -193,12 +207,26 @@ def _default_launch_command(
             f"'claude-opus-4-7'); whitespace and shell metacharacters are not allowed"
         )
     if extra_flags:
-        for token in extra_flags.split():
+        try:
+            flag_tokens = shlex.split(extra_flags)
+        except ValueError as exc:
+            raise ValueError(
+                f"extra_flags could not be parsed by shlex.split: {exc}"
+            ) from exc
+        safe_tokens: list[str] = []
+        for token in flag_tokens:
             if token in ("-p", "--print") or token.startswith("--print="):
                 raise ValueError(
                     "extra_flags must not contain -p/--print: "
                     "the interactive lane must stay on the subscription"
                 )
+            if not _SAFE_FLAG_RE.match(token):
+                raise ValueError(
+                    f"extra_flags token {token!r} contains disallowed characters; "
+                    "only plain flag forms (--flag, --flag=value, -f, bare-value) are accepted"
+                )
+            safe_tokens.append(shlex.quote(token))
+        extra_flags = " ".join(safe_tokens)
     flags = ""
     if skip_permissions:
         # Detached/autonomous run (no TTY to answer prompts). Default: scope the
@@ -452,45 +480,94 @@ class TmuxInteractiveDispatch:
 
         The path to ``append_receipt.py`` is ABSOLUTE so it resolves correctly
         regardless of the worker's cwd.
+
+        Receipt-truth design (sweep H3):
+        - ``status`` is NOT pre-baked: the worker picks one of two ready-made
+          commands (done/failed) so the status reflects actual outcome.
+        - ``timestamp`` is NOT generated at body-assembly time: each command uses
+          shell ``$(date -u +%Y-%m-%dT%H:%M:%SZ)`` so the timestamp records the
+          execution moment, not when the dispatch was launched.
         """
         append_receipt = self._project_root / "scripts" / "append_receipt.py"
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         # report_path is deterministic — include it so the receipt->report linkage
         # is established even when the report is written after the receipt.
         report_path = str(
             self._state_dir.parent / "unified_reports" / f"{dispatch_id}.md"
         )
-        receipt = {
-            "event_type": "subprocess_completion",
-            "dispatch_id": dispatch_id,
-            "terminal": label,
-            "terminal_id": label,
-            "status": "done",
-            "source": "tmux_interactive",
-            "timestamp": ts,
-            "report_path": report_path,
-            "provider": "claude",
-            "sub_provider": "anthropic",
-            "model": model,
-            "lane": "tmux_interactive",
-        }
-        state_dir = shlex.quote(str(self._state_dir))
-        data_dir = shlex.quote(str(self._state_dir.parent))
-        append_receipt_arg = shlex.quote(str(append_receipt))
-        receipts_file = shlex.quote(str(self._receipts_file))
-        receipt_arg = shlex.quote(json.dumps(receipt))
+
+        state_dir_q = shlex.quote(str(self._state_dir))
+        data_dir_q = shlex.quote(str(self._state_dir.parent))
+        append_receipt_q = shlex.quote(str(append_receipt))
+        receipts_file_q = shlex.quote(str(self._receipts_file))
+
+        def _make_receipt_json(status: str) -> str:
+            """Return a double-quoted JSON argument with shell-evaluated timestamp.
+
+            The receipt dict is built in Python (for correct key/value escaping)
+            with a sentinel timestamp placeholder. The placeholder is then replaced
+            with a shell ``$(date ...)`` substitution *outside* the single-quote
+            boundary so that bash evaluates it at execution time.
+
+            The outer double-quotes let ``$_VNX_TS`` expand; inner double-quotes
+            inside the JSON are escaped with backslash.
+            """
+            _TS_SENTINEL = "__VNX_TS_PLACEHOLDER__"
+            receipt_dict = {
+                "event_type": "subprocess_completion",
+                "dispatch_id": dispatch_id,
+                "terminal": label,
+                "terminal_id": label,
+                "status": status,
+                "source": "tmux_interactive",
+                "timestamp": _TS_SENTINEL,
+                "report_path": report_path,
+                "provider": "claude",
+                "sub_provider": "anthropic",
+                "model": model,
+                "lane": "tmux_interactive",
+            }
+            json_str = json.dumps(receipt_dict)
+            # Escape inner double-quotes for the shell double-quoted argument.
+            escaped = json_str.replace('"', '\\"')
+            # Replace the sentinel with the shell variable reference.
+            escaped = escaped.replace(_TS_SENTINEL, "$_VNX_TS")
+            return f'"{escaped}"'
+
+        env_prefix = (
+            f"VNX_STATE_DIR={state_dir_q} VNX_DATA_DIR={data_dir_q}"
+        )
+        py_cmd = (
+            f"python3 {append_receipt_q} "
+            f"--receipts-file {receipts_file_q} --receipt"
+        )
+
+        done_receipt_arg = _make_receipt_json("done")
+        failed_receipt_arg = _make_receipt_json("failed")
+
+        done_cmd = (
+            f"_VNX_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n"
+            f"{env_prefix} {py_cmd} {done_receipt_arg}"
+        )
+        failed_cmd = (
+            f"_VNX_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n"
+            f"{env_prefix} {py_cmd} {failed_receipt_arg}"
+        )
+
         return (
             "\n\n---\n\n## Completion Protocol (interactive lane)\n\n"
-            "When you have finished AND committed, emit a completion receipt "
-            "directly so the orchestrator can detect completion. Run:\n\n"
+            "When you have finished AND committed your work, emit a completion "
+            "receipt so the orchestrator can detect completion. "
+            "**Choose the correct command — do not copy blindly:**\n\n"
+            "**If work completed successfully:**\n\n"
             "```bash\n"
-            f"VNX_STATE_DIR={state_dir} VNX_DATA_DIR={data_dir} "
-            f"python3 {append_receipt_arg} --receipts-file {receipts_file} --receipt "
-            f"{receipt_arg}\n"
+            f"{done_cmd}\n"
             "```\n\n"
-            "Use `\"status\": \"failed\"` instead if you could not complete the "
-            "work. Always write your unified report first, then emit the receipt "
-            "as the last step.\n"
+            "**If you could NOT complete the work (error, blocker, or partial):**\n\n"
+            "```bash\n"
+            f"{failed_cmd}\n"
+            "```\n\n"
+            "Always write your unified report first, then emit the receipt "
+            "as the very last step.\n"
         )
 
     def _scope_note(self, dispatch_paths: "list[str] | str | None") -> str:

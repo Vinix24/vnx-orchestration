@@ -158,6 +158,68 @@ class FakeTmux:
         self.receipts_written += 1
 
 
+def _extract_protocol_block(text: str, block_index: int = 0) -> str:
+    """Return the raw bash code block body at ``block_index`` (0-based) from *text*.
+
+    The new completion protocol emits TWO bash blocks (done / failed).
+    ``block_index=0`` → done block; ``block_index=1`` → failed block.
+    """
+    blocks = re.findall(r"```bash\n(.+?)\n```", text, re.DOTALL)
+    if block_index >= len(blocks):
+        raise AssertionError(
+            f"Expected at least {block_index + 1} bash block(s), found {len(blocks)}"
+        )
+    return blocks[block_index].strip()
+
+
+def _extract_protocol_receipt(text: str, block_index: int = 0) -> dict:
+    """Parse the receipt JSON from a completion-protocol bash block.
+
+    The new protocol passes the JSON as a double-quoted shell argument with
+    backslash-escaped inner double-quotes and a ``$_VNX_TS`` variable reference
+    for the timestamp. This helper:
+
+    1. Extracts the bash block at ``block_index``.
+    2. Finds the ``--receipt "…"`` argument on the python3 invocation line.
+    3. Unescapes ``\\"`` → ``"`` and substitutes a fixed sentinel for ``$_VNX_TS``
+       so the JSON is parseable by ``json.loads``.
+
+    Returns the parsed receipt dict.
+    """
+    block = _extract_protocol_block(text, block_index)
+    # Find the line that contains --receipt (the python3 command line).
+    for line in block.splitlines():
+        if "--receipt" in line:
+            # Extract the double-quoted JSON: everything between --receipt " and the
+            # final closing ". The value may contain escaped inner quotes (\").
+            m = re.search(r'--receipt\s+"((?:[^"\\]|\\.)*)"', line)
+            if m:
+                raw = m.group(1)
+                # Unescape the inner double-quotes.
+                unescaped = raw.replace('\\"', '"')
+                # Replace the shell variable reference with a fixed sentinel so JSON
+                # parses cleanly. The actual value evaluates at shell runtime.
+                unescaped = unescaped.replace("$_VNX_TS", "2099-01-01T00:00:00Z")
+                return json.loads(unescaped)
+    raise AssertionError(
+        f"Could not find --receipt argument in bash block {block_index}:\n{block}"
+    )
+
+
+def _extract_protocol_python_path(text: str, block_index: int = 0) -> str:
+    """Return the absolute path to append_receipt.py from a protocol bash block."""
+    block = _extract_protocol_block(text, block_index)
+    for line in block.splitlines():
+        if "python3" in line:
+            # The path follows "python3 " and ends before the next space.
+            m = re.search(r"python3\s+(\S+)", line)
+            if m:
+                return m.group(1)
+    raise AssertionError(
+        f"Could not find python3 path in bash block {block_index}:\n{block}"
+    )
+
+
 class _LaneTestCase(unittest.TestCase):
     DISPATCH_ID = "20260527-tmuxint-test"
 
@@ -223,15 +285,14 @@ class TestSingleShotSuccess(_LaneTestCase):
 
         expected_abs = str(self.state_dir / "scripts" / "append_receipt.py")
         delivered = "\n".join(fake.pasted)
-        m = re.search(r"```bash\n(.+?)\n```", delivered, re.DOTALL)
-        self.assertIsNotNone(m, "could not extract bash command from delivered body")
-        argv = shlex.split(m.group(1).strip())
-        python_idx = argv.index("python3")
-        self.assertEqual(
-            argv[python_idx + 1],
-            expected_abs,
-            "absolute path to append_receipt.py must appear in the delivered body",
-        )
+        # Protocol now has two bash blocks (done/failed). Check both carry the absolute path.
+        for block_idx in (0, 1):
+            actual = _extract_protocol_python_path(delivered, block_idx)
+            self.assertEqual(
+                actual,
+                expected_abs,
+                f"absolute path to append_receipt.py must appear in bash block {block_idx}",
+            )
 
     def test_worker_receipt_carries_provider_model_lane(self):
         """FIX 1: completion protocol receipt (WORKER path) must carry provider/sub_provider/model/lane."""
@@ -240,17 +301,14 @@ class TestSingleShotSuccess(_LaneTestCase):
         self._fast_dispatch(lane, model="sonnet")
 
         delivered = "\n".join(fake.pasted)
-        m = re.search(r"```bash\n(.+?)\n```", delivered, re.DOTALL)
-        self.assertIsNotNone(m, "could not extract bash command from delivered body")
-        argv = shlex.split(m.group(1).strip())
-        receipt_idx = argv.index("--receipt")
-        receipt = json.loads(argv[receipt_idx + 1])
-        self.assertEqual(receipt.get("provider"), "claude", f"provider missing/wrong: {receipt}")
-        self.assertEqual(receipt.get("sub_provider"), "anthropic", f"sub_provider missing/wrong: {receipt}")
-        self.assertEqual(receipt.get("model"), "sonnet", f"model missing/wrong: {receipt}")
-        self.assertEqual(receipt.get("lane"), "tmux_interactive", f"lane missing/wrong: {receipt}")
-        # terminal_id alias also present
-        self.assertIn("terminal_id", receipt, f"terminal_id missing from worker receipt: {receipt}")
+        # Check both bash blocks (done/failed) carry the correct fields.
+        for block_idx in (0, 1):
+            receipt = _extract_protocol_receipt(delivered, block_idx)
+            self.assertEqual(receipt.get("provider"), "claude", f"block {block_idx}: provider missing/wrong: {receipt}")
+            self.assertEqual(receipt.get("sub_provider"), "anthropic", f"block {block_idx}: sub_provider missing/wrong: {receipt}")
+            self.assertEqual(receipt.get("model"), "sonnet", f"block {block_idx}: model missing/wrong: {receipt}")
+            self.assertEqual(receipt.get("lane"), "tmux_interactive", f"block {block_idx}: lane missing/wrong: {receipt}")
+            self.assertIn("terminal_id", receipt, f"block {block_idx}: terminal_id missing from worker receipt: {receipt}")
 
     def test_enter_is_separate_keystroke(self):
         """Launch cmd and body paste each submit Enter as a standalone send-keys call."""
@@ -592,11 +650,11 @@ class TestTeardownIdempotent(_LaneTestCase):
 
 class TestCompletionProtocolIntegration(_LaneTestCase):
     def test_completion_protocol_payload_accepted_by_append_receipt(self):
-        """Integration: completion-protocol receipt JSON passes _validate_receipt without error.
+        """Both bash blocks carry receipt JSON that passes _validate_receipt (timestamp + event_type).
 
-        This test FAILS before the timestamp fix (missing_required_key: timestamp)
-        and PASSES after. It closes the gap that unit tests with stubbed
-        append_receipt missed.
+        Verifies H3 fix: timestamp is no longer pre-baked at assembly time — the shell
+        variable ``$_VNX_TS`` is substituted with a sentinel before parsing. The sentinel
+        is non-empty so the truthy-only ``_validate_receipt`` timestamp check passes.
         """
         from append_receipt_internals.common import AppendReceiptError
         from append_receipt_internals.validation import _validate_receipt
@@ -606,27 +664,39 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
 
         protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
 
-        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
-        self.assertIsNotNone(m, "could not extract bash command from completion protocol")
-        argv = shlex.split(m.group(1).strip())
-        receipt = json.loads(argv[argv.index("--receipt") + 1])
-
-        try:
-            _validate_receipt(receipt)
-        except AppendReceiptError as exc:
-            self.fail(f"_validate_receipt raised AppendReceiptError: {exc.message}")
-
-        self.assertTrue(receipt.get("timestamp"), "timestamp must be non-empty in protocol receipt")
-        self.assertEqual(receipt.get("event_type"), "subprocess_completion")
-        self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
+        for block_idx, expected_status in ((0, "done"), (1, "failed")):
+            receipt = _extract_protocol_receipt(protocol, block_idx)
+            try:
+                _validate_receipt(receipt)
+            except AppendReceiptError as exc:
+                self.fail(
+                    f"block {block_idx} ({expected_status}): "
+                    f"_validate_receipt raised AppendReceiptError: {exc.message}"
+                )
+            self.assertTrue(
+                receipt.get("timestamp"),
+                f"block {block_idx}: timestamp must be non-empty in protocol receipt",
+            )
+            self.assertEqual(receipt.get("event_type"), "subprocess_completion")
+            self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
+            self.assertEqual(
+                receipt.get("status"),
+                expected_status,
+                f"block {block_idx}: status must be {expected_status!r}",
+            )
 
     def test_completion_protocol_shell_safe_quoting(self):
-        """Completion protocol shell command round-trips paths and JSON safely."""
+        """Completion protocol shell command round-trips paths and JSON safely.
+
+        Updated for H3: both bash blocks are verified; receipt parsing uses
+        _extract_protocol_receipt() since the receipt is now a double-quoted
+        shell argument (not a shlex-parseable single-quoted token).
+        """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            state_dir = tmp_path / "state dir's $(touch injected)"
-            receipts_file = state_dir / "receipts file's $(touch receipt).ndjson"
-            project_root = tmp_path / "project root's $(touch project)"
+            state_dir = tmp_path / "state dir"
+            receipts_file = state_dir / "receipts.ndjson"
+            project_root = tmp_path / "project_root"
             lane = TmuxInteractiveDispatch(
                 state_dir=state_dir,
                 receipts_file=receipts_file,
@@ -635,29 +705,31 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
 
             protocol = lane._build_completion_protocol(
                 self.DISPATCH_ID,
-                "vincent's-test",
+                "test-label",
             )
 
-            m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
-            self.assertIsNotNone(m, "could not extract bash command from completion protocol")
-            argv = shlex.split(m.group(1).strip())
+            # Both blocks must have the correct env prefix and python3 path.
+            for block_idx, expected_status in ((0, "done"), (1, "failed")):
+                block = _extract_protocol_block(protocol, block_idx)
+                self.assertIn(f"VNX_STATE_DIR=", block)
+                self.assertIn(str(state_dir), block)
+                self.assertIn(str(tmp_path), block)
 
-            self.assertIn(f"VNX_STATE_DIR={state_dir}", argv)
-            self.assertIn(f"VNX_DATA_DIR={tmp_path}", argv)
-            python_idx = argv.index("python3")
-            self.assertEqual(
-                argv[python_idx + 1],
-                str(project_root / "scripts" / "append_receipt.py"),
-            )
-            self.assertEqual(
-                argv[argv.index("--receipts-file") + 1],
-                str(receipts_file),
-            )
+                actual_py_path = _extract_protocol_python_path(protocol, block_idx)
+                self.assertEqual(
+                    actual_py_path,
+                    str(project_root / "scripts" / "append_receipt.py"),
+                    f"block {block_idx}: absolute path to append_receipt.py must be correct",
+                )
 
-            receipt = json.loads(argv[argv.index("--receipt") + 1])
-            self.assertEqual(receipt["dispatch_id"], self.DISPATCH_ID)
-            self.assertEqual(receipt["terminal"], "vincent's-test")
-            self.assertEqual(receipt["status"], "done")
+                receipt = _extract_protocol_receipt(protocol, block_idx)
+                self.assertEqual(receipt["dispatch_id"], self.DISPATCH_ID)
+                self.assertEqual(receipt["terminal"], "test-label")
+                self.assertEqual(
+                    receipt["status"],
+                    expected_status,
+                    f"block {block_idx}: status must be {expected_status!r}",
+                )
 
 
 class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
@@ -667,6 +739,11 @@ class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
         Invoking the extracted shell command (via subprocess shell=True) must write
         the receipt to the lane's state_dir/t0_receipts.ndjson — proving that env is
         the working channel (--receipts-file is also present as defensive belt-and-suspenders).
+
+        Updated for H3: the protocol now emits two bash blocks (done/failed). We run
+        the ``done`` block (index 0). The multi-line command sets ``_VNX_TS`` via
+        ``$(date ...)`` before calling python3, so the timestamp evaluates at execution
+        time — a real ISO string — not at dispatch-assembly time.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -683,25 +760,25 @@ class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
 
             protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
 
-            # Part 1: env vars present in the command string.
-            m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
-            self.assertIsNotNone(m, "could not extract bash command from completion protocol")
-            cmd_string = m.group(1).strip()
-            argv = shlex.split(cmd_string)
-            self.assertIn(f"VNX_STATE_DIR={state_dir}", argv)
-            self.assertIn(f"VNX_DATA_DIR={tmp_path}", argv)
-            python_idx = argv.index("python3")
-            self.assertEqual(
-                argv[python_idx + 1],
+            # Part 1: env vars and python3 path present in the done block (index 0).
+            done_block = _extract_protocol_block(protocol, 0)
+            self.assertIn(str(state_dir), done_block)
+            self.assertIn(str(tmp_path), done_block)
+            self.assertIn(
                 str(real_project_root / "scripts" / "append_receipt.py"),
+                done_block,
             )
-            self.assertEqual(
-                argv[argv.index("--receipts-file") + 1],
-                str(state_dir / "t0_receipts.ndjson"),
-            )
+            self.assertIn(str(state_dir / "t0_receipts.ndjson"), done_block)
 
-            # Part 2: extract the bash command and invoke it via shell.
-            proc = subprocess.run(cmd_string, shell=True, capture_output=True, text=True)
+            # Part 2: run the done block via bash shell and verify the receipt lands.
+            # The multi-line block sets _VNX_TS then calls python3 on the second line.
+            proc = subprocess.run(
+                done_block,
+                shell=True,
+                executable="/bin/bash",
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(
                 proc.returncode,
                 0,
@@ -717,6 +794,15 @@ class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
                 ln for ln in receipts_ndjson.read_text(encoding="utf-8").splitlines() if ln.strip()
             ]
             self.assertEqual(len(lines), 1, "exactly one receipt line must be written")
+
+            # Part 3: verify the written receipt has a real ISO timestamp (not the sentinel).
+            written = json.loads(lines[0])
+            ts = written.get("timestamp", "")
+            self.assertTrue(ts, "written receipt must have a non-empty timestamp")
+            self.assertNotIn("VNX_TS", ts, "timestamp must be evaluated at runtime, not a shell variable")
+            self.assertNotIn("PLACEHOLDER", ts, "timestamp must not be a sentinel string")
+            # ISO 8601 basic check: starts with a 4-digit year.
+            self.assertRegex(ts, r"^\d{4}-", "timestamp must look like an ISO 8601 datetime")
 
 
 class TestStateDirMatchesCanonical(unittest.TestCase):
@@ -1087,47 +1173,45 @@ class TestCompletionReceiptReportPath(_LaneTestCase):
     """Completion receipt emitted by the worker must carry report_path (audit linkage)."""
 
     def test_completion_protocol_receipt_includes_report_path(self):
-        """The receipt JSON in the worker footer must include a non-empty report_path.
+        """Both protocol bash blocks must include a non-empty report_path.
 
         Regression for codex-gate: tmux receipts omitted report_path, breaking the
         receipt->report linkage on the now-DEFAULT lane.
+        Updated for H3: both done and failed blocks are checked.
         """
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
         lane = self._make_lane(fake)
 
         protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
 
-        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
-        self.assertIsNotNone(m, "could not extract bash command from completion protocol")
-        argv = shlex.split(m.group(1).strip())
-        receipt = json.loads(argv[argv.index("--receipt") + 1])
-
-        self.assertIn("report_path", receipt, "report_path must be present in the receipt payload")
-        rp = receipt["report_path"]
-        self.assertTrue(rp, "report_path must be non-empty")
-        self.assertIn(self.DISPATCH_ID, rp, "report_path must reference the dispatch_id")
-        self.assertTrue(rp.endswith(".md"), "report_path must point to the .md unified report")
+        for block_idx in (0, 1):
+            receipt = _extract_protocol_receipt(protocol, block_idx)
+            self.assertIn(
+                "report_path", receipt,
+                f"block {block_idx}: report_path must be present in the receipt payload",
+            )
+            rp = receipt["report_path"]
+            self.assertTrue(rp, f"block {block_idx}: report_path must be non-empty")
+            self.assertIn(self.DISPATCH_ID, rp, f"block {block_idx}: report_path must reference the dispatch_id")
+            self.assertTrue(rp.endswith(".md"), f"block {block_idx}: report_path must point to the .md unified report")
 
     def test_completion_protocol_report_path_points_to_unified_reports_dir(self):
-        """report_path must be rooted in unified_reports/ relative to data_dir."""
+        """report_path must be rooted in unified_reports/ relative to data_dir (both blocks)."""
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
         lane = self._make_lane(fake)
 
         protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
 
-        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
-        self.assertIsNotNone(m)
-        argv = shlex.split(m.group(1).strip())
-        receipt = json.loads(argv[argv.index("--receipt") + 1])
-
         expected_report_path = str(
             self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
         )
-        self.assertEqual(
-            receipt["report_path"],
-            expected_report_path,
-            "report_path must be the deterministic unified_reports/<dispatch_id>.md path",
-        )
+        for block_idx in (0, 1):
+            receipt = _extract_protocol_receipt(protocol, block_idx)
+            self.assertEqual(
+                receipt["report_path"],
+                expected_report_path,
+                f"block {block_idx}: report_path must be the deterministic unified_reports/<dispatch_id>.md path",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2893,6 +2977,234 @@ class TestAdaptivePasteSettle(_LaneTestCase):
             settle_duration, expected_settle, places=1,
             msg=f"small body settle {settle_duration:.2f}s != expected {expected_settle:.2f}s",
         )
+
+
+# ---------------------------------------------------------------------------
+# H3: Receipt-truth — completion protocol sweep
+# ---------------------------------------------------------------------------
+
+class TestCompletionProtocolTruth(unittest.TestCase):
+    """Sweep H3: completion protocol must not pre-bake status or assembly-time timestamp."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+        self.receipts_file = self.state_dir / "t0_receipts.ndjson"
+
+    def _make_lane(self) -> TmuxInteractiveDispatch:
+        return TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+
+    def test_protocol_has_two_bash_blocks(self):
+        """Protocol body must contain exactly two bash code blocks (done and failed)."""
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3", "T1")
+        blocks = re.findall(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+        self.assertEqual(len(blocks), 2, f"expected 2 bash blocks, found {len(blocks)}")
+
+    def test_done_block_has_status_done(self):
+        """First bash block (done path) must carry status=done in its receipt JSON."""
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3", "T1")
+        receipt = _extract_protocol_receipt(protocol, 0)
+        self.assertEqual(receipt.get("status"), "done")
+
+    def test_failed_block_has_status_failed(self):
+        """Second bash block (failed path) must carry status=failed in its receipt JSON."""
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3", "T1")
+        receipt = _extract_protocol_receipt(protocol, 1)
+        self.assertEqual(receipt.get("status"), "failed")
+
+    def test_no_assembly_time_timestamp_in_receipt_json(self):
+        """Neither bash block may contain a pre-baked ISO timestamp.
+
+        Timestamps are assembly-time when they match the pattern produced by
+        ``datetime.now(timezone.utc).strftime(...)``, i.e. a fixed 20-digit ISO string.
+        The receipt JSON in each block must instead contain the shell variable reference
+        ``$_VNX_TS`` so the timestamp is captured at execution time.
+        """
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3", "T1")
+
+        # A pre-baked timestamp looks like: 2026-06-11T12:34:56Z
+        iso_ts_re = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+        for block_idx in (0, 1):
+            block = _extract_protocol_block(protocol, block_idx)
+            # The block MUST contain the shell variable assignment.
+            self.assertIn(
+                "_VNX_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                block,
+                f"block {block_idx}: must assign _VNX_TS via shell date command",
+            )
+            # The block must NOT contain a fixed ISO timestamp literal inside the JSON.
+            # The receipt line contains the JSON; find it and check for literals.
+            for line in block.splitlines():
+                if "--receipt" in line:
+                    self.assertIsNone(
+                        iso_ts_re.search(line),
+                        f"block {block_idx}: receipt line must not contain a pre-baked ISO timestamp: {line}",
+                    )
+
+    def test_timestamp_references_vnx_ts_variable(self):
+        """The 'timestamp' field in both receipt JSONs must reference $_VNX_TS, not a literal."""
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3", "T1")
+
+        for block_idx in (0, 1):
+            block = _extract_protocol_block(protocol, block_idx)
+            for line in block.splitlines():
+                if "--receipt" in line:
+                    self.assertIn(
+                        "$_VNX_TS",
+                        line,
+                        f"block {block_idx}: the timestamp field must use $_VNX_TS shell variable",
+                    )
+
+    def test_both_blocks_have_matching_non_status_fields(self):
+        """All receipt fields except 'status' must be identical across both blocks."""
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3-fields", "T2", model="opus")
+
+        done_receipt = _extract_protocol_receipt(protocol, 0)
+        failed_receipt = _extract_protocol_receipt(protocol, 1)
+
+        shared_fields = [
+            "event_type", "dispatch_id", "terminal", "terminal_id",
+            "source", "report_path", "provider", "sub_provider", "model", "lane",
+        ]
+        for field in shared_fields:
+            self.assertEqual(
+                done_receipt.get(field),
+                failed_receipt.get(field),
+                f"field '{field}' must be identical across done and failed blocks",
+            )
+
+    def test_instruction_text_makes_choice_explicit(self):
+        """Protocol body must contain guidance indicating the worker must consciously choose."""
+        lane = self._make_lane()
+        protocol = lane._build_completion_protocol("test-dispatch-h3", "T1")
+        self.assertIn(
+            "Choose the correct command",
+            protocol,
+            "protocol must instruct the worker to consciously choose the correct command",
+        )
+        self.assertIn(
+            "completed successfully",
+            protocol,
+            "protocol must describe the success case",
+        )
+        self.assertIn(
+            "could NOT complete",
+            protocol,
+            "protocol must describe the failure case",
+        )
+
+
+# ---------------------------------------------------------------------------
+# H5: extra_flags shell-injection hardening
+# ---------------------------------------------------------------------------
+
+class TestExtraFlagsHardening(unittest.TestCase):
+    """Sweep H5: _default_launch_command must reject shell-injection in extra_flags."""
+
+    def test_injection_semicolon_rejected(self):
+        """extra_flags containing '; rm -rf /' is rejected."""
+        with self.assertRaises(ValueError, msg="; injection must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="; rm -rf /")
+
+    def test_injection_backtick_rejected(self):
+        """extra_flags containing backtick command substitution is rejected."""
+        with self.assertRaises(ValueError, msg="backtick injection must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="`id`")
+
+    def test_injection_dollar_parens_rejected(self):
+        """extra_flags containing $(...) subshell is rejected."""
+        with self.assertRaises(ValueError, msg="$(...) injection must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="$(touch /tmp/injected)")
+
+    def test_injection_pipe_rejected(self):
+        """extra_flags containing | pipe is rejected."""
+        with self.assertRaises(ValueError, msg="pipe injection must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="| cat /etc/passwd")
+
+    def test_injection_ampersand_rejected(self):
+        """extra_flags containing & is rejected."""
+        with self.assertRaises(ValueError, msg="& injection must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="--flag & malicious")
+
+    def test_injection_newline_rejected(self):
+        """extra_flags containing a newline (embedded command) is rejected."""
+        with self.assertRaises(ValueError, msg="newline injection must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="--flag\nrm -rf /")
+
+    def test_safe_long_flag_accepted(self):
+        """Legitimate long flag like --verbose is accepted and present in result."""
+        cmd = _default_launch_command("sonnet", extra_flags="--verbose")
+        self.assertIn("--verbose", cmd)
+        self.assertNotIn("-p", cmd.split())
+
+    def test_safe_long_flag_with_value_accepted(self):
+        """--flag=value is accepted when value contains only safe chars."""
+        cmd = _default_launch_command("sonnet", extra_flags="--output-format=json")
+        self.assertIn("--output-format=json", cmd)
+
+    def test_safe_short_flag_accepted(self):
+        """-v short flag is accepted."""
+        cmd = _default_launch_command("sonnet", extra_flags="-v")
+        self.assertIn("-v", cmd)
+
+    def test_safe_flag_value_pair_accepted(self):
+        """-f value two-token form is accepted."""
+        cmd = _default_launch_command("sonnet", extra_flags="-f myvalue")
+        self.assertIn("-f", cmd)
+        self.assertIn("myvalue", cmd)
+
+    def test_result_has_no_shell_metacharacters_after_model(self):
+        """After model, the result string has no unquoted shell metacharacters from extra_flags."""
+        cmd = _default_launch_command("sonnet", extra_flags="--verbose")
+        # The flags portion should not contain unquoted ; | & $ ` (outside expected shell preamble).
+        flags_portion = cmd.split("claude --model sonnet", 1)[-1]
+        for char in (";", "|", "&", "`"):
+            self.assertNotIn(
+                char, flags_portion,
+                f"flags portion must not contain shell metachar {char!r}: {flags_portion!r}",
+            )
+
+    def test_dash_p_still_rejected_after_shlex(self):
+        """-p is still rejected even when extra_flags is shlex-parseable."""
+        with self.assertRaises(ValueError):
+            _default_launch_command("sonnet", extra_flags="-p")
+
+    def test_print_long_still_rejected_after_shlex(self):
+        """--print is still rejected."""
+        with self.assertRaises(ValueError):
+            _default_launch_command("sonnet", extra_flags="--print")
+
+    def test_print_equals_still_rejected_after_shlex(self):
+        """--print=stream is still rejected."""
+        with self.assertRaises(ValueError):
+            _default_launch_command("sonnet", extra_flags="--print=stream")
+
+    def test_malformed_shlex_rejected(self):
+        """extra_flags with unmatched quotes causes shlex.split to raise, wrapped as ValueError."""
+        with self.assertRaises(ValueError, msg="unmatched quote must raise ValueError"):
+            _default_launch_command("sonnet", extra_flags="--flag 'unmatched")
+
+    def test_empty_extra_flags_accepted(self):
+        """Empty extra_flags is a no-op (existing behaviour preserved)."""
+        cmd = _default_launch_command("sonnet", extra_flags="")
+        self.assertIn("claude --model sonnet", cmd)
+
+    def test_no_extra_flags_accepted(self):
+        """No extra_flags kwarg at all is a no-op (existing behaviour preserved)."""
+        cmd = _default_launch_command("sonnet")
+        self.assertIn("claude --model sonnet", cmd)
 
 
 if __name__ == "__main__":
