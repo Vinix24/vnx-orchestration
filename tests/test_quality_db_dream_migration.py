@@ -117,7 +117,7 @@ class TestDreamMigrationV20:
         assert "idx_dream_archives_cycle" in indexes
 
     def test_user_version_is_highest_after_bootstrap(self, tmp_path):
-        """PRAGMA user_version equals HIGHEST_QI_VERSION (21 after the provider migration)."""
+        """PRAGMA user_version equals HIGHEST_QI_VERSION after bootstrap."""
         db_path = tmp_path / "quality_intelligence.db"
         _bootstrap(db_path)
 
@@ -126,7 +126,6 @@ class TestDreamMigrationV20:
         conn.close()
 
         assert version == quality_db_init.HIGHEST_QI_VERSION
-        assert version == 22
 
     def test_bootstrap_idempotent_on_existing_db(self, tmp_path):
         """Running bootstrap twice does not corrupt dream tables or raise."""
