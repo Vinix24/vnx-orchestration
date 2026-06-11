@@ -404,3 +404,115 @@ class TestCapabilities:
     def test_adapter_type(self):
         adapter = SubprocessAdapter()
         assert adapter.adapter_type() == "subprocess"
+
+
+# ---------------------------------------------------------------------------
+# H1 pipe hygiene: stdin=DEVNULL, stderr→logfile (not PIPE)
+# ---------------------------------------------------------------------------
+
+class TestPipeHygiene:
+    """Verify H1/H6 pipe hygiene fixes: stdin DEVNULL, stderr logfile."""
+
+    def test_deliver_sets_stdin_devnull(self):
+        """stdin must be DEVNULL — headless -p reads prompt from argv, not stdin."""
+        adapter = SubprocessAdapter()
+        mock_proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            adapter.deliver("T1", "dispatch-stdin-001")
+
+        kwargs = mock_popen.call_args[1]
+        assert kwargs.get("stdin") is subprocess.DEVNULL, (
+            "stdin must be DEVNULL to prevent inherited-stdin blocking in daemon context"
+        )
+
+    def test_deliver_stderr_is_not_pipe(self):
+        """stderr must NOT be subprocess.PIPE to prevent >64KB pipe-buffer deadlock."""
+        adapter = SubprocessAdapter()
+        # Pre-disable EventStore so patching builtins.open doesn't bleed into
+        # EventStore's fcntl.flock call (which chokes on a MagicMock fd).
+        adapter._event_store_loaded = True
+        adapter._event_store = None
+        mock_proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            # Patch mkdir to avoid filesystem side-effects in unit test
+            with patch("pathlib.Path.mkdir"):
+                with patch("builtins.open", return_value=MagicMock()):
+                    adapter.deliver("T1", "dispatch-stderr-001")
+
+        kwargs = mock_popen.call_args[1]
+        assert kwargs.get("stderr") is not subprocess.PIPE, (
+            "stderr must not be PIPE — use logfile or DEVNULL to prevent deadlock"
+        )
+
+    def test_deliver_stderr_logfile_path_recorded(self):
+        """After deliver(), get_stderr_log_path() returns a Path for the terminal."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["VNX_DATA_DIR"] = tmpdir
+            try:
+                adapter = SubprocessAdapter()
+                mock_proc = _make_alive_process()
+                with patch("subprocess.Popen", return_value=mock_proc):
+                    adapter.deliver("T1", "dispatch-logpath-001")
+                log_path = adapter.get_stderr_log_path("T1")
+                assert log_path is not None
+                assert "T1" in str(log_path)
+                assert "dispatch-logpath-001" in str(log_path)
+            finally:
+                del os.environ["VNX_DATA_DIR"]
+
+    def test_deliver_stderr_logfile_path_uses_vnx_data_dir(self):
+        """Logfile path is rooted under VNX_DATA_DIR/logs/subprocess/."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["VNX_DATA_DIR"] = tmpdir
+            try:
+                adapter = SubprocessAdapter()
+                log_path = adapter._resolve_stderr_log_path("T2", "my-dispatch-xyz")
+                assert str(log_path).startswith(tmpdir)
+                assert "logs" in str(log_path)
+                assert "subprocess" in str(log_path)
+            finally:
+                del os.environ["VNX_DATA_DIR"]
+
+    def test_get_stderr_log_path_none_before_deliver(self):
+        """get_stderr_log_path returns None before any deliver() call."""
+        adapter = SubprocessAdapter()
+        assert adapter.get_stderr_log_path("T1") is None
+
+
+# ---------------------------------------------------------------------------
+# read_events() EOF returncode cache (OI-1120 consistency)
+# ---------------------------------------------------------------------------
+
+class TestReadEventsReturncode:
+    """read_events() must cache returncode at EOF, mirroring read_events_with_timeout."""
+
+    def test_read_events_caches_returncode_at_eof(self):
+        """After exhausting the iterator returncode is available in the cache."""
+        import io
+
+        adapter = SubprocessAdapter()
+        mock_proc = _make_dead_process(pid=1234, returncode=0)
+        # Give it a minimal NDJSON stdout
+        line = b'{"type":"result","subtype":"success","result":"done"}\n'
+        mock_proc.stdout = io.BytesIO(line)
+        adapter._processes["T1"] = mock_proc
+        adapter._dispatch_ids["T1"] = "dispatch-rc-001"
+
+        events = list(adapter.read_events("T1"))
+        assert len(events) >= 1
+        assert adapter._returncode_cache.get("T1") == 0
+
+    def test_read_events_caches_nonzero_returncode(self):
+        """Non-zero exit codes are also cached correctly."""
+        import io
+
+        adapter = SubprocessAdapter()
+        mock_proc = _make_dead_process(pid=5678, returncode=1)
+        mock_proc.stdout = io.BytesIO(b"")
+        adapter._processes["T1"] = mock_proc
+        adapter._dispatch_ids["T1"] = "dispatch-rc-002"
+
+        list(adapter.read_events("T1"))
+        assert adapter._returncode_cache.get("T1") == 1
