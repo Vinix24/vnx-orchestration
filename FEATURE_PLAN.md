@@ -1,12 +1,22 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-10T03:21:39.595476+00:00
+**Last updated**: 2026-06-11T12:57:35.634169+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #850 — fix(selflearn): injection-history-aware suppression breaks duplicate dominance (93% dup root-cause) (#850) (2026-06-11)
+- #849 — feat(tracks): oi-lifecycle-closure — track done, oi-close, dispatch linkage backfill, status --tracks (#849) (2026-06-11)
+- #848 — fix(dispatch): broker atomicity (orphan window, claim TOCTOU) + adapter pipe hygiene (H1/H6) (#848) (2026-06-11)
+- #847 — feat(outcome): dispatch_metadata backfill tool + contract_invalid vocab sync (gate-F2) (#847) (2026-06-11)
+- #846 — docs: truth-pass for 1.0 launch — version labels, ADR amendments, surface sync, provenance (#846) (2026-06-11)
+- #845 — fix(tmux-lane): truthful completion receipts + extra-flags quoting (H3/H5) (#845) (2026-06-11)
+- #844 — fix(routing): resolve kimi lane/constraint conflict + generalize raw-spawn guard to provider CLIs (#844) (2026-06-11)
+- #843 — fix(observability): unify state/events path resolution + events_path receipt pointer (H2) (#843) (2026-06-11)
+- #842 — fix(schema-init): view-ordering on legacy DBs unblocks v22/v23 (nightly phase-0 failure mode 2) (#842) (2026-06-11)
+- #841 — chore(roadmap): PM-close — sweep-fix closure (LB-4..7 done, blockers resolved, evidence in pr_queue) (#841) (2026-06-10)
 - #833 — feat(dashboard): lane-aware agent stream (replace fixed T0-T3) (#833) (2026-06-10)
 - #840 — fix(audit-chain): distinguish unchained from broken ledger in verify (LB-5) (#840) (2026-06-10)
 - #837 — fix(digest): event-type filter + canonical outcome vocabulary (#837) (2026-06-10)
@@ -145,15 +155,6 @@ _Last 14 days — sourced from git merge commits._
 - #678 — feat(skills): add STEP 0 ADR-check to 5 skill SKILL.md files (#678) (2026-05-29)
 - #677 — fix(trace): dual-scheme pr_id+pr_number + backfill — cat-C gap 73% → 0% (PR-B-TRACE) (#677) (2026-05-29)
 - #676 — feat(future): track layer schema + CLI + migration (PR-FUT-1) (#676) (2026-05-28)
-- #675 — feat(route): enforce provider_constraints.yaml in dispatch pre-flight (PR-ROUTE-1) (#675) (2026-05-28)
-- #674 — docs(readme): rewrite for pip-1.0 + tmux-leaseless-lane + multi-provider architecture (PR-DOC-README) (#674) (2026-05-28)
-- #673 — fix(docs): align QUICKSTART/MIGRATION with real pip-CLI surface + hello-world examples/ fallback (PR-DOC-1) (#673) (2026-05-28)
-- #672 — fix(lane): compute success from receipt status + shell-quote completion-protocol values (PR-HYG-3) (#672) (2026-05-28)
-- #671 — refactor(start): drop upfront T1-T3 pane grid — T0 only at startup, workers spawn on-demand (PR-START-1) (#671) (2026-05-28)
-- #670 — fix(quality): emit tool_unavailable warnings + declare quality-extras in pyproject (PR-QUAL-1) (#670) (2026-05-28)
-- #669 — fix(obs): codex_spawn model-default to gpt-5.5 + token-usage extraction (PR-OBS-1) (#669) (2026-05-28)
-- #668 — chore(hygiene): remove schraplijst-Phase-1 dead modules (~4.1k LOC, fresh-verified) (PR-HYG-2B) (#668) (2026-05-28)
-- #667 — chore(hygiene): remove audit-identified dead code (unused imports, unreachable bin/vnx cases, ongebruikte helpers) (PR-HYG-2A) (#667) (2026-05-28)
 
 **WAVE 6**
 - #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
@@ -173,8 +174,8 @@ _No active features._
 
 ## Completed
 
-### F1
-All PRs merged. (#773)
+### F1–F2
+All PRs merged. (#773 + #847)
 
 ## Planned (from ROADMAP.yaml)
 
@@ -314,7 +315,7 @@ Status: planned
 Status: planned
 
 ### nightly-pipeline-python-compat — Nightly pipeline phase 0-schema-init: Python 3.9 crash fix (Path | None at quality_db_init.py:905) + crontab PATH + version guard
-Status: planned
+Status: done
 
 ### outcome-normalization — Dispatch-outcome integrity: weekly_digest classifier vocab + event-type filter, status-default policy, dispatch_metadata backfill (73% unknown root-caused)
 Status: in-progress
@@ -326,14 +327,17 @@ Status: planned
 Status: done
 
 ### oi-lifecycle-closure — Track/OI lifecycle closure path: vnx track done, oi-close/unlink_open_item, dispatch<->track linkage migration, vnx status --tracks, queue hygiene
-Status: planned
+Status: done
 
 ### otel-wire-or-degrade — OTel decision: wire OTEL_EXPORTER_OTLP_ENDPOINT (+ tmux-lane callpoints) or degrade otel deps to [observability] extra
 Status: planned
 
 ### sweep-hardening-batch1 — Sweep hardening batch 1: state-dir guard, routing-policy conflict, tmux receipt truth, extra-flags quoting, broker atomicity, stderr drain, provider-CLI bypass guard
-Status: planned
+Status: done
 
 ### roadmap-governance-hygiene — Roadmap/docs governance hygiene: PM-mutator enforcement, drift-snapshot freshness, stale ROADMAP docs archive, docs-truth pass
-Status: planned
+Status: in-progress
+
+### injection-history-suppression — Self-learning quality: injection-history-aware suppression breaks 93% duplicate dominance
+Status: done
 

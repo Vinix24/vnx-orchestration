@@ -35,7 +35,7 @@ launch_state:
   status: "pre-launch"            # all blockers resolved; awaiting operator publish-go
   target_date: "2026-06-09"       # slipped 1 day by the pre-publish sweep; publish-ready since 2026-06-10
   last_verified: "2026-06-10"
-  verified_against: "origin/main@bfe37501"
+  verified_against: "origin/main@bb8f6159"
   note: >
     2026-06-10 (night): the 2026-06-09/10 pre-publish sweep found 4
     ship-blockers (LB-4..LB-7); all four were fixed, kimi-gated, and merged
@@ -901,18 +901,31 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#838"
+        title: "fix(nightly): python3.9 compat (from __future__ import annotations) + version guard"
+        status: merged
+        risk_class: low
+      - pr_id: "#842"
+        title: "fix(schema-init): view-ordering on legacy DBs unblocks v22/v23 (phase-0 failure mode 2)"
+        status: merged
+        risk_class: low
     notes: >
-      CLOSED 2026-06-10: #838 merged (from __future__ import annotations +
-      python>=3.10 warn-guard in the pipeline; kimi-gate FAIL was a false
-      positive, overruled with empirical guard-proof in the PR comments) and
-      the crontab PATH line (/opt/homebrew/bin first) applied by T0 on
-      operator instruction, backup at /tmp/crontab-backup-20260610.txt.
-      Verified: env -i with the new PATH resolves python3 -> 3.12.11.
-      Migrations v22/v23 self-heal at the next 04:00 run. Root-cause history:
-      cron without PATH -> system Python 3.9.6 -> 'Path | None' TypeError on
-      module load, phase 0 failed 9 nights (Jun 1-9), user_version stuck at
-      21, no data corruption.
+      CLOSED 2026-06-11: BOTH phase-0 failure modes resolved. Mode-2 (Python
+      3.9 crash): #838 merged (from __future__ import annotations +
+      python>=3.10 warn-guard; kimi-gate FAIL was a false positive, overruled
+      with empirical guard-proof in the PR comments) and the crontab PATH line
+      (/opt/homebrew/bin first) applied by T0 on operator instruction, backup
+      at /tmp/crontab-backup-20260610.txt; env -i with the new PATH resolves
+      python3 -> 3.12.11. Mode-1 (view-ordering): #842 merged — VIEW
+      dispatch_success_by_role was created before dispatch_metadata existed in
+      the SAVEPOINT transaction on legacy DBs, blocking v22/v23. VERIFIED
+      2026-06-11 post-merge: vnx-dev quality_intelligence.db at user_version=23
+      (v22/v23 self-healed), dispatch_success_by_role view present, quality_db
+      _init reports operational. Root-cause history: cron without PATH ->
+      system Python 3.9.6 -> 'Path | None' TypeError on module load, phase 0
+      failed 9 nights (Jun 1-9), user_version stuck at 21, no data corruption.
 
   - feature_id: outcome-normalization
     title: "Dispatch-outcome integrity: weekly_digest classifier vocab + event-type filter, status-default policy, dispatch_metadata backfill (73% unknown root-caused)"
@@ -926,6 +939,10 @@ features:
     pr_queue:
       - pr_id: "#837"
         title: "fix(digest): event-type filter + canonical outcome vocabulary (fix A + event_type fallback)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#847"
+        title: "feat(outcome): dispatch_metadata backfill tool + contract_invalid vocab sync (gate-F2)"
         status: merged
         risk_class: medium
     notes: >
@@ -942,11 +959,20 @@ features:
       real dispatch_id insertable into dispatch_metadata (which holds only 23
       rows -> FPY/rework currently rest on a 23-row sample); 830
       dispatch_id='unknown' records are unfixable without report re-parse.
-      STATUS 2026-06-10: fix A MERGED (#837, kimi-gated; gate finding F1 —
+      STATUS 2026-06-11: fix A MERGED (#837, kimi-gated; gate finding F1 —
       lost event_type fallback for status-less receipts — was real and fixed
-      forward with 4 extra tests, 41/41 green). Still open: fix B (operator
-      policy decision), the dispatch_metadata backfill, and gate-F2
-      (contract_invalid in receipt_classifier.py/payload.py failure sets).
+      forward with 4 extra tests, 41/41 green). gate-F2 CLOSED via #847:
+      contract_invalid added to receipt_classifier._FAILURE_STATUSES +
+      payload.FAILURE_STATUSES (cross-module vocab-sync test guards drift) and
+      the dispatch_metadata backfill TOOL shipped
+      (scripts/backfill_dispatch_metadata.py, dry-run default, --apply
+      --backup, 67 tests). Fix-forward F1-F4 on #847 documented in the PR
+      comment (payload SUCCESS_STATUSES missing 'done', task_timeout comment,
+      _RANK ordering, silent skip-path logging). STILL OPEN (keeps this
+      in-progress): (a) operator must RUN the backfill on the live DB
+      (dispatch_metadata holds 23 rows; ~568 insertable) — tool is staged, run
+      is an operator gate; (b) fix B status-default policy decision (default
+      tmux-report status to 'done' vs 'unknown' — needs explicit sign-off).
 
   - feature_id: adr007-composite-keys-batch
     title: "ADR-007 batch: project_id + composite UNIQUE on SPC/intelligence tables (governance_metrics, spc_*, success_patterns, antipatterns, prevention_rules, dispatch_experiments, retry_budgets, dream_pattern_archives)"
@@ -1002,22 +1028,25 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#849"
+        title: "feat(tracks): oi-lifecycle-closure — track done, oi-close, dispatch linkage backfill, status --tracks"
+        status: merged
+        risk_class: medium
     notes: >
-      Ops-sweep RD: the parent-child chain (track -> dispatch -> receipt ->
-      closure) is broken at every joint. Zero dispatch<->track linkage (all
-      291 dispatches on legacy A/B/C letters); no 'vnx track done' CLI
-      (transition_phase exists at tracks.py:338, unbound; zero
-      track_phase_transition events ever); link_open_item without
-      unlink/close (blocked-status only resettable by manual row delete —
-      explains oi-2328 done-but-blocked); 13/36 tracks phase/derived drift;
-      235 stale files in dispatches/active/ (oldest April) vs t0_state
-      active_count: 0; live vnx-dev runtime DB lacks track tables entirely
-      (migrations only in worktree DB — must land centrally); open_items.json
-      (154 open) not bridged to track_open_items (0 rows). Scope: linkage
-      migration, track done CLI (mandatory --reason), vnx track oi-close,
-      vnx status --tracks, doctor stale-queue check, central-DB track
-      migrations. This is the 'future state works like clockwork' feature.
+      CLOSED 2026-06-11 via #849 (130/130 tests, kimi-gated, fix-forward
+      4f53ad1b). Closes the parent-child chain that was broken at every joint:
+      adds 'vnx track done' CLI (mandatory --reason, binds the unbound
+      transition_phase at tracks.py:338), 'vnx track oi-close' /
+      unlink_open_item (blocked-status now closable without manual row delete),
+      dispatch<->track linkage backfill migration (was zero — all 291
+      dispatches on legacy A/B/C letters), 'vnx status --tracks', and central-DB
+      track migrations so the live vnx-dev runtime DB carries track tables.
+      This is the 'future state works like clockwork' feature. Ops-sweep RD
+      origin: track -> dispatch -> receipt -> closure chain previously broken,
+      13/36 tracks phase/derived drift, 235 stale files in dispatches/active/,
+      open_items.json (154 open) not bridged to track_open_items.
 
   - feature_id: otel-wire-or-degrade
     title: "OTel decision: wire OTEL_EXPORTER_OTLP_ENDPOINT (+ tmux-lane callpoints) or degrade otel deps to [observability] extra"
@@ -1048,25 +1077,38 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_queue:
+      - pr_id: "#843"
+        title: "fix(observability): unify state/events path resolution + events_path receipt pointer (H2, item 1)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#844"
+        title: "fix(routing): resolve kimi lane/constraint conflict + generalize raw-spawn guard to provider CLIs (items 2+7)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#845"
+        title: "fix(tmux-lane): truthful completion receipts + extra-flags quoting (H3/H5, items 3+4)"
+        status: merged
+        risk_class: medium
+      - pr_id: "#848"
+        title: "fix(dispatch): broker atomicity (orphan window, claim TOCTOU) + adapter pipe hygiene (H1/H6, items 5+6)"
+        status: merged
+        risk_class: medium
     notes: >
-      Top non-blocker fixes from the pre-publish sweep, Kimi-sec risk-ranked:
-      (1) _resolve_state_dir ignores VNX_DATA_DIR_EXPLICIT guard
-      (provider_dispatch.py:84) — panel-rated most underestimated: stale env
-      silently misdirects receipts cross-project; (2) routing_policy.yaml:36
-      review-analysis lane litellm:moonshot conflicts with blocking
-      kimi-via-cli-only under VNX_AUTO_ROUTE=1 (one-line fix to kimi CLI
-      lane); (3) tmux completion receipt hardcodes status=done + build-time
-      timestamp (tmux_interactive_dispatch.py:457-468) — lying receipts on
-      failed/long workers; (4) --extra-flags shell injection
-      (tmux_interactive_dispatch.py:218, shlex allowlist; panel-rated most
-      overestimated but fix is S); (5) dispatch_broker bundle-before-DB-row
-      orphan window + claim() TOCTOU without BEGIN IMMEDIATE
-      (dispatch_broker.py:252,345); (6) SubprocessAdapter stderr=PIPE never
-      drained -> >64KB deadlock (subprocess_adapter.py:308); (7) generalize
-      the raw-spawn receipt-bypass guard beyond claude -p to kimi/codex CLIs
-      (T0 live-observed: raw kimi call passed the hook unlogged on
-      2026-06-09).
+      CLOSED 2026-06-11: all 7 sweep-hardening items shipped across 4
+      kimi-gated PRs. (1) state-dir guard -> #843 (VNX_DATA_DIR_EXPLICIT
+      honoured; also adds events_path receipt pointer for observability
+      linkage); (2) routing_policy kimi lane/constraint conflict -> #844
+      (kimi-via-cli-only no longer collides with litellm:moonshot under
+      VNX_AUTO_ROUTE=1); (3) tmux receipt truth + (4) --extra-flags shlex
+      allowlist -> #845 (status no longer hardcoded done, timestamp evaluated
+      at execution via $_VNX_TS, shell-injection rejected; T0-direct-reviewed
+      PASS after 3x kimi-timeout, 129/129 PR tests green); (5) broker atomicity
+      orphan-window/claim TOCTOU + (6) SubprocessAdapter stderr drain -> #848;
+      (7) raw-spawn receipt-bypass guard generalized beyond claude -p to
+      kimi/codex CLIs -> #844 (closes the T0-live-observed gap where a raw kimi
+      call passed the hook unlogged on 2026-06-09).
 
   - feature_id: roadmap-governance-hygiene
     title: "Roadmap/docs governance hygiene: PM-mutator enforcement, drift-snapshot freshness, stale ROADMAP docs archive, docs-truth pass"
@@ -1076,16 +1118,48 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: in-progress
+    pr_queue:
+      - pr_id: "#846"
+        title: "docs: truth-pass for 1.0 launch — version labels, ADR amendments, surface sync, provenance"
+        status: merged
+        risk_class: low
     notes: >
-      Ops-sweep RC: PM-skill-sole-mutator is prose only — add a guard
-      (commit touching ROADMAP.yaml must reference a dispatch-ID, or
-      explicitly document it as convention); planning_drift.json was 7 days
-      stale with 13 divergences — run track_reconciler in the nightly
-      pipeline; archive claudedocs/strategy/ROADMAP.md (May, refers to
-      nonexistent companion SSOT) and update docs/manifesto/ROADMAP.md
-      (unaware of 1.0.1/1.1 cuts). Docs-truth pass from sweep R10/K4:
-      GETTING_STARTED post-line-130 V8.2-era content (client fragment already
-      in LB-4), 00_VNX_ARCHITECTURE.md 'Version 12.0.0/V8.2', ADR-015 Path-D
-      amendment (CL3 relaxation), manifesto 'prototype' disclaimer, QUICKSTART
-      /MIGRATION_GUIDE pip-surface list sync (add migrate/track/dream).
+      Ops-sweep RC. DOCS-TRUTH SUB-ITEM CLOSED 2026-06-11 via #846
+      (docs-only, no gate required): version labels corrected, ADR-015 Path-D
+      amendment landed, pip-surface list synced (migrate/track/dream),
+      provenance pass. STILL OPEN (keeps this in-progress): PM-skill-sole-
+      mutator is prose only — add a guard (commit touching ROADMAP.yaml must
+      reference a dispatch-ID, or explicitly document it as convention);
+      planning_drift.json was 7 days stale with 13 divergences — run
+      track_reconciler in the nightly pipeline; archive
+      claudedocs/strategy/ROADMAP.md (May, refers to nonexistent companion
+      SSOT) and update docs/manifesto/ROADMAP.md (unaware of 1.0.1/1.1 cuts).
+
+  - feature_id: injection-history-suppression
+    title: "Self-learning quality: injection-history-aware suppression breaks 93% duplicate dominance"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on:
+      - gap4-self-learning-reactivation
+    milestone: "1.0.1"
+    status: done
+    pr_queue:
+      - pr_id: "#850"
+        title: "fix(selflearn): injection-history-aware suppression breaks duplicate dominance (93% dup root-cause)"
+        status: merged
+        risk_class: medium
+    notes: >
+      CLOSED 2026-06-11 via #850 (kimi-gated PASS). Ops-sweep finding: the
+      reactivated self-learning loop (GAP 4) was re-injecting ~93% duplicate
+      patterns — a handful of high-frequency patterns dominated every
+      injection cycle, starving diversity and making the loop low-value
+      despite running nightly. Root-caused to history-blind selection. Fix
+      makes injection selection injection-history-aware so already-injected
+      patterns are suppressed, breaking the duplicate-dominance feedback loop
+      and restoring injection diversity. This is the substance behind the
+      operator question 'does the self-learning loop work correctly again' —
+      the loop ran but its output was near-duplicate noise; now it surfaces
+      fresh patterns.

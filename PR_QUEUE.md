@@ -7,8 +7,8 @@
 
 ## Progress Overview
 Launch status: **pre-launch** (version 1.0.0)
-Last verified: 2026-06-10 against origin/main@bfe37501
-Merged launch PRs: 39 | Queued: 0
+Last verified: 2026-06-10 against origin/main@bb8f6159
+Merged launch PRs: 49 | Queued: 0
 
 ## Status
 
@@ -50,8 +50,18 @@ Merged launch PRs: 39 | Queued: 0
 - #840 — fix(audit-chain): distinguish unchained from broken ledger in verify (LB-5) [feature=launch-sweep-blockers]
 - #835 — fix(init): wire governance hooks block into scaffolded settings.json (LB-6) [feature=launch-sweep-blockers]
 - #839 — docs(changelog): add [1.0.0] release entry (LB-7) [feature=launch-sweep-blockers]
+- #838 — fix(nightly): python3.9 compat (from __future__ import annotations) + version guard [feature=nightly-pipeline-python-compat]
+- #842 — fix(schema-init): view-ordering on legacy DBs unblocks v22/v23 (phase-0 failure mode 2) [feature=nightly-pipeline-python-compat]
 - #837 — fix(digest): event-type filter + canonical outcome vocabulary (fix A + event_type fallback) [feature=outcome-normalization]
+- #847 — feat(outcome): dispatch_metadata backfill tool + contract_invalid vocab sync (gate-F2) [feature=outcome-normalization]
 - #833 — feat(dashboard): lane-aware agent stream (incl. ops-completion commit 54b96194) [feature=dashboard-ops-completion]
+- #849 — feat(tracks): oi-lifecycle-closure — track done, oi-close, dispatch linkage backfill, status --tracks [feature=oi-lifecycle-closure]
+- #843 — fix(observability): unify state/events path resolution + events_path receipt pointer (H2, item 1) [feature=sweep-hardening-batch1]
+- #844 — fix(routing): resolve kimi lane/constraint conflict + generalize raw-spawn guard to provider CLIs (items 2+7) [feature=sweep-hardening-batch1]
+- #845 — fix(tmux-lane): truthful completion receipts + extra-flags quoting (H3/H5, items 3+4) [feature=sweep-hardening-batch1]
+- #848 — fix(dispatch): broker atomicity (orphan window, claim TOCTOU) + adapter pipe hygiene (H1/H6, items 5+6) [feature=sweep-hardening-batch1]
+- #846 — docs: truth-pass for 1.0 launch — version labels, ADR amendments, surface sync, provenance [feature=roadmap-governance-hygiene]
+- #850 — fix(selflearn): injection-history-aware suppression breaks duplicate dominance (93% dup root-cause) [feature=injection-history-suppression]
 
 ## Remaining Launch Blockers
 - LB-3 (operator): PyPI publish go (artifacts verified + staged) -> pip install from PyPI check -> git tag v1.0.0 + GitHub release. Optional: central-install refresh + TestPyPI dry-run first. LB-4..LB-7 resolved 2026-06-10 (#833/#835/#836/#839/#840, see launch-sweep-blockers).
