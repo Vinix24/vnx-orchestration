@@ -144,6 +144,16 @@ def _match_by_slug(
 ) -> list[str]:
     """H2: return candidate track_ids whose ALL significant tokens appear in dispatch_id.
 
+    Tokenisation: both the dispatch_id and each track_id are split on [-_]
+    separators only. This is token-based matching on [-_]-separated segments,
+    NOT word-boundary-aware in the regex sense — substrings within a segment
+    are not treated as separate tokens.
+
+    Limitation: track_ids that share many tokens with a dispatch_id prefix
+    (e.g. 'feat-alpha' vs. dispatch '20260501-feat-alpha-extra-work') will
+    match even when the dispatch relates to a sub-task. Prefer H1 (PR-number)
+    whenever available; treat H2 matches as medium-confidence only.
+
     A token is significant when it is at least 4 characters long. Short tokens
     like 'feat', 'fix', 'pr' are common prefixes shared by many track_ids and
     dispatch_ids and produce false positives when matched alone.
@@ -217,8 +227,12 @@ def compute_matches(db_path: Path, project_id: str) -> list[MatchResult]:
                 state=row["state"],
             )
 
-            # Already linked to a real feature track_id?
-            if d.current_track and d.current_track in track_id_set:
+            # Skip dispatches whose track column already points to a feature
+            # track_id.  Legacy labels (A/B/C/T1-T3) and NULL are candidates
+            # for relinking; anything else that isn't a known feature track_id
+            # is also treated as a candidate (conservative: attempt, then
+            # fall through to unmatched rather than silently skip).
+            if not _is_legacy_track(d.current_track) and d.current_track in track_id_set:
                 results.append(MatchResult(
                     dispatch=d,
                     matched_track_id=d.current_track,
