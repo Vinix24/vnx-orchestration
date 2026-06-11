@@ -82,10 +82,29 @@ def _resolve_data_dir() -> Path:
 
 
 def _resolve_state_dir() -> Path:
-    """Resolve VNX state directory: CENTRAL by default; VNX_STATE_DIR honored when set."""
+    """Resolve VNX state directory: CENTRAL ($HOME/.vnx-data/<project_id>/state) by default.
+
+    VNX_STATE_DIR override is honored ONLY when VNX_DATA_DIR_EXPLICIT=1 is also set,
+    mirroring the guard on _resolve_data_dir() (OI-126, sweep H2).  A VNX_STATE_DIR
+    value present in the shell environment WITHOUT the explicit flag is silently ignored
+    with a warning so a tmp-worktree dispatch that inherited the parent shell's
+    VNX_STATE_DIR does not scatter its state into the wrong project directory.
+
+    Resolution order:
+    1. VNX_DATA_DIR_EXPLICIT=1 + VNX_STATE_DIR set → use VNX_STATE_DIR
+    2. Otherwise → _resolve_data_dir() / "state"  (central ledger, same source of truth
+       as receipts and unified reports)
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
     env = os.environ.get("VNX_STATE_DIR", "")
-    if env:
-        return Path(env)
+    if env and not explicit_flag:
+        logger.warning(
+            "_resolve_state_dir: VNX_STATE_DIR=%r ignored (VNX_DATA_DIR_EXPLICIT not set); "
+            "falling back to central state dir to prevent cross-project pollution (OI-126 H2)",
+            env,
+        )
+    if explicit_flag and env:
+        return Path(env).resolve()
     return _resolve_data_dir() / "state"
 
 
@@ -405,8 +424,20 @@ def _emit_governance(
     start_time: datetime,
     end_time: datetime,
     status: str,
+    *,
+    event_store: "Optional[Any]" = None,
 ) -> None:
     """Emit dispatch receipt + unified report after every spawn handler call.
+
+    When *event_store* is provided the function archives the live event stream
+    (terminal → events/archive/{terminal}/{dispatch_id}.ndjson) BEFORE writing
+    the receipt so the receipt can carry an ``events_path`` pointer to the
+    archived file.  Callers that pass an event_store must NOT call
+    event_store.clear() separately — clear() is called here after the archive
+    so the sequence is always: archive → receipt (with pointer) → clear.
+
+    Lanes that produce no event stream (tmux, claude subprocess) pass
+    event_store=None (default); the receipt then carries ``events_path: null``.
 
     Transient OSError/RuntimeError (rename collision, brief lock) retries up to
     _EMIT_MAX_RETRIES times with exponential backoff.  After exhausting retries,
@@ -426,6 +457,22 @@ def _emit_governance(
     # up front so the receipt can carry the linkage even though the report write
     # happens afterward (the path string is stable regardless of write order).
     report_path = data_dir / "unified_reports" / f"{args.dispatch_id}.md"
+
+    # Archive the event stream NOW so the receipt pointer is stable.  The live
+    # file is archived here; clear() follows below after the receipt is written.
+    # This is the single authoritative archive call when event_store is wired in
+    # — callers must not call clear() themselves when they pass event_store here.
+    events_path: Optional[str] = None
+    if event_store is not None:
+        try:
+            archived = event_store.archive(args.terminal_id, args.dispatch_id)
+            if archived is not None:
+                events_path = str(archived)
+        except Exception as _arch_exc:
+            logger.warning(
+                "_emit_governance: event archive failed for dispatch=%s (non-fatal): %s",
+                args.dispatch_id, _arch_exc,
+            )
 
     # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
     from provider_costs import emit_provider_cost  # noqa: PLC0415
@@ -461,6 +508,7 @@ def _emit_governance(
                 cost_usd=cost_usd,
                 state_dir=state_dir,
                 report_path=str(report_path),
+                events_path=events_path,
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
@@ -483,6 +531,14 @@ def _emit_governance(
                 _EMIT_MAX_RETRIES, exc,
             )
             raise
+
+    # Clear (truncate) the live event file now that the archive + receipt are done.
+    # Only when event_store is wired in — otherwise the caller's finally block handles it.
+    if event_store is not None:
+        try:
+            event_store.clear(args.terminal_id)
+        except Exception as _clr_exc:
+            logger.debug("_emit_governance: event_store.clear failed (non-fatal): %s", _clr_exc)
 
     frontmatter = _build_frontmatter(
         args, provider, model_used, result, duration, token_usage, cost_usd,
@@ -848,30 +904,27 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         end_time = datetime.now(timezone.utc)
 
         if result.error:
-            _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
+            _emit_governance(args, "codex", model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_codex failed: {result.error}", file=sys.stderr)
             return 1
         if result.timed_out:
-            _emit_governance(args, "codex", model, result, start_time, end_time, "timeout")
+            _emit_governance(args, "codex", model, result, start_time, end_time, "timeout", event_store=event_store)
             print("spawn_codex timed out", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
+            _emit_governance(args, "codex", model, result, start_time, end_time, "failure", event_store=event_store)
             return 1
         if result.event_writer_failures > 0:
             logger.error(
                 "codex dispatch completed but %d event_writer failures occurred — audit gap",
                 result.event_writer_failures,
             )
-            _emit_governance(args, "codex", model, result, start_time, end_time, "success")
+            _emit_governance(args, "codex", model, result, start_time, end_time, "success", event_store=event_store)
             return 2
-        _emit_governance(args, "codex", model, result, start_time, end_time, "success")
+        _emit_governance(args, "codex", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        try:
-            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
-        except Exception as _exc:
-            logger.debug("_dispatch_codex: event archive+clear failed: %s", _exc)
+        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
         if isolation_cwd is not None:
             _remove_provider_worktree(args.dispatch_id)
 
@@ -1150,30 +1203,27 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         end_time = datetime.now(timezone.utc)
 
         if result.error:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
             return 1
         if result.timed_out:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout")
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout", event_store=event_store)
             print("spawn_litellm timed out", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
             return 1
         if result.event_writer_failures > 0:
             logger.error(
                 "litellm dispatch completed but %d event_writer failures occurred — audit gap",
                 result.event_writer_failures,
             )
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
             return 2
-        _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        try:
-            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
-        except Exception as _exc:
-            logger.debug("_dispatch_litellm: event archive+clear failed: %s", _exc)
+        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
         if isolation_cwd_litellm is not None:
             _remove_provider_worktree(args.dispatch_id)
 
@@ -1217,30 +1267,27 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         end_time = datetime.now(timezone.utc)
 
         if result.error:
-            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_kimi failed: {result.error}", file=sys.stderr)
             return 1
         if result.timed_out:
-            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "timeout")
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "timeout", event_store=event_store)
             print("spawn_kimi timed out", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure", event_store=event_store)
             return 1
         if result.event_writer_failures > 0:
             logger.error(
                 "kimi dispatch completed but %d event_writer failures occurred — audit gap",
                 result.event_writer_failures,
             )
-            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success", event_store=event_store)
             return 2
-        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
+        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        try:
-            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
-        except Exception as _exc:
-            logger.debug("_dispatch_kimi: event archive+clear failed: %s", _exc)
+        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
         if isolation_cwd_kimi is not None:
             _remove_provider_worktree(args.dispatch_id)
 
@@ -1322,23 +1369,21 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         model_used = result.model or model
 
         if result.error:
-            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_deepseek_harness failed: {result.error}", file=sys.stderr)
             return 1
         if result.timed_out:
-            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "timeout")
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "timeout", event_store=event_store)
             print("spawn_deepseek_harness timed out", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
             return 1
-        _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success")
+        _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        try:
-            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
-        except Exception as _exc:
-            logger.debug("_dispatch_deepseek_harness: event archive+clear failed: %s", _exc)
+        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
+        pass
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -1377,30 +1422,27 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         end_time = datetime.now(timezone.utc)
 
         if result.error:
-            _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
             return 1
         if result.timed_out:
-            _emit_governance(args, "gemini", model, result, start_time, end_time, "timeout")
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "timeout", event_store=event_store)
             print("spawn_gemini timed out", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "failure", event_store=event_store)
             return 1
         if result.event_writer_failures > 0:
             logger.error(
                 "gemini dispatch completed but %d event_writer failures occurred — audit gap",
                 result.event_writer_failures,
             )
-            _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "success", event_store=event_store)
             return 2
-        _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
+        _emit_governance(args, "gemini", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        try:
-            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
-        except Exception as _exc:
-            logger.debug("_dispatch_gemini: event archive+clear failed: %s", _exc)
+        # event_store archive+clear is handled inside _emit_governance when event_store is wired in.
         if isolation_cwd_gemini is not None:
             _remove_provider_worktree(args.dispatch_id)
 

@@ -54,6 +54,7 @@ def emit_dispatch_receipt(
     cost_usd: Optional[float],
     state_dir: Path,
     report_path: Optional[str] = None,
+    events_path: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson. fcntl.flock for concurrent safety.
 
@@ -62,6 +63,12 @@ def emit_dispatch_receipt(
     ``report_path`` links the receipt to its emitted unified report. The path is
     deterministic (``unified_reports/<dispatch_id>.md``) so the caller can supply
     it even when the report is written after the receipt.
+
+    ``events_path`` links the receipt to the archived NDJSON event stream for this
+    dispatch (``events/archive/{terminal}/{dispatch_id}.ndjson``).  Null when the
+    dispatch lane produces no event stream (tmux, claude subprocess) or when the
+    archive step was skipped.  Turns dispatch→stream linkage from convention
+    (matching dispatch_id in the filename) into an explicit data pointer.
 
     Raises:
         ValueError: provider field doesn't match required pattern
@@ -86,6 +93,7 @@ def emit_dispatch_receipt(
         "findings": findings,
         "pr_id": pr_id,
         "report_path": report_path,
+        "events_path": events_path,
         "timestamp": now_ts,
         "recorded_at": recorded_ts,
     }
