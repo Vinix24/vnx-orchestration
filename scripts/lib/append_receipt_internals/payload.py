@@ -373,7 +373,11 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
     """Wire dispatch outcome into pattern confidence scores (best-effort)."""
     try:
         SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
-        FAILURE_STATUSES = {"failed", "failure", "error", "blocked"}
+        # Keep in sync with check_active_drain.FAILURE_STATUSES,
+        # weekly_digest._FAILURE_STATUSES, and receipt_classifier._FAILURE_STATUSES
+        # (gate-F2). contract_invalid = report-body-contract failure → semantically
+        # a failure; confidence scoring should treat it as such.
+        FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "contract_invalid"}
 
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()
