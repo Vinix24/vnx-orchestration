@@ -1,6 +1,7 @@
 """Tests for pretooluse_block_raw_claude_spawn.sh and pretooluse_spawn_detector.py.
 
 Covers:
+  claude:
   - BLOCK: claude -p, claude --print, claude --dangerously-skip-permissions
   - BLOCK: background/nohup/bash-c/pipe variants of the above
   - BLOCK: combined flags in any order
@@ -8,8 +9,19 @@ Covers:
   - ALLOW: python3 scripts/lib/provider_dispatch.py   (governed wrapper)
   - ALLOW: claude --version, claude --help (benign)
   - ALLOW: interactive claude (no blocked flags)
-  - ALLOW: non-Bash tool calls (Write, Read, etc.)
   - ALLOW: grep -p (grep's -p should not trigger claude guard)
+
+  kimi (live-proven bypass gap 2026-06-09):
+  - BLOCK: kimi --print / kimi -p (prompt-executing, bypasses receipt trail)
+  - BLOCK: nohup/background/pipe variants of kimi --print
+  - ALLOW: kimi login / kimi --version / kimi --help / bare kimi (benign)
+
+  codex:
+  - BLOCK: codex exec <args> (prompt-executing, bypasses receipt trail)
+  - ALLOW: codex --version / codex --help / bare codex (benign)
+
+  general:
+  - ALLOW: non-Bash tool calls (Write, Read, etc.)
   - JSON output contract: decision + reason on block, empty on allow
   - Exit code always 0
 """
@@ -165,6 +177,108 @@ class TestClassifyDirect:
         assert classify("cat /home/user/.config/claude/settings.json") == "allow"
 
 
+# ── Kimi provider tests ───────────────────────────────────────────────────────
+
+class TestClassifyKimi:
+    """Unit tests for kimi CLI spawn detection.
+
+    Live-proven bypass gap (2026-06-09): raw `kimi --print` bypassed the receipt
+    trail the same way `claude -p` did. These tests lock the guard in place.
+    """
+
+    # Blocked cases
+    def test_classify_blocks_kimi_print(self):
+        assert classify("kimi --print 'write me a summary'") == "block"
+
+    def test_classify_blocks_kimi_dash_p(self):
+        assert classify('kimi -p "do the thing"') == "block"
+
+    def test_classify_blocks_kimi_print_background(self):
+        assert classify('kimi --print "task" &') == "block"
+
+    def test_classify_blocks_kimi_print_nohup(self):
+        assert classify('nohup kimi --print "task" &') == "block"
+
+    def test_classify_blocks_kimi_print_pipe(self):
+        assert classify('kimi --print "task" | grep result') == "block"
+
+    def test_classify_blocks_kimi_print_after_and(self):
+        assert classify('setup && kimi --print "go"') == "block"
+
+    def test_classify_blocks_kimi_dash_p_after_semicolon(self):
+        assert classify('cd /tmp; kimi -p "go"') == "block"
+
+    # Allowed cases
+    def test_classify_allows_kimi_login(self):
+        assert classify("kimi login") == "allow"
+
+    def test_classify_allows_kimi_version(self):
+        assert classify("kimi --version") == "allow"
+
+    def test_classify_allows_kimi_short_version(self):
+        assert classify("kimi -v") == "allow"
+
+    def test_classify_allows_kimi_help(self):
+        assert classify("kimi --help") == "allow"
+
+    def test_classify_allows_kimi_short_help(self):
+        assert classify("kimi -h") == "allow"
+
+    def test_classify_allows_bare_kimi(self):
+        assert classify("kimi") == "allow"
+
+    def test_classify_allows_kimi_in_path(self):
+        """'kimi' in a file path must not trigger the guard."""
+        assert classify("cat /home/user/.kimi/config.json") == "allow"
+
+    def test_classify_allows_provider_dispatch_kimi(self):
+        """Governed wrapper invocation for kimi must always be allowed."""
+        assert classify("python3 scripts/lib/provider_dispatch.py --provider kimi") == "allow"
+
+
+# ── Codex provider tests ──────────────────────────────────────────────────────
+
+class TestClassifyCodex:
+    """Unit tests for codex CLI spawn detection."""
+
+    # Blocked cases
+    def test_classify_blocks_codex_exec(self):
+        assert classify("codex exec --json") == "block"
+
+    def test_classify_blocks_codex_exec_with_prompt(self):
+        assert classify('codex exec --json "write a function"') == "block"
+
+    def test_classify_blocks_codex_exec_background(self):
+        assert classify("codex exec --json &") == "block"
+
+    def test_classify_blocks_codex_exec_nohup(self):
+        assert classify("nohup codex exec --json &") == "block"
+
+    def test_classify_blocks_codex_exec_pipe(self):
+        assert classify("codex exec --json | tee output.json") == "block"
+
+    def test_classify_blocks_codex_exec_after_and(self):
+        assert classify("setup && codex exec --json") == "block"
+
+    # Allowed cases
+    def test_classify_allows_codex_version(self):
+        assert classify("codex --version") == "allow"
+
+    def test_classify_allows_codex_help(self):
+        assert classify("codex --help") == "allow"
+
+    def test_classify_allows_bare_codex(self):
+        assert classify("codex") == "allow"
+
+    def test_classify_allows_provider_dispatch_codex(self):
+        """Governed wrapper invocation for codex must always be allowed."""
+        assert classify("python3 scripts/lib/provider_dispatch.py --provider codex") == "allow"
+
+    def test_classify_allows_codex_in_path(self):
+        """'codex' in a file path must not trigger the guard."""
+        assert classify("ls /home/user/.codex/") == "allow"
+
+
 # ── Integration tests (full bash hook via subprocess) ─────────────────────────
 
 class TestHookBlockedCases:
@@ -241,6 +355,49 @@ class TestHookAllowedCases:
     def test_allows_non_bash_grep_tool(self):
         assert_allowed("Grep")
 
+    def test_allows_kimi_login(self):
+        assert_allowed("Bash", "kimi login")
+
+    def test_allows_kimi_version(self):
+        assert_allowed("Bash", "kimi --version")
+
+    def test_allows_kimi_help(self):
+        assert_allowed("Bash", "kimi --help")
+
+    def test_allows_codex_version(self):
+        assert_allowed("Bash", "codex --version")
+
+    def test_allows_codex_help(self):
+        assert_allowed("Bash", "codex --help")
+
+
+class TestHookBlockedProviderCLIs:
+    """Full hook execution — kimi and codex blocked cases."""
+
+    def test_blocks_kimi_print(self):
+        assert_blocked("Bash", 'kimi --print "write a summary"')
+
+    def test_blocks_kimi_dash_p(self):
+        assert_blocked("Bash", 'kimi -p "do the thing"')
+
+    def test_blocks_kimi_print_background(self):
+        assert_blocked("Bash", 'kimi --print "task" &')
+
+    def test_blocks_kimi_print_after_and(self):
+        assert_blocked("Bash", 'setup && kimi --print "go"')
+
+    def test_blocks_codex_exec(self):
+        assert_blocked("Bash", "codex exec --json")
+
+    def test_blocks_codex_exec_background(self):
+        assert_blocked("Bash", "codex exec --json &")
+
+    def test_blocks_codex_exec_after_and(self):
+        assert_blocked("Bash", "setup && codex exec --json")
+
+    def test_blocks_codex_exec_with_pipe(self):
+        assert_blocked("Bash", "codex exec --json | tee output.json")
+
 
 class TestHookOutputContract:
     """Block output must be valid JSON with the required fields."""
@@ -265,6 +422,14 @@ class TestHookOutputContract:
 
     def test_reason_mentions_receipt(self):
         data = assert_blocked("Bash", 'claude --dangerously-skip-permissions')
+        assert "receipt" in data["reason"].lower()
+
+    def test_block_kimi_has_receipt_in_reason(self):
+        data = assert_blocked("Bash", 'kimi --print "task"')
+        assert "receipt" in data["reason"].lower()
+
+    def test_block_codex_has_receipt_in_reason(self):
+        data = assert_blocked("Bash", "codex exec --json")
         assert "receipt" in data["reason"].lower()
 
     def test_allow_produces_no_stdout(self):
