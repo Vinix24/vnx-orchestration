@@ -133,13 +133,15 @@ def test_opt_in_deepseek_requires_flag() -> None:
 
 def test_review_routes_to_kimi() -> None:
     decision = decide_lane("code-review", complexity="medium", env=_env())
-    assert decision.lane == "litellm:moonshot:kimi-k2-0905-default"
+    # review-analysis must route to the kimi CLI lane, not litellm:moonshot
+    # (kimi-via-cli-only constraint: litellm:moonshot is blocking).
+    assert decision.lane == "kimi"
     assert decision.rule_name == "review-analysis"
 
 
 def test_analysis_routes_to_kimi() -> None:
     decision = decide_lane("analysis", complexity="low", env=_env())
-    assert decision.lane == "litellm:moonshot:kimi-k2-0905-default"
+    assert decision.lane == "kimi"
 
 
 def test_research_high_routes_to_opus() -> None:
@@ -155,8 +157,8 @@ def test_research_high_routes_to_opus() -> None:
 
 def test_fallback_chain_resolution_deepseek() -> None:
     decision = decide_lane("code-review", complexity="medium", env=_env())
-    # review-analysis -> litellm:moonshot:kimi-k2-0905-default
-    # Its fallback chain: litellm:moonshot:* -> [litellm:deepseek:..., claude/sonnet-4-6]
+    # review-analysis -> kimi (CLI lane)
+    # Its fallback chain: kimi -> [litellm:deepseek:deepseek-v4-pro, claude/sonnet-4-6]
     assert "claude/sonnet-4-6" in decision.fallback_chain
 
 
@@ -217,3 +219,72 @@ def test_routing_decision_has_required_fields() -> None:
 def test_routing_decision_returns_rationale() -> None:
     decision = decide_lane("lint-narrow", complexity="low", env=_env())
     assert decision.rationale  # non-empty rationale from yaml
+
+
+# ---------------------------------------------------------------------------
+# Cross-check: routing_policy lanes × provider_constraints (C2 unit test)
+#
+# Ensures that every non-Claude lane in routing_policy.yaml is NOT blocked by
+# any provider_constraints.yaml entry when passed as a plain --provider arg.
+# Catches the kimi-via-cli-only / litellm:moonshot collision structurally.
+# ---------------------------------------------------------------------------
+
+
+def _parse_lane_provider(lane: str) -> tuple:
+    """Split a lane string into (provider, sub_provider, via) for constraint check.
+
+    Examples:
+      "kimi"                               -> ("kimi", None, None)
+      "litellm:deepseek:deepseek-v4-pro"  -> ("litellm", "deepseek", None)
+      "litellm:moonshot:kimi-k2-0905-..."  -> ("litellm", "moonshot", None)
+      "claude/sonnet-4-6"                  -> ("claude", None, None)  # skip
+    """
+    if lane.startswith("litellm:"):
+        parts = lane.split(":", 2)
+        sub = parts[1] if len(parts) > 1 else None
+        return "litellm", sub, None
+    if "/" in lane:
+        return lane.split("/", 1)[0], None, None
+    return lane, None, None
+
+
+def test_policy_lanes_pass_constraint_preflight() -> None:
+    """Every non-Claude lane in routing_policy.yaml must not violate provider_constraints.
+
+    This is the structural cross-check for the kimi-via-cli-only conflict
+    (sweep H4, 2026-06-11). Any litellm:moonshot lane would trigger a blocking
+    violation here; the corrected 'kimi' lane must pass cleanly.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
+    from providers.constraint_enforcer import ConstraintEnforcer, ConstraintViolationError
+
+    policy = load_routing_policy(_POLICY_PATH)
+    enforcer = ConstraintEnforcer()
+
+    # Collect all unique lanes from rules + fallback_chain values
+    lanes: set = set()
+    for rule in policy.get("rules", []):
+        lanes.add(rule.get("lane", ""))
+    for chain in policy.get("fallback_chain", {}).values():
+        if isinstance(chain, list):
+            lanes.update(chain)
+    lanes.discard("")
+
+    # Only check non-Claude lanes (Claude lane constraint violations are warn-only
+    # and depend on terminal_id context, not on lane parsing alone)
+    non_claude_lanes = {lane for lane in lanes if not lane.startswith("claude/")}
+
+    violations_found: list[str] = []
+    for lane in sorted(non_claude_lanes):
+        provider, sub_provider, via = _parse_lane_provider(lane)
+        try:
+            enforcer.enforce(provider=provider, sub_provider=sub_provider, via=via)
+        except ConstraintViolationError as exc:
+            violations_found.append(f"lane={lane!r}: [{exc.code}] {exc.message}")
+
+    assert not violations_found, (
+        "routing_policy.yaml contains lanes that violate provider_constraints.yaml:\n"
+        + "\n".join(f"  - {v}" for v in violations_found)
+        + "\n\nFix: update the lane in routing_policy.yaml to a non-blocked provider."
+    )

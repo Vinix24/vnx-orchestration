@@ -28,13 +28,13 @@ rules:
       complexity: ["medium"]
       opt_in_flag: "VNX_USE_CHEAP_LANE"  # operator opt-in only
     lane: "litellm:deepseek:deepseek-v4-pro"  # $0.28/$0.40 - 10x cheaper input than Sonnet
-    rationale: "Mid-complexity code with operator opt-in; DeepSeek V3.2 ranks competitive on coding"
+    rationale: "Mid-complexity code with operator opt-in; deepseek-v4-pro ranks competitive on coding benchmarks"
 
   - name: review-analysis
     when:
       task_class: ["code-review", "analysis", "summarization"]
-    lane: "litellm:moonshot:kimi-k2-0905-default"  # $0.60/$2.50 - 5x cheaper
-    rationale: "Long-context review benefits from Kimi K2-0905-preview's depth at lower cost"
+    lane: "kimi"  # kimi CLI OAuth lane — kimi-via-cli-only constraint enforced
+    rationale: "Long-context review/analysis routes to the Kimi K2 CLI lane (OAuth, $0 subscription quota). litellm:moonshot is blocked by kimi-via-cli-only (provider_constraints.yaml)."
 
   - name: research-deep
     when:
@@ -44,10 +44,17 @@ rules:
     rationale: "Architect-level work warrants Opus quality"
 
 # Fallback chain when preferred lane fails (API down, rate-limited, etc)
+#
+# STATUS (2026-06-11, sweep H4 routing-conflict fix): this block is ADVISORY
+# only. No runner or dispatcher currently reads fallback_chain at runtime.
+# Entries document intended fallback behaviour; they do NOT trigger automatic
+# lane switching on their own. The kimi entry below reflects the corrected
+# kimi CLI lane — litellm:moonshot:* entries are kept for reference but
+# litellm:moonshot routing is blocked by kimi-via-cli-only (OI-223).
 fallback_chain:
-  "litellm:deepseek:*": ["litellm:moonshot:kimi-k2-0905-default", "claude/sonnet-4-6"]
-  "litellm:moonshot:*": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-4-6"]
-  "litellm:zai:*": ["litellm:moonshot:kimi-k2-0905-default", "claude/sonnet-4-6"]
+  "litellm:deepseek:*": ["kimi", "claude/sonnet-4-6"]
+  "kimi": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-4-6"]
+  "litellm:zai:*": ["kimi", "claude/sonnet-4-6"]
   "claude/haiku-4-5": ["claude/sonnet-4-6"]
   # Sonnet and Opus have no fallback (they are the safety net)
 
