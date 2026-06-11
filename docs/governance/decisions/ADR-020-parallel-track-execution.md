@@ -63,6 +63,10 @@ The track layer (FUT-1, FUT-2a, FUT-2b) is shipped. Four build items remain for 
 - **(c)** Serialize `git worktree add` calls (lock around creation to fix `.git/config` race observed 2026-05-30)
 - **(d)** Serialized-merge + auto-rebase-and-regate orchestration in `roadmap_manager`/autopilot-tick
 
+## Implementation Status (as of VNX 1.0.0)
+
+Design accepted; substrate shipped (per-dispatch worktree isolation, atomic dispatch claiming, N-worker lanes, track DAL + CLI, human-gate primitive — all in 1.0.0). True parallel concurrent activation remains **Tier 3 — designed, not built**. The four build items listed in the Implementation section above (file_scope field, wave-scheduler, git-config race fix, serialized-merge + auto-rebase) are not shipped. Sequential single-active-plus-park is the operational mode in 1.0.0. Do not claim parallel activation as a shipped feature.
+
 ## Cross-references
 
 - ADR-007 — Multi-tenant composite PK/UNIQUE over `project_id` (binding for all track tables)

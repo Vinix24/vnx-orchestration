@@ -3,7 +3,8 @@
 This guide covers migration paths from legacy VNX patterns to the upgraded system. Each section describes what changed, why, and how to migrate.
 
 Plain `vnx` means the pip-installed Python CLI and is intentionally limited to
-`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, and `update`.
+`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`,
+`dream`, `version`, and `update`.
 Operator commands in this guide run through the repo-local bash entrypoint
 `./bin/vnx` from the repository root.
 

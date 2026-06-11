@@ -2,21 +2,21 @@
 **Owner**: T-MANAGER
 
 **Version**: V7.3 (Template Compilation System) — **LEGACY REFERENCE**
-**Status**: Reference (V8.2 is current production)
+**Status**: Reference (Dispatcher V8.2 is the production component in VNX 1.0.0)
 **Last Updated**: 2026-02-18
 **Purpose**: V7.3 template compilation reference. For current production dispatcher, see V8 section below.
 
 ---
 
 > **NOTE**: This document describes the V7.3 template compilation dispatcher which is no longer
-> the production dispatcher. **V8.2 Minimal** (`dispatcher_minimal.sh`) is the current
-> production system. V7 is maintained as a reference and rollback option.
+> the production dispatcher. **Dispatcher V8.2 Minimal** (`dispatcher_minimal.sh`) is the current
+> production component (VNX 1.0.0). V7 is maintained as a reference and rollback option.
 >
 > For architecture overview, see `core/00_VNX_ARCHITECTURE.md`.
 
 ---
 
-## V8.2 Production Dispatcher (Current)
+## Dispatcher Component V8.2 — Production in VNX 1.0.0
 
 ### Overview
 
@@ -24,7 +24,7 @@ The V8 dispatcher (`dispatcher_minimal.sh`) replaces V7's template compilation w
 
 ### Key Differences from V7
 
-| Feature | V7.3 | V8.2 |
+| Feature | Dispatcher V7.3 | Dispatcher V8.2 |
 |---------|------|------|
 | Token per dispatch | ~1500 | ~200 |
 | Template compilation | Yes (agent library) | No (native skills) |
@@ -44,7 +44,7 @@ The V8 dispatcher (`dispatcher_minimal.sh`) replaces V7's template compilation w
 
 The dispatcher detects the terminal's provider and uses the correct invocation format.
 
-### Receipt Footer (V8.2)
+### Receipt Footer (Dispatcher V8.2)
 
 Every dispatch includes a structured footer with:
 - **Report Metadata** block (Dispatch ID, PR, Track, Gate, Status) — parsed by receipt processor
@@ -53,7 +53,7 @@ Every dispatch includes a structured footer with:
 
 ### Parallel PR Queue Support
 
-V8.2 supports multiple PRs in progress simultaneously across different tracks:
+Dispatcher V8.2 supports multiple PRs in progress simultaneously across different tracks:
 - `pr_queue_state.yaml` stores `in_progress` as a list (not a single string)
 - Multiple tracks can run in parallel (e.g., PR-2 on Track A + PR-5 on Track B)
 - Backward compatible: reads old single-string format
@@ -1386,7 +1386,7 @@ cp /tmp/test_intelligence.md $VNX_HOME/dispatches/pending/
 - Pattern injection (top 5)
 - Prevention rules
 
-**V8.2** (Current Production — see top of document):
+**Dispatcher V8.2** (Current Production in VNX 1.0.0 — see top of document):
 - Native skill activation (87% token reduction)
 - Multi-provider dispatch (Claude/Codex/Gemini)
 - Rich receipt footer with Expected Outputs
@@ -1429,7 +1429,7 @@ cp /tmp/test_intelligence.md $VNX_HOME/dispatches/pending/
 
 ---
 
-**Document Status**: Legacy Reference (V8.2 is current production)
+**Document Status**: Legacy Reference (Dispatcher V8.2 is the production component in VNX 1.0.0)
 **Maintainer**: T-MANAGER (VNX Orchestration Expert)
 **Related Documents**:
 - `core/00_VNX_ARCHITECTURE.md` — Current architecture (V10.0)

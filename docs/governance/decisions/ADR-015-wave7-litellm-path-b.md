@@ -1,6 +1,6 @@
 # ADR-015: Wave 7 — DeepSeek/Kimi/GLM via LiteLLM Path B
 
-**Status**: Accepted
+**Status**: Accepted with Amendment (see CL3 below)
 **Date**: 2026-05-15
 **Deciders**: Vincent van Deth (operator)
 **Related ADRs**: ADR-003 (no SDK), ADR-010 (CLI subprocess canonical), ADR-016 (unified event shape)
@@ -75,6 +75,22 @@ Wave 7 lands in 5 PRs (plus 1 research-only):
 - **PR-7.6** (research-only): Tier-C network-namespace sandbox onderzoek voor Path D
 
 Effort: 5 elapsed days with VNX 3-track parallel, 9.5 days sequential.
+
+## Amendment (CL3, 2026-05-26)
+
+**Path D status updated from BLOCKED to Accepted with conditions.**
+
+Operator measurement on `claude` v2.1.150 (2026-05-26) with key-auth hardening showed the 8x telemetry leak documented in the original Path D assessment was specific to OAuth-subscription mode in v2.1.136. With own DeepSeek API key + hardening (`ANTHROPIC_BASE_URL` redirect + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + MCP disabled), operator measurement confirmed 0 calls to `api.anthropic.com` — the telemetry and OAuth-subscription-validation traffic that caused the original block is eliminated entirely in key-auth mode.
+
+**Amended constraints for Path D:**
+
+- PERMITTED: `ANTHROPIC_BASE_URL` redirect with own DeepSeek API key + hardening flags + MCP off.
+- BLOCKED: Same redirect while running on the production OAuth subscription without own key (subscription identity rides along = same ban risk as `no-anthropic-sdk` per ADR-003).
+- The Tier-C network-namespace sandbox (PR-7.6) remains recommended for production hardening but is no longer a prerequisite for operator use.
+
+This amendment does not modify the original text above. The original block reasoning was accurate for the conditions it described (v2.1.136, OAuth-subscription mode).
+
+Reference: `provider_constraints.yaml` constraint `deepseek-harness-subscription-blocked` encodes the amended rule as the machine-readable SSOT.
 
 ## See also
 
