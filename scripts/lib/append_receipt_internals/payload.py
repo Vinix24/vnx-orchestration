@@ -372,11 +372,15 @@ def append_receipt_payload(
 def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
     """Wire dispatch outcome into pattern confidence scores (best-effort)."""
     try:
-        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
+        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", "", "done"}
         # Keep in sync with check_active_drain.FAILURE_STATUSES,
         # weekly_digest._FAILURE_STATUSES, and receipt_classifier._FAILURE_STATUSES
         # (gate-F2). contract_invalid = report-body-contract failure → semantically
         # a failure; confidence scoring should treat it as such.
+        # "" is a payload-own addition (empty status string counts as success here).
+        # "timeout" is intentionally excluded: task_timeout events reach the else-return
+        # branch in _update_confidence_from_receipt and never arrive at this
+        # FAILURE_STATUSES status-match (pre-existing behaviour, kept deliberately).
         FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "contract_invalid"}
 
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()

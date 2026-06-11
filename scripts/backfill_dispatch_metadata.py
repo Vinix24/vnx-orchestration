@@ -78,8 +78,14 @@ def _normalize_status(raw: Optional[str]) -> str:
         return "success"
     if s in _FAILURE_STATUSES:
         return "failure"
-    # Substring fallback for non-canonical variants ("task_failed_hard" etc.)
-    if "fail" in s or "error" in s:
+    # Token-based fallback for non-canonical compound variants ("task_failed_hard",
+    # "deploy_error", etc.).  Split on separator characters so that "failsafe" or
+    # "trigger_failsafe_active" do NOT match — only discrete tokens "fail", "failed",
+    # "failure", "error", or "err" in the separated word list trigger this path.
+    import re as _re
+    tokens = set(_re.split(r"[_\-./]", s))
+    _FAILURE_TOKENS = {"fail", "failed", "failure", "error", "err"}
+    if tokens & _FAILURE_TOKENS:
         return "failure"
     return "unknown"
 
@@ -107,6 +113,7 @@ def _load_completion_receipts(receipts_file: Path) -> list[Dict[str, Any]]:
         return []
 
     results: list[Dict[str, Any]] = []
+    skipped_unparseable = 0
     with open(receipts_file, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -115,8 +122,10 @@ def _load_completion_receipts(receipts_file: Path) -> list[Dict[str, Any]]:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
+                skipped_unparseable += 1
                 continue
             if not isinstance(rec, dict):
+                skipped_unparseable += 1
                 continue
 
             event_type = str(rec.get("event_type") or rec.get("event") or "").lower().strip()
@@ -128,6 +137,14 @@ def _load_completion_receipts(receipts_file: Path) -> list[Dict[str, Any]]:
                 continue
 
             results.append(rec)
+
+    if skipped_unparseable:
+        import logging
+        logging.getLogger(__name__).warning(
+            "backfill_dispatch_metadata: skipped %d unparseable line(s) in %s",
+            skipped_unparseable,
+            receipts_file,
+        )
 
     return results
 
@@ -175,7 +192,10 @@ def _best_receipt_per_dispatch(
     """Collapse multiple completion receipts per dispatch_id to the 'best' one.
 
     Selection rule (mirrors link_receipts_to_dispatches fail-closed semantics):
-      - failure beats success beats unknown (fail-closed).
+      - failure beats unknown beats success (fail-closed).
+        Rationale: an explicit "unknown" outcome means we have no evidence the
+        dispatch succeeded, so it should not be superseded by a success receipt.
+        Failure always wins because a single failed receipt is proof enough.
       - Within the same outcome class, pick the latest timestamp.
     """
     _RANK = {"failure": 0, "unknown": 1, "success": 2}
@@ -323,7 +343,7 @@ def apply_backfill(
             # Update outcome_status only where it was NULL — never overwrite
             # an existing value (same contract as link_receipts_to_dispatches).
             if has_project_col:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE dispatch_metadata
                     SET outcome_status = ?, outcome_report_path = ?, completed_at = ?
@@ -338,7 +358,7 @@ def apply_backfill(
                     ),
                 )
             else:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE dispatch_metadata
                     SET outcome_status = ?, outcome_report_path = ?, completed_at = ?
@@ -351,7 +371,10 @@ def apply_backfill(
                         did,
                     ),
                 )
-            counts["updated"] += 1
+            if cursor.rowcount > 0:
+                counts["updated"] += 1
+            else:
+                counts["skipped"] += 1
 
         else:
             counts["skipped"] += 1

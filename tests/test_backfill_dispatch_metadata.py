@@ -161,6 +161,25 @@ class TestNormalizeStatus:
         assert bfm._normalize_status("contract_invalid") == "failure"
         assert bfm._normalize_status("CONTRACT_INVALID") == "failure"
 
+    def test_failsafe_does_not_map_to_failure(self):
+        """'failsafe' must NOT be treated as failure (it is not a failure token).
+
+        The old bare '"fail" in s' check would incorrectly classify this.
+        The token-split approach only matches discrete tokens: "fail", "failed",
+        "failure", "error", "err".  "failsafe" is none of those, so it returns "unknown".
+        """
+        assert bfm._normalize_status("failsafe") == "unknown"
+
+    def test_failsafe_mid_string_is_unknown(self):
+        """'trigger_failsafe_active' separates into tokens without any failure word."""
+        # Splits to ["trigger", "failsafe", "active"] — no token in _FAILURE_TOKENS.
+        assert bfm._normalize_status("trigger_failsafe_active") == "unknown"
+
+    def test_task_failed_hard_is_failure(self):
+        """Compound 'task_failed_hard' must still be classified as failure via token split."""
+        # Splits to ["task", "failed", "hard"] — "failed" is in _FAILURE_TOKENS.
+        assert bfm._normalize_status("task_failed_hard") == "failure"
+
 
 # ---------------------------------------------------------------------------
 # 2. _load_completion_receipts
@@ -215,6 +234,39 @@ class TestLoadCompletionReceipts:
         )
         result = bfm._load_completion_receipts(p)
         assert len(result) == 1
+
+    def test_skipped_unparseable_logged(self, tmp_path, caplog):
+        """Finding #4: unparseable lines must be counted and logged as one summary warning."""
+        import logging
+        p = tmp_path / "t0_receipts.ndjson"
+        p.write_text(
+            "{bad json}\n"
+            + json.dumps(_mk_receipt()) + "\n"
+            + "another bad line\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="backfill_dispatch_metadata"):
+            result = bfm._load_completion_receipts(p)
+        assert len(result) == 1
+        # Exactly one warning summarising both bad lines (no per-line spam).
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warning_msgs) == 1
+        assert "2" in warning_msgs[0]  # "skipped 2 unparseable"
+
+    def test_non_dict_json_lines_counted(self, tmp_path, caplog):
+        """Non-dict JSON values (list, string, int) are counted as unparseable."""
+        import logging
+        p = tmp_path / "t0_receipts.ndjson"
+        p.write_text(
+            "[1, 2, 3]\n"
+            + json.dumps(_mk_receipt()) + "\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="backfill_dispatch_metadata"):
+            result = bfm._load_completion_receipts(p)
+        assert len(result) == 1
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warning_msgs) == 1
 
     def test_handles_empty_file(self, tmp_path):
         p = tmp_path / "t0_receipts.ndjson"
@@ -486,6 +538,33 @@ class TestApplyBackfill:
         ).fetchone()
         conn.close()
         assert row[0] is None
+
+    def test_updated_teller_reflects_actual_rowcount(self, tmp_path):
+        """Finding #6: updated count must reflect cursor.rowcount, not unconditional increment.
+
+        Race condition: between _dispatches_needing_outcome_update() and the UPDATE
+        execution, another process could have filled the NULL. The WHERE outcome_status IS NULL
+        guard makes the UPDATE a no-op (rowcount=0). The counter must stay 0, not 1.
+        """
+        db = _mk_db(tmp_path)
+        # Seed a row with NULL outcome so it enters the null_outcome set.
+        _seed_row(db, "D1", outcome_status=None)
+
+        conn = sqlite3.connect(str(db))
+        # Pre-fill outcome_status before calling apply_backfill so the WHERE guard fires.
+        conn.execute(
+            "UPDATE dispatch_metadata SET outcome_status = 'success' WHERE dispatch_id = 'D1'"
+        )
+        conn.commit()
+
+        # null_outcome set was pre-computed with NULL, but the actual UPDATE finds no NULL row.
+        receipts = [_mk_receipt(dispatch_id="D1", status="failed")]
+        counts = bfm.apply_backfill(conn, receipts, "vnx-dev")
+        conn.close()
+
+        # The UPDATE fired but rowcount was 0 (no NULL row matched).
+        assert counts["updated"] == 0
+        assert counts["skipped"] == 1
 
     def test_large_batch_idempotent(self, tmp_path):
         """100-receipt batch is idempotent on second apply."""
