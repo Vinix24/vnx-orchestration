@@ -643,6 +643,189 @@ class TestBrokerIdempotency(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestWriteAtomicCleanup — Fix 3: tmp file cleanup on write failure
+# ---------------------------------------------------------------------------
+
+class TestWriteAtomicCleanup(unittest.TestCase):
+    """_write_atomic must not leave a .tmp file behind when write fails."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_no_tmp_file_left_on_success(self) -> None:
+        """Normal path: no .tmp residue after a successful write."""
+        from dispatch_broker import _write_atomic
+        target = self.base / "out.json"
+        _write_atomic(target, '{"ok": true}')
+        tmp_files = list(self.base.glob("*.tmp"))
+        self.assertEqual(tmp_files, [])
+
+    def test_tmp_file_cleaned_up_on_write_failure(self) -> None:
+        """If write_text() fails the .tmp sibling is deleted before re-raise."""
+        from dispatch_broker import _write_atomic
+        from unittest.mock import patch
+
+        target = self.base / "out.json"
+        with patch("pathlib.Path.write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                _write_atomic(target, "irrelevant")
+
+        # The target file must not exist and no .tmp must be left behind
+        self.assertFalse(target.exists())
+        tmp_files = list(self.base.glob("*.tmp"))
+        self.assertEqual(tmp_files, [])
+
+
+# ---------------------------------------------------------------------------
+# TestBrokerOrphanWindow — Fix 1: DB row written before bundle files
+# ---------------------------------------------------------------------------
+
+class TestBrokerOrphanWindow(unittest.TestCase):
+    """DB row must exist before any bundle file is written.
+
+    A crash between mkdir and file writes must leave a DB-anchored dispatch
+    (recoverable by governance) rather than an unanchored filesystem bundle.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir, self.dispatch_dir = _setup_dirs(self._tmp)
+        self.broker = _make_broker(self.state_dir, self.dispatch_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_db_row_exists_even_when_file_write_fails(self) -> None:
+        """If bundle file writes fail, the DB row is still present."""
+        from unittest.mock import patch
+
+        dispatch_id = "orphan-test-001"
+        # Simulate a crash midway through the file writes
+        with patch("dispatch_broker._write_atomic", side_effect=OSError("no space")):
+            with self.assertRaises(OSError):
+                self.broker.register(dispatch_id, "do work")
+
+        # The DB row should exist because register_db_row runs before _write_atomic
+        with get_connection(self.state_dir) as conn:
+            row = get_dispatch(conn, dispatch_id)
+        self.assertIsNotNone(row, "DB row must exist even when file write fails")
+        self.assertEqual(row["dispatch_id"], dispatch_id)
+
+    def test_db_row_written_before_bundle_json(self) -> None:
+        """Normal path: DB row exists before bundle.json is visible on disk."""
+        dispatch_id = "orphan-test-002"
+        written_before_bundle: list = []
+
+        original_write_atomic = __import__("dispatch_broker")._write_atomic
+
+        def capturing_write_atomic(path, content):
+            # At the point _write_atomic is first called, the DB row should already exist
+            with get_connection(self.state_dir) as conn:
+                row = get_dispatch(conn, dispatch_id)
+            if row is not None:
+                written_before_bundle.append(True)
+            return original_write_atomic(path, content)
+
+        from unittest.mock import patch
+        with patch("dispatch_broker._write_atomic", side_effect=capturing_write_atomic):
+            self.broker.register(dispatch_id, "do work")
+
+        self.assertTrue(
+            written_before_bundle,
+            "DB row was not present before _write_atomic was first called",
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestClaimConcurrency — Fix 2: TOCTOU concurrent claim
+# ---------------------------------------------------------------------------
+
+class TestClaimConcurrency(unittest.TestCase):
+    """Concurrent claim() race: exactly one caller wins, other gets a clean error.
+
+    Two threads claim the same dispatch_id simultaneously. The BEGIN IMMEDIATE
+    write-lock ensures exactly one succeeds; the other raises BrokerError or
+    InvalidTransitionError rather than both transitioning to 'claimed'.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir, self.dispatch_dir = _setup_dirs(self._tmp)
+        self.broker = _make_broker(self.state_dir, self.dispatch_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_concurrent_claim_exactly_one_winner(self) -> None:
+        import threading
+        from runtime_coordination import InvalidTransitionError
+
+        dispatch_id = "concurrent-claim-001"
+        _register_dispatch(self.broker, dispatch_id)
+
+        winners: list = []
+        errors: list = []
+        barrier = threading.Barrier(2)
+
+        def try_claim():
+            barrier.wait()  # Both threads start at the same time
+            try:
+                result = self.broker.claim(dispatch_id, "T1")
+                winners.append(result)
+            except (BrokerError, InvalidTransitionError) as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=try_claim)
+        t2 = threading.Thread(target=try_claim)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        # Exactly one winner, one loser
+        self.assertEqual(len(winners), 1, f"Expected 1 winner, got {len(winners)}")
+        self.assertEqual(len(errors), 1, f"Expected 1 error, got {len(errors)}")
+
+        # The DB must show exactly 'claimed', not a corrupted state
+        with get_connection(self.state_dir) as conn:
+            row = get_dispatch(conn, dispatch_id)
+        self.assertEqual(row["state"], "claimed")
+
+    def test_concurrent_claim_loser_gets_broker_error_or_invalid_transition(self) -> None:
+        """The losing claimer must receive BrokerError or InvalidTransitionError, not corrupt state."""
+        import threading
+        from runtime_coordination import InvalidTransitionError
+
+        dispatch_id = "concurrent-claim-002"
+        _register_dispatch(self.broker, dispatch_id)
+
+        exceptions_caught: list = []
+        barrier = threading.Barrier(2)
+
+        def try_claim():
+            barrier.wait()
+            try:
+                self.broker.claim(dispatch_id, "T2")
+            except (BrokerError, InvalidTransitionError) as exc:
+                exceptions_caught.append(type(exc).__name__)
+
+        t1 = threading.Thread(target=try_claim)
+        t2 = threading.Thread(target=try_claim)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        # Loser must receive one of the expected exception types
+        self.assertEqual(len(exceptions_caught), 1)
+        self.assertIn(exceptions_caught[0], ("BrokerError", "InvalidTransitionError"))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

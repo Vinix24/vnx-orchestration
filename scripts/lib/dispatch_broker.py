@@ -114,10 +114,21 @@ def _now_iso() -> str:
 
 
 def _write_atomic(path: Path, content: str) -> None:
-    """Write content to path atomically via a .tmp sibling then rename."""
+    """Write content to path atomically via a .tmp sibling then rename.
+
+    If write_text() fails the .tmp file is cleaned up before re-raising so no
+    orphaned partial files are left on disk (mirrors governance_emit.py:244-255).
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.rename(path)
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.rename(path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _read_bundle_json(bundle_json_path: Path) -> Optional[Dict[str, Any]]:
@@ -249,8 +260,25 @@ class DispatchBroker:
                 already_existed=True,
             )
 
-        # Write bundle directory and files atomically
+        # Register in DB first (idempotent — returns existing row if present).
+        # The DB row MUST exist before any bundle files are written so that a
+        # crash between mkdir and file-write never produces a valid-looking bundle
+        # without a DB anchor (orphan-window fix). If file writes fail afterward
+        # the row is still present and governance can detect the incomplete bundle
+        # on the next register() call (existing_bundle will be None, DB row will
+        # already exist, and register_dispatch is idempotent so it returns the
+        # existing row without re-inserting).
         bundle_dir.mkdir(parents=True, exist_ok=True)
+        row = self._register_db_row(
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            track=track,
+            pr_ref=pr_ref,
+            gate=gate,
+            priority=priority,
+            bundle_dir=bundle_dir,
+            metadata=metadata,
+        )
 
         # Run bounded intelligence selection (FP-C PR-3)
         intelligence_payload = None
@@ -297,18 +325,6 @@ class DispatchBroker:
         _write_atomic(prompt_path, prompt)
         _write_atomic(bundle_json_path, json.dumps(bundle_data, indent=2))
 
-        # Register in DB (idempotent — returns existing row if present)
-        row = self._register_db_row(
-            dispatch_id=dispatch_id,
-            terminal_id=terminal_id,
-            track=track,
-            pr_ref=pr_ref,
-            gate=gate,
-            priority=priority,
-            bundle_dir=bundle_dir,
-            metadata=metadata,
-        )
-
         return RegisterResult(
             dispatch_row=row,
             bundle_path=bundle_dir,
@@ -339,21 +355,37 @@ class DispatchBroker:
             attempt_number.
 
         Raises:
-            BrokerError: If the dispatch does not exist or is not in queued state.
-            InvalidTransitionError: If the state transition is not permitted.
+            BrokerError: If the dispatch does not exist or is not in a claimable
+                state. This is the expected signal for a concurrent claim race:
+                with BEGIN IMMEDIATE the losing claimer blocks until the winner
+                commits, then reads state 'claimed' and fails the state guard
+                with BrokerError.
+            InvalidTransitionError: If the state transition itself is rejected
+                by the state machine (defense-in-depth; not reachable via the
+                claim race under BEGIN IMMEDIATE).
+            sqlite3.OperationalError: "database is locked" when the write lock
+                stays held beyond the connection busy-timeout.
         """
         with get_connection(self._state_dir) as conn:
+            # BEGIN IMMEDIATE acquires a write lock immediately, preventing a
+            # second claimer from reading 'queued' state and passing the guard
+            # before the first caller commits the 'claimed' transition (TOCTOU fix).
+            conn.execute("BEGIN IMMEDIATE")
+
             row = get_dispatch(conn, dispatch_id)
             if row is None:
+                conn.rollback()
                 raise BrokerError(f"Cannot claim: dispatch not found: {dispatch_id!r}")
 
             current_state = row["state"]
             if current_state == "proposed":
+                conn.rollback()
                 raise BrokerError(
                     f"Cannot claim dispatch {dispatch_id!r}: state is 'proposed' "
                     f"(deliverable not yet approved). Run: vnx deliverable promote {dispatch_id}"
                 )
             if current_state not in ("queued", "ready"):
+                conn.rollback()
                 raise BrokerError(
                     f"Cannot claim dispatch {dispatch_id!r}: "
                     f"expected state 'queued' or 'ready', found {current_state!r}"
