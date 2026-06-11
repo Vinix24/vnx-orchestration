@@ -138,9 +138,22 @@ def _compute_derived_status(
     labels instead of feature track_ids). The existing dispatch-based derivation
     is unchanged; this path only fires when dispatches is empty.
     """
-    # 1. Blocker open-item check: any link_type='blocks' row → blocked.
-    #    The presence of the link implies the OI is unresolved; removal clears it.
-    if _has_col(conn, "track_open_items", "project_id"):
+    # 1. Blocker open-item check: any link_type='blocks' row with resolved_at IS NULL → blocked.
+    #    Migration 0030 adds resolved_at; when present, only unresolved rows are counted.
+    #    Pre-0030 databases have no resolved_at column — fall back to presence-only check.
+    has_project_id_col = _has_col(conn, "track_open_items", "project_id")
+    has_resolved_at_col = _has_col(conn, "track_open_items", "resolved_at")
+    if has_project_id_col and has_resolved_at_col:
+        blocker = conn.execute(
+            """
+            SELECT 1 FROM track_open_items
+            WHERE track_id = ? AND project_id = ? AND link_type = 'blocks'
+              AND resolved_at IS NULL
+            LIMIT 1
+            """,
+            (track_id, project_id),
+        ).fetchone()
+    elif has_project_id_col:
         blocker = conn.execute(
             """
             SELECT 1 FROM track_open_items

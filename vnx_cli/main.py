@@ -54,6 +54,17 @@ def _register_status_subparser(subparsers: argparse.Action) -> None:
         help="emit results as JSON",
     )
     status_parser.add_argument(
+        "--tracks",
+        action="store_true",
+        help="include a compact feature-tracks table (phase, derived_status, open OI count)",
+    )
+    status_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="PROJECT_ID",
+        help="project_id to filter tracks (default: resolved from VNX_PROJECT_ID or git remote)",
+    )
+    status_parser.add_argument(
         "--project-dir",
         default=".",
         metavar="DIR",
@@ -183,7 +194,7 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
 def _register_track_subparser(subparsers: argparse.Action) -> None:
     track_parser = subparsers.add_parser(
         "track",
-        help="manage feature-tracks (new/activate/park/unpark/dispatch/list/show)",
+        help="manage feature-tracks (new/activate/park/unpark/done/oi-close/dispatch/list/show)",
     )
     track_parser.add_argument(
         "--project-dir",
@@ -245,6 +256,26 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
     ts_parser.add_argument("--project-id", default=None, metavar="PROJECT_ID",
                            help="project_id (default: resolved from git remote / VNX_PROJECT_ID)")
     ts_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    tdone_parser = track_subs.add_parser("done", help="close a track (transition to phase=done)")
+    tdone_parser.add_argument("track_id", metavar="TRACK_ID")
+    tdone_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                              help="project_id for this track (required; ADR-007)")
+    tdone_parser.add_argument("--reason", required=True, metavar="REASON",
+                              help="closure reason (required; recorded in phase history)")
+    tdone_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    toic_parser = track_subs.add_parser("oi-close", help="non-destructively close a track open-item")
+    toic_parser.add_argument("track_id", metavar="TRACK_ID")
+    toic_parser.add_argument("oi_id", metavar="OI_ID")
+    toic_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                             help="project_id for this track (required; ADR-007)")
+    toic_parser.add_argument("--link-type", required=True,
+                             choices=["blocks", "warns", "related"], metavar="LINK_TYPE",
+                             help="link_type of the OI to close (blocks/warns/related)")
+    toic_parser.add_argument("--reason", required=True, metavar="REASON",
+                             help="resolution reason (required; recorded in audit trail)")
+    toic_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
 
 def _register_migrate_subparser(subparsers: argparse.Action) -> None:

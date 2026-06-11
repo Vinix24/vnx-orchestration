@@ -2,14 +2,132 @@
 """vnx status — show current VNX project dispatch and agent status."""
 
 import json
+import sqlite3
 from pathlib import Path
 
 from vnx_cli import _engine
 
 
+def _resolve_project_id(args) -> str | None:
+    """Resolve project_id for --tracks. Returns None when unresolvable (non-fatal)."""
+    pid = getattr(args, "project_id", None)
+    if pid:
+        return pid
+    _engine.ensure_engine_on_path()
+    project_dir = Path(getattr(args, "project_dir", ".")).resolve()
+    try:
+        from project_root import resolve_project_id
+        return resolve_project_id(project_dir)
+    except Exception:
+        return None
+
+
+def _render_tracks_table(state_dir: Path, project_id: str) -> str:
+    """Return a compact tracks table as a string.
+
+    Columns: TRACK_ID, PHASE, DERIVED_STATUS, OPEN_OIS, LAST_ACTIVITY
+    Only includes tracks for (project_id). Excludes resolved OIs from count.
+    Graceful on missing columns (pre-0028/0030 DBs).
+    """
+    db_path = state_dir / "runtime_coordination.db"
+    if not db_path.exists():
+        return "  (no runtime_coordination.db found)"
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+    except Exception as exc:
+        return f"  (DB open failed: {exc})"
+
+    try:
+        # Check what columns are present (graceful degradation).
+        track_cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+        if "track_id" not in track_cols:
+            return "  (tracks table not found — run `vnx migrate` first)"
+
+        has_derived_status = "derived_status" in track_cols
+        has_phase_changed_at = "phase_changed_at" in track_cols
+
+        oi_cols = {row[1] for row in conn.execute("PRAGMA table_info('track_open_items')")}
+        has_oi_table = bool(oi_cols)
+        has_oi_project_id = "project_id" in oi_cols
+        has_oi_resolved_at = "resolved_at" in oi_cols
+
+        tracks = conn.execute(
+            """
+            SELECT track_id, phase, priority,
+                   {derived_status_col},
+                   {last_activity_col}
+            FROM tracks
+            WHERE project_id = ?
+            ORDER BY next_up DESC, sort_order ASC, track_id ASC
+            """.format(
+                derived_status_col=(
+                    "derived_status" if has_derived_status else "NULL as derived_status"
+                ),
+                last_activity_col=(
+                    "phase_changed_at as last_activity"
+                    if has_phase_changed_at
+                    else "created_at as last_activity"
+                ),
+            ),
+            (project_id,),
+        ).fetchall()
+
+        if not tracks:
+            return f"  (no tracks for project_id={project_id!r})"
+
+        # Fetch OI counts per track — exclude resolved when migration 0030 is present.
+        oi_counts: dict[str, int] = {}
+        if has_oi_table and has_oi_project_id:
+            if has_oi_resolved_at:
+                oi_rows = conn.execute(
+                    """
+                    SELECT track_id, COUNT(*) as cnt
+                    FROM track_open_items
+                    WHERE project_id = ? AND resolved_at IS NULL
+                    GROUP BY track_id
+                    """,
+                    (project_id,),
+                ).fetchall()
+            else:
+                oi_rows = conn.execute(
+                    """
+                    SELECT track_id, COUNT(*) as cnt
+                    FROM track_open_items
+                    WHERE project_id = ?
+                    GROUP BY track_id
+                    """,
+                    (project_id,),
+                ).fetchall()
+            oi_counts = {row["track_id"]: row["cnt"] for row in oi_rows}
+
+        lines = [
+            f"  {'ID':<20} {'PHASE':<8} {'DERIVED':<12} {'OIs':<5} {'LAST_ACTIVITY':<26}"
+        ]
+        lines.append("  " + "-" * 73)
+
+        for t in tracks:
+            tid = (t["track_id"] or "")[:18]
+            phase = (t["phase"] or "")[:7]
+            derived = (t["derived_status"] or "-")[:11] if has_derived_status else "-"
+            oi_count = oi_counts.get(t["track_id"], 0)
+            oi_str = str(oi_count) if oi_count else "-"
+            last = (t["last_activity"] or "")[:25]
+            lines.append(f"  {tid:<20} {phase:<8} {derived:<12} {oi_str:<5} {last:<26}")
+
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"  (tracks query failed: {exc})"
+    finally:
+        conn.close()
+
+
 def vnx_status(args) -> int:
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
     emit_json = getattr(args, "json", False)
+    show_tracks = getattr(args, "tracks", False)
 
     # PR-PIP-2: a project is "initialized" by its tracked in-project config
     # (.vnx/ + .vnx-project-id), not by a project-local .vnx-data tree — the
@@ -61,6 +179,65 @@ def vnx_status(args) -> int:
             "agents": agent_names,
             "agent_count": len(agent_names),
         }
+        if show_tracks:
+            project_id = _resolve_project_id(args)
+            if project_id:
+                state_dir = vnx_data / "state"
+                db_path = state_dir / "runtime_coordination.db"
+                if db_path.exists():
+                    try:
+                        conn = sqlite3.connect(str(db_path), timeout=5.0)
+                        conn.row_factory = sqlite3.Row
+                        track_cols = {
+                            row[1] for row in conn.execute("PRAGMA table_info('tracks')")
+                        }
+                        oi_cols = {
+                            row[1] for row in conn.execute(
+                                "PRAGMA table_info('track_open_items')"
+                            )
+                        }
+                        has_derived_status = "derived_status" in track_cols
+                        has_oi_resolved_at = "resolved_at" in oi_cols
+                        tracks_rows = conn.execute(
+                            "SELECT * FROM tracks WHERE project_id = ? "
+                            "ORDER BY next_up DESC, sort_order ASC, track_id ASC",
+                            (project_id,),
+                        ).fetchall()
+                        oi_counts: dict[str, int] = {}
+                        if "project_id" in oi_cols:
+                            if has_oi_resolved_at:
+                                oi_rows = conn.execute(
+                                    "SELECT track_id, COUNT(*) as cnt FROM track_open_items "
+                                    "WHERE project_id = ? AND resolved_at IS NULL GROUP BY track_id",
+                                    (project_id,),
+                                ).fetchall()
+                            else:
+                                oi_rows = conn.execute(
+                                    "SELECT track_id, COUNT(*) as cnt FROM track_open_items "
+                                    "WHERE project_id = ? GROUP BY track_id",
+                                    (project_id,),
+                                ).fetchall()
+                            oi_counts = {r["track_id"]: r["cnt"] for r in oi_rows}
+                        conn.close()
+                        output["tracks"] = [
+                            {
+                                "track_id": r["track_id"],
+                                "phase": r["phase"],
+                                "derived_status": (
+                                    r["derived_status"] if has_derived_status else None
+                                ),
+                                "open_oi_count": oi_counts.get(r["track_id"], 0),
+                                "last_activity": (
+                                    r["phase_changed_at"]
+                                    if "phase_changed_at" in track_cols
+                                    else r.get("created_at")
+                                ),
+                            }
+                            for r in tracks_rows
+                        ]
+                    except Exception as exc:
+                        output["tracks_error"] = str(exc)
+            output["tracks_project_id"] = project_id
         print(json.dumps(output, indent=2))
     else:
         print(f"VNX status — {project_dir}")
@@ -79,5 +256,16 @@ def vnx_status(args) -> int:
                 print(f"    - {name}")
         else:
             print("  Recent completions: none")
+
+        if show_tracks:
+            print()
+            project_id = _resolve_project_id(args)
+            if not project_id:
+                print("  Tracks: --project-id not supplied and auto-resolution failed")
+            else:
+                state_dir = vnx_data / "state"
+                print(f"  Feature tracks [{project_id}]:")
+                print()
+                print(_render_tracks_table(state_dir, project_id))
 
     return 0

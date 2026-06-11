@@ -562,17 +562,117 @@ def get_linked_dispatches(
         conn.close()
 
 
+def unlink_open_item(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    oi_id: str,
+    link_type: str,
+    *,
+    reason: str,
+    actor: str = "operator",
+) -> None:
+    """Non-destructively close a track open-item link.
+
+    Sets resolved_at + resolution_reason so the reconciler stops treating the
+    OI as a blocker. Never deletes the row (audit trail preserved).
+
+    Requires migration 0030 (resolved_at column). Raises RuntimeError when
+    the column is absent so callers get a clear message rather than silent
+    data loss.
+
+    Raises TrackNotFoundError if the parent track does not exist.
+    Raises ValueError if the (track_id, project_id, oi_id, link_type) row is
+    not found or is already resolved.
+    """
+    valid_link_types = frozenset({"blocks", "warns", "related"})
+    if link_type not in valid_link_types:
+        raise ValueError(f"Invalid link_type: {link_type!r}. Must be one of {sorted(valid_link_types)}")
+
+    if not reason or not reason.strip():
+        raise ValueError("reason is required and must not be empty")
+
+    conn = _get_conn(state_dir)
+    try:
+        # Guard: migration 0030 must be present.
+        has_resolved_at = any(
+            row[1] == "resolved_at"
+            for row in conn.execute("PRAGMA table_info('track_open_items')")
+        )
+        if not has_resolved_at:
+            raise RuntimeError(
+                "track_open_items.resolved_at column absent; apply migration 0030 first."
+            )
+
+        if not conn.execute(
+            "SELECT 1 FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone():
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+
+        row = conn.execute(
+            """
+            SELECT resolved_at FROM track_open_items
+            WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?
+            """,
+            (track_id, project_id, oi_id, link_type),
+        ).fetchone()
+        if not row:
+            raise ValueError(
+                f"Open item not found: track={track_id!r} project={project_id!r} "
+                f"oi_id={oi_id!r} link_type={link_type!r}"
+            )
+        if row["resolved_at"] is not None:
+            raise ValueError(
+                f"Open item already resolved: track={track_id!r} oi_id={oi_id!r} "
+                f"link_type={link_type!r} (resolved_at={row['resolved_at']!r})"
+            )
+
+        now = _now_utc()
+        _emit_track_event(
+            state_dir, "track_oi_closed", track_id, project_id, actor,
+            {"oi_id": oi_id, "link_type": link_type, "reason": reason},
+        )
+        conn.execute(
+            """
+            UPDATE track_open_items
+            SET resolved_at = ?, resolution_reason = ?
+            WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?
+            """,
+            (now, reason.strip(), track_id, project_id, oi_id, link_type),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_linked_open_items(
     state_dir: str | Path,
     track_id: str,
     project_id: str,
+    *,
+    include_resolved: bool = False,
 ) -> list[dict[str, Any]]:
     conn = _get_conn(state_dir)
     try:
-        rows = conn.execute(
-            "SELECT * FROM track_open_items WHERE track_id = ? AND project_id = ? ORDER BY linked_at DESC",
-            (track_id, project_id),
-        ).fetchall()
+        has_resolved_at = any(
+            row[1] == "resolved_at"
+            for row in conn.execute("PRAGMA table_info('track_open_items')")
+        )
+        if has_resolved_at and not include_resolved:
+            rows = conn.execute(
+                """
+                SELECT * FROM track_open_items
+                WHERE track_id = ? AND project_id = ? AND resolved_at IS NULL
+                ORDER BY linked_at DESC
+                """,
+                (track_id, project_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM track_open_items WHERE track_id = ? AND project_id = ? ORDER BY linked_at DESC",
+                (track_id, project_id),
+            ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
