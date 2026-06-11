@@ -100,7 +100,11 @@ class TestRouting:
 
         with patch.dict(
             "os.environ",
-            {"VNX_STATE_DIR": str(state_dir), "VNX_DATA_DIR": str(tmp_path)},
+            {
+                "VNX_STATE_DIR": str(state_dir),
+                "VNX_DATA_DIR": str(tmp_path),
+                "VNX_DATA_DIR_EXPLICIT": "1",
+            },
             clear=False,
         ):
             os.environ.pop("DEEPSEEK_API_KEY", None)

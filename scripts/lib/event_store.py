@@ -30,11 +30,36 @@ _SIZE_WARNING_BYTES = 10 * 1024 * 1024
 
 
 def _events_dir() -> Path:
-    """Resolve the events directory from environment or default."""
-    vnx_data = os.environ.get("VNX_DATA_DIR")
-    if vnx_data:
+    """Resolve the events directory: CENTRAL ($HOME/.vnx-data/<project_id>/events) by default.
+
+    VNX_DATA_DIR override is honored ONLY when VNX_DATA_DIR_EXPLICIT=1 is also set,
+    mirroring the guard in provider_dispatch._resolve_data_dir() (OI-126, sweep H2).
+    Without the explicit flag, an inherited VNX_DATA_DIR in the shell environment
+    would cause a tmp-worktree dispatch to write its event stream to the wrong project
+    directory while the receipt lands in the central ledger — the split that caused
+    live event-stream loss on 2026-06-10 when a provider dispatch ran from a
+    tmp-worktree and the worktree was cleaned up before the stream could be read.
+
+    Resolution order:
+    1. VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set → VNX_DATA_DIR/events
+    2. VNX_PROJECT_ID set → $HOME/.vnx-data/<project_id>/events  (central ledger)
+    3. Fallback → .vnx-data/events relative to repo root  (backwards-compat for
+       single-project environments that never set VNX_PROJECT_ID)
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    vnx_data = os.environ.get("VNX_DATA_DIR", "")
+    if vnx_data and not explicit_flag:
+        logger.warning(
+            "event_store._events_dir: VNX_DATA_DIR=%r ignored (VNX_DATA_DIR_EXPLICIT not set); "
+            "falling back to central events dir to prevent cross-project stream loss (OI-126 H2)",
+            vnx_data,
+        )
+    if explicit_flag and vnx_data:
         return Path(vnx_data).expanduser().resolve() / "events"
-    # Fallback: .vnx-data/events relative to repo root
+    project_id = os.environ.get("VNX_PROJECT_ID", "")
+    if project_id:
+        return Path.home() / ".vnx-data" / project_id / "events"
+    # Backwards-compat: single-project environments without VNX_PROJECT_ID
     script_dir = Path(__file__).resolve().parent
     return script_dir.parent.parent / ".vnx-data" / "events"
 
