@@ -154,6 +154,8 @@ class SubprocessAdapter:
         self._timed_out: set = set()
         # terminal_id -> final returncode captured by stop() or EOF (OI-1120)
         self._returncode_cache: Dict[str, int] = {}
+        # terminal_id -> Path of the stderr logfile for the current dispatch
+        self._stderr_logfiles: Dict[str, Path] = {}
         # Lazy-loaded EventStore (optional dependency)
         self._event_store = None
         self._event_store_loaded = False
@@ -303,9 +305,31 @@ class SubprocessAdapter:
         cmd.append(effective_instruction)
         cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
 
+        # Resolve stderr logfile path.  Writing stderr to an append-mode file
+        # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the
+        # worker emits >64KB of stderr output (H1 fix).  The file is opened
+        # before Popen so we can record the path and surface it for diagnostics.
+        stderr_log_path = self._resolve_stderr_log_path(terminal_id, dispatch_id)
+        try:
+            stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_file = open(stderr_log_path, "ab")  # noqa: WPS515 — kept open for Popen
+        except OSError as exc:
+            logger.warning(
+                "subprocess_adapter: cannot open stderr log %s (%s); falling back to DEVNULL",
+                stderr_log_path, exc,
+            )
+            stderr_file = None
+        self._stderr_logfiles[terminal_id] = stderr_log_path
+
         popen_kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
+            # H1 fix: stderr → logfile (not PIPE) to prevent >64KB pipe-buffer deadlock.
+            # Falls back to DEVNULL when the logfile cannot be opened.
+            "stderr": stderr_file if stderr_file is not None else subprocess.DEVNULL,
+            # stdin=DEVNULL: headless -p reads the prompt from argv, not stdin.
+            # Inheriting the parent's stdin in a daemon context causes unexpected
+            # blocking behaviour when the parent's stdin is a terminal or pipe.
+            "stdin": subprocess.DEVNULL,
             "preexec_fn": os.setsid,  # new process group for clean SIGKILL
         }
         if cwd is not None:
@@ -332,6 +356,10 @@ class SubprocessAdapter:
                 path_used="none",
                 failure_reason=str(exc),
             )
+        finally:
+            # Close our file descriptor; the child process inherits its own copy.
+            if stderr_file is not None:
+                stderr_file.close()
 
         # Replace any prior process tracking (stop old one first).
         # Use SIGTERM then SIGKILL fallback so a non-responsive prior process
@@ -513,6 +541,13 @@ class SubprocessAdapter:
                     session_id=session_id if is_init else None,
                 )
 
+        # Cache returncode at EOF (mirrors read_events_with_timeout OI-1120 fix):
+        # stop() may not be called if the caller simply exhausts the iterator, so
+        # we capture the returncode here to ensure get_returncode() is consistent.
+        rc = process.poll()
+        if rc is not None:
+            self._returncode_cache[terminal_id] = rc
+
     def read_events_with_timeout(
         self,
         terminal_id: str,
@@ -632,6 +667,30 @@ class SubprocessAdapter:
         this terminal_id.
         """
         return self._session_ids.get(terminal_id)
+
+    def get_stderr_log_path(self, terminal_id: str) -> Optional[Path]:
+        """Return the stderr logfile path for the current/last dispatch of terminal_id.
+
+        Returns None if no deliver() has been called for this terminal_id yet.
+        The file may not exist if the process has not been spawned or the log dir
+        was not writable.
+        """
+        return self._stderr_logfiles.get(terminal_id)
+
+    def _resolve_stderr_log_path(self, terminal_id: str, dispatch_id: str) -> Path:
+        """Return the path for the stderr logfile for a given terminal/dispatch pair.
+
+        Derived from VNX_DATA_DIR when available, otherwise falls back to a
+        sibling directory of this module file.  Pattern mirrors the log_dir
+        convention in tmux_interactive_dispatch.py (state_dir.parent / "logs").
+        """
+        vnx_data_dir = os.environ.get("VNX_DATA_DIR", "")
+        if vnx_data_dir:
+            log_dir = Path(vnx_data_dir) / "logs" / "subprocess"
+        else:
+            # Fall back: derive from module location (useful in tests)
+            log_dir = Path(__file__).resolve().parent.parent.parent / ".vnx-data" / "logs" / "subprocess"
+        return log_dir / f"{terminal_id}_{dispatch_id}.stderr.log"
 
     # ------------------------------------------------------------------
     # Observe
@@ -823,7 +882,7 @@ class SubprocessAdapter:
     # Shutdown
     # ------------------------------------------------------------------
 
-    def shutdown(self, _graceful: bool = True) -> None:
+    def shutdown(self, graceful: bool = True) -> None:
         """Stop all tracked subprocesses."""
         for terminal_id in list(self._processes.keys()):
             self.stop(terminal_id)
