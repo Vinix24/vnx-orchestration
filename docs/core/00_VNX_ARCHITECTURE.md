@@ -1,11 +1,11 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-04-10
+**Last Updated**: 2026-06-11
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
-**Version**: 12.0.0
+**Version**: 1.0.0
 
 ---
 
@@ -60,7 +60,7 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    VNX ORCHESTRATION SYSTEM V8.2                │
+│                    VNX ORCHESTRATION SYSTEM V1.0                │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
@@ -167,7 +167,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ### 1. Dispatcher V8 (`dispatcher_minimal.sh`)
 
-**Purpose**: Native skill activation and instruction routing (V8.2 - Current Production)
+**Purpose**: Native skill activation and instruction routing (Dispatcher component V8.2, shipped in VNX 1.0.0)
 
 **Functionality**:
 - Maps dispatch roles to native Claude Code skills
@@ -187,7 +187,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Intelligence integration maintained
 - Provider-aware dispatch (detects Claude/Codex/Gemini per terminal)
 
-**Receipt Footer** (V8.2):
+**Receipt Footer** (Dispatcher V8.2):
 - Task Completion Guidelines section
 - Report Metadata block (parsed by receipt processor)
 - Expected Outputs section (implementation summary, files modified, testing evidence, open items)
@@ -302,7 +302,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                  ORCHESTRATION LOOP V8.2                        │
+│                  ORCHESTRATION LOOP (VNX 1.0.0)                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  1. T0 Creates Dispatch                                         │
@@ -522,7 +522,7 @@ Terminal status is determined by receipt-based activity detection.
 - `recommendations_engine.pid` — `recommendations_engine_daemon.sh`
 - `vnx_supervisor.pid` — self
 
-### Project-Scoped Process Isolation (V8.2)
+### Project-Scoped Process Isolation (shipped VNX 1.0.0)
 
 **Problem**: `vnx_proc_find_pids_by_fingerprint()` used bare script names in `grep -F`, matching processes from all VNX projects system-wide.
 
@@ -825,7 +825,7 @@ project-root/
 
 ---
 
-## Current System Status (V8.2)
+## Current System Status (VNX 1.0.0)
 
 ### Active Components ✅
 - Smart Tap V7 (JSON/Markdown auto-translation)
@@ -1032,7 +1032,7 @@ python .claude/vnx-system/scripts/pr_queue_manager.py promote <dispatch-id>
 | **Claude Code** | `/skill-name` | `/model opus` | `/clear` | Primary |
 | **Codex CLI** | `$skill-name` | N/A | `/new` | T1 alternative |
 | **Gemini CLI** | `@skill-name` | N/A | `/clear` | Experimental |
-| **Kimi** | N/A | N/A | N/A | Future |
+| **Kimi** | CLI OAuth | N/A | N/A | Production (CLI lane, 6/6 skill-injection verified) |
 
 ### Skill Sync
 
@@ -1164,7 +1164,7 @@ VNX_T1_PROVIDER=codex         # T1 can use different provider
 **`config.yml`** (`.vnx/config.yml`): Project metadata:
 ```yaml
 project_name: my-project
-vnx_version: 8.2.0
+vnx_version: 1.0.0
 created_at: 2026-02-18
 ```
 
@@ -1200,9 +1200,9 @@ Creates a complete LeadFlow SaaS project with:
 
 ---
 
-**Document Status**: Production Active (V12.0 — Dashboard Attention Model + Self-Learning Pipeline)
+**Document Status**: Production Active (V1.0.0 — Dashboard Attention Model + Self-Learning Pipeline)
 **Last Major Update**: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
-**Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs)
+**Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs; VNX 1.0.0)
 **Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
 **Intelligence Version**: v2.0.0 (Adoption tracking, worker injection, pairwise tag matching, 3-section digest)
 **Dashboard**: Vanilla HTML/JS + Python HTTP server (port 4173, read-only, attention model)

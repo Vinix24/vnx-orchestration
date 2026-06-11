@@ -2,7 +2,7 @@
 
 **Author**: Vincent van de Th
 **Date**: February 2026
-**Status**: Reference Architecture — Daily-Use Prototype
+**Status**: Reference Architecture — pip-installable production release (1.0.0)
 **Usage**: 6 months daily use on local system · 1466 dispatches processed · 4 concurrent terminals
 
 ---
@@ -141,17 +141,16 @@ Screenshot pointer: `SCREENSHOTS.md` (S5: Quality Advisory).
 - MIT-licensed and open for inspection
 
 **This is not:**
-- A production-grade CLI (it's a prototype proving architectural concepts)
 - A hosted service
 - A competitor to LangGraph/CrewAI/AutoGen (it's a governance layer that could complement them)
 - A promise of feature parity across all providers
 
 ### Known Limitations
 
-- Tested with 4 terminals (T0 + T1/T2/T3), Claude Code + Codex CLI
-- Gemini integration documented and validated
-- Kimi 2.5 integration planned (next experiment — testing the watcher pattern with a non-Western provider)
-- **T0 orchestrator tested exclusively with Claude Opus** (via Claude Code, which powers ~80% of the workflow). Other models (Codex 5.3, Gemini 3.0) may work as T0, but this is untested. T0's write restrictions are enforced through Claude Code hooks.
+- The interactive tmux worker lane is available and subscription-preserving; full PREPARE/GOVERN envelope parity across all lanes is targeted for 1.x (see Tier 1/2 framing in the README).
+- Gemini integration documented and validated; Kimi K2.6 is in production via CLI OAuth lane, 6/6 skill-injection verified.
+- **T0 orchestrator tested with Claude Opus** (via Claude Code, which powers ~80% of the workflow). Other models may work as T0, but this is less tested.
+- Per-worker git worktree isolation is available via `VNX_ISOLATED_WORKTREE=1` and off by default; isolation guarantees vary by lane. Parallel multi-track execution is Tier 3 — designed, not shipped (see README Tier framing).
 - File-based, local-first — not designed for distributed networks
 - Tmux dependency for terminal management
 - Python/Bash prototype — a production deployment would benefit from Rust/Go
@@ -171,4 +170,4 @@ See `OPEN_METHOD.md` for the full transparency report.
 
 ---
 
-*This is a Research Prototype. See LIMITATIONS.md for current scope.*
+*See LIMITATIONS.md for current scope and Tier 1/2/3 feature framing.*

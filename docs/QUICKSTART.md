@@ -1,8 +1,8 @@
 # VNX in 5 Minutes
 
 This quickstart uses the pip-installed Python CLI. Plain `vnx` commands below
-are limited to the stable pip surface: `init`, `doctor`, `status`,
-`dispatch-agent`, `pool`, `version`, and `update`.
+are limited to the stable pip surface: `init`, `migrate`, `doctor`, `status`,
+`dispatch-agent`, `track`, `pool`, `dream`, `version`, and `update`.
 
 ## Step 1: Install
 
@@ -75,7 +75,7 @@ Operator commands run via the bash entrypoint `bin/vnx`. See Appendix A.
 ## Appendix A: Two binaries
 
 VNX ships TWO `vnx` entry-points with different scopes:
-- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
+- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, `version`, `update`).
 - **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
 
 This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.
