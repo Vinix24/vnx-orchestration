@@ -144,6 +144,49 @@ def _cmd_unpark(args) -> int:
         return 1
 
 
+def _cmd_done(args) -> int:
+    """Transition a track to phase=done. --reason is required."""
+    project_id = args.project_id
+    state_dir = _resolve_state_dir(args.project_dir)
+    tracks_lib = _require_tracks_lib(state_dir)
+
+    try:
+        track = tracks_lib.transition_phase(
+            state_dir, args.track_id, project_id,
+            to_phase="done",
+            actor="operator",
+            reason=args.reason,
+        )
+        print(f"  Closed {track['track_id']} [{project_id}] (phase: {track['phase']})")
+        print(f"  Reason: {args.reason}")
+        if track.get("completed_at"):
+            print(f"  completed_at: {track['completed_at']}")
+        return 0
+    except Exception as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_oi_close(args) -> int:
+    """Non-destructively close a track open-item (sets resolved_at)."""
+    project_id = args.project_id
+    state_dir = _resolve_state_dir(args.project_dir)
+    tracks_lib = _require_tracks_lib(state_dir)
+
+    try:
+        tracks_lib.unlink_open_item(
+            state_dir, args.track_id, project_id, args.oi_id, args.link_type,
+            reason=args.reason,
+            actor="operator",
+        )
+        print(f"  Resolved OI {args.oi_id!r} [{args.link_type}] on track {args.track_id} [{project_id}]")
+        print(f"  Reason: {args.reason}")
+        return 0
+    except Exception as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        return 1
+
+
 def _require_dispatch_register():
     _engine.ensure_engine_on_path()
     import dispatch_register
@@ -250,6 +293,10 @@ def vnx_track(args) -> int:
         return _cmd_park(args)
     elif sub == "unpark":
         return _cmd_unpark(args)
+    elif sub == "done":
+        return _cmd_done(args)
+    elif sub == "oi-close":
+        return _cmd_oi_close(args)
     elif sub == "dispatch":
         return _cmd_dispatch(args)
     elif sub == "list":

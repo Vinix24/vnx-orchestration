@@ -12,6 +12,8 @@ Steps:
   8. Apply schemas/migrations/0028_tracks_derived_status.sql (idempotent)
   9. PRAGMA pre-flight: assert tracks has derived_status (v28) before adding track_type
   10. Apply schemas/migrations/0029_track_type_discriminator.sql (idempotent)
+  11. PRAGMA pre-flight: assert track_type present (v29) before adding resolved_at
+  12. Apply schemas/migrations/0030_track_oi_resolved_at.sql (idempotent)
 """
 
 from __future__ import annotations
@@ -481,11 +483,55 @@ def apply_migration_v29(conn: sqlite3.Connection, project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 9: preflight + apply 0030 migration (track_open_items.resolved_at)
+# ---------------------------------------------------------------------------
+
+def _assert_tracks_v29_intact(conn: sqlite3.Connection) -> None:
+    """Assert tracks has track_type (v29 state) before adding resolved_at to track_open_items.
+
+    Also guards against double-apply by rejecting if resolved_at already exists.
+    """
+    track_cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+    if "track_type" not in track_cols:
+        raise RuntimeError(
+            "tracks missing 'track_type' column (from 0029). "
+            "Run migration 0029 before 0030."
+        )
+    oi_cols = {row[1] for row in conn.execute("PRAGMA table_info('track_open_items')")}
+    if "resolved_at" in oi_cols:
+        raise RuntimeError(
+            "track_open_items already has 'resolved_at' column. Migration 0030 should be "
+            "skipped (user_version should be >= 30)."
+        )
+
+
+schema_migration.register_preflight(30, _assert_tracks_v29_intact)
+
+
+def apply_migration_v30(conn: sqlite3.Connection, project_root: Path) -> None:
+    migration_path = _MIGRATIONS / "0030_track_oi_resolved_at.sql"
+    if not migration_path.exists():
+        raise FileNotFoundError(f"Migration not found: {migration_path}")
+
+    sql = migration_path.read_text(encoding="utf-8")
+
+    current_version = schema_migration.get_user_version(conn)
+    if current_version >= 30:
+        print(f"  [skip] migration 0030 already applied (user_version={current_version})")
+        return
+
+    _assert_tracks_v29_intact(conn)
+    print("  [apply] migration 0030_track_oi_resolved_at.sql ...")
+    schema_migration.apply_script_if_below(conn, 30, sql)
+    print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def run(project_root: Path | None = None) -> None:
-    """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029."""
+    """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029, 0030."""
     if project_root is None:
         project_root = resolve_project_root(__file__)
 
@@ -529,6 +575,10 @@ def run(project_root: Path | None = None) -> None:
 
         # Apply 0029 — additive: tracks.track_type + tracks.next_action_owner
         apply_migration_v29(conn, project_root)
+        conn.commit()
+
+        # Apply 0030 — additive: track_open_items.resolved_at + resolution_reason
+        apply_migration_v30(conn, project_root)
         conn.commit()
 
         print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")
