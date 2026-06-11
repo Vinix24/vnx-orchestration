@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Regression tests: per-terminal NDJSON ring-buffer rotation for non-Claude providers.
 
-D5 Gap 2 fix: provider_dispatch.py must call event_store.clear(terminal_id,
-archive_dispatch_id=dispatch_id) in the finally-block of all 4 provider handlers
-(_dispatch_codex, _dispatch_gemini, _dispatch_kimi, _dispatch_litellm) so the
-live NDJSON is truncated and archived after each dispatch, identical to the Claude path.
+H2 sweep update: archive+clear moved from dispatch finally-block into _emit_governance
+so the receipt carries an events_path pointer to the archive before the live file is
+cleared.  These tests verify the rotation contract still holds end-to-end by mocking
+the governance sinks (receipt + report writes) while letting _emit_governance run for
+real — which exercises the archive→receipt→clear sequence.
 
 Verifies:
 - Live T{n}.ndjson is 0 bytes (or absent) after dispatch completes
@@ -79,13 +80,32 @@ def _make_spawn_result(*, error=None, timed_out=False, returncode=0, event_write
     return r
 
 
+# Patch targets for governance sinks so tests don't need real DB / receipts.
+# We mock at the governance_emit module level (where the functions are defined),
+# not at the provider_dispatch import level, so _emit_governance can run for real.
+_GOVERNANCE_PATCHES = [
+    patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake_receipt.ndjson")),
+    patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake_report.md")),
+    patch("provider_costs.emit_provider_cost"),
+    patch("provider_dispatch._record_provider_metadata"),
+]
+
+
+def _apply_governance_patches(fn):
+    """Decorator to apply all governance patches to a test."""
+    import functools
+    for p in reversed(_GOVERNANCE_PATCHES):
+        fn = p(fn)
+    return fn
+
+
 # ---------------------------------------------------------------------------
 # _dispatch_codex
 # ---------------------------------------------------------------------------
 
 
 class TestCodexEventRotation:
-    def test_live_file_truncated_after_success(self, tmp_events):
+    def test_live_file_truncated_after_success(self, tmp_path, tmp_events):
         from event_store import EventStore
 
         terminal_id = "T2"
@@ -96,9 +116,12 @@ class TestCodexEventRotation:
         args = _build_args(provider="codex", terminal_id=terminal_id, dispatch_id=dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
-             patch("provider_spawns.codex_spawn.spawn_codex", return_value=_make_spawn_result()) as mock_spawn, \
-             patch("event_store.EventStore", return_value=store):
+             patch("provider_spawns.codex_spawn.spawn_codex", return_value=_make_spawn_result()), \
+             patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"):
             rc = provider_dispatch._dispatch_codex(args)
 
         assert rc == 0
@@ -107,7 +130,7 @@ class TestCodexEventRotation:
         archive = tmp_events / "archive" / terminal_id / f"{dispatch_id}.ndjson"
         assert archive.exists() and archive.stat().st_size > 0, "archive must have content"
 
-    def test_live_file_truncated_after_failure(self, tmp_events):
+    def test_live_file_truncated_after_failure(self, tmp_path, tmp_events):
         from event_store import EventStore
 
         terminal_id = "T2"
@@ -118,9 +141,12 @@ class TestCodexEventRotation:
         args = _build_args(provider="codex", terminal_id=terminal_id, dispatch_id=dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_spawns.codex_spawn.spawn_codex", return_value=_make_spawn_result(returncode=1)), \
-             patch("event_store.EventStore", return_value=store):
+             patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"):
             rc = provider_dispatch._dispatch_codex(args)
 
         assert rc == 1
@@ -134,7 +160,7 @@ class TestCodexEventRotation:
 
 
 class TestGeminiEventRotation:
-    def test_live_file_truncated_after_success(self, tmp_events):
+    def test_live_file_truncated_after_success(self, tmp_path, tmp_events):
         from event_store import EventStore
 
         terminal_id = "T2"
@@ -145,9 +171,12 @@ class TestGeminiEventRotation:
         args = _build_args(provider="gemini", terminal_id=terminal_id, dispatch_id=dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_spawns.gemini_spawn.spawn_gemini", return_value=_make_spawn_result()), \
-             patch("event_store.EventStore", return_value=store):
+             patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"):
             rc = provider_dispatch._dispatch_gemini(args)
 
         assert rc == 0
@@ -156,7 +185,7 @@ class TestGeminiEventRotation:
         archive = tmp_events / "archive" / terminal_id / f"{dispatch_id}.ndjson"
         assert archive.exists() and archive.stat().st_size > 0
 
-    def test_live_file_truncated_after_error(self, tmp_events):
+    def test_live_file_truncated_after_error(self, tmp_path, tmp_events):
         from event_store import EventStore
 
         terminal_id = "T2"
@@ -167,9 +196,12 @@ class TestGeminiEventRotation:
         args = _build_args(provider="gemini", terminal_id=terminal_id, dispatch_id=dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_spawns.gemini_spawn.spawn_gemini", return_value=_make_spawn_result(error="timeout")), \
-             patch("event_store.EventStore", return_value=store):
+             patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"):
             rc = provider_dispatch._dispatch_gemini(args)
 
         assert rc == 1
@@ -183,7 +215,7 @@ class TestGeminiEventRotation:
 
 
 class TestKimiEventRotation:
-    def test_live_file_truncated_after_success(self, tmp_events):
+    def test_live_file_truncated_after_success(self, tmp_path, tmp_events):
         from event_store import EventStore
 
         terminal_id = "T2"
@@ -194,9 +226,12 @@ class TestKimiEventRotation:
         args = _build_args(provider="kimi", terminal_id=terminal_id, dispatch_id=dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=_make_spawn_result()), \
-             patch("event_store.EventStore", return_value=store):
+             patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"):
             rc = provider_dispatch._dispatch_kimi(args)
 
         assert rc == 0
@@ -205,7 +240,7 @@ class TestKimiEventRotation:
         archive = tmp_events / "archive" / terminal_id / f"{dispatch_id}.ndjson"
         assert archive.exists() and archive.stat().st_size > 0
 
-    def test_live_file_truncated_after_failure(self, tmp_events):
+    def test_live_file_truncated_after_failure(self, tmp_path, tmp_events):
         from event_store import EventStore
 
         terminal_id = "T2"
@@ -216,9 +251,12 @@ class TestKimiEventRotation:
         args = _build_args(provider="kimi", terminal_id=terminal_id, dispatch_id=dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=_make_spawn_result(returncode=1)), \
-             patch("event_store.EventStore", return_value=store):
+             patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"):
             rc = provider_dispatch._dispatch_kimi(args)
 
         assert rc == 1
@@ -244,7 +282,7 @@ class TestLitellmEventRotation:
         )
         return store, args
 
-    def test_live_file_truncated_after_success(self, tmp_events):
+    def test_live_file_truncated_after_success(self, tmp_path, tmp_events):
         terminal_id = "T2"
         dispatch_id = "litellm-rotate-ok"
         store, args = self._store_and_args(tmp_events, terminal_id, dispatch_id)
@@ -252,10 +290,13 @@ class TestLitellmEventRotation:
         mock_result = _make_spawn_result()
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_dispatch._resolve_deepseek_model", return_value="deepseek/deepseek-v4-pro"), \
              patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result), \
              patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"), \
              patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}):
             rc = provider_dispatch._dispatch_litellm(args)
 
@@ -265,16 +306,19 @@ class TestLitellmEventRotation:
         archive = tmp_events / "archive" / terminal_id / f"{dispatch_id}.ndjson"
         assert archive.exists() and archive.stat().st_size > 0
 
-    def test_live_file_truncated_after_failure(self, tmp_events):
+    def test_live_file_truncated_after_failure(self, tmp_path, tmp_events):
         terminal_id = "T2"
         dispatch_id = "litellm-rotate-fail"
         store, args = self._store_and_args(tmp_events, terminal_id, dispatch_id)
 
         with patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_dispatch._emit_governance"), \
              patch("provider_dispatch._resolve_deepseek_model", return_value="deepseek/deepseek-v4-pro"), \
              patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=_make_spawn_result(error="api error")), \
              patch("event_store.EventStore", return_value=store), \
+             patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
+             patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._record_provider_metadata"), \
              patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}):
             rc = provider_dispatch._dispatch_litellm(args)
 
