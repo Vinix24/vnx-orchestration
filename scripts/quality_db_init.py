@@ -765,6 +765,17 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
     project_id was added by the 0010 migration AFTER _migrate_v21 ran with a plain index.
     Table recreation is the only SQLite-safe way to alter a UNIQUE constraint.
     No destructive data drops — INSERT OR IGNORE preserves all existing rows.
+
+    View-ordering fix (failure mode 2): on legacy DBs (user_version=21) the base-schema
+    apply_script_if_below(conn, 1, ...) is skipped (version >= 1), so the three views
+    that reference dispatch_metadata already exist in the DB.  SQLite validates all views
+    that reference a table when that table is renamed *back* into scope — the RENAME in
+    step 4 below was therefore throwing:
+        "error in view dispatch_success_by_role: no such table: main.dispatch_metadata"
+    because dispatch_metadata was still missing (dropped in step 2, not yet renamed in
+    step 4).  Fix: DROP the three dependent views before step 2, recreate them after
+    step 4 using the canonical SQL from the base schema.  All three views are idempotent
+    (CREATE VIEW IF NOT EXISTS in the base schema) so this is safe on fresh DBs too.
     """
     # Ensure project_id exists before table recreation.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
@@ -783,14 +794,24 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
     )
 
     if needs_rebuild:
-        # Build the column list from the live table so any future migration-added
+        # Step 1: Drop views that reference dispatch_metadata so the subsequent
+        # DROP TABLE + RENAME sequence succeeds on legacy DBs (user_version=21)
+        # where these views already exist.  They are recreated after the rename.
+        for _view in (
+            "dispatch_success_by_role",
+            "intelligence_effectiveness",
+            "cost_per_dispatch",
+        ):
+            conn.execute(f"DROP VIEW IF EXISTS {_view}")
+
+        # Step 2: Build the column list from the live table so any future migration-added
         # columns are preserved without hardcoding them here.
         cols_info = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
         col_names = [r[1] for r in cols_info]
         # Exclude id — AUTOINCREMENT PK is re-stamped by the new table.
         non_id_cols = [c for c in col_names if c != "id"]
-        col_list = ", ".join(non_id_cols)
 
+        # Step 3: Create staging table and copy data.
         conn.execute(f"""
             CREATE TABLE _dispatch_metadata_v22 (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -836,9 +857,61 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             f"INSERT OR IGNORE INTO _dispatch_metadata_v22 ({shared_list}) "
             f"SELECT {shared_list} FROM dispatch_metadata"
         )
+
+        # Step 4: Swap the table.
         conn.execute("DROP TABLE dispatch_metadata")
         conn.execute("ALTER TABLE _dispatch_metadata_v22 RENAME TO dispatch_metadata")
         log('INFO', 'Migrated dispatch_metadata: composite UNIQUE (project_id, dispatch_id) (ADR-007)')
+
+        # Step 5: Recreate the three views that were dropped in step 1.
+        # These are the canonical view definitions from schemas/quality_intelligence.sql.
+        conn.execute("""
+            CREATE VIEW IF NOT EXISTS dispatch_success_by_role AS
+            SELECT
+                role,
+                COUNT(*) as total_dispatches,
+                SUM(CASE WHEN outcome_status = 'success' THEN 1 ELSE 0 END) as successes,
+                ROUND(AVG(CASE WHEN outcome_status = 'success' THEN 1.0 ELSE 0.0 END), 3) as success_rate,
+                AVG(pattern_count) as avg_patterns,
+                AVG(prevention_rule_count) as avg_rules,
+                AVG(instruction_char_count) as avg_instruction_chars
+            FROM dispatch_metadata
+            WHERE outcome_status IS NOT NULL
+            GROUP BY role
+            ORDER BY total_dispatches DESC
+        """)
+        conn.execute("""
+            CREATE VIEW IF NOT EXISTS intelligence_effectiveness AS
+            SELECT
+                CASE WHEN intelligence_json IS NOT NULL AND intelligence_json != '' THEN 'with_intelligence' ELSE 'without_intelligence' END as intelligence_used,
+                COUNT(*) as total,
+                SUM(CASE WHEN outcome_status = 'success' THEN 1 ELSE 0 END) as successes,
+                ROUND(AVG(CASE WHEN outcome_status = 'success' THEN 1.0 ELSE 0.0 END), 3) as success_rate,
+                AVG(pattern_count) as avg_patterns
+            FROM dispatch_metadata
+            WHERE outcome_status IS NOT NULL
+            GROUP BY intelligence_used
+        """)
+        conn.execute("""
+            CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
+            SELECT
+                dm.dispatch_id,
+                dm.terminal,
+                dm.role,
+                dm.gate,
+                dm.outcome_status,
+                sa.session_model,
+                sa.total_input_tokens,
+                sa.total_output_tokens,
+                sa.tool_calls_total,
+                sa.duration_minutes,
+                dm.pattern_count,
+                dm.instruction_char_count
+            FROM dispatch_metadata dm
+            LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
+            WHERE dm.outcome_status IS NOT NULL
+        """)
+        log('INFO', 'Recreated dispatch_metadata-dependent views after table rebuild')
 
     # Ensure composite (project_id, provider) index — covers legacy DBs where
     # _migrate_v21 ran before project_id existed and left a plain (provider) index.
