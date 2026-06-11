@@ -17,7 +17,7 @@ import os
 import random
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional, Set
 
 from intelligence_sources import (  # noqa: F401  (re-exported for backward compat)
     CONFIDENCE_THRESHOLDS, EVIDENCE_THRESHOLDS, ITEM_CLASS_PRIORITY,
@@ -159,7 +159,8 @@ class IntelligenceSelector:
                 effective_scope.append(tag)
 
         candidates = apply_candidate_diversity(self._query_candidates(resolved_class, effective_scope), resolved_class)
-        selected, suppressed = self._select_standard_classes(candidates)
+        recent_ids = self._query_recent_injected_ids(resolved_class)
+        selected, suppressed = self._select_standard_classes(candidates, recent_ids=recent_ids)
         selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)))
 
         now_ts = _now_utc()
@@ -179,11 +180,75 @@ class IntelligenceSelector:
 
         return InjectionResult(injection_point=injection_point, injected_at=now_ts, items=selected, suppressed=suppressed, task_class=resolved_class, dispatch_id=dispatch_id)
 
-    def _select_standard_classes(self, candidates):
+    _SUPPRESS_WINDOW_DEFAULT = 10
+
+    def _query_recent_injected_ids(self, task_class: str) -> FrozenSet[str]:
+        """Return item_ids injected in the last N dispatches for task_class from coord DB.
+
+        N is controlled by env var VNX_INTEL_SUPPRESS_WINDOW (default 10).
+        Rows with unparseable items_json are skipped — defensive, no crash.
+        Returns empty frozenset when coord DB is unavailable.
+        """
+        state_dir = self._coord_state_dir
+        if state_dir is None:
+            return frozenset()
+        try:
+            window = int(os.environ.get("VNX_INTEL_SUPPRESS_WINDOW", self._SUPPRESS_WINDOW_DEFAULT))
+        except (ValueError, TypeError):
+            window = self._SUPPRESS_WINDOW_DEFAULT
+        if window <= 0:
+            return frozenset()
+        try:
+            from runtime_coordination import get_connection
+        except ImportError:
+            return frozenset()
+        item_ids: Set[str] = set()
+        try:
+            with get_connection(state_dir) as conn:
+                rows = conn.execute(
+                    """SELECT items_json FROM intelligence_injections
+                       WHERE task_class = ?
+                       ORDER BY injected_at DESC
+                       LIMIT ?""",
+                    (task_class, window),
+                ).fetchall()
+            for row in rows:
+                raw = row["items_json"] if isinstance(row, sqlite3.Row) else row[0]
+                if not raw:
+                    continue
+                try:
+                    items = json.loads(raw)
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if isinstance(item, dict) and item.get("item_id"):
+                            item_ids.add(str(item["item_id"]))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.debug(
+                        "_query_recent_injected_ids: skipping malformed items_json row for task_class=%s",
+                        task_class,
+                    )
+                    continue
+        except Exception as exc:
+            logger.debug(
+                "_query_recent_injected_ids: coord DB query failed for task_class=%s: %s",
+                task_class,
+                exc,
+            )
+        return frozenset(item_ids)
+
+    def _select_standard_classes(
+        self, candidates, *, recent_ids: FrozenSet[str] = frozenset()
+    ):
         selected: List[IntelligenceItem] = []
         suppressed: List[SuppressionRecord] = []
         seen_hashes: set = set()
         governance_used = 0
+        window = self._SUPPRESS_WINDOW_DEFAULT
+        try:
+            window = int(os.environ.get("VNX_INTEL_SUPPRESS_WINDOW", self._SUPPRESS_WINDOW_DEFAULT))
+        except (ValueError, TypeError):
+            pass
         for item_class in ITEM_CLASS_PRIORITY:
             class_candidates = candidates.get(item_class, [])
             if not class_candidates:
@@ -208,7 +273,33 @@ class IntelligenceSelector:
                 parts = ([f"{dropped_dup} duplicates removed by content hash"] if dropped_dup else []) + ([f"{dropped_gov} governance items past per-batch cap"] if dropped_gov else [])
                 suppressed.append(SuppressionRecord(item_class=item_class, reason=f"diversity filter dropped all eligible items ({'; '.join(parts) or 'no diverse candidates remain'})"))
                 continue
-            best = max(diverse, key=lambda c: c.confidence)
+            # Recency suppression: filter candidates recently injected for this task_class.
+            # VANGNET: if suppression would leave the pool empty, let best candidate through.
+            if recent_ids and window > 0:
+                not_recent = [c for c in diverse if c.item_id not in recent_ids]
+                recently_suppressed = [c for c in diverse if c.item_id in recent_ids]
+                if not not_recent and recently_suppressed:
+                    # Vangnet: all diverse candidates were recently injected; allow best to prevent empty injection.
+                    best = max(diverse, key=lambda c: c.confidence)
+                    logger.debug(
+                        "_select_standard_classes: recency vangnet — all %d %s candidates recently injected, "
+                        "allowing best (%s) through to prevent empty injection",
+                        len(diverse),
+                        item_class,
+                        best.item_id,
+                    )
+                else:
+                    for cand in recently_suppressed:
+                        suppressed.append(SuppressionRecord(
+                            item_class=item_class,
+                            reason=f"recently injected (within last {window} dispatches for task_class)",
+                        ))
+                    diverse = not_recent
+                    if not diverse:
+                        continue
+                    best = max(diverse, key=lambda c: c.confidence)
+            else:
+                best = max(diverse, key=lambda c: c.confidence)
             selected.append(best)
             if best.content_hash:
                 seen_hashes.add(best.content_hash)
