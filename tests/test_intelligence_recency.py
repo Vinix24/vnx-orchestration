@@ -179,8 +179,12 @@ class TestInjectionDiversity:
 
     @pytest.mark.xfail(
         strict=False,
+        # strict=False stays intentionally — graduate to strict=True after 7-day soak
+        # with >=20 coding_interactive injections showing dup<=40% (see ROADMAP self-learning restpunt).
         reason="2026-04-30 audit: production DB has 90%+ identical injections; "
-        "see claudedocs/2026-04-30-self-learning-loop-audit.md",
+        "threshold raised from 0.10 to 0.40 after injection-history suppression fix "
+        "(fix/injection-history-suppression). "
+        "See claudedocs/2026-04-30-self-learning-loop-audit.md",
     )
     def test_recent_injections_not_all_identical(self, coord_db: Path) -> None:
         conn = _open(coord_db)
@@ -198,9 +202,12 @@ class TestInjectionDiversity:
 
         payloads = [r["items_json"] for r in rows]
         unique = set(payloads)
-        # Audit found 90%+ duplication.  Healthy is < 90% duplication.
+        # Threshold raised to 0.40 after injection-history suppression fix breaks duplicate dominance.
+        # Pre-fix baseline: 34 unique / 512 injections = 6.6% unique (93.4% dup).
+        # Post-fix target: >40% unique within 7-day soak of >=20 coding_interactive injections.
         unique_ratio = len(unique) / len(payloads)
-        assert unique_ratio > 0.10, (
+        assert unique_ratio > 0.40, (
             f"{len(payloads)} injections collapsed to {len(unique)} unique payloads "
-            f"({unique_ratio:.0%} unique). Diversity bug: selector echoing identical content."
+            f"({unique_ratio:.0%} unique). Diversity still below 40% target — "
+            "injection-history suppression may not be active or pool is too small."
         )
