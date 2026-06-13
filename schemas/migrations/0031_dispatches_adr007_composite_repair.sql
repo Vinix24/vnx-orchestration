@@ -1,0 +1,55 @@
+-- VNX Migration 0031 — dispatches ADR-007 composite-UNIQUE repair (central DB)
+--
+-- Purpose: Bring a central-DB `dispatches` table that is MISSING the ADR-007
+--          composite UNIQUE(dispatch_id, project_id) (and/or the project_id
+--          column itself) into conformance, so the track-migration preflight
+--          (_assert_dispatches_schema_intact) passes.
+--
+-- ROOT CAUSE this repairs (future-state reconciliation, symptom 4):
+--   The central DB's `runtime_schema_version` row FALSELY claimed a composite
+--   UNIQUE on dispatches that the table does not actually have. Migration 0017
+--   was supposed to add UNIQUE(dispatch_id, project_id), but the central DB
+--   arrived (via import / partial apply) with a single-column UNIQUE(dispatch_id)
+--   or no project_id at all. PRAGMA introspection is the source of truth here,
+--   NOT the version claim.
+--
+-- ADR-007 binding: docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md
+--   "every UNIQUE constraint or PK on a natural key is composite over project_id."
+--   The composite UNIQUE(dispatch_id, project_id) is mandatory for all central-DB
+--   tables that key on a tenant-scoped natural key (dispatch_id).
+--
+-- IMPORTANT: This script is applied ONLY by the introspection-driven repair in
+--   scripts/migrate_future_system.py:_repair_dispatches_adr007(), which:
+--     (a) decides applicability from PRAGMA table_info + PRAGMA index_list,
+--         NEVER from runtime_schema_version / user_version (those can lie), and
+--     (b) builds the column list dynamically so existing extra columns
+--         (operator_approved_at, output_ref, output_kind, ...) are preserved.
+--   This file documents the canonical target shape; the runtime repair performs
+--   the column-preserving rebuild. Do not run this file standalone.
+--
+-- Idempotency: the repair function is a no-op when the composite UNIQUE already
+--   exists and project_id is present — running it twice changes nothing.
+--
+-- Tested by: tests/test_migrate_dispatches_adr007_repair.py
+
+-- Canonical post-repair shape (reference only — runtime repair preserves any
+-- additional columns that exist on the live table):
+--
+--   CREATE TABLE dispatches (
+--       id              INTEGER PRIMARY KEY AUTOINCREMENT,
+--       dispatch_id     TEXT    NOT NULL,
+--       project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+--       state           TEXT    NOT NULL DEFAULT 'proposed',
+--       terminal_id     TEXT,
+--       track           TEXT,
+--       priority        TEXT    DEFAULT 'P2',
+--       pr_ref          TEXT,
+--       gate            TEXT,
+--       attempt_count   INTEGER NOT NULL DEFAULT 0,
+--       bundle_path     TEXT,
+--       created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+--       updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+--       expires_after   TEXT,
+--       metadata_json   TEXT    DEFAULT '{}',
+--       UNIQUE(dispatch_id, project_id)
+--   );

@@ -127,11 +127,32 @@ class TestPragmaPreflightAssertion:
         conn.close()
         return project_dir
 
-    def test_preflight_raises_on_missing_project_id(self, tmp_path):
+    def test_repair_adds_project_id_then_migrates(self, tmp_path):
+        """A v9-style DB (no project_id, single-column UNIQUE) is REPAIRED, not rejected.
+
+        Future-state reconciliation E: the introspection-driven repair adds
+        project_id + UNIQUE(dispatch_id, project_id) per ADR-007 before the
+        track migrations run, so the half-applied/legacy schema is brought to
+        conformance rather than failing the preflight.
+        """
         project_dir = self._v9_style_project(tmp_path)
         mod = _get_migrate_module()
-        with pytest.raises(RuntimeError, match="project_id"):
-            mod.run(project_dir)
+        mod.run(project_dir)
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+        # Composite UNIQUE(dispatch_id, project_id) now present.
+        composite = False
+        for idx in conn.execute("PRAGMA index_list('dispatches')"):
+            if idx[2]:
+                idx_cols = {c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")}
+                if idx_cols == {"dispatch_id", "project_id"}:
+                    composite = True
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        assert "project_id" in cols
+        assert composite
+        assert version == 30
 
     def test_preflight_passes_on_v21_schema(self, tmp_path):
         """v21 DB with project_id passes the preflight and migration proceeds."""
@@ -189,8 +210,14 @@ class TestBidirectionalPreflight:
         with pytest.raises(RuntimeError, match="extra="):
             mod.run(project_dir)
 
-    def test_raises_on_missing_unique(self, tmp_path):
-        """A dispatches table without UNIQUE(dispatch_id, project_id) fails preflight."""
+    def test_repair_adds_missing_unique(self, tmp_path):
+        """A dispatches table missing UNIQUE(dispatch_id, project_id) is REPAIRED.
+
+        Future-state reconciliation E + symptom 4: a DB whose dispatches lacks
+        the composite UNIQUE (the central-DB "falsely claims composite UNIQUE"
+        case) is brought to conformance by _repair_dispatches_adr007 rather than
+        rejected. Migrations then proceed.
+        """
         project_dir = tmp_path / "no_unique"
         state_dir = project_dir / ".vnx-data" / "state"
         state_dir.mkdir(parents=True)
@@ -221,8 +248,16 @@ class TestBidirectionalPreflight:
         conn.commit()
         conn.close()
         mod = _get_migrate_module()
-        with pytest.raises(RuntimeError, match="UNIQUE"):
-            mod.run(project_dir)
+        mod.run(project_dir)
+        conn = sqlite3.connect(str(db_path))
+        composite = False
+        for idx in conn.execute("PRAGMA index_list('dispatches')"):
+            if idx[2]:
+                idx_cols = {c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")}
+                if idx_cols == {"dispatch_id", "project_id"}:
+                    composite = True
+        conn.close()
+        assert composite
 
 
 class TestPreflightThroughApplyScriptIfBelow:

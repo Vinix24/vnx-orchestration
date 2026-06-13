@@ -55,6 +55,28 @@ _LIB_DIR = _SCRIPT_DIR / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+# ---------------------------------------------------------------------------
+# CANONICAL DATA-ROOT CONTRACT (future-state reconciliation, A)
+# ---------------------------------------------------------------------------
+# VNX has two historical data-root resolvers that disagreed (split-brain):
+#   - vnx_paths.resolve_data_root  -> central ``~/.vnx-data/<project_id>`` once it
+#     exists (the canonical PRODUCTION root the receipt processor + dispatcher
+#     watch).
+#   - project_root.resolve_data_dir -> worktree-local ``<repo>/.vnx-data`` (a DEV
+#     artifact, useful for isolated tests/worktrees).
+#
+# Reconciliation rule (single canonical root): all future-state DB readers
+# resolve through ``vnx_paths.ensure_env()`` / ``resolve_data_root``, whose
+# ordered precedence is the contract:
+#     1. VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR  (explicit override — worktree
+#        isolation, CI, tests). Honored *consistently* so dev/worktree usage is
+#        never broken.
+#     2. VNX_DATA_HOME/<project_id>
+#     3. existing central ``~/.vnx-data/<project_id>``        (canonical prod)
+#     4. existing project-local ``<repo>/.vnx-data``          (legacy dev)
+#     5. XDG default for a fresh install.
+# build_t0_state.py already honors this via ensure_env(); migrate_future_system.py
+# now resolves the same way instead of hard-coding the worktree-local path.
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
@@ -96,6 +118,53 @@ def _now_utc() -> datetime:
 
 def _now_iso() -> str:
     return _now_utc().isoformat()
+
+
+def _parse_iso(ts: str) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime, or None."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def compute_staleness_seconds(generated_at: str, now: Optional[datetime] = None) -> int:
+    """Real staleness in seconds = ``now - generated_at`` (never negative).
+
+    The previous builder hard-coded ``staleness_seconds: 0`` into the persisted
+    document, so a t0_state.json that was 10 days old still reported 0 — the
+    field lied. This computes the honest delta from the embedded
+    ``generated_at``. Returns 0 when ``generated_at`` is missing/unparseable so
+    callers never see a misleading negative or None.
+    """
+    gen = _parse_iso(generated_at)
+    if gen is None:
+        return 0
+    current = now or _now_utc()
+    delta = int((current - gen).total_seconds())
+    return delta if delta > 0 else 0
+
+
+def staleness_for_state_file(path: Path, now: Optional[datetime] = None) -> Optional[int]:
+    """Read a persisted t0_state.json and return its REAL staleness in seconds.
+
+    Consumers that read t0_state.json off disk should call this rather than
+    trusting the stored ``staleness_seconds`` literal, which only reflects
+    staleness at the instant of the last build. Returns None when the file is
+    absent or has no usable ``generated_at``.
+    """
+    data = _safe_json(path)
+    if not data:
+        return None
+    generated_at = data.get("generated_at")
+    if not isinstance(generated_at, str) or not generated_at:
+        return None
+    return compute_staleness_seconds(generated_at, now=now)
 
 
 def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -157,13 +226,39 @@ def _shadow_log(cmp: Any, project_id: str, read_site: str) -> None:
     _shadow_logger.write_comparison_result(cmp, project_id, read_site)
 
 
-def _count_md(directory: Path) -> int:
+def _count_dispatches(directory: Path) -> int:
+    """Count dispatches in a queue directory, both forms.
+
+    Active/pending dispatches arrive in two on-disk shapes:
+      - directory form: ``<dir>/<dispatch_id>/manifest.json`` (subprocess +
+        tmux-spawn lanes; the modern default). Each dispatch is a *directory*
+        containing manifest.json — it holds zero ``.md`` files.
+      - legacy ``.md`` form: ``<dir>/<dispatch_id>.md`` (the pre-track-layer
+        flat-file dispatch).
+
+    The previous ``_count_md`` only counted ``*.md`` files, so a queue full of
+    directory-form dispatches structurally always counted 0 — the root cause of
+    ``active_count: 0`` while ``dispatches/active/`` held 235 dirs. This counts
+    both forms: a child directory with a manifest.json OR a top-level ``.md``.
+    """
     if not directory.is_dir():
         return 0
+    count = 0
     try:
-        return sum(1 for f in directory.iterdir() if f.is_file() and f.suffix == ".md")
+        for entry in directory.iterdir():
+            if entry.is_dir():
+                if (entry / "manifest.json").is_file():
+                    count += 1
+            elif entry.is_file() and entry.suffix == ".md":
+                count += 1
     except Exception:
         return 0
+    return count
+
+
+# Backward-compat alias: some callers/tests still reference the old name. The
+# new implementation counts directory-form dispatches too (see _count_dispatches).
+_count_md = _count_dispatches
 
 
 # ---------------------------------------------------------------------------
@@ -258,9 +353,9 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
-    pending = _count_md(dispatch_dir / "pending")
-    active = _count_md(dispatch_dir / "active")
-    conflict = _count_md(dispatch_dir / "conflicts")
+    pending = _count_dispatches(dispatch_dir / "pending")
+    active = _count_dispatches(dispatch_dir / "active")
+    conflict = _count_dispatches(dispatch_dir / "conflicts")
 
     completed_last_hour = 0
     # Phase 6 P3: prefer central receipts when available (derived from state_dir)
@@ -317,7 +412,13 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
 # Track state (from progress_state.yaml)
 # ---------------------------------------------------------------------------
 
-def _build_tracks(state_dir: Path) -> Dict[str, Any]:
+def _build_tracks_legacy(state_dir: Path) -> Dict[str, Any]:
+    """Legacy A/B/C track model from ``progress_state.yaml``.
+
+    Fallback used when the ``tracks`` DB table is absent (pre-migration-0022
+    DB). The DB-backed feature-track model (``_build_tracks_from_db``) is the
+    canonical source once the track layer is migrated in.
+    """
     progress_path = state_dir / "progress_state.yaml"
     tracks: Dict[str, Any] = {}
 
@@ -354,9 +455,111 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
             "active_dispatch_id": active_dispatch_id,
             "last_receipt": last_receipt if isinstance(last_receipt, dict) else {},
             "health": health,
+            "source": "progress_state_yaml",
         }
 
     return tracks
+
+
+def _track_health(phase: str, derived_status: str) -> str:
+    """Map a feature track's phase/derived_status to a coarse health signal."""
+    if derived_status == "blocked":
+        return "blocked"
+    if phase in ("done", "merged") or derived_status == "done":
+        return "healthy"
+    if phase in ("queued", "active", "in_progress") or derived_status in ("queued", "in_progress"):
+        return "healthy"
+    return "unknown"
+
+
+def _build_tracks_from_db(state_dir: Path, project_id: str) -> Optional[Dict[str, Any]]:
+    """Build feature-track state from the ``tracks`` DB table (the canonical model).
+
+    Returns a dict keyed by ``track_id`` (the 36-row feature-track model from
+    migration 0022/0024) when the table exists, or ``None`` to signal the caller
+    to fall back to the legacy A/B/C ``progress_state.yaml`` model.
+
+    Reads via :func:`tracks.list_tracks` when available; otherwise queries the DB
+    directly with a column-aware SELECT (so it works whether or not migrations
+    0028/0029 added ``derived_status``/``track_type``). Project-scoped per ADR-007.
+    """
+    db_path = state_dir / "runtime_coordination.db"
+    if not db_path.exists():
+        return None
+
+    # Probe for the tracks table; absent → signal legacy fallback.
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+    except Exception:
+        return None
+    try:
+        try:
+            has_tracks = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tracks'"
+            ).fetchone()
+        except Exception:
+            return None
+        if not has_tracks:
+            return None
+
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+        if "track_id" not in cols:
+            return None
+
+        select_cols = ["track_id"]
+        for optional in ("title", "phase", "pr_ref", "derived_status",
+                         "track_type", "next_action_owner"):
+            if optional in cols:
+                select_cols.append(optional)
+
+        conn.row_factory = sqlite3.Row
+        if project_id and "project_id" in cols:
+            sql = (
+                f"SELECT {', '.join(select_cols)} FROM tracks "
+                "WHERE project_id = ? ORDER BY track_id ASC"
+            )
+            rows = conn.execute(sql, (project_id,)).fetchall()
+        else:
+            sql = f"SELECT {', '.join(select_cols)} FROM tracks ORDER BY track_id ASC"
+            rows = conn.execute(sql).fetchall()
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+    tracks: Dict[str, Any] = {}
+    for r in rows:
+        rec = dict(r)
+        tid = rec.get("track_id")
+        if not tid:
+            continue
+        phase = str(rec.get("phase") or "").strip()
+        derived = str(rec.get("derived_status") or "").strip()
+        tracks[tid] = {
+            "title": rec.get("title"),
+            "phase": phase or None,
+            "pr_ref": rec.get("pr_ref"),
+            "derived_status": derived or None,
+            "track_type": rec.get("track_type"),
+            "next_action_owner": rec.get("next_action_owner"),
+            "health": _track_health(phase, derived),
+            "source": "tracks_db",
+        }
+    return tracks
+
+
+def _build_tracks(state_dir: Path, project_id: str = "") -> Dict[str, Any]:
+    """Track state — canonical ``tracks`` DB table with legacy YAML fallback.
+
+    The feature-track model (migration 0022/0024, 36-row table) is canonical.
+    When the ``tracks`` table is absent (pre-migration DB) we fall back to the
+    legacy A/B/C ``progress_state.yaml`` model so a fresh/un-migrated checkout
+    still produces usable state instead of crashing.
+    """
+    db_tracks = _build_tracks_from_db(state_dir, project_id)
+    if db_tracks is not None:
+        return db_tracks
+    return _build_tracks_legacy(state_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -957,41 +1160,82 @@ def _collect_dispatch_insights(
 # Active work (scans dispatches/active/)
 # ---------------------------------------------------------------------------
 
+def _active_work_from_md(md_file: Path) -> Dict[str, Any]:
+    """Extract active-work fields from a legacy ``.md`` dispatch file."""
+    started_at = datetime.fromtimestamp(
+        md_file.stat().st_mtime, tz=timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    track: Optional[str] = None
+    gate: Optional[str] = None
+    for line in md_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if track is None:
+            m = re.search(r"\[\[TARGET:([^\]]+)\]\]", line)
+            if m:
+                track = m.group(1).strip()
+        if gate is None and re.match(r"^Gate:\s*\S+", line, re.IGNORECASE):
+            gate = line.split(":", 1)[1].strip()
+        if track and gate:
+            break
+    return {
+        "dispatch_id": md_file.stem,
+        "track": track,
+        "gate": gate,
+        "started_at": started_at,
+    }
+
+
+def _active_work_from_manifest(entry_dir: Path) -> Dict[str, Any]:
+    """Extract active-work fields from a directory-form dispatch (manifest.json)."""
+    manifest_path = entry_dir / "manifest.json"
+    started_at = datetime.fromtimestamp(
+        manifest_path.stat().st_mtime, tz=timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    dispatch_id = entry_dir.name
+    track: Optional[str] = None
+    gate: Optional[str] = None
+    data = _safe_json(manifest_path) or {}
+    if data:
+        dispatch_id = str(data.get("dispatch_id") or dispatch_id)
+        track = data.get("track") or data.get("role")
+        gate = data.get("gate")
+        ts = data.get("timestamp")
+        if isinstance(ts, str) and ts:
+            started_at = ts
+    return {
+        "dispatch_id": dispatch_id,
+        "track": track,
+        "gate": gate,
+        "started_at": started_at,
+    }
+
+
 def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
+    """Enumerate active dispatches in BOTH forms (directory + legacy .md).
+
+    Directory-form dispatches (``active/<id>/manifest.json``) are the modern
+    default written by the subprocess and tmux-spawn lanes; the legacy ``.md``
+    flat-file form predates the track layer. The old implementation globbed
+    only ``*.md`` and therefore returned an empty list for a queue full of
+    directory-form dispatches.
+    """
     active_dir = dispatch_dir / "active"
     if not active_dir.is_dir():
         return []
 
     items: List[Dict[str, Any]] = []
     try:
-        for md_file in sorted(active_dir.glob("*.md")):
+        for entry in active_dir.iterdir():
             try:
-                started_at = datetime.fromtimestamp(
-                    md_file.stat().st_mtime, tz=timezone.utc
-                ).isoformat().replace("+00:00", "Z")
-                dispatch_id = md_file.stem
-                track: Optional[str] = None
-                gate: Optional[str] = None
-                for line in md_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    if track is None:
-                        m = re.search(r"\[\[TARGET:([^\]]+)\]\]", line)
-                        if m:
-                            track = m.group(1).strip()
-                    if gate is None and re.match(r"^Gate:\s*\S+", line, re.IGNORECASE):
-                        gate = line.split(":", 1)[1].strip()
-                    if track and gate:
-                        break
-                items.append({
-                    "dispatch_id": dispatch_id,
-                    "track": track,
-                    "gate": gate,
-                    "started_at": started_at,
-                })
+                if entry.is_dir() and (entry / "manifest.json").is_file():
+                    items.append(_active_work_from_manifest(entry))
+                elif entry.is_file() and entry.suffix == ".md":
+                    items.append(_active_work_from_md(entry))
             except Exception:
                 continue
     except OSError as e:
         log.debug("Failed to enumerate active dispatches in %s: %s", active_dir, e)
 
+    items.sort(key=lambda x: str(x.get("started_at") or ""), reverse=True)
     return items[:5]
 
 
@@ -1378,7 +1622,7 @@ def build_t0_state(
 
     terminals = _build_terminals(state_dir)
     queues = _build_queues(dispatch_dir, state_dir)
-    tracks = _build_tracks(state_dir)
+    tracks = _build_tracks(state_dir, project_id)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -1407,10 +1651,16 @@ def build_t0_state(
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
 
+    generated_at = _now_iso()
     return {
         "schema_version": "2.1",
-        "generated_at": _now_iso(),
-        "staleness_seconds": 0,
+        "generated_at": generated_at,
+        # staleness_seconds is the REAL delta now - generated_at (≈0 at build
+        # time). Consumers reading t0_state.json off disk should recompute via
+        # staleness_for_state_file() rather than trusting this stored literal,
+        # which only reflects the instant of this build. The previous code
+        # hard-coded 0 here, so a stale on-disk file still claimed 0.
+        "staleness_seconds": compute_staleness_seconds(generated_at),
         "terminals": terminals,
         "queues": queues,
         "tracks": tracks,

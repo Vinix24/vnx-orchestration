@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """migrate_future_system.py — apply track layer migrations (schema only).
 
+Resolves to the CANONICAL data root (vnx_paths.resolve_data_root: explicit
+override > central ~/.vnx-data/<project_id> > project-local .vnx-data > XDG) so
+migrations land on the SAME DB the live system reads — fixing the split-brain
+where this script previously hard-coded the worktree-local path.
+
 Steps:
+  -1. introspection-driven ADR-007 repair: if dispatches is missing project_id
+      or the composite UNIQUE(dispatch_id, project_id), rebuild it to conform.
+      Decided purely from PRAGMA introspection — NEVER from the (possibly lying)
+      runtime_schema_version / user_version. Cites ADR-007.
+  0a. user_version reconciliation: lower a falsely-high user_version to the
+      level the real schema actually supports, so half-applied migrations re-run.
   1. PRAGMA pre-flight: assert dispatches schema and UNIQUE constraint are intact
   2. Apply schemas/migrations/0022_track_layer.sql (idempotent via user_version)
   3. PRAGMA pre-flight: assert tracks v22 schema intact before composite-key rebuild
@@ -40,6 +51,34 @@ import schema_migration
 
 
 # ---------------------------------------------------------------------------
+# CANONICAL DATA-ROOT RESOLUTION (future-state reconciliation, A)
+# ---------------------------------------------------------------------------
+# Historically this script hard-coded ``project_root / ".vnx-data" / "state"``
+# (the worktree-local DEV root), which is the split-brain: build_t0_state.py
+# and the receipt processor resolve through vnx_paths to the CENTRAL
+# ``~/.vnx-data/<project_id>`` once it exists, so migrations applied here landed
+# on a different DB than the one the live system reads — the root cause of
+# "migrations 0029/0030 never applied" while the worktree DB sat at v28.
+#
+# Resolve the SAME canonical root vnx_paths uses (explicit override > central >
+# project-local > XDG). Worktree/dev usage stays intact because VNX_DATA_DIR_
+# EXPLICIT=1 + VNX_DATA_DIR still wins (precedence rule 1).
+
+def resolve_canonical_state_dir(project_root: Path) -> Path:
+    """Resolve the canonical ``<data_root>/state`` dir for migrations.
+
+    Uses ``vnx_paths.resolve_data_root`` (the production-canonical resolver)
+    when available, falling back to the legacy worktree-local layout only when
+    that import fails. Honors VNX_DATA_DIR_EXPLICIT for tests/worktrees.
+    """
+    try:
+        from vnx_paths import resolve_data_root
+    except ImportError:
+        return project_root / ".vnx-data" / "state"
+    return Path(resolve_data_root(project_root)) / "state"
+
+
+# ---------------------------------------------------------------------------
 # Step 0: PRAGMA pre-flight — guard against schema drift before rebuild
 # ---------------------------------------------------------------------------
 
@@ -68,6 +107,176 @@ def _assert_dispatches_schema_intact(conn: sqlite3.Connection) -> None:
             'dispatches missing UNIQUE(dispatch_id, project_id) — '
             'was added in migration 0017, must be preserved'
         )
+
+
+# ---------------------------------------------------------------------------
+# ADR-007 dispatches composite-UNIQUE repair (introspection-driven, version-blind)
+# ---------------------------------------------------------------------------
+
+def _dispatches_has_composite_unique(conn: sqlite3.Connection) -> bool:
+    """True iff dispatches carries a UNIQUE index over exactly {dispatch_id, project_id}."""
+    for idx in conn.execute("PRAGMA index_list('dispatches')"):
+        if idx[2]:  # unique flag
+            idx_cols = {c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")}
+            if idx_cols == {"dispatch_id", "project_id"}:
+                return True
+    return False
+
+
+def _dispatches_repair_needed(conn: sqlite3.Connection) -> bool:
+    """Decide — purely from PRAGMA introspection — whether the ADR-007 repair runs.
+
+    NEVER trusts runtime_schema_version / user_version: the central DB's version
+    row falsely claimed a composite UNIQUE the table lacks. The actual schema
+    (PRAGMA table_info + index_list) is the only source of truth.
+
+    Repair is needed when dispatches exists but is missing the project_id column
+    OR the composite UNIQUE(dispatch_id, project_id).
+    """
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatches'"
+    ).fetchone()
+    if not has_table:
+        return False
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    if "project_id" not in cols:
+        return True
+    return not _dispatches_has_composite_unique(conn)
+
+
+def _repair_dispatches_adr007(conn: sqlite3.Connection) -> bool:
+    """Rebuild dispatches to add project_id + UNIQUE(dispatch_id, project_id).
+
+    Detect-and-repair the half-applied state (migration 0017 claimed-but-not-
+    applied on the central DB). Column-preserving: any columns already present
+    on the live table (operator_approved_at, output_ref, output_kind, extra
+    importer columns, ...) are carried over verbatim, with project_id injected
+    if absent. Idempotent: returns False (no-op) when repair is not needed.
+
+    ADR-007: docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md
+    — composite UNIQUE over project_id is mandatory for tenant-scoped natural keys.
+
+    Caller is responsible for the surrounding transaction/commit. SQLite ADD
+    COLUMN cannot add a NOT NULL column without a constant default, so project_id
+    is added as ``NOT NULL DEFAULT 'vnx-dev'`` (the ADR-007 bridge default).
+    """
+    if not _dispatches_repair_needed(conn):
+        return False
+
+    existing_cols = [row[1] for row in conn.execute("PRAGMA table_info('dispatches')")]
+
+    # If project_id is missing entirely, add it first (bridge default per ADR-007).
+    if "project_id" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+        )
+        existing_cols = [row[1] for row in conn.execute("PRAGMA table_info('dispatches')")]
+
+    col_list = ", ".join(existing_cols)
+
+    # Rebuild to attach the composite UNIQUE (SQLite cannot ADD a table-level
+    # UNIQUE constraint in place). Preserve all existing columns + their order;
+    # only the UNIQUE clause is new. id stays the AUTOINCREMENT rowid alias.
+    col_defs = []
+    for row in conn.execute("PRAGMA table_info('dispatches')"):
+        _cid, name, ctype, notnull, dflt, pk = row
+        parts = [name, ctype or "TEXT"]
+        if pk and (ctype or "").upper().startswith("INT"):
+            parts = [name, "INTEGER", "PRIMARY KEY", "AUTOINCREMENT"]
+        else:
+            if notnull:
+                parts.append("NOT NULL")
+            if dflt is not None:
+                parts.append(f"DEFAULT {dflt}")
+        col_defs.append(" ".join(parts))
+    col_defs.append("UNIQUE(dispatch_id, project_id)")
+
+    create_body = ",\n    ".join(col_defs)
+    conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_adr007_repair")
+    conn.execute(f"CREATE TABLE dispatches (\n    {create_body}\n)")
+    conn.execute(
+        f"INSERT INTO dispatches ({col_list}) "
+        f"SELECT {col_list} FROM dispatches_pre_adr007_repair"
+    )
+    conn.execute("DROP TABLE dispatches_pre_adr007_repair")
+    # Restore the hot-path indexes the rebuild dropped (best-effort, idempotent).
+    # Column-aware: only create an index when all its columns exist on the
+    # repaired table (a minimal/legacy dispatches table may lack updated_at etc.).
+    repaired_cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    if {"state", "updated_at"} <= repaired_cols:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_state ON dispatches(state, updated_at DESC)")
+    if {"terminal_id", "state"} <= repaired_cols:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_terminal ON dispatches(terminal_id, state)")
+    return True
+
+
+def _reconcile_lying_user_version(conn: sqlite3.Connection) -> int | None:
+    """Lower a falsely-high user_version to the level the real schema supports.
+
+    The half-applied-state hazard: a DB stamped user_version=N (e.g. via an
+    import that copied the version row) whose tables do not actually carry the
+    columns/constraints migration N installs. Trusting the stamp would skip the
+    migration that the schema genuinely still needs.
+
+    We probe the ACTUAL schema (PRAGMA introspection) for the per-version
+    invariant each migration establishes, walking down from the claimed version
+    until the schema matches. The version is then reset to that true level so
+    the run() pipeline re-applies the missing migrations.
+
+    Returns the new user_version when it was lowered, else None.
+
+    Conservative: only ever LOWERS the version (never raises it — raising is the
+    migrations' job). Probes are cheap and read-only until the final stamp.
+    """
+    claimed = schema_migration.get_user_version(conn)
+    if claimed <= 0:
+        return None
+
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    track_cols: set[str] = set()
+    if "tracks" in tables:
+        track_cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
+    oi_cols: set[str] = set()
+    if "track_open_items" in tables:
+        oi_cols = {row[1] for row in conn.execute("PRAGMA table_info('track_open_items')")}
+
+    # Per-version "is this migration actually applied?" invariants. Each entry:
+    # version N is satisfied iff the predicate(schema) is True.
+    def _v22() -> bool:
+        return "tracks" in tables and "track_open_items" in tables
+    def _v24() -> bool:
+        if "tracks" not in tables:
+            return False
+        idxs = {row[1] for row in conn.execute("PRAGMA index_list('tracks')")}
+        return "ux_tracks_next_up_per_project" in idxs and "project_id" in oi_cols
+    def _v27() -> bool:
+        return "horizon" in track_cols
+    def _v28() -> bool:
+        return "derived_status" in track_cols
+    def _v29() -> bool:
+        return "track_type" in track_cols
+    def _v30() -> bool:
+        return "resolved_at" in oi_cols
+
+    invariants = [(30, _v30), (29, _v29), (28, _v28), (27, _v27), (24, _v24), (22, _v22)]
+
+    true_version = claimed
+    for version, predicate in invariants:
+        if claimed >= version and not predicate():
+            # Migration `version` is claimed but NOT actually applied. The true
+            # version is at most version-1; keep walking down.
+            true_version = min(true_version, version - 1)
+
+    if true_version < claimed:
+        conn.execute(f"PRAGMA user_version = {true_version}")
+        print(
+            f"  [reconcile] user_version {claimed} -> {true_version} "
+            "(schema did not match the claimed version; re-applying missing migrations)"
+        )
+        return true_version
+    return None
 
 
 # Register PRAGMA pre-flight for 0022: any call to apply_script_if_below(22, ...)
@@ -535,7 +744,7 @@ def run(project_root: Path | None = None) -> None:
     if project_root is None:
         project_root = resolve_project_root(__file__)
 
-    state_dir = project_root / ".vnx-data" / "state"
+    state_dir = resolve_canonical_state_dir(project_root)
     state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / "runtime_coordination.db"
 
@@ -552,6 +761,22 @@ def run(project_root: Path | None = None) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
     try:
+        # Step -1: introspection-driven repair of half-applied state. The
+        # central DB's runtime_schema_version / user_version may FALSELY claim a
+        # composite UNIQUE on dispatches that the table does not have (symptom 4).
+        # Repair from the actual PRAGMA schema BEFORE any version-gated step, so
+        # the downstream preflight (_assert_dispatches_schema_intact) can pass.
+        if _repair_dispatches_adr007(conn):
+            print("  [repair] dispatches: added project_id + UNIQUE(dispatch_id, project_id) per ADR-007")
+            conn.commit()
+
+        # Step 0: reconcile a lying user_version against the real schema. If the
+        # version claims tracks-layer state (>= 22) but the tracks table is
+        # absent, the version is half-applied/false — reset it to the highest
+        # version the actual schema supports so the migrations below re-run.
+        _reconcile_lying_user_version(conn)
+        conn.commit()
+
         current_ver = schema_migration.get_user_version(conn)
 
         if current_ver < 22:

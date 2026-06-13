@@ -100,12 +100,26 @@ def _get_migrate_module():
 class TestPreflight0022Blocking:
     """PRAGMA pre-flight raises before 0022 SQL executes when project_id is missing."""
 
-    def test_run_raises_on_v9_schema(self, tmp_path):
-        """Full run() raises RuntimeError when dispatches lacks project_id."""
+    def test_run_repairs_v9_schema_then_migrates(self, tmp_path):
+        """Full run() REPAIRS a v9 schema (adds project_id + composite UNIQUE) then migrates.
+
+        Future-state reconciliation E: run() now detect-and-repairs the
+        half-applied/legacy dispatches schema via _repair_dispatches_adr007
+        before the version-gated migrations, so the preflight passes on the
+        repaired schema. The preflight remains a hard guard for DIRECT callers
+        (apply_migration / apply_script_if_below) — covered by the two tests
+        below, which still raise.
+        """
         project_dir = _make_v9_project(tmp_path)
         mod = _get_migrate_module()
-        with pytest.raises(RuntimeError, match="project_id"):
-            mod.run(project_dir)
+        mod.run(project_dir)
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        assert "project_id" in cols
+        assert version == 30
 
     def test_apply_migration_direct_raises_on_v9_schema(self, tmp_path):
         """apply_migration() directly (bypassing run()) still triggers the preflight."""

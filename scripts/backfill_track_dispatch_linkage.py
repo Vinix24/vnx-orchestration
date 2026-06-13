@@ -186,10 +186,46 @@ def _get_conn(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+class TrackTablesMissingError(RuntimeError):
+    """Raised when the tracks layer (migration 0022+) has not been applied yet."""
+
+
+def _require_track_tables(conn: sqlite3.Connection) -> None:
+    """Fail fast with a clear operator message when track tables are absent.
+
+    The backfill reads ``tracks`` and ``dispatches``. On a DB that predates the
+    track layer (or a central DB where migrations never ran) ``tracks`` does not
+    exist, and the bare SELECT crashed with sqlite3.OperationalError
+    ('no such table: tracks'). Detect the condition up front and raise a typed
+    error telling the operator exactly what to run first.
+    """
+    needed = ("tracks", "dispatches")
+    present = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    missing = [t for t in needed if t not in present]
+    if missing:
+        raise TrackTablesMissingError(
+            "Required table(s) missing: " + ", ".join(missing) + ". "
+            "The track layer is not migrated on this DB. "
+            "Run `python3 scripts/migrate_future_system.py` (migrations 0022-0030) "
+            "against the canonical DB first, then re-run this backfill."
+        )
+
+
 def compute_matches(db_path: Path, project_id: str) -> list[MatchResult]:
-    """Read DB, compute match results for all dispatches. Writes nothing."""
+    """Read DB, compute match results for all dispatches. Writes nothing.
+
+    Raises TrackTablesMissingError when the track layer is not yet migrated, so
+    the CLI can print a clear 'run migrations first' message instead of crashing
+    with a raw 'no such table: tracks' OperationalError.
+    """
     conn = _get_conn(db_path)
     try:
+        _require_track_tables(conn)
+
         # Load all tracks for this project.
         track_rows = conn.execute(
             "SELECT track_id, pr_ref FROM tracks WHERE project_id = ?",
@@ -430,7 +466,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"DB: {db_path}")
     print(f"project_id: {args.project_id}")
 
-    results = compute_matches(db_path, args.project_id)
+    try:
+        results = compute_matches(db_path, args.project_id)
+    except TrackTablesMissingError as exc:
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 3
     print_report(results, dry_run=dry_run)
 
     if dry_run:
