@@ -432,7 +432,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 `ROADMAP.yaml` in the repository root is the single source of truth for the active feature roadmap. The document you are reading captures the architecture principles and wave history; per-feature planning, milestone assignments, and PR queues live in `ROADMAP.yaml`. Two generated views are derived from it: `FEATURE_PLAN.md` and `PR_QUEUE.md`.
 
-**1.0.1 focus:** operational hardening and provider reliability. Key items include per-append hash-chain enforcement on the receipt ledger (`audit_chain`), Kimi content-block regression suite, log-rotation bounds for the event-stream ring buffer, self-learning loop reactivation (nightly intelligence cron), tmux submit reliability hardening, and completion of the unified dispatch envelope for the Claude subprocess lane.
+**1.0.1 focus:** operational hardening and provider reliability. Key items include Kimi content-block regression suite, log-rotation bounds for the event-stream ring buffer, tmux submit reliability hardening, and completion of the unified dispatch envelope for the Claude subprocess lane. (Per-append hash-chain enforcement shipped in #840; self-learning loop reactivation shipped in #850.)
 
 **1.1 focus:** architectural extensibility. Key items include the full unified dispatch envelope across all lanes (`VNX_UNIFIED_ENVELOPE`), full role-to-capability binding (MCP allowlist, per-role permission mode), and OpenRouter as a provider lane.
 
