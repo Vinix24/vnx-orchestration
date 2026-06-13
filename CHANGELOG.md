@@ -16,17 +16,27 @@ entries that follow document the road there.
 - **Planning / future-state layer (ships dark)** — tracks seeder + horizon views + `vnx objective list` (#787), deliverable plane with proposed→ready human gate (#790), planning kanban in the dashboard (#791), advisory rollup reconciler that never auto-writes ROADMAP (#793), dispatch→track linkage backfill (#801), human-gated objective sync (#800), `track_type` + `next_action_owner` discriminator (#803).
 - **Governance hardening** — `/pending` dispatch-path enforcement closes the T0 direct-call bypass (#811), profile-gate resolver active in `request_reviews()` (#804), worker-permission relay with operator auto-accept window + catastrophic hard-list (#799), OI bulk pattern subcommands + 1.0 closing sprint (96→48 open items) (#812).
 - **Digest architecture V2** — `atomic_io.py` + ADR-021 exception discipline (#816), progress-table + minimal digest skeleton (#817).
+- **OI-lifecycle closure** — `vnx track done`, `vnx oi-close`, dispatch-to-track linkage backfill, and `vnx status --tracks` added; coordinates track completion with open-item closure in a single governed action (#849).
+- **dispatch_metadata backfill tool** — `vnx dispatch_metadata` subcommand backfills `outcome`, `model`, `provider`, `tokens`, and `cost_usd` from receipts into the dispatch register; `contract_invalid` vocabulary synced at gate-F2 (#847).
 
 ### Fixed
 
 - **Bench seed decontamination** (#831) — task seeds no longer contain solutions and the scorer no longer reads repo-root state; `tests/test_bench_seed_integrity.py` guards that every verifier fails on the bare repo.
 - **Wheel hygiene** (#832) — benchmark dev-tooling (incl. a planted-flaw `sk-live` fixture string and a binary DB fixture) excluded from the artifact: 0 benchmark files, 2.3 MB, fresh-venv install verified.
 - Receipt dedup per dispatch_id keeps best status (#808); dispatcher survives scans that reject all dispatches (`set -e` leak) with observable rejection (#806); self-learning loop controls for task difficulty in model inference (#805); claude-spawn captures `completion_text` from stream-json (#821); smart-router null-cost sort collapse (#818); `_dispatch_gemini` respects `--model` (OI-155, #823); uniform central-path resolution (OI-126, #819); four regressed nightly intelligence phases repaired (OI-2331, #792); hook-driven version-agnostic tmux lane signals (#798); reconciler derives done from `track.pr_ref` instead of the legacy A/B/C join (#802).
+- **Audit-chain verify** now correctly distinguishes an unchained (virgin) ledger from a broken/corrupt one; previously both returned the same error code (LB-5, #840).
+- **Schema-init view-ordering** on legacy DBs unblocked v22/v23 migration failures — SQLite view dependency order now enforced during schema bootstrap (nightly phase-0 failure mode 2, #842).
+- **Observability path resolution** unified across `state/` and `events/`; `events_path` field added to receipt pointer so consumers locate the correct per-dispatch event archive (H2, #843).
+- **Kimi lane/constraint conflict** resolved — constraint file no longer marks the kimi CLI lane as violating; raw-spawn guard generalized to protect against uncontrolled provider CLI spawns on all non-claude lanes (#844).
+- **tmux-lane receipts** now emit truthful completion status and timestamps; extra-flags argument handling rewritten with `shlex.split` to eliminate quoting edge cases (H3/H5, #845).
+- **Dispatch broker atomicity** — orphan dispatch window and `claim_next` TOCTOU races closed; adapter pipe hygiene ensures `SIGPIPE` does not silently swallow worker output (H1/H6, #848).
+- **Self-learning duplicate-dominance** — injection history now suppresses patterns that dominated past injections even when their raw score is high; root cause of 93% duplicate injection rate resolved (#850).
 
 ### Changed
 
 - tmux-spawn documented as the default dispatch lane for parallel independent work; subprocess-dispatch reserved for terminal-pinned work (#824, #825).
 - README benchmark claim rewritten from package feature to repo methodology (#832); roadmap privacy trim moved operational detail to private state (#827).
+- **Docs truth-pass for 1.0 launch** — version labels corrected, ADR provenance added, surface sync between README/ROADMAP/CHANGELOG and shipped code completed (#846).
 
 ## [1.0.0-rc9] — 2026-05-26
 
@@ -61,70 +71,6 @@ entries that follow document the road there.
 - chore: bump version to 1.0.0-rc3; Wave 2a centralisation milestone
 - feat(env): Wave 2a feature flag block in `vnx.env.example` (VNX_USE_CENTRAL_DB, VNX_RUNTIME_PRIMARY, VNX_CANONICAL_LEASE_ACTIVE, dormant Wave 5/6 flags)
 - docs: dry-run manifest + rapport voor 4-project centralisatie (`claudedocs/wave2a-dag1-dry-run-2026-05-20.md`); 1,891,733 rijen gescand, 0 read errors, risico-classificatie per project
-
-## [Unreleased]
-
-### Refactored
-- refactor(dispatch): extract `_apply_runtime_overrides` from delivery.py + recovery.py to shared `runtime_overrides.py` module (Kimi audit duplication finding). Eliminates copy-paste drift.
-
-### Added
-- feat(install): `install-central.sh` for centralized VNX install (apart van embedded `install.sh`) — clones to `~/.vnx-system/versions/<v>/`, atomic symlink-swap, project-pin via `.vnx-version`. Pre-centralization must-have #7.
-- feat(intelligence): A/B random-skip framework (V5 per intelligence-injection-quality-research). Adds `ab_arm` column to intelligence_injections + 10% control-arm skip via `VNX_INTEL_AB_TEST=1` env flag + weekly lift report (`scripts/intelligence_ab_report.py`). Enables verifiable +30pp lift measurement. Audit BLOCKER #2 closes-the-loop PR-IH-3.
-- feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
-- feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
-- feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
-- feat(vnx_paths): override-resolver `_resolve_overrides_dir()` + `get_skill_path()` — per-project `.vnx-overrides/skills,schemas,configs/` directory takes precedence over central VNX_HOME. Enables mission-control-style custom assets without central pollution. (Pre-centralization must-have #5)
-- feat(pyproject): `vnx` console_script entry-point + requires-python `>=3.11,<3.14`. Pipx-installable. (Pre-centralization must-have #6)
-- feat(schema): migration 0021 `central_install_pins` + `central_install_events` tables met `scripts/lib/central_install_db.py` helper. Bookkeeping voor project pin tracking + install/update/rollback event history. Pre-centralization must-have #10.
-- feat(doctor): `vnx doctor --strict` flag with central-mode detection (install mode, dual-install warning, schema PRAGMA user_version check, skill coverage audit, overrides listing, worktree orphan detection, active dispatch drain check). Pre-centralization must-have #8.
-
-### Fixed
-- fix(governance): `_emit_governance` no longer raises `SystemExit(1)` on transient receipt write failure (Kimi audit). 3 retries with exponential backoff (0.5/1.0/1.5 s), then raises to caller. Transient FS races (rename collision, brief lock) no longer kill workers.
-- fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
-- fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
-- fix(vnx_paths): validate skill_name + resolved-path confinement check in get_skill_path (codex path-traversal blocker)
-- fix(pool): add real-subprocess integration tests for pool spawn; confirms `_spawn_via_provider_dispatch` uses real `subprocess.Popen` with live PID verification — guards against regression to pre-PR-6.5a stub (Sonnet audit BLOCKER #1)
-- fix(intelligence): catalogus-hygiene — filter governance-event success_patterns (81.6% noise) + memory_consolidation antipatterns (26% noise) at source; recency-decay (0.95^weeks) op confidence; migration invalidates existing noise. Addresses Sonnet audit BLOCKER #2 (intelligence +30pp claim artefact). PR-IH-1 per intelligence-injection-quality-research.
-- fix(intelligence-hygiene): replace ALTER TABLE IF NOT EXISTS (invalid SQLite < 3.37) with Python idempotent column-add via PRAGMA table_info check in quality_db_init.py (codex_gate blocker audit-ih-1-fixforward)
-- fix(intelligence-hygiene): parse ISO timestamps with timezone via fromisoformat + astimezone(UTC) — raw[:26] truncation was dropping tz offsets, skipping recency decay for those rows
-- fix(install-central): pin validation + resolved-path confinement in shim (path-traversal blocker)
-- fix(install-central): atomic rollback restore of previous symlink target (data-integrity blocker)
-- fix(install-central): atomic shim install via mktemp + mv (data-integrity blocker)
-- fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
-- fix(install-central): unlink+ln fallback voor macOS atomic symlink swap (codex edge-case blocker: mv -f kan dest-symlink-naar-dir verkeerd interpreteren)
-- fix(install-central): atomic symlink swap via tempfile + mv (no rm-before-replace); cleanup_on_failure raises EX_SOFTWARE on rollback failure (codex round-2 atomicity blocker)
-- fix(doctor): replace silent `except OSError: continue` in skill-coverage gate with `logger.warning` + unreadable list surfaced in strict mode (codex blocker)
-- fix(doctor): narrow OSError + sqlite3.OperationalError in _resolve_central_pin + _check_schema_versions; surface in strict-mode results instead of silent fallback (codex round-2 blockers)
-
-### Changed
-- chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
-- feat(schema): idempotent bootstrap — quality_db_init + coordination_db check PRAGMA user_version before each migration block, skip already-applied. Mid-run failures rollback cleanly via SAVEPOINT transactions. New `scripts/lib/schema_migration.py` helper centralises `apply_if_below` + `apply_script_if_below` patterns. (Pre-centralization must-have #4)
-- fix(schema-migration): replace silent `except: pass` in rollback with logger.warning (codex blocker, error-handling gate)
-- fix(coordination_db): migration gate falls back to runtime_schema_version table when PRAGMA user_version=0 (codex round-2 blocker — legacy install compatibility)
-- fix(schema-migration): replace `executescript` with quote/comment-aware SQL splitter inside SAVEPOINT in `apply_script_if_below` — schema script + `PRAGMA user_version` stamp now atomic, mid-script failure rolls back ALL statements (codex round-3 atomicity blocker)
-- fix(coordination_db): use `schema_migration.apply_script_if_below` for both V1 base schema + versioned migrations — eliminates direct `executescript` calls that broke SAVEPOINT atomicity
-- fix(quality_db_init): use `schema_migration.apply_script_if_below` for V1 base schema (codex round-3 follow-up — same atomicity pattern in third file)
-
-### Added
-- feat(skill-coverage): `scripts/check_skill_coverage.py` pre-flight scanner — finds project skill-refs vs central+overrides availability. Prevents mission-control style product-skill loss on central rollout. Pre-centralization must-have #9.
-- fix(skill-coverage): replace silent `except Exception: pass` in `_scan_local_skills_dir` + `_list_skills_in_dir` with narrow `(yaml.YAMLError, OSError)` + `logger.warning` + skipped report surfaced in `--json` output (codex 2 blockers)
-- fix(skill-coverage): narrow `_read_text` exception (OSError, UnicodeDecodeError) + logger.warning + surface to skipped list (codex round-2 blocker)
-
-- docs: refresh README + ROADMAP voor 1.0.0-rc2 (Wave 5/6/7/8 shipped, central install instructions, pipx wheel, .vnx-overrides documentation)
-
-### Planned (Wave 8)
-- Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)
-- Unified report schema enforced via YAML frontmatter + shell-script guardrails (model-agnostic)
-- Hard constraint enforcement at code level (`HardConstraintViolation` raise; T0=Opus, Kimi=CLI-only, no Anthropic SDK)
-- Self-learning loop: `route_decisions_watcher.py` auto-adjusts `routing_recommendations.yaml` on production failure patterns
-- Multi-project centralization via pipx wheel (D2 burn-in path: mission-control → sales-copilot → SEOcrawler)
-- Module-size CI gate (prevents new 2500-LOC monoliths from landing)
-- Hard-task benchmark suite (T08-T11) to discriminate Pro vs Flash on complex coding tasks
-
-### Open horizons (post-1.0)
-- Business-task benchmark suite (`scripts/benchmark_business/`) for non-coding orchestration
-- Multi-operator federation with isolated state
-- 100+ concurrent dispatch scale tuning
 
 ## [1.0.0-rc1+wave7] - 2026-05-17
 
