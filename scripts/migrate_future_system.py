@@ -18,6 +18,7 @@ Steps:
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 import warnings
@@ -37,6 +38,31 @@ if str(_LIB) not in sys.path:
 
 from project_root import resolve_project_root
 import schema_migration
+
+
+# ---------------------------------------------------------------------------
+# Test isolation guard (R8.6 / PR-0) — active only under pytest
+# ---------------------------------------------------------------------------
+
+def _pytest_db_isolation_guard() -> None:
+    """Refuse to open any DB when running under pytest without explicit isolation.
+
+    Active only when PYTEST_CURRENT_TEST is set (i.e. inside a pytest process).
+    Callers must set VNX_DATA_DIR_EXPLICIT=1 (and VNX_DATA_DIR=<tmp path>)
+    to signal that the _fsr_migration_module_isolation fixture is active.
+
+    Production code is never affected: PYTEST_CURRENT_TEST is only set by pytest.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None:
+        return
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+        return
+    raise RuntimeError(
+        "[TEST ISOLATION GUARD] migrate_future_system.run() called under pytest "
+        "without VNX_DATA_DIR_EXPLICIT=1. This would open the live database. "
+        "Ensure the _fsr_migration_module_isolation fixture is active (tests/conftest.py), "
+        "or set VNX_DATA_DIR_EXPLICIT=1 and VNX_DATA_DIR=<tmp_path> in your test."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +558,8 @@ def apply_migration_v30(conn: sqlite3.Connection, project_root: Path) -> None:
 
 def run(project_root: Path | None = None) -> None:
     """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029, 0030."""
+    _pytest_db_isolation_guard()
+
     if project_root is None:
         project_root = resolve_project_root(__file__)
 

@@ -7,6 +7,7 @@ test_vnx_snapshot_tooling.py, and the burn-in CI workflow tests.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -27,6 +28,40 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "integration: end-to-end integration tests (slower; opt-in via -m integration)",
     )
+
+
+# ---------------------------------------------------------------------------
+# Future-state / migration module-level isolation (R8.6, PR-0)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module", autouse=True)
+def _fsr_migration_module_isolation(tmp_path_factory: pytest.TempPathFactory):
+    """Module-scoped isolation for future-state and migration test modules.
+
+    Ensures VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR pointing at a per-module
+    tmp dir for the duration of each test module. Complements the per-function
+    _vnx_data_dir_isolation fixture below.
+
+    Cannot use monkeypatch (function-scoped); uses os.environ directly and
+    restores it via yield teardown.
+
+    Targets: test_future_state_reconciliation.py, test_migrate_future_system.py,
+    test_migrate_0022_preflight.py — and is harmlessly applied to all other
+    modules in this directory (extra isolation is always safe).
+    """
+    isolated = tmp_path_factory.mktemp("_fsr_module")
+    _prev = {
+        "VNX_DATA_DIR": os.environ.get("VNX_DATA_DIR"),
+        "VNX_DATA_DIR_EXPLICIT": os.environ.get("VNX_DATA_DIR_EXPLICIT"),
+    }
+    os.environ["VNX_DATA_DIR"] = str(isolated)
+    os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
+    yield isolated
+    for key, val in _prev.items():
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
 
 
 # ---------------------------------------------------------------------------

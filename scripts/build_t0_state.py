@@ -1360,11 +1360,36 @@ def _build_strategic_state_heavy(
 # Main builder
 # ---------------------------------------------------------------------------
 
+def _pytest_db_isolation_guard(state_dir: Path) -> None:
+    """Refuse to read/mutate a DB when running under pytest without explicit isolation.
+
+    Active only when PYTEST_CURRENT_TEST is set. Callers must set
+    VNX_DATA_DIR_EXPLICIT=1 (via the _fsr_migration_module_isolation fixture
+    in tests/conftest.py) to signal proper isolation is in place.
+    Production is unaffected: PYTEST_CURRENT_TEST is only set by pytest.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None:
+        return
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+        return
+    raise RuntimeError(
+        "[TEST ISOLATION GUARD] build_t0_state() called under pytest "
+        "without VNX_DATA_DIR_EXPLICIT=1. This would read/mutate the live database. "
+        "Ensure the _fsr_migration_module_isolation fixture is active (tests/conftest.py), "
+        "or set VNX_DATA_DIR_EXPLICIT=1 and VNX_DATA_DIR=<tmp_path> in your test."
+    )
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
 ) -> Dict[str, Any]:
-    """Build the full T0 state document. Never raises — errors produce safe fallbacks."""
+    """Build the full T0 state document. Never raises — errors produce safe fallbacks.
+
+    Raises RuntimeError under pytest when VNX_DATA_DIR_EXPLICIT=1 is not set
+    (test isolation guard, R8.6 / PR-0).
+    """
+    _pytest_db_isolation_guard(state_dir)
     start = time.monotonic()
 
     # Wave 1: resolve project_id for shadow-read dispatchers
