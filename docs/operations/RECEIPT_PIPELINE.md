@@ -104,19 +104,11 @@ The multi-provider GOVERN path archives the live per-terminal event stream and r
 events_path = .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
 ```
 
-`events_path` is `null` for lanes that produce no per-terminal event stream (tmux, claude subprocess) or when the archive step was skipped. The live `.vnx-data/events/T{n}.ndjson` is a ring buffer truncated after each dispatch — the durable copy lives in the archive directory keyed by `dispatch_id`. `events_path` makes the receipt → stream linkage an explicit pointer rather than a filename convention. See `docs/operations/EVENT_STREAMS.md`.
+Governed-path receipts (written by `emit_dispatch_receipt`) always carry `events_path`; the value is `null` for lanes that produce no per-terminal event stream (tmux, claude subprocess) or when the archive step was skipped. Tmux worker-authored completion receipts (written by the worker via the completion command) omit `events_path` entirely — the key is absent, not null. The live `.vnx-data/events/T{n}.ndjson` is a ring buffer truncated after each dispatch — the durable copy lives in the archive directory keyed by `dispatch_id`. See `docs/operations/EVENT_STREAMS.md`.
 
-## Hash-chain integrity (ADR-023, opt-in)
+## Hash-chain integrity (ADR-023, experimental opt-in)
 
-When `VNX_CHAIN_RECEIPTS=1`, the append path (`scripts/append_receipt.py` via `scripts/lib/append_receipt_internals/idempotency.py`) stamps each receipt with a `prev_hash` field linking it to the prior ledger entry, forming a tamper-evident chain. The tail-hash read and stamp happen inside the same `fcntl.flock(LOCK_EX)` critical section as the write, so concurrent appends cannot fork the chain.
-
-Default is OFF — the append path is byte-for-byte unchanged and no `prev_hash` is written. Verify a ledger with:
-
-```bash
-python3 scripts/audit_chain.py verify .vnx-data/state/t0_receipts.ndjson
-```
-
-Returns `unchained` (chaining off, exit 0), `verified` (chain intact, exit 0), or `broken` (tampered or partial chain, exit 1). A partial chain — some entries with `prev_hash`, some without — is `broken`. Full model in ADR-023.
+`VNX_CHAIN_RECEIPTS=1` enables an experimental hash-chain on the `append_receipt.py` path (Path 2 — report-on-disk). Only `scripts/append_receipt.py` honors the flag; `emit_dispatch_receipt` (Path 1) does NOT chain. Full per-path enforcement is DEFERRED to 1.0.1. See ADR-023.
 
 ## Downstream consumers
 

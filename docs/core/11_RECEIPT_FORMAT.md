@@ -77,9 +77,9 @@ It is `null` when the lane produces no event stream (tmux, claude subprocess) or
 
 `events_path` turns dispatch→stream linkage from a filename convention (matching `dispatch_id`) into an explicit data pointer. A reviewer can walk from a receipt straight to its event archive instead of inferring the path. See `docs/operations/EVENT_STREAMS.md` and ADR-005.
 
-### Optional hash-chain field: `prev_hash` (ADR-023)
+### Optional hash-chain field: `prev_hash` (ADR-023, experimental opt-in)
 
-When `VNX_CHAIN_RECEIPTS=1`, the receipt append path stamps one additional field:
+When `VNX_CHAIN_RECEIPTS=1`, the `append_receipt.py` write path (Path 2 — report-on-disk lane) stamps one additional field:
 
 ```json
 {
@@ -91,9 +91,9 @@ When `VNX_CHAIN_RECEIPTS=1`, the receipt append path stamps one additional field
 
 | Field | Type | Description |
 |---|---|---|
-| `prev_hash` | string (64 hex) | SHA-256 entry hash of the immediately preceding ledger entry, forming a tamper-evident chain. The first entry in a chain uses the genesis sentinel (`"0" * 64`). Present only when chaining is enabled. |
+| `prev_hash` | string (64 hex) | SHA-256 entry hash of the immediately preceding ledger entry. The first entry in a chain uses the genesis sentinel (`"0" * 64`). Present only when chaining is enabled on the `append_receipt.py` path. |
 
-There is no stored `entry_hash` field. An entry's own hash is computed on demand (`compute_entry_hash` = SHA-256 of canonical JSON with `prev_hash` excluded), never persisted. Verify integrity with `scripts/audit_chain.py verify <path>` — it returns `unchained` (chaining off, exit 0), `verified` (chain intact, exit 0), or `broken` (tampered or partial chain, exit 1). Default is OFF, in which case `prev_hash` is absent and the ledger verifies as `unchained`. Full model in ADR-023.
+`emit_dispatch_receipt` (Path 1 — governed dispatch envelope) does NOT honor `VNX_CHAIN_RECEIPTS`; enabling the flag on a deployment that uses both paths produces a mixed ledger that verifies as `broken`. Full per-path enforcement is DEFERRED to 1.0.1. Default is OFF; `prev_hash` is absent when chaining is off and the ledger verifies as `unchained`. See ADR-023.
 
 ## Status truth
 

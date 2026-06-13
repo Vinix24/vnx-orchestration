@@ -7,7 +7,7 @@
 
 ## Amendments
 
-**2026-06-13 — Hash-chain is the tamper-evidence implementation (ADR-023).** This ADR's reason #2 calls the ledger "tamper-evident by construction" on the strength of append-only file semantics. That holds against accidental mutation but not deliberate tampering — append-only is a convention, not a cryptographic property. ADR-023 codifies the receipt hash-chain (opt-in via `VNX_CHAIN_RECEIPTS=1`, `prev_hash` chain field, `audit_chain.py verify`) as the implementation that makes the tamper-evidence claim independently verifiable. When chaining is enabled, ledger integrity is a checkable property, not a trust assumption. See ADR-023 for the chain model and the three-state (`unchained` / `verified` / `broken`) verify semantics.
+**2026-06-13 — Hash-chain pointer (ADR-023, 1.0.1).** An experimental opt-in hash-chain (ADR-023, 1.0.1) adds tamper-evidence on the append_receipt path.
 
 **2026-06-13 — `events_path` receipt→stream pointer (PR #843).** Governed-path receipts (written by `emit_dispatch_receipt`) always carry an `events_path` field pointing at the archived per-terminal event stream (`.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`); the field is `null` for lanes that produce no event stream (tmux, claude subprocess). Tmux worker-authored completion receipts (written by the worker via the completion command) omit `events_path` entirely — the key is absent, not null. This turns the receipt→stream linkage from a filename convention (matching `dispatch_id`) into an explicit data pointer on the governed path, so a reviewer can walk from a receipt to its underlying event archive without inferring the path. See `docs/core/11_RECEIPT_FORMAT.md` for both receipt shapes and `docs/operations/EVENT_STREAMS.md` for the linkage.
 
