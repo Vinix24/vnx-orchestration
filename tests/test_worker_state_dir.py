@@ -125,7 +125,7 @@ class TestDeliveryEnvInjection:
                 return_value={},
             ),
             patch(
-                "subprocess_dispatch_internals.delivery._apply_runtime_overrides",
+                "subprocess_dispatch_internals.delivery.apply_runtime_overrides",
                 return_value=(300.0, 900.0),
             ),
             patch(

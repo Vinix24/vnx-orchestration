@@ -450,6 +450,7 @@ class TestReceiptStatusControlsSuccess(_LaneTestCase):
                     "--dispatch-id", "cli-failed-receipt",
                     "--instruction", "do the thing",
                     "--shared-worktree",
+                    "--allow-unstaged", "--reason", "ci-test",
                 ])
 
         self.assertNotEqual(rc, 0)
@@ -990,6 +991,7 @@ class TestWorktreeCliFlags(unittest.TestCase):
                     "--instruction", "do the thing",
                     "--shared-worktree",
                     "--base-ref", "origin/feature/foo",
+                    "--allow-unstaged", "--reason", "ci-test",
                 ])
 
         self.assertIs(captured.get("isolated_worktree"), False)
