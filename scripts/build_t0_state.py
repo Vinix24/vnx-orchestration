@@ -1360,11 +1360,61 @@ def _build_strategic_state_heavy(
 # Main builder
 # ---------------------------------------------------------------------------
 
+def _pytest_db_isolation_guard(state_dir: Path) -> None:
+    """Refuse to read/mutate a DB when running under pytest without explicit isolation.
+
+    Active whenever pytest is loaded (collection OR execution), so an
+    import-time module-level call is also guarded. Two conditions must hold:
+    1. VNX_DATA_DIR_EXPLICIT=1 must be set.
+    2. The resolved state_dir must be under tempfile.gettempdir() and NOT
+       under ~/.vnx-data.
+
+    The second check prevents tests from passing the flag while still resolving
+    to the real canonical data location — a false sense of isolation.
+
+    Production is unaffected: pytest is never in sys.modules outside a test run.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in sys.modules:
+        return
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") != "1":
+        raise RuntimeError(
+            "[TEST ISOLATION GUARD] build_t0_state() called under pytest "
+            "without VNX_DATA_DIR_EXPLICIT=1. This would read/mutate the live database. "
+            "Ensure the _fsr_migration_module_isolation fixture is active (tests/conftest.py), "
+            "or set VNX_DATA_DIR_EXPLICIT=1 and VNX_DATA_DIR=<tmp_path> in your test."
+        )
+    # Flag is set — validate the resolved state_dir is actually temp-owned.
+    resolved = state_dir.resolve()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    canonical = (Path.home() / ".vnx-data").resolve()
+    _sep = os.sep
+    under_tmp = (
+        str(resolved) == str(tmp_root)
+        or str(resolved).startswith(str(tmp_root) + _sep)
+    )
+    under_canonical = (
+        str(resolved) == str(canonical)
+        or str(resolved).startswith(str(canonical) + _sep)
+    )
+    if under_canonical or not under_tmp:
+        raise RuntimeError(
+            f"[TEST ISOLATION GUARD] VNX_DATA_DIR_EXPLICIT=1 is set but state_dir "
+            f"'{resolved}' is NOT under the system temp directory ('{tmp_root}'). "
+            "Setting the flag while pointing at the canonical ~/.vnx-data location is unsafe. "
+            "Ensure state_dir is a pytest-managed tmp_path."
+        )
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
 ) -> Dict[str, Any]:
-    """Build the full T0 state document. Never raises — errors produce safe fallbacks."""
+    """Build the full T0 state document. Never raises — errors produce safe fallbacks.
+
+    Raises RuntimeError under pytest when VNX_DATA_DIR_EXPLICIT=1 is not set
+    (test isolation guard, R8.6 / PR-0).
+    """
+    _pytest_db_isolation_guard(state_dir)
     start = time.monotonic()
 
     # Wave 1: resolve project_id for shadow-read dispatchers
