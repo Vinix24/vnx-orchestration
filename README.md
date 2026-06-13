@@ -49,7 +49,7 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-05-30.
+I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-06-10.
 
 **Tier 1, in production.** Append-only NDJSON receipts with hash-chain verification tooling (`audit_chain`); per-append chain enforcement lands in 1.0.1. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane (available and subscription-preserving; works today, is actively being hardened ahead of the June 15 OAuth rollout, and is set to become the production default as of June 15, 2026; its PREPARE/GOVERN/RECEIPT/CAPTURE structural work has shipped). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
 
@@ -131,7 +131,7 @@ For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/m
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by `scripts/lib/providers/provider_constraints.yaml`, a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
 
-The default Claude worker path runs through interactive tmux (`scripts/lib/tmux_interactive_dispatch.py`); the burst path uses subprocess `claude -p`. The receipt format and intelligence layer are uniform across all lanes today; per-lane parity on the full PREPARE/GOVERN envelope is the dispatch-unification work targeted for the 1.x release.
+The interactive tmux lane (`scripts/lib/tmux_interactive_dispatch.py`) is set to become the default Claude worker path as of the June 15, 2026 billing change and is actively maturing into that role; the headless burst path uses subprocess `claude -p`. The receipt format and intelligence layer are uniform across all lanes today; per-lane parity on the full PREPARE/GOVERN envelope is the dispatch-unification work targeted for the 1.x release.
 
 Kimi runs through the Kimi CLI with OAuth. VNX does not call the Moonshot SDK directly for that lane, which keeps attribution and rate-limit behavior in one place.
 
@@ -151,7 +151,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-Public 1.0 as of this README on 2026-05-30: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+Public 1.0 as of this README on 2026-06-10: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
