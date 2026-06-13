@@ -367,3 +367,109 @@ class TestR73SafeJsonErrorSurfacing:
         p = tmp_path / "array.json"
         p.write_text("[1, 2, 3]")
         assert bts._safe_json(p) is None
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward: _probe_db_health actually reads pages (not SELECT 1)
+# ---------------------------------------------------------------------------
+
+class TestProbeDbHealthRealRead:
+    def test_garbage_bytes_signals_failed(self, tmp_path: Path) -> None:
+        """_probe_db_health on a garbage file returns 'failed', not 'healthy'."""
+        db = tmp_path / "garbage.db"
+        db.write_bytes(b"NOT A VALID SQLITE DATABASE")
+        result = bts._probe_db_health(db)
+        assert result == "failed", (
+            f"Expected 'failed' for garbage-byte DB, got: {result!r}"
+        )
+
+    def test_missing_db_signals_healthy(self, tmp_path: Path) -> None:
+        """_probe_db_health on absent file returns 'healthy' (pre-migration path)."""
+        db = tmp_path / "absent.db"
+        assert bts._probe_db_health(db) == "healthy"
+
+    def test_valid_db_signals_healthy(self, tmp_path: Path) -> None:
+        """_probe_db_health on a real (empty) SQLite DB returns 'healthy'."""
+        db = tmp_path / "valid.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        assert bts._probe_db_health(db) == "healthy"
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward: _write_all_state_outputs surfaces write failures via return value
+# ---------------------------------------------------------------------------
+
+class TestWriteFailureSurface:
+    def test_write_failure_returns_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_write_all_state_outputs returns True when an atomic write fails."""
+        state_dir, _ = _make_isolated_env(tmp_path, monkeypatch)
+
+        def failing_write(path: Any, data: Any) -> None:
+            raise OSError("Disk full")
+
+        monkeypatch.setattr(bts, "_write_atomic", failing_write)
+
+        state: Dict[str, Any] = {}
+        write_failed = bts._write_all_state_outputs(state, state_dir, None)
+        assert write_failed, "Should return True when atomic writes fail"
+
+    def test_no_failure_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_write_all_state_outputs returns False when all writes succeed."""
+        state_dir, _ = _make_isolated_env(tmp_path, monkeypatch)
+        state: Dict[str, Any] = {}
+        write_failed = bts._write_all_state_outputs(state, state_dir, None)
+        assert not write_failed, "Should return False when writes succeed"
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward: non-string generated_at in compute_staleness_seconds
+# ---------------------------------------------------------------------------
+
+class TestNonStringGeneratedAt:
+    def test_integer_generated_at_returns_zero(self) -> None:
+        """Integer generated_at yields 0.0 without raising AttributeError."""
+        result = bts.compute_staleness_seconds({"generated_at": 1234567890})
+        assert result == 0.0, f"Expected 0.0 for integer generated_at, got {result}"
+
+    def test_float_generated_at_returns_zero(self) -> None:
+        """Float generated_at (Unix timestamp) yields 0.0 without crashing."""
+        result = bts.compute_staleness_seconds({"generated_at": 1234567890.5})
+        assert result == 0.0, f"Expected 0.0 for float generated_at, got {result}"
+
+    def test_none_value_explicit_returns_zero(self) -> None:
+        """Explicit None generated_at yields 0.0."""
+        result = bts.compute_staleness_seconds({"generated_at": None})
+        assert result == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward: unreadable active dir flags has_errors (R6.2)
+# ---------------------------------------------------------------------------
+
+class TestUnreadableActiveDirFlagsErrors:
+    def test_unreadable_active_dir_flags_has_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OSError during active dir enumeration sets has_errors=True (R6.2)."""
+        import os
+        _, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        # Remove all permissions so iterdir() raises PermissionError
+        os.chmod(active_dir, 0o000)
+        try:
+            _, has_errors = bts._build_active_work(dispatch_dir)
+        finally:
+            os.chmod(active_dir, 0o755)
+
+        assert has_errors, (
+            "OSError (PermissionError) during active dir enumeration must set has_errors=True"
+        )

@@ -194,16 +194,20 @@ def _classify_db_error(exc: Exception) -> str:
 def _probe_db_health(db_path: Path) -> str:
     """Quick read-only probe to classify a SQLite file's accessibility (R6.1).
 
-    Returns 'healthy' when absent (pre-migration) or when the file opens fine.
+    Returns 'healthy' when absent (pre-migration) or when PRAGMA integrity_check passes.
     Returns 'degraded' for SQLITE_BUSY/LOCKED; 'failed' for malformed / disk errors.
     Non-pre-migration OperationalErrors are NOT silently swallowed as legacy fallbacks.
+    Uses PRAGMA integrity_check so page-level corruption and garbage files are detected —
+    SELECT 1 is computed purely in-memory and cannot detect a malformed file.
     """
     if not db_path.exists():
         return "healthy"
     try:
         conn = sqlite3.connect(str(db_path), timeout=1)
         try:
-            conn.execute("SELECT 1")
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+            if result is None or result[0] != "ok":
+                return "failed"
         finally:
             conn.close()
         return "healthy"
@@ -226,7 +230,7 @@ def compute_staleness_seconds(
     staleness_seconds field (which was always written as 0 at build time).
     Returns 0.0 if generated_at is absent or unparseable.
     """
-    ts_raw = (state.get("generated_at") or "").strip()
+    ts_raw = str(state.get("generated_at") or "").strip()
     if not ts_raw:
         return 0.0
     try:
@@ -1115,6 +1119,7 @@ def _build_active_work(
             seen_ids.add(subdir.name)
     except OSError as exc:
         log.debug("Failed to enumerate active dispatch dirs in %s: %s", active_dir, exc)
+        has_errors = True  # R6.2: unreadable dir is a failure, not a silent skip
 
     # Legacy .md form — de-dup against directory form (R6.3)
     try:
@@ -1128,6 +1133,7 @@ def _build_active_work(
             seen_ids.add(md_file.stem)
     except OSError as exc:
         log.debug("Failed to enumerate active dispatches in %s: %s", active_dir, exc)
+        has_errors = True  # R6.2: unreadable dir is a failure, not a silent skip
 
     return items[:5], has_errors
 
@@ -1833,45 +1839,56 @@ def _resolve_output_path(args: argparse.Namespace) -> Path:
 
 def _write_all_state_outputs(
     state: Dict[str, Any], state_dir: Path, strategic_heavy: Any
-) -> None:
-    """Write secondary outputs (index, detail, brief, status). All best-effort."""
+) -> bool:
+    """Write secondary outputs (index, detail, brief, status). All best-effort.
+
+    Returns True if any core state-file write failed (caller should mark build degraded).
+    Optional helper modules (build_project_status, build_feature_plan) are not
+    counted as write failures when unavailable — only atomic state-file writes are.
+    """
+    write_failed = False
     try:
         _write_atomic(state_dir / "t0_index.json", _build_t0_index(state))
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to write t0_index.json: %s", exc)
+        write_failed = True
     try:
         if strategic_heavy is not None:
             state["_strategic_state_heavy"] = strategic_heavy
         _write_detail_files(state, state_dir / "t0_detail")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to write t0_detail/ files: %s", exc)
+        write_failed = True
     finally:
         state.pop("_strategic_state_heavy", None)
     try:
         _gc_t0_detail(state_dir / "t0_detail")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("GC of t0_detail failed (non-critical): %s", exc)
     try:
         pqs = state.get("pr_queue")
         if pqs:
             _write_atomic(state_dir / "pr_queue_state.json", pqs)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to write pr_queue_state.json: %s", exc)
+        write_failed = True
     try:
         _write_atomic(state_dir / "t0_brief.json", _state_to_brief(state))
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to write t0_brief.json: %s", exc)
+        write_failed = True
     try:
         sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
         from build_project_status import write_project_status
         write_project_status(state_dir)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("build_project_status unavailable or failed (non-critical): %s", exc)
     try:
         from build_feature_plan import write_feature_plan
         write_feature_plan(_PROJECT_ROOT / "FEATURE_PLAN.md", state_dir=state_dir)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("build_feature_plan unavailable or failed (non-critical): %s", exc)
+    return write_failed
 
 
 def _emit_build_signal(output_path: Path, elapsed: float) -> None:
@@ -1919,6 +1936,7 @@ def main() -> int:
 
     elapsed = 0.0
     _build_succeeded = False
+    write_failed = False
     state: Optional[Dict[str, Any]] = None
 
     try:
@@ -1927,7 +1945,7 @@ def main() -> int:
         _strategic_heavy = state.pop("_strategic_state_heavy", None)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
-        _write_all_state_outputs(state, _STATE_DIR, _strategic_heavy)
+        write_failed = _write_all_state_outputs(state, _STATE_DIR, _strategic_heavy)
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
     except Exception as exc:
@@ -1938,8 +1956,13 @@ def main() -> int:
 
     _emit_health_beacon(output_path, args.format, elapsed, _build_succeeded)
 
-    # R6.1: non-zero exit when DB health signals degraded or failed state
+    # R6.1/Fix-3: non-zero exit when DB health, artifact errors, or write failures degrade state.
+    # write_failed is folded into system_health before the check so the health dict is honest.
     if _build_succeeded and state is not None:
+        if write_failed:
+            sh = state.get("system_health") or {}
+            if sh.get("status") not in ("degraded", "failed"):
+                state["system_health"] = {**sh, "status": "degraded"}
         sh_status = (state.get("system_health") or {}).get("status", "healthy")
         if sh_status in ("degraded", "failed"):
             return 1
