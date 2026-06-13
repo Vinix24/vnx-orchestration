@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -44,25 +45,49 @@ import schema_migration
 # Test isolation guard (R8.6 / PR-0) — active only under pytest
 # ---------------------------------------------------------------------------
 
-def _pytest_db_isolation_guard() -> None:
+def _pytest_db_isolation_guard(project_root: Path) -> None:
     """Refuse to open any DB when running under pytest without explicit isolation.
 
     Active only when PYTEST_CURRENT_TEST is set (i.e. inside a pytest process).
-    Callers must set VNX_DATA_DIR_EXPLICIT=1 (and VNX_DATA_DIR=<tmp path>)
-    to signal that the _fsr_migration_module_isolation fixture is active.
+    Two conditions must hold:
+    1. VNX_DATA_DIR_EXPLICIT=1 must be set.
+    2. The resolved .vnx-data root derived from project_root must be under
+       tempfile.gettempdir() and NOT under ~/.vnx-data.
+
+    The second check prevents tests from passing the flag while still resolving
+    to the real canonical data location — a false sense of isolation.
 
     Production code is never affected: PYTEST_CURRENT_TEST is only set by pytest.
     """
     if os.environ.get("PYTEST_CURRENT_TEST") is None:
         return
-    if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
-        return
-    raise RuntimeError(
-        "[TEST ISOLATION GUARD] migrate_future_system.run() called under pytest "
-        "without VNX_DATA_DIR_EXPLICIT=1. This would open the live database. "
-        "Ensure the _fsr_migration_module_isolation fixture is active (tests/conftest.py), "
-        "or set VNX_DATA_DIR_EXPLICIT=1 and VNX_DATA_DIR=<tmp_path> in your test."
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") != "1":
+        raise RuntimeError(
+            "[TEST ISOLATION GUARD] migrate_future_system.run() called under pytest "
+            "without VNX_DATA_DIR_EXPLICIT=1. This would open the live database. "
+            "Ensure the _fsr_migration_module_isolation fixture is active (tests/conftest.py), "
+            "or set VNX_DATA_DIR_EXPLICIT=1 and VNX_DATA_DIR=<tmp_path> in your test."
+        )
+    # Flag is set — validate the resolved data root is actually temp-owned.
+    data_root = (project_root / ".vnx-data").resolve()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    canonical = (Path.home() / ".vnx-data").resolve()
+    _sep = os.sep
+    under_tmp = (
+        str(data_root) == str(tmp_root)
+        or str(data_root).startswith(str(tmp_root) + _sep)
     )
+    under_canonical = (
+        str(data_root) == str(canonical)
+        or str(data_root).startswith(str(canonical) + _sep)
+    )
+    if under_canonical or not under_tmp:
+        raise RuntimeError(
+            f"[TEST ISOLATION GUARD] VNX_DATA_DIR_EXPLICIT=1 is set but the resolved "
+            f"data root '{data_root}' is NOT under the system temp directory ('{tmp_root}'). "
+            "Setting the flag while pointing at the canonical ~/.vnx-data location is unsafe. "
+            "Pass a pytest tmp_path-based project_root to migrate_future_system.run()."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -558,10 +583,9 @@ def apply_migration_v30(conn: sqlite3.Connection, project_root: Path) -> None:
 
 def run(project_root: Path | None = None) -> None:
     """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029, 0030."""
-    _pytest_db_isolation_guard()
-
     if project_root is None:
         project_root = resolve_project_root(__file__)
+    _pytest_db_isolation_guard(project_root)
 
     state_dir = project_root / ".vnx-data" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)

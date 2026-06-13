@@ -131,6 +131,23 @@ class TestIsolationGuardFires:
         msg = str(exc_info.value)
         assert "_fsr_migration_module_isolation" in msg or "VNX_DATA_DIR_EXPLICIT" in msg
 
+    def test_flag_set_but_canonical_path_still_trips_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """VNX_DATA_DIR_EXPLICIT=1 pointing at the real ~/.vnx-data still trips the guard.
+
+        The flag alone is insufficient — the resolved .vnx-data root must also be
+        a temp-owned directory, not the canonical production location. This test
+        proves that setting the flag while passing Path.home() as project_root
+        (whose .vnx-data resolves to the real live directory) still raises.
+        """
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        mod = _get_migrate_module()
+
+        with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
+            mod.run(Path.home())
+
 
 # ---------------------------------------------------------------------------
 # (b) Correctly-pinned test: guard passes, run() proceeds to actual logic
@@ -184,7 +201,10 @@ class TestCanonicalDbHashUnchanged:
         canonical_dir = Path.home() / ".vnx-data" / "vnx-dev" / "state"
         if not canonical_dir.exists():
             return []
-        return sorted(canonical_dir.glob("*.db"))
+        db_files: list[Path] = []
+        for pattern in ("*.db", "*.db-wal", "*.db-shm", "*.db-journal"):
+            db_files.extend(canonical_dir.glob(pattern))
+        return sorted(db_files)
 
     def _compute_hashes(self, db_files: list[Path]) -> dict[str, str]:
         return {
@@ -210,10 +230,7 @@ class TestCanonicalDbHashUnchanged:
         # so the guard is satisfied and run() writes only to tmp_path.
         mod = _get_migrate_module()
         project_dir = _make_v21_project(tmp_path)
-        try:
-            mod.run(project_dir)
-        except Exception:
-            pass  # migration may raise for reasons unrelated to canonical DB
+        mod.run(project_dir)
 
         after = self._compute_hashes(db_files)
 
