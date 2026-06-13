@@ -1,0 +1,369 @@
+"""Behavioral tests for PR-E: kanban/state builder honesty (R6.1-R6.4, R7.1, R7.3).
+
+Each test is self-isolated via tmp_path + monkeypatch for VNX_DATA_DIR.
+No dependency on guards from other PRs.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Path bootstrap
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+_LIB_DIR = _SCRIPTS_DIR / "lib"
+
+for _p in (str(_SCRIPTS_DIR), str(_LIB_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import build_t0_state as bts  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Create isolated state_dir + dispatch_dir and pin env vars."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    dispatch_dir = tmp_path / "dispatches"
+    dispatch_dir.mkdir()
+    # Self-isolate: pin VNX_DATA_DIR so no prod DB is ever touched
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    return state_dir, dispatch_dir
+
+
+def _call_build(state_dir: Path, dispatch_dir: Path) -> Dict[str, Any]:
+    """Call build_t0_state and return the state dict."""
+    return bts.build_t0_state(state_dir, dispatch_dir)
+
+
+# ---------------------------------------------------------------------------
+# R6.1 — locked/malformed DB signals degraded/failed (not silent legacy fallback)
+# ---------------------------------------------------------------------------
+
+class TestR61DBHealthSignaling:
+    def test_malformed_db_signals_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed quality_intelligence.db → system_health.status in degraded/failed."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+
+        # Write garbage bytes — sqlite3 will raise DatabaseError on open
+        (state_dir / "quality_intelligence.db").write_bytes(b"NOT A VALID SQLITE DATABASE")
+
+        state = _call_build(state_dir, dispatch_dir)
+
+        sh_status = state["system_health"]["status"]
+        assert sh_status in ("degraded", "failed"), (
+            f"Expected degraded or failed for malformed DB, got: {sh_status!r}"
+        )
+
+    def test_locked_db_signals_degraded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Monkeypatched locked DB → system_health.status == 'degraded'."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+
+        # Create a placeholder DB file so the probe doesn't skip it
+        (state_dir / "quality_intelligence.db").write_bytes(b"")
+
+        original_connect = sqlite3.connect
+
+        def _locked_connect(path: str, **kwargs: Any) -> Any:
+            if "quality_intelligence" in str(path):
+                raise sqlite3.OperationalError("database is locked")
+            return original_connect(path, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", _locked_connect)
+
+        state = _call_build(state_dir, dispatch_dir)
+
+        sh_status = state["system_health"]["status"]
+        assert sh_status in ("degraded", "failed"), (
+            f"Expected degraded or failed for locked DB, got: {sh_status!r}"
+        )
+
+    def test_missing_table_does_not_degrade(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-migration 'no such table' error does NOT set degraded — it is a valid fallback."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+
+        # Presence of a receipt file keeps health from going degraded via the default check
+        (state_dir / "t0_receipts.ndjson").write_text("")
+
+        # Classify the error — must return 'premigration', not 'degraded'/'failed'
+        err = sqlite3.OperationalError("no such table: tracks")
+        result = bts._classify_db_error(err)
+        assert result == "premigration", (
+            f"Expected premigration for missing-table error, got: {result!r}"
+        )
+
+    def test_classify_db_error_operational_non_premigration(self) -> None:
+        """Non-premigration OperationalError → 'degraded'."""
+        err = sqlite3.OperationalError("database is locked")
+        assert bts._classify_db_error(err) == "degraded"
+
+    def test_classify_db_error_database_error(self) -> None:
+        """DatabaseError (e.g. malformed) → 'failed'."""
+        err = sqlite3.DatabaseError("file is not a database")
+        assert bts._classify_db_error(err) == "failed"
+
+
+# ---------------------------------------------------------------------------
+# R6.2 — corrupt manifest yields placeholder + degraded flag
+# ---------------------------------------------------------------------------
+
+class TestR62ArtifactReadFailure:
+    def test_corrupt_manifest_yields_placeholder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Corrupt manifest.json → dispatch represented as placeholder, not dropped."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        dispatch_id = "20260601-corrupt-dispatch"
+        subdir = active_dir / dispatch_id
+        subdir.mkdir()
+        (subdir / "manifest.json").write_text("NOT VALID JSON {{{")
+
+        items, has_errors = bts._build_active_work(dispatch_dir)
+
+        dispatch_ids = [item["dispatch_id"] for item in items]
+        assert dispatch_id in dispatch_ids, (
+            f"Corrupt dispatch {dispatch_id!r} was silently dropped (not in {dispatch_ids})"
+        )
+        corrupt_item = next(i for i in items if i["dispatch_id"] == dispatch_id)
+        assert "artifact_error" in corrupt_item, (
+            "Placeholder must carry 'artifact_error' field"
+        )
+        assert has_errors, "has_errors must be True when manifest is corrupt"
+
+    def test_corrupt_manifest_flags_build_degraded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Corrupt manifest propagates through build_t0_state → system_health degraded."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        # Provide a receipt so the default-degraded check (no receipts) doesn't fire
+        (state_dir / "t0_receipts.ndjson").write_text("")
+
+        dispatch_id = "20260601-build-degraded"
+        subdir = active_dir / dispatch_id
+        subdir.mkdir()
+        (subdir / "manifest.json").write_text("{bad json")
+
+        state = _call_build(state_dir, dispatch_dir)
+
+        active_ids = [item["dispatch_id"] for item in state["active_work"]]
+        assert dispatch_id in active_ids, "Dispatch must appear in active_work"
+        assert state["system_health"]["status"] == "degraded", (
+            f"Expected degraded, got: {state['system_health']['status']!r}"
+        )
+
+    def test_valid_manifest_no_artifact_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Valid manifest → no artifact_error, no has_errors."""
+        _, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        dispatch_id = "20260601-valid"
+        subdir = active_dir / dispatch_id
+        subdir.mkdir()
+        (subdir / "manifest.json").write_text('{"track": "A", "gate": "PR-1"}')
+
+        items, has_errors = bts._build_active_work(dispatch_dir)
+
+        assert not has_errors
+        assert any(i["dispatch_id"] == dispatch_id for i in items)
+        item = next(i for i in items if i["dispatch_id"] == dispatch_id)
+        assert "artifact_error" not in item
+
+
+# ---------------------------------------------------------------------------
+# R6.3 — de-dup across dir-form and legacy .md form
+# ---------------------------------------------------------------------------
+
+class TestR63Deduplication:
+    def test_dedup_dispatch_present_in_both_forms(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dispatch present as both active/<id>/ dir and active/<id>.md counts once."""
+        _, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        dispatch_id = "20260601-both-forms"
+
+        # Directory form
+        subdir = active_dir / dispatch_id
+        subdir.mkdir()
+        (subdir / "manifest.json").write_text('{"track": "A", "gate": "PR-2"}')
+
+        # Legacy .md form of the same dispatch
+        (active_dir / f"{dispatch_id}.md").write_text(
+            "# Dispatch 20260601-both-forms\nGate: PR-2\n[[TARGET:A]]\n"
+        )
+
+        items, _ = bts._build_active_work(dispatch_dir)
+
+        ids = [item["dispatch_id"] for item in items]
+        assert ids.count(dispatch_id) == 1, (
+            f"Expected dispatch_id to appear once, got {ids.count(dispatch_id)} times"
+        )
+
+    def test_unique_dispatches_not_deduplicated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two distinct dispatches each appear once."""
+        _, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        for did in ("20260601-alpha", "20260601-beta"):
+            (active_dir / f"{did}.md").write_text(f"# {did}\n")
+
+        items, _ = bts._build_active_work(dispatch_dir)
+
+        ids = [item["dispatch_id"] for item in items]
+        assert "20260601-alpha" in ids
+        assert "20260601-beta" in ids
+
+    def test_dir_form_takes_precedence_over_md(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When both forms exist, the directory form's data is used (it was processed first)."""
+        _, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        dispatch_id = "20260601-precedence"
+        subdir = active_dir / dispatch_id
+        subdir.mkdir()
+        (subdir / "manifest.json").write_text('{"track": "A", "gate": "from-dir"}')
+        (active_dir / f"{dispatch_id}.md").write_text(
+            f"# {dispatch_id}\nGate: from-md\n[[TARGET:B]]\n"
+        )
+
+        items, _ = bts._build_active_work(dispatch_dir)
+
+        item = next((i for i in items if i["dispatch_id"] == dispatch_id), None)
+        assert item is not None
+        assert item.get("gate") == "from-dir", (
+            f"Directory form should win, got gate={item.get('gate')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R6.4 — staleness computed from generated_at, not persisted as 0
+# ---------------------------------------------------------------------------
+
+class TestR64StalenessComputation:
+    def test_ten_day_old_state_reports_ten_days(self) -> None:
+        """compute_staleness_seconds on 10-day-old generated_at returns ~864000s."""
+        ten_days_ago = (
+            datetime.now(timezone.utc) - timedelta(days=10)
+        ).isoformat()
+        state: Dict[str, Any] = {"generated_at": ten_days_ago}
+
+        staleness = bts.compute_staleness_seconds(state)
+
+        expected = 10 * 86400  # 864000s
+        assert abs(staleness - expected) < 60, (
+            f"Expected ~{expected}s, got {staleness:.1f}s"
+        )
+
+    def test_injected_clock_gives_exact_delta(self) -> None:
+        """compute_staleness_seconds with pinned 'now' is exact."""
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        generated_at = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)  # 10 days earlier
+        state: Dict[str, Any] = {"generated_at": generated_at.isoformat()}
+
+        staleness = bts.compute_staleness_seconds(state, now=now)
+
+        assert staleness == 10 * 86400, f"Expected 864000s, got {staleness}s"
+
+    def test_missing_generated_at_returns_zero(self) -> None:
+        """Missing generated_at returns 0.0 (safe default)."""
+        assert bts.compute_staleness_seconds({}) == 0.0
+
+    def test_malformed_generated_at_returns_zero(self) -> None:
+        """Unparseable generated_at returns 0.0 (safe default)."""
+        assert bts.compute_staleness_seconds({"generated_at": "NOT A DATE"}) == 0.0
+
+    def test_build_t0_state_does_not_persist_staleness_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """build_t0_state must NOT persist staleness_seconds: 0 (R6.4 removed it)."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+
+        state = _call_build(state_dir, dispatch_dir)
+
+        assert "staleness_seconds" not in state, (
+            "staleness_seconds must not be persisted; compute it at read time "
+            "with compute_staleness_seconds()"
+        )
+
+    def test_generated_at_present_in_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """build_t0_state must emit generated_at so consumers can compute staleness."""
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+
+        state = _call_build(state_dir, dispatch_dir)
+
+        assert "generated_at" in state, "generated_at must be present for staleness computation"
+        staleness = bts.compute_staleness_seconds(state)
+        assert 0.0 <= staleness < 30.0, (
+            f"Fresh state should have staleness near 0, got {staleness:.1f}s"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R7.3 — _safe_json surfaces parse errors to caller
+# ---------------------------------------------------------------------------
+
+class TestR73SafeJsonErrorSurfacing:
+    def test_valid_json_returns_dict(self, tmp_path: Path) -> None:
+        p = tmp_path / "ok.json"
+        p.write_text('{"key": "value"}')
+        result = bts._safe_json(p)
+        assert result == {"key": "value"}
+
+    def test_absent_file_returns_none(self, tmp_path: Path) -> None:
+        p = tmp_path / "missing.json"
+        result = bts._safe_json(p)
+        assert result is None
+
+    def test_malformed_json_raises_json_decode_error(self, tmp_path: Path) -> None:
+        """Malformed JSON must raise json.JSONDecodeError, not silently return None."""
+        p = tmp_path / "bad.json"
+        p.write_text("NOT JSON {{{")
+
+        with pytest.raises(json.JSONDecodeError):
+            bts._safe_json(p)
+
+    def test_non_dict_json_returns_none(self, tmp_path: Path) -> None:
+        """A valid JSON array (not a dict) returns None."""
+        p = tmp_path / "array.json"
+        p.write_text("[1, 2, 3]")
+        assert bts._safe_json(p) is None

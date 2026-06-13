@@ -99,11 +99,14 @@ def _now_iso() -> str:
 
 
 def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
+    """Load JSON from path. Returns None on OSError (absent file).
+    Raises json.JSONDecodeError if the file exists but contains malformed JSON (R7.3)."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return None
+    data = json.loads(text)  # propagates JSONDecodeError to caller
+    return data if isinstance(data, dict) else None
 
 
 def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
@@ -164,6 +167,76 @@ def _count_md(directory: Path) -> int:
         return sum(1 for f in directory.iterdir() if f.is_file() and f.suffix == ".md")
     except Exception:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# DB health classification (R6.1)
+# ---------------------------------------------------------------------------
+
+_PREMIGRATION_OPS_MSGS: frozenset = frozenset({"no such table", "no such column"})
+
+
+def _classify_db_error(exc: Exception) -> str:
+    """Classify a sqlite3 exception for health signaling.
+
+    Returns 'premigration' for expected missing-table/column (fallback ok),
+    'degraded' for SQLITE_BUSY/LOCKED or other transient OperationalError,
+    'failed' for malformed / disk-error DatabaseError.
+    """
+    msg = str(exc).lower()
+    if any(pat in msg for pat in _PREMIGRATION_OPS_MSGS):
+        return "premigration"
+    if isinstance(exc, sqlite3.OperationalError):
+        return "degraded"
+    return "failed"
+
+
+def _probe_db_health(db_path: Path) -> str:
+    """Quick read-only probe to classify a SQLite file's accessibility (R6.1).
+
+    Returns 'healthy' when absent (pre-migration) or when the file opens fine.
+    Returns 'degraded' for SQLITE_BUSY/LOCKED; 'failed' for malformed / disk errors.
+    Non-pre-migration OperationalErrors are NOT silently swallowed as legacy fallbacks.
+    """
+    if not db_path.exists():
+        return "healthy"
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=1)
+        try:
+            conn.execute("SELECT 1")
+        finally:
+            conn.close()
+        return "healthy"
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+        return _classify_db_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Staleness helper (R6.4) — consumers call this at read time
+# ---------------------------------------------------------------------------
+
+
+def compute_staleness_seconds(
+    state: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> float:
+    """Compute real staleness from a state dict's generated_at timestamp (R6.4).
+
+    Consumers MUST call this at read time rather than relying on any persisted
+    staleness_seconds field (which was always written as 0 at build time).
+    Returns 0.0 if generated_at is absent or unparseable.
+    """
+    ts_raw = (state.get("generated_at") or "").strip()
+    if not ts_raw:
+        return 0.0
+    try:
+        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        actual_now = now if now is not None else _now_utc()
+        return max(0.0, (actual_now - ts).total_seconds())
+    except (ValueError, AttributeError, TypeError):
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +687,10 @@ _OPEN_ITEMS_SQL_TEMPLATE = "open_items_digest.json"
 
 def _collect_open_items_per_project(project_id: str, state_dir: Path) -> Dict[str, Any]:
     digest_path = state_dir / "open_items_digest.json"
-    data = _safe_json(digest_path) if digest_path.exists() else None
+    try:
+        data = _safe_json(digest_path) if digest_path.exists() else None
+    except json.JSONDecodeError:
+        data = None
     if not data:
         return {"open_count": 0, "blocker_count": 0, "top_blockers": []}
     summary = data.get("summary") or {}
@@ -664,26 +740,23 @@ def _collect_open_items(project_id: str, state_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
+    _empty: Dict[str, Any] = {
+        "operational_defects": 0,
+        "prompt_tuning_items": 0,
+        "governance_health_items": 0,
+        "total_items": 0,
+        "critical_high_count": 0,
+        "generated_at": None,
+    }
     digest_path = state_dir / "t0_quality_digest.json"
     if not digest_path.exists():
-        return {
-            "operational_defects": 0,
-            "prompt_tuning_items": 0,
-            "governance_health_items": 0,
-            "total_items": 0,
-            "critical_high_count": 0,
-            "generated_at": None,
-        }
-    data = _safe_json(digest_path)
+        return _empty
+    try:
+        data = _safe_json(digest_path)
+    except json.JSONDecodeError:
+        return _empty
     if not data:
-        return {
-            "operational_defects": 0,
-            "prompt_tuning_items": 0,
-            "governance_health_items": 0,
-            "total_items": 0,
-            "critical_high_count": 0,
-            "generated_at": None,
-        }
+        return _empty
     summary = data.get("summary") or {}
     sections = summary.get("sections") or {}
     return {
@@ -954,45 +1027,109 @@ def _collect_dispatch_insights(
 
 
 # ---------------------------------------------------------------------------
-# Active work (scans dispatches/active/)
+# Active work (scans dispatches/active/) — R6.2 + R6.3
 # ---------------------------------------------------------------------------
 
-def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
+
+def _read_dir_dispatch(subdir: Path) -> tuple[Dict[str, Any], bool]:
+    """Read one directory-form active dispatch (active/<id>/manifest.json).
+
+    Returns (item, has_error). R6.2: corrupt manifest yields a placeholder
+    with artifact_error so the dispatch is NOT silently dropped.
+    """
+    dispatch_id = subdir.name
+    try:
+        started_at: Optional[str] = datetime.fromtimestamp(
+            subdir.stat().st_mtime, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+    except OSError:
+        started_at = None
+    try:
+        data = _safe_json(subdir / "manifest.json")
+        return {
+            "dispatch_id": dispatch_id,
+            "track": (data or {}).get("track"),
+            "gate": (data or {}).get("gate"),
+            "started_at": started_at,
+        }, False
+    except json.JSONDecodeError as exc:
+        return {
+            "dispatch_id": dispatch_id,
+            "track": None, "gate": None, "started_at": started_at,
+            "artifact_error": str(exc),
+        }, True
+
+
+def _read_md_dispatch(md_file: Path) -> tuple[Dict[str, Any], bool]:
+    """Read one legacy .md active dispatch. Returns (item, has_error)."""
+    dispatch_id = md_file.stem
+    try:
+        started_at = datetime.fromtimestamp(
+            md_file.stat().st_mtime, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        track: Optional[str] = None
+        gate: Optional[str] = None
+        for line in md_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if track is None:
+                m = re.search(r"\[\[TARGET:([^\]]+)\]\]", line)
+                if m:
+                    track = m.group(1).strip()
+            if gate is None and re.match(r"^Gate:\s*\S+", line, re.IGNORECASE):
+                gate = line.split(":", 1)[1].strip()
+            if track and gate:
+                break
+        return {
+            "dispatch_id": dispatch_id,
+            "track": track, "gate": gate, "started_at": started_at,
+        }, False
+    except Exception as exc:
+        return {
+            "dispatch_id": dispatch_id,
+            "track": None, "gate": None, "started_at": None,
+            "artifact_error": str(exc),
+        }, True
+
+
+def _build_active_work(
+    dispatch_dir: Path,
+) -> tuple[List[Dict[str, Any]], bool]:
+    """Scan active dispatches from directory and legacy .md forms.
+
+    Returns (items, has_artifact_errors). R6.2+R6.3.
+    """
     active_dir = dispatch_dir / "active"
     if not active_dir.is_dir():
-        return []
+        return [], False
 
     items: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    has_errors = False
+
+    # Directory-form: active/<dispatch_id>/manifest.json
+    try:
+        for subdir in sorted(d for d in active_dir.iterdir() if d.is_dir()):
+            item, err = _read_dir_dispatch(subdir)
+            items.append(item)
+            if err:
+                has_errors = True
+            seen_ids.add(subdir.name)
+    except OSError as exc:
+        log.debug("Failed to enumerate active dispatch dirs in %s: %s", active_dir, exc)
+
+    # Legacy .md form — de-dup against directory form (R6.3)
     try:
         for md_file in sorted(active_dir.glob("*.md")):
-            try:
-                started_at = datetime.fromtimestamp(
-                    md_file.stat().st_mtime, tz=timezone.utc
-                ).isoformat().replace("+00:00", "Z")
-                dispatch_id = md_file.stem
-                track: Optional[str] = None
-                gate: Optional[str] = None
-                for line in md_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    if track is None:
-                        m = re.search(r"\[\[TARGET:([^\]]+)\]\]", line)
-                        if m:
-                            track = m.group(1).strip()
-                    if gate is None and re.match(r"^Gate:\s*\S+", line, re.IGNORECASE):
-                        gate = line.split(":", 1)[1].strip()
-                    if track and gate:
-                        break
-                items.append({
-                    "dispatch_id": dispatch_id,
-                    "track": track,
-                    "gate": gate,
-                    "started_at": started_at,
-                })
-            except Exception:
+            if md_file.stem in seen_ids:
                 continue
-    except OSError as e:
-        log.debug("Failed to enumerate active dispatches in %s: %s", active_dir, e)
+            item, err = _read_md_dispatch(md_file)
+            items.append(item)
+            if err:
+                has_errors = True
+            seen_ids.add(md_file.stem)
+    except OSError as exc:
+        log.debug("Failed to enumerate active dispatches in %s: %s", active_dir, exc)
 
-    return items[:5]
+    return items[:5], has_errors
 
 
 # ---------------------------------------------------------------------------
@@ -1122,7 +1259,13 @@ def _build_git_context() -> Dict[str, Any]:
 # System health
 # ---------------------------------------------------------------------------
 
-def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any]:
+def _build_system_health(
+    state_dir: Path,
+    db_initialized: bool,
+    *,
+    build_degraded: bool = False,
+    db_health: str = "healthy",
+) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
     if panes_path.exists():
@@ -1131,13 +1274,19 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
         except OSError as e:
             log.debug("Could not stat panes.json for uptime: %s", e)
 
-    # Degraded if we have neither terminal state nor any receipts
-    status = "healthy"
-    if (
+    # R6.1: DB health (locked/malformed) takes precedence over other signals.
+    # R6.2: artifact errors (corrupt manifest) flag build as degraded.
+    if db_health in ("failed", "degraded"):
+        status = db_health
+    elif build_degraded:
+        status = "degraded"
+    elif (
         not (state_dir / "terminal_state.json").exists()
         and not (state_dir / "t0_receipts.ndjson").exists()
     ):
         status = "degraded"
+    else:
+        status = "healthy"
 
     return {
         "status": status,
@@ -1357,39 +1506,12 @@ def _build_strategic_state_heavy(
 
 
 # ---------------------------------------------------------------------------
-# Main builder
+# PR queue section helper (extracted for R7.1 — keeps build_t0_state ≤70 lines)
 # ---------------------------------------------------------------------------
 
-def build_t0_state(
-    state_dir: Path,
-    dispatch_dir: Path,
-) -> Dict[str, Any]:
-    """Build the full T0 state document. Never raises — errors produce safe fallbacks."""
-    start = time.monotonic()
 
-    # Wave 1: resolve project_id for shadow-read dispatchers
-    project_id = (
-        project_id_from_state_dir(state_dir)
-        or os.environ.get("VNX_PROJECT_ID", "").strip()
-    )
-
-    # Step 1: Ensure DB schema (absorbed from runtime_coordination_init.py)
-    db_ok = _init_and_check_db(state_dir)
-
-    terminals = _build_terminals(state_dir)
-    queues = _build_queues(dispatch_dir, state_dir)
-    tracks = _build_tracks(state_dir)
-    pr_progress = _build_pr_progress(dispatch_dir, state_dir)
-    feature_state = _build_feature_state(state_dir=state_dir)
-    open_items = _collect_open_items(project_id, state_dir)
-    quality_digest = _build_quality_digest(state_dir)
-    dispatch_insights = _collect_dispatch_insights(project_id, state_dir=state_dir)
-    recent_dispatches = _collect_recent_dispatches(project_id, state_dir)
-    intelligence_brief = _collect_intelligence_brief(project_id, state_dir)
-    active_work = _build_active_work(dispatch_dir)
-    recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
-    register_events = _build_register_events(state_dir=state_dir)
-    git_context = _build_git_context()
+def _build_pr_queue_section(state_dir: Path) -> Dict[str, Any]:
+    """Build pr_queue section. Best-effort — never raises."""
     pr_queue: Dict[str, Any] = {
         "schema": "pr_queue/1.0",
         "timestamp": _now_iso(),
@@ -1402,15 +1524,54 @@ def build_t0_state(
             pr_queue = _build_pqs(state_dir)
         except Exception as e:
             log.warning("pr_queue_state build failed (best-effort): %s", e)
+    return pr_queue
+
+
+# ---------------------------------------------------------------------------
+# Main builder
+# ---------------------------------------------------------------------------
+
+def build_t0_state(
+    state_dir: Path,
+    dispatch_dir: Path,
+) -> Dict[str, Any]:
+    """Build the full T0 state document. Never raises — errors produce safe fallbacks."""
+    start = time.monotonic()
+
+    project_id = (
+        project_id_from_state_dir(state_dir)
+        or os.environ.get("VNX_PROJECT_ID", "").strip()
+    )
+    db_ok = _init_and_check_db(state_dir)
+    # R6.1: probe quality_intelligence.db; classify locked/malformed (not premigration)
+    db_health = _probe_db_health(state_dir / "quality_intelligence.db")
+
+    terminals = _build_terminals(state_dir)
+    queues = _build_queues(dispatch_dir, state_dir)
+    tracks = _build_tracks(state_dir)
+    pr_progress = _build_pr_progress(dispatch_dir, state_dir)
+    feature_state = _build_feature_state(state_dir=state_dir)
+    open_items = _collect_open_items(project_id, state_dir)
+    quality_digest = _build_quality_digest(state_dir)
+    dispatch_insights = _collect_dispatch_insights(project_id, state_dir=state_dir)
+    recent_dispatches = _collect_recent_dispatches(project_id, state_dir)
+    intelligence_brief = _collect_intelligence_brief(project_id, state_dir)
+    active_work, active_errors = _build_active_work(dispatch_dir)  # R6.2: track errors
+    recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
+    register_events = _build_register_events(state_dir=state_dir)
+    git_context = _build_git_context()
+    pr_queue = _build_pr_queue_section(state_dir)  # R7.1: extracted helper
     strategic_state = _build_strategic_state(state_dir)
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     elapsed = time.monotonic() - start
-    system_health = _build_system_health(state_dir, db_ok)
+    system_health = _build_system_health(
+        state_dir, db_ok, build_degraded=active_errors, db_health=db_health
+    )
 
     return {
         "schema_version": "2.1",
         "generated_at": _now_iso(),
-        "staleness_seconds": 0,
+        # staleness_seconds removed (R6.4): call compute_staleness_seconds() at read time
         "terminals": terminals,
         "queues": queues,
         "tracks": tracks,
@@ -1640,124 +1801,106 @@ def _write_atomic(path: Path, data: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI helpers (extracted for R7.1 — keeps main() ≤70 lines)
 # ---------------------------------------------------------------------------
 
-def main() -> int:
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build unified T0 state JSON from all runtime sources."
     )
     parser.add_argument(
-        "--format",
-        choices=["state", "brief"],
-        default="state",
+        "--format", choices=["state", "brief"], default="state",
         help="Output format: 'state' (schema 2.0) or 'brief' (backward-compat 1.0)",
     )
     parser.add_argument(
-        "--output",
-        default=None,
+        "--output", default=None,
         help=(
             "Output path (default: t0_state.json for --format state, "
             "t0_brief.json for --format brief)"
         ),
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if args.output is None:
-        if args.format == "brief":
-            args.output = str(_STATE_DIR / "t0_brief.json")
-        else:
-            args.output = str(_STATE_DIR / "t0_state.json")
 
-    output_path = Path(args.output)
-    elapsed = 0.0
-    _build_succeeded = False
+def _resolve_output_path(args: argparse.Namespace) -> Path:
+    if args.output is not None:
+        return Path(args.output)
+    if args.format == "brief":
+        return _STATE_DIR / "t0_brief.json"
+    return _STATE_DIR / "t0_state.json"
+
+
+def _write_all_state_outputs(
+    state: Dict[str, Any], state_dir: Path, strategic_heavy: Any
+) -> None:
+    """Write secondary outputs (index, detail, brief, status). All best-effort."""
     try:
-        t_start = time.monotonic()
-        state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
-        # Heavy strategic_state is for t0_detail/ only — do not let it leak
-        # into t0_state.json or the brief output. Re-attached below for the
-        # detail-file write step, then dropped when the function returns.
-        _strategic_heavy = state.pop("_strategic_state_heavy", None)
-        payload = _state_to_brief(state) if args.format == "brief" else state
-        _write_atomic(output_path, payload)
-        # Write cheap index — always loaded for cold-start orientation (Sprint 4a)
-        try:
-            _write_atomic(_STATE_DIR / "t0_index.json", _build_t0_index(state))
-        except Exception:
-            pass  # best-effort — must not block SessionStart
-        # Write per-section detail files — loaded on-demand (Sprint 4a)
-        try:
-            if _strategic_heavy is not None:
-                state["_strategic_state_heavy"] = _strategic_heavy
-            _write_detail_files(state, _STATE_DIR / "t0_detail")
-        except Exception:
-            pass  # best-effort — must not block SessionStart
-        finally:
-            state.pop("_strategic_state_heavy", None)
-        # GC: prune stale t0_detail snapshots (W-UX-4)
-        try:
-            _gc_t0_detail(_STATE_DIR / "t0_detail")
-        except Exception:
-            pass  # best-effort — must not block SessionStart
-        # Write pr_queue_state.json — replaces hand-maintained PR_QUEUE.md (Phase 2.1)
-        try:
-            pqs = state.get("pr_queue")
-            if pqs:
-                _write_atomic(_STATE_DIR / "pr_queue_state.json", pqs)
-        except Exception:
-            pass  # best-effort — must not block SessionStart
-        # Regenerate t0_brief.json alongside t0_state.json — orchestration helpers
-        # (receipt_processor, intelligence_ack, t0_intelligence_aggregator) read
-        # t0_brief.json directly and must stay in sync with the new state.
-        try:
-            brief_path = _STATE_DIR / "t0_brief.json"
-            _write_atomic(brief_path, _state_to_brief(state))
-        except Exception:
-            pass  # best-effort — must not block SessionStart
-        # Write human-readable cold-start orientation doc (Sprint 4b)
-        try:
-            sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
-            from build_project_status import write_project_status
-            write_project_status(_STATE_DIR)
-        except Exception:
-            pass  # best-effort
-        # Regenerate FEATURE_PLAN.md from canonical state sources (Phase 2.2)
-        try:
-            from build_feature_plan import write_feature_plan
-            write_feature_plan(_PROJECT_ROOT / "FEATURE_PLAN.md", state_dir=_STATE_DIR)
-        except Exception:
-            pass  # best-effort — must not block SessionStart
-        elapsed = time.monotonic() - t_start
-        _build_succeeded = True
-    except Exception as exc:
-        log.warning("build_t0_state failed (SessionStart continues): %s", exc)
+        _write_atomic(state_dir / "t0_index.json", _build_t0_index(state))
+    except Exception:
+        pass
+    try:
+        if strategic_heavy is not None:
+            state["_strategic_state_heavy"] = strategic_heavy
+        _write_detail_files(state, state_dir / "t0_detail")
+    except Exception:
+        pass
+    finally:
+        state.pop("_strategic_state_heavy", None)
+    try:
+        _gc_t0_detail(state_dir / "t0_detail")
+    except Exception:
+        pass
+    try:
+        pqs = state.get("pr_queue")
+        if pqs:
+            _write_atomic(state_dir / "pr_queue_state.json", pqs)
+    except Exception:
+        pass
+    try:
+        _write_atomic(state_dir / "t0_brief.json", _state_to_brief(state))
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
+        from build_project_status import write_project_status
+        write_project_status(state_dir)
+    except Exception:
+        pass
+    try:
+        from build_feature_plan import write_feature_plan
+        write_feature_plan(_PROJECT_ROOT / "FEATURE_PLAN.md", state_dir=state_dir)
+    except Exception:
+        pass
 
-    if _build_succeeded:
-        try:
-            if str(_LIB_DIR) not in sys.path:
-                sys.path.insert(0, str(_LIB_DIR))
-            from state_mutation import emit_state_mutation
-            size_bytes = output_path.stat().st_size if output_path.exists() else 0
-            emit_state_mutation(
-                output_path.name,
-                trigger="auto_rebuild",
-                rebuild_seconds=elapsed,
-                size_bytes=size_bytes,
-            )
-        except Exception as e:
-            log.warning("emit_state_mutation failed (non-critical): %s", e)
 
+def _emit_build_signal(output_path: Path, elapsed: float) -> None:
+    """Emit state mutation event (best-effort)."""
+    try:
+        if str(_LIB_DIR) not in sys.path:
+            sys.path.insert(0, str(_LIB_DIR))
+        from state_mutation import emit_state_mutation
+        size_bytes = output_path.stat().st_size if output_path.exists() else 0
+        emit_state_mutation(
+            output_path.name, trigger="auto_rebuild",
+            rebuild_seconds=elapsed, size_bytes=size_bytes,
+        )
+    except Exception as e:
+        log.warning("emit_state_mutation failed (non-critical): %s", e)
+
+
+def _emit_health_beacon(
+    output_path: Path, fmt: str, elapsed: float, succeeded: bool
+) -> None:
+    """Emit HealthBeacon heartbeat (best-effort)."""
     try:
         from health_beacon import HealthBeacon
         HealthBeacon(
-            _DATA_DIR,
-            "t0_state_builder",
-            expected_interval_seconds=1800,
+            _DATA_DIR, "t0_state_builder", expected_interval_seconds=1800,
         ).heartbeat(
-            status="ok" if _build_succeeded else "fail",
+            status="ok" if succeeded else "fail",
             details={
-                "format": args.format,
+                "format": fmt,
                 "output": str(output_path),
                 "elapsed_seconds": round(elapsed, 3),
             },
@@ -1765,7 +1908,42 @@ def main() -> int:
     except Exception as e:
         log.debug("HealthBeacon heartbeat failed (non-critical): %s", e)
 
-    return 0  # Always exit 0
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    args = _parse_args()
+    output_path = _resolve_output_path(args)
+
+    elapsed = 0.0
+    _build_succeeded = False
+    state: Optional[Dict[str, Any]] = None
+
+    try:
+        t_start = time.monotonic()
+        state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
+        _strategic_heavy = state.pop("_strategic_state_heavy", None)
+        payload = _state_to_brief(state) if args.format == "brief" else state
+        _write_atomic(output_path, payload)
+        _write_all_state_outputs(state, _STATE_DIR, _strategic_heavy)
+        elapsed = time.monotonic() - t_start
+        _build_succeeded = True
+    except Exception as exc:
+        log.warning("build_t0_state failed (SessionStart continues): %s", exc)
+
+    if _build_succeeded:
+        _emit_build_signal(output_path, elapsed)
+
+    _emit_health_beacon(output_path, args.format, elapsed, _build_succeeded)
+
+    # R6.1: non-zero exit when DB health signals degraded or failed state
+    if _build_succeeded and state is not None:
+        sh_status = (state.get("system_health") or {}).get("status", "healthy")
+        if sh_status in ("degraded", "failed"):
+            return 1
+    return 0
 
 
 if __name__ == "__main__":
