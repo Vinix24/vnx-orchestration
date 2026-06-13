@@ -29,6 +29,7 @@ Steps:
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import warnings
@@ -47,6 +48,7 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from project_root import resolve_project_root
+from project_scope import current_project_id
 import schema_migration
 
 
@@ -123,6 +125,16 @@ def _dispatches_has_composite_unique(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _dispatches_has_single_unique(conn: sqlite3.Connection) -> bool:
+    """True iff dispatches still enforces UNIQUE(dispatch_id) by itself."""
+    for idx in conn.execute("PRAGMA index_list('dispatches')"):
+        if idx[2]:
+            idx_cols = [c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")]
+            if idx_cols == ["dispatch_id"]:
+                return True
+    return False
+
+
 def _dispatches_repair_needed(conn: sqlite3.Connection) -> bool:
     """Decide — purely from PRAGMA introspection — whether the ADR-007 repair runs.
 
@@ -131,7 +143,8 @@ def _dispatches_repair_needed(conn: sqlite3.Connection) -> bool:
     (PRAGMA table_info + index_list) is the only source of truth.
 
     Repair is needed when dispatches exists but is missing the project_id column
-    OR the composite UNIQUE(dispatch_id, project_id).
+    OR the composite UNIQUE(dispatch_id, project_id), or still carries the
+    superseded single-column UNIQUE(dispatch_id).
     """
     has_table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatches'"
@@ -141,18 +154,205 @@ def _dispatches_repair_needed(conn: sqlite3.Connection) -> bool:
     cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
     if "project_id" not in cols:
         return True
-    return not _dispatches_has_composite_unique(conn)
+    return (
+        not _dispatches_has_composite_unique(conn)
+        or _dispatches_has_single_unique(conn)
+    )
 
 
-def _repair_dispatches_adr007(conn: sqlite3.Connection) -> bool:
-    """Repair dispatches to satisfy ADR-007: project_id column + composite UNIQUE.
+_IDENTIFIER = r'(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_$]*)'
 
-    Preferred non-destructive path: ALTER TABLE ADD COLUMN (when project_id is
-    absent) then CREATE UNIQUE INDEX. This naturally preserves ALL existing CHECK
-    constraints, foreign keys, triggers, collations, and generated columns — none
-    of which survive a RENAME+CREATE+DROP rebuild cycle. A standalone UNIQUE INDEX
-    is functionally equivalent to an inline UNIQUE(dispatch_id, project_id) clause
-    and satisfies _dispatches_has_composite_unique.
+
+def _unquote_identifier(identifier: str) -> str:
+    identifier = identifier.strip()
+    if identifier.startswith('"') and identifier.endswith('"'):
+        return identifier[1:-1].replace('""', '"')
+    if identifier.startswith("`") and identifier.endswith("`"):
+        return identifier[1:-1].replace("``", "`")
+    if identifier.startswith("[") and identifier.endswith("]"):
+        return identifier[1:-1]
+    return identifier
+
+
+def _find_table_body(sql: str) -> tuple[int, int]:
+    """Return the outer CREATE TABLE body parentheses, respecting SQL quoting."""
+    quote: str | None = None
+    depth = 0
+    start = -1
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if quote == "'":
+            if ch == "'" and i + 1 < len(sql) and sql[i + 1] == "'":
+                i += 2
+                continue
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == '"' and i + 1 < len(sql) and sql[i + 1] == '"':
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+        elif quote == "`":
+            if ch == "`" and i + 1 < len(sql) and sql[i + 1] == "`":
+                i += 2
+                continue
+            if ch == "`":
+                quote = None
+        elif quote == "]":
+            if ch == "]":
+                quote = None
+        elif ch in {"'", '"', "`"}:
+            quote = ch
+        elif ch == "[":
+            quote = "]"
+        elif ch == "(":
+            if start < 0:
+                start = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                return start, i
+        i += 1
+    raise RuntimeError("dispatches CREATE TABLE SQL has no balanced table body")
+
+
+def _split_sql_list(sql: str) -> list[str]:
+    """Split a comma-delimited SQL list without splitting nested expressions."""
+    parts: list[str] = []
+    quote: str | None = None
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if quote == "'":
+            if ch == "'" and i + 1 < len(sql) and sql[i + 1] == "'":
+                i += 2
+                continue
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == '"' and i + 1 < len(sql) and sql[i + 1] == '"':
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+        elif quote == "`":
+            if ch == "`" and i + 1 < len(sql) and sql[i + 1] == "`":
+                i += 2
+                continue
+            if ch == "`":
+                quote = None
+        elif quote == "]":
+            if ch == "]":
+                quote = None
+        elif ch in {"'", '"', "`"}:
+            quote = ch
+        elif ch == "[":
+            quote = "]"
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(sql[start:i].strip())
+            start = i + 1
+        i += 1
+    parts.append(sql[start:].strip())
+    return [part for part in parts if part]
+
+
+def _column_name(component: str) -> str | None:
+    match = re.match(rf"\s*({_IDENTIFIER})", component)
+    if not match:
+        return None
+    name = _unquote_identifier(match.group(1))
+    if name.upper() in {"CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"}:
+        return None
+    return name
+
+
+def _single_dispatch_unique_constraint(component: str) -> bool:
+    rest = component.strip()
+    constraint = re.match(rf"(?is)^CONSTRAINT\s+{_IDENTIFIER}\s+(.*)$", rest)
+    if constraint:
+        rest = constraint.group(1).strip()
+    unique = re.match(r"(?is)^UNIQUE\s*\((.*)\)\s*(?:ON\s+CONFLICT\s+\w+)?$", rest)
+    if not unique:
+        return False
+    columns = _split_sql_list(unique.group(1))
+    return (
+        len(columns) == 1
+        and _unquote_identifier(columns[0]).lower() == "dispatch_id"
+    )
+
+
+def _remove_inline_dispatch_unique(component: str) -> str:
+    if (_column_name(component) or "").lower() != "dispatch_id":
+        return component
+    return re.sub(
+        r"(?is)\bUNIQUE\b(?:\s+ON\s+CONFLICT\s+(?:ROLLBACK|ABORT|FAIL|IGNORE|REPLACE))?",
+        "",
+        component,
+        count=1,
+    )
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _repaired_dispatches_create_sql(original_sql: str, project_id: str) -> str:
+    """Transform sqlite_master CREATE SQL while preserving all unrelated DDL."""
+    body_start, body_end = _find_table_body(original_sql)
+    components = _split_sql_list(original_sql[body_start + 1:body_end])
+    repaired: list[str] = []
+    has_project_id = False
+    for component in components:
+        column = _column_name(component)
+        if column and column.lower() == "project_id":
+            has_project_id = True
+        if _single_dispatch_unique_constraint(component):
+            continue
+        repaired.append(_remove_inline_dispatch_unique(component))
+
+    if not has_project_id:
+        repaired.append(
+            f"project_id TEXT NOT NULL DEFAULT {_sql_literal(project_id)}"
+        )
+    repaired.append("UNIQUE(dispatch_id, project_id)")
+    suffix = original_sql[body_end + 1:].strip()
+    suffix = f" {suffix}" if suffix else ""
+    body = ",\n    ".join(repaired)
+    return f'CREATE TABLE "dispatches_adr007_new" (\n    {body}\n){suffix}'
+
+
+def _single_dispatch_unique_index(sql: str) -> bool:
+    if not re.match(r"(?is)^\s*CREATE\s+UNIQUE\s+INDEX\b", sql):
+        return False
+    try:
+        start, end = _find_table_body(sql)
+    except RuntimeError:
+        return False
+    columns = _split_sql_list(sql[start + 1:end])
+    return (
+        len(columns) == 1
+        and _unquote_identifier(columns[0]).lower() == "dispatch_id"
+    )
+
+
+def _repair_dispatches_adr007(
+    conn: sqlite3.Connection,
+    project_id: str | None = None,
+) -> bool:
+    """Repair dispatches via SQLite's schema-preserving 12-step rebuild.
+
+    The CREATE TABLE, index, and trigger SQL comes from sqlite_master. The repair
+    changes only tenant scoping: it adds project_id when absent, removes
+    single-column UNIQUE(dispatch_id), and adds UNIQUE(dispatch_id, project_id).
 
     Idempotent: returns False (no-op) when repair is not needed.
 
@@ -162,23 +362,66 @@ def _repair_dispatches_adr007(conn: sqlite3.Connection) -> bool:
     if not _dispatches_repair_needed(conn):
         return False
 
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    if conn.in_transaction:
+        raise RuntimeError("ADR-007 dispatches repair requires no active transaction")
 
-    # Step 1: Add project_id column if absent (non-destructive; constant default
-    # is required by SQLite ADD COLUMN for NOT NULL columns).
-    if "project_id" not in existing_cols:
+    effective_project_id = project_id or current_project_id()
+    table_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatches'"
+    ).fetchone()
+    if not table_row or not table_row[0]:
+        raise RuntimeError("dispatches CREATE TABLE SQL missing from sqlite_master")
+    schema_objects = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE tbl_name='dispatches' AND type IN ('index', 'trigger') "
+        "AND sql IS NOT NULL ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name"
+    ).fetchall()
+    recreate_sql = [
+        sql for obj_type, _name, sql in schema_objects
+        if not (obj_type == "index" and _single_dispatch_unique_index(sql))
+    ]
+    create_sql = _repaired_dispatches_create_sql(table_row[0], effective_project_id)
+
+    table_xinfo = conn.execute("PRAGMA table_xinfo('dispatches')").fetchall()
+    copy_columns = [row[1] for row in table_xinfo if row[6] == 0]
+    has_project_id = "project_id" in copy_columns
+    insert_columns = list(copy_columns)
+    select_exprs = [f'"{column}"' for column in copy_columns]
+    params: tuple[str, ...] = ()
+    if not has_project_id:
+        insert_columns.append("project_id")
+        select_exprs.append("?")
+        params = (effective_project_id,)
+    quoted_insert = ", ".join(f'"{column}"' for column in insert_columns)
+    select_sql = ", ".join(select_exprs)
+
+    foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    if foreign_keys_enabled:
+        conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(create_sql)
         conn.execute(
-            "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+            f'INSERT INTO "dispatches_adr007_new" ({quoted_insert}) '
+            f'SELECT {select_sql} FROM "dispatches"',
+            params,
         )
-
-    # Step 2: Create a composite UNIQUE index. SQLite cannot add a table-level
-    # UNIQUE constraint in-place, but a UNIQUE INDEX is equivalent and does not
-    # require touching the table DDL — so all existing CHECK constraints, triggers,
-    # and other indexes remain intact.
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ux_dispatches_pid "
-        "ON dispatches(dispatch_id, project_id)"
-    )
+        conn.execute('DROP TABLE "dispatches"')
+        conn.execute('ALTER TABLE "dispatches_adr007_new" RENAME TO "dispatches"')
+        for sql in recreate_sql:
+            conn.execute(sql)
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"ADR-007 dispatches repair introduced foreign-key violations: {violations[:5]}"
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if foreign_keys_enabled:
+            conn.execute("PRAGMA foreign_keys = ON")
     return True
 
 
