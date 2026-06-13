@@ -30,6 +30,27 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Production events-dir contamination guard
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect VNX_DATA_DIR so EventStore() without an explicit events_dir
+    cannot write to ~/.vnx-data during any test run.
+
+    Sets VNX_DATA_DIR_EXPLICIT=1 so the explicit-path branch in _events_dir()
+    is taken. Tests that need a specific value can override via their own
+    monkeypatch.setenv — the last setenv wins within the same function scope.
+    Tests that need the fallback behaviour (no explicit flag) can monkeypatch
+    delenv("VNX_DATA_DIR_EXPLICIT") to undo this guard for that test only.
+    """
+    isolated = tmp_path / "_vnx_test_data"
+    isolated.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("VNX_DATA_DIR", str(isolated))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+
+# ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------
 
