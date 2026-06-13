@@ -57,12 +57,12 @@ One edge case makes this guard load-bearing rather than cosmetic. Three states n
 
 Append-only means past entries are never edited in place. Corrections are new entries that reference what they supersede. The chain primitives recognise:
 
-- `backfill` — historical entry added retroactively; `prev_hash` set to genesis.
+- `backfill` — historical entry added retroactively; `prev_hash` set to genesis (`"0" * 64`) regardless of file position (`ndjson_hash_chain.py:60-62`).
 - `correction` — supersedes a prior entry; must carry `corrects_hash`.
 - `redaction` — marks a prior entry as superseded; must carry `redacts_hash`; the redaction entry's body is tombstoned, chain preserved. The original entry's bytes remain readable in the append-only ledger — the ledger does not delete them. True content removal requires an out-of-band ledger rewrite or rotation.
 - `tombstone` — marks an entry withdrawn; must carry `tombstones_hash`; entry-id preserved for chain continuity.
 
-These keep the chain continuous through real-world edits without ever mutating a hashed body.
+These are append-only design conventions; they do not mutate hashed bodies. They are not yet fully reconciled with `verify_chain`: a `backfill` entry appended to a non-empty ledger sets `prev_hash` to genesis regardless of what precedes it, so `verify_chain` returns `broken` for that ledger. See Known limitations (1.0.1) below.
 
 ## Reasoning
 
@@ -82,7 +82,7 @@ These keep the chain continuous through real-world edits without ever mutating a
 
 - The receipt schema gains one optional field, `prev_hash`, present only when `VNX_CHAIN_RECEIPTS=1`. Documented in `docs/core/11_RECEIPT_FORMAT.md`.
 - `audit_chain.py verify` is the canonical integrity check. CI and pre-launch audits run it against `.vnx-data/state/t0_receipts.ndjson`; exit 1 (`broken`) fails the check, exit 0 (`unchained` or `verified`) passes, with `unchained` surfacing the enable-hint.
-- High-assurance deployments enable `VNX_CHAIN_RECEIPTS=1` per-environment. The flag is read at receipt-append time, so it can be turned on going forward without rewriting history. Enabling mid-ledger transitions the file from fully-unchained to a chained tail; by the partial-chain rule that reads as `broken` until the unchained prefix is rotated out. Operators enabling chaining on an existing ledger should rotate (archive + truncate) the ledger file first so the new chain starts clean.
+- High-assurance deployments may enable `VNX_CHAIN_RECEIPTS=1` per-environment. **This flag is currently honored only by the `append_receipt` write path** (`scripts/lib/append_receipt_internals/idempotency.py:192-193`). `governance_emit.emit_dispatch_receipt` — used by `dispatch_envelope.py` and `provider_dispatch.py` — does not check the flag and always writes receipts without `prev_hash`. On a deployment using both paths (the normal case), enabling `VNX_CHAIN_RECEIPTS=1` produces a mixed ledger; `verify_chain` classifies that as `broken`. Chaining is therefore not functional end-to-end until the gap in `emit_dispatch_receipt` is closed in 1.0.1. When the flag is active in an environment where only the `append_receipt` path writes receipts, chaining can be turned on going forward without rewriting history; enabling mid-ledger transitions the file from fully-unchained to a chained tail, which reads as `broken` by the partial-chain rule until the unchained prefix is rotated out. Operators in that scenario should archive + truncate the ledger first so the new chain starts clean. See Known limitations (1.0.1) below.
 - `entry_hash` is never a stored field. Any tool or doc referencing a persisted `entry_hash` is wrong; the hash is always recomputed from canonical JSON.
 
 ### Rejected
@@ -97,6 +97,24 @@ These keep the chain continuous through real-world edits without ever mutating a
 - Primitives: `scripts/lib/ndjson_hash_chain.py`. Append-path integration: `scripts/lib/append_receipt_internals/idempotency.py` (`_chain_receipts_enabled`, tail-hash read under lock, `prev_hash` stamp before write). CLI: `scripts/audit_chain.py`.
 - The tail-hash read and `prev_hash` stamp MUST happen inside the existing append `LOCK_EX` critical section. The hash-chain module exposes `append_chained_entry()` for standalone use, but the receipt path deliberately inlines the tail read so it never opens a second file handle outside the lock (fork-the-chain risk under concurrency).
 - `audit_chain.py walk <path>` emits `(line_number, short_hash, event_type)` per entry for forensic inspection of a specific chain.
+
+## Known limitations (1.0.1)
+
+These gaps are identified; fixes are scoped to 1.0.1.
+
+### 1. `emit_dispatch_receipt` does not honor `VNX_CHAIN_RECEIPTS`
+
+`governance_emit.emit_dispatch_receipt` (`scripts/lib/governance_emit.py`) writes receipts unconditionally without `prev_hash`, regardless of the `VNX_CHAIN_RECEIPTS` flag. This function is used by both `dispatch_envelope.py` (subprocess lane) and `provider_dispatch.py` (multi-provider lane). Only `append_receipt.py` (via `scripts/lib/append_receipt_internals/idempotency.py:192-193`) stamps `prev_hash` when the flag is on.
+
+Consequence: enabling `VNX_CHAIN_RECEIPTS=1` in a normal deployment that uses both paths produces a mixed ledger — some entries chained (from `append_receipt`), others unchained (from `emit_dispatch_receipt`). `verify_chain` classifies that as `broken`. End-to-end chaining is blocked until `emit_dispatch_receipt` is updated to honor the flag.
+
+### 2. Backfill/correction/redaction conventions not reconciled with `verify_chain`
+
+`ndjson_hash_chain.append_chained_entry()` sets `prev_hash = GENESIS_HASH` for `backfill` event types (`ndjson_hash_chain.py:60-62`). A backfill entry appended to a non-empty ledger carries `prev_hash = GENESIS_HASH` while `verify_chain` expects the hash of the preceding entry; `verify_chain` reports `broken`.
+
+`correction`, `redaction`, and `tombstone` entries use `_read_last_hash()` and chain correctly at the ledger tail. However, the semantic relationship they express (superseding an earlier entry) is not validated by `verify_chain` — the chain is a linear sequence check only.
+
+The event-type conventions in this ADR are design intent. Until 1.0.1, treat backfill/correction/redaction/tombstone as append-only auditing conventions and do not rely on `verify_chain` to validate correction semantics or backfill integrity.
 
 ## See also
 

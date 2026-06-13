@@ -26,22 +26,39 @@ VNX has two production lanes that produce receipts. Both append to the same ledg
 
 ### Path 1 — Governed dispatch envelope (subprocess + multi-provider)
 
-Subprocess and multi-provider dispatches emit their own receipt inline at the GOVERN step of the dispatch envelope. There is no separate watcher.
+Subprocess and multi-provider dispatches emit their own receipt inline at the GOVERN step. There is no separate watcher. Two sub-paths share `governance_emit.emit_dispatch_receipt` but differ in write ordering and idempotency behavior.
+
+**Envelope sub-path (`dispatch_envelope.py` — subprocess / tmux lane)**
 
 ```
-worker runs (subprocess / provider lane)
+worker runs (subprocess / tmux lane)
         ↓
 envelope GOVERN step
         ↓
 emit_unified_report   →  .vnx-data/unified_reports/<dispatch_id>.md   (report first)
         ↓
-emit_dispatch_receipt →  .vnx-data/state/t0_receipts.ndjson           (receipt second)
+_receipt_exists_for_dispatch() dedup check
+        ↓
+emit_dispatch_receipt →  .vnx-data/state/t0_receipts.ndjson           (receipt second, skipped if already present)
 ```
 
-- `scripts/lib/dispatch_envelope.py` and `scripts/lib/provider_dispatch.py` call `governance_emit.emit_dispatch_receipt`.
-- Report is written **first** so the receipt can carry the `report_path` linkage (ADR-005 write ordering).
-- The receipt is fail-closed: if the receipt write raises, the dispatch fails loudly rather than silently losing the receipt. Writes are idempotent — an existing line for the same `dispatch_id` is not double-emitted.
-- The multi-provider path also archives the event stream here and stamps `events_path` on the receipt (see below). The subprocess and tmux lanes leave `events_path` null.
+Report is written first so the receipt can carry the `report_path` linkage. `dispatch_envelope.py` checks whether a receipt already exists for the `dispatch_id` before writing (`_receipt_exists_for_dispatch`), making this sub-path idempotent against double-emit.
+
+**Multi-provider sub-path (`provider_dispatch.py`)**
+
+```
+worker runs (provider lane)
+        ↓
+archive event stream → .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
+        ↓
+emit_dispatch_receipt →  .vnx-data/state/t0_receipts.ndjson           (receipt first)
+        ↓
+emit_unified_report   →  .vnx-data/unified_reports/<dispatch_id>.md   (report second)
+```
+
+The receipt is written before the report. `report_path` is pre-computed as a deterministic string (`unified_reports/<dispatch_id>.md`) so the linkage is valid even though the file is written afterward (`provider_dispatch.py:480-482`). `emit_dispatch_receipt` is called unconditionally on this path — no dispatch-level dedup check is applied, so duplicate GOVERN calls can produce duplicate ledger lines.
+
+Both sub-paths: the receipt write is fail-closed (raises on `OSError` rather than silently losing the receipt). The multi-provider path stamps `events_path` on the receipt (see below); the subprocess and tmux lanes leave `events_path` null.
 
 This is the lane to know about when working on dispatch infrastructure or the subprocess adapter.
 
