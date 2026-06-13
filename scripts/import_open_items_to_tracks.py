@@ -55,11 +55,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sqlite3
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 _HERE = Path(__file__).resolve().parent
 _LIB = _HERE / "lib"
@@ -72,6 +75,10 @@ _SEVERITY_TO_LINK_TYPE = {
     "warn": "warns",
     "info": "related",
 }
+
+# Statuses that mean an OI is explicitly closed. Every other value is either
+# "open" or unknown. Unknown is treated as skip — never auto-resolve.
+_CLOSED_STATUSES = frozenset({"done", "wontfix", "deferred", "closed", "resolved"})
 
 _LEGACY_TRACK_LABELS = frozenset({"A", "B", "C", "T1", "T2", "T3"})
 
@@ -167,15 +174,45 @@ def _resolve_track_for_item(
 
 
 def load_open_items(path: Path) -> list[dict]:
-    """Load the items list from an open_items.json file. Returns [] when absent."""
+    """Load the items list from an open_items.json file.
+
+    Returns [] only when the file does not exist. When the file exists but
+    is unreadable (OSError) or malformed (JSONDecodeError), logs an error and
+    raises RuntimeError — silently treating an unreadable SSOT as empty-success
+    would mask a data loss condition (ADR-005).
+    """
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        log.error("load_open_items: unreadable SSOT at %s: %s", path, exc)
+        raise RuntimeError(f"open_items SSOT unreadable at {path}: {exc}") from exc
     items = data.get("items") if isinstance(data, dict) else None
     return items if isinstance(items, list) else []
+
+
+def _emit_ledger_event(
+    conn: sqlite3.Connection,
+    event_type: str,
+    entity_id: str,
+    reason: str,
+    project_id: str,
+) -> None:
+    """Emit a coordination ledger event for a track_open_items mutation. Best-effort."""
+    try:
+        from coordination_db import _append_event  # type: ignore[import]
+        _append_event(
+            conn,
+            event_type=event_type,
+            entity_type="track",
+            entity_id=entity_id,
+            actor="import_open_items",
+            reason=reason,
+            project_id=project_id,
+        )
+    except Exception:
+        pass
 
 
 def bridge_open_items(
@@ -213,41 +250,56 @@ def bridge_open_items(
                 continue
             severity = str(item.get("severity") or "info").strip()
             link_type = _SEVERITY_TO_LINK_TYPE.get(severity, "related")
-            status = str(item.get("status") or "open").strip()
+            # Normalize case; only treat explicit closed statuses as closed.
+            # Unknown values are skipped — never auto-resolve an OI with unknown status.
+            raw_status = str(item.get("status") or "open").strip()
+            status_lower = raw_status.lower()
+            if status_lower == "open":
+                is_open = True
+                is_closed = False
+            elif status_lower in _CLOSED_STATUSES:
+                is_open = False
+                is_closed = True
+            else:
+                # Unknown status — skip entirely.
+                continue
 
             track_id = _resolve_track_for_item(item, pr_to_track, dispatch_to_track)
             if track_id is None:
                 result.unmapped += 1
                 continue
 
-            existing = conn.execute(
-                "SELECT resolved_at FROM track_open_items "
-                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?"
-                if has_resolved else
-                "SELECT 1 FROM track_open_items "
-                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
-                (track_id, project_id, oi_id, link_type),
-            ).fetchone()
+            # Fix 5: look up by (track_id, project_id, oi_id) WITHOUT link_type to
+            # detect stale active links that survive a severity change.
+            if has_resolved:
+                existing_rows = conn.execute(
+                    "SELECT link_type, resolved_at FROM track_open_items "
+                    "WHERE track_id = ? AND project_id = ? AND oi_id = ?",
+                    (track_id, project_id, oi_id),
+                ).fetchall()
+            else:
+                existing_rows = [
+                    (row[0], None) for row in conn.execute(
+                        "SELECT link_type FROM track_open_items "
+                        "WHERE track_id = ? AND project_id = ? AND oi_id = ?",
+                        (track_id, project_id, oi_id),
+                    ).fetchall()
+                ]
 
-            if status == "open":
-                if existing is not None:
+            same_type_row = next(
+                ((lt, ra) for lt, ra in existing_rows if lt == link_type), None
+            )
+            stale_active_types = [
+                lt for lt, ra in existing_rows if lt != link_type and ra is None
+            ]
+
+            if is_open:
+                if same_type_row is not None:
                     result.skipped_existing += 1
                     continue
-                if apply:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO track_open_items "
-                        "(track_id, project_id, oi_id, link_type, link_source, linked_at) "
-                        "VALUES (?, ?, ?, ?, 'mention', ?)",
-                        (track_id, project_id, oi_id, link_type, _now_utc()),
-                    )
-                result.imported += 1
-                result.mapped_details.append(
-                    {"oi_id": oi_id, "track_id": track_id, "link_type": link_type}
-                )
-            else:
-                # Closed item: non-destructively resolve any existing link.
-                if existing is not None and has_resolved and existing[0] is None:
-                    if apply:
+                # Supersede any stale active link whose link_type changed (severity change).
+                if apply and stale_active_types and has_resolved:
+                    for stale_lt in stale_active_types:
                         conn.execute(
                             "UPDATE track_open_items "
                             "SET resolved_at = ?, resolution_reason = ? "
@@ -255,11 +307,50 @@ def bridge_open_items(
                             "AND link_type = ? AND resolved_at IS NULL",
                             (
                                 _now_utc(),
-                                f"open_items.json status={status}",
-                                track_id, project_id, oi_id, link_type,
+                                f"severity_change -> {link_type}",
+                                track_id, project_id, oi_id, stale_lt,
                             ),
                         )
-                    result.resolved += 1
+                if apply:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO track_open_items "
+                        "(track_id, project_id, oi_id, link_type, link_source, linked_at) "
+                        "VALUES (?, ?, ?, ?, 'mention', ?)",
+                        (track_id, project_id, oi_id, link_type, _now_utc()),
+                    )
+                    # ADR-005: emit governance ledger event for canonical mutation.
+                    _emit_ledger_event(
+                        conn, "track_oi_linked", track_id,
+                        f"oi_id={oi_id} link_type={link_type}", project_id,
+                    )
+                result.imported += 1
+                result.mapped_details.append(
+                    {"oi_id": oi_id, "track_id": track_id, "link_type": link_type}
+                )
+            elif is_closed:
+                # Closed item: non-destructively resolve ANY active link for this OI,
+                # regardless of link_type (a severity change may have left a stale link).
+                active_rows = [(lt, ra) for lt, ra in existing_rows if ra is None]
+                for active_lt, _ in active_rows:
+                    if has_resolved:
+                        if apply:
+                            conn.execute(
+                                "UPDATE track_open_items "
+                                "SET resolved_at = ?, resolution_reason = ? "
+                                "WHERE track_id = ? AND project_id = ? AND oi_id = ? "
+                                "AND link_type = ? AND resolved_at IS NULL",
+                                (
+                                    _now_utc(),
+                                    f"open_items.json status={raw_status}",
+                                    track_id, project_id, oi_id, active_lt,
+                                ),
+                            )
+                            # ADR-005: emit governance ledger event for canonical mutation.
+                            _emit_ledger_event(
+                                conn, "track_oi_resolved", track_id,
+                                f"oi_id={oi_id} reason=status={raw_status}", project_id,
+                            )
+                        result.resolved += 1
 
         if apply:
             conn.commit()

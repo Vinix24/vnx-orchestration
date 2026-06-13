@@ -145,68 +145,40 @@ def _dispatches_repair_needed(conn: sqlite3.Connection) -> bool:
 
 
 def _repair_dispatches_adr007(conn: sqlite3.Connection) -> bool:
-    """Rebuild dispatches to add project_id + UNIQUE(dispatch_id, project_id).
+    """Repair dispatches to satisfy ADR-007: project_id column + composite UNIQUE.
 
-    Detect-and-repair the half-applied state (migration 0017 claimed-but-not-
-    applied on the central DB). Column-preserving: any columns already present
-    on the live table (operator_approved_at, output_ref, output_kind, extra
-    importer columns, ...) are carried over verbatim, with project_id injected
-    if absent. Idempotent: returns False (no-op) when repair is not needed.
+    Preferred non-destructive path: ALTER TABLE ADD COLUMN (when project_id is
+    absent) then CREATE UNIQUE INDEX. This naturally preserves ALL existing CHECK
+    constraints, foreign keys, triggers, collations, and generated columns — none
+    of which survive a RENAME+CREATE+DROP rebuild cycle. A standalone UNIQUE INDEX
+    is functionally equivalent to an inline UNIQUE(dispatch_id, project_id) clause
+    and satisfies _dispatches_has_composite_unique.
+
+    Idempotent: returns False (no-op) when repair is not needed.
 
     ADR-007: docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md
     — composite UNIQUE over project_id is mandatory for tenant-scoped natural keys.
-
-    Caller is responsible for the surrounding transaction/commit. SQLite ADD
-    COLUMN cannot add a NOT NULL column without a constant default, so project_id
-    is added as ``NOT NULL DEFAULT 'vnx-dev'`` (the ADR-007 bridge default).
     """
     if not _dispatches_repair_needed(conn):
         return False
 
-    existing_cols = [row[1] for row in conn.execute("PRAGMA table_info('dispatches')")]
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
 
-    # If project_id is missing entirely, add it first (bridge default per ADR-007).
+    # Step 1: Add project_id column if absent (non-destructive; constant default
+    # is required by SQLite ADD COLUMN for NOT NULL columns).
     if "project_id" not in existing_cols:
         conn.execute(
             "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
         )
-        existing_cols = [row[1] for row in conn.execute("PRAGMA table_info('dispatches')")]
 
-    col_list = ", ".join(existing_cols)
-
-    # Rebuild to attach the composite UNIQUE (SQLite cannot ADD a table-level
-    # UNIQUE constraint in place). Preserve all existing columns + their order;
-    # only the UNIQUE clause is new. id stays the AUTOINCREMENT rowid alias.
-    col_defs = []
-    for row in conn.execute("PRAGMA table_info('dispatches')"):
-        _cid, name, ctype, notnull, dflt, pk = row
-        parts = [name, ctype or "TEXT"]
-        if pk and (ctype or "").upper().startswith("INT"):
-            parts = [name, "INTEGER", "PRIMARY KEY", "AUTOINCREMENT"]
-        else:
-            if notnull:
-                parts.append("NOT NULL")
-            if dflt is not None:
-                parts.append(f"DEFAULT {dflt}")
-        col_defs.append(" ".join(parts))
-    col_defs.append("UNIQUE(dispatch_id, project_id)")
-
-    create_body = ",\n    ".join(col_defs)
-    conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_adr007_repair")
-    conn.execute(f"CREATE TABLE dispatches (\n    {create_body}\n)")
+    # Step 2: Create a composite UNIQUE index. SQLite cannot add a table-level
+    # UNIQUE constraint in-place, but a UNIQUE INDEX is equivalent and does not
+    # require touching the table DDL — so all existing CHECK constraints, triggers,
+    # and other indexes remain intact.
     conn.execute(
-        f"INSERT INTO dispatches ({col_list}) "
-        f"SELECT {col_list} FROM dispatches_pre_adr007_repair"
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_dispatches_pid "
+        "ON dispatches(dispatch_id, project_id)"
     )
-    conn.execute("DROP TABLE dispatches_pre_adr007_repair")
-    # Restore the hot-path indexes the rebuild dropped (best-effort, idempotent).
-    # Column-aware: only create an index when all its columns exist on the
-    # repaired table (a minimal/legacy dispatches table may lack updated_at etc.).
-    repaired_cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
-    if {"state", "updated_at"} <= repaired_cols:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_state ON dispatches(state, updated_at DESC)")
-    if {"terminal_id", "state"} <= repaired_cols:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_terminal ON dispatches(terminal_id, state)")
     return True
 
 

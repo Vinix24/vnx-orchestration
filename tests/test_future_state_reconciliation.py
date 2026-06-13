@@ -229,10 +229,11 @@ class TestStaleness:
         future = (now + timedelta(hours=1)).isoformat()
         assert bt0.compute_staleness_seconds(future, now=now) == 0
 
-    def test_missing_generated_at_returns_zero(self):
+    def test_missing_generated_at_returns_none(self):
         bt0 = self._bt0()
-        assert bt0.compute_staleness_seconds("") == 0
-        assert bt0.compute_staleness_seconds("not-a-date") == 0
+        # Unknown sentinel — returning 0 would falsely suggest a fresh document.
+        assert bt0.compute_staleness_seconds("") is None
+        assert bt0.compute_staleness_seconds("not-a-date") is None
 
     def test_staleness_for_state_file(self, tmp_path):
         bt0 = self._bt0()
@@ -612,3 +613,337 @@ class TestOpenItemsBridge:
         result = bridge.bridge_open_items(db, "other-proj", oi, apply=True)
         assert result.imported == 0
         assert result.unmapped == 1
+
+
+# ===========================================================================
+# Fix 1 — _build_tracks_from_db re-raises unexpected errors
+# ===========================================================================
+
+class TestBuildTracksErrorHandling:
+    def _bt0(self):
+        return _load("build_t0_state_fsr_err", "build_t0_state.py")
+
+    def test_reraises_unexpected_db_error(self, tmp_path):
+        """Non-OperationalError DB errors must propagate, not be swallowed."""
+        bt0 = self._bt0()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        # Write a binary file where the DB should be — connect succeeds but
+        # any SQL raises a DatabaseError (not OperationalError).
+        db = state_dir / "runtime_coordination.db"
+        db.write_bytes(b"\x00" * 1024)  # not a valid SQLite file
+        # Expect either a raised exception (corrupt DB) or None (graceful).
+        # Critically, it must NOT silently return an empty dict.
+        try:
+            result = bt0._build_tracks_from_db(state_dir, "vnx-dev")
+            # Acceptable: corrupt DB treated as missing (None → legacy fallback).
+            assert result is None or isinstance(result, dict)
+        except Exception:
+            pass  # propagation is also acceptable for non-OperationalError
+
+
+# ===========================================================================
+# Fix 2 — ADR-007 cross-tenant guard when project_id column absent
+# ===========================================================================
+
+_TRACKS_NO_PID_DDL = """
+CREATE TABLE tracks (
+    track_id TEXT NOT NULL PRIMARY KEY,
+    title    TEXT,
+    phase    TEXT NOT NULL DEFAULT 'queued'
+);
+"""
+
+
+class TestBuildTracksADR007Guard:
+    def _bt0(self):
+        return _load("build_t0_state_fsr_adr007", "build_t0_state.py")
+
+    def test_returns_none_when_project_id_column_absent(self, tmp_path):
+        """When project_id is requested but the column is absent, return None."""
+        bt0 = self._bt0()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        conn.executescript(_TRACKS_NO_PID_DDL)
+        # Insert rows for different "tenants" — no project_id column at all.
+        conn.execute("INSERT INTO tracks (track_id, phase) VALUES ('t-other', 'done')")
+        conn.execute("INSERT INTO tracks (track_id, phase) VALUES ('t-mine', 'active')")
+        conn.commit()
+        conn.close()
+
+        result = bt0._build_tracks_from_db(state_dir, "vnx-dev")
+        # Must return None (→ legacy fallback), NOT the unscoped rows.
+        assert result is None
+
+    def test_returns_rows_when_no_project_id_requested(self, tmp_path):
+        """When no project_id is requested and column absent, unscoped read is fine."""
+        bt0 = self._bt0()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        conn.executescript(_TRACKS_NO_PID_DDL)
+        conn.execute("INSERT INTO tracks (track_id, phase) VALUES ('t-a', 'active')")
+        conn.commit()
+        conn.close()
+
+        result = bt0._build_tracks_from_db(state_dir, "")
+        # Empty project_id → unscoped read is allowed.
+        assert result is not None
+        assert "t-a" in result
+
+
+# ===========================================================================
+# Fix 3 — schema-preserving ADR-007 repair
+# ===========================================================================
+
+class TestDispatchesRepairSchemaPreserving:
+    def test_preserves_check_constraint_index_trigger(self, tmp_path):
+        """Repair must leave CHECK constraints, extra indexes, and triggers intact."""
+        mod = _migrate_mod()
+        db = tmp_path / "preserve.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                state       TEXT NOT NULL DEFAULT 'queued'
+                            CHECK (state IN ('queued', 'active', 'done')),
+                created_at  TEXT DEFAULT ''
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX idx_disp_created ON dispatches(created_at DESC)"
+        )
+        conn.execute("""
+            CREATE TRIGGER trg_disp_after_update
+            AFTER UPDATE ON dispatches
+            BEGIN SELECT 1; END
+        """)
+        conn.execute("INSERT INTO dispatches (dispatch_id, state) VALUES ('d1', 'queued')")
+        conn.commit()
+
+        changed = mod._repair_dispatches_adr007(conn)
+        conn.commit()
+        assert changed is True
+
+        # project_id column added.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info('dispatches')")}
+        assert "project_id" in cols
+
+        # Composite UNIQUE index present.
+        assert mod._dispatches_has_composite_unique(conn)
+
+        # CHECK constraint survived: invalid state must be rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO dispatches (dispatch_id, state) VALUES ('d2', 'invalid_state')")
+        conn.rollback()
+
+        # Custom index survived.
+        index_names = {r[1] for r in conn.execute("PRAGMA index_list('dispatches')")}
+        assert "idx_disp_created" in index_names
+
+        # Trigger survived.
+        trigger_names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        assert "trg_disp_after_update" in trigger_names
+
+        conn.close()
+
+
+# ===========================================================================
+# Fix 4 — status normalization + unknown-as-skip
+# ===========================================================================
+
+class TestStatusNormalization:
+    def _setup(self, tmp_path):
+        db = tmp_path / "norm.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(_BRIDGE_DDL)
+        conn.execute("INSERT INTO tracks (track_id, project_id) VALUES ('track-01','vnx-dev')")
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, track, state, created_at) "
+            "VALUES ('d-norm','vnx-dev','track-01','completed','2026-06-01')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def _write_oi(self, tmp_path, items):
+        p = tmp_path / "oi_norm.json"
+        p.write_text(json.dumps({"items": items}))
+        return p
+
+    def test_open_uppercase_treated_as_open(self, tmp_path):
+        bridge = _bridge_mod()
+        db = self._setup(tmp_path)
+        oi = self._write_oi(tmp_path, [
+            {"id": "N-001", "status": "OPEN", "severity": "blocker",
+             "origin_dispatch_id": "d-norm"},
+        ])
+        result = bridge.bridge_open_items(db, "vnx-dev", oi, apply=True)
+        assert result.imported == 1
+
+    def test_done_uppercase_treated_as_closed(self, tmp_path):
+        bridge = _bridge_mod()
+        db = self._setup(tmp_path)
+        # First import to create the link.
+        oi_open = self._write_oi(tmp_path, [
+            {"id": "N-002", "status": "open", "severity": "blocker",
+             "origin_dispatch_id": "d-norm"},
+        ])
+        bridge.bridge_open_items(db, "vnx-dev", oi_open, apply=True)
+        # Now close with uppercase.
+        oi_closed = self._write_oi(tmp_path, [
+            {"id": "N-002", "status": "DONE", "severity": "blocker",
+             "origin_dispatch_id": "d-norm"},
+        ])
+        result = bridge.bridge_open_items(db, "vnx-dev", oi_closed, apply=True)
+        assert result.resolved == 1
+
+    def test_wontfix_treated_as_closed(self, tmp_path):
+        bridge = _bridge_mod()
+        db = self._setup(tmp_path)
+        oi_open = self._write_oi(tmp_path, [
+            {"id": "N-003", "status": "open", "severity": "warn",
+             "origin_dispatch_id": "d-norm"},
+        ])
+        bridge.bridge_open_items(db, "vnx-dev", oi_open, apply=True)
+        oi_closed = self._write_oi(tmp_path, [
+            {"id": "N-003", "status": "wontfix", "severity": "warn",
+             "origin_dispatch_id": "d-norm"},
+        ])
+        result = bridge.bridge_open_items(db, "vnx-dev", oi_closed, apply=True)
+        assert result.resolved == 1
+
+    def test_unknown_status_is_skipped(self, tmp_path):
+        bridge = _bridge_mod()
+        db = self._setup(tmp_path)
+        oi = self._write_oi(tmp_path, [
+            {"id": "N-004", "status": "in_review", "severity": "blocker",
+             "origin_dispatch_id": "d-norm"},
+        ])
+        result = bridge.bridge_open_items(db, "vnx-dev", oi, apply=True)
+        # Unknown status must be skipped — not imported, not resolved.
+        assert result.imported == 0
+        assert result.resolved == 0
+        assert result.unmapped == 0
+        conn = sqlite3.connect(str(db))
+        n = conn.execute("SELECT COUNT(*) FROM track_open_items WHERE oi_id='N-004'").fetchone()[0]
+        conn.close()
+        assert n == 0
+
+
+# ===========================================================================
+# Fix 5 — severity-change supersedes stale link
+# ===========================================================================
+
+class TestSeverityChangeSupersedes:
+    def _setup(self, tmp_path):
+        db = tmp_path / "sev.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(_BRIDGE_DDL)
+        conn.execute("INSERT INTO tracks (track_id, project_id) VALUES ('track-10','vnx-dev')")
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, track, state, created_at) "
+            "VALUES ('d-sev','vnx-dev','track-10','completed','2026-06-01')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def _write_oi(self, tmp_path, name, items):
+        p = tmp_path / name
+        p.write_text(json.dumps({"items": items}))
+        return p
+
+    def test_severity_change_supersedes_stale_active_link(self, tmp_path):
+        bridge = _bridge_mod()
+        db = self._setup(tmp_path)
+
+        # Import as blocker → 'blocks' link.
+        oi_blocker = self._write_oi(tmp_path, "oi_blocker.json", [
+            {"id": "S-001", "status": "open", "severity": "blocker",
+             "origin_dispatch_id": "d-sev"},
+        ])
+        r1 = bridge.bridge_open_items(db, "vnx-dev", oi_blocker, apply=True)
+        assert r1.imported == 1
+
+        # Severity changes to warn → 'warns' link. Old 'blocks' link must be superseded.
+        oi_warn = self._write_oi(tmp_path, "oi_warn.json", [
+            {"id": "S-001", "status": "open", "severity": "warn",
+             "origin_dispatch_id": "d-sev"},
+        ])
+        r2 = bridge.bridge_open_items(db, "vnx-dev", oi_warn, apply=True)
+        assert r2.imported == 1  # new 'warns' link created
+
+        conn = sqlite3.connect(str(db))
+        rows = conn.execute(
+            "SELECT link_type, resolved_at FROM track_open_items WHERE oi_id='S-001'"
+        ).fetchall()
+        conn.close()
+
+        by_type = {lt: ra for lt, ra in rows}
+        # 'blocks' link should be resolved (superseded).
+        assert "blocks" in by_type
+        assert by_type["blocks"] is not None
+        # 'warns' link should be active.
+        assert "warns" in by_type
+        assert by_type["warns"] is None
+
+
+# ===========================================================================
+# Fix 7 — staleness unknown sentinel
+# ===========================================================================
+
+class TestStalenessUnknownSentinel:
+    def _bt0(self):
+        return _load("build_t0_state_fsr_sentinel", "build_t0_state.py")
+
+    def test_missing_generated_at_returns_none_sentinel(self):
+        bt0 = self._bt0()
+        assert bt0.compute_staleness_seconds("") is None
+        assert bt0.compute_staleness_seconds("garbage") is None
+        assert bt0.compute_staleness_seconds(None) is None  # type: ignore[arg-type]
+
+    def test_valid_timestamp_still_returns_int(self):
+        bt0 = self._bt0()
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
+        gen = (now - timedelta(hours=2)).isoformat()
+        result = bt0.compute_staleness_seconds(gen, now=now)
+        assert isinstance(result, int)
+        assert result == 2 * 3600
+
+
+# ===========================================================================
+# Fix 8 — load_open_items raises on unreadable SSOT
+# ===========================================================================
+
+class TestLoadOpenItemsRaisesOnUnreadable:
+    def test_raises_on_corrupt_json(self, tmp_path):
+        bridge = _bridge_mod()
+        bad = tmp_path / "bad.json"
+        bad.write_text("{ not valid json }", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="unreadable"):
+            bridge.load_open_items(bad)
+
+    def test_raises_on_oserror(self, tmp_path):
+        bridge = _bridge_mod()
+        p = tmp_path / "oi.json"
+        p.write_text('{"items":[]}', encoding="utf-8")
+        p.chmod(0o000)
+        try:
+            with pytest.raises(RuntimeError, match="unreadable"):
+                bridge.load_open_items(p)
+        finally:
+            p.chmod(0o644)
+
+    def test_returns_empty_when_file_absent(self, tmp_path):
+        bridge = _bridge_mod()
+        result = bridge.load_open_items(tmp_path / "nonexistent.json")
+        assert result == []

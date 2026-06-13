@@ -133,18 +133,18 @@ def _parse_iso(ts: str) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-def compute_staleness_seconds(generated_at: str, now: Optional[datetime] = None) -> int:
+def compute_staleness_seconds(generated_at: str, now: Optional[datetime] = None) -> Optional[int]:
     """Real staleness in seconds = ``now - generated_at`` (never negative).
 
     The previous builder hard-coded ``staleness_seconds: 0`` into the persisted
     document, so a t0_state.json that was 10 days old still reported 0 — the
     field lied. This computes the honest delta from the embedded
-    ``generated_at``. Returns 0 when ``generated_at`` is missing/unparseable so
-    callers never see a misleading negative or None.
+    ``generated_at``. Returns None (unknown sentinel) when ``generated_at`` is
+    missing or unparseable — returning 0 would falsely suggest a fresh document.
     """
     gen = _parse_iso(generated_at)
     if gen is None:
-        return 0
+        return None
     current = now or _now_utc()
     delta = int((current - gen).total_seconds())
     return delta if delta > 0 else 0
@@ -497,13 +497,20 @@ def _build_tracks_from_db(state_dir: Path, project_id: str) -> Optional[Dict[str
             has_tracks = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tracks'"
             ).fetchone()
-        except Exception:
+        except sqlite3.OperationalError:
             return None
         if not has_tracks:
             return None
 
         cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
         if "track_id" not in cols:
+            return None
+
+        # ADR-007 cross-tenant guard: when a project_id is requested but the
+        # column is absent from the tracks table, do NOT fall through to an
+        # unscoped query that would return every tenant's rows. Signal the caller
+        # to use the legacy fallback instead.
+        if project_id and "project_id" not in cols:
             return None
 
         select_cols = ["track_id"]
@@ -522,8 +529,15 @@ def _build_tracks_from_db(state_dir: Path, project_id: str) -> Optional[Dict[str
         else:
             sql = f"SELECT {', '.join(select_cols)} FROM tracks ORDER BY track_id ASC"
             rows = conn.execute(sql).fetchall()
-    except Exception:
+    except sqlite3.OperationalError:
+        # Missing table or column — signal legacy fallback.
         return None
+    except Exception:
+        log.warning(
+            "_build_tracks_from_db: unexpected DB error at %s — not masking as legacy fallback",
+            db_path, exc_info=True,
+        )
+        raise
     finally:
         conn.close()
 
