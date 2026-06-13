@@ -1,311 +1,140 @@
-# NDJSON Receipt Format V2 Specification
-**Last Updated**: 2026-02-15
-**Owner**: T-MANAGER
-**Purpose**: Documentation for NDJSON Receipt Format V2 Specification.
+# NDJSON Receipt Format
 
-**Updated**: 2025-09-15  
+**Version**: 1.0.0
+**Last Updated**: 2026-06-13
 **Status**: Active
-**Replaces**: Original format with gate/status/track  
-**New**: Added ACK receipt support (V6 Dispatcher)
+**Purpose**: Canonical schema for receipt lines in `.vnx-data/state/t0_receipts.ndjson`.
 
-## Receipt Types
+A receipt is one JSON line that records the outcome of a single dispatch. The receipt ledger is the append-only NDJSON file T0 reads to advance quality gates. Per ADR-005 it is the canonical audit surface; SQLite projections are downstream.
 
-### 1. ACK Receipt (NEW - V6 Dispatcher)
-Immediate acknowledgment receipt sent within 5 seconds of receiving a manager block.
+## Canonical location
+
+```
+.vnx-data/state/t0_receipts.ndjson
+```
+
+`VNX_STATE_DIR` defaults to `$VNX_DATA_DIR/state`. The file is one JSON object per line, written append-only under an exclusive lock (`fcntl.flock(LOCK_EX)`). The `.vnx-data/` tree is gitignored runtime state — never commit it.
+
+## How a receipt is written
+
+The governed dispatch paths (`scripts/lib/dispatch_envelope.py`, `scripts/lib/provider_dispatch.py`) emit receipts through `governance_emit.emit_dispatch_receipt`. The interactive tmux lane (`scripts/lib/tmux_interactive_dispatch.py`) writes a receipt via `append_receipt.py --receipt` when the worker runs the completion command. Both append to the same ledger file. See `docs/operations/RECEIPT_PIPELINE.md` for the end-to-end flow.
+
+## Receipt schema
+
+The receipt object written by `emit_dispatch_receipt` (the governed path):
 
 ```json
 {
-  "event": "task_ack",
-  "track": "A|B|C",
-  "status": "working|blocked",
-  "task_id": "<optional>",
-  "summary": "Task received, starting execution",
-  "timestamp": "2025-09-15T07:00:00Z"
-}
-```
-
-### 2. Task Complete Receipt (STANDARDIZED)
-Final receipt sent after task completion.
-
-## Format Definition
-
-```json
-{
-  "event": "task_complete",
-  "run_id": "<yyyyMMdd-hhmmss-phase>",
-  "track": "A|B|C",
-  "phase": "2.3|3.0|...", 
-  "gate": "planning|implementation|review|testing|validation",
-  "task_id": "A3-2_webvitals_core", 
-  "cmd_id": "<uuid or hash>",
-  "status": "ready|working|blocked|success|fail|offline",
-  "summary": "<<=160 chars>",
-  "report_path": "<optional: .claude/vnx-system/unified_reports/YYYYMMDD-HHMMSS-TN-TYPE-topic.md>",
-  "metrics": { "optional_key": "value" }
-}
-```
-
-## Field Descriptions
-
-### Required Fields
-
-- **event** (string): Receipt type
-  - `task_ack` - Immediate acknowledgment receipt (NEW)
-  - `task_complete` - Task completion receipt (STANDARDIZED)
-- **run_id** (string): Unique identifier for this run, format: `yyyyMMdd-hhmmss-phase`
-  - Example: `20250908-142000-A3-2`
-- **track** (string): Track identifier
-  - `A` - Crawler (T1)
-  - `B` - Storage (T2)
-  - `C` - Infrastructure/Deep work (T3)
-- **phase** (string): Sprint phase number (e.g., "2.3", "3.0")
-- **gate** (string): Current quality gate
-  - `planning` - Requirements and design
-  - `implementation` - Code development
-  - `review` - Code review and quality
-  - `testing` - Test execution
-  - `validation` - Final validation
-- **task_id** (string): Unique task identifier
-  - Format: `[Track][Sprint]-[SubTask]_[description]`
-  - Example: `A3-2_webvitals_core`
-- **cmd_id** (string): Command/dispatch identifier (UUID or hash)
-- **status** (string): Task execution status
-  - `ready` - Task prepared, awaiting execution
-  - `working` - Task in progress
-  - `blocked` - Cannot proceed due to dependency
-  - `success` - Task completed successfully
-  - `fail` - Task failed
-  - `offline` - Terminal unavailable
-- **summary** (string): Brief description (max 160 characters)
-
-### Optional Fields
-
-- **report_path** (string): Path to detailed report file
-  - Format: `.claude/reports/track-[x]/[TYPE]-[TASK_ID]-[TIMESTAMP].md`
-- **metrics** (object): Task-specific metrics
-  - Track A: `tests_passed`, `tests_failed`, `memory_mb`, `coverage`
-  - Track B: `query_time_ms`, `throughput_per_sec`, `cache_hit_rate`
-  - Track C: `findings_count`, `critical_issues`, `confidence`
-- **provenance** (object): Git repository state at receipt creation time (Phase 1A)
-  - **git_ref** (string): SHA of HEAD commit (40 hex characters)
-  - **branch** (string): Active branch name
-  - **is_dirty** (boolean): True if uncommitted changes exist
-  - **dirty_files** (integer): Count of modified/new files
-  - **diff_summary** (object|null): Line change statistics (null if clean)
-    - **files_changed** (integer): Number of changed files
-    - **insertions** (integer): Lines added
-    - **deletions** (integer): Lines removed
-  - **captured_at** (string): ISO 8601 timestamp when captured
-  - **captured_by** (string): Component identifier ("receipt_processor")
-- **session** (object): Session metadata for usage tracking (Phase 1B)
-  - **session_id** (string): Unique session identifier for usage correlation
-  - **terminal** (string): Terminal name (T0, T1, T2, T3, etc.)
-  - **model** (string): Model name (e.g., "claude-sonnet-4.6", "gemini-pro")
-  - **provider** (string): Provider type ("claude_code", "gemini_cli", "codex_cli")
-  - **captured_at** (string): ISO 8601 timestamp when captured
-
-## Receipt Workflow (V6 Dispatcher)
-
-### Two-Phase Receipt Pattern
-```
-1. Manager Block Received → Send ACK Receipt (within 5 seconds)
-                        → Status: "working" or "blocked"
-                        
-2. Task Execution       → Work on task
-                        
-3. Task Complete        → Send Final Receipt
-                        → Status: "success" or "fail"
-```
-
-## Status Transitions
-
-```
-ready → working → success
-              ↘ → fail
-              ↘ → blocked
-                     ↓
-                  ready (unblocked)
-
-offline (terminal disconnected)
-```
-
-## Gate Progression Based on Status
-
-- **success** → Progress to next gate
-- **blocked** → Stay in current gate, await resolution
-- **fail** → Return to completed gate or planning
-- **working** → Stay in current gate, monitor progress
-- **ready** → Stay in current gate, awaiting execution
-- **offline** → Redistribute work to available terminals
-
-## Example Receipts
-
-### ACK Receipt Examples (NEW)
-
-#### Immediate Acknowledgment - Track A
-```json
-{
-  "event": "task_ack",
-  "track": "A",
-  "status": "working",
-  "summary": "Task received, starting A3-2 WebVitals implementation",
-  "timestamp": "2025-09-15T07:00:00Z"
-}
-```
-
-#### Blocked ACK - Track B
-```json
-{
-  "event": "task_ack",
-  "track": "B",
-  "status": "blocked",
-  "summary": "Cannot accept: Currently processing critical migration",
-  "timestamp": "2025-09-15T07:00:05Z"
-}
-```
-
-### Final Receipt Examples
-
-### Track A (Crawler) - Success
-```json
-{
-  "event": "task_complete",
-  "run_id": "20250908-142000-A3-2",
-  "track": "A",
-  "phase": "3.2",
-  "gate": "implementation",
-  "task_id": "A3-2_webvitals_core",
-  "cmd_id": "a8e41fe0-1211-490a",
+  "dispatch_id": "20260613-142000-receipt-format-refresh",
+  "terminal_id": "T1",
+  "provider": "claude",
+  "model": "claude-sonnet-4.6",
   "status": "success",
-  "summary": "WebVitals implementation complete, all 405 tests passing, memory 72MB",
-  "report_path": ".claude/vnx-system/unified_reports/20250908-142000-T1-IMPL-feature-implementation.md",
-  "metrics": {
-    "tests_passed": 103,
-    "tests_failed": 0,
-    "memory_mb": 72,
-    "coverage": 92
-  }
+  "completion_pct": 100,
+  "risk": 0.0,
+  "duration_seconds": 184.512,
+  "token_usage": { "input": 18240, "output": 4096 },
+  "cost_usd": 0.214,
+  "findings": [],
+  "pr_id": "742",
+  "report_path": ".vnx-data/unified_reports/20260613-142000-receipt-format-refresh.md",
+  "events_path": ".vnx-data/events/archive/T1/20260613-142000-receipt-format-refresh.ndjson",
+  "timestamp": "2026-06-13T14:23:04Z",
+  "recorded_at": "2026-06-13T14:23:04Z"
 }
 ```
 
-### Track B (Storage) - Working
+### Field descriptions
+
+| Field | Type | Description |
+|---|---|---|
+| `dispatch_id` | string | Dispatch identifier, format `YYYYMMDD-HHMMSS-<slug>`. |
+| `terminal_id` | string | Terminal that ran the work (`T0`–`T3`). |
+| `provider` | string | Routing provider. Validated against a fixed pattern: `claude`, `codex`, `gemini`, `kimi`, `deepseek-harness`, `litellm[:model[:tag]]`, `local-gemma`. A non-matching provider raises `ValueError` at emit time. |
+| `model` | string | Concrete model name (e.g. `claude-sonnet-4.6`, `gpt-5-codex`). |
+| `status` | string | Dispatch outcome (`success`, `failed`, and lane-specific states). Reflects actual outcome — not hardcoded; see "Status truth" below. |
+| `completion_pct` | integer | 100 on success, 0 otherwise (governed path). |
+| `risk` | float | Risk score for the dispatch (0.0 when no findings). |
+| `duration_seconds` | float | Wall-clock dispatch duration, rounded to 3 decimals. |
+| `token_usage` | object | `{ "input": int, "output": int }`. Empty or partial when the lane does not report usage. |
+| `cost_usd` | float \| null | Estimated cost from the static pricing table. `null` when not computed (e.g. subscription/OAuth lanes). |
+| `findings` | array | Quality findings (severity, file, message). `[]` when clean. |
+| `pr_id` | string \| null | Associated PR number, when the dispatch produced one. |
+| `report_path` | string \| null | Path to the unified report for this dispatch (`unified_reports/<dispatch_id>.md`). Links the receipt to its report. |
+| `events_path` | string \| null | Path to the archived per-terminal event stream for this dispatch. See below. |
+| `timestamp` | string | ISO 8601 UTC (`%Y-%m-%dT%H:%M:%SZ`) when the receipt was written. |
+| `recorded_at` | string | Same instant as `timestamp` on the governed path; the explicit record-time field. |
+
+### `events_path` — receipt→stream pointer (PR #843)
+
+`events_path` points at the archived NDJSON event stream for the dispatch:
+
+```
+.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
+```
+
+It is `null` when the lane produces no event stream (tmux, claude subprocess) or when the archive step was skipped. Only subprocess-routed terminals produce a per-terminal event stream; the live `.vnx-data/events/T{n}.ndjson` is a ring buffer truncated after each dispatch, with the durable copy in the archive directory.
+
+`events_path` turns dispatch→stream linkage from a filename convention (matching `dispatch_id`) into an explicit data pointer. A reviewer can walk from a receipt straight to its event archive instead of inferring the path. See `docs/operations/EVENT_STREAMS.md` and ADR-005.
+
+### Optional hash-chain field: `prev_hash` (ADR-023, experimental opt-in)
+
+When `VNX_CHAIN_RECEIPTS=1`, the `append_receipt.py` write path (Path 2 — report-on-disk lane) stamps one additional field:
+
 ```json
 {
-  "event": "task_complete",
-  "run_id": "20250908-143000-B2-1",
-  "track": "B",
-  "phase": "2.1",
-  "gate": "implementation",
-  "task_id": "B2-1_rag_pipeline_optimization",
-  "cmd_id": "b5df8da2-b6b1-4714",
-  "status": "working",
-  "summary": "RAG pipeline optimization in progress, 60% complete",
-  "metrics": {
-    "progress_percent": 60,
-    "current_step": "index_optimization"
-  }
+  "dispatch_id": "20260613-142000-receipt-format-refresh",
+  "...": "...",
+  "prev_hash": "9f2c1ab4...e07d"
 }
 ```
 
-### Track C (Infrastructure) - Blocked
-```json
-{
-  "event": "task_complete",
-  "run_id": "20250908-102355-C1-1",
-  "track": "C",
-  "phase": "1.1",
-  "gate": "review",
-  "task_id": "C1-1_rag_architecture_review",
-  "cmd_id": "c45d3cdc-1e65-4cb7",
-  "status": "blocked",
-  "summary": "Architecture review blocked awaiting Track B schema finalization",
-  "report_path": ".claude/vnx-system/unified_reports/20250922-143000-T3-REVIEW-system-analysis.md"
-}
-```
+| Field | Type | Description |
+|---|---|---|
+| `prev_hash` | string (64 hex) | SHA-256 entry hash of the immediately preceding ledger entry. The first entry in a chain uses the genesis sentinel (`"0" * 64`). Present only when chaining is enabled on the `append_receipt.py` path. |
 
-### Enhanced Receipt with Provenance and Session (Phase 1A+1B)
+`emit_dispatch_receipt` (Path 1 — governed dispatch envelope) does NOT honor `VNX_CHAIN_RECEIPTS`; enabling the flag on a deployment that uses both paths produces a mixed ledger that verifies as `broken`. Full per-path enforcement is DEFERRED to 1.0.1. Default is OFF; `prev_hash` is absent when chaining is off and the ledger verifies as `unchained`. See ADR-023.
+
+## Status truth
+
+`status` reflects the real outcome of the dispatch, not a placeholder.
+
+- Governed path: `emit_dispatch_receipt` is called with the adapter's actual status; `completion_pct` follows (`100` on `success`, else `0`).
+- Interactive tmux lane (#845): the worker is given two distinct completion commands — one stamping `status: "done"`, one stamping `status: "failed"` — and chooses based on whether the work actually completed. The timestamp is evaluated at run time via `_VNX_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)` rather than baked into the dispatch, so the receipt time is the completion time.
+
+The tmux-lane receipt carries a lane-tagged shape:
 
 ```json
 {
-  "event": "task_complete",
-  "run_id": "20260215-143000-A3-2",
-  "track": "A",
-  "phase": "5.0",
-  "gate": "implementation",
-  "task_id": "A3-2_receipt_upgrade",
-  "cmd_id": "f8d91ac2-4e3f-429b",
-  "status": "success",
-  "summary": "Implemented git provenance and session metadata capture for receipts",
-  "report_path": ".claude/vnx-system/unified_reports/20260215-143000-T1-IMPL-receipt-upgrade.md",
-  "metrics": {
-    "tests_passed": 12,
-    "performance_impact_ms": 25
-  },
-  "provenance": {
-    "git_ref": "e3a4b26a6e91ccc1122293ca41bd8f2f71d6553b",
-    "branch": "feature/pr3-registry-merge",
-    "is_dirty": true,
-    "dirty_files": 68,
-    "diff_summary": {
-      "files_changed": 26,
-      "insertions": 1677,
-      "deletions": 618
-    },
-    "captured_at": "2026-02-15T14:30:00Z",
-    "captured_by": "receipt_processor"
-  },
-  "session": {
-    "session_id": "abc-def-123-456",
-    "terminal": "T1",
-    "model": "claude-sonnet-4.6",
-    "provider": "claude_code",
-    "captured_at": "2026-02-15T14:30:00Z"
-  }
+  "event_type": "subprocess_completion",
+  "dispatch_id": "20260613-142000-receipt-format-refresh",
+  "terminal": "T1",
+  "terminal_id": "T1",
+  "status": "done",
+  "source": "tmux_interactive",
+  "timestamp": "2026-06-13T14:23:04Z",
+  "report_path": ".vnx-data/unified_reports/20260613-142000-receipt-format-refresh.md",
+  "provider": "claude",
+  "sub_provider": "anthropic",
+  "model": "claude-sonnet-4.6",
+  "lane": "tmux_interactive"
 }
 ```
 
-## File Locations
+The tmux worker receipt omits `events_path` entirely — the key is absent, not null. The tmux lane produces no per-terminal event stream, so there is no archive path to point at. Receipt→stream linkage for tmux dispatches falls back to `dispatch_id` convention only. This differs from the governed-path schema above (where `events_path` is always present and written as `null` for lanes without an event stream): the worker-authored completion receipt shown here is a leaner shape that does not include the field.
 
-**Canonical production receipt log** (what T0 reads):
-- `.claude/vnx-system/state/t0_receipts.ndjson`
+## Integration points
 
-**Legacy/compatibility files** (may exist but are not required for production):
-- `.claude/vnx-system/state/receipts_track_*.ndjson`
-- `.claude/vnx-system/state/unified_receipts.ndjson`
+- **T0 Orchestrator** — reads `status` to decide gate advancement, `report_path` to open the unified report, `pr_id` to track PRs, `findings` for quality signals.
+- **Cost tracker** (`scripts/cost_tracker.py`, `vnx cost-report`) — aggregates receipts by `model`, `terminal_id`, and provider from `token_usage` + `cost_usd`. Missing fields are counted as `unknown`.
+- **Audit chain** (`scripts/audit_chain.py`) — verifies the `prev_hash` chain when `VNX_CHAIN_RECEIPTS=1`.
 
-**Event naming**:
-- Target canonical field: `event_type` (parsers may also accept legacy `event` during migration)
+## See also
 
-## Changes from V1
-
-| Field | V1 Format | V2 Format |
-|-------|-----------|-----------|
-| event | (not present) | "task_complete" |
-| run_id | Simple timestamp | Phase-aware ID |
-| phase | (not present) | Sprint phase number |
-| task_id | (not present) | Structured task ID |
-| cmd_id | (not present) | Dispatch tracking |
-| status | ok/blocked/warning | 6 distinct states |
-| artifact_path | Used | Renamed to report_path |
-| ts | ISO timestamp | (removed - in run_id) |
-
-## Integration Points
-
-### Gates Controller
-- Reads status field to determine gate transitions
-- Uses phase to track sprint progress
-- Creates new dispatches based on gate progression
-
-### Receipt Notifier
-- Parses all fields for T0 notification
-- Highlights task_id and phase for context
-- Maps status to action recommendations
-
-### T0 Orchestrator
-- Uses status to determine next manager block
-- Tracks run_id for session continuity
-- Reads report_path for detailed analysis
-
----
-
-*This format ensures full task tracking with clear status progression and sprint phase awareness.*
+- ADR-005 — Append-only NDJSON ledger as the canonical audit surface
+- ADR-023 — Receipt hash-chain (`prev_hash`, three-state verify)
+- ADR-016 — Unified event shape
+- `docs/operations/RECEIPT_PIPELINE.md` — report→receipt→ledger flow
+- `docs/operations/EVENT_STREAMS.md` — per-terminal event streams and the `events_path` linkage
+- `scripts/lib/governance_emit.py` — `emit_dispatch_receipt` (governed receipt writer)
+- `scripts/lib/append_receipt_internals/idempotency.py` — append path + hash-chain stamping
