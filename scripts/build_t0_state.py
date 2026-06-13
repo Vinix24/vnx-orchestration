@@ -1363,7 +1363,8 @@ def _build_strategic_state_heavy(
 def _pytest_db_isolation_guard(state_dir: Path) -> None:
     """Refuse to read/mutate a DB when running under pytest without explicit isolation.
 
-    Active only when PYTEST_CURRENT_TEST is set. Two conditions must hold:
+    Active whenever pytest is loaded (collection OR execution), so an
+    import-time module-level call is also guarded. Two conditions must hold:
     1. VNX_DATA_DIR_EXPLICIT=1 must be set.
     2. The resolved state_dir must be under tempfile.gettempdir() and NOT
        under ~/.vnx-data.
@@ -1371,9 +1372,9 @@ def _pytest_db_isolation_guard(state_dir: Path) -> None:
     The second check prevents tests from passing the flag while still resolving
     to the real canonical data location — a false sense of isolation.
 
-    Production is unaffected: PYTEST_CURRENT_TEST is only set by pytest.
+    Production is unaffected: pytest is never in sys.modules outside a test run.
     """
-    if os.environ.get("PYTEST_CURRENT_TEST") is None:
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in sys.modules:
         return
     if os.environ.get("VNX_DATA_DIR_EXPLICIT") != "1":
         raise RuntimeError(
