@@ -2,9 +2,9 @@
 # Intelligence queries for T0 orchestration
 # Live state monitoring and orchestration pattern queries
 
-INTEL_SCRIPT=".claude/vnx-system/scripts/gather_intelligence.py"
-STATE_DIR=".claude/vnx-system/state"
-DISPATCH_DIR=".claude/vnx-system/dispatches"
+INTEL_SCRIPT="scripts/gather_intelligence.py"
+STATE_DIR=".vnx-data/state"
+DISPATCH_DIR=".vnx-data/dispatches"
 
 # ============================================
 # LIVE STATE QUERIES
@@ -30,7 +30,7 @@ check_queue() {
 
 # Check open items digest (deliverables)
 check_open_items() {
-    python3 ".claude/vnx-system/scripts/open_items_manager.py" digest 2>/dev/null || echo "No open items data"
+    python3 "scripts/open_items_manager.py" digest 2>/dev/null || echo "No open items data"
 }
 
 # Get orchestration recommendations
