@@ -121,7 +121,7 @@ The tmux-lane receipt carries a lane-tagged shape:
 }
 ```
 
-This lane sets no `events_path` (the tmux lane produces no per-terminal event stream), so receipt→stream linkage for tmux dispatches is by `dispatch_id` only.
+The tmux worker receipt omits `events_path` entirely — the key is absent, not null. The tmux lane produces no per-terminal event stream, so there is no archive path to point at. Receipt→stream linkage for tmux dispatches falls back to `dispatch_id` convention only. This differs from the governed-path schema above (where `events_path` is always present and written as `null` for lanes without an event stream): the worker-authored completion receipt shown here is a leaner shape that does not include the field.
 
 ## Integration points
 

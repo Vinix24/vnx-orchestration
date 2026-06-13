@@ -51,7 +51,7 @@ Empty or missing file is `unchained` (exit 0) — a fresh ledger is honestly "no
 
 A ledger must be either fully unchained or fully chained to be healthy. A ledger where some entries carry `prev_hash` and others do not is classified `broken`, even when every present `prev_hash` links correctly.
 
-One edge case makes this guard load-bearing rather than cosmetic. The first entry in a chain is allowed to carry no `prev_hash` (or the genesis sentinel). If the first entry is unchained but every later entry hash-links correctly to its predecessor, the link-by-link comparison produces zero mismatches — the loop alone would pass it. Only the count check (`chained_count < total` → `broken`) catches that case. Without it, an attacker could strip the genesis anchor and present a chain that "verifies link by link" while having no fixed start. So: first-entry-unchained-but-rest-linked is explicitly `broken`.
+One edge case makes this guard load-bearing rather than cosmetic. Three states need precise distinction: in a **fully chained** ledger the first entry carries the genesis sentinel (`"0" * 64`) as `prev_hash`; in a **fully unchained** ledger no entry carries `prev_hash` at all; a **partial chain** is when some entries carry `prev_hash` and others do not. The subtle edge case is a ledger where the first entry lacks `prev_hash` while every later entry hash-links correctly to its predecessor: the link-by-link loop skips the absent first-entry key without flagging a violation — only the count check (`chained_count < total` → `broken`) catches that case. Without it, an attacker could strip the genesis anchor and present a chain that "verifies link by link" while having no fixed start. So: first-entry-unchained-but-rest-linked is explicitly `broken`, not `unchained`.
 
 ### Event-type conventions for corrections
 
@@ -59,14 +59,14 @@ Append-only means past entries are never edited in place. Corrections are new en
 
 - `backfill` — historical entry added retroactively; `prev_hash` set to genesis.
 - `correction` — supersedes a prior entry; must carry `corrects_hash`.
-- `redaction` — removes content from a prior entry; must carry `redacts_hash`; body is tombstoned, chain preserved.
+- `redaction` — marks a prior entry as superseded; must carry `redacts_hash`; the redaction entry's body is tombstoned, chain preserved. The original entry's bytes remain readable in the append-only ledger — the ledger does not delete them. True content removal requires an out-of-band ledger rewrite or rotation.
 - `tombstone` — marks an entry withdrawn; must carry `tombstones_hash`; entry-id preserved for chain continuity.
 
 These keep the chain continuous through real-world edits without ever mutating a hashed body.
 
 ## Reasoning
 
-1. **Upgrades ADR-005's claim from convention to proof.** ADR-005 reason #2 ("tamper-evident by construction") rests on append-only file semantics and mtime/size monotonicity — sufficient against accident, not against intent. The hash-chain makes the claim independently verifiable: a reviewer runs `audit_chain.py verify` and gets a cryptographic yes/no, no trust in the operator required.
+1. **Upgrades ADR-005's claim from convention to tamper-evidence.** ADR-005 reason #2 ("tamper-evident by construction") rests on append-only file semantics and mtime/size monotonicity — sufficient against accident, not against intent. The hash-chain makes the claim independently verifiable as tamper-evidence: a reviewer runs `audit_chain.py verify` and detects any in-place edit to a past entry that did not recompute all subsequent hashes. This is tamper-EVIDENCE, not authenticity or non-repudiation — an actor with write access to the ledger file can rewrite entries and recompute all downstream hashes, producing a chain that still verifies clean. Establishing authenticity requires external anchoring (a public timestamp service, a cryptographic signature under a key the operator does not control) — which is out of scope for 1.0.
 
 2. **Opt-in keeps the default path untouched.** Most deployments do not need cryptographic chaining and should not pay its cost or complexity. Gating on `VNX_CHAIN_RECEIPTS` means the OFF path is byte-identical to the pre-chain writer, so enabling it is a pure add and disabling it never corrupts an existing ledger. High-assurance deployments (compliance, customer audits) flip the flag.
 
@@ -74,7 +74,7 @@ These keep the chain continuous through real-world edits without ever mutating a
 
 4. **Partial-chain-is-broken closes a real splice attack.** Allowing a partial chain would let an attacker chain only the half of the ledger they fabricated and leave the rest "unchained," or strip the genesis anchor to float the chain's start. Demanding all-or-nothing removes that seam.
 
-5. **Corrections stay append-only.** The `correction`/`redaction`/`tombstone` conventions let the ledger evolve (fix a wrong entry, redact secrets) without ever editing a hashed body — which would otherwise break every downstream link. The audit trail of the correction is itself a chained entry.
+5. **Corrections stay append-only.** The `correction`/`redaction`/`tombstone` conventions let the ledger evolve (fix a wrong entry, mark an entry superseded) without ever editing a hashed body — which would otherwise break every downstream link. The audit trail of the correction is itself a chained entry. Note: a `redaction` entry marks/tombstones a prior entry but does not delete its bytes from the append-only ledger — the original content remains readable. True removal of sensitive content requires an out-of-band ledger rewrite or rotation.
 
 ## Consequences
 
