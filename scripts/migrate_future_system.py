@@ -59,7 +59,7 @@ def _pytest_db_isolation_guard(project_root: Path) -> None:
 
     Production code is never affected: PYTEST_CURRENT_TEST is only set by pytest.
     """
-    if os.environ.get("PYTEST_CURRENT_TEST") is None:
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in sys.modules:
         return
     if os.environ.get("VNX_DATA_DIR_EXPLICIT") != "1":
         raise RuntimeError(

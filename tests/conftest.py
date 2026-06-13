@@ -9,10 +9,25 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Module-level isolation pin (import-time / collection-time guard)
+# ---------------------------------------------------------------------------
+# _pytest_db_isolation_guard detects pytest via sys.modules (active from
+# collection onward, before PYTEST_CURRENT_TEST is set). This pin ensures
+# VNX_DATA_DIR_EXPLICIT=1 and a temp VNX_DATA_DIR are in place from the
+# moment conftest loads, so any module-level run() call during collection
+# hits the guard instead of touching ~/.vnx-data.
+# Per-module (_fsr_migration_module_isolation) and per-test (_vnx_data_dir_isolation)
+# fixtures re-pin to tighter tmp dirs; this is the fallback floor.
+_CONFTEST_ISOLATION_TMP = tempfile.mkdtemp(prefix="vnx_conftest_")
+os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
+os.environ["VNX_DATA_DIR"] = _CONFTEST_ISOLATION_TMP
 
 # Make scripts/lib importable for all tests
 _LIB_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lib"

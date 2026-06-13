@@ -148,6 +148,26 @@ class TestIsolationGuardFires:
         with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
             mod.run(Path.home())
 
+    def test_guard_blocks_at_collection_time_via_sys_modules(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard fires via sys.modules detection even when PYTEST_CURRENT_TEST is absent.
+
+        PYTEST_CURRENT_TEST is set only during test execution, not during collection.
+        Removing it here simulates a module-level run() call at import/collection time.
+        The guard must detect pytest via sys.modules (true from collection onward)
+        to block an unguarded run() against ~/.vnx-data before any fixture runs.
+        """
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+        assert "pytest" in sys.modules, "pytest must be in sys.modules during test execution"
+
+        mod = _get_migrate_module()
+
+        with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
+            mod.run(Path.home())
+
 
 # ---------------------------------------------------------------------------
 # (b) Correctly-pinned test: guard passes, run() proceeds to actual logic
@@ -157,7 +177,11 @@ class TestIsolationGuardPasses:
     """With VNX_DATA_DIR_EXPLICIT=1 (from autouse fixture), guard lets run() proceed."""
 
     def test_guard_passes_with_isolation_pin(self, tmp_path: Path) -> None:
-        """VNX_DATA_DIR_EXPLICIT=1 is set by the autouse fixture; guard is satisfied."""
+        """VNX_DATA_DIR_EXPLICIT=1 is set by the autouse fixture; guard is satisfied.
+
+        Any exception raised by run() (guard or otherwise) fails this test — the
+        try/except pattern that masked unrelated RuntimeErrors has been removed.
+        """
         assert os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1", (
             "autouse fixture _fsr_migration_module_isolation must set VNX_DATA_DIR_EXPLICIT=1"
         )
@@ -165,29 +189,23 @@ class TestIsolationGuardPasses:
         mod = _get_migrate_module()
         project_dir = _make_v21_project(tmp_path)
 
-        try:
-            mod.run(project_dir)
-        except RuntimeError as exc:
-            assert "TEST ISOLATION GUARD" not in str(exc), (
-                f"Isolation guard must not fire when VNX_DATA_DIR_EXPLICIT=1 is set: {exc}"
-            )
+        mod.run(project_dir)
 
     def test_explicit_env_override_also_passes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Explicitly setting VNX_DATA_DIR_EXPLICIT=1 (not via autouse) also passes."""
+        """Explicitly setting VNX_DATA_DIR_EXPLICIT=1 (not via autouse) also passes.
+
+        Any exception raised by run() (guard or otherwise) fails this test — the
+        try/except pattern that masked unrelated RuntimeErrors has been removed.
+        """
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
         monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "_override"))
 
         mod = _get_migrate_module()
         project_dir = _make_v21_project(tmp_path)
 
-        try:
-            mod.run(project_dir)
-        except RuntimeError as exc:
-            assert "TEST ISOLATION GUARD" not in str(exc), (
-                f"Guard should not fire when VNX_DATA_DIR_EXPLICIT=1 is explicitly set: {exc}"
-            )
+        mod.run(project_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +235,17 @@ class TestCanonicalDbHashUnchanged:
     ) -> None:
         """Canonical DB hashes are identical before and after running migration in isolation.
 
+        Re-globs the canonical dir AFTER the operation to also catch newly-created
+        files (WAL, SHM, journal entries) that the before-list would otherwise miss.
+
         If the canonical DB is absent (CI, fresh env), this test is skipped gracefully.
         """
-        db_files = self._canonical_db_files()
-        if not db_files:
+        db_files_before = self._canonical_db_files()
+        if not db_files_before:
             pytest.skip("Canonical DB absent — CI or fresh environment, skipping canary")
 
-        before = self._compute_hashes(db_files)
+        before_names = {f.name for f in db_files_before}
+        before_hashes = self._compute_hashes(db_files_before)
 
         # Run a representative migration helper in isolation.
         # VNX_DATA_DIR_EXPLICIT=1 is already set by the autouse fixture,
@@ -232,10 +254,20 @@ class TestCanonicalDbHashUnchanged:
         project_dir = _make_v21_project(tmp_path)
         mod.run(project_dir)
 
-        after = self._compute_hashes(db_files)
+        # Re-glob after to detect newly created canonical files.
+        db_files_after = self._canonical_db_files()
+        after_names = {f.name for f in db_files_after}
+        after_hashes = self._compute_hashes(db_files_after)
 
-        assert after == before, (
+        new_files = after_names - before_names
+        assert not new_files, (
+            "CANARY FAILURE: New canonical DB files were created during isolated migration run! "
+            "The TEST ISOLATION GUARD may have failed to protect the live database. "
+            f"New files: {sorted(new_files)}"
+        )
+
+        assert after_hashes == before_hashes, (
             "CANARY FAILURE: Canonical DB was mutated during isolated migration run! "
             "The TEST ISOLATION GUARD may have failed to protect the live database. "
-            f"Changed files: {[k for k in before if before[k] != after.get(k)]}"
+            f"Changed files: {[k for k in before_hashes if before_hashes[k] != after_hashes.get(k)]}"
         )
