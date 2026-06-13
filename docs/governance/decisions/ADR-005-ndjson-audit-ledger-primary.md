@@ -5,6 +5,12 @@
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Codification of M1 (NDJSON audit ledger) from `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4
 
+## Amendments
+
+**2026-06-13 — Hash-chain is the tamper-evidence implementation (ADR-023).** This ADR's reason #2 calls the ledger "tamper-evident by construction" on the strength of append-only file semantics. That holds against accidental mutation but not deliberate tampering — append-only is a convention, not a cryptographic property. ADR-023 codifies the receipt hash-chain (opt-in via `VNX_CHAIN_RECEIPTS=1`, `prev_hash` chain field, `audit_chain.py verify`) as the implementation that makes the tamper-evidence claim independently verifiable. When chaining is enabled, ledger integrity is a checkable property, not a trust assumption. See ADR-023 for the chain model and the three-state (`unchained` / `verified` / `broken`) verify semantics.
+
+**2026-06-13 — `events_path` receipt→stream pointer (PR #843).** Each `t0_receipts.ndjson` receipt now carries an `events_path` field that points at the archived per-terminal event stream for that dispatch (`.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`). It is `null` for lanes that produce no event stream (tmux, claude subprocess). This turns the receipt→stream linkage from a filename convention (matching `dispatch_id`) into an explicit data pointer, so a reviewer can walk from a receipt to its underlying event archive without inferring the path. See `docs/core/11_RECEIPT_FORMAT.md` for the field and `docs/operations/EVENT_STREAMS.md` for the linkage.
+
 ## Context
 
 VNX records every dispatch lifecycle event, receipt, gate outcome, and lease/heartbeat transition. Two storage shapes exist in the codebase:
@@ -39,7 +45,7 @@ Five reinforcing reasons for the ledger-first model:
 
 1. **Operator-readable without a DB client.** The operator (and any human reviewer) can `tail -f .vnx-data/state/t0_receipts.ndjson`, `grep dispatch_id .vnx-data/dispatch_register.ndjson`, or open the file in any editor. SQLite requires a client (`sqlite3` CLI, DB GUI). For a glass-box system per ADR-004, the cheapest path to inspectability is plain text. Every minute of "let me query the DB to find out what happened" friction is a minute the human gate erodes.
 
-2. **Tamper-evident by construction.** Append-only NDJSON files have a one-way write semantic: new lines only, no in-place mutation. Any retroactive edit shows up in `git diff` (the `.vnx-data/` directory is gitignored runtime state, but the operator's backup workflow and forensic-recovery procedures rely on file-mtime + size monotonicity). SQLite UPDATE/DELETE are silent in comparison; reconstructing a tamper trail from a relational DB requires a separate audit log on top — which is what the NDJSON ledger already is.
+2. **Tamper-evident by construction.** Append-only NDJSON files have a one-way write semantic: new lines only, no in-place mutation. Any retroactive edit shows up in `git diff` (the `.vnx-data/` directory is gitignored runtime state, but the operator's backup workflow and forensic-recovery procedures rely on file-mtime + size monotonicity). SQLite UPDATE/DELETE are silent in comparison; reconstructing a tamper trail from a relational DB requires a separate audit log on top — which is what the NDJSON ledger already is. Append-only file semantics cover accidental mutation; against deliberate tampering the receipt hash-chain (ADR-023, opt-in via `VNX_CHAIN_RECEIPTS=1`) makes integrity an independently verifiable property rather than a trust assumption.
 
 3. **Recoverable from disk alone.** If SQLite databases corrupt (page checksum failure, partial write during power loss, fsync ordering issue), the ledger remains intact because each line is independently parseable. Recovery procedure: replay the ledger, rebuild the SQLite projection. The reverse is not possible — a corrupted ledger leaves no source of truth. ADR-001 (no external Redis) already established VNX as a system whose state must be recoverable from local disk; the NDJSON ledger is what makes that promise real. Killing the dispatcher and restarting it does not lose state because the ledger is already on disk.
 
@@ -80,6 +86,7 @@ A note on the ring-buffer pattern: `.vnx-data/events/T{n}.ndjson` is per-dispatc
 - ADR-003 — OAuth-only Claude routing (subprocess output is what feeds `T{n}.ndjson`)
 - ADR-004 — VNX as alternative to Managed Agents (glass-box observability is the moat)
 - ADR-006 — Staging→promote human gate (the gate's evidence trail is the ledger)
+- ADR-023 — Receipt hash-chain (the tamper-evidence implementation behind reason #2; see Amendments)
 - `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M1) — strategic-moat justification
 - `CLAUDE.md` "Event Streams" section — ring-buffer + archive convention
 - Memory: `project_ndjson_ring_buffer.md` — per-terminal NDJSON is ring buffer, durable archive in `.vnx-data/events/archive/{terminal}/`

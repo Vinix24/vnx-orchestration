@@ -1,7 +1,7 @@
 # Event Streams
 
 **Status**: Active
-**Last Updated**: 2026-04-24
+**Last Updated**: 2026-06-13
 **Purpose**: Explain the lifecycle of per-terminal NDJSON event streams so that operators and future investigators don't misread an empty live file as a broken writer.
 
 ---
@@ -28,6 +28,20 @@ Only **subprocess-routed** terminals emit per-terminal NDJSON.
 - T1 / T2 / T3 use the subprocess adapter by default in current configurations, but this is controlled per-terminal via `VNX_ADAPTER_T{n}=subprocess`.
 - Terminals routed through the tmux adapter produce no per-terminal NDJSON at all. Their activity is observable via `t0_receipts.ndjson`, `governance_audit.ndjson`, and the receipt pipeline.
 
+## Receipt linkage: the `events_path` pointer (PR #843)
+
+A dispatch's receipt in `t0_receipts.ndjson` carries an `events_path` field that points back at this archived stream:
+
+```
+events_path = .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
+```
+
+For multi-provider dispatches, the GOVERN step archives the live stream and records its path on the receipt before the receipt is written. The receipt → stream linkage is therefore an explicit data pointer, not a filename convention you have to reconstruct from the `dispatch_id`.
+
+`events_path` is `null` when the lane produces no per-terminal stream — tmux dispatches and claude subprocess dispatches do not emit one — or when the archive step was skipped. For those receipts, there is no archived stream to point at; the receipt itself, the unified report, and the dispatch register carry the trail.
+
+To walk from a receipt to its events: read `events_path` from the receipt line and open that archive file. To walk the other way, the archive filename already encodes `{terminal}` and `{dispatch_id}`, which match the receipt's `terminal_id` and `dispatch_id`. See `docs/core/11_RECEIPT_FORMAT.md` for the field and ADR-005 for why the linkage is explicit.
+
 ## Historical context
 
 In April 2026 an audit (finding W-2) flagged `T1.ndjson` and `T2.ndjson` as "partially silent" based on observing 0-byte live files between dispatches. A follow-up investigation (OI-AT-6) proved the observation was correct but the interpretation was wrong: the files are ring buffers by design, and events were being durably archived the whole time. This document exists so that future observers don't re-derive the same wrong conclusion.
@@ -35,4 +49,6 @@ In April 2026 an audit (finding W-2) flagged `T1.ndjson` and `T2.ndjson` as "par
 ## Related docs
 
 - [Receipt Pipeline](RECEIPT_PIPELINE.md) — how receipts flow from archived events to the audit trail
+- [Receipt Format](../core/11_RECEIPT_FORMAT.md) — the receipt schema, including the `events_path` field
 - [Subprocess Adapter Feature Flag](SUBPROCESS_ADAPTER_FEATURE_FLAG.md) — how the per-terminal routing is selected
+- ADR-005 — Append-only NDJSON ledger (why receipt → stream linkage is an explicit pointer)
