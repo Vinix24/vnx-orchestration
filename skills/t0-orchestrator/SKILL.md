@@ -444,7 +444,7 @@ For any feature work (code edit + PR + tests), dispatches to T1/T2/T3 MUST go vi
 ```bash
 export VNX_STATE_DIR=.vnx-data/state VNX_DATA_DIR=.vnx-data VNX_DISPATCH_DIR=.vnx-data/dispatches
 
-python3 .claude/vnx-system/scripts/lib/subprocess_dispatch.py \
+python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
   --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
   --model sonnet \
@@ -511,22 +511,22 @@ python3 scripts/validate_skill.py --list
 
 ## 12. Recommended Script Toolbox
 
-1. `scripts/queue_status.sh`
+1. `.claude/skills/t0-orchestrator/scripts/queue_status.sh`
 - queue/staging/terminal summary
 
-2. `scripts/deliverable_review.sh`
+2. `.claude/skills/t0-orchestrator/scripts/deliverable_review.sh`
 - PR-focused open-item checks
 
-3. `scripts/dispatch_guard.sh`
+3. `.claude/skills/t0-orchestrator/scripts/dispatch_guard.sh`
 - go/no-go guard
 
-4. `scripts/provider_capabilities.sh`
+4. `.claude/skills/t0-orchestrator/scripts/provider_capabilities.sh`
 - provider constraints and routing hints
 
-5. `scripts/staging_helper.sh`
+5. `.claude/skills/t0-orchestrator/scripts/staging_helper.sh`
 - staging convenience wrapper
 
-6. `scripts/intelligence.sh`
+6. `.claude/skills/t0-orchestrator/scripts/intelligence.sh`
 - intelligence read helpers
 
 ## 13. Decision Outputs
