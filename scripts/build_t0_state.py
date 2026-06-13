@@ -1050,10 +1050,17 @@ def _read_dir_dispatch(subdir: Path) -> tuple[Dict[str, Any], bool]:
         started_at = None
     try:
         data = _safe_json(subdir / "manifest.json")
+        if data is None:
+            # Missing file or non-object JSON — flag as artifact error (Warning 3)
+            return {
+                "dispatch_id": dispatch_id,
+                "track": None, "gate": None, "started_at": started_at,
+                "artifact_error": "manifest missing or non-object",
+            }, True
         return {
             "dispatch_id": dispatch_id,
-            "track": (data or {}).get("track"),
-            "gate": (data or {}).get("gate"),
+            "track": data.get("track"),
+            "gate": data.get("gate"),
             "started_at": started_at,
         }, False
     except json.JSONDecodeError as exc:
@@ -1838,13 +1845,21 @@ def _resolve_output_path(args: argparse.Namespace) -> Path:
 
 
 def _write_all_state_outputs(
-    state: Dict[str, Any], state_dir: Path, strategic_heavy: Any
+    state: Dict[str, Any], state_dir: Path, strategic_heavy: Any,
+    *,
+    project_root: Optional[Path] = None,
+    skip_paths: Optional[set] = None,
 ) -> bool:
     """Write secondary outputs (index, detail, brief, status). All best-effort.
 
     Returns True if any core state-file write failed (caller should mark build degraded).
     Optional helper modules (build_project_status, build_feature_plan) are not
     counted as write failures when unavailable — only atomic state-file writes are.
+
+    project_root: project root for FEATURE_PLAN.md resolution (defaults to _PROJECT_ROOT).
+                  Tests pass an isolated tmp path to prevent touching the real file (Error 2).
+    skip_paths: resolved Path objects to skip (prevents double-writing the primary output
+                when --format brief is used; caller passes {output_path.resolve()}).
     """
     write_failed = False
     try:
@@ -1872,20 +1887,25 @@ def _write_all_state_outputs(
     except Exception as exc:
         log.warning("Failed to write pr_queue_state.json: %s", exc)
         write_failed = True
+    # Warning 4: guard against double-write when output_path == brief_path
+    brief_path = state_dir / "t0_brief.json"
+    if skip_paths is None or brief_path.resolve() not in skip_paths:
+        try:
+            _write_atomic(brief_path, _state_to_brief(state))
+        except Exception as exc:
+            log.warning("Failed to write t0_brief.json: %s", exc)
+            write_failed = True
+    effective_root = project_root if project_root is not None else _PROJECT_ROOT
     try:
-        _write_atomic(state_dir / "t0_brief.json", _state_to_brief(state))
-    except Exception as exc:
-        log.warning("Failed to write t0_brief.json: %s", exc)
-        write_failed = True
-    try:
-        sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
+        sys.path.insert(0, str(effective_root / "scripts"))
         from build_project_status import write_project_status
         write_project_status(state_dir)
     except Exception as exc:
         log.debug("build_project_status unavailable or failed (non-critical): %s", exc)
+    # Error 2: derive FEATURE_PLAN.md path from effective_root so tests can isolate it
     try:
         from build_feature_plan import write_feature_plan
-        write_feature_plan(_PROJECT_ROOT / "FEATURE_PLAN.md", state_dir=state_dir)
+        write_feature_plan(effective_root / "FEATURE_PLAN.md", state_dir=state_dir)
     except Exception as exc:
         log.debug("build_feature_plan unavailable or failed (non-critical): %s", exc)
     return write_failed
@@ -1945,7 +1965,27 @@ def main() -> int:
         _strategic_heavy = state.pop("_strategic_state_heavy", None)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
-        write_failed = _write_all_state_outputs(state, _STATE_DIR, _strategic_heavy)
+        write_failed = _write_all_state_outputs(
+            state, _STATE_DIR, _strategic_heavy,
+            project_root=_PROJECT_ROOT,
+            skip_paths={output_path.resolve()},
+        )
+        # Error 1: patch health + re-persist BEFORE the beacon fires so on-disk state is honest
+        if write_failed:
+            sh = state.get("system_health") or {}
+            if sh.get("status") not in ("degraded", "failed"):
+                state["system_health"] = {**sh, "status": "degraded"}
+            try:
+                re_payload = _state_to_brief(state) if args.format == "brief" else state
+                _write_atomic(output_path, re_payload)
+            except Exception as exc:
+                log.warning("Failed to re-persist patched state after write errors: %s", exc)
+            brief_path = _STATE_DIR / "t0_brief.json"
+            if brief_path.resolve() != output_path.resolve():
+                try:
+                    _write_atomic(brief_path, _state_to_brief(state))
+                except Exception as exc:
+                    log.warning("Failed to re-write brief with degraded status: %s", exc)
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
     except Exception as exc:
@@ -1954,15 +1994,10 @@ def main() -> int:
     if _build_succeeded:
         _emit_build_signal(output_path, elapsed)
 
-    _emit_health_beacon(output_path, args.format, elapsed, _build_succeeded)
+    # Error 1: beacon status reflects both build success AND write health
+    _emit_health_beacon(output_path, args.format, elapsed, _build_succeeded and not write_failed)
 
-    # R6.1/Fix-3: non-zero exit when DB health, artifact errors, or write failures degrade state.
-    # write_failed is folded into system_health before the check so the health dict is honest.
     if _build_succeeded and state is not None:
-        if write_failed:
-            sh = state.get("system_health") or {}
-            if sh.get("status") not in ("degraded", "failed"):
-                state["system_health"] = {**sh, "status": "degraded"}
         sh_status = (state.get("system_health") or {}).get("status", "healthy")
         if sh_status in ("degraded", "failed"):
             return 1

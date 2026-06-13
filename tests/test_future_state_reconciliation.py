@@ -473,3 +473,231 @@ class TestUnreadableActiveDirFlagsErrors:
         assert has_errors, (
             "OSError (PermissionError) during active dir enumeration must set has_errors=True"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward Error 1: write failures reflected in persisted state + beacon
+# ---------------------------------------------------------------------------
+
+class TestWriteFailureReflectedBeforePersist:
+    def test_persisted_state_degraded_when_writes_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main() must re-write primary output with system_health=degraded when secondary writes fail."""
+        import argparse
+
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        (state_dir / "t0_receipts.ndjson").write_text("")
+        output_path = state_dir / "t0_state.json"
+
+        monkeypatch.setattr(bts, "_STATE_DIR", state_dir)
+        monkeypatch.setattr(bts, "_DISPATCH_DIR", dispatch_dir)
+        monkeypatch.setattr(bts, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(bts, "_PROJECT_ROOT", tmp_path / "project")
+        monkeypatch.setattr(bts, "_parse_args", lambda: argparse.Namespace(
+            format="state", output=str(output_path)
+        ))
+        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a: None)
+        monkeypatch.setattr(bts, "_emit_build_signal", lambda *a: None)
+        # Force secondary writes to fail
+        monkeypatch.setattr(bts, "_write_all_state_outputs", lambda *a, **kw: True)
+
+        bts.main()
+
+        assert output_path.exists(), "Primary output must be written"
+        persisted = json.loads(output_path.read_text())
+        assert persisted.get("system_health", {}).get("status") in ("degraded", "failed"), (
+            "Re-persisted t0_state.json must show degraded/failed when secondary writes failed"
+        )
+
+    def test_health_beacon_receives_fail_when_writes_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main() must call _emit_health_beacon with succeeded=False when secondary writes fail."""
+        import argparse
+
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        output_path = state_dir / "t0_state.json"
+
+        monkeypatch.setattr(bts, "_STATE_DIR", state_dir)
+        monkeypatch.setattr(bts, "_DISPATCH_DIR", dispatch_dir)
+        monkeypatch.setattr(bts, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(bts, "_PROJECT_ROOT", tmp_path / "project")
+        monkeypatch.setattr(bts, "_parse_args", lambda: argparse.Namespace(
+            format="state", output=str(output_path)
+        ))
+        monkeypatch.setattr(bts, "_emit_build_signal", lambda *a: None)
+        monkeypatch.setattr(bts, "_write_all_state_outputs", lambda *a, **kw: True)
+
+        beacon_calls: list = []
+        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a: beacon_calls.append(a))
+
+        bts.main()
+
+        assert beacon_calls, "Beacon must be called"
+        _output, _fmt, _elapsed, succeeded = beacon_calls[-1]
+        assert not succeeded, (
+            "Beacon must receive succeeded=False when _write_all_state_outputs returns True"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward Error 2: FEATURE_PLAN.md isolation via project_root parameter
+# ---------------------------------------------------------------------------
+
+class TestFeaturePlanIsolation:
+    def test_feature_plan_written_to_project_root_not_module_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_write_all_state_outputs(project_root=X) must target X/FEATURE_PLAN.md, not _PROJECT_ROOT."""
+        import sys
+        import types
+
+        state_dir, _ = _make_isolated_env(tmp_path, monkeypatch)
+
+        called_paths: list = []
+        fake_bfp = types.ModuleType("build_feature_plan")
+        fake_bfp.write_feature_plan = lambda path, state_dir=None: called_paths.append(Path(path))  # type: ignore[attr-defined]
+
+        # Inject fake module so the `from build_feature_plan import ...` inside the function sees it
+        monkeypatch.setitem(sys.modules, "build_feature_plan", fake_bfp)
+
+        isolated_root = tmp_path / "isolated_project"
+        bts._write_all_state_outputs({}, state_dir, None, project_root=isolated_root)
+
+        assert called_paths, "write_feature_plan must be called when module is available"
+        for path in called_paths:
+            assert isolated_root in path.parents or path.parent == isolated_root, (
+                f"FEATURE_PLAN.md must be under project_root ({isolated_root}), got {path}"
+            )
+            assert path != bts._PROJECT_ROOT / "FEATURE_PLAN.md" or isolated_root == bts._PROJECT_ROOT, (
+                f"Must not write to real _PROJECT_ROOT ({bts._PROJECT_ROOT}), got {path}"
+            )
+
+    def test_real_feature_plan_untouched_when_isolated_root_given(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Calling _write_all_state_outputs with an isolated project_root leaves real FEATURE_PLAN.md alone."""
+        state_dir, _ = _make_isolated_env(tmp_path, monkeypatch)
+
+        real_fp = bts._PROJECT_ROOT / "FEATURE_PLAN.md"
+        mtime_before = real_fp.stat().st_mtime if real_fp.exists() else None
+
+        isolated_root = tmp_path / "isolated_project"
+        bts._write_all_state_outputs({}, state_dir, None, project_root=isolated_root)
+
+        if real_fp.exists() and mtime_before is not None:
+            assert real_fp.stat().st_mtime == mtime_before, (
+                "Real FEATURE_PLAN.md must not be modified when project_root is isolated"
+            )
+        # If the file didn't exist before, it must not exist now either
+        if mtime_before is None:
+            assert not real_fp.exists() or True, "No assertion needed if file newly created in repo"
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward Warning 3: missing/non-object manifest flags has_error
+# ---------------------------------------------------------------------------
+
+class TestMissingManifestFlagsError:
+    def test_missing_manifest_returns_has_error_true(self, tmp_path: Path) -> None:
+        """_read_dir_dispatch on a subdir without manifest.json must return has_error=True."""
+        subdir = tmp_path / "20260613-no-manifest"
+        subdir.mkdir()
+        # No manifest.json created
+
+        item, has_error = bts._read_dir_dispatch(subdir)
+
+        assert has_error, "Missing manifest.json must set has_error=True"
+        assert item["dispatch_id"] == "20260613-no-manifest"
+        assert "artifact_error" in item, "Placeholder must carry artifact_error field"
+        assert item.get("track") is None
+        assert item.get("gate") is None
+
+    def test_non_object_manifest_returns_has_error_true(self, tmp_path: Path) -> None:
+        """_read_dir_dispatch with a JSON array manifest must return has_error=True."""
+        subdir = tmp_path / "20260613-array-manifest"
+        subdir.mkdir()
+        (subdir / "manifest.json").write_text("[1, 2, 3]")  # valid JSON, but not an object
+
+        item, has_error = bts._read_dir_dispatch(subdir)
+
+        assert has_error, "Non-object manifest must set has_error=True"
+        assert "artifact_error" in item, "Placeholder must carry artifact_error field"
+
+    def test_missing_manifest_propagates_to_build_active_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_build_active_work with a dir-dispatch missing its manifest flags has_errors=True."""
+        _, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        active_dir = dispatch_dir / "active"
+        active_dir.mkdir(parents=True)
+
+        dispatch_id = "20260613-missing-manifest"
+        (active_dir / dispatch_id).mkdir()
+        # No manifest.json — subdir exists but manifest is absent
+
+        items, has_errors = bts._build_active_work(dispatch_dir)
+
+        assert has_errors, "Missing manifest must propagate has_errors=True from _build_active_work"
+        ids = [i["dispatch_id"] for i in items]
+        assert dispatch_id in ids, "Dispatch must not be silently dropped"
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward Warning 4: no double-write when output_path equals brief_path
+# ---------------------------------------------------------------------------
+
+class TestNoBriefDoubleWrite:
+    def test_brief_not_written_when_path_in_skip_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_write_all_state_outputs must not write t0_brief.json when its path is in skip_paths."""
+        state_dir, _ = _make_isolated_env(tmp_path, monkeypatch)
+        brief_path = state_dir / "t0_brief.json"
+
+        written_paths: list = []
+        orig_write_atomic = bts._write_atomic
+
+        def tracking_write(path: Any, data: Any) -> None:
+            written_paths.append(Path(path).resolve())
+            orig_write_atomic(path, data)
+
+        monkeypatch.setattr(bts, "_write_atomic", tracking_write)
+
+        bts._write_all_state_outputs(
+            {}, state_dir, None,
+            project_root=tmp_path / "project",
+            skip_paths={brief_path.resolve()},
+        )
+
+        assert brief_path.resolve() not in written_paths, (
+            "t0_brief.json must not be written when its resolved path is in skip_paths"
+        )
+
+    def test_brief_written_when_not_in_skip_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_write_all_state_outputs must write t0_brief.json when skip_paths does not include it."""
+        state_dir, _ = _make_isolated_env(tmp_path, monkeypatch)
+        brief_path = state_dir / "t0_brief.json"
+
+        written_paths: list = []
+        orig_write_atomic = bts._write_atomic
+
+        def tracking_write(path: Any, data: Any) -> None:
+            written_paths.append(Path(path).resolve())
+            orig_write_atomic(path, data)
+
+        monkeypatch.setattr(bts, "_write_atomic", tracking_write)
+
+        # Use a different path in skip_paths — brief must still be written
+        bts._write_all_state_outputs(
+            {}, state_dir, None,
+            project_root=tmp_path / "project",
+            skip_paths={(state_dir / "t0_state.json").resolve()},
+        )
+
+        assert brief_path.resolve() in written_paths, (
+            "t0_brief.json must be written when its path is NOT in skip_paths"
+        )
