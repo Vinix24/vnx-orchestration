@@ -4,6 +4,39 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.0.1] — Unreleased
+
+Future-state reconciliation batch (`adr007-composite-keys-batch` / future-state milestone). It makes the track ↔ dispatch ↔ open-item future state reflect reality *automatically* and brings the `dispatches` table into ADR-007 composite-key tenancy. `VERSION` is still `1.0.0`: these changes are on `main` but not yet cut as a tagged release. Driven by `claudedocs/PRD-future-state-reconciliation-v1.1.md` (database-engineer skill under T0 governance). The 1.0 launch does not depend on this batch. Cite ADR-007.
+
+### Added
+
+- **ADR-007 composite-key `dispatches` rebuild (PR-A1, #859)** — schema-preserving in-place repair of the `dispatches` table to `UNIQUE(dispatch_id, project_id)`, removing every uniqueness keyed solely on `dispatch_id` (inline column, table-level, standalone index, partial index, and `lower(dispatch_id)` expression index). Canonical 12-step crash-safe rebuild: capture/restore `PRAGMA foreign_keys`, `BEGIN IMMEDIATE` with bounded retry on `SQLITE_BUSY/LOCKED`, drop+recreate dependent views/triggers verbatim, preserve the `sqlite_sequence` high-water mark, and run `foreign_key_check` + `integrity_check` before commit (abort/rollback on any violation). Tenant `project_id` is resolved **fail-closed** from a precedence chain (resolved DB path → `.vnx-project-id` marker → `VNX_PROJECT_ID`); conflicting or unknown sources abort, and existing NULL/empty/conflicting `project_id` values abort before any mutation. Never a silent `vnx-dev` default. (`scripts/migrate_future_system.py`)
+- **Version reconciliation via a declarative invariant manifest (PR-A2, #861)** — a per-version (v22–v30) invariant manifest (tables; columns with type + nullability; PK ordinals; FK actions; index definitions; views) in `scripts/lib/schema_manifest.py`. A DB whose claimed `user_version` fails its invariant is downgraded to the highest version whose invariants actually hold and the missing migrations re-run; on no safe target it raises rather than guess (ADR-009).
+- **Tenant-scoped canonical tracks in `build_t0_state` (PR-B, #863, R3.2)** — the canonical-track and `track_open_items` reads always carry a `WHERE project_id = ?` predicate. On unavailable tenant identity the builder returns a documented degraded fallback (`available: false`, `tenant_unavailable: true`, empty `tracks`/`open_items`) and never returns cross-tenant rows.
+- **Open-item → track bridge through `tracks.py` (PR-C, #862, R4.1–R4.4)** — `scripts/import_open_items_to_tracks.py`, a thin orchestrator over the single-writer primitives `tracks.link_open_item` / `tracks.unlink_open_item` (no second SQL writer; decision D1). One run-level `BEGIN IMMEDIATE` transaction makes the read-then-write window serialized (TOCTOU closed) and the run atomic. It fails loud on an absent/unreadable/wrong-shape source (never coerced to an empty store that would close every active link), requires the migration 0030 resolution schema (`resolved_at` / `resolution_reason`) and fails closed on a pre-0030 DB, and is idempotent (`INSERT OR REPLACE` upsert — re-running yields identical rows). **D3 event semantics, documented honestly:** the DB is authoritative and the ADR-005 ledger events are emitted *after* a successful commit (at-most-once, never orphaned). A post-commit emit failure is logged loudly and is non-fatal — the DB mutation persists and the reconciler re-derives status — surfacing as CLI exit 4. Exactly-once via a transactional outbox is deferred to 1.x (#867).
+- **Bridge + reconcile wired into the autopilot loop (PR-D, #871, R5/D2/D4)** — `RoadmapManager.autopilot_tick()` runs the open-item → track bridge and then `reconcile_tracks()` synchronously, under the `VNX_ROADMAP_AUTOPILOT=1` gate, before any feature-step dispatch or advance. If the track sync fails the tick returns `status: degraded` (`reason: track_sync_failed`) and refuses to advance on stale state — the downstream advance is gated on a clean sync. (`scripts/roadmap_manager.py`)
+- **Bridge CLI exit codes** in `docs/EXIT_CODES.md`: `3` source missing/malformed, `4` ledger-emit failure (DB already committed), `5` resolution-schema (0030) precondition, `6` DB error.
+- **Operator runtime-migration runbook** in `docs/MIGRATION_GUIDE.md` (PRD §7.2, human-gated): quiesce → WAL-safe verified backup → preflight + dry-run → migrate → backfill linkage → bridge-import → reconcile → row/schema/checksum/`integrity_check` postflight; restore-from-verified-backup and re-run on any phase failure (each phase idempotent).
+
+### Changed
+
+- **Test-isolation guard enforced (PR-0, #857)** — migration test modules pin `VNX_DATA_DIR` to a tmp dir; a guard refuses to open the canonical `$HOME/.vnx-data` DB in test mode, and a CI canary asserts the live DB file hash is unchanged after the full suite.
+- **Kanban / state-builder honesty (PR-E, #858)** — `build_t0_state` catches only enumerated pre-migration missing-table/column cases; any other `OperationalError` (locked/malformed) sets a `health=degraded|failed` field and a non-zero exit instead of a silent legacy fallback. Artifact-read failures are recorded with the dispatch id (work is not dropped) and flag the build degraded; the active-dispatch count is de-duplicated across dir and `.md` forms.
+- Kimi default per-chunk stall threshold raised 300s → 600s (#860).
+- Worker-role skills pre-approved in settings so detached lanes don't stall on skill-permission prompts (#872).
+- Roadmap updated with the local-model PM-gate-automation plan and an honest future-state batch status (#873).
+
+### Known issues / roadmap (1.x)
+
+Filed and tracked in `ROADMAP.yaml`; not part of this batch:
+
+- **#864** — broader ADR-007 composite-key batch across the SPC / intelligence tables (separate from this dispatches/tracks migration).
+- **#866** — event-stream-primary measurement (normalized NDJSON of all tool-calls as the primary measurement substrate).
+- **#867** — open-item bridge exactly-once via a transactional outbox (supersedes the current at-most-once post-commit events).
+- **#868** — governance observability.
+- **#869** — operator-runbook automation (automating the §7.2 runtime-migration runbook).
+- Additional follow-ups **#865**, **#870**, **#874** are filed against the 1.x line.
+
 ## [1.0.0] — 2026-06-10
 
 First public release. Everything below is the rc9 → 1.0.0 delta; the rc-series

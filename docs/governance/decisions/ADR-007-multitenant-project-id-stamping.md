@@ -63,6 +63,54 @@ The structural test in `tests/test_migrate_dry_run.py` parses migration `0015_co
 - **`DEFAULT 'vnx-dev'` as a sentinel for legitimate rows.** The default exists only as a column-add bridge during migration. New writers MUST stamp `project_id` explicitly. Lessons doc Section 4 action item #8 reinforces: future column-add migrations should prefer `DEFAULT NULL` + explicit post-migration UPDATE + `CHECK` constraint over `DEFAULT 'vnx-dev'`.
 - **Cross-tenant deduplication.** Rolling up `tag_combinations`, `success_patterns`, etc. across projects without `project_id` partition is the bug pattern T6. Aggregates that intentionally cross tenants must do so explicitly via a derived view, not by omitting `project_id` from the underlying table.
 
+## Implementation note — 2026-06-14 (1.0.1 future-state reconciliation)
+
+The `dispatches` table (`runtime_coordination.db`) is now brought into this ADR's
+composite-key pattern, and the supporting version-reconciliation machinery is
+implemented. This is the database-engineer-led future-state batch (PRD
+`claudedocs/PRD-future-state-reconciliation-v1.1.md`), distinct from the still-
+planned broader SPC/intelligence-table batch (#864).
+
+- **PR-A1 (#859) — in-place `dispatches` rebuild.** `scripts/migrate_future_system.py`
+  performs a schema-preserving, crash-safe, in-place rebuild that swaps any
+  uniqueness keyed solely on `dispatch_id` for a composite
+  `UNIQUE(dispatch_id, project_id)`. Per R1.1 it removes the single-key
+  constraint in **every** form — inline column `UNIQUE`, table-level
+  `UNIQUE(dispatch_id …)`, standalone `CREATE UNIQUE INDEX`, partial unique
+  indexes, and `lower(dispatch_id)` expression indexes — detected by parsing
+  `sqlite_master` SQL, not PRAGMA alone. The rebuild follows the canonical
+  12-step order (capture/restore `PRAGMA foreign_keys`; `BEGIN IMMEDIATE` with
+  bounded retry; recreate dependent views/triggers verbatim; preserve the
+  `sqlite_sequence` high-water mark; `foreign_key_check` + `integrity_check`
+  before commit), preserving FKs, CHECKs, collations, generated columns, and
+  non-target indexes. Tenant `project_id` is resolved **fail-closed** from a
+  precedence chain (resolved DB path → `.vnx-project-id` marker →
+  `VNX_PROJECT_ID`): conflicting or unknown sources abort, and existing
+  NULL/empty/conflicting `project_id` values abort before any mutation. This
+  upholds the Decision's constraint rule and the rejected "`DEFAULT 'vnx-dev'`
+  as a sentinel" consequence — there is **never a silent `vnx-dev` default** at
+  the live runtime tier.
+
+- **PR-A2 (#861) — version reconciliation via a declarative invariant manifest.**
+  `scripts/lib/schema_manifest.py` replaces name-based version checks with a
+  per-version (v22–v30) invariant manifest (tables; columns with type +
+  nullability; PK ordinals; FK actions; index definitions; views). A DB whose
+  claimed `user_version` fails its invariant is downgraded to the highest version
+  whose invariants actually hold and the missing migrations re-run; on no safe
+  target it raises rather than guess (the ADR-009 schema-first discipline this
+  ADR depends on for enforceability).
+
+- **PR-B (#863) — tenant-scoped reads.** `scripts/build_t0_state.py` reads
+  canonical tracks and `track_open_items` only with a `WHERE project_id = ?`
+  predicate, degrading to an explicit `tenant_unavailable` flag (empty rows)
+  rather than ever returning cross-tenant rows.
+
+The bridge that maintains `track_open_items` (PR-C #862) likewise scopes all
+access by `(track_id, project_id)`. The operator runtime-migration runbook for
+applying the in-place rebuild against a live DB (quiesce, verified backup,
+preflight + dry-run, postflight `integrity_check`, restore-on-failure) is in
+`docs/MIGRATION_GUIDE.md` (PRD §7.2, human-gated).
+
 ## Cross-references
 
 - ADR-009 — Schema-first migrations via PRAGMA introspection (the implementation discipline that keeps this ADR enforceable across future migrations)
@@ -72,3 +120,5 @@ The structural test in `tests/test_migrate_dry_run.py` parses migration `0015_co
 - PR #410 (Phase 0 column add), PR #412/#416 (verifier), PR #431/#432 (P4 data import), open items OI-1375 + OI-1376
 - `schemas/migrations/0010_add_project_id.sql`, `schemas/migrations/0015_complete_project_id.sql`, `schemas/migrations/0016_rebuild_fts5.sql`
 - `scripts/migrate_to_central_vnx.py`, `scripts/verify_central_vnx.py`, `tests/test_migrate_dry_run.py`
+- 1.0.1 future-state batch: `scripts/migrate_future_system.py` (PR-A1 #859), `scripts/lib/schema_manifest.py` (PR-A2 #861), `scripts/build_t0_state.py` (PR-B #863), `scripts/import_open_items_to_tracks.py` + `scripts/lib/tracks.py` (PR-C #862), `scripts/roadmap_manager.py` (PR-D #871), and the PRD `claudedocs/PRD-future-state-reconciliation-v1.1.md`
+- Operator runbook: `docs/MIGRATION_GUIDE.md` §6 (runtime migration, human-gated)

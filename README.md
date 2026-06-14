@@ -53,7 +53,7 @@ I am honest about maturity because the audit trail is the whole point and an ove
 
 **Tier 1, in production.** Append-only NDJSON receipts with hash-chain verification tooling (`audit_chain`); per-append chain enforcement lands in 1.0.1. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane (available and subscription-preserving; works today, is actively being hardened ahead of the June 15 OAuth rollout, and is set to become the production default as of June 15, 2026; its PREPARE/GOVERN/RECEIPT/CAPTURE structural work has shipped). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
 
-**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot (FUT-1/FUT-2 shipped and the tracks layer activated for forward-state planning), the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
+**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot (FUT-1/FUT-2 shipped and the tracks layer activated for forward-state planning; the 1.0.1 future-state reconciliation wires the open-item → track bridge and the `derived_status` reconciler into the autopilot tick behind the `VNX_ROADMAP_AUTOPILOT=1` gate, and brings the `dispatches` table into ADR-007 composite-key tenancy), the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
 
 **Tier 3, designed, not built.** Parallel multi-track execution. The wave scheduler, merge lock, and file-scope derivation are designed, not shipped. Treat it as architecture, not a feature.
 
@@ -105,9 +105,9 @@ Memory is the unsolved problem in agentic AI. Most systems bolt a vector store o
 
 The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with thousands of receipts behind it.
 
-The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness.
+The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. As of 1.0.1 the `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 
-The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The FUT-1 track schema, DAL, and CLI and the FUT-2 ADR-007 tenant-scoping have shipped, and the tracks layer is now activated for forward-state planning. The autopilot stays opt-in: it plans, but a human still approves the last step.
+The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The FUT-1 track schema, DAL, and CLI and the FUT-2 ADR-007 tenant-scoping have shipped, and the tracks layer is now activated for forward-state planning. The 1.0.1 future-state reconciliation keeps it honest automatically: an open-item → track bridge syncs `track_open_items` through the single-writer `tracks.py` primitives, then a reconciler derives each track's status — a track is `done` only when it has no unresolved blocking open-items, every dependency track is done, all of its dispatches are in terminal states, and any linked PR is confirmed merged. Both run inside the autopilot tick, which refuses to advance on a failed sync. The autopilot stays opt-in: it plans, but a human still approves the last step.
 
 A learning layer (`quality_intelligence.db`) consolidates the past into patterns and antipatterns that get injected into future dispatch context. The consolidation loop (auto-dream) is shipped and opt-in. It is burning in, not yet on by default.
 
@@ -151,7 +151,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-Public 1.0 as of this README on 2026-06-10: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+Public 1.0 as of this README on 2026-06-10: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. The 1.0.1 future-state reconciliation batch (ADR-007 composite-key `dispatches`, the open-item → track bridge, and its autopilot wiring) has landed on `main` — see [CHANGELOG.md](CHANGELOG.md) — but `VERSION` stays `1.0.0` until that milestone is cut. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
