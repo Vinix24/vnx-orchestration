@@ -991,3 +991,167 @@ class TestCommitFailureHandling:
             real.close()
         # The rollback undid the in-flight mutation — nothing committed.
         assert _rows(state_dir, "OI-1") == []
+
+
+# ---------------------------------------------------------------------------
+# C4-N1 — per-item shape validation: malformed items surfaced, not silently
+# defaulted to an "info" link nor silently dropped; legit closes stay quiet.
+# ---------------------------------------------------------------------------
+
+def _raw(oi_id, **fields):
+    """Build a raw open-item dict with EXACTLY the given fields (no defaults)."""
+    return {"id": oi_id, **fields}
+
+
+class TestPerItemValidation:
+    def test_unknown_status_surfaced_not_silently_dropped(self, state_dir, capsys):
+        """An unrecognised status is MALFORMED — counted + logged, NOT silent-dropped."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        item = _raw("OI-bad", severity="blocker", status="frobnicate", pr_id="#100")
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[item])
+        assert "OI-bad" in res.skipped_malformed
+        assert _rows(state_dir, "OI-bad") == []          # never linked
+        err = capsys.readouterr().err
+        assert "MALFORMED" in err and "OI-bad" in err    # logged loudly
+
+    def test_missing_status_surfaced(self, state_dir):
+        """A MISSING status field is malformed (not treated as a quiet skip)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        item = _raw("OI-nostatus", severity="blocker", pr_id="#100")  # no status key
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[item])
+        assert "OI-nostatus" in res.skipped_malformed
+        assert _rows(state_dir, "OI-nostatus") == []
+
+    def test_unknown_severity_surfaced_not_linked_as_info(self, state_dir, capsys):
+        """An OPEN item with an unknown severity is MALFORMED — never silently
+        defaulted into an "info"/"related" link."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        item = _raw("OI-sev", severity="critical", status="open", pr_id="#100")
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[item])
+        assert "OI-sev" in res.skipped_malformed
+        assert res.linked == 0
+        assert _rows(state_dir, "OI-sev") == []          # NOT linked-as-info
+        assert "MALFORMED" in capsys.readouterr().err
+
+    def test_missing_severity_surfaced_not_defaulted(self, state_dir):
+        """A MISSING severity on an OPEN item is malformed (no silent default link)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        item = _raw("OI-nosev", status="open", pr_id="#100")  # no severity key
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[item])
+        assert "OI-nosev" in res.skipped_malformed
+        assert _rows(state_dir, "OI-nosev") == []
+
+    @pytest.mark.parametrize("status", ["done", "deferred", "wontfix"])
+    def test_recognised_non_open_status_skipped_quietly(self, state_dir, capsys, status):
+        """A recognised non-open status is skipped QUIETLY — NOT counted malformed,
+        NOT logged — and its existing link closes (intended filter)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        capsys.readouterr()  # drain the link run
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", status=status, pr_id="#100")])
+        assert res.skipped_malformed == []               # NOT malformed
+        assert res.unlinked == 1                          # existing link closed
+        assert _rows(state_dir, "OI-1")[0]["resolved_at"] is not None
+        assert "MALFORMED" not in capsys.readouterr().err  # quiet
+
+    def test_malformed_item_preserves_existing_links(self, state_dir):
+        """A malformed item is untrustworthy → the bridge leaves its EXISTING active
+        link UNTOUCHED (non-destructive), unlike a legitimately-closed item."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert _active_blocks(state_dir) == 1
+        bad = _raw("OI-1", severity="blocker", status="garbage", pr_id="#100")
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[bad])
+        assert "OI-1" in res.skipped_malformed
+        assert res.unlinked == 0                          # NOT closed on bad data
+        assert _active_blocks(state_dir) == 1             # preserved
+        assert _rows(state_dir, "OI-1")[0]["resolved_at"] is None
+
+    def test_valid_item_alongside_malformed_still_links(self, state_dir):
+        """A malformed item does not abort the run — well-formed items still sync."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        _mk_track(state_dir, "feat-b", pr_ref="#200")
+        good = _oi("OI-good", pr_id="#200")
+        bad = _raw("OI-bad", severity="blocker", status="???", pr_id="#100")
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[good, bad])
+        assert res.linked == 1
+        assert "OI-bad" in res.skipped_malformed
+        assert _rows(state_dir, "OI-good")[0]["track_id"] == "feat-b"
+        assert _rows(state_dir, "OI-bad") == []
+
+
+# ---------------------------------------------------------------------------
+# C4-N2 — the read + mutations occur within a single BEGIN IMMEDIATE transaction
+# ---------------------------------------------------------------------------
+
+class _TxSpy:
+    """Delegating proxy recording every execute() SQL and commit() call, so a test
+    can prove the read-then-write window is one serialized BEGIN IMMEDIATE tx."""
+
+    def __init__(self, real, log):
+        self._real = real
+        self._log = log
+
+    def execute(self, sql, *a, **k):
+        self._log.append(("exec", sql))
+        return self._real.execute(sql, *a, **k)
+
+    def commit(self):
+        self._log.append(("commit", None))
+        return self._real.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestSerializedRead:
+    def test_read_and_mutations_in_single_begin_immediate(self, state_dir, monkeypatch):
+        """C4-N2: the run opens exactly one BEGIN IMMEDIATE, and BOTH the existing-
+        links read and the link mutation run AFTER it with NO commit in between —
+        i.e. the read-then-write window is one serialized transaction."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        log: list = []
+        real_open = bridge._open_conn
+        monkeypatch.setattr(
+            bridge, "_open_conn", lambda sd: _TxSpy(real_open(sd), log))
+
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert res.linked == 1 and res.ok
+
+        begins = [i for i, (k, s) in enumerate(log)
+                  if k == "exec" and "BEGIN IMMEDIATE" in s.upper()]
+        assert len(begins) == 1                           # single serialized tx
+        begin_idx = begins[0]
+        read_idx = next(
+            i for i, (k, s) in enumerate(log)
+            if k == "exec" and s.strip().upper().startswith("SELECT")
+            and "track_open_items" in s)
+        mut_idx = next(
+            i for i, (k, s) in enumerate(log)
+            if k == "exec" and "INSERT OR REPLACE INTO track_open_items" in s)
+        commit_idxs = [i for i, (k, _) in enumerate(log) if k == "commit"]
+        # BEGIN IMMEDIATE precedes the read, which precedes the write.
+        assert begin_idx < read_idx < mut_idx
+        # The read + mutation share ONE transaction: no commit before the write.
+        assert commit_idxs and all(ci > mut_idx for ci in commit_idxs)
+
+    def test_write_lock_held_during_links_read(self, state_dir, monkeypatch):
+        """BEGIN IMMEDIATE acquires the write lock UP FRONT: the conn is already
+        in a transaction when the existing-links read runs (TOCTOU window closed)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        seen = {}
+        real_load = bridge._load_links_grouped
+
+        def _spy_load(conn, project_id):
+            seen["in_transaction"] = conn.in_transaction
+            return real_load(conn, project_id)
+
+        monkeypatch.setattr(bridge, "_load_links_grouped", _spy_load)
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert seen["in_transaction"] is True

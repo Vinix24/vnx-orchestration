@@ -48,6 +48,18 @@ Contracts implemented:
   * C-N3 mutation counters (linked/reopened/unlinked/skipped) count ONLY
     committed mutations: a run-level rollback resets them to zero so a failed run
     never over-reports progress.
+  * C4-N1 per-item shape validation: an open-item whose status is unknown/missing
+    OR (when open) whose severity is unknown/missing is MALFORMED — it is counted
+    in ``skipped_malformed``, logged LOUDLY, and left UNTOUCHED (its existing links
+    are neither closed nor relinked). Untrustworthy input is never silently
+    coerced into a default "info"/"related" link nor silently dropped — the same
+    fail-loud posture as the C-N1 source validation. A RECOGNISED non-open status
+    (done/deferred/wontfix) is still skipped QUIETLY and its links close (INTENDED
+    — closed/resolved items must not stay active blocks).
+  * C4-N2 serialized read: the run transaction is opened with ``BEGIN IMMEDIATE``
+    (RESERVED write lock acquired up front) BEFORE the existing-links read, so the
+    whole read-then-write window is ONE serialized transaction — a concurrent
+    writer cannot change links between the read and the commit (TOCTOU closed).
 
 Wiring into ``RoadmapManager.autopilot_tick()`` is PR-D, NOT this module.
 ``import_open_items_to_tracks`` is runtime-callable for that future caller.
@@ -91,6 +103,17 @@ _SEVERITY_TO_LINK_TYPE: Dict[str, str] = {
     "info": "related",
 }
 
+# OI status vocabulary (open_items_manager). "open" is the only ACTIVE status —
+# its item can hold a live link. The rest are legitimately non-open
+# (closed/inactive) statuses whose links are closed QUIETLY (intended filter). A
+# status outside BOTH sets — or a missing status — is MALFORMED (C4-N1): it is
+# surfaced + counted + logged, never silently dropped.
+_OPEN_STATUS = "open"
+_RECOGNISED_NON_OPEN_STATUSES: frozenset = frozenset({"done", "deferred", "wontfix"})
+# Recognised severities map 1:1 to a link_type; an unknown/missing severity on an
+# OPEN item is MALFORMED (C4-N1) — surfaced, never silently defaulted to a link.
+_VALID_SEVERITIES: frozenset = frozenset(_SEVERITY_TO_LINK_TYPE)
+
 # CLI exit codes (contract-bound — see module docstring).
 EXIT_OK = 0
 EXIT_GENERIC_ERROR = 1
@@ -127,6 +150,7 @@ class BridgeResult:
     unlinked: int = 0
     skipped: int = 0
     unmappable: List[str] = field(default_factory=list)
+    skipped_malformed: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     ledger_failed: bool = False
 
@@ -278,18 +302,48 @@ def _load_links_grouped(
 # Desired-state computation (pure — reads only)
 # ---------------------------------------------------------------------------
 
+def _surface_malformed(oi: dict, result: BridgeResult, reason: str) -> None:
+    """Surface a MALFORMED open-item LOUDLY instead of silently mishandling it (C4-N1).
+
+    An item with an unknown/missing status or (when open) an unknown/missing
+    severity is NOT a legitimately-closed item: coercing it (a silent skip, or a
+    default "info"/"related" link) would hide a corrupt source. It is counted in
+    ``result.skipped_malformed`` and logged to stderr; the caller then leaves the
+    item's existing links UNTOUCHED — the bridge refuses to act on untrustworthy
+    data (the same destructive-guard posture as the C-N1 source validation).
+    """
+    oi_id = oi.get("id", "<no-id>")
+    result.skipped_malformed.append(oi_id)
+    print(
+        f"[bridge] MALFORMED open-item surfaced (skipped, links left intact): "
+        f"{oi_id}: {reason}",
+        file=sys.stderr,
+    )
+
+
 def _resolve_target_track(
     oi: dict, by_pr: Dict[int, List[str]], track_ids: set, result: BridgeResult
 ) -> Optional[Tuple[str, str]]:
-    """Resolve an OPEN open-item to (track_id, link_type), or None if unmappable.
+    """Resolve an OPEN open-item to (track_id, link_type), or None if not mappable.
 
-    A non-open OI has no current mapping (its links get closed). Mapping
-    precedence: explicit ``track_id``/``track`` field, else the OI's ``pr_id``
-    matched (uniquely) against a track ``pr_ref``. Ambiguous / unknown → None.
+    Per-item shape is VALIDATED against the open_items_manager vocabulary (C4-N1):
+      * status "open"                   → resolve a mapping;
+      * recognised non-open status      → None, skipped QUIETLY (links close — intended);
+      * unknown/missing status          → MALFORMED (surfaced), never silent-dropped;
+      * unknown/missing severity (open) → MALFORMED (surfaced), never a silent "info" link.
+    Mapping precedence: explicit ``track_id``/``track`` field, else the OI's
+    ``pr_id`` matched (uniquely) against a track ``pr_ref``. Ambiguous/unknown → None.
     """
-    if oi.get("status") != "open":
+    status = oi.get("status")
+    if status != _OPEN_STATUS:
+        if status not in _RECOGNISED_NON_OPEN_STATUSES:
+            _surface_malformed(oi, result, f"unknown/missing status {status!r}")
         return None
-    link_type = _SEVERITY_TO_LINK_TYPE.get(oi.get("severity", "info"), "related")
+    severity = oi.get("severity")
+    if severity not in _VALID_SEVERITIES:
+        _surface_malformed(oi, result, f"unknown/missing severity {severity!r}")
+        return None
+    link_type = _SEVERITY_TO_LINK_TYPE[severity]
     explicit = oi.get("track_id") or oi.get("track")
     if explicit and explicit in track_ids:
         return (explicit, link_type)
@@ -495,10 +549,21 @@ def import_open_items_to_tracks(
     try:
         _require_resolution_schema(conn)
         items = _load_open_items(state_dir) if open_items is None else open_items
+        # C4-N2: serialize the read-then-write. Open the run transaction with
+        # BEGIN IMMEDIATE (acquire the RESERVED write lock NOW) BEFORE reading the
+        # existing links, so the whole read+mutation window is ONE serialized
+        # transaction — a concurrent writer cannot change links between the read
+        # and the commit (TOCTOU closed). The disk source load above stays OUTSIDE
+        # the lock (no DB I/O, and a source error must not hold the write lock).
+        # _run_mutations commits / rolls back this same transaction.
+        conn.execute("BEGIN IMMEDIATE")
         by_pr, track_ids = _load_tracks_by_pr(conn, project_id)
         existing_by_oi = _load_links_grouped(conn, project_id)
         desired = _build_desired(items, by_pr, track_ids, result)
-        all_oi_ids = sorted(set(desired) | set(existing_by_oi))
+        # C4-N1: a MALFORMED item is untrustworthy input — exclude its oi_id so its
+        # existing links are neither closed nor relinked (non-destructive; surfaced).
+        malformed = set(result.skipped_malformed)
+        all_oi_ids = sorted((set(desired) | set(existing_by_oi)) - malformed)
         _run_mutations(
             state_dir, conn, project_id, all_oi_ids,
             desired, existing_by_oi, link_source, result,
@@ -581,6 +646,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"[bridge] project={result.project_id} linked={result.linked} "
         f"reopened={result.reopened} unlinked={result.unlinked} "
         f"skipped={result.skipped} unmappable={len(result.unmappable)} "
+        f"skipped_malformed={len(result.skipped_malformed)} "
         f"ledger_failed={result.ledger_failed}"
     )
     if result.ledger_failed:
