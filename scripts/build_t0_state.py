@@ -372,12 +372,16 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
                 if not ts_raw:
                     continue
                 try:
-                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    # Coerce defensively: a malformed receipt may carry a non-string
+                    # (e.g. integer epoch) timestamp. str() keeps fromisoformat the
+                    # sole arbiter of validity rather than crashing the whole build
+                    # on AttributeError ('int' object has no attribute 'replace').
+                    dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     if dt.astimezone(timezone.utc) >= cutoff:
                         completed_last_hour += 1
-                except ValueError as e:
+                except (ValueError, TypeError) as e:
                     log.debug("Malformed receipt timestamp: %s", e)
         except OSError as e:
             log.debug("Could not read receipts file %s: %s", receipts_path, e)
@@ -1380,23 +1384,35 @@ def _build_system_health(
 
     # R6.1: DB health (locked/malformed) takes precedence over other signals.
     # R6.2: artifact errors (corrupt manifest) flag build as degraded.
+    # These are the GENUINE degradation signals — corruption the operator must see
+    # (preserved per dispatch: a corrupt/locked DB still exits non-zero degraded).
     if db_health in ("failed", "degraded"):
         status = db_health
     elif build_degraded:
         status = "degraded"
-    elif (
-        not (state_dir / "terminal_state.json").exists()
-        and not (state_dir / "t0_receipts.ndjson").exists()
-    ):
-        status = "degraded"
     else:
         status = "healthy"
 
-    return {
+    result: Dict[str, Any] = {
         "status": status,
         "db_initialized": db_initialized,
         "uptime_seconds": uptime_seconds,
     }
+
+    # Soft signal — RECOVERABLE, not degraded. A fresh or just-migrated environment
+    # (ADR-007 tenant DB rebuilt in place, or a brand-new install) has neither
+    # terminal_state.json nor any receipts yet. PR-E previously folded this into
+    # "degraded"; combined with main()'s non-zero exit on degraded, that made a
+    # legacy DB which merely NEEDS migration fail the "runs clean" smoke. Migration-
+    # pending / not-yet-populated is initializing, not corruption — surface it
+    # honestly as a flag (no silent drop, PR-E spirit) without forcing exit 1.
+    if status == "healthy" and (
+        not (state_dir / "terminal_state.json").exists()
+        and not (state_dir / "t0_receipts.ndjson").exists()
+    ):
+        result["initializing"] = True
+
+    return result
 
 
 # ---------------------------------------------------------------------------
