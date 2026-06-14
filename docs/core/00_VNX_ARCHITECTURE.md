@@ -18,10 +18,11 @@
 6. [Process Management](#process-management)
 7. [Intelligence Systems](#intelligence-systems)
 8. [Open Items System](#open-items-system)
-9. [Staging Workflow](#staging-workflow)
-10. [Multi-Provider Dispatch](#multi-provider-dispatch)
-11. [Unified Dashboard](#unified-dashboard)
-12. [Demo & Distribution](#demo--distribution)
+9. [Future-State Reconciliation: Open-Item → Track → Dispatch](#future-state-reconciliation-open-item--track--dispatch)
+10. [Staging Workflow](#staging-workflow)
+11. [Multi-Provider Dispatch](#multi-provider-dispatch)
+12. [Unified Dashboard](#unified-dashboard)
+13. [Demo & Distribution](#demo--distribution)
 
 ---
 
@@ -893,6 +894,119 @@ Check open items digest
     ├─ YES → Resolve (close/defer/wontfix)
     └─ NO → Can promote PR
 ```
+
+---
+
+## Future-State Reconciliation: Open-Item → Track → Dispatch
+
+The future state (the track layer + roadmap autopilot) only earns trust if it
+mirrors reality without a human re-stating it. The 1.0.1 future-state
+reconciliation batch (PRD `claudedocs/PRD-future-state-reconciliation-v1.1.md`)
+makes that linkage automatic and tenant-safe. Three pieces: a **lifecycle**
+(open-item → track → dispatch), a **loop** (the autopilot tick), and a
+**multi-tenancy model** (ADR-007 composite keys).
+
+### The lifecycle
+
+Open items are the source of blockers and follow-up work (see *Open Items
+System* above). Tracks are the planning unit for forward-state features.
+Dispatches are the executable work. The reconciliation keeps the three in sync:
+
+```
+open_items.json  ──(bridge)──▶  track_open_items  ──(reconciler)──▶  tracks.derived_status
+   (source of truth)              (per-track links)                   (computed state)
+        ▲                                                                    │
+        │                          dispatches (terminal? PR merged?) ────────┘
+```
+
+1. **Bridge** (`scripts/import_open_items_to_tracks.py`, PR-C #862). Reads the
+   on-disk open-items store, resolves each item's current target track, and
+   keeps `track_open_items` in sync. It is a **thin orchestrator over the
+   single-writer primitives** `tracks.link_open_item` / `tracks.unlink_open_item`
+   (decision D1): it owns no `track_open_items` SQL of its own. The whole run is
+   one `BEGIN IMMEDIATE` transaction — the read-then-write window is serialized
+   (TOCTOU closed) and the mutations are atomic (a failure anywhere rolls the run
+   back). It fails loud on an absent/unreadable/wrong-shape source, requires the
+   migration 0030 resolution schema (`resolved_at` / `resolution_reason`) and
+   fails closed on a pre-0030 DB, and is idempotent. All access is
+   `(track_id, project_id)`-scoped (ADR-007).
+
+2. **Reconciler** (`scripts/lib/track_reconciler.py`). After the bridge syncs
+   the links, the reconciler recomputes each track's `derived_status` from the
+   links, the dependency graph, and the track's dispatches/PR — never an LLM.
+
+3. **Event semantics (D3, honest).** Each `track_open_items` mutation has a
+   matching ADR-005 NDJSON ledger event, but under the implemented D3 posture
+   those events are emitted **after** the DB commit. The DB is authoritative;
+   events are **at-most-once, never orphaned**; a post-commit emit failure is
+   logged loudly, is non-fatal (the reconciler re-derives status from the rows),
+   and surfaces as CLI exit 4. Exactly-once via a transactional outbox is
+   deferred to 1.x (#867). See ADR-005.
+
+### The derived_status rule (precise)
+
+`track_reconciler._compute_derived_status` evaluates the conditions in order and
+returns the first that applies. A track is **`done` only when all of these hold**:
+
+- it has **zero unresolved blocking open-items** — no `track_open_items` row with
+  `link_type = 'blocks'` and `resolved_at IS NULL`; and
+- **every dependency track is `done`** (each `track_dependencies` edge points at a
+  track whose phase is `done`); and
+- **all of its dispatches are in terminal states** —
+  `{completed, expired, dead_letter}`; and
+- **if it has a linked PR, that PR is confirmed merged** — via a `pr_merged`
+  coordination event on one of the track's dispatches. A track with **no
+  dispatches** is `done` only when its `pr_ref` is in the merged set (historical
+  tracks); a track with no PR and all dispatches terminal is `done` outright.
+
+Otherwise the status is one of:
+
+- **`blocked`** — an unresolved blocking open-item exists, or a dependency track
+  is not `done`;
+- **`in_progress`** — a dispatch is still in flight, or all dispatches are
+  terminal but a linked PR is not yet confirmed merged;
+- **`queued`** — only planned/proposed dispatches (or none) and no merged PR.
+
+This rule is deterministic. It is the truth the optional PM-gate automation
+(#873, 1.x) sits on top of: deterministic closes auto-apply, judgment cases
+escalate to a human gate.
+
+### The autopilot loop (the tick)
+
+`RoadmapManager.autopilot_tick()` (`scripts/roadmap_manager.py`, PR-D #871) runs
+the lifecycle on every tick, **under the `VNX_ROADMAP_AUTOPILOT=1` gate**:
+
+```
+autopilot_tick()                       [gate: VNX_ROADMAP_AUTOPILOT=1]
+  ├─ track sync:
+  │    ├─ bridge: import_open_items_to_tracks()   # sync track_open_items
+  │    └─ reconcile_tracks()                       # synchronous; recompute derived_status
+  │         └─ status != ok ?  → return {status: "degraded",
+  │                                       reason: "track_sync_failed"}   ◀── STOP. No advance.
+  └─ (sync ok) → dispatch the next feature step / advance the roadmap
+```
+
+The bridge runs immediately **before** the synchronous reconcile; reconcile
+failure is surfaced in the tick result. The downstream advance is **gated on a
+clean sync**: if the track sync fails, the tick returns `degraded` and refuses to
+dispatch a feature step or advance on stale state. The reconcile pass emits its
+governance receipt, so the gated path is auditable in the ledger.
+
+### Multi-tenancy: ADR-007 composite keys
+
+All of the above is tenant-scoped. The `dispatches` table was brought into the
+ADR-007 pattern in 1.0.1 (PR-A1 #859): a schema-preserving, in-place,
+crash-safe 12-step rebuild swaps any uniqueness keyed solely on `dispatch_id`
+for a composite `UNIQUE(dispatch_id, project_id)`, and removes every single-key
+variant (inline, table-level, standalone, partial, and `lower(dispatch_id)`
+expression indexes). Tenant `project_id` is resolved **fail-closed** from a
+precedence chain (resolved DB path → `.vnx-project-id` marker → `VNX_PROJECT_ID`);
+conflicting or unknown sources abort, existing NULL/empty/conflicting values
+abort before any mutation, and there is **never a silent `vnx-dev` default**.
+`build_t0_state` reads canonical tracks and `track_open_items` only with a
+`WHERE project_id = ?` predicate, degrading to an explicit `tenant_unavailable`
+flag (empty rows) rather than leaking cross-tenant data (PR-B #863). See
+ADR-007 and `docs/MIGRATION_GUIDE.md` for the operator runbook.
 
 ---
 

@@ -264,4 +264,40 @@ T0 should reach `ESCALATE` rarely — only in genuinely ambiguous situations. If
 
 ---
 
-*Last updated: April 2026 — F39 Headless T0 Benchmark*
+## 9. Future-State Reconciliation as a Governed Loop
+
+The roadmap autopilot advances planned work, but advancing on a stale picture of
+the future state would be exactly the "coordinated chaos" the governance layer
+exists to prevent. The 1.0.1 future-state reconciliation (PR-C #862, PR-D #871)
+treats the freshness of that picture as a **hard, code-enforced precondition** —
+the same posture as a gate lock.
+
+`RoadmapManager.autopilot_tick()` runs only under the `VNX_ROADMAP_AUTOPILOT=1`
+gate. On each tick it first **syncs the future state** before it considers any
+advance:
+
+1. The open-item → track bridge updates `track_open_items` through a single
+   writer in one transaction (deterministic, no LLM).
+2. The reconciler recomputes each track's `derived_status` synchronously.
+3. **The advance is gated on a clean sync.** If the bridge or reconcile fails,
+   the tick returns `status: degraded` (`reason: track_sync_failed`) and does
+   **not** dispatch a feature step or advance the roadmap. Stale state never
+   drives a dispatch.
+
+This is a hard decision in the sense of §2: there is no LLM judgment about
+whether to honor a failed sync. The code refuses to advance, just as the
+pre-filter returns `WAIT` on a present gate lock. The reconcile pass emits its
+governance receipt, so the tick is auditable in the ledger either way.
+
+The `derived_status` it computes is itself deterministic — a track is `done`
+only with zero unresolved blocking open-items, all dependency tracks done, all
+dispatches terminal, and any linked PR confirmed merged. Because that truth is
+computed rather than asserted, it is the safe substrate for the planned PM-gate
+automation (#873, 1.x): deterministic closes can auto-apply with a receipt,
+while judgment cases escalate to the human gate per §8. For the precise rule and
+the lifecycle diagram, see `docs/core/00_VNX_ARCHITECTURE.md`
+(*Future-State Reconciliation*).
+
+---
+
+*Last updated: April 2026 — F39 Headless T0 Benchmark; §9 added 2026-06-14 for the 1.0.1 future-state reconciliation.*

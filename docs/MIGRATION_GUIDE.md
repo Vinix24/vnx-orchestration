@@ -184,6 +184,108 @@ vnx status                    # Pip CLI project status
 ./bin/vnx recover             # Full session recovery
 ```
 
+---
+
+## 6. Runtime Database Migration (Operator Runbook)
+
+The 1.0.1 future-state reconciliation brings the live `dispatches` table into the
+ADR-007 composite-key model (`UNIQUE(dispatch_id, project_id)`) with an in-place,
+crash-safe rebuild (`scripts/migrate_future_system.py`, PR-A1 #859), and then
+populates the open-item → track linkage. Applying this to a **live** database is
+an **operator step, not a test or PR step** — code and PRs only ever run the
+migration against temporary DBs. This runbook is **human-gated** and is run only
+after PR-A1/PR-A2/PR-B/PR-C/PR-D are merged and verified (PRD §7.2). Cite ADR-007.
+
+### What Changed
+
+| Aspect | Before | After (1.0.1) |
+|--------|--------|---------------|
+| `dispatches` uniqueness | keyed on `dispatch_id` alone | composite `UNIQUE(dispatch_id, project_id)` |
+| Tenant stamping | implicit / `vnx-dev` default | fail-closed `project_id` resolution; no silent default |
+| `track_open_items` | not kept current automatically | synced by the bridge, reconciled into `derived_status` |
+| Version trust | name-based checks | declarative invariant manifest, downgrade-and-re-run |
+
+### Preconditions (do not skip)
+
+1. **Quiesce.** Stop the orchestration processes (notably the `dispatcher` and
+   `receipt_processor` managed processes) so no writer can touch `dispatches`
+   during the rebuild. `./bin/vnx stop` tears down the VNX tmux session and its
+   orchestration processes; confirm nothing is left running before continuing.
+   ```bash
+   ./bin/vnx stop          # stops the session + orchestration processes
+   ./bin/vnx ps            # confirm dispatcher + receipt_processor are down
+   ```
+2. **WAL-safe backup, then verify it.** Take the backup with `VACUUM INTO` (or
+   the SQLite backup API) so a WAL checkpoint is included, then prove the copy
+   opens and is consistent before trusting it.
+   ```bash
+   sqlite3 "$VNX_DATA_DIR/<project_id>/state/runtime_coordination.db" \
+     "VACUUM INTO '$VNX_DATA_DIR/backups/runtime_coordination.pre-1.0.1.db'"
+   sqlite3 "$VNX_DATA_DIR/backups/runtime_coordination.pre-1.0.1.db" \
+     "PRAGMA integrity_check;"   # must print 'ok'
+   ```
+3. **Preflight** identity + schema checks: confirm the resolved `project_id`
+   (DB path → `.vnx-project-id` marker → `VNX_PROJECT_ID` must agree; a conflict
+   aborts), and that the DB is at the migration 0030 resolution schema or later
+   (the bridge fails closed with exit `5` on a pre-0030 DB).
+4. **Dry-run** the migration and confirm it reports **zero writes** against the
+   live file before doing the real run.
+
+### Run (each phase is idempotent)
+
+Run the phases in order. Every phase is safe to re-run, which is what makes the
+restore-and-retry recovery below safe.
+
+```
+migrate  →  backfill linkage  →  bridge-import  →  reconcile
+```
+
+1. **migrate** — `scripts/migrate_future_system.py` performs the 12-step in-place
+   rebuild (composite key + version reconciliation) under `BEGIN IMMEDIATE` with
+   `foreign_key_check` + `integrity_check` before commit.
+2. **backfill linkage** — populate dispatch ↔ track linkage.
+3. **bridge-import** — `scripts/import_open_items_to_tracks.py` syncs
+   `track_open_items` through the single-writer `tracks.py` primitives. Watch the
+   exit code (see `docs/EXIT_CODES.md`): `3` source missing/malformed, `4`
+   ledger-emit failure (DB already committed; at-most-once event gap, non-fatal),
+   `5` resolution-schema precondition, `6` DB error.
+4. **reconcile** — recompute `tracks.derived_status` from the synced links,
+   dependencies, and dispatches.
+
+### Postflight
+
+Verify before un-quiescing:
+
+- **Row counts** unchanged per table (only `project_id` content may differ).
+- **Schema** diff is exactly: added `project_id` column + composite
+  `UNIQUE(dispatch_id, project_id)`; no remaining uniqueness keyed solely on
+  `dispatch_id`.
+- **Checksums** of rebuilt-table content match the pre-migration content.
+- `PRAGMA integrity_check;` and `PRAGMA foreign_key_check;` both clean.
+
+Record the operator approval, write a unified report, and emit a completion
+receipt so the run is in the audit trail. Then un-quiesce by restarting the VNX
+session (or restart the individual managed processes):
+
+```bash
+./bin/vnx start                      # relaunch the session + orchestration
+# or, per-process: ./bin/vnx restart dispatcher && ./bin/vnx restart receipt_processor
+```
+
+### On any phase failure
+
+**Restore from the verified backup and re-run from scratch.** Per-phase
+idempotency makes a full restart safe — do not attempt a partial fix-forward on a
+half-migrated DB.
+
+```bash
+cp "$VNX_DATA_DIR/backups/runtime_coordination.pre-1.0.1.db" \
+   "$VNX_DATA_DIR/<project_id>/state/runtime_coordination.db"
+# verify the restored DB opens + integrity_check 'ok', then re-run from Preconditions
+```
+
+---
+
 ## Appendix A: Two binaries
 
 VNX ships TWO `vnx` entry-points with different scopes:

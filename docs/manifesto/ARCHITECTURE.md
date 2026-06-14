@@ -117,6 +117,37 @@ Screenshot pointer: `SCREENSHOTS.md` (S5: Quality Advisory).
 
 ---
 
+## Keeping the Future State Honest
+
+The four pillars govern work that has happened. The hardest part of a planning
+layer is keeping the *intended* future state true without a human re-typing it.
+The 1.0.1 future-state reconciliation is how VNX does that, and it follows the
+same glass-box discipline as the rest of the system.
+
+Open items (blockers, follow-ups) feed **tracks** (the planning unit), which feed
+**dispatches** (the executable work). A bridge keeps the open-item → track links
+current, and a deterministic reconciler computes each track's status from those
+links, its dependency graph, and its dispatches. A track is `done` only when it
+has no unresolved blocking open-items, every dependency track is done, all of its
+dispatches reached a terminal state, and any linked PR is confirmed merged.
+No LLM decides this; it is computed, so it is auditable.
+
+Two design choices keep it trustworthy. First, the bridge is a **single writer**:
+every `track_open_items` mutation goes through one set of primitives in one
+transaction, so there is no second code path that can disagree with the first.
+Second, it runs inside the autopilot tick under an explicit gate
+(`VNX_ROADMAP_AUTOPILOT=1`), and if the sync fails the tick **refuses to advance**
+on stale state rather than guessing. The ledger events for these mutations are
+emitted after the DB commit (at-most-once, reconcile-compensated); exactly-once
+delivery via an outbox is deliberately deferred, and that tradeoff is written
+down rather than hidden. The whole linkage is tenant-scoped under the ADR-007
+composite-key model so one project's planning state can never bleed into another.
+
+For the precise rule, the lifecycle diagram, and the loop, see
+`docs/core/00_VNX_ARCHITECTURE.md` (*Future-State Reconciliation*).
+
+---
+
 ## How This Compares
 
 | Feature | Native Agent Teams | Aura | SafeClaw | Camunda | **VNX** |
