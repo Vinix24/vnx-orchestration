@@ -1,6 +1,22 @@
+{#-
+  Skill(<name>) pre-approves a skill so worker lanes (which run in detached
+  worktrees with no human to answer prompts) do not stall on the skill-use
+  permission prompt. This is the same rule grammar the Claude Code Agent SDK
+  emits for its `skills` option: skills:"all" -> "Skill", named skills ->
+  Skill(<name>) appended to allowedTools (verified in the installed CLI binary
+  v2.1.177). Keep these scoped to the worker roles the lanes use; do not
+  broaden to a blanket Skill allow.
+-#}
 {
   "permissions": {
     "allow": [
+      "Skill(database-engineer)",
+      "Skill(backend-developer)",
+      "Skill(frontend-developer)",
+      "Skill(quality-engineer)",
+      "Skill(security-engineer)",
+      "Skill(api-developer)",
+      "Skill(debugger)",
       "Bash(git *)",
       "Bash(python3 *)",
       "Bash(vnx *)"

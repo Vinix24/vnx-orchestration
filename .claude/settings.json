@@ -1,4 +1,15 @@
 {
+  "permissions": {
+    "allow": [
+      "Skill(database-engineer)",
+      "Skill(backend-developer)",
+      "Skill(frontend-developer)",
+      "Skill(quality-engineer)",
+      "Skill(security-engineer)",
+      "Skill(api-developer)",
+      "Skill(debugger)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
