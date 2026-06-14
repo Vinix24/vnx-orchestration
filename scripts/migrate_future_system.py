@@ -42,6 +42,7 @@ if str(_LIB) not in sys.path:
 
 from project_root import resolve_project_root
 import schema_migration
+from atomic_io import audit_event_append
 
 
 # ---------------------------------------------------------------------------
@@ -111,31 +112,48 @@ def _pytest_db_isolation_guard(project_root: Path) -> None:
 # docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md
 # ===========================================================================
 
-_IDENT_RE = re.compile(r'"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*')
+_IDENT_PATTERN = r'"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*'
+_IDENT_RE = re.compile(_IDENT_PATTERN)
 _CONSTRAINT_KW = ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT")
 
 
-def _matching_paren(sql: str, open_pos: int) -> int:
-    """Index of the ``)`` matching the ``(`` at *open_pos*, skipping string literals.
+def _mask_quoted_sql(sql: str) -> str:
+    """Mask quoted content while preserving length and quote delimiters.
 
-    String-literal aware (G): a paren inside '...' / "..." / `...` never affects the
-    depth count, so a column ``DEFAULT '('`` cannot mis-balance the scan. A doubled
-    quote nets to two toggles with no chars between (same quote-state logic as
-    _split_columns_and_constraints), so escaped quotes are handled correctly.
+    Handles SQL strings plus double-quoted, backtick-quoted, and bracket-quoted
+    identifiers, including doubled closing delimiters. This is intentionally a
+    bounded scanner for the existing CREATE TABLE/INDEX helpers, not a SQL parser.
     """
-    depth = 0
-    in_str, quote = False, ""
-    for i in range(open_pos, len(sql)):
-        ch = sql[i]
-        if in_str:
-            if ch == quote:
-                in_str = False
+    out, i = list(sql), 0
+    while i < len(sql):
+        opener = sql[i]
+        if opener not in ("'", '"', "`", "["):
+            i += 1
             continue
-        if ch in ("'", '"', "`"):
-            in_str, quote = True, ch
-        elif ch == "(":
+        closer = "]" if opener == "[" else opener
+        i += 1
+        while i < len(sql):
+            if sql[i] != closer:
+                out[i] = "\x00"
+                i += 1
+                continue
+            if i + 1 < len(sql) and sql[i + 1] == closer:
+                out[i] = out[i + 1] = "\x00"
+                i += 2
+                continue
+            i += 1
+            break
+    return "".join(out)
+
+
+def _matching_paren(sql: str, open_pos: int) -> int:
+    """Index of the ``)`` matching the ``(`` at *open_pos*, skipping quoted text."""
+    depth = 0
+    masked = _mask_quoted_sql(sql)
+    for i in range(open_pos, len(masked)):
+        if masked[i] == "(":
             depth += 1
-        elif ch == ")":
+        elif masked[i] == ")":
             depth -= 1
             if depth == 0:
                 return i
@@ -197,16 +215,49 @@ def _unique_index_rows(conn: sqlite3.Connection):
     return [r for r in conn.execute("PRAGMA index_list('dispatches')") if r[2] == 1]
 
 
+def _index_sql(conn: sqlite3.Connection, index_name: str) -> str | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (index_name,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _index_is_partial(conn: sqlite3.Connection, index_row) -> bool:
+    """True when an index is partial by PRAGMA metadata or CREATE INDEX SQL."""
+    if len(index_row) > 4 and bool(index_row[4]):
+        return True
+    sql = _index_sql(conn, index_row[1])
+    return bool(sql and re.search(r"(?i)\bWHERE\b", _mask_quoted_sql(sql)))
+
+
+def _index_key_column_names(conn: sqlite3.Connection, index_name: str) -> list[str]:
+    """Return real key-column names; expressions make the result invalid/empty."""
+    xinfo = conn.execute(f"PRAGMA index_xinfo('{index_name}')").fetchall()
+    key_rows = [r for r in xinfo if len(r) > 5 and r[5] == 1]
+    if not key_rows:
+        key_rows = conn.execute(f"PRAGMA index_info('{index_name}')").fetchall()
+    if any(r[1] < 0 or r[2] is None for r in key_rows):
+        return []
+    return [r[2].lower() for r in key_rows]
+
+
 def _has_solo_dispatch_id_unique(conn: sqlite3.Connection, dispatch_cols) -> bool:
     return any(_index_is_solo_dispatch_id(conn, r[1], dispatch_cols)
                for r in _unique_index_rows(conn))
 
 
 def _has_composite_unique(conn: sqlite3.Connection, dispatch_cols=None) -> bool:
-    """True if dispatches carries a UNIQUE keyed exactly on (dispatch_id, project_id)."""
+    """True for a full UNIQUE keyed exactly on dispatch_id + project_id.
+
+    ADR-007 requires uniqueness for every row. A partial unique index cannot
+    satisfy the contract because duplicate pairs remain possible outside its
+    WHERE predicate.
+    """
     for r in _unique_index_rows(conn):
-        names = {c[2].lower() for c in conn.execute(f"PRAGMA index_info('{r[1]}')") if c[2]}
-        if names == {"dispatch_id", "project_id"}:
+        if _index_is_partial(conn, r):
+            continue
+        names = _index_key_column_names(conn, r[1])
+        if len(names) == 2 and set(names) == {"dispatch_id", "project_id"}:
             return True
     return False
 
@@ -346,22 +397,15 @@ def _split_columns_and_constraints(body: str):
     literals never split an item.
     """
     items, depth, cur = [], 0, []
-    in_str, quote = False, ""
-    for ch in body:
-        if in_str:
-            cur.append(ch)
-            if ch == quote:
-                in_str = False
-        elif ch in ("'", '"', "`"):
-            in_str, quote = True, ch
-            cur.append(ch)
-        elif ch == "(":
+    masked = _mask_quoted_sql(body)
+    for ch, visible in zip(body, masked):
+        if visible == "(":
             depth += 1
             cur.append(ch)
-        elif ch == ")":
+        elif visible == ")":
             depth -= 1
             cur.append(ch)
-        elif ch == "," and depth == 0:
+        elif visible == "," and depth == 0:
             items.append("".join(cur).strip())
             cur = []
         else:
@@ -382,7 +426,7 @@ def _is_solo_unique_constraint(item: str, dispatch_cols) -> bool:
     on dispatch_id (B — a table-level PRIMARY KEY(dispatch_id) is stripped the same
     way as UNIQUE so only the composite remains)."""
     s = item.strip()
-    m = re.match(r'(?is)^CONSTRAINT\s+("[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)\s+(.*)$', s)
+    m = re.match(rf"(?is)^CONSTRAINT\s+({_IDENT_PATTERN})\s+(.*)$", s)
     if m:
         s = m.group(2).strip()
     if not re.match(r'(?is)^(?:UNIQUE|PRIMARY\s+KEY)\s*\(', s):
@@ -392,7 +436,7 @@ def _is_solo_unique_constraint(item: str, dispatch_cols) -> bool:
 
 def _constraint_is_composite(item: str, dispatch_cols) -> bool:
     s = item.strip()
-    m = re.match(r'(?is)^CONSTRAINT\s+\S+\s+(.*)$', s)
+    m = re.match(rf"(?is)^CONSTRAINT\s+({_IDENT_PATTERN})\s+(.*)$", s)
     if m:
         s = m.group(1).strip()
     if not re.match(r'(?is)^UNIQUE\s*\(', s):
@@ -409,24 +453,8 @@ _PK_TOKEN_RE = re.compile(r'(?is)\bPRIMARY\s+KEY\b')
 
 
 def _mask_string_literals(sql: str) -> str:
-    """Return *sql* with every char inside a '...'/"..."/`...` literal replaced by
-    NUL (quotes kept, length and indices preserved) so a regex run over the mask
-    sees keyword tokens ONLY outside quoted strings (N3). A doubled quote nets to
-    two toggles with no chars between (same quote-state logic as
-    _split_columns_and_constraints), so an escaped quote stays masked.
-    """
-    out, in_str, quote = [], False, ""
-    for ch in sql:
-        if in_str:
-            out.append(ch if ch == quote else "\x00")
-            if ch == quote:
-                in_str = False
-        elif ch in ("'", '"', "`"):
-            in_str, quote = True, ch
-            out.append(ch)
-        else:
-            out.append(ch)
-    return "".join(out)
+    """Mask SQL strings and quoted identifiers for keyword-token scans (N3)."""
+    return _mask_quoted_sql(sql)
 
 
 def _strip_inline_unique(coldef: str) -> str:
@@ -460,7 +488,7 @@ def _coldef_has_primary_key(coldef: str) -> bool:
 def _constraint_is_primary_key(item: str) -> bool:
     """True if table-constraint *item* is a PRIMARY KEY(...) (optionally CONSTRAINT-named, N4)."""
     s = item.strip()
-    m = re.match(r'(?is)^CONSTRAINT\s+\S+\s+(.*)$', s)
+    m = re.match(rf"(?is)^CONSTRAINT\s+({_IDENT_PATTERN})\s+(.*)$", s)
     if m:
         s = m.group(1).strip()
     return bool(re.match(r'(?is)^PRIMARY\s+KEY\s*\(', s))
@@ -871,13 +899,9 @@ def _repair_dispatches_adr007(conn: sqlite3.Connection, project_id: str) -> bool
     identity (R3.1); never the 'vnx-dev' sentinel. Returns True if a rebuild ran.
     Cite ADR-007.
 
-    ADR-005 audit (N5): this primitive deliberately emits NO NDJSON ledger event.
-    It operates on a raw conn/db_path with no event-store wiring; emitting from
-    here would break temp-DB test isolation and couple the data layer to the
-    ledger. The ADR-005 event for this mutation is recorded at the GOVERNED CALLER
-    layer — run() under VNX_ROADMAP_AUTOPILOT / migration governance and the
-    operator runbook §7.2 (operator approval + unified report + completion
-    receipt). That caller layer, not this function, is the correct ledger surface.
+    ADR-005 audit (N5): this primitive deliberately emits no ledger event. The
+    governed caller records the mutation after a successful rebuild, preserving
+    unit-testability and the operator runbook §7.2 caller boundary.
     """
     if not _dispatches_needs_adr007_repair(conn):
         return False
@@ -901,21 +925,51 @@ def _repair_dispatches_adr007(conn: sqlite3.Connection, project_id: str) -> bool
     return True
 
 
+def _adr007_events_dir(db_path) -> Path:
+    """Resolve the ADR-005 events directory without falling back to live data.
+
+    An explicit VNX_DATA_DIR wins, matching repo event-store behavior and keeping
+    temp-DB tests isolated. Otherwise events live beside the resolved DB's state
+    directory under the same project-specific .vnx-data tree.
+    """
+    explicit = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    data_dir = (os.environ.get("VNX_DATA_DIR") or "").strip()
+    if explicit and data_dir:
+        return Path(data_dir).expanduser().resolve() / "events"
+    db = Path(db_path).expanduser().resolve()
+    return db.parent.parent / "events" if db.parent.name == "state" else db.parent / "events"
+
+
+def _emit_adr007_repair_event(db_path, project_id: str) -> None:
+    """Record the successful dispatches rebuild under ADR-005 and ADR-007."""
+    audit_event_append(
+        _adr007_events_dir(db_path),
+        "adr007_dispatches_repaired",
+        {
+            "dispatch_table": "dispatches",
+            "project_id": project_id,
+            "rebuild_occurred": True,
+            "adr": "ADR-007",
+            "db_path": str(Path(db_path).expanduser().resolve()),
+        },
+    )
+
+
 def _run_adr007_dispatches_repair(conn: sqlite3.Connection, db_path) -> None:
     """run() wiring: detect → resolve tenant → repair. project_id is resolved
     ONLY when a rebuild is actually needed, so a fresh/composite DB never
     requires identity resolution. Cite ADR-007.
 
-    ADR-005 audit (N5): the repair mutation is audited at this GOVERNED CALLER
-    layer — run() under VNX_ROADMAP_AUTOPILOT / migration governance and the
-    operator runbook §7.2 (operator approval + unified report + completion
-    receipt) — NOT inside the pure repair primitive, which has no event-store
-    wiring and must stay temp-DB-isolation safe (no code-level ledger emission).
+    ADR-005 audit (N5): this GOVERNED CALLER records a temp-safe event only after
+    a successful rebuild. The pure primitive remains event-I/O free. This is the
+    operator runbook §7.2 caller boundary. See ADR-007:
+    docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md.
     """
     if not _dispatches_needs_adr007_repair(conn):
         return
     project_id = _resolve_validated_project_id(db_path)
     if _repair_dispatches_adr007(conn, project_id):
+        _emit_adr007_repair_event(db_path, project_id)
         print(f"  [adr007] dispatches rebuilt → composite UNIQUE(dispatch_id, "
               f"project_id), tenant={project_id!r}")
 
@@ -936,15 +990,7 @@ def _assert_dispatches_schema_intact(conn: sqlite3.Connection) -> None:
             f'dispatches schema drift: missing={missing} extra={extra}. '
             'Refusing rebuild — please add migration logic for the new columns first.'
         )
-    indexes = list(conn.execute("PRAGMA index_list('dispatches')"))
-    composite_unique_exists = False
-    for idx in indexes:
-        if idx[2]:  # unique flag
-            idx_cols = [c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")]
-            if set(idx_cols) == {'dispatch_id', 'project_id'}:
-                composite_unique_exists = True
-                break
-    if not composite_unique_exists:
+    if not _has_composite_unique(conn):
         raise RuntimeError(
             'dispatches missing UNIQUE(dispatch_id, project_id) — '
             'was added in migration 0017, must be preserved'

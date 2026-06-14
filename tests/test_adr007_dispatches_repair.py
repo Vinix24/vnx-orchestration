@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import re
 import sqlite3
 import sys
@@ -557,6 +558,122 @@ def test_noop_when_already_composite(tmp_path: Path) -> None:
     assert mfs._dispatches_needs_adr007_repair(conn) is False
     # passing a deliberately wrong identity must not matter — it is a pure no-op
     assert mfs._repair_dispatches_adr007(conn, "irrelevant") is False
+    conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# ADR-007 partial-index and unusual-identifier regressions
+# --------------------------------------------------------------------------- #
+
+def test_partial_composite_unique_needs_repair_and_gets_full_composite(
+        tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            state TEXT
+        );
+        CREATE UNIQUE INDEX ux_active_pair
+            ON dispatches(dispatch_id, project_id) WHERE state='active';
+        INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','proj-x','queued');
+    """)
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is False
+    assert mfs._dispatches_needs_adr007_repair(conn) is True
+
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO dispatches(dispatch_id,project_id,state) "
+            "VALUES('d1','proj-x','another')")
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("table_name", "dispatch_id", "project_id"),
+    [
+        ('"dispatches"', '"dispatch_id"', '"project_id"'),
+        ("[dispatches]", "[dispatch_id]", "[project_id]"),
+        ("`dispatches`", "`dispatch_id`", "`project_id`"),
+    ],
+)
+def test_quoted_identifier_solo_unique_repairs(
+        tmp_path: Path, table_name: str, dispatch_id: str, project_id: str) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, f"""
+        CREATE TABLE {table_name} (
+            id INTEGER PRIMARY KEY,
+            {dispatch_id} TEXT NOT NULL,
+            {project_id} TEXT,
+            UNIQUE({dispatch_id})
+        );
+        INSERT INTO {table_name}(id,{dispatch_id},{project_id})
+            VALUES(1,'d1','proj-x');
+    """)
+    assert mfs._dispatches_needs_adr007_repair(conn) is True
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    assert mfs._has_solo_dispatch_id_unique(conn, _dispatch_cols(conn)) is False
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
+    conn.close()
+
+
+def test_quoted_identifier_full_composite_is_detected(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE [dispatches] (
+            id INTEGER PRIMARY KEY,
+            "dispatch_id" TEXT NOT NULL,
+            `project_id` TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX [ux_dispatch_pair]
+            ON [dispatches]([dispatch_id], "project_id");
+    """)
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
+    assert mfs._dispatches_needs_adr007_repair(conn) is False
+    assert mfs._repair_dispatches_adr007(conn, "irrelevant") is False
+    conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# ADR-005 governed-caller audit event
+# --------------------------------------------------------------------------- #
+
+def test_governed_caller_emits_repair_event_to_temp_events_dir(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL
+        );
+        INSERT INTO dispatches VALUES(1, 'd1', 'proj-x');
+    """)
+    mfs._run_adr007_dispatches_repair(conn, db)
+    event_path = tmp_path / "_vnx_data" / "events" / "adr007_dispatches_repaired.ndjson"
+    event = json.loads(event_path.read_text(encoding="utf-8").strip())
+    assert event["event_type"] == "adr007_dispatches_repaired"
+    assert event["dispatch_table"] == "dispatches"
+    assert event["project_id"] == "proj-x"
+    assert event["rebuild_occurred"] is True
+    assert event["timestamp"]
+    conn.close()
+
+
+def test_governed_caller_noop_emits_no_repair_event(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            UNIQUE(dispatch_id, project_id)
+        );
+    """)
+    mfs._run_adr007_dispatches_repair(conn, db)
+    event_path = tmp_path / "_vnx_data" / "events" / "adr007_dispatches_repaired.ndjson"
+    assert not event_path.exists()
     conn.close()
 
 
