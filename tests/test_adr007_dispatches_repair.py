@@ -610,6 +610,399 @@ def schema_migration_user_version(conn: sqlite3.Connection) -> int:
     return conn.execute("PRAGMA user_version").fetchone()[0]
 
 
+# =========================================================================== #
+# Gate round-1 fix-forward (#859) — one behavioral test per finding A–M.
+# Every test pins VNX_DATA_DIR_EXPLICIT=1 + a tmp VNX_DATA_DIR (autouse fixture)
+# and operates ONLY on temp DBs.
+# =========================================================================== #
+
+
+# A — added project_id has NO 'vnx-dev' default; an insert omitting it fails closed
+def test_finding_a_added_project_id_has_no_vnx_dev_default(tmp_path: Path) -> None:
+    db = _db_path(tmp_path, project_id="proj-x")
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            state TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,state) VALUES(1,'a','q');
+    """)
+    assert "project_id" not in _dispatch_cols(conn)
+    mfs._repair_dispatches_adr007(conn, "proj-x")
+    # existing rows stamped from the validated identity, NOT a silent vnx-dev
+    assert conn.execute(
+        "SELECT project_id FROM dispatches WHERE dispatch_id='a'").fetchone()[0] == "proj-x"
+    # a future insert omitting project_id now fails closed (no silent vnx-dev)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO dispatches(dispatch_id) VALUES('b')")
+    conn.close()
+
+
+# B — column-level dispatch_id PRIMARY KEY ends composite-only; cross-tenant reuse OK
+def test_finding_b_column_level_pk_becomes_composite(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            dispatch_id TEXT PRIMARY KEY,
+            project_id TEXT,
+            state TEXT
+        );
+        INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projA','q');
+    """)
+    assert mfs._dispatches_needs_adr007_repair(conn) is True
+    assert mfs._repair_dispatches_adr007(conn, "projA") is True
+    cols = _dispatch_cols(conn)
+    assert mfs._has_solo_dispatch_id_unique(conn, cols) is False
+    assert mfs._has_composite_unique(conn, cols) is True
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projB','q')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projA','q')")
+    conn.close()
+
+
+# B — table-level PRIMARY KEY(dispatch_id) ends composite-only; cross-tenant reuse OK
+def test_finding_b_table_level_pk_becomes_composite(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT,
+            state TEXT,
+            PRIMARY KEY(dispatch_id)
+        );
+        INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projA','q');
+    """)
+    assert mfs._dispatches_needs_adr007_repair(conn) is True
+    assert mfs._repair_dispatches_adr007(conn, "projA") is True
+    cols = _dispatch_cols(conn)
+    assert mfs._has_solo_dispatch_id_unique(conn, cols) is False
+    assert mfs._has_composite_unique(conn, cols) is True
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projB','q')")
+    conn.close()
+
+
+# B — a surviving solo uniqueness makes the post-rebuild guard RAISE (no false success)
+def test_finding_b_post_rebuild_guard_raises_on_surviving_solo(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+    # force the inline UNIQUE to survive the transform; the guard must catch it
+    monkeypatch.setattr(mfs, "_strip_inline_unique", lambda coldef: coldef)
+    with pytest.raises(RuntimeError, match="did not eliminate solo dispatch_id uniqueness"):
+        mfs._repair_dispatches_adr007(conn, "proj-x")
+    monkeypatch.undo()
+    # rolled back: original solo-unique schema + data intact, still needs repair
+    assert mfs._dispatches_needs_adr007_repair(conn) is True
+    assert conn.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == 1
+    conn.close()
+
+
+# C — a STRICT table option survives the rebuild (type enforcement still fires)
+def test_finding_c_strict_table_option_preserved(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT,
+            amt INTEGER
+        ) STRICT;
+        INSERT INTO dispatches(id,dispatch_id,project_id,amt) VALUES(1,'a','proj-x',5);
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatches'").fetchone()[0]
+    assert "STRICT" in sql.upper()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO dispatches(dispatch_id,project_id,amt) VALUES('b','proj-x','nope')")
+    conn.close()
+
+
+# D — calling with an open transaction RAISES (never silently commits the caller's work)
+def test_finding_d_open_transaction_raises_not_silent_commit(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id) VALUES('b','proj-x')")
+    assert conn.in_transaction
+    with pytest.raises(RuntimeError, match="no open transaction"):
+        mfs._repair_dispatches_adr007(conn, "proj-x")
+    # the caller's uncommitted work was NOT silently committed
+    conn.rollback()
+    assert conn.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == 1
+    conn.close()
+
+
+# E — a RENAME failure still restores legacy_alter_table (finally guard)
+def test_finding_e_legacy_alter_table_restored_on_rename_failure(tmp_path: Path) -> None:
+    db = tmp_path / "e.db"
+    conn = sqlite3.connect(str(db))
+    conn.isolation_level = None
+    conn.execute("CREATE TABLE dispatches(x)")          # rename target already taken
+    conn.execute("CREATE TABLE dispatches_new(y)")
+    orig = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
+    with pytest.raises(sqlite3.OperationalError):
+        mfs._rename_new_to_dispatches(conn, orig)
+    assert conn.execute("PRAGMA legacy_alter_table").fetchone()[0] == orig
+    conn.close()
+
+
+# F — recreate order puts views before table triggers
+def test_finding_f_recreate_order_views_before_table_triggers() -> None:
+    executed: list[str] = []
+
+    class _Rec:
+        def execute(self, sql):
+            executed.append(sql)
+
+    plan = {
+        "indexes": [("ix", "CREATE INDEX ix ON dispatches(state)")],
+        "views": [("v", "CREATE VIEW v AS SELECT 1")],
+        "table_triggers": [("trg_tbl", "CREATE TRIGGER trg_tbl AFTER INSERT ON dispatches BEGIN SELECT 1; END")],
+        "view_triggers": [("trg_view", "CREATE TRIGGER trg_view INSTEAD OF INSERT ON v BEGIN SELECT 1; END")],
+    }
+    mfs._recreate_dependent_objects(_Rec(), plan)
+    assert executed.index(plan["views"][0][1]) < executed.index(plan["table_triggers"][0][1])
+    assert executed == [plan["indexes"][0][1], plan["views"][0][1],
+                        plan["table_triggers"][0][1], plan["view_triggers"][0][1]]
+
+
+# F — a table trigger referencing a dependent view is recreated and works after repair
+def test_finding_f_table_trigger_referencing_view_survives_repair(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT,
+            state TEXT
+        );
+        CREATE VIEW v_active AS SELECT dispatch_id FROM dispatches WHERE state='active';
+        CREATE TABLE log(n INTEGER);
+        CREATE TRIGGER trg_ai AFTER INSERT ON dispatches
+            BEGIN INSERT INTO log(n) SELECT COUNT(*) FROM v_active; END;
+        INSERT INTO dispatches(id,dispatch_id,project_id,state) VALUES(1,'a','proj-x','active');
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('b','proj-x','active')")
+    assert conn.execute("SELECT MAX(n) FROM log").fetchone()[0] == 2
+    conn.close()
+
+
+# G — _paren_group skips parens inside string literals
+def test_finding_g_paren_group_skips_string_literal_parens() -> None:
+    s = "CREATE TABLE t (a TEXT DEFAULT '(', b TEXT)"
+    assert mfs._paren_group(s, s.index("(")) == "a TEXT DEFAULT '(', b TEXT"
+
+
+# G — a default with an unbalanced paren in a string literal repairs cleanly
+def test_finding_g_default_with_unbalanced_paren_in_string(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT,
+            note TEXT DEFAULT '(unbalanced'
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id) VALUES('b','proj-x')")
+    assert conn.execute(
+        "SELECT note FROM dispatches WHERE dispatch_id='b'").fetchone()[0] == "(unbalanced"
+    conn.close()
+
+
+# H — the validation re-runs INSIDE the txn and aborts with the DB byte-unchanged
+def test_finding_h_in_txn_revalidation_aborts_db_unchanged(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a',NULL);
+    """)
+    conn.close()
+    # skip the FIRST (pre-BEGIN) validation so the IN-TXN re-validation is what aborts
+    real = mfs._validate_existing_project_id_or_abort
+    calls = {"n": 0}
+
+    def _skip_first(c, pid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return
+        return real(c, pid)
+
+    monkeypatch.setattr(mfs, "_validate_existing_project_id_or_abort", _skip_first)
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    conn = sqlite3.connect(str(db))
+    with pytest.raises(RuntimeError, match="NULL/empty project_id"):
+        mfs._repair_dispatches_adr007(conn, "proj-x")
+    conn.close()
+    after = hashlib.sha256(db.read_bytes()).hexdigest()
+    assert calls["n"] == 2, "the in-transaction re-validation did not run (H)"
+    assert before == after, "DB mutated despite an in-transaction abort (H)"
+
+
+# I — a tab/newline/CR-only project_id aborts like empty (TRIM whitespace set)
+@pytest.mark.parametrize("ws", ["\t", "\n", "\r", "\x0b", "\x0c", "\t\n ", "  \r\n\t"])
+def test_finding_i_whitespace_only_project_id_aborts(tmp_path: Path, ws) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+    """, rows=[("INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a',?)", (ws,))])
+    with pytest.raises(RuntimeError, match="NULL/empty project_id"):
+        mfs._repair_dispatches_adr007(conn, "proj-x")
+    conn.close()
+
+
+# J — a nullable project_id column is promoted to NOT NULL by the rebuild
+def test_finding_j_nullable_project_id_promoted_to_not_null(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+
+    def _pid_notnull():
+        return [r for r in conn.execute("PRAGMA table_info('dispatches')")
+                if r[1] == "project_id"][0][3]
+
+    assert _pid_notnull() == 0, "precondition: project_id starts nullable"
+    mfs._repair_dispatches_adr007(conn, "proj-x")
+    assert _pid_notnull() == 1, "project_id must be NOT NULL after repair (J)"
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO dispatches(dispatch_id,project_id) VALUES('b',NULL)")
+    conn.close()
+
+
+# K — a ROLLBACK failure does not mask the ORIGINAL error
+def test_finding_k_rollback_failure_does_not_mask_original_error(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+
+    def _commit_then_boom(c, plan):
+        c.execute("COMMIT")              # ends the txn so the except-clause ROLLBACK fails
+        raise RuntimeError("ORIGINAL boom")
+
+    monkeypatch.setattr(mfs, "_recreate_dependent_objects", _commit_then_boom)
+    with pytest.raises(RuntimeError, match="ORIGINAL boom"):
+        mfs._repair_dispatches_adr007(conn, "proj-x")
+    conn.close()
+
+
+# L — a no-'id' shape does not crash the content checksum; falls back to rowid/cols
+def test_finding_l_no_id_table_checksum_does_not_crash(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT,
+            state TEXT
+        );
+        INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('a','proj-x','q');
+        INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('b','proj-x','r');
+    """)
+    assert "id" not in _dispatch_cols(conn)
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
+    assert mfs._has_solo_dispatch_id_unique(conn, _dispatch_cols(conn)) is False
+    assert conn.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == 2
+    conn.close()
+
+
+# L — checksum ordering raises explicitly when no id/rowid/cols are available
+def test_finding_l_checksum_raises_when_no_orderable_key() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE w(k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID")
+    with pytest.raises(RuntimeError, match="cannot compute a deterministic checksum"):
+        mfs._checksum_order_clause(conn, "w", [])
+    assert mfs._checksum_order_clause(conn, "w", ["k", "v"]) == 'ORDER BY "k", "v"'
+    conn.close()
+
+
+# M — a BUSY-coded error with a non-standard message is classified retryable + retried
+def test_finding_m_is_busy_or_locked_classifies_by_errorcode() -> None:
+    exc = sqlite3.OperationalError("Datenbank ist gesperrt")     # no code, no substring
+    assert mfs._is_busy_or_locked(exc) is False
+    exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    assert mfs._is_busy_or_locked(exc) is True                   # structured code wins
+    assert mfs._is_busy_or_locked(sqlite3.OperationalError("database is locked")) is True
+
+
+def test_finding_m_busy_coded_error_is_retried() -> None:
+    class _FakeBusyConn:
+        def __init__(self, fail_times):
+            self.fail_times, self.attempts = fail_times, 0
+
+        def execute(self, sql):
+            self.attempts += 1
+            if self.attempts <= self.fail_times:
+                exc = sqlite3.OperationalError("gesperrt")       # no 'locked'/'busy' substring
+                exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                raise exc
+            return None
+
+    conn = _FakeBusyConn(fail_times=2)
+    mfs._begin_immediate_with_retry(conn, max_attempts=5, base_delay=0.001, max_delay=0.002)
+    assert conn.attempts == 3, "a BUSY-coded error with a non-standard message was not retried (M)"
+
+
+# Lock the FALSE-POSITIVE: a doubled-quote default must not corrupt column splitting
+def test_escaped_quote_default_does_not_corrupt_split(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT,
+            owner TEXT DEFAULT 'O''Brien'
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id) VALUES('b','proj-x')")
+    assert conn.execute(
+        "SELECT owner FROM dispatches WHERE dispatch_id='b'").fetchone()[0] == "O'Brien"
+    conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # R7.1 — every function in migrate_future_system.py is ≤70 lines (gate counter)
 # --------------------------------------------------------------------------- #

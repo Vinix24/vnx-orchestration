@@ -115,18 +115,36 @@ _IDENT_RE = re.compile(r'"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*')
 _CONSTRAINT_KW = ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT")
 
 
-def _paren_group(sql: str, open_pos: int) -> str:
-    """Return the substring inside the parentheses that open at *open_pos*."""
+def _matching_paren(sql: str, open_pos: int) -> int:
+    """Index of the ``)`` matching the ``(`` at *open_pos*, skipping string literals.
+
+    String-literal aware (G): a paren inside '...' / "..." / `...` never affects the
+    depth count, so a column ``DEFAULT '('`` cannot mis-balance the scan. A doubled
+    quote nets to two toggles with no chars between (same quote-state logic as
+    _split_columns_and_constraints), so escaped quotes are handled correctly.
+    """
     depth = 0
+    in_str, quote = False, ""
     for i in range(open_pos, len(sql)):
         ch = sql[i]
-        if ch == "(":
+        if in_str:
+            if ch == quote:
+                in_str = False
+            continue
+        if ch in ("'", '"', "`"):
+            in_str, quote = True, ch
+        elif ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
             if depth == 0:
-                return sql[open_pos + 1:i]
+                return i
     raise ValueError("unbalanced parentheses in SQL")
+
+
+def _paren_group(sql: str, open_pos: int) -> str:
+    """Return the substring inside the parentheses that open at *open_pos* (G)."""
+    return sql[open_pos + 1:_matching_paren(sql, open_pos)]
 
 
 def _referenced_columns(spec: str, dispatch_cols) -> set[str]:
@@ -290,8 +308,12 @@ def _validate_existing_project_id_or_abort(conn: sqlite3.Connection,
     cols = [c for c, _ in _dispatch_table_columns(conn)]
     if "project_id" not in cols:
         return
+    # SQLite's bare TRIM() strips only the ASCII space (0x20); pass the full
+    # whitespace set so a tab/newline/CR/FF/VT-only project_id is treated as empty
+    # and aborts like '' rather than passing as a valid tenant (I).
     bad = conn.execute(
-        "SELECT COUNT(*) FROM dispatches WHERE project_id IS NULL OR TRIM(project_id)=''"
+        "SELECT COUNT(*) FROM dispatches WHERE project_id IS NULL OR "
+        "TRIM(project_id, char(32)||char(9)||char(10)||char(13)||char(11)||char(12)) = ''"
     ).fetchone()[0]
     if bad:
         raise RuntimeError(
@@ -348,12 +370,14 @@ def _is_table_constraint(item: str) -> bool:
 
 
 def _is_solo_unique_constraint(item: str, dispatch_cols) -> bool:
-    """True iff *item* is a table-level UNIQUE(...) keyed solely on dispatch_id."""
+    """True iff *item* is a table-level UNIQUE(...) or PRIMARY KEY(...) keyed solely
+    on dispatch_id (B — a table-level PRIMARY KEY(dispatch_id) is stripped the same
+    way as UNIQUE so only the composite remains)."""
     s = item.strip()
     m = re.match(r'(?is)^CONSTRAINT\s+("[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)\s+(.*)$', s)
     if m:
         s = m.group(2).strip()
-    if not re.match(r'(?is)^UNIQUE\s*\(', s):
+    if not re.match(r'(?is)^(?:UNIQUE|PRIMARY\s+KEY)\s*\(', s):
         return False
     return _referenced_columns(_paren_group(s, s.index("(")), dispatch_cols) == {"dispatch_id"}
 
@@ -370,32 +394,65 @@ def _constraint_is_composite(item: str, dispatch_cols) -> bool:
 
 
 def _strip_inline_unique(coldef: str) -> str:
-    """Remove an inline column UNIQUE constraint (+ optional ON CONFLICT clause)."""
-    return re.sub(r'(?is)\s+UNIQUE(\s+ON\s+CONFLICT\s+\w+)?(?=\s|$)', " ", coldef).rstrip()
+    """Strip an inline column UNIQUE *and* PRIMARY KEY constraint from a column-def (B).
+
+    Removes a column-level UNIQUE (+ optional ON CONFLICT) and a column-level
+    PRIMARY KEY (+ optional ASC/DESC, ON CONFLICT, AUTOINCREMENT) so a solo
+    dispatch_id key cannot survive the rebuild while the repair reports success.
+    Called only on the dispatch_id column-def; the composite UNIQUE(dispatch_id,
+    project_id) is added separately.
+    """
+    coldef = re.sub(r'(?is)\s+UNIQUE(\s+ON\s+CONFLICT\s+\w+)?(?=\s|$)', " ", coldef)
+    coldef = re.sub(
+        r'(?is)\s+PRIMARY\s+KEY(\s+(?:ASC|DESC))?'
+        r'(\s+ON\s+CONFLICT\s+\w+)?(\s+AUTOINCREMENT)?(?=\s|$)',
+        " ", coldef)
+    return coldef.rstrip()
 
 
-def _dispatch_id_coldef_index(items, dispatch_cols) -> int:
+def _column_def_index(items, dispatch_cols, target: str) -> int:
+    """Index of the column-def in *items* whose leading identifier is *target*."""
     for idx, item in enumerate(items):
         if _is_table_constraint(item):
             continue
         toks = _IDENT_RE.findall(item)
-        if toks and toks[0].strip('"`[]').lower() == "dispatch_id":
+        if toks and toks[0].strip('"`[]').lower() == target:
             return idx
     return -1
 
 
+def _promote_project_id_not_null(coldef: str) -> str:
+    """Ensure an existing project_id column-def is NOT NULL (J); add no DEFAULT (A).
+
+    R1.4 guarantees zero NULL/empty project_id rows at repair time, so promoting a
+    nullable column to NOT NULL is safe and closes the tenant-isolation hole (SQLite
+    treats NULLs as distinct in a UNIQUE). An already-NOT NULL column is returned
+    verbatim (the real dispatches table keeps its existing default).
+    """
+    if re.search(r'(?is)\bNOT\s+NULL\b', coldef):
+        return coldef
+    return coldef.rstrip() + " NOT NULL"
+
+
 def _transform_create_table_sql(orig_sql: str, dispatch_cols, has_project_id: bool) -> str:
     """Mutate dispatches CREATE SQL → dispatches_new: drop solo dispatch_id
-    uniqueness, add project_id (if absent) + composite UNIQUE. Everything else
-    (FKs, CHECK, collations, generated cols) is preserved verbatim (R1.5).
+    uniqueness (inline/table UNIQUE *and* PRIMARY KEY, B) and add/keep project_id
+    as NOT NULL — added with no vnx-dev default (A), existing-nullable promoted (J),
+    existing NOT NULL untouched — plus the composite UNIQUE. FKs, CHECK, collations,
+    generated cols and the trailing table-option suffix (STRICT / WITHOUT ROWID, C)
+    are preserved verbatim (R1.5).
 
     SQLite requires every column-def to precede every table constraint, so the
     new project_id column is appended to the column section and the composite
     UNIQUE to the constraint section (never interleaved).
     """
-    body = _paren_group(orig_sql, orig_sql.index("("))
+    open_pos = orig_sql.index("(")
+    close_pos = _matching_paren(orig_sql, open_pos)
+    body = orig_sql[open_pos + 1:close_pos]
+    suffix = orig_sql[close_pos + 1:].strip().rstrip(";").strip()       # C: table options
     items = _split_columns_and_constraints(body)
-    did_idx = _dispatch_id_coldef_index(items, dispatch_cols)
+    did_idx = _column_def_index(items, dispatch_cols, "dispatch_id")
+    pid_idx = _column_def_index(items, dispatch_cols, "project_id")
     col_defs, constraints, has_composite = [], [], False
     for idx, item in enumerate(items):
         if _is_table_constraint(item):
@@ -403,14 +460,19 @@ def _transform_create_table_sql(orig_sql: str, dispatch_cols, has_project_id: bo
                 continue
             has_composite = has_composite or _constraint_is_composite(item, dispatch_cols)
             constraints.append(item)
+        elif idx == did_idx:
+            col_defs.append(_strip_inline_unique(item))                 # B: strip UNIQUE + PK
+        elif idx == pid_idx:
+            col_defs.append(_promote_project_id_not_null(item))         # J: always NOT NULL
         else:
-            col_defs.append(_strip_inline_unique(item) if idx == did_idx else item)
+            col_defs.append(item)
     if not has_project_id:
-        col_defs.append("project_id TEXT NOT NULL DEFAULT 'vnx-dev'")
+        col_defs.append("project_id TEXT NOT NULL")                     # A: no vnx-dev default
     if not has_composite:
         constraints.append("UNIQUE(dispatch_id, project_id)")
     body_items = ",\n    ".join(col_defs + constraints)
-    return "CREATE TABLE dispatches_new (\n    " + body_items + "\n)"
+    new_sql = "CREATE TABLE dispatches_new (\n    " + body_items + "\n)"
+    return new_sql + (" " + suffix if suffix else "")                   # C: re-append options
 
 
 # --- R1.3: dependent view/trigger discovery (transitive, quoted-aware) -------
@@ -475,10 +537,34 @@ def _standalone_indexes_to_recreate(conn: sqlite3.Connection, dispatch_cols):
     return keep
 
 
+def _checksum_order_clause(conn: sqlite3.Connection, table: str, cols) -> str:
+    """Deterministic ORDER BY for the content checksum (L).
+
+    Prefer ``id`` when the column is present; else ``rowid`` for a rowid table; else
+    order by all copy columns (WITHOUT ROWID / alt-PK shapes). Raise an explicit
+    error when none is available rather than crashing opaquely on a hard-coded
+    ``ORDER BY id``.
+    """
+    table_cols = {r[1].lower() for r in conn.execute(f'PRAGMA table_info("{table}")')}
+    if "id" in table_cols:
+        return "ORDER BY id"
+    try:
+        conn.execute(f'SELECT rowid FROM "{table}" LIMIT 0')
+        return "ORDER BY rowid"
+    except sqlite3.OperationalError:
+        pass
+    if cols:
+        return "ORDER BY " + ", ".join(f'"{c}"' for c in cols)
+    raise RuntimeError(
+        f"ADR-007 checksum: table {table!r} exposes no id, no rowid, and no copy "
+        "columns to order by; cannot compute a deterministic checksum (L).")
+
+
 def _content_checksum(conn: sqlite3.Connection, table: str, cols):
-    """Deterministic (row_count, sha256) over *cols* of *table* ordered by id."""
+    """Deterministic (row_count, sha256) over *cols* of *table* (L: id|rowid|cols)."""
     collist = ", ".join(f'"{c}"' for c in cols) or "1"
-    rows = conn.execute(f'SELECT {collist} FROM "{table}" ORDER BY id').fetchall()
+    order = _checksum_order_clause(conn, table, cols)
+    rows = conn.execute(f'SELECT {collist} FROM "{table}" {order}').fetchall()
     h = hashlib.sha256()
     for row in rows:
         h.update(repr(row).encode("utf-8"))
@@ -519,6 +605,24 @@ def _build_dispatches_rebuild_plan(conn: sqlite3.Connection) -> dict:
 
 # --- R7.2: bounded retry/backoff on a locked DB ------------------------------
 
+def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
+    """Classify a retryable lock error (M).
+
+    Prefer the structured ``sqlite_errorcode`` (Python 3.11+) against SQLITE_BUSY /
+    SQLITE_LOCKED — including extended codes via the low-byte primary mask — so a
+    localized or otherwise non-standard error message cannot bypass retry. Fall back
+    to the legacy substring check when no usable error code is available.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return True
+        if (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return True
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def _begin_immediate_with_retry(conn: sqlite3.Connection, max_attempts: int = 6,
                                 base_delay: float = 0.05, max_delay: float = 1.0) -> None:
     """BEGIN IMMEDIATE with bounded exponential backoff on BUSY/LOCKED (R7.2)."""
@@ -528,7 +632,7 @@ def _begin_immediate_with_retry(conn: sqlite3.Connection, max_attempts: int = 6,
             conn.execute("BEGIN IMMEDIATE")
             return
         except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            if not _is_busy_or_locked(exc):
                 raise
             last = exc
             if attempt < max_attempts:
@@ -577,14 +681,16 @@ def _drop_dependent_objects(conn: sqlite3.Connection, plan: dict) -> None:
 
 
 def _recreate_dependent_objects(conn: sqlite3.Connection, plan: dict) -> None:
-    """Step 10: recreate indexes, table triggers, dependent views (+ their
-    triggers) verbatim. Any failure propagates → whole repair rolls back (R1.3).
+    """Step 10: recreate dependent objects in dependency order (F):
+    indexes → views → table triggers → view triggers, so every view exists before
+    any trigger whose body may reference it. SQL is recreated verbatim; any failure
+    propagates → whole repair rolls back (R1.3).
     """
     for _, sql in plan["indexes"]:
         conn.execute(sql)
-    for _, sql in plan["table_triggers"]:
+    for _, sql in plan["views"]:          # base-first; views before any trigger (F)
         conn.execute(sql)
-    for _, sql in plan["views"]:          # base-first order
+    for _, sql in plan["table_triggers"]:
         conn.execute(sql)
     for _, sql in plan["view_triggers"]:
         conn.execute(sql)
@@ -600,14 +706,40 @@ def _assert_integrity_or_raise(conn: sqlite3.Connection) -> None:
         raise RuntimeError(f"ADR-007 repair integrity_check failed: {res}")
 
 
+def _rename_new_to_dispatches(conn: sqlite3.Connection, orig_legacy) -> None:
+    """Step 9: rename dispatches_new → dispatches with legacy_alter_table ON (so
+    SQLite does not auto-rewrite the dependent triggers/views we recreate verbatim),
+    restoring the PRAGMA in a finally even when the RENAME raises (E — the PRAGMA is
+    non-transactional and would otherwise leak ON to later migrations).
+    """
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("ALTER TABLE dispatches_new RENAME TO dispatches")
+    finally:
+        conn.execute(f"PRAGMA legacy_alter_table={orig_legacy}")
+
+
+def _assert_no_solo_unique_or_raise(conn: sqlite3.Connection) -> None:
+    """Post-rebuild guard (B): fail (→ rollback) if any solo dispatch_id uniqueness
+    survived the rebuild; never return a false success."""
+    cols = [c for c, _ in _dispatch_table_columns(conn)]
+    if _has_solo_dispatch_id_unique(conn, cols):
+        raise RuntimeError(
+            "ADR-007 repair did not eliminate solo dispatch_id uniqueness "
+            "(a column/table PRIMARY KEY or UNIQUE survived the rebuild); rolling "
+            "back rather than reporting a false success (B).")
+
+
 def _execute_dispatches_rebuild(conn: sqlite3.Connection, plan: dict, project_id: str) -> None:
     """Steps 4–12 inside one BEGIN IMMEDIATE txn. foreign_keys is already OFF
-    (caller, steps 1–2). On any failure the explicit transaction is rolled back,
-    leaving the DB consistent; the caller restores foreign_keys.
+    (caller, steps 1–2). On any failure the explicit transaction is rolled back
+    (guarded so a rollback error never masks the original, K), leaving the DB
+    consistent; the caller restores foreign_keys.
     """
     orig_legacy = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
     _begin_immediate_with_retry(conn)                                   # step 4
     try:
+        _validate_existing_project_id_or_abort(conn, project_id)        # H: re-validate in-txn
         conn.execute(plan["new_table_sql"])                             # step 5
         _copy_rows_into_new(conn, plan, project_id)                     # step 6
         after = _content_checksum(conn, "dispatches_new", plan["checksum_cols"])
@@ -617,15 +749,17 @@ def _execute_dispatches_rebuild(conn: sqlite3.Connection, plan: dict, project_id
                 f"after={after}); aborting to prevent data loss.")
         _drop_dependent_objects(conn, plan)                             # step 8a
         conn.execute("DROP TABLE dispatches")                           # step 8b
-        conn.execute("PRAGMA legacy_alter_table=ON")
-        conn.execute("ALTER TABLE dispatches_new RENAME TO dispatches")  # step 9
-        conn.execute(f"PRAGMA legacy_alter_table={orig_legacy}")
+        _rename_new_to_dispatches(conn, orig_legacy)                    # step 9 (E)
         _restore_dispatches_sequence(conn, plan)                        # step 7 (post-rename)
         _recreate_dependent_objects(conn, plan)                         # step 10
         _assert_integrity_or_raise(conn)                                # step 11
+        _assert_no_solo_unique_or_raise(conn)                           # B: post-rebuild guard
         conn.execute("COMMIT")                                          # step 12
     except Exception:
-        conn.execute("ROLLBACK")
+        try:
+            conn.execute("ROLLBACK")                                    # K: guarded rollback
+        except Exception:
+            pass
         raise
 
 
@@ -655,12 +789,15 @@ def _repair_dispatches_adr007(conn: sqlite3.Connection, project_id: str) -> bool
     """
     if not _dispatches_needs_adr007_repair(conn):
         return False
+    if conn.in_transaction:
+        raise RuntimeError(
+            "ADR-007 repair requires a connection with no open transaction; it "
+            "refuses to commit the caller's uncommitted work (D). Commit or roll "
+            "back before invoking the repair.")
     _validate_existing_project_id_or_abort(conn, project_id)            # R1.4 pre-mutation abort
     plan = _build_dispatches_rebuild_plan(conn)                         # read-only capture
     orig_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]         # step 1
     prev_iso = conn.isolation_level
-    if conn.in_transaction:
-        conn.commit()
     conn.isolation_level = None                                         # explicit-txn control
     try:
         conn.execute("PRAGMA foreign_keys=OFF")                         # step 2 (before BEGIN)
