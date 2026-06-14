@@ -437,6 +437,97 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Canonical tracks (DB-backed, tenant-scoped) — R3.2 / ADR-007
+# ---------------------------------------------------------------------------
+#
+# ADR-007 binding: the canonical `tracks` / `track_open_items` tables are
+# multi-tenant, keyed by composite PRIMARY KEY (track_id, project_id). EVERY
+# read here MUST carry a `WHERE project_id = ?` predicate. A tenant-less SELECT
+# would merge rows across tenants — two tenants sharing a track_id would
+# overwrite/collide (codex F11 / opus #11). On an unavailable identity we return
+# a documented DEGRADED fallback (no rows + flag) rather than risk a
+# cross-tenant leak; we never SELECT canonical track rows without the predicate.
+
+_CANONICAL_TRACKS_SQL = (
+    "SELECT track_id, title, phase, next_up, sort_order, priority, "
+    "pr_ref, phase_changed_at, completed_at "
+    "FROM tracks WHERE project_id = ? "
+    "ORDER BY next_up DESC, sort_order ASC, track_id ASC"
+)
+
+_CANONICAL_TRACK_OI_SQL = (
+    "SELECT track_id, oi_id, link_type, link_source, linked_at "
+    "FROM track_open_items WHERE project_id = ? "
+    "ORDER BY linked_at DESC"
+)
+
+
+def _tracks_db_degraded(
+    reason: str, *, health: str, tenant_unavailable: bool
+) -> Dict[str, Any]:
+    """Documented DEGRADED fallback for canonical tracks (R3.2).
+
+    NEVER carries track rows — this guarantees no cross-tenant leak when the
+    identity is unavailable or the DB is locked/malformed.
+    """
+    return {
+        "available": False,
+        "health": health,
+        "tenant_unavailable": tenant_unavailable,
+        "reason": reason,
+        "project_id": None,
+        "tracks": [],
+        "open_items": [],
+    }
+
+
+def _query_canonical_scoped(db_path: Path, sql: str, project_id: str) -> List[Dict[str, Any]]:
+    """Run a tenant-scoped read-only query; project_id is ALWAYS bound (ADR-007)."""
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(sql, (project_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _build_tracks_from_db(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """Tenant-scoped canonical tracks/track_open_items reader (R3.2, ADR-007).
+
+    Returns ``available=True`` with tenant-scoped rows when the identity
+    resolves and the DB is healthy. On UNAVAILABLE identity (no derivable
+    project_id) → DEGRADED fallback (no rows, ``tenant_unavailable=True``),
+    never another tenant's rows. On a locked/malformed DB → degraded/failed
+    (no rows). A pre-migration DB (no ``tracks`` table yet) is a healthy empty
+    result, not a tenant problem.
+    """
+    pid = (project_id or "").strip()
+    if not pid:
+        return _tracks_db_degraded(
+            "tenant_identity_unavailable", health="degraded", tenant_unavailable=True
+        )
+
+    db_path = state_dir / "runtime_coordination.db"
+    healthy_empty = {
+        "available": True, "health": "healthy", "tenant_unavailable": False,
+        "reason": None, "project_id": pid, "tracks": [], "open_items": [],
+    }
+    if not db_path.exists():
+        return healthy_empty
+    try:
+        tracks = _query_canonical_scoped(db_path, _CANONICAL_TRACKS_SQL, pid)
+        open_items = _query_canonical_scoped(db_path, _CANONICAL_TRACK_OI_SQL, pid)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+        cls = _classify_db_error(exc)
+        if cls == "premigration":
+            return {**healthy_empty, "reason": "premigration"}
+        return _tracks_db_degraded(f"db_{cls}", health=cls, tenant_unavailable=False)
+
+    return {**healthy_empty, "tracks": tracks, "open_items": open_items}
+
+
+# ---------------------------------------------------------------------------
 # Feature state — register-canonical aggregation with FEATURE_PLAN.md fallback
 # ---------------------------------------------------------------------------
 
@@ -1610,6 +1701,7 @@ def build_t0_state(
     terminals = _build_terminals(state_dir)
     queues = _build_queues(dispatch_dir, state_dir)
     tracks = _build_tracks(state_dir)
+    canonical_tracks = _build_tracks_from_db(state_dir, project_id)  # R3.2/ADR-007: tenant-scoped
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -1636,6 +1728,7 @@ def build_t0_state(
         "terminals": terminals,
         "queues": queues,
         "tracks": tracks,
+        "canonical_tracks": canonical_tracks,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
         "open_items": open_items,
