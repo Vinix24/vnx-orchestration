@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import sqlite3
 import subprocess as _subprocess
 import sys
 from pathlib import Path
@@ -10,9 +11,77 @@ import pytest
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
+_MIGRATIONS = VNX_ROOT / "schemas" / "migrations"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import roadmap_manager as rm
+
+
+def _provision_track_layer(state_dir: Path) -> None:
+    """Provision a v30 runtime_coordination.db + an empty open-items store so
+    ``autopilot_tick()``'s track-sync leg runs cleanly (bridge → reconcile both
+    succeed). Mirrors tests/test_autopilot_tick_bridge.py::_build_tracks_db: the
+    base ``dispatches`` + ``coordination_events`` tables, then the track-layer
+    migration chain through 0030 (resolution schema) the OI bridge requires.
+
+    Without this the bridge raises BridgePreconditionError (pre-0030 DB), the
+    sync fails, and the D-N1 gate degrades the tick — these advance-loop tests
+    assert ``stepped``/``advanced``/``blocked``, so they need a clean sync.
+
+    ADR-007: every dispatches / track_open_items row is (id, project_id)-scoped
+    (composite ``UNIQUE(dispatch_id, project_id)``) — tenant isolation preserved.
+    """
+    import schema_migration  # noqa: PLC0415
+
+    (state_dir.parent / "events").mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'queued',
+            terminal_id TEXT, track TEXT, priority TEXT DEFAULT 'P2', pr_ref TEXT,
+            gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0, bundle_path TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            expires_after TEXT, metadata_json TEXT DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS coordination_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT, event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL DEFAULT 'dispatch', entity_id TEXT NOT NULL,
+            from_state TEXT, to_state TEXT, actor TEXT, reason TEXT, metadata_json TEXT,
+            occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            project_id TEXT
+        )
+        """
+    )
+    conn.commit()
+    for version, filename in [
+        (22, "0022_track_layer.sql"),
+        (24, "0024_tracks_tenant_scoping.sql"),
+        (27, "0027_planning_horizon_and_deliverable_view.sql"),
+        (28, "0028_tracks_derived_status.sql"),
+        (29, "0029_track_type_discriminator.sql"),
+        (30, "0030_track_oi_resolved_at.sql"),
+    ]:
+        sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, version, sql)
+        conn.commit()
+    conn.close()
+    # A PRESENT but empty store is a legitimate empty desired state; the bridge
+    # refuses a MISSING source (it would close every active link).
+    (state_dir / "open_items.json").write_text(
+        json.dumps({"items": []}), encoding="utf-8",
+    )
 
 
 @pytest.fixture
@@ -856,6 +925,7 @@ def test_autopilot_tick_full_loop_advances_a_to_b(roadmap_env, monkeypatch):
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
     _setup_passing_gates(roadmap_env["state_dir"])
+    _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
 
     # feature-a is conditional_auto + low risk → no approval token required
     tick1 = manager.autopilot_tick()
@@ -885,6 +955,7 @@ def test_autopilot_tick_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
     # No gate results written → gates_incomplete
+    _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
 
     tick1 = manager.autopilot_tick()
     assert tick1["status"] == "stepped"
@@ -913,6 +984,7 @@ def test_autopilot_tick_blocked_awaiting_human_approval(roadmap_env, monkeypatch
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_file)
     manager.load_feature("feature-hi", no_worktree=True)
+    _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
 
     tick1 = manager.autopilot_tick()
     assert tick1["status"] == "stepped"

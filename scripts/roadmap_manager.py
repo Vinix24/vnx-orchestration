@@ -694,6 +694,26 @@ Implement the minimum blocking fix required before the roadmap may advance.
         if not state.get("current_active_feature"):
             return {"status": "idle", "reason": "no_active_feature"}
 
+        # R5 (D2/D4): keep future-state self-aware. Sync open-items into
+        # track_open_items, then reconcile derived_status — SYNCHRONOUSLY, under
+        # this same VNX_ROADMAP_AUTOPILOT gate, BEFORE the feature step so the
+        # reconciler sees the freshly-synced links. A bridge/reconcile fault is
+        # surfaced in track_sync (D2 — one wiring site), never crashes the tick.
+        track_sync = self._run_track_sync()
+
+        # D-N1/D4 gate: a failed track-sync means future-state is NOT current, so
+        # the tick MUST NOT dispatch a feature step or advance on stale state.
+        # _run_track_sync derives its status from bridge.ok AND reconcile success,
+        # so status != "ok" here covers a raised fault AND a non-fatal bridge
+        # failure (ledger/per-item). Reflect it in the tick status (degraded, never
+        # "ok") with the error detail, and short-circuit before any progression.
+        if track_sync.get("status") != "ok":
+            return {
+                "status": "degraded",
+                "reason": "track_sync_failed",
+                "track_sync": track_sync,
+            }
+
         step_result = self.run_feature_step()
 
         if step_result["status"] == "dispatched":
@@ -702,21 +722,80 @@ Implement the minimum blocking fix required before the roadmap may advance.
                 "feature_id": step_result["feature_id"],
                 "pr_id": step_result["pr_id"],
                 "dispatch_id": step_result["dispatch_id"],
+                "track_sync": track_sync,
             }
 
         if step_result["status"] in ("failed", "no_active_feature"):
-            return {"status": step_result["status"], "step": step_result}
+            return {"status": step_result["status"], "step": step_result,
+                    "track_sync": track_sync}
 
         # Queue drained (no_ready_pr) → reconcile (via advance) + approval gate.
         advance_result = self.advance()
         if advance_result.get("advanced"):
-            return {"status": "advanced", "advance": advance_result}
+            return {"status": "advanced", "advance": advance_result,
+                    "track_sync": track_sync}
 
         return {
             "status": "blocked",
             "reason": advance_result.get("reason"),
             "advance": advance_result,
+            "track_sync": track_sync,
         }
+
+    def _run_track_sync(self) -> Dict[str, Any]:
+        """R5 tick step: bridge open-items → track_open_items, then reconcile.
+
+        Drives the runtime-callable bridge ``import_open_items_to_tracks`` and the
+        advisory ``reconcile_tracks`` IN ORDER (bridge BEFORE reconcile, so
+        derived_status reflects the freshly-synced links — D4 synchronous). Both
+        legs are fault-isolated: a raised bridge/reconcile error is captured into
+        the returned dict (status="error" + stage + message) so ``autopilot_tick``
+        surfaces it WITHOUT crashing (R5.2); a non-fatal bridge ledger warning is
+        surfaced honestly via ``bridge.ok``/``exit_code``. The bridge is
+        idempotent (D5), so the repeating tick is safe to re-run.
+
+        Uses the bridge's BridgeResult object (``.ok``/``.exit_code``) directly —
+        never ``main()``/subprocess/``sys.exit``.
+
+        ADR-007: both primitives are (state_dir, project_id)-scoped, so tenant
+        isolation across the operator's central DBs is preserved end to end.
+        """
+        from import_open_items_to_tracks import import_open_items_to_tracks  # noqa: PLC0415
+
+        try:
+            bridge = import_open_items_to_tracks(self.state_dir, self.project_id)
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the tick (R5.2)
+            return {"status": "error", "stage": "bridge", "error": str(exc)}
+
+        bridge_view = {
+            "ok": bridge.ok,
+            "exit_code": bridge.exit_code,
+            "linked": bridge.linked,
+            "reopened": bridge.reopened,
+            "unlinked": bridge.unlinked,
+            "errors": bridge.errors,
+        }
+        # D-N2: a non-fatal bridge failure (post-commit ledger emit failed → exit 4,
+        # or per-item errors → exit 1) leaves bridge.ok False. The sync did NOT
+        # succeed — NEVER report status "ok" when bridge.ok is False (the prior
+        # blocker). Surface it as a sync failure so autopilot_tick gates advance.
+        if not bridge.ok:
+            return {"status": "error", "stage": "bridge",
+                    "error": f"bridge reported failure "
+                             f"(exit_code={bridge.exit_code}, errors={bridge.errors})",
+                    "bridge": bridge_view}
+        try:
+            reconcile = self.reconcile_tracks()
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the tick (R5.2)
+            return {"status": "error", "stage": "reconcile",
+                    "error": str(exc), "bridge": bridge_view}
+        # Reconcile that returns a non-"ok" status (e.g. "disabled") is not a
+        # success either — derive the sync status from reconcile success too.
+        if reconcile.get("status") != "ok":
+            return {"status": "error", "stage": "reconcile",
+                    "error": f"reconcile returned status={reconcile.get('status')!r}",
+                    "bridge": bridge_view, "reconcile": reconcile}
+        return {"status": "ok", "bridge": bridge_view, "reconcile": reconcile}
 
     def reconcile_tracks(self) -> Dict[str, Any]:
         """Advisory track-layer rollup (Phase 3). Gated by VNX_ROADMAP_AUTOPILOT.
