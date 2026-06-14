@@ -52,6 +52,13 @@ Contracts implemented:
 Wiring into ``RoadmapManager.autopilot_tick()`` is PR-D, NOT this module.
 ``import_open_items_to_tracks`` is runtime-callable for that future caller.
 
+C3-N4 (ACCEPTED TRADEOFF — do NOT "fix"): committing the DB mutations BEFORE the
+ADR-005 events exist is the INTENTIONAL, operator-approved D3 posture — the DB is
+authoritative, events are at-most-once, and a missing event is reconcile-
+compensated (the reconciler re-derives ``derived_status`` from ``track_open_items``).
+Making the mutation+event pair atomic would require a transactional OUTBOX; that is
+deliberately OUT OF SCOPE here and tracked as a separate 1.x issue.
+
 ADR-007: all ``track_open_items`` access is (track_id, project_id)-scoped.
 ADR-005: every state mutation carries a matching NDJSON ledger event. Under the
 D3 deviation those events are emitted AFTER the DB commit; a post-commit emit
@@ -435,12 +442,14 @@ def _run_mutations(
 ) -> None:
     """Run ALL DB mutations in ONE transaction, COMMIT, then emit events (D3).
 
-    Run-level DB atomicity: a DB/validation error on ANY item rolls back EVERY
-    mutation of the run, resets the counters (C-N3), and propagates with its own
-    type (C-N4 → distinct CLI exit). On full success the transaction COMMITS
-    (the DB is now authoritative) and the deferred ADR-005 events are emitted
-    AFTER the commit — a post-commit emit failure is logged + non-fatal (exit 4),
-    never a rollback (D3 deviation; reconcile compensates).
+    Run-level DB atomicity: a DB/validation error on ANY item — OR a failure of
+    the run-level ``conn.commit()`` itself (C3-N3: the commit runs INSIDE the
+    guarded block) — rolls back EVERY mutation of the run, resets the counters
+    (C-N3), and propagates with its own type (C-N4 → distinct CLI exit), so a
+    commit failure surfaces a clean error with honest (zeroed) counters. On full
+    success the deferred ADR-005 events are emitted AFTER the commit — a
+    post-commit emit failure is logged + non-fatal (exit 4), never a rollback
+    (D3 deviation; reconcile compensates).
     """
     events: List[Tuple] = []
     try:
@@ -449,11 +458,13 @@ def _run_mutations(
                 state_dir, conn, project_id, oi_id, desired.get(oi_id),
                 existing_by_oi.get(oi_id, []), link_source, result, events,
             )
+        conn.commit()  # inside the guard (C3-N3): a commit failure rolls back + resets
     except Exception:
         conn.rollback()  # run-level rollback: undo every mutation, then propagate
         _reset_progress_counters(result)  # C-N3 — count only committed mutations
         raise
-    conn.commit()  # DB authoritative & committed; events follow (D3)
+    # DB now authoritative & committed; deferred ADR-005 events follow (D3). A
+    # post-commit emit failure is logged + non-fatal — never a rollback.
     _emit_deferred_events(state_dir, events, result)
 
 

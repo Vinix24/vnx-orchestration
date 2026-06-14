@@ -126,6 +126,57 @@ def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def _assert_conn_targets_db(
+    conn: sqlite3.Connection, state_dir: str | Path, op: str
+) -> None:
+    """Raise unless ``conn``'s main schema file is the DB derived from state_dir.
+
+    C3-N2: a primitive enrolled in a caller-owned transaction must never mutate
+    an unrelated database. Compare the resolved ``runtime_coordination.db`` path
+    against the connection's ``PRAGMA database_list`` 'main' file so a conn opened
+    on a different (e.g. wrong-tenant) database fails LOUD instead of silently
+    corrupting state.
+    """
+    expected = _db_path(state_dir).resolve()
+    main_file = next(
+        (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+        None,
+    )
+    actual = Path(main_file).resolve() if main_file else None
+    if actual != expected:
+        raise ValueError(
+            f"{op}: supplied conn targets {str(actual)!r}, expected "
+            f"{str(expected)!r} (state_dir mismatch); refusing to mutate a database "
+            "other than the one derived from state_dir (C3-N2)."
+        )
+
+
+def _validate_shared_conn(
+    conn: Optional[sqlite3.Connection],
+    state_dir: str | Path,
+    event_sink: Optional[list],
+    op: str,
+) -> None:
+    """Enforce the shared-connection (owns=False) contract for link/unlink (C3-N1).
+
+    When a caller supplies its own ``conn`` the primitive joins a CALLER-owned
+    transaction and must defer BOTH the commit AND the ADR-005 event to the caller:
+    a non-None ``event_sink`` is therefore REQUIRED (the event is appended for
+    post-commit emission; the primitive emits NOTHING before the run-level commit).
+    The conn must also target the database derived from ``state_dir`` (C3-N2). No-op
+    when ``conn`` is None — the standalone owns=True path is unchanged.
+    """
+    if conn is None:
+        return
+    if event_sink is None:
+        raise ValueError(
+            f"{op}: a caller-supplied conn (owns=False) must defer its ADR-005 event "
+            "— pass event_sink so the event emits only AFTER the caller's run-level "
+            "commit (post-commit DB-authoritative model; C3-N1)."
+        )
+    _assert_conn_targets_db(conn, state_dir, op)
+
+
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
@@ -480,14 +531,15 @@ def link_open_item(
 ) -> None:
     """Upsert an active track↔open-item link (INSERT OR REPLACE; reopen-safe).
 
-    Pass ``conn`` to enrol in a CALLER-owned transaction: commit is deferred to
-    the caller and any failure propagates (the caller rolls back). Without
-    ``conn`` the function self-manages its connection and commits as before.
+    Pass ``conn`` to enrol in a CALLER-owned transaction (owns=False): the
+    primitive defers BOTH the commit AND the ADR-005 event entirely to the caller
+    — it emits NOTHING itself. ``event_sink`` is then REQUIRED; the
+    ``track_oi_linked`` spec is appended for the caller to emit AFTER its single
+    run-level commit (D3 — DB authoritative; no event before the commit, no orphan
+    event on rollback; C3-N1). The conn must target the state_dir DB (C3-N2).
 
-    Pass ``event_sink`` (a list) to DEFER the ADR-005 ledger event: the row is
-    mutated but the ``track_oi_linked`` event is appended to the sink for the
-    caller to emit AFTER committing (D3 — DB authoritative; no orphan events on
-    rollback). Without a sink the event is emitted in-line.
+    Without ``conn`` (owns=True, standalone) the function self-manages its
+    connection, emits the event in-line, and commits — unchanged behaviour.
     """
     valid_link_types = frozenset({"blocks", "warns", "related"})
     valid_link_sources = frozenset({"file_path", "mention", "manual"})
@@ -498,6 +550,7 @@ def link_open_item(
         raise ValueError(f"Invalid link_source: {link_source!r}. Must be one of {sorted(valid_link_sources)}")
 
     owns = conn is None
+    _validate_shared_conn(conn, state_dir, event_sink, "link_open_item")
     _conn = _get_conn(state_dir) if owns else conn
     try:
         if not _conn.execute(
@@ -621,15 +674,16 @@ def unlink_open_item(
     event_sink: Optional[list] = None,
 ) -> None:
     """Close a track↔OI link non-destructively (resolved_at + reason; row kept).
-    Requires migration 0030. ``conn`` enrols in a CALLER-owned transaction;
-    ``event_sink`` DEFERS the ``track_oi_closed`` event for post-commit emission
-    (D3 — DB authoritative). Raises TrackNotFoundError / ValueError / RuntimeError."""
+    Requires migration 0030. A caller ``conn`` (owns=False) defers BOTH commit AND
+    the ``track_oi_closed`` event — ``event_sink`` REQUIRED, conn must target the
+    state_dir DB (D3; C3-N1/C3-N2). Raises TrackNotFoundError/ValueError/RuntimeError."""
     valid_link_types = frozenset({"blocks", "warns", "related"})
     if link_type not in valid_link_types:
         raise ValueError(f"Invalid link_type: {link_type!r}. Must be one of {sorted(valid_link_types)}")
     if not reason or not reason.strip():
         raise ValueError("reason is required and must not be empty")
     owns = conn is None
+    _validate_shared_conn(conn, state_dir, event_sink, "unlink_open_item")
     _conn = _get_conn(state_dir) if owns else conn
     try:
         has_resolved_at = any(
@@ -637,9 +691,7 @@ def unlink_open_item(
             for row in _conn.execute("PRAGMA table_info('track_open_items')")
         )
         if not has_resolved_at:
-            raise RuntimeError(
-                "track_open_items.resolved_at column absent; apply migration 0030 first."
-            )
+            raise RuntimeError("track_open_items.resolved_at column absent; apply migration 0030 first.")
         if not _conn.execute(
             "SELECT 1 FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),

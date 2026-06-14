@@ -822,3 +822,172 @@ class TestExceptionClassification:
         code = bridge.main(["--project-id", PROJECT_ID, "--state-dir", str(state_dir)])
         assert code != bridge.EXIT_LEDGER_FAILURE  # not misclassified as ledger
         assert code == bridge.EXIT_DB_ERROR == 6
+
+
+# ---------------------------------------------------------------------------
+# C3-N1 — consistent post-commit emit: NO event before the run-level commit
+# ---------------------------------------------------------------------------
+
+class _ConnSpy:
+    """Delegating proxy that records every commit() so a test can assert ordering."""
+
+    def __init__(self, real, log):
+        self._real = real
+        self._log = log
+
+    def commit(self):
+        self._log.append("commit")
+        return self._real.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestEmitDeferredUntilCommit:
+    def test_no_event_emitted_before_run_level_commit(self, state_dir, monkeypatch):
+        """C3-N1: a full bridge run emits NO track event until AFTER the single
+        run-level commit. Events are deferred via the sink and flushed post-commit,
+        so the DB is always authoritative before any ADR-005 event exists."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+
+        order: list = []
+        real_open = bridge._open_conn
+        real_emit = tracks_lib._emit_track_event
+
+        def fake_open(sd):
+            return _ConnSpy(real_open(sd), order)
+
+        def spy_emit(state_dir_, event_type, *a, **k):
+            order.append(("emit", event_type))
+            return real_emit(state_dir_, event_type, *a, **k)
+
+        monkeypatch.setattr(bridge, "_open_conn", fake_open)
+        monkeypatch.setattr(tracks_lib, "_emit_track_event", spy_emit)
+
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert res.linked == 1 and res.ok
+
+        assert "commit" in order, order
+        commit_idx = order.index("commit")
+        emit_idxs = [i for i, e in enumerate(order)
+                     if isinstance(e, tuple) and e[0] == "emit"]
+        assert emit_idxs, "expected at least one deferred track event"
+        assert all(i > commit_idx for i in emit_idxs), (
+            f"a track event was emitted BEFORE the run-level commit: {order}")
+
+    def test_shared_conn_without_event_sink_raises(self, state_dir):
+        """C3-N1: a caller-supplied conn (owns=False) MUST defer its event — calling
+        the primitive without an event_sink raises instead of emitting inline."""
+        _mk_track(state_dir, "feat-a")
+        conn = bridge._open_conn(state_dir)
+        try:
+            with pytest.raises(ValueError, match="event_sink"):
+                tracks_lib.link_open_item(
+                    state_dir, "feat-a", PROJECT_ID, "OI-1", "blocks", "manual",
+                    conn=conn,
+                )
+            with pytest.raises(ValueError, match="event_sink"):
+                tracks_lib.unlink_open_item(
+                    state_dir, "feat-a", PROJECT_ID, "OI-1", "blocks",
+                    reason="x", conn=conn,
+                )
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# C3-N2 — a caller-supplied conn must target the state_dir DB
+# ---------------------------------------------------------------------------
+
+class TestConnTargetValidation:
+    def test_link_rejects_foreign_conn(self, state_dir, tmp_path):
+        """C3-N2: a conn opened on a DIFFERENT database is rejected before any write."""
+        _mk_track(state_dir, "feat-a")
+        other = sqlite3.connect(str(tmp_path / "other.db"))
+        try:
+            with pytest.raises(ValueError, match="C3-N2"):
+                tracks_lib.link_open_item(
+                    state_dir, "feat-a", PROJECT_ID, "OI-1", "blocks", "manual",
+                    conn=other, event_sink=[],
+                )
+        finally:
+            other.close()
+
+    def test_unlink_rejects_foreign_conn(self, state_dir, tmp_path):
+        """C3-N2: unlink also rejects a conn that points at the wrong database."""
+        _mk_track(state_dir, "feat-a")
+        other = sqlite3.connect(str(tmp_path / "other2.db"))
+        try:
+            with pytest.raises(ValueError, match="C3-N2"):
+                tracks_lib.unlink_open_item(
+                    state_dir, "feat-a", PROJECT_ID, "OI-1", "blocks",
+                    reason="x", conn=other, event_sink=[],
+                )
+        finally:
+            other.close()
+
+    def test_matching_conn_is_accepted_and_defers(self, state_dir):
+        """A conn on the EXPECTED state_dir DB passes validation; the event is
+        deferred to the sink (not emitted) and the row commits with the caller."""
+        _mk_track(state_dir, "feat-a")
+        conn = bridge._open_conn(state_dir)
+        events: list = []
+        try:
+            tracks_lib.link_open_item(
+                state_dir, "feat-a", PROJECT_ID, "OI-1", "blocks", "manual",
+                conn=conn, event_sink=events,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-a"
+        assert events and events[0][0] == "track_oi_linked"  # deferred, not emitted
+
+
+# ---------------------------------------------------------------------------
+# C3-N3 — run-level commit failure rolls back + resets counters (commit in try)
+# ---------------------------------------------------------------------------
+
+class TestCommitFailureHandling:
+    class _CommitFails:
+        """Proxy whose commit() raises, leaving every other op delegated to real."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def commit(self):
+            raise sqlite3.OperationalError("simulated commit failure")
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    def test_commit_failure_rolls_back_and_resets_counters(self, state_dir):
+        """C3-N3: the run-level commit runs INSIDE the guarded block, so a commit
+        failure rolls back every mutation, resets the counters to zero (count only
+        committed work), and surfaces a clean typed error."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        items = [_oi("OI-1", pr_id="#100")]
+
+        real = bridge._open_conn(state_dir)
+        try:
+            bridge._require_resolution_schema(real)
+            result = bridge.BridgeResult(project_id=PROJECT_ID)
+            by_pr, track_ids = bridge._load_tracks_by_pr(real, PROJECT_ID)
+            existing = bridge._load_links_grouped(real, PROJECT_ID)
+            desired = bridge._build_desired(items, by_pr, track_ids, result)
+            all_ids = sorted(set(desired) | set(existing))
+
+            proxy = self._CommitFails(real)
+            with pytest.raises(sqlite3.OperationalError, match="commit failure"):
+                bridge._run_mutations(
+                    state_dir, proxy, PROJECT_ID, all_ids, desired, existing,
+                    "mention", result,
+                )
+            # Optimistic linked=1 is undone by the reset after the failed commit.
+            assert (result.linked, result.reopened,
+                    result.unlinked, result.skipped) == (0, 0, 0, 0)
+        finally:
+            real.close()
+        # The rollback undid the in-flight mutation — nothing committed.
+        assert _rows(state_dir, "OI-1") == []
