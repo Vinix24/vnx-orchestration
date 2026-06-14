@@ -449,7 +449,17 @@ def link_open_item(
     oi_id: str,
     link_type: str,
     link_source: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> None:
+    """Upsert an active track↔open-item link (INSERT OR REPLACE; reopen-safe).
+
+    Pass ``conn`` to enrol in a CALLER-owned transaction: commit is deferred to
+    the caller and any failure propagates (the caller rolls back). Without
+    ``conn`` the function self-manages its connection and commits as before.
+    The ADR-005 ledger event is emitted AFTER the row mutation so a mutation
+    failure cannot orphan it; an emit failure rolls the row back (R4.1/D3).
+    """
     valid_link_types = frozenset({"blocks", "warns", "related"})
     valid_link_sources = frozenset({"file_path", "mention", "manual"})
 
@@ -458,19 +468,16 @@ def link_open_item(
     if link_source not in valid_link_sources:
         raise ValueError(f"Invalid link_source: {link_source!r}. Must be one of {sorted(valid_link_sources)}")
 
-    conn = _get_conn(state_dir)
+    owns = conn is None
+    _conn = _get_conn(state_dir) if owns else conn
     try:
-        if not conn.execute(
+        if not _conn.execute(
             "SELECT 1 FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone():
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
 
-        _emit_track_event(
-            state_dir, "track_oi_linked", track_id, project_id, "system",
-            {"oi_id": oi_id, "link_type": link_type},
-        )
-        conn.execute(
+        _conn.execute(
             """
             INSERT OR REPLACE INTO track_open_items
                 (track_id, project_id, oi_id, link_type, link_source, linked_at)
@@ -478,9 +485,19 @@ def link_open_item(
             """,
             (track_id, project_id, oi_id, link_type, link_source, _now_utc()),
         )
-        conn.commit()
+        _emit_track_event(
+            state_dir, "track_oi_linked", track_id, project_id, "system",
+            {"oi_id": oi_id, "link_type": link_type},
+        )
+        if owns:
+            _conn.commit()
+    except Exception:
+        if owns:
+            _conn.rollback()
+        raise
     finally:
-        conn.close()
+        if owns:
+            _conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -571,50 +588,37 @@ def unlink_open_item(
     *,
     reason: str,
     actor: str = "operator",
+    conn: Optional[sqlite3.Connection] = None,
 ) -> None:
-    """Non-destructively close a track open-item link.
-
-    Sets resolved_at + resolution_reason so the reconciler stops treating the
-    OI as a blocker. Never deletes the row (audit trail preserved).
-
-    Requires migration 0030 (resolved_at column). Raises RuntimeError when
-    the column is absent so callers get a clear message rather than silent
-    data loss.
-
-    Raises TrackNotFoundError if the parent track does not exist.
-    Raises ValueError if the (track_id, project_id, oi_id, link_type) row is
-    not found or is already resolved.
-    """
+    """Close a track↔OI link non-destructively (resolved_at + reason; row kept).
+    Requires migration 0030. Pass ``conn`` for a CALLER-owned transaction (commit
+    deferred; ADR-005 event emitted AFTER the mutation, never before). Raises
+    TrackNotFoundError / ValueError (bad/missing/resolved row, empty reason) /
+    RuntimeError (pre-0030)."""
     valid_link_types = frozenset({"blocks", "warns", "related"})
     if link_type not in valid_link_types:
         raise ValueError(f"Invalid link_type: {link_type!r}. Must be one of {sorted(valid_link_types)}")
-
     if not reason or not reason.strip():
         raise ValueError("reason is required and must not be empty")
-
-    conn = _get_conn(state_dir)
+    owns = conn is None
+    _conn = _get_conn(state_dir) if owns else conn
     try:
-        # Guard: migration 0030 must be present.
         has_resolved_at = any(
             row[1] == "resolved_at"
-            for row in conn.execute("PRAGMA table_info('track_open_items')")
+            for row in _conn.execute("PRAGMA table_info('track_open_items')")
         )
         if not has_resolved_at:
             raise RuntimeError(
                 "track_open_items.resolved_at column absent; apply migration 0030 first."
             )
-
-        if not conn.execute(
+        if not _conn.execute(
             "SELECT 1 FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone():
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
-
-        row = conn.execute(
-            """
-            SELECT resolved_at FROM track_open_items
-            WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?
-            """,
+        row = _conn.execute(
+            "SELECT resolved_at FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
             (track_id, project_id, oi_id, link_type),
         ).fetchone()
         if not row:
@@ -627,23 +631,24 @@ def unlink_open_item(
                 f"Open item already resolved: track={track_id!r} oi_id={oi_id!r} "
                 f"link_type={link_type!r} (resolved_at={row['resolved_at']!r})"
             )
-
-        now = _now_utc()
+        _conn.execute(
+            "UPDATE track_open_items SET resolved_at = ?, resolution_reason = ? "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
+            (_now_utc(), reason.strip(), track_id, project_id, oi_id, link_type),
+        )
         _emit_track_event(
             state_dir, "track_oi_closed", track_id, project_id, actor,
             {"oi_id": oi_id, "link_type": link_type, "reason": reason},
         )
-        conn.execute(
-            """
-            UPDATE track_open_items
-            SET resolved_at = ?, resolution_reason = ?
-            WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?
-            """,
-            (now, reason.strip(), track_id, project_id, oi_id, link_type),
-        )
-        conn.commit()
+        if owns:
+            _conn.commit()
+    except Exception:
+        if owns:
+            _conn.rollback()
+        raise
     finally:
-        conn.close()
+        if owns:
+            _conn.close()
 
 
 def get_linked_open_items(

@@ -13,10 +13,16 @@ Single writer (D1): EVERY ``track_open_items`` mutation goes THROUGH
 state, then drives the primitives.
 
 Contracts implemented:
-  * R4.1 (D3) rollback-on-ledger-failure — the primitives emit the ADR-005
-    NDJSON ledger event BEFORE the DB mutation+commit, so a ledger-emission
-    failure aborts before any row changes (nothing committed). The bridge
-    catches that failure, records it, stops, and the CLI exits 4.
+  * R4.1 (D3) run-level rollback-on-ledger-failure — the bridge drives EVERY
+    link/unlink mutation through ONE shared connection/transaction and commits
+    only after the whole run succeeds. A ledger-emission failure ANYWHERE (even
+    on a non-first item) rolls back ALL track_open_items mutations of the run
+    (zero net changes); the bridge records it and the CLI exits 4. The ADR-005
+    event is emitted AFTER each mutation (never before) so a mutation failure
+    cannot orphan an event, and an emit failure rolls its mutation back.
+  * C-N1 the on-disk open-items source is authoritative: an ABSENT/unreadable
+    source fails LOUD (BridgeSourceError, exit 3) — never silently treated as an
+    empty store that would close every active link.
   * R4.2 load ALL links by (project_id, oi_id) and supersede/resolve every
     now-obsolete active link, including CLOSURE when there is no current
     mapping (the OI was closed or became unmappable).
@@ -67,8 +73,10 @@ _SEVERITY_TO_LINK_TYPE: Dict[str, str] = {
 # CLI exit codes (contract-bound — see module docstring).
 EXIT_OK = 0
 EXIT_GENERIC_ERROR = 1
+EXIT_SOURCE_MISSING = 3   # C-N1 — absent/unreadable open-items source
 EXIT_LEDGER_FAILURE = 4   # R4.1 / D3
 EXIT_SCHEMA_PRECONDITION = 5  # R4.3
+EXIT_DB_ERROR = 6        # C-N4 — DB-layer failure (NOT a ledger failure)
 
 
 class BridgeError(Exception):
@@ -79,8 +87,23 @@ class BridgePreconditionError(BridgeError):
     """Raised when the resolution schema (migration 0030) is absent (R4.3)."""
 
 
+class BridgeSourceError(BridgeError):
+    """Raised when the open-items source is absent or unreadable (C-N1).
+
+    A missing/unreadable source must NOT be treated as an empty store: that
+    would make every active link obsolete and close it (destructive). Fail loud
+    with a distinct exit code (3) instead.
+    """
+
+
 class LedgerEmitError(BridgeError):
     """Raised when a single-writer primitive fails to emit its ledger event (R4.1)."""
+
+
+# Exception types from a primitive that are NOT ledger failures: they keep their
+# own type and exit code (C-N4). Everything else a primitive raises is treated
+# as an ADR-005 ledger/emit failure (D3 → exit 4).
+_NON_LEDGER_ERRORS: Tuple[type, ...] = (sqlite3.Error, ValueError)
 
 
 @dataclass
@@ -121,7 +144,9 @@ def _parse_pr_number(pr_ref: Optional[str]) -> Optional[int]:
         return None
 
 
-def _read_conn(state_dir: str | Path) -> sqlite3.Connection:
+def _open_conn(state_dir: str | Path) -> sqlite3.Connection:
+    """Open the bridge connection used for BOTH the upfront reads and the single
+    run-level mutation transaction (C-N2). WAL + FK enforced."""
     conn = sqlite3.connect(str(Path(state_dir) / DB_FILENAME), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
@@ -142,14 +167,29 @@ def _require_resolution_schema(conn: sqlite3.Connection) -> None:
 
 
 def _load_open_items(state_dir: str | Path) -> List[dict]:
-    """Load the open-items store (open_items.json) from the state dir.
+    """Load the open-items store (open_items.json) — the AUTHORITATIVE desired state.
 
-    Mirrors open_items_manager's on-disk source of truth. Missing file → [].
+    An ABSENT or unreadable source is NOT an empty store: treating it as ``[]``
+    would make every existing active link obsolete and close it (destructive).
+    Fail LOUD with BridgeSourceError so the caller aborts before any mutation
+    (C-N1). A PRESENT file that parses to an empty list IS a legitimate empty
+    desired state and returns ``[]`` (obsolete links may then close).
     """
     path = Path(state_dir) / OPEN_ITEMS_FILENAME
     if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
+        raise BridgeSourceError(
+            f"open-items source absent: {path}. Refusing to treat a missing source "
+            "as an empty store (would close every active link). Create the store "
+            "(open_items_manager) or pass open_items explicitly."
+        )
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise BridgeSourceError(f"open-items source unreadable: {path}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BridgeSourceError(f"open-items source not valid JSON: {path}: {exc}") from exc
     if isinstance(data, dict):
         return list(data.get("items", []))
     return list(data) if isinstance(data, list) else []
@@ -233,25 +273,31 @@ def _build_desired(
 # ---------------------------------------------------------------------------
 
 def _safe_mutate(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Run a single-writer primitive; convert any failure into LedgerEmitError.
+    """Run a single-writer primitive, classifying its failure (C-N4).
 
-    Within the bridge's validated flow (existing tracks, valid link types,
-    schema pre-checked) the realistic failure mode of a primitive is the
-    ADR-005 ledger emit raising (D3). Surfacing it as LedgerEmitError lets the
-    orchestrator honor rollback-on-ledger-failure → CLI exit 4.
+    Only a genuine ADR-005 ledger/emit failure becomes LedgerEmitError (D3 →
+    exit 4). DB (sqlite3.Error) and validation (ValueError, incl. its
+    TrackNotFoundError / Invalid* subclasses) errors propagate WITH THEIR OWN
+    TYPE so the CLI maps them to the correct distinct exit code.
     """
     try:
         fn(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001 — re-raised as a typed bridge error
+    except _NON_LEDGER_ERRORS:
+        raise  # DB / validation — not a ledger failure (C-N4)
+    except Exception as exc:  # noqa: BLE001 — re-raised as a typed ledger error
         raise LedgerEmitError(str(exc)) from exc
 
 
 def _close_obsolete_links(
-    state_dir: str | Path, project_id: str, oi_id: str,
+    state_dir: str | Path, conn: sqlite3.Connection, project_id: str, oi_id: str,
     existing: List[dict], desired_key: Optional[Tuple[str, str]],
     result: BridgeResult,
 ) -> None:
-    """Resolve every ACTIVE link that is not the desired one (R4.2 + closure)."""
+    """Resolve every ACTIVE link that is not the desired one (R4.2 + closure).
+
+    Mutations run on the caller's ``conn`` (no per-link commit) so they share
+    the run-level transaction (C-N2).
+    """
     for link in existing:
         key = (link["track_id"], link["link_type"])
         if link["resolved_at"] is not None or key == desired_key:
@@ -263,50 +309,83 @@ def _close_obsolete_links(
         )
         _safe_mutate(
             tracks.unlink_open_item, state_dir, link["track_id"], project_id,
-            oi_id, link["link_type"], reason=reason, actor="system",
+            oi_id, link["link_type"], reason=reason, actor="system", conn=conn,
         )
         result.unlinked += 1
 
 
 def _establish_desired_link(
-    state_dir: str | Path, project_id: str, oi_id: str,
+    state_dir: str | Path, conn: sqlite3.Connection, project_id: str, oi_id: str,
     desired: Tuple[str, str], existing: List[dict], link_source: str,
     result: BridgeResult,
 ) -> None:
-    """Ensure the desired link is active; reopen-aware and idempotent (R4.4/R8.1)."""
+    """Ensure the desired link is active; reopen-aware and idempotent (R4.4/R8.1).
+
+    The reopen ledger event is emitted AFTER the link mutation (C-N3) and inside
+    the same run-level transaction, so a mutation failure cannot orphan a
+    ``track_oi_reopened`` event and an emit failure rolls the mutation back.
+    """
     track_id, link_type = desired
     same = [l for l in existing if (l["track_id"], l["link_type"]) == desired]
     if any(l["resolved_at"] is None for l in same):
         result.skipped += 1  # already active — idempotent no-op
         return
     reopening = any(l["resolved_at"] is not None for l in same)
+    _safe_mutate(
+        tracks.link_open_item, state_dir, track_id, project_id,
+        oi_id, link_type, link_source, conn=conn,
+    )
     if reopening:
         _safe_mutate(
             tracks._emit_track_event, state_dir, "track_oi_reopened",
             track_id, project_id, "system",
             {"oi_id": oi_id, "link_type": link_type},
         )
-    _safe_mutate(
-        tracks.link_open_item, state_dir, track_id, project_id,
-        oi_id, link_type, link_source,
-    )
-    if reopening:
         result.reopened += 1
     else:
         result.linked += 1
 
 
 def _sync_one_oi(
-    state_dir: str | Path, project_id: str, oi_id: str,
+    state_dir: str | Path, conn: sqlite3.Connection, project_id: str, oi_id: str,
     desired: Optional[Tuple[str, str]], existing: List[dict],
     link_source: str, result: BridgeResult,
 ) -> None:
     """Close obsolete links, then establish the current mapping (if any)."""
-    _close_obsolete_links(state_dir, project_id, oi_id, existing, desired, result)
+    _close_obsolete_links(state_dir, conn, project_id, oi_id, existing, desired, result)
     if desired is not None:
         _establish_desired_link(
-            state_dir, project_id, oi_id, desired, existing, link_source, result
+            state_dir, conn, project_id, oi_id, desired, existing, link_source, result
         )
+
+
+def _run_mutations(
+    state_dir: str | Path, conn: sqlite3.Connection, project_id: str,
+    all_oi_ids: List[str], desired: Dict[str, Tuple[str, str]],
+    existing_by_oi: Dict[str, List[dict]], link_source: str, result: BridgeResult,
+) -> None:
+    """Drive ALL link/unlink mutations through ONE transaction (C-N2).
+
+    Commit ONLY if every item succeeds. A ledger-emit failure ANYWHERE — even on
+    a non-first item — rolls the WHOLE run back (zero net track_open_items
+    changes) and is recorded for CLI exit 4. A non-ledger error (DB/validation)
+    rolls back and propagates with its own type (C-N4).
+    """
+    for oi_id in all_oi_ids:
+        try:
+            _sync_one_oi(
+                state_dir, conn, project_id, oi_id, desired.get(oi_id),
+                existing_by_oi.get(oi_id, []), link_source, result,
+            )
+        except LedgerEmitError as exc:
+            conn.rollback()  # run-level rollback: undo every prior mutation
+            result.ledger_failed = True
+            result.errors.append(f"ledger emit failed for OI {oi_id}: {exc}")
+            return
+        except Exception:
+            conn.rollback()  # DB/validation error: undo, then propagate (C-N4)
+            raise
+    conn.commit()
 
 
 def import_open_items_to_tracks(
@@ -319,34 +398,29 @@ def import_open_items_to_tracks(
     """Sync track_open_items to the open-items store. Runtime-callable (PR-D).
 
     Reads open items + their current track mapping, then drives the tracks.py
-    primitives so the reconciler's derived_status reflects reality. Aborts
-    fail-fast on a ledger-emission failure (R4.1) with zero committed changes.
+    primitives through ONE run-level transaction so the reconciler's
+    derived_status reflects reality. A ledger-emission failure rolls the whole
+    run back (R4.1/C-N2) with zero net changes.
 
-    Raises BridgePreconditionError on a pre-0030 DB (R4.3). Returns a
-    BridgeResult whose ``ledger_failed`` / ``exit_code`` carry the outcome.
+    Raises BridgePreconditionError on a pre-0030 DB (R4.3); BridgeSourceError
+    when the on-disk source is absent/unreadable (C-N1). Returns a BridgeResult
+    whose ``ledger_failed`` / ``exit_code`` carry the outcome.
     """
     result = BridgeResult(project_id=project_id)
-    conn = _read_conn(state_dir)
+    conn = _open_conn(state_dir)
     try:
         _require_resolution_schema(conn)
         items = _load_open_items(state_dir) if open_items is None else open_items
         by_pr, track_ids = _load_tracks_by_pr(conn, project_id)
         existing_by_oi = _load_links_grouped(conn, project_id)
         desired = _build_desired(items, by_pr, track_ids, result)
+        all_oi_ids = sorted(set(desired) | set(existing_by_oi))
+        _run_mutations(
+            state_dir, conn, project_id, all_oi_ids,
+            desired, existing_by_oi, link_source, result,
+        )
     finally:
         conn.close()
-
-    all_oi_ids = sorted(set(desired) | set(existing_by_oi))
-    for oi_id in all_oi_ids:
-        try:
-            _sync_one_oi(
-                state_dir, project_id, oi_id, desired.get(oi_id),
-                existing_by_oi.get(oi_id, []), link_source, result,
-            )
-        except LedgerEmitError as exc:
-            result.ledger_failed = True
-            result.errors.append(f"ledger emit failed for OI {oi_id}: {exc}")
-            break  # rollback-on-ledger-failure: stop before any further mutation
     return result
 
 
@@ -405,6 +479,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     except BridgePreconditionError as exc:
         print(f"[bridge] PRECONDITION FAILURE: {exc}", file=sys.stderr)
         return EXIT_SCHEMA_PRECONDITION
+    except BridgeSourceError as exc:
+        print(f"[bridge] SOURCE FAILURE: {exc}", file=sys.stderr)
+        return EXIT_SOURCE_MISSING
+    except sqlite3.Error as exc:
+        print(f"[bridge] DB ERROR: {exc}", file=sys.stderr)
+        return EXIT_DB_ERROR
     except Exception as exc:  # noqa: BLE001 — top-level CLI guard
         print(f"[bridge] ERROR: {exc}", file=sys.stderr)
         return EXIT_GENERIC_ERROR
