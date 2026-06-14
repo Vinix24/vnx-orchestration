@@ -1,12 +1,24 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-11T12:57:35.634169+00:00
+**Last updated**: 2026-06-14T16:02:17.164488+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #862 — feat(fsr-c): open-item→track bridge through tracks.py (R4.1–R4.4, D1/D3/D5) (#862) (2026-06-14)
+- #863 — feat(fsr-b): tenant-scoped canonical tracks in build_t0_state (#863) (2026-06-14)
+- #861 — feat(fsr-a2): version reconciliation via declarative invariant manifest (#861) (2026-06-14)
+- #859 — feat(fsr-a1): ADR-007 dispatches in-place rebuild — composite UNIQUE, 12-step, fail-closed tenant (#859) (2026-06-14)
+- #860 — chore(kimi): raise default per-chunk stall threshold 300s→600s (#860) (2026-06-14)
+- #858 — PR-E (future-state): kanban honesty — degraded signal, no silent drops, staleness truth (#858) (2026-06-13)
+- #857 — PR-0 (future-state): enforced test-isolation guard (no test mutates the live DB) (#857) (2026-06-13)
+- #853 — docs(provenance): hash-chain ADR-023 + receipt/pipeline truth-pass (events_path, .vnx-data paths) (#853) (2026-06-13)
+- #856 — test(hygiene): prevent production events-dir contamination + reconcile 3 silent test failures (#595 mock, #811 staging-guard) (#856) (2026-06-13)
+- #855 — fix(t0-skill): correct dead dispatch path + intelligence.sh paths + §12 prefixes + CLAUDE.md stale blocks (#855) (2026-06-13)
+- #854 — docs: CHANGELOG #840-#851 wave + ROADMAP shipped-item reclass + README date/tmux-default truth (#854) (2026-06-13)
+- #851 — chore(roadmap): PM-reconcile overnight wave (#842-#850) — status sync to bb8f6159 (#851) (2026-06-11)
 - #850 — fix(selflearn): injection-history-aware suppression breaks duplicate dominance (93% dup root-cause) (#850) (2026-06-11)
 - #849 — feat(tracks): oi-lifecycle-closure — track done, oi-close, dispatch linkage backfill, status --tracks (#849) (2026-06-11)
 - #848 — fix(dispatch): broker atomicity (orphan window, claim TOCTOU) + adapter pipe hygiene (H1/H6) (#848) (2026-06-11)
@@ -97,76 +109,9 @@ _Last 14 days — sourced from git merge commits._
 - #761 — feat(governance): provider-aware intelligence + receipt token/cost capture (non-Claude parity) (#761) (2026-06-01)
 - #760 — chore(governance): thin-T0 role + role-based manager block + auto-inject footer (packaged/wheel) (#760) (2026-06-01)
 - #759 — refactor(rename): _vN scripts -> canonical names + compat shims (remove in 1.0.1) (#759) (2026-05-31)
-- #753 — chore(security): remove dead prep-applier + de-advertise private products from public wheel (#753) (2026-05-30)
-- #752 — fix(security): pre-publish hardening — bash_check RCE + heartbeat shell-injection + strip private portfolio from wheel (#752) (2026-05-30)
-- #750 — refactor(hygiene): extract _validate_review_evidence helpers (no behavior change) (#750) (2026-05-30)
-- #749 — fix(hygiene): size findings are advisory (warning), not blocking + OI backfill (#749) (2026-05-30)
-- #747 — fix(migrate): create runtime_schema_version table before stamping it (#747) (2026-05-30)
-- #746 — fix(resolver-unify): unify project_id + DB path resolution for pool, dream, init (#746) (2026-05-30)
-- #745 — fix(migrate): seed default pool_config row + stamp runtime_schema_version (#745) (2026-05-30)
-- #743 — fix(migrate): bootstrap runtime_coordination.db + fix XDG path resolution for track/pool (#743) (2026-05-30)
-- #742 — chore(release): bump version rc3 → 1.0.0 for public launch (#742) (2026-05-29)
-- #740 — fix(blk-initmigrate): bootstrap runtime DBs in vnx init; add vnx migrate command (#740) (2026-05-29)
-- #741 — fix(selflearn): unify canonical DB path + add nightly dream phase (#741) (2026-05-29)
-- #738 — docs(1.0): update roadmap + archive superseded docs for 1.0 launch state (#738) (2026-05-29)
-- #730 — feat(ci): add Profile D pip-install smoke test (PR-CI-SMOKE) (#730) (2026-05-29)
-- #737 — fix(dream): guided exit when resolve_project_root fails outside git repo (#737) (2026-05-29)
-- #736 — feat(dispatch): scope register_dispatch to composite (dispatch_id, project_id) — ADR-007 (#736) (2026-05-29)
-- #732 — chore(packaging): wheel hygiene — exclude pycache/tests/benchmarks, remove stale dist/ (#732) (2026-05-29)
-- #735 — fix(dream): route all file I/O through canonical vnx_paths data root (#735) (2026-05-29)
-- #733 — fix(blk-readme): make quickstart work on clean pip install (#733) (2026-05-29)
-- #734 — fix(blk-initpath): guard _scaffold_vnx_data_local behind inside_project (#734) (2026-05-29)
-- #731 — fix(bootstrap): route dream/track through _engine bootstrap; guided pool status error (#731) (2026-05-29)
-- #729 — feat(ra6-autopilot-tick): autopilot_tick + scheduler wiring, ships DARK (#729) (2026-05-29)
-- #728 — Fix pool status project display (#728) (2026-05-29)
-- #727 — feat(pool): N-3 wire VNX_POOL_TASK_CONSUMER to pool_worker_runner spawn (#727) (2026-05-29)
-- #726 — feat(pool): N-2 pool_worker_runner single-claim entrypoint (#726) (2026-05-29)
-- #725 — fix(ra3b-gate-holes): close 4 advance-gate bypass holes (RA-3b) (#725) (2026-05-29)
-- #720 — feat(dispatch): atomic claim_next_queued_dispatch + migration 0026 (PR-N-1) (#720) (2026-05-29)
-- #724 — fix(gate): fetch origin/<branch> before diff, use origin/main...origin/<branch> (#724) (2026-05-29)
-- #723 — feat(ra5-step-driver): add step subcommand driving active feature PR queue (#723) (2026-05-29)
-- #721 — feat(ra4-human-gate): add human approval gate primitive to roadmap advance (#721) (2026-05-29)
-- #722 — fix(dream): resolve quality DB via canonical vnx_paths.resolve_state_dir (#722) (2026-05-29)
-- #719 — fix(dream): kill process group on kimi timeout, add entry log (PR-DREAM-HANG-2) (#719) (2026-05-29)
-- #718 — feat(ra3-gate-enforce): enforce review-gate evidence in reconcile/advance (#718) (2026-05-29)
-- #717 — test(fut-2b): ADR-007 structural regression tests for track child tables (#717) (2026-05-29)
-- #716 — feat(ra2-materialize): branch + worktree provisioning in load_feature (#716) (2026-05-29)
-- #715 — feat(dispatch): extend VNX_ISOLATED_WORKTREE to provider_dispatch (PR-PROVIDER-ISO) (#715) (2026-05-29)
-- #714 — feat(ra1-projectid): ADR-007 project_id stamp on roadmap_state.json + receipts (#714) (2026-05-29)
-- #713 — fix(hygiene): wire vulture, clear 100%-confidence dead-code findings (OI-001/OI-002/OI-005) (#713) (2026-05-29)
-- #712 — feat(dispatch): extend repo-map enrichment to all providers (PR-REPOMAP) (#712) (2026-05-29)
-- #711 — fix(dream): guard empty-DB hang + add kimi timeout (GAP-7/ADR-019) (#711) (2026-05-29)
-- #710 — fix(central-qdb): detect partial-init QI DB and complete bootstrap (OI-011) (#710) (2026-05-29)
-- #709 — feat(dispatch): complete smart-router for non-Claude providers + constraint-aware routing (#709) (2026-05-29)
-- #708 — feat(dream-scheduler-v2): install-scheduler subcommands + GAP-7 receipt preflight (#708) (2026-05-29)
-- #707 — fix(dream-mode-tier): register dream in TIER_OPERATOR_ONLY + bin/vnx dispatch (#707) (2026-05-29)
-- #706 — fix(pool): terminate subprocess and remove worktree on scale_down and reap (OI-010) (#706) (2026-05-29)
-- #705 — feat(dispatch): per-dispatch git worktree isolation, env-gated VNX_ISOLATED_WORKTREE (default off) (#705) (2026-05-29)
-- #656 — feat(governance): PreToolUse hook blocks raw claude worker-spawns, enforces subprocess_dispatch (#656) (2026-05-29)
-- #702 — feat(smart-routing-activate): cost-aware auto-route with VNX_AUTO_ROUTE env gate (#702) (2026-05-29)
-- #701 — fix(kimi-dispatch-enrichment): wire intelligence injection into kimi dispatch path (#701) (2026-05-29)
-- #699 — fix(a14-wire-0025): wire 0025_dream_consolidation.sql into quality-DB bootstrap (#699) (2026-05-29)
-- #697 — fix(a14-pr2-fix): address all 5 codex blocking findings on PR #696 (#697) (2026-05-29)
-- #691 — fix(issue-687): dispatches sqlite_sequence preservation in 0022 (#691) (2026-05-29)
-- #684 — feat(h-cost-tracking): universal cost tracking for all providers (#684) (2026-05-29)
-- #683 — refactor(hyg-4): extract subparser registrations and dispatch chain from main() (#683) (2026-05-29)
-- #682 — feat(d-role-prompts): add database-engineer, intelligence-engineer, security-engineer roles + update architect (#682) (2026-05-29)
-- #679 — feat(int-1): adrs table + FTS5 + indexer (PR-INT-1) (#679) (2026-05-29)
-- #678 — feat(skills): add STEP 0 ADR-check to 5 skill SKILL.md files (#678) (2026-05-29)
-- #677 — fix(trace): dual-scheme pr_id+pr_number + backfill — cat-C gap 73% → 0% (PR-B-TRACE) (#677) (2026-05-29)
-- #676 — feat(future): track layer schema + CLI + migration (PR-FUT-1) (#676) (2026-05-28)
-
-**WAVE 6**
-- #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
-
-**WAVE-5**
-- #680 — feat(int-2): Wave-5 ADR injection in dispatch context (#680) (2026-05-29)
 
 **WAVE0**
 - #756 — chore(wave0): untrack .venv+scratch (keep FEATURE_PLAN/PR_QUEUE), strip emoji/buzzwords (#756) (2026-05-31)
-
-**WAVE6**
-- #698 — fix(wave6-pool-lease-spawn): insert terminal_leases row before add_member in pool scale_up (#698) (2026-05-29)
 
 ## Active features
 
@@ -340,4 +285,10 @@ Status: in-progress
 
 ### injection-history-suppression — Self-learning quality: injection-history-aware suppression breaks 93% duplicate dominance
 Status: done
+
+### future-state-rebuild-batch — Future-state rebuild batch (FSR): ADR-007 in-place dispatches rebuild + version-reconciliation manifest + tenant-scoped build_t0_state + OI->track bridge -> autopilot_tick wiring
+Status: in-progress
+
+### pm-gate-agent-automation — PM-gate agent automation — event-driven per-receipt roadmap maintenance
+Status: planned
 

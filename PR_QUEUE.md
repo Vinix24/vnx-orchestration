@@ -8,7 +8,7 @@
 ## Progress Overview
 Launch status: **pre-launch** (version 1.0.0)
 Last verified: 2026-06-10 against origin/main@bb8f6159
-Merged launch PRs: 49 | Queued: 0
+Merged launch PRs: 55 | Queued: 1
 
 ## Status
 
@@ -62,6 +62,15 @@ Merged launch PRs: 49 | Queued: 0
 - #848 — fix(dispatch): broker atomicity (orphan window, claim TOCTOU) + adapter pipe hygiene (H1/H6, items 5+6) [feature=sweep-hardening-batch1]
 - #846 — docs: truth-pass for 1.0 launch — version labels, ADR amendments, surface sync, provenance [feature=roadmap-governance-hygiene]
 - #850 — fix(selflearn): injection-history-aware suppression breaks duplicate dominance (93% dup root-cause) [feature=injection-history-suppression]
+- #857 — PR-0 (future-state): enforced test-isolation guard (no test mutates the live DB) [feature=future-state-rebuild-batch]
+- #858 — PR-E (future-state): kanban honesty — degraded signal, no silent drops, staleness truth [feature=future-state-rebuild-batch]
+- #859 — feat(fsr-a1): ADR-007 dispatches in-place rebuild — composite UNIQUE, 12-step, fail-closed tenant [feature=future-state-rebuild-batch]
+- #861 — feat(fsr-a2): version reconciliation via declarative invariant manifest [feature=future-state-rebuild-batch]
+- #863 — feat(fsr-b): tenant-scoped canonical tracks in build_t0_state [feature=future-state-rebuild-batch]
+- #862 — feat(fsr-c): open-item→track bridge through tracks.py (R4.1–R4.4, D1/D3/D5) [feature=future-state-rebuild-batch]
+
+### Queued / In Progress
+- #871 — feat(fsr-d): OI->track bridge wiring into autopilot_tick [risk=high, feature=future-state-rebuild-batch]
 
 ## Remaining Launch Blockers
 - LB-3 (operator): PyPI publish go (artifacts verified + staged) -> pip install from PyPI check -> git tag v1.0.0 + GitHub release. Optional: central-install refresh + TestPyPI dry-run first. LB-4..LB-7 resolved 2026-06-10 (#833/#835/#836/#839/#840, see launch-sweep-blockers).
