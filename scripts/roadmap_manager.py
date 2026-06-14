@@ -701,6 +701,19 @@ Implement the minimum blocking fix required before the roadmap may advance.
         # surfaced in track_sync (D2 — one wiring site), never crashes the tick.
         track_sync = self._run_track_sync()
 
+        # D-N1/D4 gate: a failed track-sync means future-state is NOT current, so
+        # the tick MUST NOT dispatch a feature step or advance on stale state.
+        # _run_track_sync derives its status from bridge.ok AND reconcile success,
+        # so status != "ok" here covers a raised fault AND a non-fatal bridge
+        # failure (ledger/per-item). Reflect it in the tick status (degraded, never
+        # "ok") with the error detail, and short-circuit before any progression.
+        if track_sync.get("status") != "ok":
+            return {
+                "status": "degraded",
+                "reason": "track_sync_failed",
+                "track_sync": track_sync,
+            }
+
         step_result = self.run_feature_step()
 
         if step_result["status"] == "dispatched":
@@ -762,12 +775,26 @@ Implement the minimum blocking fix required before the roadmap may advance.
             "unlinked": bridge.unlinked,
             "errors": bridge.errors,
         }
+        # D-N2: a non-fatal bridge failure (post-commit ledger emit failed → exit 4,
+        # or per-item errors → exit 1) leaves bridge.ok False. The sync did NOT
+        # succeed — NEVER report status "ok" when bridge.ok is False (the prior
+        # blocker). Surface it as a sync failure so autopilot_tick gates advance.
+        if not bridge.ok:
+            return {"status": "error", "stage": "bridge",
+                    "error": f"bridge reported failure "
+                             f"(exit_code={bridge.exit_code}, errors={bridge.errors})",
+                    "bridge": bridge_view}
         try:
             reconcile = self.reconcile_tracks()
         except Exception as exc:  # noqa: BLE001 — surface, never crash the tick (R5.2)
             return {"status": "error", "stage": "reconcile",
                     "error": str(exc), "bridge": bridge_view}
-
+        # Reconcile that returns a non-"ok" status (e.g. "disabled") is not a
+        # success either — derive the sync status from reconcile success too.
+        if reconcile.get("status") != "ok":
+            return {"status": "error", "stage": "reconcile",
+                    "error": f"reconcile returned status={reconcile.get('status')!r}",
+                    "bridge": bridge_view, "reconcile": reconcile}
         return {"status": "ok", "bridge": bridge_view, "reconcile": reconcile}
 
     def reconcile_tracks(self) -> Dict[str, Any]:

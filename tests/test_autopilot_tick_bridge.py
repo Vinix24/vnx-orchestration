@@ -208,6 +208,14 @@ def _derived_status(state_dir: Path, track_id: str):
     return row[0] if row else None
 
 
+def _pending_dispatches(state_dir: Path) -> list:
+    """Promoted dispatch files. A non-empty list proves run_feature_step ran
+    (created + promoted a PR dispatch) — i.e. the tick advanced. The D-N1 gate
+    must leave this EMPTY when the track-sync failed (no advance on stale state)."""
+    pending = state_dir.parent / "dispatches" / "pending"
+    return sorted(pending.glob("*.md")) if pending.exists() else []
+
+
 # ---------------------------------------------------------------------------
 # R5.1 — tick bridges then reconciles, in one tick, no CLI
 # ---------------------------------------------------------------------------
@@ -308,3 +316,82 @@ def test_autopilot_tick_surfaces_bridge_failure_without_crashing(env, monkeypatc
     assert sync["stage"] == "bridge"
     assert "forced bridge failure" in sync["error"]
     assert "reconcile" not in sync  # reconcile never ran
+
+
+# ---------------------------------------------------------------------------
+# D-N1 / D-N2 — a failed track-sync GATES advance + degrades the tick status
+# ---------------------------------------------------------------------------
+
+def test_autopilot_tick_gates_advance_on_bridge_failure(env, monkeypatch):
+    """D-N1: a forced bridge failure makes the tick status reflect the error
+    (degraded, NOT 'ok'/'stepped') AND gates the downstream advance — no PR
+    dispatch is created on stale state (no silent advance on a failed sync)."""
+    _seed_blocking_oi(env["state_dir"])
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    import import_open_items_to_tracks as bridge_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("forced bridge failure")
+
+    monkeypatch.setattr(bridge_mod, "import_open_items_to_tracks", _boom)
+
+    result = manager.autopilot_tick()  # must not raise
+
+    # (a) status reflects the failure — degraded, never "ok".
+    assert result["status"] == "degraded"
+    assert result["reason"] == "track_sync_failed"
+    assert result["track_sync"]["status"] == "error"
+    assert result["track_sync"]["stage"] == "bridge"
+    # (b) advance is gated: run_feature_step never ran → no promoted dispatch.
+    assert _pending_dispatches(env["state_dir"]) == []
+
+
+def test_autopilot_tick_gates_advance_on_reconcile_failure(env, monkeypatch):
+    """D-N1: a forced reconcile failure (after the bridge committed) likewise
+    degrades the tick status and gates advance — no dispatch is created."""
+    _seed_blocking_oi(env["state_dir"])
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("forced reconcile failure")
+
+    monkeypatch.setattr(track_reconciler, "reconcile_all_tracks", _boom)
+
+    result = manager.autopilot_tick()  # must not raise
+
+    assert result["status"] == "degraded"
+    assert result["reason"] == "track_sync_failed"
+    assert result["track_sync"]["status"] == "error"
+    assert result["track_sync"]["stage"] == "reconcile"
+    # The bridge DID commit before reconcile failed (D4 ordering) ...
+    assert result["track_sync"]["bridge"]["ok"] is True
+    # ... but the tick still gates advance: no PR dispatch on a half-synced state.
+    assert _pending_dispatches(env["state_dir"]) == []
+
+
+def test_autopilot_tick_happy_path_returns_ok_and_advances(env):
+    """Happy path: a clean track-sync (bridge.ok AND reconcile ok) leaves the
+    gate OPEN — the tick is NOT degraded, the sync is 'ok', track_open_items +
+    derived_status are updated, and the feature step runs (PR dispatched)."""
+    _seed_blocking_oi(env["state_dir"])
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    result = manager.autopilot_tick()
+
+    # The gate did NOT fire: the tick proceeded to the feature step.
+    assert result["status"] == "stepped"
+    assert result["track_sync"]["status"] == "ok"
+    assert result["track_sync"]["bridge"]["ok"] is True
+    assert result["track_sync"]["reconcile"]["status"] == "ok"
+    # State updated: the blocking link is live and derived_status flipped.
+    assert _rows(env["state_dir"], "OI-1")[0]["track_id"] == "feat-a"
+    assert _derived_status(env["state_dir"], "feat-a") == "blocked"
+    # Advance ran: a PR dispatch was created + promoted.
+    assert len(_pending_dispatches(env["state_dir"])) == 1
