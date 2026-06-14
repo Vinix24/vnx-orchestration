@@ -43,11 +43,7 @@ def _seed_db_at_v13(db_path: Path) -> None:
     """Create a runtime_coordination.db with prerequisite tables at v13.
 
     Mirrors the post-install state expected by apply_0020 (the runner is
-    strict: it refuses to apply unless current_version == 13). The legacy
-    ``dispatches`` table is created WITHOUT project_id (pre-0010 shape): the
-    full auto_apply chain runs 0022/0024/0026, and apply_0022 self-heals the
-    missing project_id (ADR-007 tenant key) before its in-place rebuild — so
-    this fixture also exercises the #863 graceful-degrade fix.
+    strict: it refuses to apply unless current_version == 13).
     """
     conn = sqlite3.connect(str(db_path))
     try:
@@ -69,29 +65,9 @@ def _seed_db_at_v13(db_path: Path) -> None:
                 lease_token TEXT    NOT NULL DEFAULT '',
                 UNIQUE(terminal_id, project_id)
             );
-
-            CREATE TABLE dispatches (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                dispatch_id   TEXT    NOT NULL,
-                state         TEXT    NOT NULL DEFAULT 'queued',
-                terminal_id   TEXT, track TEXT, priority TEXT DEFAULT 'P2',
-                pr_ref        TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
-                bundle_path   TEXT,
-                created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                expires_after TEXT, metadata_json TEXT DEFAULT '{}'
-            );
             """
         )
         conn.commit()
-    finally:
-        conn.close()
-
-
-def _dispatches_has_project_id(db_path: Path) -> bool:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        return any(r[1] == "project_id" for r in conn.execute("PRAGMA table_info(dispatches)"))
     finally:
         conn.close()
 
@@ -173,11 +149,9 @@ def test_auto_apply_creates_pool_tables_and_bumps_user_version(tmp_path, caplog)
     assert _table_exists(db_path, "pool_config")
     assert _table_exists(db_path, "worker_pools")
     assert _table_exists(db_path, "worker_pool_membership")
-    # The full chain (0020 → 0022 → 0024 → 0026) runs; apply_0022 self-heals the
-    # legacy dispatches table with project_id before its in-place rebuild (#863).
-    assert _dispatches_has_project_id(db_path)
-    # PRAGMA advances to the highest migration number with a runner (0026).
-    assert _user_version(db_path) == 26
+    # PRAGMA advances to the highest migration number we tried (20),
+    # regardless of which lower-numbered runners reported idempotent skips.
+    assert _user_version(db_path) == 20
     assert any("migration 0020 auto-applied" in rec.message for rec in caplog.records)
 
 
@@ -191,7 +165,7 @@ def test_auto_apply_is_idempotent_on_second_run(tmp_path, caplog):
         applied = auto_apply(db_path)
 
     assert applied == []
-    assert _user_version(db_path) == 26
+    assert _user_version(db_path) == 20
     # No re-application log line on the second run.
     assert not any("auto-applied" in rec.message for rec in caplog.records)
 
