@@ -78,6 +78,7 @@ class IndexInvariant:
     columns: Tuple[str, ...]     # key column names, in order
     unique: bool = False
     partial: bool = False        # has a WHERE predicate
+    where: Optional[str] = None  # the partial WHERE predicate text (compared normalized)
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ _DISPATCH_INDEXES = (
     IndexInvariant("idx_dispatch_terminal", ("terminal_id", "state")),
     IndexInvariant("idx_dispatch_created", ("created_at",)),
     IndexInvariant("idx_dispatches_ready", ("state", "operator_approved_at"),
-                   partial=True),
+                   partial=True, where="state = 'proposed' OR state = 'ready'"),
 )
 
 
@@ -213,7 +214,8 @@ def _tracks_v22() -> TableInvariant:
     return TableInvariant(
         name="tracks", columns=_TRACKS_COLS_V22, pk=("track_id",),
         indexes=(
-            IndexInvariant("ux_tracks_next_up", ("project_id",), unique=True, partial=True),
+            IndexInvariant("ux_tracks_next_up", ("project_id",), unique=True, partial=True,
+                           where="next_up = 1 AND phase = 'queued'"),
             IndexInvariant("idx_tracks_phase_nextup",
                            ("project_id", "phase", "next_up", "sort_order")),
         ),
@@ -224,7 +226,7 @@ def _tracks_composite(columns: Dict[str, ColumnInvariant],
                       extra_indexes: Tuple[IndexInvariant, ...] = ()) -> TableInvariant:
     base = (
         IndexInvariant("ux_tracks_next_up_per_project", ("project_id",),
-                       unique=True, partial=True),
+                       unique=True, partial=True, where="next_up = 1 AND phase = 'queued'"),
         IndexInvariant("idx_tracks_project_phase_nextup",
                        ("project_id", "phase", "next_up", "sort_order")),
     )
@@ -336,7 +338,8 @@ GROUP BY project_id, output_ref
 """)
 
 _OI_BLOCKER_IDX = (IndexInvariant("idx_track_oi_active_blockers",
-                                  ("track_id", "project_id", "link_type"), partial=True),)
+                                  ("track_id", "project_id", "link_type"), partial=True,
+                                  where="resolved_at IS NULL"),)
 
 
 def _build_manifest() -> Dict[int, VersionManifest]:
@@ -437,6 +440,26 @@ def _normalize_sql(sql: Optional[str]) -> str:
     return s.replace("if not exists ", "")
 
 
+def _normalize_predicate(pred: Optional[str]) -> str:
+    """Collapse a partial-index WHERE predicate to a comparable canonical form."""
+    return re.sub(r"\s+", " ", pred or "").strip().rstrip(";").strip().lower()
+
+
+def _index_where_predicate(conn: sqlite3.Connection, index_name: str) -> Optional[str]:
+    """The raw WHERE predicate text of a partial index (None when absent/non-partial).
+
+    PRAGMA index_xinfo does NOT expose the predicate, so it is read from the
+    verbatim CREATE INDEX statement in sqlite_master: everything after the first
+    WHERE keyword (a CREATE INDEX has no WHERE other than the partial predicate)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (index_name,)
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    m = re.search(r"(?i)\bWHERE\b", row[0])
+    return row[0][m.end():] if m else None
+
+
 # ---------------------------------------------------------------------------
 # Validators (each returns a list of human-readable violation strings)
 # ---------------------------------------------------------------------------
@@ -470,6 +493,15 @@ def _validate_indexes(conn: sqlite3.Connection, tbl: TableInvariant) -> List[str
             out.append(f"{tbl.name}.{idx.name}: unique={unique} != {idx.unique}")
         if partial != idx.partial:
             out.append(f"{tbl.name}.{idx.name}: partial={partial} != {idx.partial}")
+        elif idx.partial and idx.where is not None:
+            # A2-N1: an index with the right columns but a DIFFERENT WHERE predicate is
+            # NOT the declared invariant — the boolean partial flag alone would accept
+            # a mis-predicated index, so the actual predicate text must also match.
+            actual_pred = _normalize_predicate(_index_where_predicate(conn, idx.name))
+            want_pred = _normalize_predicate(idx.where)
+            if actual_pred != want_pred:
+                out.append(f"{tbl.name}.{idx.name}: partial predicate "
+                           f"{actual_pred!r} != {want_pred!r}")
     return out
 
 

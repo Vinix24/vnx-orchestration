@@ -1061,13 +1061,32 @@ def _run_version_reconciliation(conn: sqlite3.Connection, db_path) -> None:
     """R2.1: validate the claimed user_version against the invariant manifest and
     DOWNGRADE to the highest fully-satisfied version on mismatch, so the numbered
     walk re-applies the exposed migrations. Runs AFTER the ADR-007 repair, BEFORE
-    the walk (R2.2). A downgrade is committed immediately (deliberate state change);
-    genuine corruption with no satisfiable lower version raises (schema_manifest)."""
-    result = schema_manifest.reconcile_user_version(conn)
-    if not result.reconciled:
-        return
-    conn.commit()
-    _emit_version_reconcile_event(db_path, result.claimed, result.corrected, result.violations)
+    the walk (R2.2). Genuine corruption with no satisfiable lower version raises.
+
+    A2-N2 (PRD D3, rollback-on-ledger-failure): the downgrade and its ADR-005 ledger
+    event are ATOMIC. The reconcile (which writes `PRAGMA user_version`) runs inside an
+    explicit BEGIN IMMEDIATE and the event is emitted BEFORE the COMMIT, so a ledger
+    emit failure ROLLS BACK the downgrade — nothing is committed without its audit
+    event. A bare conn.commit() after the write does NOT suffice: `PRAGMA user_version`
+    auto-commits in autocommit mode, so the explicit transaction is what makes the
+    mutation revertible. Cite ADR-005 (audit ledger) + ADR-009 (schema-first)."""
+    prev_iso = conn.isolation_level
+    conn.isolation_level = None                         # full manual transaction control
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = schema_manifest.reconcile_user_version(conn)
+            if not result.reconciled:
+                conn.execute("ROLLBACK")               # no mutation; release the lock
+                return
+            _emit_version_reconcile_event(             # D3: emit BEFORE the commit
+                db_path, result.claimed, result.corrected, result.violations)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")                   # emit/reconcile failure → revert downgrade
+            raise
+    finally:
+        conn.isolation_level = prev_iso
     print(f"  [reconcile] user_version {result.claimed} → {result.corrected}: claimed "
           f"version failed its manifest; re-walk will re-apply. first violations: "
           f"{list(result.violations)[:2]}")

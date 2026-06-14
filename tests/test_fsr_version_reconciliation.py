@@ -23,6 +23,7 @@ and operates ONLY on temp DBs; the live ~/.vnx-data is never opened or mutated.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -337,6 +338,37 @@ def test_invariant_wrong_nullability(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_invariant_wrong_partial_index_predicate(tmp_path: Path) -> None:
+    """WRONG PARTIAL PREDICATE (A2-N1): an index keyed on the correct columns but with a
+    DIFFERENT WHERE predicate must FAIL validation and trigger the downgrade — not be
+    silently accepted. The boolean partial check alone passes (the index IS still
+    partial with the right cols); only the predicate comparison catches the break."""
+    proj = _build_db_at(tmp_path, 30)
+    db = _db_path(proj)
+    conn = _open(db)
+    # Re-create the v30 blocker index with the SAME cols + partial flag but the WRONG
+    # predicate (resolved_at IS NOT NULL instead of IS NULL). user_version stays 30.
+    conn.execute("DROP INDEX idx_track_oi_active_blockers")
+    conn.execute(
+        "CREATE INDEX idx_track_oi_active_blockers "
+        "ON track_open_items(track_id, project_id, link_type) "
+        "WHERE resolved_at IS NOT NULL")
+    conn.commit()
+    try:
+        # Boolean-only check would have PASSED: the index is still partial w/ right cols.
+        unique, partial, keycols = sm._actual_indexes(conn, "track_open_items")[
+            "idx_track_oi_active_blockers"]
+        assert partial is True and keycols == ("track_id", "project_id", "link_type")
+        # The predicate comparison is what flags it.
+        violations = sm.validate_db_at_version(conn, 30)
+        assert any("idx_track_oi_active_blockers" in v and "partial predicate" in v
+                   for v in violations), violations
+        result = sm.reconcile_user_version(conn)
+        assert result.reconciled and result.corrected == 29   # v29 omits this v30 index
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # Oscillation guard (R2.1): non-convergence aborts loudly, never loops
 # --------------------------------------------------------------------------- #
@@ -388,6 +420,44 @@ def test_genuine_corruption_run_fails_loudly(tmp_path: Path) -> None:
     conn.close()
     with pytest.raises(sm.SchemaReconciliationError):
         mfs.run(proj)
+
+
+# --------------------------------------------------------------------------- #
+# A2-N2 (PRD D3): downgrade + ADR-005 ledger event are atomic
+# --------------------------------------------------------------------------- #
+
+def test_reconcile_ledger_emit_failure_rolls_back_downgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2-N2 / PRD D3 (rollback-on-ledger-failure): if the ADR-005 reconcile event emit
+    RAISES, the user_version downgrade MUST NOT be persisted (nothing committed without
+    its audit event) and the error MUST surface. A genuine v27 DB stamped @30 would
+    otherwise be downgraded to 27; with a failing emitter the DB stays at the lying 30
+    and no schema_version_reconciled event is written."""
+    proj = _build_db_at(tmp_path, 27)
+    db = _db_path(proj)
+    _stamp_user_version(db, 30)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("ledger append failed")
+
+    monkeypatch.setattr(mfs, "_emit_version_reconcile_event", _boom)
+
+    with pytest.raises(RuntimeError, match="ledger append failed"):
+        mfs.run(proj)
+
+    # The downgrade was rolled back: user_version is still the lying 30 (not 27).
+    conn = _open(db)
+    try:
+        assert schema_migration.get_user_version(conn) == 30
+    finally:
+        conn.close()
+
+    # No ADR-005 reconcile event was written (the emit failed before any durable line).
+    events_dir = Path(os.environ["VNX_DATA_DIR"]) / "events"
+    events = list(events_dir.rglob("*.ndjson")) if events_dir.exists() else []
+    blob = "".join(p.read_text(encoding="utf-8") for p in events)
+    assert "schema_version_reconciled" not in blob
 
 
 # --------------------------------------------------------------------------- #
