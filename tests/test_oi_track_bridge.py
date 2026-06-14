@@ -1155,3 +1155,205 @@ class TestSerializedRead:
         bridge.import_open_items_to_tracks(
             state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
         assert seen["in_transaction"] is True
+
+
+# ---------------------------------------------------------------------------
+# C4-N3 — project-id reader hardening (marker / --project-id / env validated,
+# fail-closed; first NON-EMPTY line only, never raw multi-line content).
+# ---------------------------------------------------------------------------
+
+class TestFirstNonEmptyLine:
+    @pytest.mark.parametrize("text,expected", [
+        ("vnx-dev\n", "vnx-dev"),
+        ("  vnx-dev \n", "vnx-dev"),                       # surrounding whitespace
+        ("\n\n  vnx-dev \n", "vnx-dev"),                   # leading blanks tolerated
+        ("vnx-dev\norchestrator-1\nagent-1\n", "vnx-dev"),  # only the first line
+        ("   \n\t\n", ""),                                  # all-blank → ""
+        ("", ""),                                           # empty → ""
+    ])
+    def test_first_non_empty_line(self, text, expected):
+        assert bridge._first_non_empty_line(text) == expected
+
+
+class TestValidatedProjectId:
+    @pytest.mark.parametrize("candidate", ["vnx-dev", "test-proj", "a1", "x" * 32])
+    def test_valid_ids_pass_through(self, candidate):
+        assert bridge._validated_project_id(candidate, "src") == candidate
+
+    @pytest.mark.parametrize("candidate", [
+        "Sales",            # uppercase
+        "proj_x",           # underscore
+        "a",                # too short (min 2)
+        "x" * 33,           # too long (max 32)
+        "1abc",             # leading digit
+        "-abc",             # leading hyphen
+        "vnx dev",          # embedded space
+        "vnx-dev\nagent-1",  # multi-token blob (embedded newline)
+        "",                 # empty
+    ])
+    def test_malformed_ids_fail_closed(self, candidate):
+        with pytest.raises(bridge.BridgePreconditionError, match="malformed"):
+            bridge._validated_project_id(candidate, "src")
+
+
+class TestMarkerReader:
+    @staticmethod
+    def _marker(tmp_path, content):
+        m = tmp_path / ".vnx-project-id"
+        m.write_text(content, encoding="utf-8")
+        return m
+
+    def test_valid_single_line_marker(self, tmp_path):
+        assert bridge._read_marker_project_id(
+            self._marker(tmp_path, "vnx-dev\n")) == "vnx-dev"
+
+    def test_canonical_three_line_marker_returns_only_project_id(self, tmp_path):
+        """The blocker: a 3-line marker yields ONLY line 1, never the whole blob."""
+        m = self._marker(tmp_path, "vnx-dev\norchestrator-1\nagent-1\n")
+        assert bridge._read_marker_project_id(m) == "vnx-dev"
+
+    def test_leading_blank_line_tolerated(self, tmp_path):
+        assert bridge._read_marker_project_id(
+            self._marker(tmp_path, "\n\nvnx-dev\n")) == "vnx-dev"
+
+    @pytest.mark.parametrize("content,match", [
+        ("", "empty"),                  # truly empty file
+        ("\n\n  \n", "empty"),          # only blank lines
+        ("Sales\nx\n", "malformed"),    # uppercase first line
+        ("proj_x\n", "malformed"),      # underscore
+        ("vnx dev\n", "malformed"),     # space → multi-token first line
+        ("a\n", "malformed"),           # too short
+    ])
+    def test_malformed_marker_fails_closed(self, tmp_path, content, match):
+        m = self._marker(tmp_path, content)
+        with pytest.raises(bridge.BridgePreconditionError, match=match):
+            bridge._read_marker_project_id(m)
+
+    def test_unreadable_marker_fails_closed(self, tmp_path):
+        """A marker that is a directory (read_text → OSError) fails closed, not raw."""
+        d = tmp_path / ".vnx-project-id"
+        d.mkdir()
+        with pytest.raises(bridge.BridgePreconditionError, match="unreadable"):
+            bridge._read_marker_project_id(d)
+
+
+class TestResolveProjectId:
+    @staticmethod
+    def _state_dir(tmp_path, marker_content=None):
+        # _resolve_project_id looks for the marker at state_dir.parent.parent.
+        state_dir = tmp_path / "wt" / "state"
+        state_dir.mkdir(parents=True)
+        if marker_content is not None:
+            (tmp_path / ".vnx-project-id").write_text(marker_content, encoding="utf-8")
+        return state_dir
+
+    def test_explicit_flag_validated_and_returned(self, tmp_path):
+        assert bridge._resolve_project_id(
+            "vnx-dev", self._state_dir(tmp_path)) == "vnx-dev"
+
+    def test_explicit_malformed_flag_fails_closed(self, tmp_path):
+        with pytest.raises(bridge.BridgePreconditionError, match="--project-id"):
+            bridge._resolve_project_id("Bad_Id", self._state_dir(tmp_path))
+
+    def test_marker_resolved_when_no_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        sd = self._state_dir(tmp_path, "vnx-dev\norch-1\nagent-1\n")
+        assert bridge._resolve_project_id(None, sd) == "vnx-dev"
+
+    def test_present_malformed_marker_not_masked_by_env(self, tmp_path, monkeypatch):
+        """A PRESENT but corrupt marker FAILS CLOSED — never silently falls to env."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "env-proj")
+        sd = self._state_dir(tmp_path, "GARBAGE BLOB\nmore\n")
+        with pytest.raises(bridge.BridgePreconditionError):
+            bridge._resolve_project_id(None, sd)
+
+    def test_absent_marker_falls_through_to_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_PROJECT_ID", "env-proj")
+        assert bridge._resolve_project_id(None, self._state_dir(tmp_path)) == "env-proj"
+
+    def test_malformed_env_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_PROJECT_ID", "Bad Env")
+        with pytest.raises(bridge.BridgePreconditionError, match="VNX_PROJECT_ID"):
+            bridge._resolve_project_id(None, self._state_dir(tmp_path))
+
+    def test_nothing_resolves_raises(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        with pytest.raises(bridge.BridgePreconditionError, match="could not be resolved"):
+            bridge._resolve_project_id(None, self._state_dir(tmp_path))
+
+    def test_cli_exit_5_on_malformed_marker(self, tmp_path, monkeypatch):
+        """End-to-end: a malformed marker surfaces as the precondition exit (5)."""
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        state_dir = tmp_path / "wt" / "state"
+        state_dir.mkdir(parents=True)
+        resolved = state_dir.expanduser().resolve()  # mirror main()'s resolution
+        (resolved.parent.parent / ".vnx-project-id").write_text(
+            "Bad Id Blob\n", encoding="utf-8")
+        code = bridge.main(["--state-dir", str(state_dir)])
+        assert code == bridge.EXIT_SCHEMA_PRECONDITION == 5
+
+
+# ---------------------------------------------------------------------------
+# C4-N3 — per-item id / track-reference field hardening (missing/invalid id and
+# non-string track reference are surfaced + counted, never silently dropped).
+# ---------------------------------------------------------------------------
+
+class TestPerItemFieldHardening:
+    @pytest.mark.parametrize("item", [
+        {"severity": "blocker", "status": "open", "pr_id": "#100"},          # no id key
+        {"id": "", "severity": "blocker", "status": "open", "pr_id": "#100"},  # empty
+        {"id": "   ", "severity": "blocker", "status": "open", "pr_id": "#100"},  # blank
+        {"id": 123, "severity": "blocker", "status": "open", "pr_id": "#100"},  # int
+    ])
+    def test_missing_or_invalid_id_surfaced_not_silently_dropped(
+        self, state_dir, capsys, item
+    ):
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[item])
+        assert res.skipped_malformed == ["<no-id>"]   # counted, not silent-continue
+        assert res.linked == 0
+        err = capsys.readouterr().err
+        assert "MALFORMED" in err and "id" in err
+
+    @pytest.mark.parametrize("track_ref", [
+        {"track_id": ["feat-a"]},   # list (also unhashable — must not crash)
+        {"track_id": {"x": 1}},     # dict
+        {"track": 7},               # int via the 'track' alias
+    ])
+    def test_non_string_track_reference_surfaced(self, state_dir, capsys, track_ref):
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        item = {"id": "OI-bad", "severity": "blocker", "status": "open", **track_ref}
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[item])
+        assert "OI-bad" in res.skipped_malformed
+        assert _rows(state_dir, "OI-bad") == []          # never linked
+        assert "MALFORMED" in capsys.readouterr().err
+
+    def test_non_string_track_does_not_crash_and_preserves_links(self, state_dir):
+        """A corrupt track ref must surface (not raise) and leave existing links intact."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert _active_blocks(state_dir) == 1
+        bad = {"id": "OI-1", "severity": "blocker", "status": "open", "track_id": [1, 2]}
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[bad])
+        assert "OI-1" in res.skipped_malformed
+        assert res.unlinked == 0                          # NOT closed on bad data
+        assert _active_blocks(state_dir) == 1             # preserved (non-destructive)
+
+    def test_valid_string_track_still_resolves(self, state_dir):
+        """The type guard does not regress the accepted explicit-track happy path."""
+        _mk_track(state_dir, "feat-x", pr_ref="#100")
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", track_id="feat-x")])
+        assert res.linked == 1
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-x"
+
+    def test_malformed_pr_id_is_unmappable_not_silent_default(self, state_dir):
+        """A present-but-unparseable pr_id yields NO PR match → unmappable (counted),
+        never a silent default link."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-x", pr_id="not-a-number")])
+        assert "OI-x" in res.unmappable
+        assert res.linked == 0
+        assert _rows(state_dir, "OI-x") == []

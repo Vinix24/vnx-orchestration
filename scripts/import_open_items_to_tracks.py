@@ -60,6 +60,21 @@ Contracts implemented:
     (RESERVED write lock acquired up front) BEFORE the existing-links read, so the
     whole read-then-write window is ONE serialized transaction — a concurrent
     writer cannot change links between the read and the commit (TOCTOU closed).
+  * C4-N3 comprehensive input-reader hardening: EVERY external-input reader either
+    returns validated data or surfaces the problem (fail-closed or explicit
+    logged+counted skip) — never silently accepted/defaulted/returned-raw.
+      - the ``.vnx-project-id`` marker reader validates the FIRST NON-EMPTY line
+        against the canonical project-id format and FAILS CLOSED on an empty,
+        unreadable, or malformed marker (never returns raw multi-line content);
+        the ``--project-id`` flag and ``VNX_PROJECT_ID`` env are validated the same
+        way (ADR-007 fail-closed) — see ``_resolve_project_id``;
+      - the open-items SOURCE loader fails LOUD on every wrong shape (C-N1);
+      - per-item fields: a missing/empty/non-string ``id`` (the link correlation
+        key) and a non-string explicit ``track``/``track_id`` reference are
+        MALFORMED — surfaced + counted in ``skipped_malformed``, never a silent
+        drop or a mislinking PR fallback (extends C4-N1 status/severity validation);
+      - a malformed/unparseable ``pr_id`` on an open item yields no PR match and is
+        recorded in ``unmappable`` (explicit-skip-with-count), never silent-default.
 
 Wiring into ``RoadmapManager.autopilot_tick()`` is PR-D, NOT this module.
 ``import_open_items_to_tracks`` is runtime-callable for that future caller.
@@ -92,6 +107,7 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 import tracks  # noqa: E402  (single-writer primitives — D1)
+from vnx_ids import PROJECT_ID_RE  # noqa: E402  (canonical project-id format — ADR-007)
 
 DB_FILENAME = "runtime_coordination.db"
 OPEN_ITEMS_FILENAME = "open_items.json"
@@ -312,7 +328,8 @@ def _surface_malformed(oi: dict, result: BridgeResult, reason: str) -> None:
     item's existing links UNTOUCHED — the bridge refuses to act on untrustworthy
     data (the same destructive-guard posture as the C-N1 source validation).
     """
-    oi_id = oi.get("id", "<no-id>")
+    raw_id = oi.get("id")
+    oi_id = raw_id if isinstance(raw_id, str) and raw_id.strip() else "<no-id>"
     result.skipped_malformed.append(oi_id)
     print(
         f"[bridge] MALFORMED open-item surfaced (skipped, links left intact): "
@@ -345,6 +362,13 @@ def _resolve_target_track(
         return None
     link_type = _SEVERITY_TO_LINK_TYPE[severity]
     explicit = oi.get("track_id") or oi.get("track")
+    if explicit is not None and not isinstance(explicit, str):
+        # A non-string explicit track reference is corrupt input: it can never name
+        # a real track and (being potentially unhashable) could even crash the set
+        # membership test. Surface it (C4-N3) instead of silently ignoring it and
+        # mislinking via the PR fallback.
+        _surface_malformed(oi, result, f"non-string track reference {explicit!r}")
+        return None
     if explicit and explicit in track_ids:
         return (explicit, link_type)
     pr = _parse_pr_number(oi.get("pr_id"))
@@ -363,8 +387,13 @@ def _build_desired(
     desired: Dict[str, Tuple[str, str]] = {}
     for oi in open_items:
         oi_id = oi.get("id")
-        if not oi_id:
+        # The `id` is the correlation key for every link mutation — a missing,
+        # empty, or non-string id is MALFORMED (surfaced + counted), never a silent
+        # `continue` that would drop the item without trace (C4-N3).
+        if not isinstance(oi_id, str) or not oi_id.strip():
+            _surface_malformed(oi, result, f"missing/invalid 'id' field {oi_id!r}")
             continue
+        oi_id = oi_id.strip()
         target = _resolve_target_track(oi, by_pr, track_ids, result)
         if target is not None:
             desired[oi_id] = target
@@ -585,19 +614,81 @@ def _resolve_state_dir(explicit: Optional[str]) -> Path:
     return Path(resolve_paths()["VNX_STATE_DIR"]).expanduser().resolve()
 
 
+def _first_non_empty_line(text: str) -> str:
+    """Return the first stripped non-empty line of ``text`` ("" if none).
+
+    The ``.vnx-project-id`` marker's canonical format carries the project_id on
+    its first line; taking the first NON-EMPTY line tolerates a leading blank
+    while still ignoring the rest of the file — so the orchestrator/agent lines
+    that follow can NEVER leak into the returned id (the prior blocker, where
+    ``read_text().strip()`` returned the whole multi-line content).
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _validated_project_id(candidate: str, source: str) -> str:
+    """Return ``candidate`` iff it matches the canonical project-id format, else FAIL.
+
+    A present-but-malformed project_id (wrong case, illegal chars, too short/long,
+    or a multi-token blob) is REJECTED with BridgePreconditionError rather than
+    returned raw — ADR-007 fail-closed: a tenant id is never silently accepted or
+    coerced. ``source`` names the origin (CLI flag / marker / env) for the error.
+    """
+    if PROJECT_ID_RE.match(candidate):
+        return candidate
+    raise BridgePreconditionError(
+        f"project_id from {source} is malformed: {candidate!r} does not match the "
+        f"canonical format {PROJECT_ID_RE.pattern} (ADR-007 fail-closed). Refusing "
+        "to use an unvalidated project_id."
+    )
+
+
+def _read_marker_project_id(marker: Path) -> str:
+    """Read + validate the project_id from a PRESENT ``.vnx-project-id`` marker.
+
+    Reads the first non-empty line and validates it against the canonical format.
+    A present marker is an explicit identity declaration: an empty/unreadable/
+    malformed marker FAILS CLOSED (BridgePreconditionError) instead of returning
+    raw multi-line content or silently falling through to the env fallback — a
+    corrupt declaration must surface, never be masked (ADR-007).
+    """
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise BridgePreconditionError(
+            f"project_id marker unreadable: {marker}: {exc}"
+        ) from exc
+    first = _first_non_empty_line(raw)
+    if not first:
+        raise BridgePreconditionError(
+            f"project_id marker empty: {marker} has no non-empty line — refusing "
+            "to default (ADR-007 fail-closed)."
+        )
+    return _validated_project_id(first, f"marker {marker}")
+
+
 def _resolve_project_id(explicit: Optional[str], state_dir: Path) -> str:
-    """Resolve project_id from --project-id, the marker file, or VNX_PROJECT_ID."""
+    """Resolve project_id from --project-id, the marker file, or VNX_PROJECT_ID.
+
+    EVERY source is validated against the canonical project-id format; a present
+    but malformed source is REJECTED (fail-closed, ADR-007) rather than returned
+    raw or silently skipped. Resolution order: explicit flag → present marker →
+    env. A PRESENT marker is authoritative — if it is malformed the run aborts and
+    is NOT masked by the env fallback (only an ABSENT marker falls through).
+    """
     if explicit:
-        return explicit
+        return _validated_project_id(explicit.strip(), "--project-id")
     marker = state_dir.parent.parent / ".vnx-project-id"
     if marker.exists():
-        text = marker.read_text(encoding="utf-8").strip()
-        if text:
-            return text
+        return _read_marker_project_id(marker)
     import os  # noqa: PLC0415
     env = os.environ.get("VNX_PROJECT_ID")
     if env:
-        return env
+        return _validated_project_id(env.strip(), "VNX_PROJECT_ID")
     raise BridgePreconditionError(
         "project_id could not be resolved (no --project-id, no .vnx-project-id "
         "marker, no VNX_PROJECT_ID). Refusing to default — ADR-007 fail-closed."
