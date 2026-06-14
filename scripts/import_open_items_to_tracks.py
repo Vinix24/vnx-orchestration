@@ -13,16 +13,25 @@ Single writer (D1): EVERY ``track_open_items`` mutation goes THROUGH
 state, then drives the primitives.
 
 Contracts implemented:
-  * R4.1 (D3) run-level rollback-on-ledger-failure — the bridge drives EVERY
-    link/unlink mutation through ONE shared connection/transaction and commits
-    only after the whole run succeeds. A ledger-emission failure ANYWHERE (even
-    on a non-first item) rolls back ALL track_open_items mutations of the run
-    (zero net changes); the bridge records it and the CLI exits 4. The ADR-005
-    event is emitted AFTER each mutation (never before) so a mutation failure
-    cannot orphan an event, and an emit failure rolls its mutation back.
-  * C-N1 the on-disk open-items source is authoritative: an ABSENT/unreadable
-    source fails LOUD (BridgeSourceError, exit 3) — never silently treated as an
-    empty store that would close every active link.
+  * R4.1 (D3 DEVIATION — DB-authoritative, at-most-once events): the bridge
+    drives EVERY link/unlink mutation through ONE shared connection/transaction
+    and COMMITS only after every item's DB mutation succeeds (run-level DB
+    atomicity — a DB/validation error ANYWHERE rolls back ALL mutations of the
+    run). The ADR-005 NDJSON events are DEFERRED and emitted ONLY AFTER a
+    successful commit. RATIONALE: a non-transactional NDJSON ledger cannot be
+    both "rollback-on-ledger-failure" (emit-before-commit) and "no-orphan-events"
+    (emit-after-commit) without an outbox. We choose the DB as the single source
+    of truth. A POST-COMMIT emit failure does NOT roll back (the DB state is
+    already correct); it is logged LOUDLY and is NON-FATAL because the reconciler
+    re-derives ``tracks.derived_status`` from ``track_open_items`` (the missing
+    event is recoverable). Such a run reports ``ledger_failed`` and the CLI exits
+    4 (ledger-emit-warning) while the DB mutation PERSISTS. Event semantics are
+    at-most-once, never orphaned.
+  * C-N1 the on-disk open-items source is authoritative: an ABSENT/unreadable OR
+    structurally-invalid (parseable-but-wrong-shape) source fails LOUD
+    (BridgeSourceError, exit 3) — never silently coerced to an empty store that
+    would close every active link. Only a well-formed PRESENT-but-empty store
+    ({"items": []} or []) is a legitimate empty desired state.
   * R4.2 load ALL links by (project_id, oi_id) and supersede/resolve every
     now-obsolete active link, including CLOSURE when there is no current
     mapping (the OI was closed or became unmappable).
@@ -34,14 +43,19 @@ Contracts implemented:
     when the link is already active; ``tracks.link_open_item`` upserts
     (``INSERT OR REPLACE``) when a (re)link is genuinely needed.
   * R8.1 reopen invariant — open→close→open clears ``resolved_at`` back to NULL
-    (the upsert resets the row) and emits a ``track_oi_reopened`` ledger event.
+    (the upsert resets the row) and emits a ``track_oi_reopened`` ledger event
+    (deferred to post-commit like every other event under D3).
+  * C-N3 mutation counters (linked/reopened/unlinked/skipped) count ONLY
+    committed mutations: a run-level rollback resets them to zero so a failed run
+    never over-reports progress.
 
 Wiring into ``RoadmapManager.autopilot_tick()`` is PR-D, NOT this module.
 ``import_open_items_to_tracks`` is runtime-callable for that future caller.
 
 ADR-007: all ``track_open_items`` access is (track_id, project_id)-scoped.
-ADR-005: every state mutation carries a matching NDJSON ledger event, emitted
-by the tracks.py primitives (and the bridge's reopen event).
+ADR-005: every state mutation carries a matching NDJSON ledger event. Under the
+D3 deviation those events are emitted AFTER the DB commit; a post-commit emit
+failure is logged and recoverable via the reconciler, never silently dropped.
 """
 
 from __future__ import annotations
@@ -52,7 +66,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
@@ -94,16 +108,6 @@ class BridgeSourceError(BridgeError):
     would make every active link obsolete and close it (destructive). Fail loud
     with a distinct exit code (3) instead.
     """
-
-
-class LedgerEmitError(BridgeError):
-    """Raised when a single-writer primitive fails to emit its ledger event (R4.1)."""
-
-
-# Exception types from a primitive that are NOT ledger failures: they keep their
-# own type and exit code (C-N4). Everything else a primitive raises is treated
-# as an ADR-005 ledger/emit failure (D3 → exit 4).
-_NON_LEDGER_ERRORS: Tuple[type, ...] = (sqlite3.Error, ValueError)
 
 
 @dataclass
@@ -166,33 +170,71 @@ def _require_resolution_schema(conn: sqlite3.Connection) -> None:
         )
 
 
-def _load_open_items(state_dir: str | Path) -> List[dict]:
-    """Load the open-items store (open_items.json) — the AUTHORITATIVE desired state.
+def _coerce_items(data: Any, path: Path) -> List[dict]:
+    """Validate the parsed source is the expected shape, else FAIL LOUD (C-N1).
 
-    An ABSENT or unreadable source is NOT an empty store: treating it as ``[]``
+    Accepted shapes (the canonical open_items_manager store and the bare-list
+    form): a dict carrying an ``items`` LIST, or a top-level LIST. Every element
+    must be an object. A parseable-but-WRONG-SHAPE source (a scalar, a dict
+    without ``items``, a non-list ``items``, or a list with non-object elements)
+    raises BridgeSourceError instead of being silently coerced to ``[]`` — that
+    coercion would mark every active link obsolete and close it (destructive).
+    A well-formed PRESENT-but-empty store ({"items": []} or []) is legitimate.
+    """
+    if isinstance(data, dict):
+        if "items" not in data:
+            raise BridgeSourceError(
+                f"open-items source malformed: {path}: object has no 'items' key "
+                "(expected {\"items\": [...]}). Refusing to treat a wrong-shape "
+                "source as empty (would close every active link)."
+            )
+        items = data["items"]
+    elif isinstance(data, list):
+        items = data
+    else:
+        raise BridgeSourceError(
+            f"open-items source malformed: {path}: top-level JSON is "
+            f"{type(data).__name__}, expected an object with 'items' or a list."
+        )
+    if not isinstance(items, list):
+        raise BridgeSourceError(
+            f"open-items source malformed: {path}: 'items' is "
+            f"{type(items).__name__}, expected a list."
+        )
+    if not all(isinstance(it, dict) for it in items):
+        raise BridgeSourceError(
+            f"open-items source malformed: {path}: every item must be an object."
+        )
+    return items
+
+
+def _load_open_items(state_dir: str | Path, *, path: Optional[Path] = None) -> List[dict]:
+    """Load + validate the open-items store — the AUTHORITATIVE desired state.
+
+    ``path`` overrides the default ``<state_dir>/open_items.json`` (used by the
+    CLI ``--open-items`` flag so it shares this validation). An ABSENT, unreadable,
+    or structurally-invalid source is NOT an empty store: treating it as ``[]``
     would make every existing active link obsolete and close it (destructive).
     Fail LOUD with BridgeSourceError so the caller aborts before any mutation
-    (C-N1). A PRESENT file that parses to an empty list IS a legitimate empty
+    (C-N1). A PRESENT, well-formed file with no items IS a legitimate empty
     desired state and returns ``[]`` (obsolete links may then close).
     """
-    path = Path(state_dir) / OPEN_ITEMS_FILENAME
-    if not path.exists():
+    src = Path(path) if path is not None else Path(state_dir) / OPEN_ITEMS_FILENAME
+    if not src.exists():
         raise BridgeSourceError(
-            f"open-items source absent: {path}. Refusing to treat a missing source "
+            f"open-items source absent: {src}. Refusing to treat a missing source "
             "as an empty store (would close every active link). Create the store "
             "(open_items_manager) or pass open_items explicitly."
         )
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = src.read_text(encoding="utf-8")
     except OSError as exc:
-        raise BridgeSourceError(f"open-items source unreadable: {path}: {exc}") from exc
+        raise BridgeSourceError(f"open-items source unreadable: {src}: {exc}") from exc
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise BridgeSourceError(f"open-items source not valid JSON: {path}: {exc}") from exc
-    if isinstance(data, dict):
-        return list(data.get("items", []))
-    return list(data) if isinstance(data, list) else []
+        raise BridgeSourceError(f"open-items source not valid JSON: {src}: {exc}") from exc
+    return _coerce_items(data, src)
 
 
 def _load_tracks_by_pr(
@@ -272,31 +314,56 @@ def _build_desired(
 # Mutation orchestration (drives the tracks.py single-writer primitives)
 # ---------------------------------------------------------------------------
 
-def _safe_mutate(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Run a single-writer primitive, classifying its failure (C-N4).
+def _reset_progress_counters(result: BridgeResult) -> None:
+    """Zero the per-run mutation counters after a run-level rollback (C-N3).
 
-    Only a genuine ADR-005 ledger/emit failure becomes LedgerEmitError (D3 →
-    exit 4). DB (sqlite3.Error) and validation (ValueError, incl. its
-    TrackNotFoundError / Invalid* subclasses) errors propagate WITH THEIR OWN
-    TYPE so the CLI maps them to the correct distinct exit code.
+    The counters are incremented optimistically as each item's mutation runs, but
+    a rollback undoes EVERY mutation of the run. Resetting keeps the reported
+    counts honest: they reflect ONLY committed mutations, never rolled-back ones.
+    ``unmappable`` / ``errors`` are diagnostics, not mutation counts — left as-is.
     """
-    try:
-        fn(*args, **kwargs)
-    except _NON_LEDGER_ERRORS:
-        raise  # DB / validation — not a ledger failure (C-N4)
-    except Exception as exc:  # noqa: BLE001 — re-raised as a typed ledger error
-        raise LedgerEmitError(str(exc)) from exc
+    result.linked = 0
+    result.reopened = 0
+    result.unlinked = 0
+    result.skipped = 0
+
+
+def _emit_deferred_events(
+    state_dir: str | Path, events: List[Tuple], result: BridgeResult
+) -> None:
+    """Emit the deferred ledger events AFTER a successful commit (D3 deviation).
+
+    The DB is already authoritative and committed, so a post-commit emit failure
+    is LOGGED LOUDLY and is NON-FATAL — it never rolls back. Each event is an
+    independent NDJSON append, so a single failure does not abort the rest
+    (best-effort, at-most-once). A failure records ``ledger_failed`` (CLI exit 4
+    — ledger-emit-warning) while the committed DB mutation persists; the
+    reconciler re-derives derived_status from track_open_items, so the missing
+    event is recoverable.
+    """
+    for spec in events:
+        try:
+            tracks._emit_track_event(state_dir, *spec)
+        except Exception as exc:  # noqa: BLE001 — post-commit best-effort; logged, not swallowed
+            result.ledger_failed = True
+            result.errors.append(f"post-commit ledger emit failed ({spec[0]}): {exc}")
+            print(
+                f"[bridge] LEDGER EMIT FAILED (post-commit; DB COMMITTED, "
+                f"reconcile compensates): {spec[0]} track={spec[1]}: {exc}",
+                file=sys.stderr,
+            )
 
 
 def _close_obsolete_links(
     state_dir: str | Path, conn: sqlite3.Connection, project_id: str, oi_id: str,
     existing: List[dict], desired_key: Optional[Tuple[str, str]],
-    result: BridgeResult,
+    result: BridgeResult, events: List[Tuple],
 ) -> None:
     """Resolve every ACTIVE link that is not the desired one (R4.2 + closure).
 
-    Mutations run on the caller's ``conn`` (no per-link commit) so they share
-    the run-level transaction (C-N2).
+    Mutations run on the caller's ``conn`` (no per-link commit) so they share the
+    run-level transaction; their ledger events are DEFERRED to ``events`` for
+    post-commit emission (D3).
     """
     for link in existing:
         key = (link["track_id"], link["link_type"])
@@ -307,9 +374,9 @@ def _close_obsolete_links(
             if desired_key is not None
             else f"closed: OI {oi_id} no longer active (bridge sync)"
         )
-        _safe_mutate(
-            tracks.unlink_open_item, state_dir, link["track_id"], project_id,
-            oi_id, link["link_type"], reason=reason, actor="system", conn=conn,
+        tracks.unlink_open_item(
+            state_dir, link["track_id"], project_id, oi_id, link["link_type"],
+            reason=reason, actor="system", conn=conn, event_sink=events,
         )
         result.unlinked += 1
 
@@ -317,13 +384,13 @@ def _close_obsolete_links(
 def _establish_desired_link(
     state_dir: str | Path, conn: sqlite3.Connection, project_id: str, oi_id: str,
     desired: Tuple[str, str], existing: List[dict], link_source: str,
-    result: BridgeResult,
+    result: BridgeResult, events: List[Tuple],
 ) -> None:
     """Ensure the desired link is active; reopen-aware and idempotent (R4.4/R8.1).
 
-    The reopen ledger event is emitted AFTER the link mutation (C-N3) and inside
-    the same run-level transaction, so a mutation failure cannot orphan a
-    ``track_oi_reopened`` event and an emit failure rolls the mutation back.
+    The link mutation runs in the run-level transaction; its ``track_oi_linked``
+    event (and, on a reopen, ``track_oi_reopened``) is DEFERRED to ``events`` for
+    post-commit emission (D3), so a rolled-back mutation can never orphan an event.
     """
     track_id, link_type = desired
     same = [l for l in existing if (l["track_id"], l["link_type"]) == desired]
@@ -331,15 +398,14 @@ def _establish_desired_link(
         result.skipped += 1  # already active — idempotent no-op
         return
     reopening = any(l["resolved_at"] is not None for l in same)
-    _safe_mutate(
-        tracks.link_open_item, state_dir, track_id, project_id,
-        oi_id, link_type, link_source, conn=conn,
+    tracks.link_open_item(
+        state_dir, track_id, project_id, oi_id, link_type, link_source,
+        conn=conn, event_sink=events,
     )
     if reopening:
-        _safe_mutate(
-            tracks._emit_track_event, state_dir, "track_oi_reopened",
-            track_id, project_id, "system",
-            {"oi_id": oi_id, "link_type": link_type},
+        events.append(
+            ("track_oi_reopened", track_id, project_id, "system",
+             {"oi_id": oi_id, "link_type": link_type})
         )
         result.reopened += 1
     else:
@@ -349,13 +415,16 @@ def _establish_desired_link(
 def _sync_one_oi(
     state_dir: str | Path, conn: sqlite3.Connection, project_id: str, oi_id: str,
     desired: Optional[Tuple[str, str]], existing: List[dict],
-    link_source: str, result: BridgeResult,
+    link_source: str, result: BridgeResult, events: List[Tuple],
 ) -> None:
     """Close obsolete links, then establish the current mapping (if any)."""
-    _close_obsolete_links(state_dir, conn, project_id, oi_id, existing, desired, result)
+    _close_obsolete_links(
+        state_dir, conn, project_id, oi_id, existing, desired, result, events
+    )
     if desired is not None:
         _establish_desired_link(
-            state_dir, conn, project_id, oi_id, desired, existing, link_source, result
+            state_dir, conn, project_id, oi_id, desired, existing, link_source,
+            result, events,
         )
 
 
@@ -364,28 +433,28 @@ def _run_mutations(
     all_oi_ids: List[str], desired: Dict[str, Tuple[str, str]],
     existing_by_oi: Dict[str, List[dict]], link_source: str, result: BridgeResult,
 ) -> None:
-    """Drive ALL link/unlink mutations through ONE transaction (C-N2).
+    """Run ALL DB mutations in ONE transaction, COMMIT, then emit events (D3).
 
-    Commit ONLY if every item succeeds. A ledger-emit failure ANYWHERE — even on
-    a non-first item — rolls the WHOLE run back (zero net track_open_items
-    changes) and is recorded for CLI exit 4. A non-ledger error (DB/validation)
-    rolls back and propagates with its own type (C-N4).
+    Run-level DB atomicity: a DB/validation error on ANY item rolls back EVERY
+    mutation of the run, resets the counters (C-N3), and propagates with its own
+    type (C-N4 → distinct CLI exit). On full success the transaction COMMITS
+    (the DB is now authoritative) and the deferred ADR-005 events are emitted
+    AFTER the commit — a post-commit emit failure is logged + non-fatal (exit 4),
+    never a rollback (D3 deviation; reconcile compensates).
     """
-    for oi_id in all_oi_ids:
-        try:
+    events: List[Tuple] = []
+    try:
+        for oi_id in all_oi_ids:
             _sync_one_oi(
                 state_dir, conn, project_id, oi_id, desired.get(oi_id),
-                existing_by_oi.get(oi_id, []), link_source, result,
+                existing_by_oi.get(oi_id, []), link_source, result, events,
             )
-        except LedgerEmitError as exc:
-            conn.rollback()  # run-level rollback: undo every prior mutation
-            result.ledger_failed = True
-            result.errors.append(f"ledger emit failed for OI {oi_id}: {exc}")
-            return
-        except Exception:
-            conn.rollback()  # DB/validation error: undo, then propagate (C-N4)
-            raise
-    conn.commit()
+    except Exception:
+        conn.rollback()  # run-level rollback: undo every mutation, then propagate
+        _reset_progress_counters(result)  # C-N3 — count only committed mutations
+        raise
+    conn.commit()  # DB authoritative & committed; events follow (D3)
+    _emit_deferred_events(state_dir, events, result)
 
 
 def import_open_items_to_tracks(
@@ -399,12 +468,16 @@ def import_open_items_to_tracks(
 
     Reads open items + their current track mapping, then drives the tracks.py
     primitives through ONE run-level transaction so the reconciler's
-    derived_status reflects reality. A ledger-emission failure rolls the whole
-    run back (R4.1/C-N2) with zero net changes.
+    derived_status reflects reality. Under the D3 deviation the DB is the source
+    of truth: every mutation commits together (a DB/validation error rolls the
+    whole run back), and ADR-005 events are emitted AFTER the commit. A
+    post-commit emit failure does NOT roll back — it sets ``ledger_failed``
+    (exit 4) but the DB mutation persists and the reconciler can recover the
+    missing event.
 
     Raises BridgePreconditionError on a pre-0030 DB (R4.3); BridgeSourceError
-    when the on-disk source is absent/unreadable (C-N1). Returns a BridgeResult
-    whose ``ledger_failed`` / ``exit_code`` carry the outcome.
+    when the on-disk source is absent/unreadable/malformed (C-N1). Returns a
+    BridgeResult whose ``ledger_failed`` / ``exit_code`` carry the outcome.
     """
     result = BridgeResult(project_id=project_id)
     conn = _open_conn(state_dir)
@@ -471,8 +544,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         state_dir = _resolve_state_dir(args.state_dir)
         project_id = _resolve_project_id(args.project_id, state_dir)
-        items = json.loads(Path(args.open_items).read_text(encoding="utf-8")).get("items") \
+        # Route --open-items through the same validating loader as the disk source
+        # so a wrong-shape override file fails LOUD (C-N1) instead of silent-empty.
+        items = (
+            _load_open_items(state_dir, path=Path(args.open_items))
             if args.open_items else None
+        )
         result = import_open_items_to_tracks(
             state_dir, project_id, open_items=items, link_source=args.link_source,
         )

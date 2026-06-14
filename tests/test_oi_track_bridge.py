@@ -1,11 +1,16 @@
 """tests/test_oi_track_bridge.py — behavioral tests for the OI→track bridge (PR-C).
 
 Covers the R4 contracts of scripts/import_open_items_to_tracks.py:
-  R4.1 / R8.2 — rollback-on-ledger-failure (zero changes, error set, CLI exit 4)
+  R4.1 (D3)   — DB-authoritative, at-most-once events: all mutations COMMIT, then
+                events emit; a post-commit emit failure is logged + non-fatal
+                (DB persists, ledger_failed, CLI exit 4). A DB/validation error
+                rolls the whole run back (run-level DB atomicity) and resets the
+                mutation counters (C-N3); the reconciler recovers a missing event.
   R4.2        — load ALL links by (project_id, oi_id) + supersede/close obsolete
   R4.3 / R8.3 — require 0030 resolution schema; pre-0030 fails (raise + CLI exit 5)
   R4.4        — idempotent (run twice → identical track_open_items)
   R8.1        — reopen invariant (open→close→open: resolved_at NULL + reopen event)
+  C-N1        — malformed/absent source fails LOUD (exit 3), never silent-empty
   plus: mapping (pr_id→pr_ref / explicit track), disk-loading, reconciler tie-in.
 
 All DBs are temp (tmp_path); the conftest pins VNX_DATA_DIR_EXPLICIT=1 + tmp
@@ -433,11 +438,13 @@ class TestReopen:
 
 
 # ---------------------------------------------------------------------------
-# R4.1 / R8.2 — rollback-on-ledger-failure
+# R4.1 (D3 deviation) — post-commit emit failure: DB persists, logged, exit 4
 # ---------------------------------------------------------------------------
 
 class TestLedgerFailure:
-    def test_fresh_link_ledger_failure_zero_changes(self, state_dir, monkeypatch):
+    def test_fresh_link_emit_failure_db_committed(self, state_dir, monkeypatch):
+        """D3: events emit AFTER commit, so an emit failure leaves the DB row PRESENT
+        (committed) + ledger_failed + exit 4 — NOT zero-changes."""
         _mk_track(state_dir, "feat-a", pr_ref="#100")
 
         def _boom(*a, **k):
@@ -447,18 +454,21 @@ class TestLedgerFailure:
         res = bridge.import_open_items_to_tracks(
             state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
         assert res.ledger_failed is True
-        assert res.errors and "OI-1" in res.errors[0]
+        assert res.errors and "ledger emit failed" in res.errors[0]
         assert res.exit_code == bridge.EXIT_LEDGER_FAILURE == 4
-        # Nothing committed — the run-level transaction rolls back on ledger failure.
-        assert _rows(state_dir, "OI-1") == []
+        # DB is authoritative: the link IS committed despite the emit failure.
+        rows = _rows(state_dir, "OI-1")
+        assert len(rows) == 1
+        assert rows[0]["track_id"] == "feat-a"
+        assert rows[0]["resolved_at"] is None
 
-    def test_existing_link_unchanged_on_ledger_failure(self, state_dir, monkeypatch):
-        """A remap whose unlink hits a ledger failure leaves the old link intact."""
+    def test_remap_emit_failure_db_committed(self, state_dir, monkeypatch):
+        """D3: a remap whose post-commit emit fails STILL commits the remap
+        (feat-a resolved, feat-b active) + ledger_failed + exit 4."""
         _mk_track(state_dir, "feat-a", pr_ref="#100")
         _mk_track(state_dir, "feat-b", pr_ref="#200")
         bridge.import_open_items_to_tracks(
             state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
-        before = _rows(state_dir, "OI-1")
 
         def _boom(*a, **k):
             raise RuntimeError("ledger boom")
@@ -468,11 +478,13 @@ class TestLedgerFailure:
             state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#200")])
         assert res.ledger_failed is True
         assert res.exit_code == 4
-        # The original feat-a link is untouched; feat-b never created.
-        assert _rows(state_dir, "OI-1") == before
-        assert all(r["track_id"] != "feat-b" for r in _rows(state_dir, "OI-1"))
+        # The remap committed: feat-a closed, feat-b active (DB authoritative).
+        rows = {r["track_id"]: r for r in _rows(state_dir, "OI-1")}
+        assert rows["feat-a"]["resolved_at"] is not None
+        assert rows["feat-b"]["resolved_at"] is None
+        assert _active_blocks(state_dir) == 1
 
-    def test_cli_exit_4_on_ledger_failure(self, state_dir, monkeypatch):
+    def test_cli_exit_4_on_emit_failure_row_persists(self, state_dir, monkeypatch):
         _mk_track(state_dir, "feat-a", pr_ref="#100")
         (state_dir / "open_items.json").write_text(json.dumps(
             {"items": [_oi("OI-1", pr_id="#100")]}), encoding="utf-8")
@@ -483,6 +495,8 @@ class TestLedgerFailure:
         monkeypatch.setattr(tracks_lib, "_emit_track_event", _boom)
         code = bridge.main(["--project-id", PROJECT_ID, "--state-dir", str(state_dir)])
         assert code == 4
+        # D3: exit 4 (ledger-emit-warning) but the DB mutation persists.
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-a"
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +565,61 @@ class TestSourceFailLoud:
         with pytest.raises(bridge.BridgeSourceError):
             bridge.import_open_items_to_tracks(state_dir, PROJECT_ID)
 
+    def test_malformed_scalar_source_raises_zero_closures(self, state_dir):
+        """C2-N1: a parseable scalar (42) is WRONG-SHAPE → fail loud, NO closures."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert _active_blocks(state_dir) == 1
+        (state_dir / "open_items.json").write_text("42", encoding="utf-8")
+        with pytest.raises(bridge.BridgeSourceError, match="malformed"):
+            bridge.import_open_items_to_tracks(state_dir, PROJECT_ID)
+        # Wrong-shape must NOT silent-empty → no active link closed.
+        assert _active_blocks(state_dir) == 1
+        assert _rows(state_dir, "OI-1")[0]["resolved_at"] is None
+
+    def test_malformed_dict_without_items_raises(self, state_dir):
+        """C2-N1: a dict that loads but lacks an 'items' key is wrong-shape."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        (state_dir / "open_items.json").write_text(
+            json.dumps({"schema_version": "1.0", "next_id": 1}), encoding="utf-8")
+        with pytest.raises(bridge.BridgeSourceError, match="items"):
+            bridge.import_open_items_to_tracks(state_dir, PROJECT_ID)
+        assert _active_blocks(state_dir) == 1  # destructive guard held
+
+    def test_malformed_items_not_a_list_raises(self, state_dir):
+        """C2-N1: {"items": <non-list>} is wrong-shape → fail loud."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        (state_dir / "open_items.json").write_text(
+            json.dumps({"items": "nope"}), encoding="utf-8")
+        with pytest.raises(bridge.BridgeSourceError, match="list"):
+            bridge.import_open_items_to_tracks(state_dir, PROJECT_ID)
+
+    def test_malformed_list_with_non_object_raises(self, state_dir):
+        """C2-N1: a list whose elements are not objects is wrong-shape."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        (state_dir / "open_items.json").write_text(
+            json.dumps(["OI-1", "OI-2"]), encoding="utf-8")
+        with pytest.raises(bridge.BridgeSourceError, match="object"):
+            bridge.import_open_items_to_tracks(state_dir, PROJECT_ID)
+
+    def test_bare_list_form_is_legitimate(self, state_dir):
+        """A top-level list of item objects is an accepted shape (not malformed)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        (state_dir / "open_items.json").write_text(
+            json.dumps([_oi("OI-1", pr_id="#100")]), encoding="utf-8")
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID)
+        assert res.linked == 1
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-a"
+
+    def test_cli_exit_3_on_malformed_source(self, state_dir):
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        (state_dir / "open_items.json").write_text("42", encoding="utf-8")
+        code = bridge.main(["--project-id", PROJECT_ID, "--state-dir", str(state_dir)])
+        assert code == bridge.EXIT_SOURCE_MISSING == 3
+
     def test_present_empty_store_is_legitimate(self, state_dir):
         """A PRESENT but empty store IS a legitimate empty desired state (closes obsolete)."""
         _mk_track(state_dir, "feat-a", pr_ref="#100")
@@ -570,12 +639,43 @@ class TestSourceFailLoud:
 
 
 # ---------------------------------------------------------------------------
-# C-N2 — run-level atomicity (ledger failure on a NON-FIRST item rolls back ALL)
+# Run-level DB atomicity — a DB error on a NON-FIRST item rolls back ALL mutations
 # ---------------------------------------------------------------------------
 
 class TestRunLevelAtomicity:
-    def test_later_item_ledger_failure_rolls_back_all(self, state_dir, monkeypatch):
-        """Emit succeeds on item 1, fails on item 2 → ZERO track_open_items changes."""
+    def test_later_item_db_error_rolls_back_all(self, state_dir, monkeypatch):
+        """DB error on item 2 → run-level rollback → ZERO net track_open_items
+        changes (the earlier item's mutation is undone too), propagated by type."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        _mk_track(state_dir, "feat-b", pr_ref="#200")
+        items = [_oi("OI-1", pr_id="#100"), _oi("OI-2", pr_id="#200")]
+
+        real_link = tracks_lib.link_open_item
+        calls = {"n": 0}
+
+        def _link(*a, **k):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # item 1 mutates in-tx, item 2's DB op fails
+                raise sqlite3.OperationalError("db boom on later item")
+            return real_link(*a, **k)
+
+        monkeypatch.setattr(tracks_lib, "link_open_item", _link)
+        with pytest.raises(sqlite3.OperationalError):
+            bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=items)
+        # Run-level rollback: NO rows committed for either item.
+        assert _rows(state_dir, "OI-1") == []
+        assert _rows(state_dir, "OI-2") == []
+        assert _active_blocks(state_dir) == 0
+
+
+# ---------------------------------------------------------------------------
+# C2-N2 (D3) — post-commit emit failure: DB authoritative, reconcile compensates
+# ---------------------------------------------------------------------------
+
+class TestPostCommitEmit:
+    def test_later_item_emit_failure_all_committed(self, state_dir, monkeypatch):
+        """Emit succeeds on item 1, FAILS on item 2 — but both DB mutations are
+        already committed (D3): the DB is authoritative, exit 4, no rollback."""
         _mk_track(state_dir, "feat-a", pr_ref="#100")
         _mk_track(state_dir, "feat-b", pr_ref="#200")
         items = [_oi("OI-1", pr_id="#100"), _oi("OI-2", pr_id="#200")]
@@ -585,7 +685,7 @@ class TestRunLevelAtomicity:
 
         def _emit(*a, **k):
             calls["n"] += 1
-            if calls["n"] >= 2:  # first item commits-in-tx, LATER item fails
+            if calls["n"] >= 2:  # commit already happened; later event fails
                 raise RuntimeError("ledger boom on later item")
             return real_emit(*a, **k)
 
@@ -593,10 +693,78 @@ class TestRunLevelAtomicity:
         res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=items)
         assert res.ledger_failed is True
         assert res.exit_code == bridge.EXIT_LEDGER_FAILURE == 4
-        # Run-level rollback: the EARLIER item's mutation is undone too (zero net).
+        # D3: both mutations persist (committed before emit), no run-level rollback.
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-a"
+        assert _rows(state_dir, "OI-2")[0]["track_id"] == "feat-b"
+        assert _active_blocks(state_dir) == 2
+
+    def test_post_commit_emit_failure_reconcile_recovers(self, state_dir, monkeypatch):
+        """The instruction's D3 acceptance test: a post-commit emit failure leaves
+        the DB committed (exit 4), and a follow-up reconcile derives the correct
+        derived_status from track_open_items (the missing event is recoverable)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+
+        def _boom(*a, **k):
+            raise RuntimeError("ledger boom")
+
+        monkeypatch.setattr(tracks_lib, "_emit_track_event", _boom)
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert res.ledger_failed is True and res.exit_code == 4
+        # DB mutation persisted despite the emit failure.
+        assert _rows(state_dir, "OI-1")[0]["resolved_at"] is None
+        # Reconcile re-derives from track_open_items — recovers the correct status.
+        monkeypatch.undo()  # restore real emit for the reconciler
+        rec = track_reconciler.reconcile_track(state_dir, "feat-a", PROJECT_ID)
+        assert rec["derived_status"] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# C2-N3 — mutation counters reset on a run-level rollback (count only committed)
+# ---------------------------------------------------------------------------
+
+class TestCounterResetOnRollback:
+    def test_counters_reset_after_run_level_rollback(self, state_dir, monkeypatch):
+        """Item 1 increments linked, item 2's DB op fails → run-level rollback.
+        The in-place result counters MUST reset to zero (only committed counts)."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        _mk_track(state_dir, "feat-b", pr_ref="#200")
+        items = [_oi("OI-1", pr_id="#100"), _oi("OI-2", pr_id="#200")]
+
+        conn = bridge._open_conn(state_dir)
+        try:
+            bridge._require_resolution_schema(conn)
+            result = bridge.BridgeResult(project_id=PROJECT_ID)
+            by_pr, track_ids = bridge._load_tracks_by_pr(conn, PROJECT_ID)
+            existing = bridge._load_links_grouped(conn, PROJECT_ID)
+            desired = bridge._build_desired(items, by_pr, track_ids, result)
+            all_ids = sorted(set(desired) | set(existing))
+
+            real_link = tracks_lib.link_open_item
+            calls = {"n": 0}
+
+            def _link(*a, **k):
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise sqlite3.OperationalError("db boom on item 2")
+                return real_link(*a, **k)
+
+            monkeypatch.setattr(tracks_lib, "link_open_item", _link)
+            with pytest.raises(sqlite3.OperationalError):
+                bridge._run_mutations(
+                    state_dir, conn, PROJECT_ID, all_ids, desired, existing,
+                    "mention", result,
+                )
+            # C-N3: item 1 had incremented linked to 1; the rollback resets it.
+            assert result.linked == 0
+            assert result.unlinked == 0
+            assert result.reopened == 0
+            assert result.skipped == 0
+        finally:
+            conn.close()
+        # DB confirms the run-level rollback: nothing committed.
         assert _rows(state_dir, "OI-1") == []
         assert _rows(state_dir, "OI-2") == []
-        assert _active_blocks(state_dir) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +804,8 @@ class TestExceptionClassification:
             raise sqlite3.OperationalError("database is locked")
 
         monkeypatch.setattr(tracks_lib, "link_open_item", _boom_link)
-        # A DB error must surface as sqlite3.Error — NOT swallowed into LedgerEmitError.
+        # A DB error must surface as sqlite3.Error with its own type (CLI exit 6),
+        # NOT misclassified as a ledger-emit warning (exit 4).
         with pytest.raises(sqlite3.OperationalError):
             bridge.import_open_items_to_tracks(
                 state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])

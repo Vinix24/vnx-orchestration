@@ -92,6 +92,31 @@ def _emit_track_event(
     state_writer.append_locked(Path(state_dir).parent / "events" / _TRACK_EVENTS_FILE, record)
 
 
+def _emit_or_defer(
+    event_sink: Optional[list],
+    state_dir: str | Path,
+    event_type: str,
+    track_id: str,
+    project_id: str,
+    actor: str,
+    details: dict,
+) -> None:
+    """Emit a ledger event NOW, or DEFER it to a caller-owned sink (ADR-005 / D3).
+
+    When ``event_sink`` is None the event is written immediately (standalone
+    callers, backward-compatible). When a sink is provided, the
+    (event_type, track_id, project_id, actor, details) spec is appended and the
+    CALLER is responsible for emitting it AFTER committing the DB transaction.
+    Deferring makes the DB authoritative: a rolled-back mutation can never orphan
+    an already-written NDJSON event (the bridge's D3 deviation — see
+    import_open_items_to_tracks).
+    """
+    if event_sink is None:
+        _emit_track_event(state_dir, event_type, track_id, project_id, actor, details)
+    else:
+        event_sink.append((event_type, track_id, project_id, actor, details))
+
+
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
     path = _db_path(state_dir)
     conn = sqlite3.connect(str(path), timeout=10.0)
@@ -451,14 +476,18 @@ def link_open_item(
     link_source: str,
     *,
     conn: Optional[sqlite3.Connection] = None,
+    event_sink: Optional[list] = None,
 ) -> None:
     """Upsert an active track↔open-item link (INSERT OR REPLACE; reopen-safe).
 
     Pass ``conn`` to enrol in a CALLER-owned transaction: commit is deferred to
     the caller and any failure propagates (the caller rolls back). Without
     ``conn`` the function self-manages its connection and commits as before.
-    The ADR-005 ledger event is emitted AFTER the row mutation so a mutation
-    failure cannot orphan it; an emit failure rolls the row back (R4.1/D3).
+
+    Pass ``event_sink`` (a list) to DEFER the ADR-005 ledger event: the row is
+    mutated but the ``track_oi_linked`` event is appended to the sink for the
+    caller to emit AFTER committing (D3 — DB authoritative; no orphan events on
+    rollback). Without a sink the event is emitted in-line.
     """
     valid_link_types = frozenset({"blocks", "warns", "related"})
     valid_link_sources = frozenset({"file_path", "mention", "manual"})
@@ -485,9 +514,9 @@ def link_open_item(
             """,
             (track_id, project_id, oi_id, link_type, link_source, _now_utc()),
         )
-        _emit_track_event(
-            state_dir, "track_oi_linked", track_id, project_id, "system",
-            {"oi_id": oi_id, "link_type": link_type},
+        _emit_or_defer(
+            event_sink, state_dir, "track_oi_linked", track_id, project_id,
+            "system", {"oi_id": oi_id, "link_type": link_type},
         )
         if owns:
             _conn.commit()
@@ -589,12 +618,12 @@ def unlink_open_item(
     reason: str,
     actor: str = "operator",
     conn: Optional[sqlite3.Connection] = None,
+    event_sink: Optional[list] = None,
 ) -> None:
     """Close a track↔OI link non-destructively (resolved_at + reason; row kept).
-    Requires migration 0030. Pass ``conn`` for a CALLER-owned transaction (commit
-    deferred; ADR-005 event emitted AFTER the mutation, never before). Raises
-    TrackNotFoundError / ValueError (bad/missing/resolved row, empty reason) /
-    RuntimeError (pre-0030)."""
+    Requires migration 0030. ``conn`` enrols in a CALLER-owned transaction;
+    ``event_sink`` DEFERS the ``track_oi_closed`` event for post-commit emission
+    (D3 — DB authoritative). Raises TrackNotFoundError / ValueError / RuntimeError."""
     valid_link_types = frozenset({"blocks", "warns", "related"})
     if link_type not in valid_link_types:
         raise ValueError(f"Invalid link_type: {link_type!r}. Must be one of {sorted(valid_link_types)}")
@@ -636,8 +665,8 @@ def unlink_open_item(
             "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
             (_now_utc(), reason.strip(), track_id, project_id, oi_id, link_type),
         )
-        _emit_track_event(
-            state_dir, "track_oi_closed", track_id, project_id, actor,
+        _emit_or_defer(
+            event_sink, state_dir, "track_oi_closed", track_id, project_id, actor,
             {"oi_id": oi_id, "link_type": link_type, "reason": reason},
         )
         if owns:
