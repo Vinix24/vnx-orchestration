@@ -9,8 +9,8 @@
 | Architecture | `docs/manifesto/ARCHITECTURE.md` | Glass Box Governance architecture story |
 | Dispatch Guide | `docs/DISPATCH_GUIDE.md` | How dispatches work |
 | Operations | `docs/operations/README.md` | Entry point for monitoring and runtime operations |
-| Migration Guide | `docs/MIGRATION_GUIDE.md` | Upgrading between versions |
-| Exit Codes | `docs/EXIT_CODES.md` | Process exit code reference |
+| Migration Guide | `docs/MIGRATION_GUIDE.md` | Upgrading between versions; includes the 1.0.1 runtime DB migration runbook (§6, operator-gated) |
+| Exit Codes | `docs/EXIT_CODES.md` | Process exit code reference, including the open-item → track bridge codes (3–6) |
 | Changelog | `CHANGELOG.md` | Release notes |
 | Product Modes | `docs/contracts/PRODUCTIZATION_CONTRACT.md` | Starter, operator, and governed execution modes |
 | Contributing | `CONTRIBUTING.md` | How to contribute |
@@ -19,8 +19,9 @@
 
 | Document | Path | Description |
 |----------|------|-------------|
-| Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | Complete system architecture and data flow |
+| Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | Complete system architecture and data flow, incl. *Future-State Reconciliation* (open-item → track → dispatch lifecycle, the autopilot loop, and the precise `derived_status` rule) |
 | Scripts Index | `docs/SCRIPTS_INDEX.md` | Active script surface map |
+| Architecture Decisions | `docs/governance/decisions/` | ADRs — incl. ADR-005 (NDJSON audit ledger; D3 at-most-once bridge events) and ADR-007 (multi-tenant `project_id` / composite-key `dispatches`) |
 | Core Contracts | `docs/core/` | Operational contracts and technical references |
 | System Contracts | `docs/contracts/` | Feature-level and platform contracts |
 | Receipt Operations | `docs/operations/RECEIPT_PIPELINE.md` | Receipt generation, processing, and delivery |
