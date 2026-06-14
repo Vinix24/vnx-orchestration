@@ -189,8 +189,18 @@ class TestBidirectionalPreflight:
         with pytest.raises(RuntimeError, match="extra="):
             mod.run(project_dir)
 
-    def test_raises_on_missing_unique(self, tmp_path):
-        """A dispatches table without UNIQUE(dispatch_id, project_id) fails preflight."""
+    def test_raises_on_missing_unique(self, tmp_path, monkeypatch):
+        """A dispatches table missing UNIQUE(dispatch_id, project_id) must not migrate silently.
+
+        N1 (#859 round-2): a table with neither a solo dispatch_id uniqueness nor the
+        composite is now detected as needing the ADR-007 pre-migration repair (it was
+        previously a silent no-op). This DB sits at a NON-canonical .vnx-data/state
+        path with no .vnx-project-id marker and no VNX_PROJECT_ID, so the tenant is
+        unresolvable and the repair fails closed (R3.1) — run() still raises (the
+        guard property holds), just earlier and with a precise tenant-resolution
+        error instead of the legacy "missing UNIQUE" preflight message.
+        """
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         project_dir = tmp_path / "no_unique"
         state_dir = project_dir / ".vnx-data" / "state"
         state_dir.mkdir(parents=True)
@@ -221,7 +231,8 @@ class TestBidirectionalPreflight:
         conn.commit()
         conn.close()
         mod = _get_migrate_module()
-        with pytest.raises(RuntimeError, match="UNIQUE"):
+        # N1: missing composite → ADR-007 repair fires; unresolvable tenant → fail-closed.
+        with pytest.raises(RuntimeError, match="project_id|UNIQUE"):
             mod.run(project_dir)
 
 

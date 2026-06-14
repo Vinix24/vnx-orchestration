@@ -212,11 +212,18 @@ def _has_composite_unique(conn: sqlite3.Connection, dispatch_cols=None) -> bool:
 
 
 def _dispatches_needs_adr007_repair(conn: sqlite3.Connection) -> bool:
-    """True when dispatches still carries single-column uniqueness on dispatch_id.
+    """True when dispatches lacks the ADR-007 composite UNIQUE(dispatch_id, project_id).
 
-    Detection is sqlite_master/PRAGMA based (R1.1). A table already keyed by the
-    composite (no solo-dispatch_id unique object) is a no-op; a missing
-    dispatches table is a no-op.
+    Detection is sqlite_master/PRAGMA based (R1.1). Repair is needed when EITHER a
+    single-column uniqueness on dispatch_id still exists OR the composite is absent
+    (N1: a table with NO solo uniqueness AND no composite was previously treated as
+    "no repair needed", so the composite was never added). Semantics:
+      already-composite (no solo)      → False  (no-op)
+      solo dispatch_id uniqueness      → True
+      neither solo nor composite       → True   (N1: composite now added)
+      composite + a stray solo unique  → True
+    A missing dispatches table is a no-op. See ADR-007
+    (docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md).
     """
     present = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatches'"
@@ -224,7 +231,8 @@ def _dispatches_needs_adr007_repair(conn: sqlite3.Connection) -> bool:
     if not present:
         return False
     cols = [c for c, _ in _dispatch_table_columns(conn)]
-    return _has_solo_dispatch_id_unique(conn, cols)
+    return (_has_solo_dispatch_id_unique(conn, cols)
+            or not _has_composite_unique(conn, cols))
 
 
 # --- R3.1: DB-path-anchored, fail-closed project_id resolver/validator -------
@@ -393,6 +401,34 @@ def _constraint_is_composite(item: str, dispatch_cols) -> bool:
         "dispatch_id", "project_id"}
 
 
+_INLINE_UNIQUE_RE = re.compile(r'(?is)\s+UNIQUE(\s+ON\s+CONFLICT\s+\w+)?(?=\s|$)')
+_INLINE_PK_RE = re.compile(
+    r'(?is)\s+PRIMARY\s+KEY(\s+(?:ASC|DESC))?'
+    r'(\s+ON\s+CONFLICT\s+\w+)?(\s+AUTOINCREMENT)?(?=\s|$)')
+_PK_TOKEN_RE = re.compile(r'(?is)\bPRIMARY\s+KEY\b')
+
+
+def _mask_string_literals(sql: str) -> str:
+    """Return *sql* with every char inside a '...'/"..."/`...` literal replaced by
+    NUL (quotes kept, length and indices preserved) so a regex run over the mask
+    sees keyword tokens ONLY outside quoted strings (N3). A doubled quote nets to
+    two toggles with no chars between (same quote-state logic as
+    _split_columns_and_constraints), so an escaped quote stays masked.
+    """
+    out, in_str, quote = [], False, ""
+    for ch in sql:
+        if in_str:
+            out.append(ch if ch == quote else "\x00")
+            if ch == quote:
+                in_str = False
+        elif ch in ("'", '"', "`"):
+            in_str, quote = True, ch
+            out.append(ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _strip_inline_unique(coldef: str) -> str:
     """Strip an inline column UNIQUE *and* PRIMARY KEY constraint from a column-def (B).
 
@@ -401,13 +437,33 @@ def _strip_inline_unique(coldef: str) -> str:
     dispatch_id key cannot survive the rebuild while the repair reports success.
     Called only on the dispatch_id column-def; the composite UNIQUE(dispatch_id,
     project_id) is added separately.
+
+    N3: the keyword scan is string-literal aware — a UNIQUE / PRIMARY KEY token
+    inside a quoted DEFAULT (e.g. ``DEFAULT 'a UNIQUE b'``) is preserved verbatim;
+    only a real keyword token outside any quoted string is stripped. Match spans
+    are computed on the masked copy and deleted from the original right-to-left so
+    earlier indices stay valid (the two keyword tokens never overlap).
     """
-    coldef = re.sub(r'(?is)\s+UNIQUE(\s+ON\s+CONFLICT\s+\w+)?(?=\s|$)', " ", coldef)
-    coldef = re.sub(
-        r'(?is)\s+PRIMARY\s+KEY(\s+(?:ASC|DESC))?'
-        r'(\s+ON\s+CONFLICT\s+\w+)?(\s+AUTOINCREMENT)?(?=\s|$)',
-        " ", coldef)
+    masked = _mask_string_literals(coldef)
+    spans = [m.span() for m in _INLINE_UNIQUE_RE.finditer(masked)]
+    spans += [m.span() for m in _INLINE_PK_RE.finditer(masked)]
+    for start, end in sorted(spans, reverse=True):
+        coldef = coldef[:start] + " " + coldef[end:]
     return coldef.rstrip()
+
+
+def _coldef_has_primary_key(coldef: str) -> bool:
+    """True if *coldef* declares an inline PRIMARY KEY (string-literal aware, N4)."""
+    return bool(_PK_TOKEN_RE.search(_mask_string_literals(coldef)))
+
+
+def _constraint_is_primary_key(item: str) -> bool:
+    """True if table-constraint *item* is a PRIMARY KEY(...) (optionally CONSTRAINT-named, N4)."""
+    s = item.strip()
+    m = re.match(r'(?is)^CONSTRAINT\s+\S+\s+(.*)$', s)
+    if m:
+        s = m.group(1).strip()
+    return bool(re.match(r'(?is)^PRIMARY\s+KEY\s*\(', s))
 
 
 def _column_def_index(items, dispatch_cols, target: str) -> int:
@@ -434,17 +490,36 @@ def _promote_project_id_not_null(coldef: str) -> str:
     return coldef.rstrip() + " NOT NULL"
 
 
+def _composite_constraint_clause(col_defs, constraints, removed_solo_pk: bool) -> str:
+    """The composite (dispatch_id, project_id) clause for the rebuilt table (N4).
+
+    Emit it as PRIMARY KEY when the removed solo dispatch_id uniqueness WAS a
+    PRIMARY KEY and no other PRIMARY KEY survives the rebuild — otherwise the table
+    would lose its PK. Emit UNIQUE in every other case (a separate PK such as
+    ``id INTEGER PRIMARY KEY`` remains, or the removed solo key was a plain UNIQUE).
+    """
+    has_remaining_pk = (any(_coldef_has_primary_key(c) for c in col_defs)
+                        or any(_constraint_is_primary_key(c) for c in constraints))
+    if removed_solo_pk and not has_remaining_pk:
+        return "PRIMARY KEY(dispatch_id, project_id)"
+    return "UNIQUE(dispatch_id, project_id)"
+
+
 def _transform_create_table_sql(orig_sql: str, dispatch_cols, has_project_id: bool) -> str:
     """Mutate dispatches CREATE SQL → dispatches_new: drop solo dispatch_id
     uniqueness (inline/table UNIQUE *and* PRIMARY KEY, B) and add/keep project_id
     as NOT NULL — added with no vnx-dev default (A), existing-nullable promoted (J),
-    existing NOT NULL untouched — plus the composite UNIQUE. FKs, CHECK, collations,
+    existing NOT NULL untouched — plus the composite key. FKs, CHECK, collations,
     generated cols and the trailing table-option suffix (STRICT / WITHOUT ROWID, C)
     are preserved verbatim (R1.5).
 
+    N4: the composite is added as PRIMARY KEY(dispatch_id, project_id) when the
+    stripped solo key was a PRIMARY KEY and no other PK survives (so the table is
+    not left PK-less); otherwise as UNIQUE(dispatch_id, project_id).
+
     SQLite requires every column-def to precede every table constraint, so the
     new project_id column is appended to the column section and the composite
-    UNIQUE to the constraint section (never interleaved).
+    to the constraint section (never interleaved).
     """
     open_pos = orig_sql.index("(")
     close_pos = _matching_paren(orig_sql, open_pos)
@@ -453,14 +528,16 @@ def _transform_create_table_sql(orig_sql: str, dispatch_cols, has_project_id: bo
     items = _split_columns_and_constraints(body)
     did_idx = _column_def_index(items, dispatch_cols, "dispatch_id")
     pid_idx = _column_def_index(items, dispatch_cols, "project_id")
-    col_defs, constraints, has_composite = [], [], False
+    col_defs, constraints, has_composite, removed_solo_pk = [], [], False, False
     for idx, item in enumerate(items):
         if _is_table_constraint(item):
             if _is_solo_unique_constraint(item, dispatch_cols):
+                removed_solo_pk = removed_solo_pk or _constraint_is_primary_key(item)
                 continue
             has_composite = has_composite or _constraint_is_composite(item, dispatch_cols)
             constraints.append(item)
         elif idx == did_idx:
+            removed_solo_pk = removed_solo_pk or _coldef_has_primary_key(item)  # N4
             col_defs.append(_strip_inline_unique(item))                 # B: strip UNIQUE + PK
         elif idx == pid_idx:
             col_defs.append(_promote_project_id_not_null(item))         # J: always NOT NULL
@@ -469,7 +546,8 @@ def _transform_create_table_sql(orig_sql: str, dispatch_cols, has_project_id: bo
     if not has_project_id:
         col_defs.append("project_id TEXT NOT NULL")                     # A: no vnx-dev default
     if not has_composite:
-        constraints.append("UNIQUE(dispatch_id, project_id)")
+        constraints.append(_composite_constraint_clause(               # N4: PK vs UNIQUE
+            col_defs, constraints, removed_solo_pk))
     body_items = ",\n    ".join(col_defs + constraints)
     new_sql = "CREATE TABLE dispatches_new (\n    " + body_items + "\n)"
     return new_sql + (" " + suffix if suffix else "")                   # C: re-append options
@@ -758,8 +836,14 @@ def _execute_dispatches_rebuild(conn: sqlite3.Connection, plan: dict, project_id
     except Exception:
         try:
             conn.execute("ROLLBACK")                                    # K: guarded rollback
-        except Exception:
-            pass
+        except Exception as rb_exc:
+            # N2/K: never silently swallow the rollback failure (silent-except CI
+            # gate). Log it, then fall through to re-raise the ORIGINAL exception
+            # so K's contract holds — the original error propagates, not this one.
+            warnings.warn(
+                f"ADR-007 repair: ROLLBACK after error failed: {rb_exc}",
+                stacklevel=2,
+            )
         raise
 
 
@@ -786,6 +870,14 @@ def _repair_dispatches_adr007(conn: sqlite3.Connection, project_id: str) -> bool
     (PRD §7.1 / R1.6). *project_id* is the DB-path-anchored validated tenant
     identity (R3.1); never the 'vnx-dev' sentinel. Returns True if a rebuild ran.
     Cite ADR-007.
+
+    ADR-005 audit (N5): this primitive deliberately emits NO NDJSON ledger event.
+    It operates on a raw conn/db_path with no event-store wiring; emitting from
+    here would break temp-DB test isolation and couple the data layer to the
+    ledger. The ADR-005 event for this mutation is recorded at the GOVERNED CALLER
+    layer — run() under VNX_ROADMAP_AUTOPILOT / migration governance and the
+    operator runbook §7.2 (operator approval + unified report + completion
+    receipt). That caller layer, not this function, is the correct ledger surface.
     """
     if not _dispatches_needs_adr007_repair(conn):
         return False
@@ -813,6 +905,12 @@ def _run_adr007_dispatches_repair(conn: sqlite3.Connection, db_path) -> None:
     """run() wiring: detect → resolve tenant → repair. project_id is resolved
     ONLY when a rebuild is actually needed, so a fresh/composite DB never
     requires identity resolution. Cite ADR-007.
+
+    ADR-005 audit (N5): the repair mutation is audited at this GOVERNED CALLER
+    layer — run() under VNX_ROADMAP_AUTOPILOT / migration governance and the
+    operator runbook §7.2 (operator approval + unified report + completion
+    receipt) — NOT inside the pure repair primitive, which has no event-store
+    wiring and must stay temp-DB-isolation safe (no code-level ledger emission).
     """
     if not _dispatches_needs_adr007_repair(conn):
         return

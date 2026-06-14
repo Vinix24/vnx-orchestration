@@ -24,8 +24,11 @@ opened or mutated.
 from __future__ import annotations
 
 import hashlib
+import inspect
+import re
 import sqlite3
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -1016,3 +1019,200 @@ def test_all_functions_within_70_lines_gate_counter() -> None:
         "functions exceeding 70 lines by the gate's own counter "
         f"(function_size_gate._scan_python_functions): {oversized}"
     )
+
+
+# =========================================================================== #
+# Gate round-2 fix-forward (#859) — one behavioral test per finding N1–N5.
+# Every test pins VNX_DATA_DIR_EXPLICIT=1 + a tmp VNX_DATA_DIR (autouse fixture)
+# and operates ONLY on temp DBs.
+# =========================================================================== #
+
+
+# N1 — a dispatches table whose dispatch_id has NO uniqueness at all (no solo, no
+# composite) is now detected as needing repair and gets the composite UNIQUE added.
+def test_finding_n1_no_uniqueness_gets_composite(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT,
+            state TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id,state) VALUES(1,'a','proj-x','q');
+    """)
+    cols = _dispatch_cols(conn)
+    assert mfs._has_solo_dispatch_id_unique(conn, cols) is False     # no solo to begin with
+    assert mfs._has_composite_unique(conn, cols) is False            # and no composite
+    assert mfs._dispatches_needs_adr007_repair(conn) is True         # N1: still needs repair
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    cols = _dispatch_cols(conn)
+    assert mfs._has_composite_unique(conn, cols) is True             # composite now added
+    assert mfs._has_solo_dispatch_id_unique(conn, cols) is False
+    # idempotent: an already-composite table is a no-op
+    assert mfs._dispatches_needs_adr007_repair(conn) is False
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is False
+    conn.close()
+
+
+# N1 — full detection truth table: already-composite→F, solo→T, neither→T, composite+stray→T
+def test_finding_n1_detection_truth_table(tmp_path: Path) -> None:
+    def _needs(name: str, ddl: str) -> bool:
+        c = sqlite3.connect(str(tmp_path / f"{name}.db"))
+        c.executescript(ddl)
+        c.commit()
+        out = mfs._dispatches_needs_adr007_repair(c)
+        c.close()
+        return out
+
+    assert _needs("composite", """
+        CREATE TABLE dispatches (
+            dispatch_id TEXT NOT NULL, project_id TEXT NOT NULL,
+            UNIQUE(dispatch_id, project_id));
+    """) is False
+    assert _needs("solo", """
+        CREATE TABLE dispatches (dispatch_id TEXT UNIQUE, project_id TEXT);
+    """) is True
+    assert _needs("neither", """
+        CREATE TABLE dispatches (dispatch_id TEXT, project_id TEXT);
+    """) is True
+    assert _needs("composite_plus_stray", """
+        CREATE TABLE dispatches (
+            dispatch_id TEXT NOT NULL, project_id TEXT NOT NULL,
+            UNIQUE(dispatch_id, project_id));
+        CREATE UNIQUE INDEX ux_stray ON dispatches(dispatch_id);
+    """) is True
+
+
+# N2 — a ROLLBACK failure is WARNED (not silently swallowed) and the ORIGINAL error
+# still propagates (the silent-except CI gate fix must keep K's contract).
+def test_finding_n2_rollback_failure_warns_and_propagates_original(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+
+    def _commit_then_boom(c, plan):
+        c.execute("COMMIT")              # ends the txn so the except-clause ROLLBACK fails
+        raise RuntimeError("ORIGINAL boom")
+
+    monkeypatch.setattr(mfs, "_recreate_dependent_objects", _commit_then_boom)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RuntimeError, match="ORIGINAL boom"):   # original, not rollback error
+            mfs._repair_dispatches_adr007(conn, "proj-x")
+    assert any("ROLLBACK after error failed" in str(rec.message) for rec in caught), (
+        "N2: the rollback failure must be warned (no silent except + pass)"
+    )
+    conn.close()
+
+
+# N3 — a UNIQUE / PRIMARY KEY keyword inside a quoted string literal is preserved;
+# only a real keyword token outside any quoted string is stripped.
+def test_finding_n3_strip_inline_unique_is_string_literal_aware() -> None:
+    # quoted 'a UNIQUE b' preserved verbatim; the trailing real UNIQUE removed
+    out = mfs._strip_inline_unique("dispatch_id TEXT DEFAULT 'a UNIQUE b' UNIQUE")
+    assert "'a UNIQUE b'" in out
+    assert out.rstrip().endswith("'a UNIQUE b'")
+    # quoted 'x PRIMARY KEY y' preserved verbatim; the real inline PRIMARY KEY removed
+    out2 = mfs._strip_inline_unique("dispatch_id TEXT PRIMARY KEY DEFAULT 'x PRIMARY KEY y'")
+    assert "'x PRIMARY KEY y'" in out2
+    assert "PRIMARY" not in out2.replace("'x PRIMARY KEY y'", "")
+    # a literal with NO real keyword is returned untouched
+    assert mfs._strip_inline_unique(
+        "note TEXT DEFAULT 'has UNIQUE inside'") == "note TEXT DEFAULT 'has UNIQUE inside'"
+
+
+# N3 — end-to-end: a dispatch_id column whose DEFAULT literal contains UNIQUE is not
+# corrupted by the rebuild, while the real inline UNIQUE on dispatch_id is stripped.
+def test_finding_n3_quoted_keyword_default_survives_rebuild(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL UNIQUE DEFAULT 'tag UNIQUE x',
+            project_id TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id) VALUES(1,'a','proj-x');
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "proj-x") is True
+    cols = _dispatch_cols(conn)
+    assert mfs._has_composite_unique(conn, cols) is True
+    assert mfs._has_solo_dispatch_id_unique(conn, cols) is False
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatches'").fetchone()[0]
+    assert "'tag UNIQUE x'" in sql, "N3: the quoted DEFAULT literal must survive verbatim"
+    conn.close()
+
+
+# N4(a) — a sole dispatch_id PRIMARY KEY becomes PRIMARY KEY(dispatch_id, project_id)
+def test_finding_n4_sole_pk_becomes_composite_primary_key(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            dispatch_id TEXT PRIMARY KEY,
+            project_id TEXT,
+            state TEXT
+        );
+        INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projA','q');
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "projA") is True
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatches'").fetchone()[0]
+    norm = re.sub(r"\s+", "", sql)
+    assert "PRIMARYKEY(dispatch_id,project_id)" in norm, "N4(a): composite must be the PK"
+    pk = {r[1]: r[5] for r in conn.execute("PRAGMA table_info('dispatches')")}
+    assert pk["dispatch_id"] > 0 and pk["project_id"] > 0
+    # cross-tenant reuse works; duplicate (d1, projA) rejected
+    conn.execute("INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projB','q')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO dispatches(dispatch_id,project_id,state) VALUES('d1','projA','q')")
+    conn.close()
+
+
+# N4(b) — a separate id PK + a solo dispatch_id UNIQUE → composite stays UNIQUE, id stays PK
+def test_finding_n4_separate_pk_keeps_composite_unique(tmp_path: Path) -> None:
+    db = _db_path(tmp_path)
+    conn = _seed(db, """
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY,
+            dispatch_id TEXT NOT NULL UNIQUE,
+            project_id TEXT,
+            state TEXT
+        );
+        INSERT INTO dispatches(id,dispatch_id,project_id,state) VALUES(1,'d1','projA','q');
+    """)
+    assert mfs._repair_dispatches_adr007(conn, "projA") is True
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatches'").fetchone()[0]
+    norm = re.sub(r"\s+", "", sql)
+    assert "UNIQUE(dispatch_id,project_id)" in norm
+    assert "PRIMARYKEY(dispatch_id,project_id)" not in norm
+    pk = {r[1]: r[5] for r in conn.execute("PRAGMA table_info('dispatches')")}
+    assert pk["id"] == 1, "N4(b): id must remain the sole PRIMARY KEY"
+    assert pk["dispatch_id"] == 0 and pk["project_id"] == 0
+    assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
+    conn.close()
+
+
+# N5 — the ADR-005 audit responsibility is DOCUMENTED at the governed caller layer and
+# the repair primitive emits NO ledger event itself (documentation + isolation contract).
+def test_finding_n5_adr005_caller_layer_documented_no_emission() -> None:
+    for fn in (mfs._repair_dispatches_adr007, mfs._run_adr007_dispatches_repair):
+        doc = fn.__doc__ or ""
+        assert "ADR-005" in doc, f"{fn.__name__} must document the ADR-005 caller layer (N5)"
+        assert "§7.2" in doc, f"{fn.__name__} must cite the operator runbook §7.2 (N5)"
+        assert "caller" in doc.lower(), f"{fn.__name__} must name the governed caller layer (N5)"
+    # the pure repair primitive must not wire any NDJSON ledger emission
+    prim_src = (inspect.getsource(mfs._repair_dispatches_adr007)
+                + inspect.getsource(mfs._execute_dispatches_rebuild))
+    for forbidden in ("append_receipt", ".ndjson", "incident_log", "dispatch_register"):
+        assert forbidden not in prim_src, (
+            f"N5: the repair primitive must not emit ledger events itself ({forbidden})"
+        )
