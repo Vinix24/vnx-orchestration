@@ -1163,3 +1163,100 @@ features:
       operator question 'does the self-learning loop work correctly again' —
       the loop ran but its output was near-duplicate noise; now it surfaces
       fresh patterns.
+
+  # ---- 2026-06-14 PM-reconcile: future-state rebuild batch status + local-model PM-gate plan ----
+  # Source: the 2026-06-13/14 future-state-rebuild (FSR) batch on main and the
+  # pm-gate-agent-automation design (event-stream-primary measurement substrate).
+
+  - feature_id: future-state-rebuild-batch
+    title: "Future-state rebuild batch (FSR): ADR-007 in-place dispatches rebuild + version-reconciliation manifest + tenant-scoped build_t0_state + OI->track bridge -> autopilot_tick wiring"
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on:
+      - oi-lifecycle-closure
+      - planning-future-state-layer
+    milestone: "1.0.1"
+    status: in-progress
+    pr_queue:
+      - pr_id: "#857"
+        title: "PR-0 (future-state): enforced test-isolation guard (no test mutates the live DB)"
+        status: merged
+        risk_class: high
+      - pr_id: "#858"
+        title: "PR-E (future-state): kanban honesty — degraded signal, no silent drops, staleness truth"
+        status: merged
+        risk_class: low
+      - pr_id: "#859"
+        title: "feat(fsr-a1): ADR-007 dispatches in-place rebuild — composite UNIQUE, 12-step, fail-closed tenant"
+        status: merged
+        risk_class: high
+      - pr_id: "#861"
+        title: "feat(fsr-a2): version reconciliation via declarative invariant manifest"
+        status: merged
+        risk_class: high
+      - pr_id: "#863"
+        title: "feat(fsr-b): tenant-scoped canonical tracks in build_t0_state"
+        status: merged
+        risk_class: high
+      - pr_id: "#862"
+        title: "feat(fsr-c): open-item→track bridge through tracks.py (R4.1–R4.4, D1/D3/D5)"
+        status: merged
+        risk_class: high
+      - pr_id: "#871"
+        title: "feat(fsr-d): OI->track bridge wiring into autopilot_tick"
+        status: in_progress
+        risk_class: high
+    notes: >
+      Future-state rebuild batch — the live activation step beyond
+      planning-future-state-layer (build-complete, shipped-dark) and
+      oi-lifecycle-closure (#849). HONEST STATUS as of 2026-06-14: PR-0
+      isolation guard (#857) and PR-E kanban honesty (#858) merged earlier;
+      PR-A1 ADR-007 dispatches in-place rebuild (#859), PR-A2 version-
+      reconciliation invariant manifest (#861), PR-B tenant-scoped
+      build_t0_state (#863), and PR-C OI->track bridge through tracks.py
+      (#862) all merged to main today. PR-D — the bridge wiring into
+      autopilot_tick (#871) — is IN PROGRESS (landing), NOT merged; tracked
+      here as in_progress so it surfaces in the PR_QUEUE queued section and is
+      not overstated as done. Remaining after PR-D: the operator
+      runtime-migration runbook (§7.2, human-gated) — see #869. This batch is
+      a real database-engineer-led ADR-007 migration of the dispatches/tracks
+      future-state, not the SPC/intelligence-table batch (that is
+      adr007-composite-keys-batch / #864, still planned and separate).
+
+  - feature_id: pm-gate-agent-automation
+    title: "PM-gate agent automation — event-driven per-receipt roadmap maintenance"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on:
+      - planning-future-state-layer
+      - oi-lifecycle-closure
+      - gemma-4-12b-integration
+    milestone: "1.x"
+    status: planned
+    notes: >
+      The PM-gate (roadmap mutation / track-close decision) need not be
+      human-driven. A tiered model-agent runs the PM checks per receipt:
+      deterministic / high-confidence closes are auto-applied (each with a
+      receipt for the audit trail); ambiguous cases escalate to a stronger
+      model or the human gate, preserving human-in-the-loop on the judgment
+      tail. Key design points: (1) EVENT-DRIVEN per-receipt — fired by the
+      receipt processor on each dispatch completion, NOT a living daemon, so
+      it runs exactly when there is new state to reconcile. (2) TIERED MODEL —
+      a cheap LOCAL model (gemma-4-12B via Ollama on the Mac Mini, or haiku)
+      handles the high-frequency mechanical checks: zero API cost, fast, and
+      Anthropic-cutoff-resilient (the local tier keeps working if the
+      subscription/headless lane is disrupted); judgment cases escalate to
+      sonnet or the human. (3) The advisory rollup reconciler already computes
+      derived_status deterministically with no LLM (planning-future-state-
+      layer Phase 3, #793), so the agent only handles the judgment tail on top
+      of the deterministic truth — deterministic auto-close, ambiguous to the
+      human gate. Relates to the 1.x items already filed as issues: #866
+      (event-stream-primary measurement — the agent's normalized input
+      substrate), #867 (OI-bridge exactly-once outbox), #868 (governance
+      observability), #869 (operator runbook automation), #864 (broader
+      ADR-007 batch). Depends on the reconciler (deterministic derived_status)
+      and the local-lane evaluation (gemma-4-12b-integration) being in place.
