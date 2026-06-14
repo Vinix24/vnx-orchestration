@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
 """migrate_future_system.py — apply track layer migrations (schema only).
 
-Steps:
+run() ordering (R2.2 — repair → version-reconcile → numbered walk):
+  A. ADR-007 dispatches repair (`_run_adr007_dispatches_repair`, PR-A1) — the ad-hoc
+     in-place composite-UNIQUE rebuild, a PRE-walk step. NOT a numbered migration.
+  B. Numbered version reconciliation (`_run_version_reconciliation`, PR-A2) — validate
+     the DB's CLAIMED `user_version` against the declarative invariant manifest
+     (scripts/lib/schema_manifest.py). A DB that LIES about its version (claims v30 but
+     is physically v27) is DOWNGRADED to the exact highest version whose invariants
+     fully hold, so the numbered walk re-applies whatever the downgrade exposes.
+  C. Numbered migration walk (0022 → 0030), each idempotent via user_version.
+  D. Convergence guard (`_assert_manifest_converged`) — after the walk the terminal
+     version's manifest MUST hold, else a downgrade+re-walk did not converge → abort
+     loudly rather than loop (oscillation guard).
+
+The reconciliation (B) runs BEFORE the walk (C) so the walk re-applies whatever the
+downgrade exposed. This matches the operator ordering in PRD §6 (migrate first) and
+PRD §7.2 (Run: migrate → backfill → bridge → reconcile). The numbered walk itself:
+
   1. PRAGMA pre-flight: assert dispatches schema and UNIQUE constraint are intact
   2. Apply schemas/migrations/0022_track_layer.sql (idempotent via user_version)
   3. PRAGMA pre-flight: assert tracks v22 schema intact before composite-key rebuild
@@ -14,6 +30,10 @@ Steps:
   10. Apply schemas/migrations/0029_track_type_discriminator.sql (idempotent)
   11. PRAGMA pre-flight: assert track_type present (v29) before adding resolved_at
   12. Apply schemas/migrations/0030_track_oi_resolved_at.sql (idempotent)
+
+The per-version preflights (steps 3-11) are now MANIFEST-BACKED (schema_manifest):
+the name-based column/table assertions are sourced from the declarative manifest, not
+hand-typed name sets (ADR-009 schema-first). Cite ADR-007 (composite tenant keys).
 """
 
 from __future__ import annotations
@@ -42,6 +62,7 @@ if str(_LIB) not in sys.path:
 
 from project_root import resolve_project_root
 import schema_migration
+import schema_manifest
 from atomic_io import audit_event_append
 
 
@@ -974,6 +995,99 @@ def _run_adr007_dispatches_repair(conn: sqlite3.Connection, db_path) -> None:
               f"project_id), tenant={project_id!r}")
 
 
+# ===========================================================================
+# PR-A2 — manifest-backed migration preflights + numbered version reconciliation
+# (R2.1, R2.2). The version reconciler is the AUTHORITATIVE replacement for the
+# old name-based version trust: it runs BEFORE the numbered walk and aligns a
+# lying `user_version` with the DB's true shape (schema_manifest). The per-version
+# preflights below remain as defense-in-depth migration-apply-time guards, but
+# their column/PK identities are now sourced from the declarative manifest
+# (ADR-009 schema-first), not hand-typed name sets. Cite ADR-007 (tenant keys).
+# ===========================================================================
+
+def _table_pk(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    """Ordered PK column names for *table* (empty when none / table absent)."""
+    rows = [r for r in conn.execute(f"PRAGMA table_info('{table}')") if r[5] > 0]
+    return tuple(r[1] for r in sorted(rows, key=lambda r: r[5]))
+
+
+def _assert_required_tables(conn: sqlite3.Connection, tables, before: str) -> None:
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    for required in tables:
+        if required not in present:
+            raise RuntimeError(
+                f"Required table '{required}' not found. Run prior migrations before {before}.")
+
+
+def _assert_track_precondition(conn: sqlite3.Connection, *, prereq_table: str,
+                               prereq_cols, forbidden_table: str, forbidden_cols) -> None:
+    """Manifest-backed migration precondition guard (replaces the name-based
+    `_assert_tracks_vNN_intact` body). Raises when a prerequisite column from the
+    PRIOR migration is MISSING, or a column the TARGET migration adds is already
+    PRESENT (double-apply). Column identities come from schema_manifest deltas, not
+    hand-typed sets (ADR-009). Messages name the specific offending column."""
+    have_prereq = {r[1] for r in conn.execute(f"PRAGMA table_info('{prereq_table}')")}
+    for col in prereq_cols:
+        if col not in have_prereq:
+            raise RuntimeError(
+                f"{prereq_table} missing '{col}' column (prior migration not applied). "
+                "Run the prior migration before this one.")
+    have_forbidden = {r[1] for r in conn.execute(f"PRAGMA table_info('{forbidden_table}')")}
+    for col in forbidden_cols:
+        if col in have_forbidden:
+            raise RuntimeError(
+                f"{forbidden_table} already has '{col}' column. Migration should be "
+                "skipped (user_version should already be advanced).")
+
+
+def _emit_version_reconcile_event(db_path, claimed: int, corrected: int, violations) -> None:
+    """ADR-005 ledger: record a user_version downgrade (a state mutation) after it
+    succeeds. Temp-safe via _adr007_events_dir (respects VNX_DATA_DIR_EXPLICIT)."""
+    audit_event_append(
+        _adr007_events_dir(db_path),
+        "schema_version_reconciled",
+        {
+            "claimed_user_version": claimed,
+            "corrected_user_version": corrected,
+            "first_violations": list(violations)[:5],
+            "adr": "ADR-009",
+            "db_path": str(Path(db_path).expanduser().resolve()),
+        },
+    )
+
+
+def _run_version_reconciliation(conn: sqlite3.Connection, db_path) -> None:
+    """R2.1: validate the claimed user_version against the invariant manifest and
+    DOWNGRADE to the highest fully-satisfied version on mismatch, so the numbered
+    walk re-applies the exposed migrations. Runs AFTER the ADR-007 repair, BEFORE
+    the walk (R2.2). A downgrade is committed immediately (deliberate state change);
+    genuine corruption with no satisfiable lower version raises (schema_manifest)."""
+    result = schema_manifest.reconcile_user_version(conn)
+    if not result.reconciled:
+        return
+    conn.commit()
+    _emit_version_reconcile_event(db_path, result.claimed, result.corrected, result.violations)
+    print(f"  [reconcile] user_version {result.claimed} → {result.corrected}: claimed "
+          f"version failed its manifest; re-walk will re-apply. first violations: "
+          f"{list(result.violations)[:2]}")
+
+
+def _assert_manifest_converged(conn: sqlite3.Connection) -> None:
+    """Oscillation guard (R2.1): after the numbered walk, the terminal version's
+    manifest MUST hold. If a downgrade+re-walk did not converge, fail loudly rather
+    than leave a silently-broken DB (or loop on the next run). Cite ADR-009."""
+    final = schema_migration.get_user_version(conn)
+    if final not in schema_manifest.SCHEMA_MANIFEST:
+        return
+    violations = schema_manifest.validate_db_at_version(conn, final)
+    if violations:
+        raise schema_manifest.SchemaReconciliationError(
+            f"version reconciliation did not converge: after the migration walk "
+            f"user_version={final} but the v{final} invariant manifest still fails "
+            f"({violations[:3]}). Aborting rather than looping (R2.1).")
+
+
 # ---------------------------------------------------------------------------
 # Step 0: PRAGMA pre-flight — guard against schema drift before rebuild
 # ---------------------------------------------------------------------------
@@ -1028,46 +1142,30 @@ def apply_migration(conn: sqlite3.Connection, project_root: Path) -> None:
 # Step 2: PRAGMA pre-flight for 0024 — assert v22 tracks schema intact
 # ---------------------------------------------------------------------------
 
-_EXPECTED_TRACKS_V22_COLS = frozenset({
-    'track_id', 'title', 'goal_state', 'phase', 'next_up', 'sort_order',
-    'priority', 'requires_operator_promotion', 'instruction_template',
-    'context_composer_rules', 'pr_ref', 'trigger_condition', 'project_id',
-    'created_at', 'phase_changed_at', 'completed_at', 'metadata_json',
-})
-
-
 def _assert_tracks_v22_intact(conn: sqlite3.Connection) -> None:
-    """Assert tracks table is in v22 state: single-column PK, no composite indexes.
-
-    Codex peer-review §3: preflight must check columns AND unique indexes,
-    not just column names.
+    """Manifest-backed preflight for 0024: tracks must be in the v22 single-column-PK
+    state. A composite (track_id, project_id) PK means 0024 already applied. Required
+    columns + PK shape come from schema_manifest (ADR-009), not a hand-typed set.
+    Codex peer-review §3: check columns AND key shape, not just column names.
     """
-    tables = {row[0] for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
-    for required in ('tracks', 'track_phase_history', 'track_dependencies', 'track_open_items'):
-        if required not in tables:
-            raise RuntimeError(
-                f"Required table '{required}' not found. "
-                "Run migration 0022 before 0024."
-            )
-
+    _assert_required_tables(
+        conn, ('tracks', 'track_phase_history', 'track_dependencies', 'track_open_items'),
+        before='0024')
     cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
-    missing = _EXPECTED_TRACKS_V22_COLS - cols
+    missing = set(schema_manifest.table_at(22, 'tracks').columns) - cols
     if missing:
         raise RuntimeError(
             f"tracks schema drift before v24 migration: missing columns={missing}. "
-            "Expected v22 state."
-        )
-
-    # Guard: if composite PK already present (ux_tracks_next_up_per_project from v24),
-    # skip — migration was already applied to this tracks table.
-    indexes = [row[1] for row in conn.execute("PRAGMA index_list('tracks')")]
-    if 'ux_tracks_next_up_per_project' in indexes:
+            "Expected v22 state.")
+    pk = _table_pk(conn, 'tracks')
+    if pk == schema_manifest.table_pk_at(24, 'tracks'):
         raise RuntimeError(
-            "tracks already has v24 composite index 'ux_tracks_next_up_per_project'. "
-            "Migration 0024 should be skipped (user_version should be >= 24)."
-        )
+            "tracks already has the v24 composite (track_id, project_id) PK. "
+            "Migration 0024 should be skipped (user_version should be >= 24).")
+    if pk != schema_manifest.table_pk_at(22, 'tracks'):
+        raise RuntimeError(
+            f"tracks PK {pk} is neither v22 single-column nor v24 composite — "
+            "schema drift before 0024.")
 
 
 schema_migration.register_preflight(24, _assert_tracks_v22_intact)
@@ -1271,31 +1369,21 @@ def _ensure_dispatches_output_columns(conn: sqlite3.Connection) -> None:
 
 
 def _assert_tracks_v24_intact(conn: sqlite3.Connection) -> None:
-    """Assert tracks is in the composite-key (v24+) state before adding horizon.
-
-    0027 is purely additive (ALTER TABLE ADD COLUMN + a VIEW), so it only needs
-    the tracks table to exist with its composite-key index. It must NOT run on a
+    """Manifest-backed preflight for 0027: tracks must be at the composite-key (v24+)
+    state before adding horizon. 0027 is additive (ALTER ADD COLUMN + a VIEW), so it
+    needs the composite (track_id, project_id) PK and horizon ABSENT. The PK and the
+    introduced column come from schema_manifest (ADR-009); it must NOT run on a
     pre-v24 single-column-PK tracks table.
     """
-    tables = {row[0] for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
-    if 'tracks' not in tables:
+    _assert_required_tables(conn, ('tracks',), before='0027')
+    if _table_pk(conn, 'tracks') != schema_manifest.table_pk_at(24, 'tracks'):
         raise RuntimeError(
-            "Required table 'tracks' not found. Run migrations 0022 + 0024 before 0027."
-        )
-    indexes = [row[1] for row in conn.execute("PRAGMA index_list('tracks')")]
-    if 'ux_tracks_next_up_per_project' not in indexes:
-        raise RuntimeError(
-            "tracks missing composite-key index 'ux_tracks_next_up_per_project' "
-            "(from 0024). Run migration 0024 before 0027."
-        )
-    cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
-    if 'horizon' in cols:
-        raise RuntimeError(
-            "tracks already has 'horizon' column. Migration 0027 should be "
-            "skipped (user_version should be >= 27)."
-        )
+            "tracks missing the v24 composite (track_id, project_id) PK. "
+            "Run migration 0024 before 0027.")
+    _assert_track_precondition(
+        conn, prereq_table='tracks', prereq_cols=(),
+        forbidden_table='tracks',
+        forbidden_cols=schema_manifest.columns_introduced_at(27, 'tracks'))
 
 
 schema_migration.register_preflight(27, _ensure_dispatches_output_columns)
@@ -1329,18 +1417,14 @@ def apply_migration_v27(conn: sqlite3.Connection, project_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _assert_tracks_v27_intact(conn: sqlite3.Connection) -> None:
-    """Assert tracks has horizon column (v27 state) before adding derived_status."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
-    if "horizon" not in cols:
-        raise RuntimeError(
-            "tracks missing 'horizon' column (from 0027). "
-            "Run migration 0027 before 0028."
-        )
-    if "derived_status" in cols:
-        raise RuntimeError(
-            "tracks already has 'derived_status' column. Migration 0028 should be "
-            "skipped (user_version should be >= 28)."
-        )
+    """Manifest-backed preflight for 0028: tracks has horizon (v27) and not yet
+    derived_status (double-apply guard). Column identities from schema_manifest
+    (the v27 and v28 tracks deltas) per ADR-009."""
+    _assert_track_precondition(
+        conn, prereq_table='tracks',
+        prereq_cols=schema_manifest.columns_introduced_at(27, 'tracks'),
+        forbidden_table='tracks',
+        forbidden_cols=schema_manifest.columns_introduced_at(28, 'tracks'))
 
 
 schema_migration.register_preflight(28, _assert_tracks_v27_intact)
@@ -1369,23 +1453,16 @@ def apply_migration_v28(conn: sqlite3.Connection, project_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _assert_tracks_v28_intact(conn: sqlite3.Connection) -> None:
-    """Assert tracks has derived_status (v28 state) before adding track_type.
-
-    Also guards against double-apply by rejecting if track_type already exists.
-    Column-presence check via PRAGMA table_info provides a secondary idempotency
-    guard beyond the user_version check in apply_script_if_below.
-    """
-    cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
-    if "derived_status" not in cols:
-        raise RuntimeError(
-            "tracks missing 'derived_status' column (from 0028). "
-            "Run migration 0028 before 0029."
-        )
-    if "track_type" in cols:
-        raise RuntimeError(
-            "tracks already has 'track_type' column. Migration 0029 should be "
-            "skipped (user_version should be >= 29)."
-        )
+    """Manifest-backed preflight for 0029: tracks has derived_status (v28) and not yet
+    track_type (double-apply guard). Column identities come from schema_manifest (the
+    v28 and v29 tracks deltas) per ADR-009 — a secondary idempotency guard beyond the
+    user_version check in apply_script_if_below. Raises 'missing derived_status' /
+    'already has track_type' for the specific offending column."""
+    _assert_track_precondition(
+        conn, prereq_table='tracks',
+        prereq_cols=schema_manifest.columns_introduced_at(28, 'tracks'),
+        forbidden_table='tracks',
+        forbidden_cols=schema_manifest.columns_introduced_at(29, 'tracks'))
 
 
 schema_migration.register_preflight(29, _assert_tracks_v28_intact)
@@ -1414,22 +1491,15 @@ def apply_migration_v29(conn: sqlite3.Connection, project_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _assert_tracks_v29_intact(conn: sqlite3.Connection) -> None:
-    """Assert tracks has track_type (v29 state) before adding resolved_at to track_open_items.
-
-    Also guards against double-apply by rejecting if resolved_at already exists.
-    """
-    track_cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
-    if "track_type" not in track_cols:
-        raise RuntimeError(
-            "tracks missing 'track_type' column (from 0029). "
-            "Run migration 0029 before 0030."
-        )
-    oi_cols = {row[1] for row in conn.execute("PRAGMA table_info('track_open_items')")}
-    if "resolved_at" in oi_cols:
-        raise RuntimeError(
-            "track_open_items already has 'resolved_at' column. Migration 0030 should be "
-            "skipped (user_version should be >= 30)."
-        )
+    """Manifest-backed preflight for 0030: tracks has track_type (v29) and
+    track_open_items has not yet gained resolved_at (double-apply guard). Column
+    identities come from schema_manifest (the v29 tracks delta + v30 track_open_items
+    delta) per ADR-009."""
+    _assert_track_precondition(
+        conn, prereq_table='tracks',
+        prereq_cols=schema_manifest.columns_introduced_at(29, 'tracks'),
+        forbidden_table='track_open_items',
+        forbidden_cols=schema_manifest.columns_introduced_at(30, 'track_open_items'))
 
 
 schema_migration.register_preflight(30, _assert_tracks_v29_intact)
@@ -1457,6 +1527,25 @@ def apply_migration_v30(conn: sqlite3.Connection, project_root: Path) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _run_numbered_walk(conn: sqlite3.Connection, project_root: Path) -> None:
+    """Step C of run(): apply the numbered migrations 0022 → 0030 in order, each
+    idempotent via user_version, committing after each. Preflights (steps 3-11) are
+    manifest-backed (schema_manifest). See the module docstring for the full ordering.
+    """
+    apply_migration(conn, project_root)       # 0022 — track tables; dispatches w/o track FK
+    conn.commit()
+    apply_migration_v24(conn, project_root)   # 0024 — composite (track_id, project_id) PK/FK
+    conn.commit()
+    apply_migration_v27(conn, project_root)   # 0027 — tracks.horizon + deliverables view
+    conn.commit()
+    apply_migration_v28(conn, project_root)   # 0028 — tracks.derived_status advisory column
+    conn.commit()
+    apply_migration_v29(conn, project_root)   # 0029 — tracks.track_type + next_action_owner
+    conn.commit()
+    apply_migration_v30(conn, project_root)   # 0030 — track_open_items.resolved_at + reason
+    conn.commit()
+
+
 def run(project_root: Path | None = None) -> None:
     """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029, 0030."""
     if project_root is None:
@@ -1480,39 +1569,26 @@ def run(project_root: Path | None = None) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
     try:
-        # ADR-007 pre-migration repair (R1/R2.2/R3.1): convert any single-column
+        # (A) ADR-007 pre-migration repair (R1/R2.2/R3.1): convert any single-column
         # dispatch_id uniqueness into composite UNIQUE(dispatch_id, project_id).
         # No-op when already composite; resolves the tenant only when needed.
         _run_adr007_dispatches_repair(conn, db_path)
 
-        current_ver = schema_migration.get_user_version(conn)
+        # (B) Numbered version reconciliation (R2.1/R2.2): validate the claimed
+        # user_version against the invariant manifest; a DB that LIES about its
+        # version is downgraded to its true version so the walk re-applies what the
+        # downgrade exposed. Runs AFTER the repair, BEFORE the numbered walk (PRD §6).
+        _run_version_reconciliation(conn, db_path)
 
-        if current_ver < 22:
+        if schema_migration.get_user_version(conn) < 22:
             _assert_dispatches_schema_intact(conn)
 
-        # Apply 0022 — creates track tables; dispatches rebuilt WITHOUT track FK
-        apply_migration(conn, project_root)
-        conn.commit()
+        # (C) Numbered migration walk: 0022 → 0030 (each idempotent via user_version).
+        _run_numbered_walk(conn, project_root)
 
-        # Apply 0024 — rebuilds track tables with composite (track_id, project_id) PKs
-        apply_migration_v24(conn, project_root)
-        conn.commit()
-
-        # Apply 0027 — additive: tracks.horizon column + deliverables derived view
-        apply_migration_v27(conn, project_root)
-        conn.commit()
-
-        # Apply 0028 — additive: tracks.derived_status advisory column
-        apply_migration_v28(conn, project_root)
-        conn.commit()
-
-        # Apply 0029 — additive: tracks.track_type + tracks.next_action_owner
-        apply_migration_v29(conn, project_root)
-        conn.commit()
-
-        # Apply 0030 — additive: track_open_items.resolved_at + resolution_reason
-        apply_migration_v30(conn, project_root)
-        conn.commit()
+        # (D) Oscillation guard (R2.1): the terminal version's manifest MUST hold;
+        # a downgrade+re-walk that did not converge aborts here rather than looping.
+        _assert_manifest_converged(conn)
 
         print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")
 
