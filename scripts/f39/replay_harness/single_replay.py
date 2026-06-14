@@ -17,8 +17,9 @@ log = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCENARIOS_DIR = _REPO_ROOT / "tests" / "f39" / "scenarios"
 
-# Populated by __init__.py after sys.path setup; accessed via module reference for testability.
-from context_assembler import (  # noqa: E402
+# f39_context_assembler is the f39-specific assembler, registered by replay_harness/__init__.py
+# via importlib so it does not shadow scripts/lib/context_assembler in sys.modules.
+from f39_context_assembler import (  # noqa: E402
     assemble_t0_context,
     _DEFAULT_FEATURE_PLAN,
     _DEFAULT_SKILL,

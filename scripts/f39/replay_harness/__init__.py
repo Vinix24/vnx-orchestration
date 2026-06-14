@@ -5,20 +5,29 @@ Backwards-compatible re-exports so existing callers continue to work:
 """
 from __future__ import annotations
 
+import importlib.util as _ilu
 import logging
 import sys
 from pathlib import Path
 
-# Set up sys.path so scripts/f39/context_assembler takes precedence over the
-# scripts/lib/context_assembler that exists under a different name.
-# scripts/f39 must be at position 0; scripts/lib must be accessible for decision_parser.
 _F39_DIR = Path(__file__).resolve().parents[1]
 _SCRIPTS_LIB_DIR = Path(__file__).resolve().parents[2] / "lib"
+
+# scripts/lib must be accessible for decision_parser and other shared modules.
 if str(_SCRIPTS_LIB_DIR) not in sys.path:
     sys.path.append(str(_SCRIPTS_LIB_DIR))
-if str(_F39_DIR) in sys.path:
-    sys.path.remove(str(_F39_DIR))
-sys.path.insert(0, str(_F39_DIR))
+
+# Load scripts/f39/context_assembler.py by absolute path and register it as
+# "f39_context_assembler" so it never shadows the canonical scripts/lib version
+# in sys.modules['context_assembler']. Without this isolation, alphabetical
+# collection order causes tests/f39/ to cache the wrong module before the lib
+# test files are even imported.
+if "f39_context_assembler" not in sys.modules:
+    _f39_ca_path = _F39_DIR / "context_assembler.py"
+    _spec = _ilu.spec_from_file_location("f39_context_assembler", _f39_ca_path)
+    _mod = _ilu.module_from_spec(_spec)
+    sys.modules["f39_context_assembler"] = _mod
+    _spec.loader.exec_module(_mod)
 
 from .models import (  # noqa: E402
     ReplayResult,
