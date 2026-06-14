@@ -34,11 +34,6 @@ from migrations.auto_apply import (  # noqa: E402  (path bootstrap above)
 _MIGRATIONS_DIR = _REPO_ROOT / "schemas" / "migrations"
 _RUNNERS_DIR = _REPO_ROOT / "scripts" / "lib" / "migrations"
 
-# The auto_apply lane builds the dispatches composite UNIQUE inside migration 0022;
-# keep the migrate_future_system v22 preflight (leaked via collection-time imports
-# in a shared pytest process) out of this lane. See conftest for the rationale.
-pytestmark = pytest.mark.usefixtures("isolate_v22_composite_preflight")
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -165,12 +160,7 @@ def test_load_runner_loads_real_apply_0020():
 # Apply path (uses real 0020 migration against fixture DB)
 # ---------------------------------------------------------------------------
 
-def test_auto_apply_creates_pool_tables_and_bumps_user_version(tmp_path, caplog, monkeypatch):
-    # B-N1: apply_0022's self-heal now resolves a VALIDATED tenant (never a silent
-    # 'vnx-dev' default). The tmp DB has no canonical path nor marker, so supply the
-    # tenant via VNX_PROJECT_ID — the production lane resolves it from the central
-    # DB path or the repo's .vnx-project-id marker.
-    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+def test_auto_apply_creates_pool_tables_and_bumps_user_version(tmp_path, caplog):
     db_path = tmp_path / "runtime_coordination.db"
     _seed_db_at_v13(db_path)
     assert _user_version(db_path) == 0
@@ -191,8 +181,7 @@ def test_auto_apply_creates_pool_tables_and_bumps_user_version(tmp_path, caplog,
     assert any("migration 0020 auto-applied" in rec.message for rec in caplog.records)
 
 
-def test_auto_apply_is_idempotent_on_second_run(tmp_path, caplog, monkeypatch):
-    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")  # B-N1: validated tenant for the self-heal
+def test_auto_apply_is_idempotent_on_second_run(tmp_path, caplog):
     db_path = tmp_path / "runtime_coordination.db"
     _seed_db_at_v13(db_path)
     auto_apply(db_path)

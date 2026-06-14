@@ -80,38 +80,6 @@ def _fsr_migration_module_isolation(tmp_path_factory: pytest.TempPathFactory):
 
 
 # ---------------------------------------------------------------------------
-# Auto_apply-lane preflight isolation (ADR-007 / PR-B fix-forward 2)
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def isolate_v22_composite_preflight():
-    """Run the test the way the production AUTO_APPLY lane runs migration 0022.
-
-    apply_0022 (the auto_apply runner) builds the composite
-    ``UNIQUE(dispatch_id, project_id)`` INSIDE migration 0022, so the
-    migrate_future_system v22 preflight ``_assert_dispatches_schema_intact``
-    (which asserts the composite already EXISTS before 0022) does NOT belong to
-    this lane. In production they are separate processes; in a shared pytest
-    process another module's ``import migrate_future_system`` registers that
-    preflight into the global ``schema_migration._PREFLIGHT_HOOKS`` at collection
-    time. Snapshot + drop the v22 hooks for the duration of this test, then
-    restore — so auto_apply-lane tests are order/collection independent while the
-    preflight-lane tests (test_migrate_0022_preflight.py) still see the hook.
-    """
-    import schema_migration as _sm
-
-    saved = list(_sm._PREFLIGHT_HOOKS.get(22, []))
-    _sm._PREFLIGHT_HOOKS[22] = []
-    try:
-        yield
-    finally:
-        if saved:
-            _sm._PREFLIGHT_HOOKS[22] = saved
-        else:
-            _sm._PREFLIGHT_HOOKS.pop(22, None)
-
-
-# ---------------------------------------------------------------------------
 # Production events-dir contamination guard
 # ---------------------------------------------------------------------------
 
