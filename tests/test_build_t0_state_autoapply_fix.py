@@ -52,6 +52,12 @@ for _p in (str(_SCRIPTS_DIR), str(_LIB_DIR)):
 
 import build_t0_state as bts  # noqa: E402
 
+# The in-process tests below drive the auto_apply lane (build_t0_state → auto_apply
+# → apply_0022), which builds the dispatches composite UNIQUE inside migration 0022.
+# Keep the migrate_future_system v22 preflight (leaked into the shared pytest process
+# via collection-time imports) out of this lane. See conftest for the rationale.
+pytestmark = pytest.mark.usefixtures("isolate_v22_composite_preflight")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -244,10 +250,16 @@ def test_build_queues_survives_int_timestamp(
 # Migration-level — apply_0022 self-heals a legacy dispatches table
 # ---------------------------------------------------------------------------
 
-def test_apply_0022_self_heals_legacy_dispatches(tmp_path: Path) -> None:
+def test_apply_0022_self_heals_legacy_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """apply_0022 adds dispatches.project_id before the rebuild on a legacy DB."""
     import importlib.util
 
+    # B-N1: the self-heal resolves a VALIDATED tenant (never a silent 'vnx-dev'
+    # default). The tmp DB is not on a canonical path and has no marker, so the
+    # tenant comes from VNX_PROJECT_ID.
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     _make_legacy_db(state_dir)
