@@ -92,6 +92,31 @@ def _emit_track_event(
     state_writer.append_locked(Path(state_dir).parent / "events" / _TRACK_EVENTS_FILE, record)
 
 
+def _emit_or_defer(
+    event_sink: Optional[list],
+    state_dir: str | Path,
+    event_type: str,
+    track_id: str,
+    project_id: str,
+    actor: str,
+    details: dict,
+) -> None:
+    """Emit a ledger event NOW, or DEFER it to a caller-owned sink (ADR-005 / D3).
+
+    When ``event_sink`` is None the event is written immediately (standalone
+    callers, backward-compatible). When a sink is provided, the
+    (event_type, track_id, project_id, actor, details) spec is appended and the
+    CALLER is responsible for emitting it AFTER committing the DB transaction.
+    Deferring makes the DB authoritative: a rolled-back mutation can never orphan
+    an already-written NDJSON event (the bridge's D3 deviation — see
+    import_open_items_to_tracks).
+    """
+    if event_sink is None:
+        _emit_track_event(state_dir, event_type, track_id, project_id, actor, details)
+    else:
+        event_sink.append((event_type, track_id, project_id, actor, details))
+
+
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
     path = _db_path(state_dir)
     conn = sqlite3.connect(str(path), timeout=10.0)
@@ -99,6 +124,57 @@ def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _assert_conn_targets_db(
+    conn: sqlite3.Connection, state_dir: str | Path, op: str
+) -> None:
+    """Raise unless ``conn``'s main schema file is the DB derived from state_dir.
+
+    C3-N2: a primitive enrolled in a caller-owned transaction must never mutate
+    an unrelated database. Compare the resolved ``runtime_coordination.db`` path
+    against the connection's ``PRAGMA database_list`` 'main' file so a conn opened
+    on a different (e.g. wrong-tenant) database fails LOUD instead of silently
+    corrupting state.
+    """
+    expected = _db_path(state_dir).resolve()
+    main_file = next(
+        (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+        None,
+    )
+    actual = Path(main_file).resolve() if main_file else None
+    if actual != expected:
+        raise ValueError(
+            f"{op}: supplied conn targets {str(actual)!r}, expected "
+            f"{str(expected)!r} (state_dir mismatch); refusing to mutate a database "
+            "other than the one derived from state_dir (C3-N2)."
+        )
+
+
+def _validate_shared_conn(
+    conn: Optional[sqlite3.Connection],
+    state_dir: str | Path,
+    event_sink: Optional[list],
+    op: str,
+) -> None:
+    """Enforce the shared-connection (owns=False) contract for link/unlink (C3-N1).
+
+    When a caller supplies its own ``conn`` the primitive joins a CALLER-owned
+    transaction and must defer BOTH the commit AND the ADR-005 event to the caller:
+    a non-None ``event_sink`` is therefore REQUIRED (the event is appended for
+    post-commit emission; the primitive emits NOTHING before the run-level commit).
+    The conn must also target the database derived from ``state_dir`` (C3-N2). No-op
+    when ``conn`` is None — the standalone owns=True path is unchanged.
+    """
+    if conn is None:
+        return
+    if event_sink is None:
+        raise ValueError(
+            f"{op}: a caller-supplied conn (owns=False) must defer its ADR-005 event "
+            "— pass event_sink so the event emits only AFTER the caller's run-level "
+            "commit (post-commit DB-authoritative model; C3-N1)."
+        )
+    _assert_conn_targets_db(conn, state_dir, op)
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -449,7 +525,22 @@ def link_open_item(
     oi_id: str,
     link_type: str,
     link_source: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    event_sink: Optional[list] = None,
 ) -> None:
+    """Upsert an active track↔open-item link (INSERT OR REPLACE; reopen-safe).
+
+    Pass ``conn`` to enrol in a CALLER-owned transaction (owns=False): the
+    primitive defers BOTH the commit AND the ADR-005 event entirely to the caller
+    — it emits NOTHING itself. ``event_sink`` is then REQUIRED; the
+    ``track_oi_linked`` spec is appended for the caller to emit AFTER its single
+    run-level commit (D3 — DB authoritative; no event before the commit, no orphan
+    event on rollback; C3-N1). The conn must target the state_dir DB (C3-N2).
+
+    Without ``conn`` (owns=True, standalone) the function self-manages its
+    connection, emits the event in-line, and commits — unchanged behaviour.
+    """
     valid_link_types = frozenset({"blocks", "warns", "related"})
     valid_link_sources = frozenset({"file_path", "mention", "manual"})
 
@@ -458,19 +549,17 @@ def link_open_item(
     if link_source not in valid_link_sources:
         raise ValueError(f"Invalid link_source: {link_source!r}. Must be one of {sorted(valid_link_sources)}")
 
-    conn = _get_conn(state_dir)
+    owns = conn is None
+    _validate_shared_conn(conn, state_dir, event_sink, "link_open_item")
+    _conn = _get_conn(state_dir) if owns else conn
     try:
-        if not conn.execute(
+        if not _conn.execute(
             "SELECT 1 FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone():
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
 
-        _emit_track_event(
-            state_dir, "track_oi_linked", track_id, project_id, "system",
-            {"oi_id": oi_id, "link_type": link_type},
-        )
-        conn.execute(
+        _conn.execute(
             """
             INSERT OR REPLACE INTO track_open_items
                 (track_id, project_id, oi_id, link_type, link_source, linked_at)
@@ -478,9 +567,19 @@ def link_open_item(
             """,
             (track_id, project_id, oi_id, link_type, link_source, _now_utc()),
         )
-        conn.commit()
+        _emit_or_defer(
+            event_sink, state_dir, "track_oi_linked", track_id, project_id,
+            "system", {"oi_id": oi_id, "link_type": link_type},
+        )
+        if owns:
+            _conn.commit()
+    except Exception:
+        if owns:
+            _conn.rollback()
+        raise
     finally:
-        conn.close()
+        if owns:
+            _conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -571,50 +670,36 @@ def unlink_open_item(
     *,
     reason: str,
     actor: str = "operator",
+    conn: Optional[sqlite3.Connection] = None,
+    event_sink: Optional[list] = None,
 ) -> None:
-    """Non-destructively close a track open-item link.
-
-    Sets resolved_at + resolution_reason so the reconciler stops treating the
-    OI as a blocker. Never deletes the row (audit trail preserved).
-
-    Requires migration 0030 (resolved_at column). Raises RuntimeError when
-    the column is absent so callers get a clear message rather than silent
-    data loss.
-
-    Raises TrackNotFoundError if the parent track does not exist.
-    Raises ValueError if the (track_id, project_id, oi_id, link_type) row is
-    not found or is already resolved.
-    """
+    """Close a track↔OI link non-destructively (resolved_at + reason; row kept).
+    Requires migration 0030. A caller ``conn`` (owns=False) defers BOTH commit AND
+    the ``track_oi_closed`` event — ``event_sink`` REQUIRED, conn must target the
+    state_dir DB (D3; C3-N1/C3-N2). Raises TrackNotFoundError/ValueError/RuntimeError."""
     valid_link_types = frozenset({"blocks", "warns", "related"})
     if link_type not in valid_link_types:
         raise ValueError(f"Invalid link_type: {link_type!r}. Must be one of {sorted(valid_link_types)}")
-
     if not reason or not reason.strip():
         raise ValueError("reason is required and must not be empty")
-
-    conn = _get_conn(state_dir)
+    owns = conn is None
+    _validate_shared_conn(conn, state_dir, event_sink, "unlink_open_item")
+    _conn = _get_conn(state_dir) if owns else conn
     try:
-        # Guard: migration 0030 must be present.
         has_resolved_at = any(
             row[1] == "resolved_at"
-            for row in conn.execute("PRAGMA table_info('track_open_items')")
+            for row in _conn.execute("PRAGMA table_info('track_open_items')")
         )
         if not has_resolved_at:
-            raise RuntimeError(
-                "track_open_items.resolved_at column absent; apply migration 0030 first."
-            )
-
-        if not conn.execute(
+            raise RuntimeError("track_open_items.resolved_at column absent; apply migration 0030 first.")
+        if not _conn.execute(
             "SELECT 1 FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone():
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
-
-        row = conn.execute(
-            """
-            SELECT resolved_at FROM track_open_items
-            WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?
-            """,
+        row = _conn.execute(
+            "SELECT resolved_at FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
             (track_id, project_id, oi_id, link_type),
         ).fetchone()
         if not row:
@@ -627,23 +712,24 @@ def unlink_open_item(
                 f"Open item already resolved: track={track_id!r} oi_id={oi_id!r} "
                 f"link_type={link_type!r} (resolved_at={row['resolved_at']!r})"
             )
-
-        now = _now_utc()
-        _emit_track_event(
-            state_dir, "track_oi_closed", track_id, project_id, actor,
+        _conn.execute(
+            "UPDATE track_open_items SET resolved_at = ?, resolution_reason = ? "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
+            (_now_utc(), reason.strip(), track_id, project_id, oi_id, link_type),
+        )
+        _emit_or_defer(
+            event_sink, state_dir, "track_oi_closed", track_id, project_id, actor,
             {"oi_id": oi_id, "link_type": link_type, "reason": reason},
         )
-        conn.execute(
-            """
-            UPDATE track_open_items
-            SET resolved_at = ?, resolution_reason = ?
-            WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?
-            """,
-            (now, reason.strip(), track_id, project_id, oi_id, link_type),
-        )
-        conn.commit()
+        if owns:
+            _conn.commit()
+    except Exception:
+        if owns:
+            _conn.rollback()
+        raise
     finally:
-        conn.close()
+        if owns:
+            _conn.close()
 
 
 def get_linked_open_items(
