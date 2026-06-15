@@ -1,0 +1,10 @@
+# Worker queue names — edit here to change queues without touching code.
+# Resolution order in worker_runner.load_queues():
+#   1. WORKER_QUEUES env var (comma-separated) overrides this file.
+#   2. This file's `queues:` list.
+#   3. Built-in default ["default"] when this file is missing or malformed.
+queues:
+  - default
+  - scoring
+  - ingestion
+  - indexing
