@@ -887,3 +887,103 @@ def run_envelope_plan(
         completion_text=result.completion_text,
         error=result.error,
     )
+
+
+def run_envelope_headless_plan(
+    plan: "ExecutionPlan",
+    permit: "ExecutionPermit",
+    *,
+    state_dir: Path,
+    data_dir: Path,
+    role: Optional[str] = None,
+) -> EnvelopeResult:
+    """Execute a validated ExecutionPlan for the claude_headless lane (api_metered billing).
+
+    Headless lane routes to ClaudeSubprocessAdapter (spawn_claude, claude -p) with the
+    same require_permit + instruction-sha256 TOCTOU verify + fail-closed GOVERN as the
+    provider lane. ClaudeSubprocessAdapter is reused — not reimplemented.
+
+    Raises:
+        PermissionError: permit was not issued by issue_permit for this plan.
+        ValueError: plan.lane is not "claude_headless".
+        EnvelopeGovernError: GOVERN cannot confirm receipt (fail-closed).
+    """
+    from dispatch_internal import is_valid_instruction_hash, require_permit  # noqa: PLC0415
+
+    require_permit(plan, permit)  # un-evadable backstop — FIRST action
+
+    if plan.lane != "claude_headless":
+        raise ValueError(
+            f"run_envelope_headless_plan handles lane='claude_headless' only; "
+            f"got lane={plan.lane!r}"
+        )
+
+    # P0-3: REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
+    if not is_valid_instruction_hash(plan.instruction_sha256):
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=None,
+            receipt_path=None,
+            completion_text="",
+            error=(
+                f"plan.instruction_sha256 is not a valid 64-hex digest "
+                f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
+            ),
+        )
+
+    # TOCTOU verification — re-read and verify sha256 before delivering
+    instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
+    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+    if actual != plan.instruction_sha256:
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=None,
+            receipt_path=None,
+            completion_text="",
+            error=(
+                f"instruction file mutated after permit: sha256 mismatch "
+                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
+            ),
+        )
+
+    spec = EnvelopeSpec(
+        dispatch_id=plan.dispatch_id,
+        terminal_id=plan.target_id,
+        provider="claude",
+        model=plan.model,
+        instruction=instruction,
+        role=role,
+        pr_id=None,
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+
+    enriched_instruction = _prepare(spec)
+    enriched_spec = EnvelopeSpec(
+        dispatch_id=spec.dispatch_id,
+        terminal_id=spec.terminal_id,
+        provider=spec.provider,
+        model=spec.model,
+        instruction=enriched_instruction,
+        role=spec.role,
+        pr_id=spec.pr_id,
+        state_dir=spec.state_dir,
+        data_dir=spec.data_dir,
+    )
+
+    start = datetime.now(timezone.utc)
+    result = ClaudeSubprocessAdapter().run(enriched_spec)
+    end = datetime.now(timezone.utc)
+
+    report_path, receipt_path = _govern(enriched_spec, result, start, end)
+
+    return EnvelopeResult(
+        status=result.status,
+        returncode=0 if result.status == "success" else 1,
+        report_path=report_path,
+        receipt_path=receipt_path,
+        completion_text=result.completion_text,
+        error=result.error,
+    )

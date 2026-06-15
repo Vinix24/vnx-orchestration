@@ -85,6 +85,8 @@ class DispatchSpec:
     target_id_override: Optional[str] = None
     tags: tuple[str, ...] = ()
     instruction_sha256: Optional[str] = None  # P0-3: caller may pre-bind hash; validate() verifies
+    allow_headless: bool = False              # PR-5: explicit opt-in to api_metered headless lane
+    headless_reason: Optional[str] = None    # PR-5: mandatory non-empty reason when allow_headless=True
     # DERIVED-not-declared (deliberately absent): lane, billing, serialization_class
     # — compile_plan owns them. Do not add here.
 
@@ -251,6 +253,23 @@ def validate(
             "bad-deadline",
             f"deadline_seconds must be in [60, 14400], got {spec.deadline_seconds}",
         )
+
+    # Rule 12 — headless opt-in requires a non-empty reason (PR-5)
+    if spec.allow_headless:
+        reason = (spec.headless_reason or "").strip()
+        if not reason:
+            return Reject(
+                "headless-reason-required",
+                "allow_headless=True requires a non-empty headless_reason explaining "
+                "the API billing opt-in; set headless_reason to a human-readable justification",
+            )
+        # MED: headless is only valid for claude (or auto that could resolve to claude)
+        if spec.provider not in (Provider.CLAUDE, Provider.AUTO):
+            return Reject(
+                "headless-claude-only",
+                f"allow_headless is only valid for provider=claude, got provider={spec.provider.value!r}; "
+                "headless api-metered billing is a claude-only lane",
+            )
 
     return ValidatedSpec(
         spec=spec,
