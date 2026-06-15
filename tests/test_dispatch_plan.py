@@ -11,6 +11,7 @@ Covers all dispatch rules D1-D12 including:
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -90,10 +91,12 @@ def _make_vspec(
         target_id_override=target_id_override,
         tmp_path=tmp_path,
     )
+    instruction_text = "# Test instruction\n"
     return ValidatedSpec(
         spec=spec,
-        instruction_text="# Test instruction\n",
+        instruction_text=instruction_text,
         normalized_paths=dispatch_paths,
+        instruction_sha256=hashlib.sha256(instruction_text.encode("utf-8")).hexdigest(),
     )
 
 
@@ -342,3 +345,60 @@ class TestDigestStableAndPermitCompatible:
         assert isinstance(plan, ExecutionPlan)
         permit = issue_permit(plan)
         require_permit(plan, permit)  # must not raise PermissionError
+
+
+# ---------------------------------------------------------------------------
+# test_instruction_sha256_in_plan
+# ---------------------------------------------------------------------------
+
+class TestInstructionSha256InPlan:
+    def test_compile_plan_sets_instruction_sha256(self, tmp_path: Path) -> None:
+        """compile_plan propagates instruction_sha256 from ValidatedSpec into ExecutionPlan."""
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.instruction_sha256 == vspec.instruction_sha256
+        assert len(plan.instruction_sha256) == 64
+
+    def test_instruction_sha256_changes_digest(self, tmp_path: Path) -> None:
+        """Changing instruction_sha256 on an otherwise identical plan changes digest()."""
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+
+        # Build a variant with a different sha256 (simulate different instruction content)
+        from dataclasses import replace
+        other_sha = hashlib.sha256(b"different content").hexdigest()
+        plan_b = replace(plan, instruction_sha256=other_sha)
+
+        assert plan.digest() != plan_b.digest(), (
+            "Plans with different instruction_sha256 must produce different digests"
+        )
+
+    def test_default_sha256_is_empty_string(self, tmp_path: Path) -> None:
+        """ExecutionPlan constructed without instruction_sha256 defaults to empty string."""
+        ifile = tmp_path / "instruction.md"
+        ifile.write_text("test", encoding="utf-8")
+        plan = ExecutionPlan(
+            dispatch_id="test-default-sha",
+            project_id="vnx-dev",
+            provider=Provider.CLAUDE,
+            model="sonnet",
+            lane="claude_tmux_subscription",
+            adapter="tmux_claude",
+            target_id="ephemeral",
+            billing="subscription",
+            serialization_class="claude-tmux",
+            isolation=Isolation.WORKTREE,
+            require_worktree=True,
+            seed_materialize=False,
+            instruction_delivery="file_ref",
+            report_contract="required",
+            warmup="verify_strict",
+            deadline_seconds=3600,
+            base_ref="origin/main",
+            dispatch_paths=(),
+            instruction_file=ifile,
+            route_reason="D1",
+        )
+        assert plan.instruction_sha256 == ""

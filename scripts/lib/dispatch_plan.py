@@ -73,6 +73,7 @@ class ExecutionPlan:
     dispatch_paths: tuple[DispatchPath, ...]
     instruction_file: Path
     route_reason: str                   # comma-joined rule ids, e.g. "D11,D3,D1,D2,D4,D5,D6,D7,D8,D9,D10,D12"
+    instruction_sha256: str = ""        # P0-3: sha256 of instruction content at validate() time
     warnings: tuple[str, ...] = ()
 
     def digest(self) -> str:
@@ -99,6 +100,7 @@ class ExecutionPlan:
             "deadline_seconds": self.deadline_seconds,
             "base_ref": self.base_ref,
             "instruction_file": str(self.instruction_file),
+            "instruction_sha256": self.instruction_sha256,
             "route_reason": self.route_reason,
             "dispatch_paths": [
                 {
@@ -242,5 +244,6 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         dispatch_paths=dispatch_paths,
         instruction_file=spec.instruction_file,
         route_reason=",".join(fired),
+        instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )
