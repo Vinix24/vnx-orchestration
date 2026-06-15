@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import io
 import logging
 import os
+import re
+import tokenize
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -210,6 +214,155 @@ def _model_in_registry(provider: Optional[str], sub_provider: Optional[str], mod
     return False
 
 
+# P0 (PR-4d): robust, tokenize-based Anthropic SDK detection.
+#
+# The PR-4c regex-only scanner was fail-OPEN for line-continuation, submodule,
+# and dynamic import forms that still reach the executor (codex-proven, rc=0):
+#   import \<nl>    anthropic as a       (backslash line continuation)
+#   from anthropic \<nl> import Client   (continuation inside a from-import)
+#   from anthropic.client import Client  (submodule)
+#   __import__("anthropic")              (dynamic)
+#   importlib.import_module("anthropic") (dynamic)
+# Fix: tokenize the text and flag an `anthropic` NAME/STRING in any import
+# context. The tokenizer joins line-continuations, exposes submodules as the
+# first dotted NAME, and surfaces dynamic-import string args, so every form is
+# caught structurally instead of by brittle line-shape regexes.
+#
+# Non-Python / garbled instruction text (markdown with apostrophes, unbalanced
+# brackets, stray indentation) raises tokenize.TokenError / IndentationError. We
+# catch that and fall back to a line-continuation-normalized regex pass so a
+# partial/garbled snippet never silently passes the gate (fail-CLOSED).
+
+_ANTHROPIC_NAME = "anthropic"
+_DYNAMIC_IMPORT_FUNCS = frozenset({"__import__", "import_module"})
+
+# JS SDK — no internal whitespace to tolerate; matched as a literal substring.
+_ANTHROPIC_SDK_LITERALS: tuple[str, ...] = (
+    "@anthropic-ai/sdk",
+)
+
+# Built-in default forbid_import patterns (mirror provider_constraints.yaml).
+# Always applied IN ADDITION to the tokenize pass so detection never depends on
+# the SSOT being present; the constraint engine overlays the YAML patterns on top
+# (so a future / second forbid_import rule is actually enforced — SSOT governs).
+_DEFAULT_ANTHROPIC_PATTERNS: tuple[str, ...] = (
+    "import anthropic",
+    "from anthropic import",
+    "anthropic.Anthropic(",
+    "@anthropic-ai/sdk",
+)
+
+# Backslash line-continuation: join physical lines before the fallback / pattern
+# regexes so `import \<nl> anthropic` reads as one logical line.
+_LINE_CONT_RE = re.compile(r"\\\r?\n")
+
+# Fallback regexes — run only when tokenize cannot complete. Cover the import
+# statement shapes plus submodule (`from anthropic.x`) and the SDK call/dynamic
+# import; with continuations joined first, these also catch the continuation forms.
+_FALLBACK_SDK_REGEXES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bimport\s+anthropic\b", re.IGNORECASE),
+    re.compile(r"\bfrom\s+anthropic\b", re.IGNORECASE),
+    re.compile(r"\banthropic\s*\.\s*Anthropic\s*\(", re.IGNORECASE),
+    re.compile(r"(?:__import__|import_module)\s*\(\s*['\"]\s*anthropic", re.IGNORECASE),
+)
+
+
+@lru_cache(maxsize=256)
+def _compiled_pattern(pattern: str) -> Optional[re.Pattern[str]]:
+    r"""Compile a configured forbid_import pattern, whitespace-normalized.
+
+    Runs of whitespace in the pattern become ``\s+`` so ``import anthropic`` also
+    matches ``import\tanthropic`` / ``import   anthropic``; every other character
+    is escaped and matched literally, case-insensitively.
+    """
+    parts = pattern.split()
+    if not parts:
+        return None
+    body = r"\s+".join(re.escape(part) for part in parts)
+    return re.compile(body, re.IGNORECASE)
+
+
+def _scan_tokens_for_anthropic(text: str) -> Optional[bool]:
+    """Tokenize-based scan for an `anthropic` reference in an import context.
+
+    Returns True on a match, False if tokenization completed cleanly with no
+    match, and None if the text could not be tokenized (the caller must then run
+    the regex fallback so a garbled snippet never silently passes).
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return None
+
+    seq = [
+        (tok.type, tok.string)
+        for tok in tokens
+        if tok.type in (tokenize.NAME, tokenize.STRING, tokenize.OP)
+    ]
+    for i, (ttype, tstr) in enumerate(seq):
+        prev = seq[i - 1] if i > 0 else None
+        nxt = seq[i + 1] if i + 1 < len(seq) else None
+        if ttype == tokenize.NAME and tstr == _ANTHROPIC_NAME:
+            # after `import` / `from`  ->  import anthropic / from anthropic[...]
+            if prev and prev[0] == tokenize.NAME and prev[1] in ("import", "from"):
+                return True
+            # first dotted segment  ->  anthropic.client / anthropic.Anthropic(
+            preceded_by_dot = bool(prev and prev[0] == tokenize.OP and prev[1] == ".")
+            followed_by_dot = bool(nxt and nxt[0] == tokenize.OP and nxt[1] == ".")
+            if followed_by_dot and not preceded_by_dot:
+                return True
+        elif ttype == tokenize.STRING and _ANTHROPIC_NAME in tstr.lower():
+            # string arg to __import__("anthropic") / import_module("anthropic")
+            if (
+                prev and prev[0] == tokenize.OP and prev[1] == "("
+                and i >= 2
+                and seq[i - 2][0] == tokenize.NAME
+                and seq[i - 2][1] in _DYNAMIC_IMPORT_FUNCS
+            ):
+                return True
+    return False
+
+
+def scan_anthropic_sdk_text(
+    text: Optional[str],
+    patterns: Optional[list] = None,
+) -> bool:
+    """True if *text* references the forbidden Anthropic SDK.
+
+    Shared by the constraint engine's forbid_import rule and the dispatch_cli
+    blocking backstop so both gates apply identical, bypass-resistant matching:
+      1. JS SDK literal substring (`@anthropic-ai/sdk`).
+      2. Robust tokenize pass (line-continuation / submodule / dynamic imports),
+         with a line-continuation-normalized regex fallback for garbled text.
+      3. Configured forbid_import patterns applied IN ADDITION — defaults to the
+         built-in set; the constraint engine passes the SSOT patterns so the YAML
+         governs (a future / second forbid_import rule is actually enforced).
+    """
+    if not text:
+        return False
+
+    lowered = text.lower()
+    if any(lit in lowered for lit in _ANTHROPIC_SDK_LITERALS):
+        return True
+
+    token_verdict = _scan_tokens_for_anthropic(text)
+    if token_verdict is True:
+        return True
+    if token_verdict is None:
+        joined = _LINE_CONT_RE.sub(" ", text)
+        if any(rgx.search(joined) for rgx in _FALLBACK_SDK_REGEXES):
+            return True
+
+    configured = _DEFAULT_ANTHROPIC_PATTERNS if patterns is None else patterns
+    if configured:
+        joined = _LINE_CONT_RE.sub(" ", text)
+        for pat in configured:
+            rgx = _compiled_pattern(str(pat))
+            if rgx is not None and rgx.search(joined):
+                return True
+    return False
+
+
 def _scan_anthropic_sdk_references(
     constraint: Mapping[str, Any],
     instruction_text: Optional[str],
@@ -218,15 +371,16 @@ def _scan_anthropic_sdk_references(
     forbidden = constraint.get("forbidden_import") or {}
     patterns = forbidden.get("patterns") if isinstance(forbidden, Mapping) else None
     if not isinstance(patterns, list):
-        return False
+        # No SSOT patterns configured -> tokenize pass + built-in defaults still run.
+        patterns = None
     env_fragments = [
         env.get("VNX_WORKER_ENV", ""),
         env.get("WORKER_ENV", ""),
         env.get("VNX_PROVIDER_ENV", ""),
         env.get("VNX_INSTRUCTION", ""),
     ]
-    haystack = "\n".join([instruction_text or "", *env_fragments]).lower()
-    return any(str(pattern).lower() in haystack for pattern in patterns)
+    haystack = "\n".join([instruction_text or "", *env_fragments])
+    return scan_anthropic_sdk_text(haystack, patterns=patterns)
 
 
 def _violation_from_constraint(
