@@ -53,15 +53,17 @@ from skill_prefix import build_structured_prompt  # noqa: E402
 # subscription pre-15-juni and bypasses the interactive-session bug.
 #
 # Expanded 2026-06-05 after retry-run observed opus-4-7 + sonnet-4-6 hitting
-# the same 0.1s immediate-exit pattern on T3-09 instruction content. Issue
-# #63390 explicitly names "Opus 4.8, Sonnet 4.6"; opus-4-7 hit it empirically
-# on identical content. Safer to route all three through headless until
-# Anthropic ships the fix (currently #63390 + #64153 open as of 2026-06-05).
-HEADLESS_FORCED_MODELS = {
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-}
+# the same 0.1s immediate-exit pattern on T3-09 instruction content (#63390/#64153).
+#
+# 2026-06-15 EMPIRICAL RE-TEST (cutover day — headless = API billing is now
+# disallowed per the June-15 subscription escape): opus-4-8 / opus-4-7 /
+# sonnet-4-6 each completed a trivial task via the tmux interactive (subscription)
+# lane in ~39s, success=true, clean teardown — the #63390 hidden-thinking hang did
+# NOT reproduce on the current `claude` CLI for trivial/medium work. Emptied so ALL
+# Claude lanes route via tmux (subscription). Mechanism retained: re-add a model
+# here ONLY if a t3-complex (>1h) run empirically hangs again (the original hang
+# was on a 3h T3 task, so t3 is the residual risk to watch).
+HEADLESS_FORCED_MODELS: set[str] = set()
 # Report-dir search order: project-local (tmux-spawn writes here) first, central second.
 # tmux_interactive_dispatch uses resolve_state_dir which lands on <REPO_ROOT>/.vnx-data/.
 # provider_dispatch can write to central or project-local depending on install mode.
