@@ -26,6 +26,7 @@ EventStore wiring and cost emission are open items for later PRs (PR-1 scope: fl
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sys
@@ -815,7 +816,22 @@ def run_envelope_plan(
             f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
         )
 
+    # P0-3: TOCTOU verification — re-read and verify sha256 before delivering
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
+    if plan.instruction_sha256:
+        actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+        if actual != plan.instruction_sha256:
+            return EnvelopeResult(
+                status="failure",
+                returncode=1,
+                report_path=None,
+                receipt_path=None,
+                completion_text="",
+                error=(
+                    f"instruction file mutated after permit: sha256 mismatch "
+                    f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
+                ),
+            )
 
     spec = EnvelopeSpec(
         dispatch_id=plan.dispatch_id,

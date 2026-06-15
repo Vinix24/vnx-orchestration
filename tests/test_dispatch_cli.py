@@ -7,6 +7,7 @@ dry-run mode, permit fingerprint stability, and legacy bash flag behavior.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -124,6 +125,13 @@ def _make_minimal_plan(
     target_id = "ephemeral" if provider == Provider.CLAUDE else "T1"
     serialization_class = "claude-tmux" if provider == Provider.CLAUDE else None
     warmup = "verify_strict" if provider == Provider.CLAUDE else "n/a"
+    # Compute sha256 from file content if the file exists, else use zero-sentinel
+    if instruction_file.exists():
+        sha256 = hashlib.sha256(
+            instruction_file.read_text(encoding="utf-8").encode("utf-8")
+        ).hexdigest()
+    else:
+        sha256 = "0" * 64
     return ExecutionPlan(
         dispatch_id=dispatch_id,
         project_id="vnx-dev",
@@ -145,6 +153,7 @@ def _make_minimal_plan(
         dispatch_paths=(),
         instruction_file=instruction_file,
         route_reason="D11,D3,D1,D2,D4,D5,D6,D7,D8,D9,D10,D12",
+        instruction_sha256=sha256,
     )
 
 
@@ -178,40 +187,75 @@ def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, t
 # test_claude_runs_compile_plan_and_constraints
 # ---------------------------------------------------------------------------
 
-@patch("dispatch_cli.build_runtime_snapshot")
-@patch("dispatch_cli._execute_claude")
-def test_claude_runs_compile_plan_and_constraints(mock_execute, mock_snapshot, tmp_path):
-    """Claude lane: blocking constraint → Reject (no spawn). Clean spec → routes to _execute_claude."""
-    spec_file = _make_spec_file(tmp_path, provider="claude")
+def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
+    """Real constraint engine (no mock): instruction with `import anthropic` → Reject.
+    Clean instruction inside bundle → routes to _execute_claude."""
+    data_dir = tmp_path / "vnx-data"
+    staging_id = "20260615-staging-real-test"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
 
-    # Part 1: blocking constraint verdict → compile_plan returns Reject → return 1
-    mock_snapshot.return_value = RuntimeSnapshot(
-        constraint_verdicts=(
-            ConstraintVerdict(
-                code="kimi-via-cli-only",
-                severity="blocking",
-                message="Route forbidden: Kimi models must use provider kimi.",
-                override_applied=False,
-            ),
-        ),
-        staging_promoted=True,
-        target_health={"ephemeral": "healthy"},
-        target_capable={"ephemeral": True},
-        model_pins={"T0": "opus", "T1": "sonnet", "T2": "sonnet", "T3": "sonnet"},
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    # Part 1: instruction contains `import anthropic` → blocking no-anthropic-sdk → Reject
+    evil_inst = bundle_dir / "evil_instruction.md"
+    evil_inst.write_text(
+        "# Evil dispatch\n\nimport anthropic\nclient = anthropic.Anthropic()\n",
+        encoding="utf-8",
     )
+    spec_dict = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-test-evil",
+        "staging_id": staging_id,
+        "instruction_file": str(evil_inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file_evil = bundle_dir / "dispatch-spec-evil.json"
+    spec_file_evil.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    rc = run_dispatch(spec_file)
-    assert rc == 1
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file_evil)
+
+    assert rc == 1, "Expected Reject from no-anthropic-sdk constraint"
     mock_execute.assert_not_called()
 
-    # Part 2: clean spec → routes to _execute_claude
-    mock_snapshot.return_value = _clean_snapshot()
-    mock_execute.return_value = 0
+    # Part 2: clean instruction inside bundle → routes to _execute_claude
+    clean_inst = bundle_dir / "clean_instruction.md"
+    clean_inst.write_text(
+        "# Clean dispatch\n\nDo something safe and useful.\n",
+        encoding="utf-8",
+    )
+    spec_dict2 = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-test-clean",
+        "staging_id": staging_id,
+        "instruction_file": str(clean_inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file_clean = bundle_dir / "dispatch-spec-clean.json"
+    spec_file_clean.write_text(json.dumps(spec_dict2), encoding="utf-8")
 
-    rc = run_dispatch(spec_file)
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        mock_execute.return_value = 0
+        rc = run_dispatch(spec_file_clean)
+
     assert rc == 0
     mock_execute.assert_called_once()
-    # First positional arg to _execute_claude is an ExecutionPlan
     plan_arg = mock_execute.call_args[0][0]
     assert plan_arg.lane == "claude_tmux_subscription"
     assert plan_arg.provider == Provider.CLAUDE
@@ -274,7 +318,8 @@ def test_claude_routes_to_tmux_with_permit(mock_snapshot, tmp_path):
             rc = run_dispatch(spec_file)
 
     assert rc == 0
-    mock_require.assert_called_once()
+    # P1-#6 adds require_permit in run_dispatch; _execute_claude also calls it → 2 total
+    assert mock_require.call_count == 2
     mock_tmux_dispatch.assert_called_once()
 
     # Part B: tampered permit → PermissionError raised before tmux dispatch
@@ -368,6 +413,126 @@ cmd_dispatch '{dispatch_md}' --dry-run
     combined = result.stdout + result.stderr
     assert "DRY RUN" in combined
     # Confirms NOT the single-entry gate path
+    assert "single-entry gate" not in combined.lower()
+
+
+# ---------------------------------------------------------------------------
+# test_staging_binding_required (P0-2)
+# ---------------------------------------------------------------------------
+
+def test_staging_binding_required(tmp_path, monkeypatch, capsys):
+    """spec_file or instruction_file outside bundle dir → Reject(ADR-006-binding), no spawn."""
+    data_dir = tmp_path / "vnx-data"
+    staging_id = "20260615-staging-bind-test"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    # Instruction file is OUTSIDE the bundle
+    instruction_file = tmp_path / "outside_instruction.md"
+    instruction_file.write_text("# Dispatch outside bundle\n", encoding="utf-8")
+
+    # spec_file is also OUTSIDE the bundle
+    spec_data = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-binding-test",
+        "staging_id": staging_id,
+        "instruction_file": str(instruction_file),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = tmp_path / "dispatch-spec-outside.json"
+    spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    assert "ADR-006-binding" in err
+
+
+# ---------------------------------------------------------------------------
+# test_instruction_mutation_rejected (P0-3)
+# ---------------------------------------------------------------------------
+
+def test_instruction_mutation_rejected(tmp_path):
+    """Mutating instruction file after permit issuance → PermissionError (sha256 mismatch), no spawn."""
+    original_content = "# Clean dispatch\n\nDo something safe.\n"
+    instruction_file = tmp_path / "instruction.md"
+    instruction_file.write_text(original_content, encoding="utf-8")
+
+    plan = _make_minimal_plan(instruction_file=instruction_file)
+    expected_sha = hashlib.sha256(original_content.encode("utf-8")).hexdigest()
+    assert plan.instruction_sha256 == expected_sha
+
+    permit = issue_permit(plan)
+
+    # Mutate the instruction file AFTER permit is issued
+    instruction_file.write_text(
+        "import anthropic\n# Evil override injected after permit",
+        encoding="utf-8",
+    )
+
+    # _execute_claude must fail-closed: sha256 mismatch → PermissionError, no tmux spawn
+    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
+        with pytest.raises(PermissionError, match="sha256 mismatch"):
+            _execute_claude(
+                plan,
+                permit,
+                state_dir=tmp_path / "state",
+                data_dir=tmp_path,
+            )
+        mock_tmux.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# test_legacy_rollback
+# ---------------------------------------------------------------------------
+
+def test_legacy_rollback(tmp_path):
+    """VNX_DISPATCH_LEGACY=1 forces legacy path even when VNX_SINGLE_ENTRY_DISPATCH=1."""
+    dispatch_md = tmp_path / "test-rollback.md"
+    dispatch_md.write_text(
+        "[[TARGET:T1]]\nRole: backend-developer\nGate: human-promoted\n\nTest rollback.\n",
+        encoding="utf-8",
+    )
+
+    dispatch_sh = _REPO_ROOT / "scripts" / "commands" / "dispatch.sh"
+    dispatches_dir = tmp_path / "dispatches"
+    dispatches_dir.mkdir()
+
+    bash_cmd = f"""
+set -e
+VNX_HOME='{_REPO_ROOT}'
+VNX_DATA_DIR='{tmp_path}'
+VNX_DISPATCH_DIR='{dispatches_dir}'
+VNX_STATE_DIR='{tmp_path}/state'
+VNX_SINGLE_ENTRY_DISPATCH=1
+VNX_DISPATCH_LEGACY=1
+log() {{ echo "[LOG] $*"; }}
+err() {{ echo "[ERR] $*" >&2; }}
+source '{dispatch_sh}'
+cmd_dispatch '{dispatch_md}' --dry-run
+"""
+    result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
+
+    assert result.returncode == 0, (
+        f"Expected legacy rollback to succeed; rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "DRY RUN" in combined
+    # VNX_DISPATCH_LEGACY=1 must force the legacy path, not the single-entry gate
     assert "single-entry gate" not in combined.lower()
 
 

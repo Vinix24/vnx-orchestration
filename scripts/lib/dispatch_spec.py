@@ -9,6 +9,7 @@ ADR-007: not triggered here — no new table, pure in-process types only.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -83,6 +84,7 @@ class DispatchSpec:
     requires_mcp: bool = False
     target_id_override: Optional[str] = None
     tags: tuple[str, ...] = ()
+    instruction_sha256: Optional[str] = None  # P0-3: caller may pre-bind hash; validate() verifies
     # DERIVED-not-declared (deliberately absent): lane, billing, serialization_class
     # — compile_plan owns them. Do not add here.
 
@@ -102,6 +104,7 @@ class ValidatedSpec:
     spec: DispatchSpec
     instruction_text: str                    # loaded from instruction_file during validate()
     normalized_paths: tuple[DispatchPath, ...]
+    instruction_sha256: str                  # sha256 of instruction_text, computed in validate()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +205,15 @@ def validate(
     except OSError as exc:
         return Reject("instruction-unreadable", f"instruction_file not readable: {exc}")
 
+    # P0-3: compute sha256 over instruction content; verify against DispatchSpec field if set
+    computed_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
+    if spec.instruction_sha256 is not None and spec.instruction_sha256 != computed_sha256:
+        return Reject(
+            "instruction-hash-mismatch",
+            f"instruction_file sha256 mismatch: spec declared {spec.instruction_sha256[:12]}…, "
+            f"computed {computed_sha256[:12]}…",
+        )
+
     # Rule 6 — DO NOT scan instruction_text for spawn tokens (claude -p, codex exec, etc.).
     # The file-reference design already neutralizes prompt injection; a content scan would
     # falsely reject legitimate instructions that discuss CLI invocation patterns.
@@ -240,4 +252,5 @@ def validate(
         spec=spec,
         instruction_text=instruction_text,
         normalized_paths=tuple(normalized),
+        instruction_sha256=computed_sha256,
     )
