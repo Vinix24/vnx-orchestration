@@ -1,22 +1,26 @@
 """test_dispatch_serialization.py — Tests for serialize_lane + force_release (PR-6).
 
 Covers: intra-thread serialization, no-op for None, exception release,
-force_release escape, and account-level lock directory resolution.
+force_release escape, account-level lock directory resolution, pid liveness
+warnings, unexpected OSError re-raise, and timezone-aware _iso_now.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
-from dispatch_serialization import force_release, serialize_lane
+import dispatch_serialization as _ds_mod
+from dispatch_serialization import _iso_now, force_release, serialize_lane
 
 
 # ---------------------------------------------------------------------------
@@ -231,3 +235,105 @@ def test_lock_dir_is_account_level(tmp_path, monkeypatch):
     assert default_dir == home / ".vnx-data" / "locks", (
         f"default lock dir {default_dir} is not ~/.vnx-data/locks"
     )
+
+
+# ---------------------------------------------------------------------------
+# test_force_release_warns_on_live_holder
+# ---------------------------------------------------------------------------
+
+def test_force_release_warns_on_live_holder(tmp_path, monkeypatch, capsys):
+    """force_release prints LOUD double-run warning when holder pid is still alive."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_dir / "claude-tmux.lock"
+
+    # Current pid is guaranteed alive
+    live_meta = {
+        "pid": os.getpid(),
+        "dispatch_id": "live-dispatch",
+        "timestamp": "2026-06-15T00:00:00Z",
+    }
+    lock_file.write_text(json.dumps(live_meta))
+
+    force_release("claude-tmux")
+    captured = capsys.readouterr()
+
+    assert "STILL ALIVE" in captured.out, "live-holder warning not printed"
+    assert "PARALLEL" in captured.out or "double-run" in captured.out.lower(), (
+        "double-run risk not mentioned in live-holder warning"
+    )
+    assert not lock_file.exists(), "lock file not removed after force_release on live holder"
+
+
+# ---------------------------------------------------------------------------
+# test_force_release_dead_holder_no_warning
+# ---------------------------------------------------------------------------
+
+def test_force_release_dead_holder_no_warning(tmp_path, monkeypatch, capsys):
+    """force_release notes safe removal when holder pid is already dead; no live warning."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_dir / "claude-tmux.lock"
+
+    dead_meta = {
+        "pid": 999999,  # safely outside any realistic PID range on macOS/Linux
+        "dispatch_id": "dead-dispatch",
+        "timestamp": "2026-01-01T00:00:00Z",
+    }
+    lock_file.write_text(json.dumps(dead_meta))
+
+    force_release("claude-tmux")
+    captured = capsys.readouterr()
+
+    assert "STILL ALIVE" not in captured.out, (
+        "false live-holder warning printed for a dead pid"
+    )
+    assert not lock_file.exists(), "lock file not removed for dead holder"
+    # Should note that the holder is gone
+    assert "already gone" in captured.out or "dead-dispatch" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# test_acquire_reraises_unexpected_oserror
+# ---------------------------------------------------------------------------
+
+def test_acquire_reraises_unexpected_oserror(tmp_path, monkeypatch):
+    """_acquire_with_warn re-raises OSError(EBADF) immediately without spinning."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+
+    call_count = 0
+
+    def bad_flock(fd, op):
+        nonlocal call_count
+        call_count += 1
+        raise OSError(errno.EBADF, "bad file descriptor")
+
+    monkeypatch.setattr(_ds_mod.fcntl, "flock", bad_flock)
+
+    with pytest.raises(OSError, match="bad file descriptor"):
+        with serialize_lane("claude-tmux", dispatch_id="badf-test"):
+            pass  # must not reach here
+
+    # Must raise on first call — not spin
+    assert call_count == 1, f"flock called {call_count} times; expected 1 (no spin on EBADF)"
+
+
+# ---------------------------------------------------------------------------
+# test_iso_now_is_timezone_aware
+# ---------------------------------------------------------------------------
+
+def test_iso_now_is_timezone_aware():
+    """_iso_now() returns a Z-suffixed UTC timestamp with no DeprecationWarning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        result = _iso_now()
+
+    assert result.endswith("Z"), f"_iso_now() did not end with 'Z': {result!r}"
+    # Must parse as timezone-aware
+    import datetime
+    parsed = datetime.datetime.fromisoformat(result.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None, "_iso_now() result is not timezone-aware"
