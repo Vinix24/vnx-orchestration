@@ -110,6 +110,12 @@ _d_single_entry_dispatch() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --spec-file)
+        # P1 (PR-4c): guard $2 so a trailing `--spec-file` with no value emits a
+        # clean gate error instead of aborting the shell under `set -u`.
+        if [ -z "${2:-}" ]; then
+          err "[dispatch] single-entry gate: --spec-file requires a path argument"
+          return 1
+        fi
         spec_file="$2"; shift 2 ;;
       --spec-file=*)
         spec_file="${1#*=}"; shift ;;

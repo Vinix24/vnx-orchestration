@@ -9,6 +9,7 @@ Any plan-like object that satisfies PlanLike is accepted.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -16,6 +17,16 @@ from typing import Protocol, runtime_checkable
 # via ExecutionPermit(...) without access to this object yields a broken permit
 # that require_permit() will reject.
 _PERMIT_SENTINEL = object()
+
+# P0-3 (PR-4c): a plan's instruction hash must be a 64-char lowercase hex sha256.
+# An empty / short / non-hex value disables TOCTOU verification (fail-OPEN), so it
+# is refused at permit-mint time and again at the executor (defense-in-depth).
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def is_valid_instruction_hash(value: object) -> bool:
+    """True iff *value* is a 64-char lowercase hex sha256 digest."""
+    return isinstance(value, str) and bool(_SHA256_RE.match(value))
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +72,19 @@ class ExecutionPermit:
 # ---------------------------------------------------------------------------
 
 def issue_permit(plan: PlanLike) -> ExecutionPermit:
-    """Mint a permit for a validated plan. Called ONLY by the envelope/executor."""
+    """Mint a permit for a validated plan. Called ONLY by the envelope/executor.
+
+    P0-3 (PR-4c) defense-in-depth: refuse to mint a permit for a plan whose
+    instruction_sha256 is present but not a valid 64-hex digest. An empty/invalid
+    hash would let the executor's TOCTOU guard fall open. A missing attribute
+    (loose PlanLike used by lower-level callers) is allowed for back-compat.
+    """
+    sha = getattr(plan, "instruction_sha256", None)
+    if sha is not None and not is_valid_instruction_hash(sha):
+        raise PermissionError(
+            "cannot mint permit: plan.instruction_sha256 is not a valid 64-hex "
+            f"digest (got {sha!r}) — an empty/invalid hash disables TOCTOU verification"
+        )
     return ExecutionPermit(
         dispatch_id=plan.dispatch_id,
         plan_digest=plan.digest(),

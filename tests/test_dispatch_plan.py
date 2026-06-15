@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
-from dispatch_internal import issue_permit, require_permit
+from dispatch_internal import is_valid_instruction_hash, issue_permit, require_permit
 from dispatch_plan import (
     ConstraintVerdict,
     ExecutionPlan,
@@ -359,6 +359,17 @@ class TestInstructionSha256InPlan:
         assert isinstance(plan, ExecutionPlan)
         assert plan.instruction_sha256 == vspec.instruction_sha256
         assert len(plan.instruction_sha256) == 64
+
+    @pytest.mark.parametrize("provider", [p for p in Provider if p != Provider.AUTO])
+    def test_compiled_plan_hash_is_always_valid_64hex(self, provider: Provider, tmp_path: Path) -> None:
+        """P0-3 (PR-4c): a plan from compile_plan never carries an empty/invalid hash —
+        the empty default cannot flow through to an executor. Every lane is fail-closed."""
+        vspec = _make_vspec(provider=provider, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert is_valid_instruction_hash(plan.instruction_sha256), (
+            f"compile_plan produced an invalid hash for {provider.value}: {plan.instruction_sha256!r}"
+        )
 
     def test_instruction_sha256_changes_digest(self, tmp_path: Path) -> None:
         """Changing instruction_sha256 on an otherwise identical plan changes digest()."""

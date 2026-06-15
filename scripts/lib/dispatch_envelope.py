@@ -806,7 +806,7 @@ def run_envelope_plan(
         ValueError: plan.lane is not "provider".
         EnvelopeGovernError: GOVERN cannot confirm receipt (fail-closed).
     """
-    from dispatch_internal import require_permit  # noqa: PLC0415
+    from dispatch_internal import is_valid_instruction_hash, require_permit  # noqa: PLC0415
 
     require_permit(plan, permit)  # un-evadable backstop — FIRST action
 
@@ -816,22 +816,37 @@ def run_envelope_plan(
             f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
         )
 
-    # P0-3: TOCTOU verification — re-read and verify sha256 before delivering
+    # P0-3 (PR-4c): REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
+    # The old `if plan.instruction_sha256:` guard fell OPEN on an empty hash, letting
+    # an empty-hash plan + valid permit spawn mutated content. No hash → no spawn.
+    if not is_valid_instruction_hash(plan.instruction_sha256):
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=None,
+            receipt_path=None,
+            completion_text="",
+            error=(
+                f"plan.instruction_sha256 is not a valid 64-hex digest "
+                f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
+            ),
+        )
+
+    # TOCTOU verification — re-read and verify sha256 before delivering
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
-    if plan.instruction_sha256:
-        actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
-        if actual != plan.instruction_sha256:
-            return EnvelopeResult(
-                status="failure",
-                returncode=1,
-                report_path=None,
-                receipt_path=None,
-                completion_text="",
-                error=(
-                    f"instruction file mutated after permit: sha256 mismatch "
-                    f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
-                ),
-            )
+    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+    if actual != plan.instruction_sha256:
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=None,
+            receipt_path=None,
+            completion_text="",
+            error=(
+                f"instruction file mutated after permit: sha256 mismatch "
+                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
+            ),
+        )
 
     spec = EnvelopeSpec(
         dispatch_id=plan.dispatch_id,
