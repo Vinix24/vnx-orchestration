@@ -3209,5 +3209,390 @@ class TestExtraFlagsHardening(unittest.TestCase):
         self.assertIn("claude --model sonnet", cmd)
 
 
+# ---------------------------------------------------------------------------
+# PR-8: Robust multi-signal completion detection — lane-freeze fix
+# ---------------------------------------------------------------------------
+
+class TestRobustCompletionDetection(_LaneTestCase):
+    """PR-8: _matching_receipts now covers three signals; _wait_for_receipt logs resolution."""
+
+    # ---- Signal 1 extensions: task_complete / success statuses ---- #
+
+    def test_task_complete_in_ndjson_detected(self):
+        """A canonical ndjson receipt with status='task_complete' is matched."""
+        receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "task_complete",
+            "source": "tmux_interactive",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        matches = lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["status"], "task_complete")
+
+    def test_success_status_in_ndjson_detected(self):
+        """A canonical ndjson receipt with status='success' is matched."""
+        receipt = {
+            "event_type": "task_success",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "success",
+            "source": "tmux_interactive",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        matches = lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["status"], "success")
+
+    def test_task_complete_resolves_wait(self):
+        """_wait_for_receipt returns a task_complete receipt (not None)."""
+        receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "task_complete",
+            "source": "tmux_interactive",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+        )
+        self.assertIsNotNone(result, "_wait_for_receipt must return task_complete receipt")
+        self.assertEqual(result["status"], "task_complete")
+
+    # ---- Signal 2: raw pending receipts ---- #
+
+    def test_raw_pending_receipt_detected_no_ndjson(self):
+        """A receipt in receipts/pending/ with status='done' is detected without ndjson line."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        raw = {
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "done",
+            "event_type": "task_complete",
+            "source": "worker",
+        }
+        (pending_dir / f"{self.DISPATCH_ID}-receipt.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        matches = lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES)
+        self.assertGreaterEqual(len(matches), 1)
+        signal_sources = {m.get("_signal") or m.get("source") for m in matches}
+        self.assertIn("raw_pending", signal_sources, "raw_pending signal must appear in matches")
+
+    def test_raw_pending_receipt_resolves_wait(self):
+        """_wait_for_receipt detects a pending receipt even when ndjson has no matching line."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        raw = {
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "done",
+            "source": "worker",
+        }
+        (pending_dir / f"{self.DISPATCH_ID}.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+        )
+        self.assertIsNotNone(result, "_wait_for_receipt must detect raw pending receipt")
+
+    def test_raw_pending_wrong_dispatch_id_ignored(self):
+        """A pending receipt for a different dispatch_id must not match."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        wrong = {"dispatch_id": "other-dispatch-id", "status": "done"}
+        (pending_dir / "other-receipt.json").write_text(json.dumps(wrong), encoding="utf-8")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        matches = lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES)
+        self.assertEqual(len(matches), 0, "Pending receipt for different dispatch_id must not match")
+
+    # ---- Signal 3: report backstop ---- #
+
+    def test_report_backstop_active_when_summary_present(self):
+        """_is_report_backstop_active returns True for a non-empty report with ## Summary."""
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nWork done.\n\n## Open Items\n\nNone.\n",
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        self.assertTrue(lane._is_report_backstop_active(self.DISPATCH_ID))
+
+    def test_report_backstop_resolves_wait_no_receipt(self):
+        """_wait_for_receipt detects completion via report backstop when no receipt exists.
+
+        Simulates the real flow: baseline captured BEFORE report is written
+        (baseline_backstop=False), then the worker writes the report.
+        """
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        # Capture baseline BEFORE writing the report (simulates pre-delivery state).
+        baseline_backstop = lane._is_report_backstop_active(self.DISPATCH_ID)
+
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nImplementation complete.\n",
+            encoding="utf-8",
+        )
+
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_backstop=baseline_backstop,
+        )
+        self.assertIsNotNone(result, "_wait_for_receipt must detect completion via report backstop")
+        self.assertEqual(result.get("status"), "done")
+        self.assertEqual(result.get("source"), "report_backstop")
+
+    def test_report_backstop_empty_report_not_active(self):
+        """_is_report_backstop_active returns False for an empty report file."""
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text("", encoding="utf-8")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        self.assertFalse(lane._is_report_backstop_active(self.DISPATCH_ID))
+
+    def test_report_backstop_no_summary_heading_not_active(self):
+        """_is_report_backstop_active returns False when ## Summary heading is absent."""
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\nContent but no Summary heading.\n",
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        self.assertFalse(lane._is_report_backstop_active(self.DISPATCH_ID))
+
+    # ---- Failed / blocked receipts remain terminal ---- #
+
+    def test_failed_receipt_returned_not_hang(self):
+        """A failed ndjson receipt is returned immediately (not a hang to deadline)."""
+        receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "failed",
+            "source": "tmux_interactive",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=5.0,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+        )
+        self.assertIsNotNone(result, "failed receipt must be returned, not cause a deadline hang")
+        self.assertEqual(result["status"], "failed")
+
+    def test_raw_pending_failed_receipt_returned(self):
+        """A raw pending receipt with status='failed' is returned immediately."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}.json").write_text(
+            json.dumps({"dispatch_id": self.DISPATCH_ID, "status": "failed"}),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("status"), "failed")
+
+    # ---- Stale guard: pre-existing signals counted in baseline ---- #
+
+    def test_stale_report_does_not_satisfy_new_run(self):
+        """A pre-existing report (active at baseline) must not fire for the new run.
+
+        Simulates: report already existed when baseline was captured (baseline_backstop=True).
+        """
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nOld run.\n",
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        # Capture baseline AFTER writing the report (simulates pre-delivery state when stale)
+        baseline = len(lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES))
+        baseline_backstop = lane._is_report_backstop_active(self.DISPATCH_ID)  # True
+
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.15,
+            poll_interval=0.02,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=baseline,
+            baseline_backstop=baseline_backstop,
+        )
+        self.assertIsNone(result, "Pre-existing report must not satisfy the new-run stale guard")
+
+    def test_stale_raw_pending_receipt_does_not_satisfy_new_run(self):
+        """A pre-existing raw pending receipt (in baseline) must not fire for the new run."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}.json").write_text(
+            json.dumps({"dispatch_id": self.DISPATCH_ID, "status": "done", "source": "stale"}),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        baseline = len(lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES))
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.15,
+            poll_interval=0.02,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=baseline,
+        )
+        self.assertIsNone(result, "Pre-existing raw pending receipt must not satisfy the new-run wait")
+
+    # ---- env_prefix: VNX_DATA_DIR_EXPLICIT=1 (B: split-brain close) ---- #
+
+    def test_env_prefix_contains_vnx_data_dir_explicit(self):
+        """Both completion protocol bash blocks must include VNX_DATA_DIR_EXPLICIT=1."""
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+        for block_idx in (0, 1):
+            block = _extract_protocol_block(protocol, block_idx)
+            self.assertIn(
+                "VNX_DATA_DIR_EXPLICIT=1",
+                block,
+                f"block {block_idx}: VNX_DATA_DIR_EXPLICIT=1 must be in env_prefix",
+            )
+
+    # ---- Signal 1 canonical happy path still works (regression guard) ---- #
+
+    def test_canonical_done_receipt_still_resolves(self):
+        """Happy path: canonical ndjson 'done' receipt resolves via signal 1 unchanged."""
+        receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "done",
+            "source": "tmux_interactive",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(result.get("source"), "tmux_interactive")
+
+
 if __name__ == "__main__":
     unittest.main()
