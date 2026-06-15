@@ -1,0 +1,8 @@
+# Worker queue names consumed by worker_runner.load_queues().
+# Operators can edit this list without code changes. Overridden at runtime
+# by the WORKER_QUEUES env var (comma-separated) when set.
+queues:
+  - default
+  - scoring
+  - ingestion
+  - indexing
