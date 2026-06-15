@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 from dispatch_cli import (
     _execute_claude,
+    _execute_claude_headless,
     build_runtime_snapshot,
     fingerprint,
     load_spec,
@@ -1063,3 +1064,302 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 
     assert rc == 1, "Blocking forbid_route verdict must cause a Reject"
     mock_exec.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PR-5 — headless opt-in lane
+# ---------------------------------------------------------------------------
+
+@patch("dispatch_cli.build_runtime_snapshot")
+@patch("dispatch_cli.run_envelope_headless_plan")
+def test_headless_optin_routes_to_subprocess_adapter(mock_headless, mock_snapshot, tmp_path):
+    """allow_headless=True + non-empty reason → routes to run_envelope_headless_plan.
+    tmux NOT called; permit is passed to the envelope.
+    """
+    mock_snapshot.return_value = _clean_snapshot()
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_headless.return_value = mock_result
+
+    spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+        "allow_headless": True,
+        "headless_reason": "burst benchmark run",
+    })
+
+    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_headless.assert_called_once()
+    mock_tmux.assert_not_called()
+
+    plan_arg = mock_headless.call_args[0][0]
+    assert plan_arg.lane == "claude_headless"
+    assert plan_arg.billing == "api_metered"
+    assert plan_arg.adapter == "claude_subprocess"
+
+
+@patch("dispatch_cli.build_runtime_snapshot")
+def test_headless_empty_reason_rejected(mock_snapshot, tmp_path, capsys):
+    """allow_headless=True + empty headless_reason → Reject at validate() → rc=1, no spawn."""
+    mock_snapshot.return_value = _clean_snapshot()
+
+    spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+        "allow_headless": True,
+        "headless_reason": "",
+    })
+
+    with patch("dispatch_cli._execute_claude_headless") as mock_headless:
+        with patch("dispatch_cli._execute_claude") as mock_tmux:
+            rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_headless.assert_not_called()
+    mock_tmux.assert_not_called()
+    err = capsys.readouterr().err
+    assert "headless-reason-required" in err
+
+
+def test_default_claude_still_routes_tmux(tmp_path, monkeypatch):
+    """allow_headless absent/false → claude_tmux_subscription (unchanged default behavior)."""
+    data_dir = tmp_path / "vnx-data"
+    staging_id = "20260615-staging-default-tmux"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    inst = bundle_dir / "instruction.md"
+    inst.write_text("# Default claude test\n\nDo something safe.\n", encoding="utf-8")
+    spec_data = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-default-claude-tmux",
+        "staging_id": staging_id,
+        "instruction_file": str(inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
+        with patch("dispatch_cli._execute_claude_headless") as mock_headless:
+            rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_tmux.assert_called_once()
+    mock_headless.assert_not_called()
+    plan_arg = mock_tmux.call_args[0][0]
+    assert plan_arg.lane == "claude_tmux_subscription"
+
+
+def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
+    """VNX_AUTO_ROUTE=1 + VNX_ADAPTER=subprocess env vars have no effect through the door.
+    Without allow_headless=true in the spec, the plan is always claude_tmux_subscription.
+    """
+    data_dir = tmp_path / "vnx-data"
+    staging_id = "20260615-legacy-env-probe"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_AUTO_ROUTE", "1")
+    monkeypatch.setenv("VNX_ADAPTER", "subprocess")
+
+    inst = bundle_dir / "instruction.md"
+    inst.write_text("# Legacy env test\n\nDo something safe.\n", encoding="utf-8")
+    spec_data = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-legacy-env-probe",
+        "staging_id": staging_id,
+        "instruction_file": str(inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
+        with patch("dispatch_cli._execute_claude_headless") as mock_headless:
+            rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_tmux.assert_called_once()
+    mock_headless.assert_not_called()
+    plan_arg = mock_tmux.call_args[0][0]
+    assert plan_arg.lane == "claude_tmux_subscription"
+
+
+# ---------------------------------------------------------------------------
+# HIGH-1 — load_spec strict bool coercion for allow_headless / requires_mcp
+# ---------------------------------------------------------------------------
+
+class TestLoadSpecStrictBoolCoercion:
+    """load_spec must parse allow_headless strictly: only JSON boolean true enables it.
+
+    Closes the bool("false") == True coercion trap where a JSON string "false"
+    would have been interpreted as True, silently enabling headless billing.
+    """
+
+    def _write_coercion_spec(self, tmp_path, allow_headless_raw, provider="claude"):
+        instruction = _make_instruction(tmp_path)
+        spec = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260615-coercion-test",
+            "staging_id": "test-stage",
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": provider,
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+            "allow_headless": allow_headless_raw,
+        }
+        spec_file = tmp_path / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec), encoding="utf-8")
+        return spec_file
+
+    def test_string_false_does_not_enable_headless(self, tmp_path):
+        """JSON string 'false' → allow_headless=False (was bool('false')==True before fix)."""
+        spec_file = self._write_coercion_spec(tmp_path, "false")
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False, (
+            "allow_headless='false' (string) must NOT enable headless; bool('false') is the old bug"
+        )
+
+    def test_string_true_does_not_enable_headless(self, tmp_path):
+        """JSON string 'true' → allow_headless=False (only JSON boolean true enables)."""
+        spec_file = self._write_coercion_spec(tmp_path, "true")
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False
+
+    def test_integer_0_does_not_enable_headless(self, tmp_path):
+        """JSON integer 0 → allow_headless=False."""
+        spec_file = self._write_coercion_spec(tmp_path, 0)
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False
+
+    def test_integer_1_does_not_enable_headless(self, tmp_path):
+        """JSON integer 1 → allow_headless=False (only JSON boolean true, not numeric 1)."""
+        spec_file = self._write_coercion_spec(tmp_path, 1)
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False
+
+    def test_empty_string_does_not_enable_headless(self, tmp_path):
+        """JSON empty string '' → allow_headless=False."""
+        spec_file = self._write_coercion_spec(tmp_path, "")
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False
+
+    def test_json_bool_true_enables_headless(self, tmp_path):
+        """JSON boolean true → allow_headless=True (the ONLY accepted value)."""
+        spec_file = self._write_coercion_spec(tmp_path, True)
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is True
+
+    def test_json_bool_false_does_not_enable_headless(self, tmp_path):
+        """JSON boolean false → allow_headless=False."""
+        spec_file = self._write_coercion_spec(tmp_path, False)
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False
+
+    def test_string_false_on_non_claude_does_not_trigger_headless_claude_only_reject(self, tmp_path):
+        """Regression: string 'false' on a codex spec must not enable headless.
+
+        Before the fix, bool('false')==True would have enabled headless on a codex spec,
+        causing validate() to reject it with headless-claude-only instead of passing cleanly.
+        """
+        spec_file = self._write_coercion_spec(tmp_path, "false", provider="codex")
+        loaded = load_spec(spec_file)
+        assert loaded.allow_headless is False
+
+
+# ---------------------------------------------------------------------------
+# LOW — headless_reason sanitization in load_spec
+# ---------------------------------------------------------------------------
+
+class TestLoadSpecHeadlessReasonSanitization:
+
+    def _write_spec_with_reason(self, tmp_path, headless_reason_raw):
+        instruction = _make_instruction(tmp_path)
+        spec = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260615-reason-sanitize-test",
+            "staging_id": "test-stage",
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+            "allow_headless": True,
+            "headless_reason": headless_reason_raw,
+        }
+        spec_file = tmp_path / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec), encoding="utf-8")
+        return spec_file
+
+    def test_multiline_reason_has_newlines_removed(self, tmp_path):
+        """Newlines in headless_reason are replaced so the reason stays on one log line."""
+        spec_file = self._write_spec_with_reason(tmp_path, "line one\nline two\nline three")
+        loaded = load_spec(spec_file)
+        assert "\n" not in (loaded.headless_reason or "")
+        assert "line one" in (loaded.headless_reason or "")
+
+    def test_control_chars_stripped(self, tmp_path):
+        """Control chars (\\r, \\x00, etc.) are stripped from headless_reason."""
+        spec_file = self._write_spec_with_reason(tmp_path, "benchmark\x00run\r\nfast")
+        loaded = load_spec(spec_file)
+        reason = loaded.headless_reason or ""
+        assert "\x00" not in reason
+        assert "\r" not in reason
+        assert "\n" not in reason
+
+    def test_clean_reason_unchanged(self, tmp_path):
+        """A clean single-line reason passes through unchanged."""
+        spec_file = self._write_spec_with_reason(tmp_path, "burst benchmark run")
+        loaded = load_spec(spec_file)
+        assert loaded.headless_reason == "burst benchmark run"
+
+    def test_none_reason_stays_none(self, tmp_path):
+        """Missing headless_reason stays None."""
+        instruction = _make_instruction(tmp_path)
+        spec = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260615-no-reason-test",
+            "staging_id": "test-stage",
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+            "allow_headless": False,
+        }
+        spec_file = tmp_path / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec), encoding="utf-8")
+        loaded = load_spec(spec_file)
+        assert loaded.headless_reason is None

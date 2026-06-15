@@ -386,6 +386,33 @@ class TestInstructionSha256InPlan:
             "Plans with different instruction_sha256 must produce different digests"
         )
 
+    def test_headless_plan_hash_is_valid(self, tmp_path: Path) -> None:
+        """claude_headless plan always carries a valid 64-hex instruction hash."""
+        spec = DispatchSpec(
+            schema_version=1,
+            project_id="vnx-dev",
+            dispatch_id="test-headless-hash",
+            staging_id="staging-headless",
+            instruction_file=_fake_instruction_file(tmp_path),
+            role="backend-developer",
+            target_slot="T1",
+            gate="human-promoted",
+            dispatch_paths=(),
+            provider=Provider.CLAUDE,
+            allow_headless=True,
+            headless_reason="benchmark",
+        )
+        instruction_text = "# Test instruction\n"
+        vspec = ValidatedSpec(
+            spec=spec,
+            instruction_text=instruction_text,
+            normalized_paths=(),
+            instruction_sha256=hashlib.sha256(instruction_text.encode("utf-8")).hexdigest(),
+        )
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert is_valid_instruction_hash(plan.instruction_sha256)
+
     def test_default_sha256_is_empty_string(self, tmp_path: Path) -> None:
         """ExecutionPlan constructed without instruction_sha256 defaults to empty string."""
         ifile = tmp_path / "instruction.md"
@@ -413,3 +440,88 @@ class TestInstructionSha256InPlan:
             route_reason="D1",
         )
         assert plan.instruction_sha256 == ""
+
+
+# ---------------------------------------------------------------------------
+# PR-5 — claude_headless lane
+# ---------------------------------------------------------------------------
+
+def _make_vspec_headless(
+    *,
+    headless_reason: str = "burst benchmark",
+    target_slot: str = "T1",
+    model: str | None = None,
+    tmp_path: Path,
+) -> ValidatedSpec:
+    """Build a ValidatedSpec with allow_headless=True for headless lane tests."""
+    spec = DispatchSpec(
+        schema_version=1,
+        project_id="vnx-dev",
+        dispatch_id="test-headless-dispatch",
+        staging_id="staging-headless-001",
+        instruction_file=_fake_instruction_file(tmp_path),
+        role="backend-developer",
+        target_slot=target_slot,
+        gate="human-promoted",
+        dispatch_paths=(),
+        provider=Provider.CLAUDE,
+        model=model,
+        allow_headless=True,
+        headless_reason=headless_reason,
+    )
+    instruction_text = "# Test instruction\n"
+    return ValidatedSpec(
+        spec=spec,
+        instruction_text=instruction_text,
+        normalized_paths=(),
+        instruction_sha256=hashlib.sha256(instruction_text.encode("utf-8")).hexdigest(),
+    )
+
+
+class TestClaudeHeadlessLane:
+    def test_headless_optin_lane_fields(self, tmp_path: Path) -> None:
+        """allow_headless=True → lane=claude_headless, adapter=claude_subprocess, billing=api_metered."""
+        vspec = _make_vspec_headless(tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.lane == "claude_headless"
+        assert plan.adapter == "claude_subprocess"
+        assert plan.billing == "api_metered"
+        assert plan.serialization_class is None
+        assert plan.warmup == "n/a"
+        assert plan.target_id == "ephemeral"
+
+    def test_headless_warning_contains_reason(self, tmp_path: Path) -> None:
+        """Headless plan carries a LOUD warning containing the headless_reason."""
+        reason = "quarterly burst load benchmark"
+        vspec = _make_vspec_headless(headless_reason=reason, tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert any("HEADLESS API-billing opted-in" in w for w in plan.warnings)
+        assert any(reason in w for w in plan.warnings)
+
+    def test_default_claude_remains_tmux(self, tmp_path: Path) -> None:
+        """Default Claude (allow_headless=False) → claude_tmux_subscription unchanged."""
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.lane == "claude_tmux_subscription"
+        assert plan.billing == "subscription"
+        assert plan.serialization_class == "claude-tmux"
+        assert plan.warmup == "verify_strict"
+        assert not any("HEADLESS" in w for w in plan.warnings)
+
+    def test_headless_isolation_always_worktree(self, tmp_path: Path) -> None:
+        """claude_headless inherits the universal isolation=WORKTREE rule."""
+        vspec = _make_vspec_headless(tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.isolation == Isolation.WORKTREE
+        assert plan.require_worktree is True
+
+    def test_headless_serial_disabled_still_no_serial_class(self, tmp_path: Path) -> None:
+        """claude_headless never gets serialization_class even when claude_serial_enabled=True."""
+        vspec = _make_vspec_headless(tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot(claude_serial_enabled=True))
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.serialization_class is None

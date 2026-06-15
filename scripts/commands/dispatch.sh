@@ -131,6 +131,10 @@ Single-entry gate (VNX_SINGLE_ENTRY_DISPATCH=1).
   <pending-id>        Dispatch ID resolved to dispatches/pending/<id>/dispatch-spec.json
   --dry-run           Print plan + fingerprint; spawn nothing
   VNX_DISPATCH_LEGACY=1  Force legacy path even when gate is on
+
+Headless (api_metered) lane: set allow_headless=true + headless_reason in dispatch-spec.json.
+  The --adapter subprocess / VNX_ADAPTER / VNX_AUTO_ROUTE flags are LEGACY-ONLY
+  (cmd_dispatch path when VNX_SINGLE_ENTRY_DISPATCH is unset) and have no effect here.
 HELP
         return 0 ;;
       -*)
@@ -362,6 +366,8 @@ HELP
   # VNX_AUTO_ROUTE=1 overrides the bare default tmux lane so smart routing
   # is honoured. Yields to any explicit adapter choice (--adapter flag,
   # Adapter: header, or VNX_ADAPTER env).
+  # LEGACY PATH ONLY — has no effect when VNX_SINGLE_ENTRY_DISPATCH=1.
+  # For headless claude via the door, set allow_headless=true in dispatch-spec.json.
   if [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && \
      [[ -z "$adapter_override" ]] && \
      [[ -z "$adapter_header" ]] && \

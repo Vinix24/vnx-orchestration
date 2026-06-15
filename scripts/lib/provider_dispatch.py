@@ -1605,17 +1605,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if provider == "claude":
-        _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"
-        _envelope_lanes = [
-            lane.strip()
-            for lane in (os.environ.get("VNX_UNIFIED_ENVELOPE_LANES") or "").split(",")
-            if lane.strip()
-        ]
-        if _envelope_on and (
-            "claude-subprocess" in _envelope_lanes or "claude" in _envelope_lanes
-        ):
-            return _dispatch_claude_via_envelope(args)
-        return _dispatch_claude(args)
+        # PR-5: claude is not a provider-lane provider. The single-entry door owns
+        # all Claude routing. Silent headless auto-selection via provider_dispatch is
+        # removed — use DispatchSpec with allow_headless=true through the door instead.
+        print(
+            "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
+            "Claude dispatches route via the single-entry dispatch door. "
+            "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
+            "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
+            "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
+            file=sys.stderr,
+        )
+        return _EX_USAGE
 
     if provider == "codex":
         _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"

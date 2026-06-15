@@ -51,7 +51,7 @@ def _make_spawn_result(returncode: int = 0) -> MagicMock:
     return r
 
 
-def _noop_governance(args, provider, model, result, start, end, status):
+def _noop_governance(args, provider, model, result, start, end, status, event_store=None):
     pass
 
 

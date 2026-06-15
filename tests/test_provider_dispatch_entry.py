@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Wave 4.6 PR-4.6.3/R3 — provider_dispatch.py entry-point tests.
+"""Wave 4.6 / PR-5 — provider_dispatch.py entry-point tests.
 
 Covers:
-- Claude provider delegates to subprocess_dispatch with unchanged argv semantics.
+- Claude provider is explicitly rejected (PR-5: claude is not a provider-lane provider).
 - Codex provider routes to _dispatch_codex (PR-4.6.3 wired).
 - Gemini provider routes to _dispatch_gemini (PR-4.6.4 wired).
 - LiteLLM provider raises SystemExit(64) with PR reference in message.
@@ -43,107 +43,45 @@ def _make_claude_argv(**overrides) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Test: claude provider delegates to subprocess_dispatch
+# Test: claude provider is rejected from the provider lane (PR-5)
 # ---------------------------------------------------------------------------
 
-class TestProviderClaudeDelegatesToSubprocessDispatch:
+class TestProviderClaudeRejectedFromProviderLane:
+    """PR-5: claude is not a provider-lane provider.
 
-    def test_delegates_on_success(self):
-        """deliver_with_recovery is called and its return value gates exit code."""
-        mock_deliver = MagicMock(return_value=True)
-        mock_extract = MagicMock(return_value=None)
+    The single-entry dispatch door (dispatch_cli.py) owns all Claude routing.
+    Direct --provider claude invocations via provider_dispatch must be hard-rejected
+    so operators get a clear error pointing to the correct path.
+    """
 
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", mock_extract):
-            result = provider_dispatch.main(_make_claude_argv())
+    def test_claude_returns_exit_64(self):
+        """--provider claude returns exit code EX_USAGE (64), not 0 or 1."""
+        result = provider_dispatch.main(_make_claude_argv())
+        assert result == 64
 
-        assert result == 0
-        mock_deliver.assert_called_once()
+    def test_claude_emits_reject_to_stderr(self, capsys):
+        """--provider claude prints a REJECT message to stderr."""
+        provider_dispatch.main(_make_claude_argv())
+        err = capsys.readouterr().err
+        assert "REJECT" in err
 
-    def test_delegates_core_kwargs(self):
-        """terminal_id, dispatch_id, instruction forwarded to deliver_with_recovery."""
-        mock_deliver = MagicMock(return_value=True)
-
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
+    def test_claude_does_not_call_subprocess_dispatch(self):
+        """--provider claude must NOT delegate to subprocess_dispatch.deliver_with_recovery."""
+        with patch("subprocess_dispatch.deliver_with_recovery") as mock_deliver:
             provider_dispatch.main(_make_claude_argv())
+        mock_deliver.assert_not_called()
 
-        call_kwargs = mock_deliver.call_args[1]
-        assert call_kwargs["terminal_id"] == "T1"
-        assert call_kwargs["dispatch_id"] == "test-pr461-smoke"
-        assert call_kwargs["instruction"] == "noop"
+    def test_claude_error_references_dispatch_door(self, capsys):
+        """Error message references the single-entry door so the operator knows the next step."""
+        provider_dispatch.main(_make_claude_argv())
+        err = capsys.readouterr().err
+        assert "dispatch" in err.lower()
 
-    def test_failed_deliver_returns_exit_code_1(self):
-        """When deliver_with_recovery returns False, main returns 1."""
-        with patch("subprocess_dispatch.deliver_with_recovery", return_value=False), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
-            result = provider_dispatch.main(_make_claude_argv())
-        assert result == 1
-
-    def test_no_auto_commit_forwarded(self):
-        """--no-auto-commit flips auto_commit=False in deliver_with_recovery."""
-        mock_deliver = MagicMock(return_value=True)
-        argv = _make_claude_argv() + ["--no-auto-commit"]
-
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
-            provider_dispatch.main(argv)
-
-        assert mock_deliver.call_args[1]["auto_commit"] is False
-
-    def test_role_extracted_from_instruction_when_absent(self):
-        """When --role is omitted, role is extracted from instruction body."""
-        mock_deliver = MagicMock(return_value=True)
-        argv = [
-            "--provider", "claude",
-            "--terminal-id", "T1",
-            "--dispatch-id", "test-role-extraction",
-            "--instruction", "Role: security-engineer\n\nDo the thing.",
-        ]
-
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver):
-            provider_dispatch.main(argv)
-
-        assert mock_deliver.call_args[1]["role"] == "security-engineer"
-
-    def test_explicit_role_not_overridden_by_instruction(self):
-        """--role flag takes precedence over Role: header in instruction."""
-        mock_deliver = MagicMock(return_value=True)
-        argv = [
-            "--provider", "claude",
-            "--terminal-id", "T1",
-            "--dispatch-id", "test-explicit-role",
-            "--instruction", "Role: backend-developer\n\nTask.",
-            "--role", "architect",
-        ]
-
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value="backend-developer"):
-            provider_dispatch.main(argv)
-
-        assert mock_deliver.call_args[1]["role"] == "architect"
-
-    def test_dispatch_paths_split_on_comma(self):
-        """--dispatch-paths is split into a list for deliver_with_recovery."""
-        mock_deliver = MagicMock(return_value=True)
-        argv = _make_claude_argv(**{"--dispatch-paths": "scripts/lib,tests"})
-
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
-            provider_dispatch.main(argv)
-
-        assert mock_deliver.call_args[1]["dispatch_paths"] == ["scripts/lib", "tests"]
-
-    def test_pr_id_forwarded(self):
-        """--pr-id is forwarded to deliver_with_recovery."""
-        mock_deliver = MagicMock(return_value=True)
-        argv = _make_claude_argv() + ["--pr-id", "488"]
-
-        with patch("subprocess_dispatch.deliver_with_recovery", mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
-            provider_dispatch.main(argv)
-
-        assert mock_deliver.call_args[1]["pr_id"] == "488"
+    def test_claude_with_extra_args_still_rejected(self):
+        """--provider claude with extra flags (model, role, etc.) is still rejected."""
+        argv = _make_claude_argv(**{"--model": "opus", "--role": "architect"})
+        result = provider_dispatch.main(argv)
+        assert result == 64
 
 
 # ---------------------------------------------------------------------------
@@ -299,18 +237,32 @@ class TestModuleImportability:
         import sys
 
         # Remove spawn modules and provider_dispatch from sys.modules so we can
-        # observe what loading provider_dispatch alone pulls in.
+        # observe what loading provider_dispatch alone pulls in. Save the original
+        # module objects and restore them in `finally` — re-importing creates a NEW
+        # provider_dispatch object, and leaving that in sys.modules desyncs every
+        # later test that bound `provider_dispatch` at collection time (their
+        # patch("provider_dispatch.X") would target the new object while their code
+        # under test still references the old one). The swap must not leak.
         to_remove = [
             k for k in sys.modules
             if any(s in k for s in ("codex_spawn", "gemini_spawn", "litellm_spawn", "provider_dispatch"))
         ]
+        saved = {k: sys.modules[k] for k in to_remove}
         for k in to_remove:
             del sys.modules[k]
 
-        importlib.import_module("provider_dispatch")
+        try:
+            importlib.import_module("provider_dispatch")
 
-        # None of the optional spawn modules should have been imported as side effects.
-        for mod_name in sys.modules:
-            assert "codex_spawn" not in mod_name, f"codex_spawn imported at module load: {mod_name}"
-            assert "gemini_spawn" not in mod_name, f"gemini_spawn imported at module load: {mod_name}"
-            assert "litellm_spawn" not in mod_name, f"litellm_spawn imported at module load: {mod_name}"
+            # None of the optional spawn modules should have been imported as side effects.
+            for mod_name in sys.modules:
+                assert "codex_spawn" not in mod_name, f"codex_spawn imported at module load: {mod_name}"
+                assert "gemini_spawn" not in mod_name, f"gemini_spawn imported at module load: {mod_name}"
+                assert "litellm_spawn" not in mod_name, f"litellm_spawn imported at module load: {mod_name}"
+        finally:
+            # Restore the exact module objects every other test bound at import time.
+            for k in [k for k in sys.modules if any(
+                s in k for s in ("codex_spawn", "gemini_spawn", "litellm_spawn", "provider_dispatch")
+            )]:
+                del sys.modules[k]
+            sys.modules.update(saved)

@@ -408,3 +408,88 @@ class TestRule11Deadline:
         spec = _valid_spec(ifile, deadline_seconds=good_deadline)
         result = _do_validate(spec, monkeypatch)
         assert isinstance(result, ValidatedSpec)
+
+
+# ---------------------------------------------------------------------------
+# Rule 12 — headless opt-in (PR-5)
+# ---------------------------------------------------------------------------
+
+class TestHeadlessOptin:
+    def test_allow_headless_requires_reason(self, tmp_path, monkeypatch):
+        """allow_headless=True + headless_reason=None → Reject(headless-reason-required)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason=None)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "headless-reason-required"
+
+    def test_allow_headless_empty_reason_rejected(self, tmp_path, monkeypatch):
+        """allow_headless=True + whitespace-only reason → Reject(headless-reason-required)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="   ")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "headless-reason-required"
+
+    def test_allow_headless_with_reason_passes(self, tmp_path, monkeypatch):
+        """allow_headless=True + non-empty reason → ValidatedSpec."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="burst benchmark run")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    def test_default_no_headless_passes(self, tmp_path, monkeypatch):
+        """Default spec (allow_headless=False, headless_reason=None) → ValidatedSpec without extra check."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    def test_allow_headless_false_with_no_reason_passes(self, tmp_path, monkeypatch):
+        """allow_headless=False + no reason → ValidatedSpec (rule only fires when allow_headless=True)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=False, headless_reason=None)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+
+# ---------------------------------------------------------------------------
+# Rule 12 — headless opt-in: non-claude provider rejection (MED fix)
+# ---------------------------------------------------------------------------
+
+class TestHeadlessNonClaudeProvider:
+    @pytest.mark.parametrize("non_claude_provider", [
+        Provider.CODEX,
+        Provider.GEMINI,
+        Provider.KIMI,
+        Provider.LITELLM_DEEPSEEK,
+        Provider.LITELLM_ZAI,
+    ])
+    def test_non_claude_provider_with_allow_headless_rejected(self, tmp_path, monkeypatch, non_claude_provider):
+        """allow_headless=True + non-claude provider → Reject(headless-claude-only)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="benchmark", provider=non_claude_provider)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "headless-claude-only"
+
+    def test_auto_provider_with_allow_headless_passes(self, tmp_path, monkeypatch):
+        """allow_headless=True + provider=auto → ValidatedSpec (auto could resolve to claude)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="benchmark", provider=Provider.AUTO)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    def test_claude_provider_with_allow_headless_passes(self, tmp_path, monkeypatch):
+        """allow_headless=True + provider=claude + reason → ValidatedSpec."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="benchmark", provider=Provider.CLAUDE)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    def test_non_claude_with_allow_headless_false_passes(self, tmp_path, monkeypatch):
+        """allow_headless=False + non-claude provider → ValidatedSpec (check only fires when True)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=False, headless_reason=None, provider=Provider.CODEX)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
