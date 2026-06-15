@@ -1,0 +1,10 @@
+# Worker queue names — operator-editable, no code change required.
+# Resolution order in worker_runner.load_queues():
+#   1. env var WORKER_QUEUES (comma-separated) wins
+#   2. this file (config/worker_queues.yaml)
+#   3. fallback to ["default"]
+queues:
+  - default
+  - scoring
+  - ingestion
+  - indexing
