@@ -186,12 +186,13 @@ def _compute_derived_status(
         if row[0] != "done":
             return "blocked"
 
-    # 3. Fetch track's pr_ref once (reused in both the zero-dispatch and all-terminal paths).
+    # 3. Fetch track's pr_ref and declared phase once (reused below).
     track_row = conn.execute(
-        "SELECT pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
+        "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
         (track_id, project_id),
     ).fetchone()
     track_pr_ref = track_row["pr_ref"] if track_row else None
+    track_phase = track_row["phase"] if track_row else None
 
     # 4. Dispatch state aggregation.
     dispatches = conn.execute(
@@ -208,6 +209,12 @@ def _compute_derived_status(
         pr_num = _parse_pr_number(track_pr_ref)
         if pr_num is not None and pr_num in merged_pr_numbers:
             return "done"
+        # Absence of evidence is not evidence of queued. Historical dispatches may
+        # be archived, so defer to declared phase (2026-06-15 migration panel).
+        if track_phase == "done":
+            return "done"
+        if track_phase == "active":
+            return "in_progress"
         return "queued"
 
     states = [d[0] for d in dispatches]  # d is (dispatch_id, state); note row_factory gives dict
