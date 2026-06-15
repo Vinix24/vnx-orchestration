@@ -1,16 +1,16 @@
 """R8.5 — version reconciliation / invariant manifest behavioral suite (PR-A2).
 
 Covers:
-  * the fresh-DB → v30-manifest SELF-CONSISTENCY test (the manifest matches what the
+  * the fresh-DB → v31-manifest SELF-CONSISTENCY test (the manifest matches what the
     full migration walk produces — ADR-009 schema-first);
-  * the parametrized walk-down: a DB that LIES about its `user_version` (claims v30 but
+  * the parametrized walk-down: a DB that LIES about its `user_version` (claims v31 but
     is physically vK) is downgraded to vK and the numbered walk re-applies the exposed
-    migrations until it converges at a valid v30;
+    migrations until it converges at a valid v31;
   * one case PER invariant class (missing table / missing column / wrong nullability /
     missing index / missing view) proving the manifest DETECTS the break and the
     reconciler responds (downgrade to the true version, or a loud abort when no lower
     version holds);
-  * the no-spurious-downgrade guarantee for a genuinely-complete v30 DB;
+  * the no-spurious-downgrade guarantee for a genuinely-complete v31 DB;
   * the oscillation guard: a downgrade+re-walk that cannot converge aborts with an
     explicit error rather than looping.
 
@@ -73,6 +73,7 @@ CREATE TABLE dispatches (
 _APPLY_CHAIN = (
     (22, "apply_migration"), (24, "apply_migration_v24"), (27, "apply_migration_v27"),
     (28, "apply_migration_v28"), (29, "apply_migration_v29"), (30, "apply_migration_v30"),
+    (31, "apply_migration_v31"),
 )
 
 
@@ -126,11 +127,11 @@ def _open(db: Path) -> sqlite3.Connection:
 
 
 # --------------------------------------------------------------------------- #
-# Self-consistency (ADR-009): fresh walk → exact v30 manifest
+# Self-consistency (ADR-009): fresh walk → exact v31 manifest
 # --------------------------------------------------------------------------- #
 
-def test_fresh_db_walk_satisfies_v30_manifest_exactly(tmp_path: Path) -> None:
-    """Applying the full walk to a fresh DB yields a schema that satisfies the v30
+def test_fresh_db_walk_satisfies_v31_manifest_exactly(tmp_path: Path) -> None:
+    """Applying the full walk to a fresh DB yields a schema that satisfies the v31
     invariant manifest EXACTLY (zero violations). If this fails, the manifest has
     drifted from the migration SQL and the reconciler would oscillate."""
     proj = _make_project(tmp_path)
@@ -138,7 +139,7 @@ def test_fresh_db_walk_satisfies_v30_manifest_exactly(tmp_path: Path) -> None:
     conn = _open(_db_path(proj))
     try:
         assert schema_migration.get_user_version(conn) == sm.TERMINAL_VERSION
-        assert sm.validate_db_at_version(conn, 30) == []
+        assert sm.validate_db_at_version(conn, 31) == []
     finally:
         conn.close()
 
@@ -151,7 +152,7 @@ def test_every_intermediate_version_self_consistent(tmp_path: Path) -> None:
         conn = _open(_db_path(proj))
         try:
             assert sm.validate_db_at_version(conn, ver) == [], f"v{ver} self-inconsistent"
-            assert sm.derive_correct_version(conn, max_version=30) == ver
+            assert sm.derive_correct_version(conn, max_version=ver) == ver
         finally:
             conn.close()
 
@@ -161,38 +162,38 @@ def test_every_intermediate_version_self_consistent(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("true_version", [24, 27, 28, 29])
-def test_lying_v30_downgrades_to_true_version_and_rewalks(
+def test_lying_v31_downgrades_to_true_version_and_rewalks(
     tmp_path: Path, true_version: int
 ) -> None:
-    """A genuine vK DB stamped as v30 is reconciled DOWN to vK; the numbered walk then
-    re-applies 00(K+1)..0030 and converges at a clean v30 (no data dropped)."""
+    """A genuine vK DB stamped as v31 is reconciled DOWN to vK; the numbered walk then
+    re-applies 00(K+1)..0031 and converges at a clean v31 (no data dropped)."""
     proj = _build_db_at(tmp_path, true_version)
     db = _db_path(proj)
-    _stamp_user_version(db, 30)
+    _stamp_user_version(db, 31)
 
-    # Before run(): the claimed v30 manifest fails (migrations are physically un-applied)
+    # Before run(): the claimed v31 manifest fails (migrations are physically un-applied)
     conn = _open(db)
-    assert sm.validate_db_at_version(conn, 30), "claimed v30 should fail before reconcile"
+    assert sm.validate_db_at_version(conn, 31), "claimed v31 should fail before reconcile"
     conn.close()
 
     mfs.run(proj)
 
     conn = _open(db)
     try:
-        assert schema_migration.get_user_version(conn) == 30
-        assert sm.validate_db_at_version(conn, 30) == []
+        assert schema_migration.get_user_version(conn) == 31
+        assert sm.validate_db_at_version(conn, 31) == []
         # the seeded dispatch row survived the whole walk (no data loss)
         assert conn.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == 1
     finally:
         conn.close()
 
 
-def test_canonical_derived_status_absent_at_v30(tmp_path: Path) -> None:
+def test_canonical_derived_status_absent_at_v31(tmp_path: Path) -> None:
     """Acceptance example (R8.5): tracks present + derived_status absent while
-    user_version=30 → reconciler downgrades to <=27 and the walk re-runs 0028→0030."""
+    user_version=31 → reconciler downgrades to <=27 and the walk re-runs 0028→0031."""
     proj = _build_db_at(tmp_path, 27)          # genuine v27: tracks+horizon, NO derived_status
     db = _db_path(proj)
-    _stamp_user_version(db, 30)
+    _stamp_user_version(db, 31)
 
     conn = _open(db)
     cols = {r[1] for r in conn.execute("PRAGMA table_info('tracks')")}
@@ -209,7 +210,7 @@ def test_canonical_derived_status_absent_at_v30(tmp_path: Path) -> None:
     mfs.run(proj)
     conn = _open(db)
     try:
-        assert schema_migration.get_user_version(conn) == 30
+        assert schema_migration.get_user_version(conn) == 31
         new_cols = {r[1] for r in conn.execute("PRAGMA table_info('tracks')")}
         assert {"derived_status", "track_type"} <= new_cols      # 0028+0029 re-ran
         oi_cols = {r[1] for r in conn.execute("PRAGMA table_info('track_open_items')")}
@@ -218,27 +219,27 @@ def test_canonical_derived_status_absent_at_v30(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_no_spurious_downgrade_on_complete_v30(tmp_path: Path) -> None:
-    """A genuinely-complete v30 DB claiming v30 is LEFT UNTOUCHED (no downgrade)."""
-    proj = _build_db_at(tmp_path, 30)
+def test_no_spurious_downgrade_on_complete_v31(tmp_path: Path) -> None:
+    """A genuinely-complete v31 DB claiming v31 is LEFT UNTOUCHED (no downgrade)."""
+    proj = _build_db_at(tmp_path, 31)
     conn = _open(_db_path(proj))
     try:
         result = sm.reconcile_user_version(conn)
         assert result.reconciled is False
-        assert result.corrected == 30
-        assert schema_migration.get_user_version(conn) == 30
+        assert result.corrected == 31
+        assert schema_migration.get_user_version(conn) == 31
     finally:
         conn.close()
 
 
-def test_complete_v30_run_is_idempotent_noop(tmp_path: Path) -> None:
-    """run() on an already-complete, truthful v30 DB leaves user_version at 30."""
-    proj = _build_db_at(tmp_path, 30)
+def test_complete_v31_run_is_idempotent_noop(tmp_path: Path) -> None:
+    """run() on an already-complete, truthful v31 DB leaves user_version at 31."""
+    proj = _build_db_at(tmp_path, 31)
     mfs.run(proj)
     conn = _open(_db_path(proj))
     try:
-        assert schema_migration.get_user_version(conn) == 30
-        assert sm.validate_db_at_version(conn, 30) == []
+        assert schema_migration.get_user_version(conn) == 31
+        assert sm.validate_db_at_version(conn, 31) == []
     finally:
         conn.close()
 

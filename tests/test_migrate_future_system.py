@@ -127,9 +127,11 @@ class TestPragmaPreflightAssertion:
         conn.close()
         return project_dir
 
-    def test_preflight_raises_on_missing_project_id(self, tmp_path):
+    def test_preflight_raises_on_missing_project_id(self, tmp_path, monkeypatch):
         project_dir = self._v9_style_project(tmp_path)
         mod = _get_migrate_module()
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.setattr(mod, "_marker_project_id", lambda _db_path: None)
         with pytest.raises(RuntimeError, match="project_id"):
             mod.run(project_dir)
 
@@ -141,8 +143,10 @@ class TestPragmaPreflightAssertion:
         db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
         conn = sqlite3.connect(str(db_path))
         cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
         assert "project_id" in cols
+        assert version == 31
 
 
 class TestBidirectionalPreflight:
@@ -231,6 +235,7 @@ class TestBidirectionalPreflight:
         conn.commit()
         conn.close()
         mod = _get_migrate_module()
+        monkeypatch.setattr(mod, "_marker_project_id", lambda _db_path: None)
         # N1: missing composite → ADR-007 repair fires; unresolvable tenant → fail-closed.
         with pytest.raises(RuntimeError, match="project_id|UNIQUE"):
             mod.run(project_dir)
