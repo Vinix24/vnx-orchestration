@@ -45,13 +45,15 @@ class PlanLike(Protocol):
 class ExecutionPermit:
     """Proof that a lane adapter was launched through the validated dispatch core.
 
-    Do not construct directly — use issue_permit(). A hand-constructed permit
-    without _PERMIT_SENTINEL will be rejected by require_permit().
+    Do not construct directly — use issue_permit(). The _sentinel field defaults
+    to None (deliberately a non-matching value), so any permit built via the public
+    constructor without explicit _sentinel access is rejected by require_permit().
+    Only issue_permit() attaches the real _PERMIT_SENTINEL.
     """
 
     dispatch_id: str
     plan_digest: str
-    _sentinel: object = field(default=_PERMIT_SENTINEL, repr=False, compare=False)
+    _sentinel: object = field(default=None, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------

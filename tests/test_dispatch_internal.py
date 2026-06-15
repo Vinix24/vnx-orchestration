@@ -77,27 +77,27 @@ class TestHandConstructedPermitRejected:
             require_permit(plan, forged)
 
     def test_rejects_hand_constructed_permit_with_default_sentinel_slot(self):
-        """Direct construction without _sentinel kwarg still inserts the module-private sentinel.
+        """Direct construction without _sentinel kwarg must be rejected.
 
-        But because the module-private object is unreachable from outside the module,
-        the only way to get the real sentinel is through issue_permit(). This tests that
-        a permit constructed with the field's default (which Python resolves at class
-        definition time — i.e. _PERMIT_SENTINEL itself) would actually pass, but that
-        path is not reachable from outside since the field default IS the real sentinel.
-
-        Instead we test the observable contract: only issue_permit()-minted permits pass.
+        The _sentinel field defaults to None (not the real sentinel), so any permit
+        built via the public constructor without explicit _sentinel access is rejected.
+        Only issue_permit() attaches _PERMIT_SENTINEL — that is the un-evadable backstop.
         """
         plan = FakePlan("dispatch-004")
-        # Hand-construct without _sentinel (uses class default = the real sentinel)
-        # This SHOULD pass because dataclass field default is the real sentinel object.
         permit = ExecutionPermit(
             dispatch_id=plan.dispatch_id,
             plan_digest=plan.digest(),
         )
-        # The sentinel default in the dataclass IS _PERMIT_SENTINEL, so this actually
-        # does succeed — which is the correct and documented behavior (the protection is
-        # against cross-module object reconstruction, not against in-module construction).
-        require_permit(plan, permit)  # must not raise — default IS the real sentinel
+        with pytest.raises(PermissionError):
+            require_permit(plan, permit)
+
+    def test_bare_constructed_permit_is_rejected(self):
+        """An ExecutionPermit built via the public constructor (no access to the module
+        sentinel) MUST be rejected — this is the un-evadable backstop's whole point."""
+        plan = FakePlan("dispatch-004b", "digest-bare")
+        forged = ExecutionPermit(plan.dispatch_id, plan.digest())  # no _sentinel passed
+        with pytest.raises(PermissionError):
+            require_permit(plan, forged)
 
 
 # ---------------------------------------------------------------------------
