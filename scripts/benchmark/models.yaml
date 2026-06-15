@@ -13,7 +13,7 @@ models:
 
   - id: claude-opus-4-6
     provider: claude
-    model_arg: opus
+    model_arg: claude-opus-4-6   # was `opus` alias which resolves to CURRENT opus (4-8); pin 4-6 explicitly
     cost_input_mtok: 15.00
     cost_output_mtok: 75.00
 
@@ -85,4 +85,10 @@ models:
     provider: codex
     model_arg: gpt-5.4
     cost_input_mtok: 1.25
+    cost_output_mtok: 10.00
+
+  - id: codex-gpt-5-5
+    provider: codex
+    model_arg: gpt-5.5
+    cost_input_mtok: 1.25      # TODO verify gpt-5.5 pricing before publishing the cost column
     cost_output_mtok: 10.00
