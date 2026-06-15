@@ -1,0 +1,9 @@
+# Worker queue configuration.
+# Operators may edit this list without code changes. The runner reads the
+# top-level `queues:` key. Override at runtime with the WORKER_QUEUES env var
+# (comma-separated); a missing or malformed file falls back to ["default"].
+queues:
+  - default
+  - scoring
+  - ingestion
+  - indexing
