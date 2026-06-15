@@ -41,7 +41,12 @@ from dispatch_plan import (  # noqa: E402
     RuntimeSnapshot,
     compile_plan,
 )
-from dispatch_internal import ExecutionPermit, issue_permit, require_permit  # noqa: E402
+from dispatch_internal import (  # noqa: E402
+    ExecutionPermit,
+    is_valid_instruction_hash,
+    issue_permit,
+    require_permit,
+)
 from dispatch_envelope import run_envelope_plan  # noqa: E402
 
 
@@ -194,6 +199,37 @@ import re as _re
 _PENDING_ID_RE = _re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$')
 
 
+def _check_pending_root_anchor_verdict(data_dir: Path) -> Optional[ConstraintVerdict]:
+    """Return BLOCKING ConstraintVerdict if dispatches/pending escapes the data root.
+
+    P0-2: the binding/existence checks resolve bundle paths *relative to* the
+    pending root. If `dispatches` or `pending` is a symlink that hops outside the
+    trusted data_dir, an external bundle resolves "inside" the (escaped) pending
+    root and every downstream containment check passes — fail-OPEN. Anchor the
+    pending root first: its fully-resolved path must stay under the resolved
+    data_dir, else refuse to promote. Returns None on pass.
+    """
+    try:
+        data_root = data_dir.resolve()
+        pending_root = (data_dir / "dispatches" / "pending").resolve()
+    except (ValueError, OSError) as exc:
+        return ConstraintVerdict(
+            code="ADR-006-untrusted-root",
+            severity="blocking",
+            message=f"pending root resolution failed: {exc}",
+        )
+    if not pending_root.is_relative_to(data_root):
+        return ConstraintVerdict(
+            code="ADR-006-untrusted-root",
+            severity="blocking",
+            message=(
+                f"dispatches/pending escapes the trusted data root: resolved "
+                f"{pending_root} is not under {data_root} — refusing to promote"
+            ),
+        )
+    return None
+
+
 def _check_staging_binding_verdict(
     spec_file: Path,
     instruction_file: Path,
@@ -204,9 +240,24 @@ def _check_staging_binding_verdict(
     """Return BLOCKING ConstraintVerdict if spec_file or instruction_file escape the bundle.
 
     Follows symlinks via resolve() so symlink escapes are caught. Returns None on pass.
+
+    P0-2: the bundle dir is anchored under the resolved data root before the
+    per-file containment checks, so a symlinked `staging_id` (or any symlink in
+    the pending path) that resolves outside the data root is rejected rather than
+    silently trusted.
     """
     try:
+        data_root = data_dir.resolve()
         bundle_dir = (data_dir / "dispatches" / "pending" / staging_id).resolve()
+        if not bundle_dir.is_relative_to(data_root):
+            return ConstraintVerdict(
+                code="ADR-006-untrusted-root",
+                severity="blocking",
+                message=(
+                    f"bundle pending/{staging_id}/ escapes the trusted data root: "
+                    f"resolved {bundle_dir} is not under {data_root}"
+                ),
+            )
         sf_resolved = spec_file.resolve()
         if not sf_resolved.is_relative_to(bundle_dir):
             return ConstraintVerdict(
@@ -266,15 +317,6 @@ def _via_for_provider(provider_value: str, sub_provider: Optional[str]) -> Optio
     return None
 
 
-# P0-1: SDK import patterns for dispatch-time blocking gate
-_SDK_PATTERNS = [
-    "import anthropic",
-    "from anthropic import",
-    "anthropic.anthropic(",
-    "@anthropic-ai/sdk",
-]
-
-
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -287,7 +329,10 @@ def build_runtime_snapshot(
     P0-2: staging binding verified via spec_file containment check.
     P1-#3: model_pins from provider_constraints.yaml SSOT.
     """
-    from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
+    from providers.constraint_enforcer import (  # noqa: PLC0415
+        check_constraints as _constraint_check,
+        scan_anthropic_sdk_text as _scan_sdk,
+    )
     from staging_validator import _exists_in_dir as _staging_exists  # noqa: PLC0415
 
     spec = vspec.spec
@@ -335,14 +380,22 @@ def build_runtime_snapshot(
             message=f"Constraint registry unavailable — fail-closed: {exc}",
         ),)
 
-    # P0-1: direct blocking SDK import scan (dispatch-time gate, belt-and-suspenders vs CI grep)
-    instruction_lower = (vspec.instruction_text or "").lower()
-    if any(p in instruction_lower for p in _SDK_PATTERNS):
+    # P0-1: direct blocking SDK import scan (dispatch-time gate, belt-and-suspenders
+    # vs CI grep). Whitespace-aware so `import\tanthropic` / `import   anthropic`
+    # cannot slip past as they did with literal-substring matching.
+    if _scan_sdk(vspec.instruction_text):
         constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
             code="no-anthropic-sdk",
             severity="blocking",
             message="Instruction references forbidden Anthropic SDK (dispatch-time gate)",
         ),)
+
+    # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
+    # dispatches/pending that escapes the data root cannot host a promoted bundle
+    # (fail-closed) — checked unconditionally so it holds even if existence is faked.
+    root_verdict = _check_pending_root_anchor_verdict(data_dir)
+    if root_verdict is not None:
+        constraint_verdicts = constraint_verdicts + (root_verdict,)
 
     # Staging existence check (belt-and-suspenders; binding check below is the specific gate)
     dispatches_dir = data_dir / "dispatches"
@@ -397,15 +450,23 @@ def _execute_claude(
 
     require_permit(plan, permit)  # un-evadable gate — FIRST action, cannot be moved
 
-    # P0-3: TOCTOU verification — re-read and verify sha256 before delivering
+    # P0-3 (PR-4c): REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
+    # The old `if plan.instruction_sha256:` guard fell OPEN on an empty hash, letting
+    # an empty-hash plan + valid permit spawn mutated content. No hash → no spawn.
+    if not is_valid_instruction_hash(plan.instruction_sha256):
+        raise PermissionError(
+            f"plan.instruction_sha256 is not a valid 64-hex digest "
+            f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
+        )
+
+    # TOCTOU verification — re-read and verify sha256 before delivering
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
-    if plan.instruction_sha256:
-        actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
-        if actual != plan.instruction_sha256:
-            raise PermissionError(
-                f"instruction file mutated after permit: sha256 mismatch "
-                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
-            )
+    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+    if actual != plan.instruction_sha256:
+        raise PermissionError(
+            f"instruction file mutated after permit: sha256 mismatch "
+            f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
+        )
 
     lane = TmuxInteractiveDispatch(state_dir)
     result = lane.dispatch(

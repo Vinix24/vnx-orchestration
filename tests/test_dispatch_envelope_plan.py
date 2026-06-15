@@ -10,6 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -54,6 +55,12 @@ def _make_provider_plan(
     if instruction_file is None:
         instruction_file = tmp_path / f"instruction-{provider.value.replace(':', '-')}.md"
         instruction_file.write_text("# Test dispatch\nDo something.", encoding="utf-8")
+    # PR-4c: executors now require a valid 64-hex plan hash before delivery, so a
+    # well-formed fixture plan carries the sha256 of its instruction file content
+    # (mirrors compile_plan, which always propagates it from the ValidatedSpec).
+    sha256 = hashlib.sha256(
+        instruction_file.read_text(encoding="utf-8").encode("utf-8")
+    ).hexdigest()
     return ExecutionPlan(
         dispatch_id=dispatch_id,
         project_id="vnx-dev",
@@ -75,12 +82,18 @@ def _make_provider_plan(
         dispatch_paths=(),
         instruction_file=instruction_file,
         route_reason="D1,D2,D3,D4,D5,D6,D7,D8,D9,D10,D11,D12",
+        instruction_sha256=sha256,
     )
 
 
 def _make_claude_plan(tmp_path: Path) -> ExecutionPlan:
     instruction_file = tmp_path / "claude_inst.md"
     instruction_file.write_text("# Claude dispatch", encoding="utf-8")
+    # PR-4c: carry the instruction sha256 so the plan is well-formed under the
+    # executors' mandatory 64-hex hash gate (see _make_provider_plan note).
+    sha256 = hashlib.sha256(
+        instruction_file.read_text(encoding="utf-8").encode("utf-8")
+    ).hexdigest()
     return ExecutionPlan(
         dispatch_id="test-claude-dispatch",
         project_id="vnx-dev",
@@ -102,6 +115,7 @@ def _make_claude_plan(tmp_path: Path) -> ExecutionPlan:
         dispatch_paths=(),
         instruction_file=instruction_file,
         route_reason="D1,D2,D3",
+        instruction_sha256=sha256,
     )
 
 

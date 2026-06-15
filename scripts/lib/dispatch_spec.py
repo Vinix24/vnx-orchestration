@@ -204,6 +204,10 @@ def validate(
         instruction_text = ifile.read_text(encoding="utf-8")
     except OSError as exc:
         return Reject("instruction-unreadable", f"instruction_file not readable: {exc}")
+    except UnicodeDecodeError as exc:
+        # P1 (PR-4c): a non-UTF-8 instruction must Reject, not raise out of the door.
+        # The "door never panics" invariant must cover validation, not just runtime.
+        return Reject("instruction-unreadable", f"instruction_file is not valid UTF-8: {exc}")
 
     # P0-3: compute sha256 over instruction content; verify against DispatchSpec field if set
     computed_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
