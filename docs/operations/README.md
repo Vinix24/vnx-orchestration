@@ -16,6 +16,7 @@
 - Subprocess adapter flag: `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`
 - Multi-model guide: `MULTI_MODEL_GUIDE.md`
 - Autonomous production guide: `AUTONOMOUS_PRODUCTION_GUIDE.md`
+- Transcript backup & archive: `TRANSCRIPT_BACKUP_ARCHIVE.md`
 
 > **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available
 > via the dashboard server (`dashboard/serve_dashboard.py`) at `/api/health`.
