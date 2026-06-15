@@ -11,6 +11,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import textwrap
 from pathlib import Path, PurePosixPath
 from unittest.mock import MagicMock, call, patch
 
@@ -26,6 +27,10 @@ from dispatch_cli import (
     run_dispatch,
 )
 from dispatch_internal import ExecutionPermit, issue_permit
+from providers.constraint_enforcer import (
+    ConstraintEnforcer,
+    scan_anthropic_sdk_text,
+)
 from dispatch_plan import (
     ConstraintVerdict,
     ExecutionPlan,
@@ -786,3 +791,166 @@ def test_permit_fingerprint_stable(tmp_path):
     assert fp_a1.startswith(permit_a1.plan_digest[:12])
     assert fp_a1.endswith(plan_a.dispatch_id)
     assert "-" in fp_a1
+
+
+# ---------------------------------------------------------------------------
+# PR-4d P0 — tokenize-robust SDK scanner closes the codex-proven deep forms
+# ---------------------------------------------------------------------------
+
+# codex re-probe forms that the PR-4c regex scanner let through (rc=0). Each is
+# stored inside a Python string literal (never a bare source-line import) so the
+# ADR-003 file scanner does not flag this test file.
+_CODEX_SDK_FORMS = [
+    ("line_continuation_import", "import \\\n    anthropic as a"),
+    ("line_continuation_from", "from anthropic \\\n    import Client"),
+    ("submodule_from", "from anthropic.client import Client"),
+    ("submodule_import", "import anthropic.client"),
+    ("dunder_import", '__import__("anthropic")'),
+    ("importlib_module", 'importlib.import_module("anthropic")'),
+    ("spaced_attr_call", "client = anthropic . Anthropic ( )"),
+    ("js_sdk_literal", 'const x = require("@anthropic-ai/sdk")'),
+]
+
+
+@pytest.mark.parametrize("form_id,snippet", _CODEX_SDK_FORMS, ids=[f[0] for f in _CODEX_SDK_FORMS])
+def test_scanner_blocks_codex_deep_forms(form_id, snippet):
+    """Gate #1 (shared scanner): every codex-proven deep form is detected."""
+    text = f"# Dispatch\n\n{snippet}\n"
+    assert scan_anthropic_sdk_text(text) is True, f"{form_id!r} slipped past the scanner"
+
+
+@pytest.mark.parametrize("form_id,snippet", _CODEX_SDK_FORMS, ids=[f[0] for f in _CODEX_SDK_FORMS])
+def test_constraint_engine_blocks_codex_deep_forms(form_id, snippet):
+    """Gate #2 (constraint engine): the forbid_import rule flags every deep form."""
+    text = f"# Dispatch\n\n{snippet}\n"
+    violations = ConstraintEnforcer().check_constraints(instruction_text=text)
+    assert any(v.code == "no-anthropic-sdk" for v in violations), (
+        f"constraint engine missed {form_id!r}"
+    )
+
+
+@pytest.mark.parametrize("form_id,snippet", _CODEX_SDK_FORMS, ids=[f[0] for f in _CODEX_SDK_FORMS])
+def test_dispatch_gate_blocks_codex_deep_forms(form_id, snippet, tmp_path, monkeypatch):
+    """End-to-end via run_dispatch: every codex deep form → fail-closed Reject, no spawn.
+
+    run_dispatch exercises BOTH gates inside the single door (constraint engine in
+    build_runtime_snapshot AND the blocking backstop)."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text=f"# Dispatch\n\n{snippet}\n",
+        staging_id=f"20260615-codex-{form_id.replace('_', '-')}",
+        dispatch_id=f"20260615-codex-{form_id.replace('_', '-')}",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, f"Expected fail-closed Reject for {form_id!r}"
+    mock_execute.assert_not_called()
+
+
+def test_scanner_allows_clean_prose_with_anthropic_word():
+    """Sanity: prose mentioning 'anthropic' without an import shape is not flagged."""
+    text = "# Dispatch\n\nDocument the anthropic routing policy clearly.\n"
+    assert scan_anthropic_sdk_text(text) is False
+
+
+def test_scanner_handles_garbled_non_python_text():
+    """Garbled text that breaks tokenization (unbalanced brackets) must not crash the
+    scanner and must still catch a hidden import via the regex fallback (fail-CLOSED)."""
+    garbled = "Broken markdown with [an unbalanced bracket and (paren\nimport anthropic\n"
+    assert scan_anthropic_sdk_text(garbled) is True
+    benign_garbled = "Broken markdown with [an unbalanced bracket and (paren only\n"
+    assert scan_anthropic_sdk_text(benign_garbled) is False
+
+
+# ---------------------------------------------------------------------------
+# PR-4d P2 — the SSOT (provider_constraints.yaml) patterns are authoritative
+# ---------------------------------------------------------------------------
+
+def test_ssot_forbid_import_pattern_is_authoritative(tmp_path):
+    """A forbid_import pattern configured ONLY in the YAML must be enforced — proving
+    the SSOT governs and the scanner is not limited to a hard-coded list."""
+    custom = tmp_path / "constraints.yaml"
+    custom.write_text(
+        textwrap.dedent(
+            """\
+            version: 1
+            constraints:
+              - id: no-anthropic-sdk
+                rule: forbid_import
+                forbidden_import:
+                  patterns:
+                    - "vnx_probe_forbidden_marker"
+                reason: SSOT-authoritative probe
+                enforcement: ci_grep
+                audit_severity: blocking
+                override_allowed: false
+            """
+        ),
+        encoding="utf-8",
+    )
+    probe = "benign instruction containing vnx_probe_forbidden_marker inline"
+
+    # Configured-pattern enforcer flags the marker...
+    violations = ConstraintEnforcer(path=custom).check_constraints(instruction_text=probe)
+    assert any(v.code == "no-anthropic-sdk" for v in violations), (
+        "configured SSOT pattern was not enforced"
+    )
+
+    # ...while the real SSOT (no such pattern) does NOT — confirming the match came
+    # from the configured pattern, not a built-in default.
+    control = ConstraintEnforcer().check_constraints(instruction_text=probe)
+    assert not any(v.code == "no-anthropic-sdk" for v in control)
+
+
+# ---------------------------------------------------------------------------
+# PR-4d — dispatches-level symlink escape is rejected (kimi P2-2 regression)
+# ---------------------------------------------------------------------------
+
+def test_symlinked_dispatches_dir_rejected(tmp_path, monkeypatch, capsys):
+    """kimi P2-2: symlink <data_dir>/dispatches (one level above pending) to an
+    external dir, drop a bundle in it. The pending-root anchor resolves THROUGH the
+    symlink, lands outside the data root → BLOCKING ADR-006-untrusted-root, no spawn."""
+    data_dir = tmp_path / "vnx-data"
+    data_dir.mkdir(parents=True)
+
+    external = tmp_path / "external-dispatches"
+    staging_id = "20260615-external-dispatches-bundle"
+    external_bundle = external / "pending" / staging_id
+    external_bundle.mkdir(parents=True)
+    inst = external_bundle / "instruction.md"
+    inst.write_text("# Looks clean\n\nDo something.\n", encoding="utf-8")
+
+    # Symlink the WHOLE dispatches dir (not just pending) to the external location
+    dispatches_link = data_dir / "dispatches"
+    dispatches_link.symlink_to(external, target_is_directory=True)
+
+    spec = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-dispatches-symlink-probe",
+        "staging_id": staging_id,
+        "instruction_file": str(dispatches_link / "pending" / staging_id / "instruction.md"),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = dispatches_link / "pending" / staging_id / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_execute.assert_not_called()
+    assert "ADR-006-untrusted-root" in capsys.readouterr().err

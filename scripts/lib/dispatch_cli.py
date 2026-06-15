@@ -55,7 +55,16 @@ from dispatch_envelope import run_envelope_plan  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _resolve_data_dir() -> Path:
-    """Resolve VNX data directory. Mirrors provider_dispatch._resolve_data_dir."""
+    """Resolve VNX data directory. Mirrors provider_dispatch._resolve_data_dir.
+
+    PR-4d trust boundary: the resolved data root is OPERATOR config, not attacker
+    input. The threat model is our own agents, not an external adversary — and an
+    operator who wants an external-drive layout would point VNX_DATA_DIR straight
+    at it. A symlinked data root is therefore legitimate and is NOT rejected (that
+    would break external-drive setups). What IS untrusted is anything PLANTED
+    INSIDE this root by a dispatch (e.g. a symlinked dispatches/pending escaping
+    it); that is closed by _check_pending_root_anchor_verdict below.
+    """
     explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
     explicit_val = os.environ.get("VNX_DATA_DIR", "")
     if explicit_flag and explicit_val:
@@ -208,6 +217,11 @@ def _check_pending_root_anchor_verdict(data_dir: Path) -> Optional[ConstraintVer
     root and every downstream containment check passes — fail-OPEN. Anchor the
     pending root first: its fully-resolved path must stay under the resolved
     data_dir, else refuse to promote. Returns None on pass.
+
+    PR-4d trust boundary: this anchor protects against symlinks PLANTED INSIDE the
+    trusted data root (a dispatch-controlled `dispatches`/`dispatches/pending`
+    that escapes it). The data root ITSELF is trusted operator config (see
+    _resolve_data_dir) and is intentionally not rejected for being a symlink.
     """
     try:
         data_root = data_dir.resolve()
@@ -380,9 +394,11 @@ def build_runtime_snapshot(
             message=f"Constraint registry unavailable — fail-closed: {exc}",
         ),)
 
-    # P0-1: direct blocking SDK import scan (dispatch-time gate, belt-and-suspenders
-    # vs CI grep). Whitespace-aware so `import\tanthropic` / `import   anthropic`
-    # cannot slip past as they did with literal-substring matching.
+    # P0-1 / PR-4d: direct blocking SDK import scan (dispatch-time gate, belt-and-
+    # suspenders vs CI grep). This backstop shares the constraint engine's robust,
+    # tokenize-based scanner, so line-continuation / submodule (`from anthropic.x`)
+    # / dynamic (`__import__("anthropic")`) forms cannot slip past — both gates
+    # apply identical, bypass-resistant matching.
     if _scan_sdk(vspec.instruction_text):
         constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
             code="no-anthropic-sdk",
