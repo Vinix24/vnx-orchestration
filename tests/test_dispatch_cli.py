@@ -193,8 +193,8 @@ def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, t
 # ---------------------------------------------------------------------------
 
 def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
-    """Real constraint engine (no mock): instruction with `import anthropic` → Reject.
-    Clean instruction inside bundle → routes to _execute_claude."""
+    """Real constraint engine (no mock): instruction with `import anthropic` → PROCEEDS (warn only).
+    SDK import is no longer a blocking verdict after PR-4e. Clean instruction → same outcome."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260615-staging-real-test"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -203,7 +203,7 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    # Part 1: instruction contains `import anthropic` → blocking no-anthropic-sdk → Reject
+    # Part 1: instruction contains `import anthropic` → SDK is warn not blocking → dispatch proceeds
     evil_inst = bundle_dir / "evil_instruction.md"
     evil_inst.write_text(
         "# Evil dispatch\n\nimport anthropic\nclient = anthropic.Anthropic()\n",
@@ -226,11 +226,11 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
     spec_file_evil = bundle_dir / "dispatch-spec-evil.json"
     spec_file_evil.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file_evil)
 
-    assert rc == 1, "Expected Reject from no-anthropic-sdk constraint"
-    mock_execute.assert_not_called()
+    assert rc == 0, "SDK instruction must PROCEED after PR-4e (warn only, not blocking)"
+    mock_execute.assert_called_once()
 
     # Part 2: clean instruction inside bundle → routes to _execute_claude
     clean_inst = bundle_dir / "clean_instruction.md"
@@ -596,8 +596,8 @@ def _make_bundle_spec(
     "client = anthropic . Anthropic ( )",  # spaced attribute access + call
 ])
 def test_sdk_block_is_whitespace_aware(tmp_path, monkeypatch, evil_line):
-    """codex PROVED `import\\tanthropic` / `import   anthropic` slip past literal
-    substring matching. The whitespace-aware gate must Reject all of these → no spawn."""
+    """PR-4e: SDK forms (whitespace variants) are DETECTED by the scanner (warn) but no longer
+    BLOCK the dispatch — the instruction proceeds. The scanner still catches every form."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text=f"# Dispatch\n\n{evil_line}\n",
@@ -605,11 +605,11 @@ def test_sdk_block_is_whitespace_aware(tmp_path, monkeypatch, evil_line):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, f"Expected fail-closed Reject for {evil_line!r}"
-    mock_execute.assert_not_called()
+    assert rc == 0, f"SDK form must PROCEED (warn not blocked) after PR-4e: {evil_line!r}"
+    mock_execute.assert_called_once()
 
 
 def test_clean_import_mentioning_anthropic_word_not_blocked(tmp_path, monkeypatch):
@@ -830,11 +830,12 @@ def test_constraint_engine_blocks_codex_deep_forms(form_id, snippet):
 
 
 @pytest.mark.parametrize("form_id,snippet", _CODEX_SDK_FORMS, ids=[f[0] for f in _CODEX_SDK_FORMS])
-def test_dispatch_gate_blocks_codex_deep_forms(form_id, snippet, tmp_path, monkeypatch):
-    """End-to-end via run_dispatch: every codex deep form → fail-closed Reject, no spawn.
+def test_dispatch_gate_codex_deep_forms_proceed(form_id, snippet, tmp_path, monkeypatch):
+    """PR-4e: every codex SDK deep form → dispatch PROCEEDS (warn only, not blocking).
 
-    run_dispatch exercises BOTH gates inside the single door (constraint engine in
-    build_runtime_snapshot AND the blocking backstop)."""
+    The scanner and constraint engine still DETECT the form (see test_scanner_blocks_codex_deep_forms
+    and test_constraint_engine_blocks_codex_deep_forms); the change is that the dispatch no longer
+    BLOCKS on it — the executor is reachable."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text=f"# Dispatch\n\n{snippet}\n",
@@ -844,11 +845,11 @@ def test_dispatch_gate_blocks_codex_deep_forms(form_id, snippet, tmp_path, monke
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, f"Expected fail-closed Reject for {form_id!r}"
-    mock_execute.assert_not_called()
+    assert rc == 0, f"SDK deep form must PROCEED (warn) after PR-4e: {form_id!r}"
+    mock_execute.assert_called_once()
 
 
 def test_scanner_allows_clean_prose_with_anthropic_word():
@@ -954,3 +955,111 @@ def test_symlinked_dispatches_dir_rejected(tmp_path, monkeypatch, capsys):
     assert rc == 1
     mock_execute.assert_not_called()
     assert "ADR-006-untrusted-root" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# PR-4e — SDK instruction-scan WARN (not blocking); routing constraints stay blocking
+# ---------------------------------------------------------------------------
+
+def test_sdk_instruction_proceeds_warn_not_block(tmp_path, monkeypatch):
+    """PR-4e: actual `import anthropic` in instruction → dispatch PROCEEDS (warn only).
+    The SDK scan is a signal, not a gate. rc=0 proves no blocking verdict was produced."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Task\n\nimport anthropic\nclient = anthropic.Anthropic()\n",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, "SDK import in instruction must PROCEED after PR-4e"
+    mock_exec.assert_called_once()
+
+
+def test_sdk_instruction_url_mention_proceeds(tmp_path, monkeypatch):
+    """PR-4e: a URL mentioning 'anthropic.com' is not an SDK import → no violation at all."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Task\n\nSee https://anthropic.com/docs for the routing policy.\n",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_exec.assert_called_once()
+
+
+def test_sdk_violation_is_warn_not_blocking_in_constraint_engine():
+    """PR-4e: forbid_import (no-anthropic-sdk) must emit WARN severity, never blocking."""
+    violations = ConstraintEnforcer().check_constraints(
+        instruction_text="import anthropic\nclient = anthropic.Anthropic()\n"
+    )
+    sdk_violations = [v for v in violations if v.code == "no-anthropic-sdk"]
+    assert sdk_violations, "Expected a no-anthropic-sdk violation from the constraint engine"
+    assert all(v.severity == "warn" for v in sdk_violations), (
+        f"SDK violation must be warn, got {sdk_violations[0].severity!r}"
+    )
+
+
+def test_forbid_route_kimi_is_blocking_in_constraint_engine():
+    """PR-4e: forbid_route kimi-via-cli-only must remain BLOCKING severity."""
+    violations = ConstraintEnforcer().check_constraints(
+        provider="litellm:moonshot",
+        sub_provider="moonshot",
+        via="moonshot",
+    )
+    kimi_v = next((v for v in violations if v.code == "kimi-via-cli-only"), None)
+    assert kimi_v is not None, "Expected kimi-via-cli-only violation for litellm:moonshot"
+    assert kimi_v.severity == "blocking"
+
+
+def test_forbid_route_deprecated_glm_is_blocking_in_constraint_engine():
+    """PR-4e: deprecated-glm-models forbid_route must remain BLOCKING severity."""
+    violations = ConstraintEnforcer().check_constraints(
+        provider="litellm:zai",
+        sub_provider="zai",
+        model="glm-4.5",
+    )
+    glm_v = next((v for v in violations if v.code == "deprecated-glm-models"), None)
+    assert glm_v is not None, "Expected deprecated-glm-models violation for glm-4.5"
+    assert glm_v.severity == "blocking"
+
+
+def test_require_route_wrong_model_is_warn_not_block():
+    """PR-4e: require_route (t0-opus-only) with wrong model → WARN, not blocking."""
+    violations = ConstraintEnforcer().check_constraints(
+        provider="claude",
+        terminal_id="T0",
+        role="T0",
+        model="sonnet",
+    )
+    t0_v = next((v for v in violations if v.code == "t0-opus-only"), None)
+    assert t0_v is not None, "Expected t0-opus-only violation when T0 runs with sonnet"
+    assert t0_v.severity == "warn"
+
+
+def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
+    """PR-4e: a blocking verdict from forbid_route in the snapshot → compile_plan Rejects → rc=1."""
+    spec_file = _make_spec_file(tmp_path, provider="claude")
+    blocking_snapshot = RuntimeSnapshot(
+        constraint_verdicts=(ConstraintVerdict(
+            code="kimi-via-cli-only",
+            severity="blocking",
+            message="Route forbidden: Kimi must use the kimi CLI lane",
+        ),),
+        staging_promoted=True,
+        target_health={"ephemeral": "healthy"},
+        target_capable={"ephemeral": True},
+        model_pins={"T0": "opus", "T1": "sonnet", "T2": "sonnet", "T3": "sonnet"},
+    )
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=blocking_snapshot):
+        with patch("dispatch_cli._execute_claude") as mock_exec:
+            rc = run_dispatch(spec_file)
+
+    assert rc == 1, "Blocking forbid_route verdict must cause a Reject"
+    mock_exec.assert_not_called()
