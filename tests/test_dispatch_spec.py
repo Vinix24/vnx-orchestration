@@ -336,6 +336,50 @@ class TestRule10DispatchPaths:
 
 
 # ---------------------------------------------------------------------------
+# instruction_sha256 in ValidatedSpec
+# ---------------------------------------------------------------------------
+
+class TestInstructionSha256:
+    def test_validated_spec_has_sha256(self, tmp_path, monkeypatch):
+        """validate() always populates instruction_sha256 in the returned ValidatedSpec."""
+        import hashlib
+        content = "Do the work."
+        ifile = _write_instruction(tmp_path, text=content)
+        spec = _valid_spec(ifile)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        expected = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        assert result.instruction_sha256 == expected
+
+    def test_dispatch_spec_sha256_mismatch_rejects(self, tmp_path, monkeypatch):
+        """If DispatchSpec.instruction_sha256 is set and wrong, validate() returns Reject."""
+        ifile = _write_instruction(tmp_path, text="Real content here.")
+        spec = _valid_spec(ifile, instruction_sha256="0" * 64)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "instruction-hash-mismatch"
+
+    def test_dispatch_spec_sha256_correct_passes(self, tmp_path, monkeypatch):
+        """If DispatchSpec.instruction_sha256 matches the file content, validate() passes."""
+        import hashlib
+        content = "Real content here."
+        ifile = _write_instruction(tmp_path, text=content)
+        correct_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        spec = _valid_spec(ifile, instruction_sha256=correct_sha256)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        assert result.instruction_sha256 == correct_sha256
+
+    def test_dispatch_spec_no_sha256_skips_verification(self, tmp_path, monkeypatch):
+        """instruction_sha256=None on DispatchSpec means no pre-check; ValidatedSpec still gets sha."""
+        ifile = _write_instruction(tmp_path, text="Do the work.")
+        spec = _valid_spec(ifile, instruction_sha256=None)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        assert len(result.instruction_sha256) == 64  # sha256 hex digest is 64 chars
+
+
+# ---------------------------------------------------------------------------
 # Rule 11 — deadline_seconds bounds
 # ---------------------------------------------------------------------------
 

@@ -144,6 +144,11 @@ HELP
       err "[dispatch] single-entry gate: requires --spec-file <abs> or <pending-id>"
       return 1
     fi
+    # P0-2: validate pending-id format BEFORE interpolation into path (traversal guard)
+    if [[ ! "$pending_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+      err "[dispatch] single-entry gate: invalid pending-id format (must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$): $pending_id"
+      return 1
+    fi
     local candidate="${VNX_DISPATCH_DIR}/pending/${pending_id}/dispatch-spec.json"
     if [ ! -f "$candidate" ]; then
       err "[dispatch] single-entry gate: dispatch-spec.json not found: $candidate"
@@ -165,7 +170,8 @@ HELP
 
   log "[dispatch] single-entry gate: spec=$spec_file"
 
-  PYTHONPATH="${VNX_HOME}/scripts/lib:${PYTHONPATH:-}" \
+  # P1-#7: no trailing colon (avoids CWD on sys.path when PYTHONPATH is unset)
+  PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
     python3 "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
   return $?
 }

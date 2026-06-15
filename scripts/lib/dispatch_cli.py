@@ -11,6 +11,7 @@ tmux (subscription). Provider lane executes via run_envelope_plan (provider_mete
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -106,6 +107,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         requires_mcp=bool(raw.get("requires_mcp", False)),
         target_id_override=(raw.get("target_id_override") or None),
         tags=tuple(str(t) for t in (raw.get("tags") or [])),
+        instruction_sha256=(raw.get("instruction_sha256") or None),
     )
 
 
@@ -143,6 +145,98 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# P1-#3: model pins from SSOT
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MODEL_PINS: dict[str, str] = {
+    "T0": "opus",
+    "T1": "sonnet",
+    "T2": "sonnet",
+    "T3": "sonnet",
+}
+
+
+def _load_model_pins_from_yaml() -> dict[str, str]:
+    """Load T0/T1/T2/T3 model pins from provider_constraints.yaml SSOT.
+
+    Falls back to DEFAULT_MODEL_PINS on any read/parse error (never raises).
+    """
+    yaml_path = _LIB_DIR / "providers" / "provider_constraints.yaml"
+    try:
+        import yaml  # noqa: PLC0415
+        with yaml_path.open(encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return dict(_DEFAULT_MODEL_PINS)
+        pins: dict[str, str] = {}
+        for constraint in (data.get("constraints") or []):
+            cid = str(constraint.get("id", ""))
+            required = constraint.get("required_route") or {}
+            model = required.get("model")
+            if not model:
+                continue
+            if cid == "t0-opus-only":
+                pins["T0"] = str(model)
+            elif cid == "workers-sonnet-pinned":
+                for slot in ("T1", "T2", "T3"):
+                    pins[slot] = str(model)
+        return {**_DEFAULT_MODEL_PINS, **pins}
+    except Exception:
+        return dict(_DEFAULT_MODEL_PINS)
+
+
+# ---------------------------------------------------------------------------
+# P0-2: staging binding check helpers
+# ---------------------------------------------------------------------------
+
+# Mirrors _DISPATCH_ID_RE from staging_validator.py
+import re as _re
+_PENDING_ID_RE = _re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$')
+
+
+def _check_staging_binding_verdict(
+    spec_file: Path,
+    instruction_file: Path,
+    *,
+    data_dir: Path,
+    staging_id: str,
+) -> Optional[ConstraintVerdict]:
+    """Return BLOCKING ConstraintVerdict if spec_file or instruction_file escape the bundle.
+
+    Follows symlinks via resolve() so symlink escapes are caught. Returns None on pass.
+    """
+    try:
+        bundle_dir = (data_dir / "dispatches" / "pending" / staging_id).resolve()
+        sf_resolved = spec_file.resolve()
+        if not sf_resolved.is_relative_to(bundle_dir):
+            return ConstraintVerdict(
+                code="ADR-006-binding",
+                severity="blocking",
+                message=(
+                    f"spec_file is not inside bundle pending/{staging_id}/: "
+                    f"got {sf_resolved}"
+                ),
+            )
+        if_resolved = instruction_file.resolve()
+        if not if_resolved.is_relative_to(bundle_dir):
+            return ConstraintVerdict(
+                code="ADR-006-binding",
+                severity="blocking",
+                message=(
+                    f"instruction_file is not inside bundle pending/{staging_id}/: "
+                    f"got {if_resolved}"
+                ),
+            )
+    except (ValueError, OSError) as exc:
+        return ConstraintVerdict(
+            code="ADR-006-binding",
+            severity="blocking",
+            message=f"staging binding path resolution failed: {exc}",
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # build_runtime_snapshot — all I/O lives here
 # ---------------------------------------------------------------------------
 
@@ -172,24 +266,26 @@ def _via_for_provider(provider_value: str, sub_provider: Optional[str]) -> Optio
     return None
 
 
+# P0-1: SDK import patterns for dispatch-time blocking gate
+_SDK_PATTERNS = [
+    "import anthropic",
+    "from anthropic import",
+    "anthropic.anthropic(",
+    "@anthropic-ai/sdk",
+]
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
     data_dir: Path,
+    spec_file: Path,
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
-    Constraint enforcement runs for ALL providers including claude — this is the
-    door's per-provider correctness gate. compile_plan's D3 then rejects on any
-    blocking verdict before a single subprocess is spawned.
-
-    Staging check reuses staging_validator._exists_in_dir logic (including path
-    containment defense-in-depth).
-
-    model_pins are derived from provider_constraints.yaml tiers:
-      T0 → opus, T1/T2/T3 → sonnet
-
-    Target health defaults to healthy (best-effort; the tmux lane is leaseless).
+    P0-1: instruction_text + check_registry=True (FAIL-CLOSED); effective model; SDK scan (blocking).
+    P0-2: staging binding verified via spec_file containment check.
+    P1-#3: model_pins from provider_constraints.yaml SSOT.
     """
     from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
     from staging_validator import _exists_in_dir as _staging_exists  # noqa: PLC0415
@@ -199,40 +295,70 @@ def build_runtime_snapshot(
     sub_provider = _sub_provider_for(provider_value)
     via = _via_for_provider(provider_value, sub_provider)
 
-    model = spec.model or "sonnet"
+    # P1-#3: model_pins from SSOT
+    model_pins = _load_model_pins_from_yaml()
 
-    raw_violations = _constraint_check(
-        provider=provider_value,
-        sub_provider=sub_provider,
-        model=model,
-        terminal_id=spec.target_slot,
-        role=spec.role,
-        via=via,
-        env=os.environ,
-        check_registry=False,
-    )
+    # P0-1: effective model — same computation compile_plan uses in D4
+    is_claude_lane = spec.provider == Provider.CLAUDE
+    if is_claude_lane:
+        effective_model = model_pins.get(spec.target_slot) or spec.model or "sonnet"
+    else:
+        effective_model = spec.model or "default"
 
-    constraint_verdicts = tuple(
-        ConstraintVerdict(
-            code=v.code,
-            severity=v.severity,
-            message=v.message,
-            override_applied=v.override_applied,
+    # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
+    constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
+    try:
+        raw_violations = _constraint_check(
+            provider=provider_value,
+            sub_provider=sub_provider,
+            model=effective_model,
+            terminal_id=spec.target_slot,
+            role=spec.role,
+            via=via,
+            env=os.environ,
+            check_registry=True,
+            instruction_text=vspec.instruction_text,
         )
-        for v in raw_violations
-    )
+        constraint_verdicts = tuple(
+            ConstraintVerdict(
+                code=v.code,
+                severity=v.severity,
+                message=v.message,
+                override_applied=v.override_applied,
+            )
+            for v in raw_violations
+        )
+    except Exception as exc:
+        constraint_verdicts = (ConstraintVerdict(
+            code="registry-unavailable",
+            severity="blocking",
+            message=f"Constraint registry unavailable — fail-closed: {exc}",
+        ),)
 
+    # P0-1: direct blocking SDK import scan (dispatch-time gate, belt-and-suspenders vs CI grep)
+    instruction_lower = (vspec.instruction_text or "").lower()
+    if any(p in instruction_lower for p in _SDK_PATTERNS):
+        constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+            code="no-anthropic-sdk",
+            severity="blocking",
+            message="Instruction references forbidden Anthropic SDK (dispatch-time gate)",
+        ),)
+
+    # Staging existence check (belt-and-suspenders; binding check below is the specific gate)
     dispatches_dir = data_dir / "dispatches"
     staging_promoted = _staging_exists(dispatches_dir / "pending", spec.staging_id)
 
-    model_pins: dict[str, str] = {
-        "T0": "opus",
-        "T1": "sonnet",
-        "T2": "sonnet",
-        "T3": "sonnet",
-    }
+    # P0-2: staging binding — spec_file and instruction_file must be inside the bundle dir
+    if staging_promoted:
+        binding_verdict = _check_staging_binding_verdict(
+            spec_file,
+            spec.instruction_file,
+            data_dir=data_dir,
+            staging_id=spec.staging_id,
+        )
+        if binding_verdict is not None:
+            constraint_verdicts = constraint_verdicts + (binding_verdict,)
 
-    is_claude_lane = spec.provider == Provider.CLAUDE
     if is_claude_lane:
         target_health: dict[str, str] = {"ephemeral": "healthy"}
         target_capable: dict[str, bool] = {"ephemeral": True}
@@ -264,16 +390,22 @@ def _execute_claude(
 ) -> int:
     """Execute a validated claude_tmux_subscription plan via TmuxInteractiveDispatch.
 
-    require_permit is the first action — un-evadable. The tmux lane self-governs
-    (emits its own receipt + report); the door's job is validate + permit +
-    plan-faithful invocation. The claude serial lock and warmup are owned by the
-    tmux lane itself.
+    require_permit is the first action — un-evadable. P0-3: sha256 of the instruction
+    file is re-verified immediately before delivery to detect TOCTOU swaps.
     """
     from tmux_interactive_dispatch import TmuxInteractiveDispatch  # noqa: PLC0415
 
     require_permit(plan, permit)  # un-evadable gate — FIRST action, cannot be moved
 
+    # P0-3: TOCTOU verification — re-read and verify sha256 before delivering
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
+    if plan.instruction_sha256:
+        actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+        if actual != plan.instruction_sha256:
+            raise PermissionError(
+                f"instruction file mutated after permit: sha256 mismatch "
+                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
+            )
 
     lane = TmuxInteractiveDispatch(state_dir)
     result = lane.dispatch(
@@ -315,36 +447,43 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         _emit_reject(vspec)
         return 1
 
-    snapshot = build_runtime_snapshot(vspec, data_dir=data_dir)
+    # P1-#1: wrap everything after validate in try/except — door never panics
+    try:
+        snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
 
-    plan = compile_plan(vspec, snapshot)
-    if isinstance(plan, Reject):
-        _emit_reject(plan)
+        plan = compile_plan(vspec, snapshot)
+        if isinstance(plan, Reject):
+            _emit_reject(plan)
+            return 1
+
+        permit = issue_permit(plan)
+        require_permit(plan, permit)  # P1-#6: door backstop for BOTH lanes
+        fp = fingerprint(permit)
+        logger.info("[dispatch_cli] permit fingerprint: %s", fp)
+
+        if dry_run:
+            _print_plan(plan, fp)
+            return 0
+
+        if plan.lane == "provider":
+            result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+            return result.returncode
+        elif plan.lane == "claude_tmux_subscription":
+            return _execute_claude(
+                plan,
+                permit,
+                state_dir=state_dir,
+                data_dir=data_dir,
+                role=vspec.spec.role,
+            )
+        else:
+            raise ValueError(
+                f"[dispatch_cli] closed set violated — unknown lane: {plan.lane!r}"
+            )
+
+    except Exception as exc:
+        print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
-
-    permit = issue_permit(plan)
-    fp = fingerprint(permit)
-    logger.info("[dispatch_cli] permit fingerprint: %s", fp)
-
-    if dry_run:
-        _print_plan(plan, fp)
-        return 0
-
-    if plan.lane == "provider":
-        result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
-        return result.returncode
-    elif plan.lane == "claude_tmux_subscription":
-        return _execute_claude(
-            plan,
-            permit,
-            state_dir=state_dir,
-            data_dir=data_dir,
-            role=vspec.spec.role,
-        )
-    else:
-        raise ValueError(
-            f"[dispatch_cli] closed set violated — unknown lane: {plan.lane!r}"
-        )
 
 
 # ---------------------------------------------------------------------------
