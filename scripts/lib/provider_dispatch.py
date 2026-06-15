@@ -130,6 +130,9 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
 
     Returns the original instruction unchanged on any failure.
     """
+    if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
+        return args.instruction
+
     # Layer: intelligence injection (existing)
     try:
         from intelligence_injection import build_intelligence_section  # noqa: PLC0415
