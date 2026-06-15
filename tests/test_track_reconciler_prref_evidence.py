@@ -3,8 +3,9 @@
 Verifies the additive pr_ref evidence path added in feat/reconciler-prref-evidence:
 
 - A track with pr_ref + merged evidence derives 'done' with ZERO matching dispatches
-- A track with pr_ref but PR not merged stays 'queued' (no dispatch match)
+- Zero-dispatch tracks without merged-PR evidence defer to declared phase
 - Idempotent re-run of the pr_ref path
+- Idempotent re-run of the declared-phase fallback
 - Determinism: two runs over identical state produce identical derived_status
 - Dispatch-based path not regressed (tracks WITH matching dispatches still use it)
 - _load_merged_pr_numbers reads from pr_merged.ndjson (NDJSON source)
@@ -277,7 +278,7 @@ def test_load_merged_graceful_on_bad_ndjson(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_done_when_pr_ref_merged_zero_dispatches(tmp_path):
-    """A track with pr_ref + merged evidence and NO dispatches derives 'done'."""
+    """The existing pr_ref + merged evidence path still derives 'done'."""
     state_dir = _build_db(tmp_path)
     _seed_track(state_dir, "T-ev-done", pr_ref="#756")
 
@@ -289,40 +290,53 @@ def test_done_when_pr_ref_merged_zero_dispatches(tmp_path):
     assert _get_derived(state_dir, "T-ev-done") == "done"
 
 
-def test_queued_when_pr_ref_not_in_merged_set(tmp_path):
-    """A track with pr_ref but PR not in merged set stays 'queued' (no dispatch)."""
+def test_done_when_declared_done_without_evidence(tmp_path):
+    """A done track with no dispatch or merged-PR evidence stays done."""
     state_dir = _build_db(tmp_path)
-    _seed_track(state_dir, "T-ev-queued", pr_ref="#999")
+    _seed_track(state_dir, "T-phase-done", phase="done", pr_ref=None)
 
     result = track_reconciler.reconcile_track(
-        state_dir, "T-ev-queued", PROJECT_ID,
-        _merged_pr_numbers=frozenset({756}),  # 999 not in set
+        state_dir, "T-phase-done", PROJECT_ID,
+        _merged_pr_numbers=frozenset(),
     )
-    assert result["derived_status"] == "queued"
+    assert result["derived_status"] == "done"
+    assert _get_derived(state_dir, "T-phase-done") == "done"
 
 
-def test_queued_when_no_pr_ref_and_no_dispatches(tmp_path):
-    """A track with no pr_ref and no dispatches stays 'queued'."""
+def test_in_progress_when_declared_active_without_evidence(tmp_path):
+    """An active track with no dispatch or merged-PR evidence stays in progress."""
     state_dir = _build_db(tmp_path)
-    _seed_track(state_dir, "T-ev-nopr", pr_ref=None)
+    _seed_track(state_dir, "T-phase-active", phase="active", pr_ref=None)
 
     result = track_reconciler.reconcile_track(
-        state_dir, "T-ev-nopr", PROJECT_ID,
-        _merged_pr_numbers=frozenset({756, 757, 758}),
+        state_dir, "T-phase-active", PROJECT_ID,
+        _merged_pr_numbers=frozenset(),
     )
-    assert result["derived_status"] == "queued"
+    assert result["derived_status"] == "in_progress"
 
 
-def test_queued_when_merged_set_empty_and_no_dispatches(tmp_path):
-    """A track with pr_ref but empty merged set stays 'queued'."""
+def test_queued_when_declared_queued_without_evidence(tmp_path):
+    """A queued track with no dispatch or merged-PR evidence stays queued."""
     state_dir = _build_db(tmp_path)
-    _seed_track(state_dir, "T-ev-empty", pr_ref="#756")
+    _seed_track(state_dir, "T-phase-queued", phase="queued", pr_ref=None)
 
     result = track_reconciler.reconcile_track(
-        state_dir, "T-ev-empty", PROJECT_ID,
+        state_dir, "T-phase-queued", PROJECT_ID,
         _merged_pr_numbers=frozenset(),
     )
     assert result["derived_status"] == "queued"
+
+
+def test_in_progress_when_pr_ref_not_in_merged_set(tmp_path):
+    """An active track with unconfirmed pr_ref and no dispatches stays in progress."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-ev-unmerged", phase="active", pr_ref="#999")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-ev-unmerged", PROJECT_ID,
+        _merged_pr_numbers=frozenset({756}),  # 999 not in set
+    )
+    assert result["derived_status"] == "in_progress"
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +355,23 @@ def test_idempotent_prref_evidence_path(tmp_path):
     r2 = track_reconciler.reconcile_track(
         state_dir, "T-ev-idem", PROJECT_ID,
         _merged_pr_numbers=frozenset({800}),
+    )
+    assert r1["derived_status"] == "done"
+    assert r2["derived_status"] == "done"
+
+
+def test_idempotent_done_phase_without_evidence(tmp_path):
+    """The declared-done fallback remains done across repeated reconciles."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-phase-done-idem", phase="done", pr_ref=None)
+
+    r1 = track_reconciler.reconcile_track(
+        state_dir, "T-phase-done-idem", PROJECT_ID,
+        _merged_pr_numbers=frozenset(),
+    )
+    r2 = track_reconciler.reconcile_track(
+        state_dir, "T-phase-done-idem", PROJECT_ID,
+        _merged_pr_numbers=frozenset(),
     )
     assert r1["derived_status"] == "done"
     assert r2["derived_status"] == "done"
@@ -416,9 +447,9 @@ def test_reconcile_all_tracks_prref_evidence(tmp_path):
     state_dir = _build_db(tmp_path, deep=True)
     # Track with pr_ref + merged: should derive 'done'
     _seed_track(state_dir, "T-all-a", pr_ref="#756")
-    # Track with pr_ref, not merged: should stay 'queued'
+    # Active track with pr_ref, not merged: defer to phase.
     _seed_track(state_dir, "T-all-b", pr_ref="#999")
-    # Track with no pr_ref, no dispatches: stays 'queued'
+    # Active track with no pr_ref or dispatches: defer to phase.
     _seed_track(state_dir, "T-all-c", pr_ref=None)
     # Track with dispatch (no pr_ref match): dispatch path
     _seed_track(state_dir, "T-all-d", pr_ref=None)
@@ -434,8 +465,8 @@ def test_reconcile_all_tracks_prref_evidence(tmp_path):
     by_id = {r["track_id"]: r for r in results}
 
     assert by_id["T-all-a"]["derived_status"] == "done"
-    assert by_id["T-all-b"]["derived_status"] == "queued"
-    assert by_id["T-all-c"]["derived_status"] == "queued"
+    assert by_id["T-all-b"]["derived_status"] == "in_progress"
+    assert by_id["T-all-c"]["derived_status"] == "in_progress"
     assert by_id["T-all-d"]["derived_status"] == "in_progress"
 
 
