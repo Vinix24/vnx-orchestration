@@ -7,45 +7,27 @@ version: 1
 tiers:
   t1_trivial:
     description: "Mechanical refactor, single/few-file, ~5 min wallclock"
-    lanes:
+    lanes: &bench_lanes_10
       - claude-opus-4-8
       - claude-opus-4-7
       - claude-opus-4-6
       - claude-sonnet-4-6
-      - claude-haiku-4-5
-      - deepseek-v4-pro-harness
-      - deepseek-v4-pro-bare
-      - deepseek-v4-flash-harness
-      - deepseek-v4-flash-bare
+      - codex-gpt-5-4
+      - codex-gpt-5-5
       - kimi-k2-6
-      - kimi-k2-0905
-      - local-gemma-4b
+      - glm-5-1
+      - deepseek-v4-pro-harness
+      - deepseek-v4-flash-harness
     n_replications: 3
 
   t2_medium:
     description: "Multi-file refactor + tests + migration, bounded scope, ~15-25 min"
-    lanes:
-      - claude-opus-4-8
-      - claude-opus-4-7
-      - claude-opus-4-6
-      - claude-sonnet-4-6
-      - deepseek-v4-pro-harness
-      - deepseek-v4-pro-bare
-      - deepseek-v4-flash-harness
-      - kimi-k2-6
-      - kimi-k2-0905
+    lanes: *bench_lanes_10
     n_replications: 3
 
   t3_complex:
     description: "Cross-module state, security boundaries, introspection-heavy, >1h"
-    lanes:
-      - claude-opus-4-8
-      - claude-opus-4-7
-      - claude-sonnet-4-6
-      - deepseek-v4-pro-harness
-      - kimi-k2-6
-      - kimi-k2-0905
-      - codex-gpt-5-4
+    lanes: *bench_lanes_10
     n_replications: 2
 
 tasks:
