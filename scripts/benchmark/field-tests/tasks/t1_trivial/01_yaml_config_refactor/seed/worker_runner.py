@@ -1,13 +1,39 @@
 """worker_runner — minimal queue runner for benchmark task 01.
 
-Seed state: queue names are hardcoded below. The assignment (see
-instruction.md) is to move them to config/worker_queues.yaml with an
-env-var override and a graceful default — tests/test_worker_runner.py
-encodes that contract and fails against this seed.
+Queue names are resolved at import time via load_queues():
+  1. env var WORKER_QUEUES (comma-separated) wins if set.
+  2. config/worker_queues.yaml parsed if present and valid.
+  3. Falls back to ["default"].
 """
 from __future__ import annotations
 
-QUEUES = ["default", "scoring", "ingestion", "indexing"]
+import os
+from pathlib import Path
+
+import yaml
+
+_DEFAULT_QUEUES = ["default"]
+_CONFIG_PATH = Path("config/worker_queues.yaml")
+
+
+def load_queues() -> list[str]:
+    env_value = os.environ.get("WORKER_QUEUES")
+    if env_value:
+        return [q.strip() for q in env_value.split(",") if q.strip()]
+
+    if _CONFIG_PATH.is_file():
+        try:
+            data = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
+            queues = (data or {}).get("queues")
+            if isinstance(queues, list) and queues:
+                return queues
+        except yaml.YAMLError:
+            return list(_DEFAULT_QUEUES)
+
+    return list(_DEFAULT_QUEUES)
+
+
+QUEUES = load_queues()
 
 
 def run_one(queue_name: str) -> str:
