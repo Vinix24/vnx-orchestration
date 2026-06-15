@@ -48,6 +48,7 @@ from dispatch_internal import (  # noqa: E402
     require_permit,
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
+from dispatch_serialization import force_release, serialize_lane  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -554,29 +555,30 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             _print_plan(plan, fp)
             return 0
 
-        if plan.lane == "provider":
-            result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
-            return result.returncode
-        elif plan.lane == "claude_tmux_subscription":
-            return _execute_claude(
-                plan,
-                permit,
-                state_dir=state_dir,
-                data_dir=data_dir,
-                role=vspec.spec.role,
-            )
-        elif plan.lane == "claude_headless":
-            return _execute_claude_headless(
-                plan,
-                permit,
-                state_dir=state_dir,
-                data_dir=data_dir,
-                role=vspec.spec.role,
-            )
-        else:
-            raise ValueError(
-                f"[dispatch_cli] closed set violated — unknown lane: {plan.lane!r}"
-            )
+        with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
+            if plan.lane == "provider":
+                result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+                return result.returncode
+            elif plan.lane == "claude_tmux_subscription":
+                return _execute_claude(
+                    plan,
+                    permit,
+                    state_dir=state_dir,
+                    data_dir=data_dir,
+                    role=vspec.spec.role,
+                )
+            elif plan.lane == "claude_headless":
+                return _execute_claude_headless(
+                    plan,
+                    permit,
+                    state_dir=state_dir,
+                    data_dir=data_dir,
+                    role=vspec.spec.role,
+                )
+            else:
+                raise ValueError(
+                    f"[dispatch_cli] closed set violated — unknown lane: {plan.lane!r}"
+                )
 
     except Exception as exc:
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
@@ -594,14 +596,28 @@ def main(argv: Optional[list] = None) -> int:
         description="VNX single-entry dispatch gate (PR-4)"
     )
     parser.add_argument(
-        "--spec-file", required=True, type=Path, dest="spec_file",
+        "--spec-file", type=Path, dest="spec_file",
         help="Absolute path to dispatch-spec.json",
     )
     parser.add_argument(
         "--dry-run", action="store_true", dest="dry_run",
         help="Print plan + fingerprint; spawn nothing",
     )
+    parser.add_argument(
+        "--force-release-lock", dest="force_release_class",
+        metavar="CLASS", nargs="?", const="claude-tmux", default=None,
+        help="Release stale lock for CLASS (default: claude-tmux); "
+             "prints prior holder and removes lock file",
+    )
     args = parser.parse_args(argv)
+
+    if args.force_release_class is not None:
+        force_release(args.force_release_class)
+        return 0
+
+    if args.spec_file is None:
+        parser.error("--spec-file is required")
+
     return run_dispatch(args.spec_file, dry_run=args.dry_run)
 
 
