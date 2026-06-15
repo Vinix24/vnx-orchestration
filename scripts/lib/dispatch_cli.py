@@ -47,7 +47,7 @@ from dispatch_internal import (  # noqa: E402
     issue_permit,
     require_permit,
 )
-from dispatch_envelope import run_envelope_plan  # noqa: E402
+from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +122,8 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         target_id_override=(raw.get("target_id_override") or None),
         tags=tuple(str(t) for t in (raw.get("tags") or [])),
         instruction_sha256=(raw.get("instruction_sha256") or None),
+        allow_headless=bool(raw.get("allow_headless", False)),
+        headless_reason=(raw.get("headless_reason") or None),
     )
 
 
@@ -483,6 +485,23 @@ def _execute_claude(
     return 0 if result.success else 1
 
 
+def _execute_claude_headless(
+    plan: ExecutionPlan,
+    permit: ExecutionPermit,
+    *,
+    state_dir: Path,
+    data_dir: Path,
+    role: Optional[str] = None,
+) -> int:
+    """Execute a validated claude_headless plan via ClaudeSubprocessAdapter (headless api_metered).
+
+    Delegates all permit verification, TOCTOU check, and GOVERN to
+    run_envelope_headless_plan — same security contract as the provider lane.
+    """
+    result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role)
+    return result.returncode
+
+
 # ---------------------------------------------------------------------------
 # run_dispatch — the single door
 # ---------------------------------------------------------------------------
@@ -532,6 +551,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             return result.returncode
         elif plan.lane == "claude_tmux_subscription":
             return _execute_claude(
+                plan,
+                permit,
+                state_dir=state_dir,
+                data_dir=data_dir,
+                role=vspec.spec.role,
+            )
+        elif plan.lane == "claude_headless":
+            return _execute_claude_headless(
                 plan,
                 permit,
                 state_dir=state_dir,
