@@ -86,6 +86,14 @@ def _resolve_repo_root() -> Path:
 # Spec loading from JSON
 # ---------------------------------------------------------------------------
 
+def _sanitize_headless_reason(raw: object) -> "str | None":
+    """Strip newlines/control chars from headless_reason so multi-line values can't break log formatting."""
+    if not raw or not isinstance(raw, str):
+        return None
+    cleaned = _re.sub(r"[\x00-\x1f\x7f]+", " ", raw).strip()
+    return cleaned or None
+
+
 def load_spec(spec_file: Path) -> DispatchSpec:
     """Parse a DispatchSpec from a JSON dispatch-spec.json file."""
     raw = json.loads(spec_file.read_text(encoding="utf-8"))
@@ -95,7 +103,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         DispatchPath(
             path=PurePosixPath(str(p["path"])),
             access=PathAccess(p.get("access", "read_write")),
-            materialize_at_cwd=bool(p.get("materialize_at_cwd", False)),
+            materialize_at_cwd=p.get("materialize_at_cwd") is True,
         )
         for p in raw_paths
     )
@@ -118,12 +126,12 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         deadline_seconds=int(raw.get("deadline_seconds", 3600)),
         base_ref=str(raw.get("base_ref", "origin/main")),
         isolation=Isolation(raw.get("isolation", "worktree")),
-        requires_mcp=bool(raw.get("requires_mcp", False)),
+        requires_mcp=raw.get("requires_mcp") is True,
         target_id_override=(raw.get("target_id_override") or None),
         tags=tuple(str(t) for t in (raw.get("tags") or [])),
         instruction_sha256=(raw.get("instruction_sha256") or None),
-        allow_headless=bool(raw.get("allow_headless", False)),
-        headless_reason=(raw.get("headless_reason") or None),
+        allow_headless=raw.get("allow_headless") is True,
+        headless_reason=_sanitize_headless_reason(raw.get("headless_reason")),
     )
 
 

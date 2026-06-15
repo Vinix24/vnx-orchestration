@@ -263,6 +263,13 @@ def validate(
                 "allow_headless=True requires a non-empty headless_reason explaining "
                 "the API billing opt-in; set headless_reason to a human-readable justification",
             )
+        # MED: headless is only valid for claude (or auto that could resolve to claude)
+        if spec.provider not in (Provider.CLAUDE, Provider.AUTO):
+            return Reject(
+                "headless-claude-only",
+                f"allow_headless is only valid for provider=claude, got provider={spec.provider.value!r}; "
+                "headless api-metered billing is a claude-only lane",
+            )
 
     return ValidatedSpec(
         spec=spec,
