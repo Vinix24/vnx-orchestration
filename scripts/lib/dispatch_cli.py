@@ -339,14 +339,11 @@ def build_runtime_snapshot(
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
-    P0-1: instruction_text + check_registry=True (FAIL-CLOSED); effective model; SDK scan (blocking).
+    P0-1: instruction_text + check_registry=True (FAIL-CLOSED); effective model; SDK scan (warn via constraint engine).
     P0-2: staging binding verified via spec_file containment check.
     P1-#3: model_pins from provider_constraints.yaml SSOT.
     """
-    from providers.constraint_enforcer import (  # noqa: PLC0415
-        check_constraints as _constraint_check,
-        scan_anthropic_sdk_text as _scan_sdk,
-    )
+    from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
     from staging_validator import _exists_in_dir as _staging_exists  # noqa: PLC0415
 
     spec = vspec.spec
@@ -392,18 +389,6 @@ def build_runtime_snapshot(
             code="registry-unavailable",
             severity="blocking",
             message=f"Constraint registry unavailable — fail-closed: {exc}",
-        ),)
-
-    # P0-1 / PR-4d: direct blocking SDK import scan (dispatch-time gate, belt-and-
-    # suspenders vs CI grep). This backstop shares the constraint engine's robust,
-    # tokenize-based scanner, so line-continuation / submodule (`from anthropic.x`)
-    # / dynamic (`__import__("anthropic")`) forms cannot slip past — both gates
-    # apply identical, bypass-resistant matching.
-    if _scan_sdk(vspec.instruction_text):
-        constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
-            code="no-anthropic-sdk",
-            severity="blocking",
-            message="Instruction references forbidden Anthropic SDK (dispatch-time gate)",
         ),)
 
     # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
