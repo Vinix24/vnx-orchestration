@@ -550,12 +550,13 @@ if __name__ == "__main__":
         except Exception as _wt_exc:
             import logging as _log_mod
             _log_mod.getLogger(__name__).error(
-                "VNX_ISOLATED_WORKTREE: worktree creation failed (%s); "
-                "falling back to shared repo root",
-                _wt_exc,
+                "VNX_ISOLATED_WORKTREE=1 worktree creation failed for %s: %s — "
+                "aborting dispatch; no shared-checkout fallback",
+                args.dispatch_id, _wt_exc,
             )
-            _isolated = False
-            _isolation_wt_path = None
+            _hb_stop.set()
+            _hb_thread.join(timeout=5)
+            sys.exit(1)
 
     try:
         ok = deliver_with_recovery(

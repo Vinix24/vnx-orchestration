@@ -427,3 +427,98 @@ def test_legacy_run_envelope_unchanged(tmp_path, monkeypatch):
     assert codex_adapter_calls == ["test-legacy-codex"], (
         f"CodexAdapter.run was not called; got: {codex_adapter_calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: PR-7 — envelope owns worktree; fail-loud on creation failure
+# ---------------------------------------------------------------------------
+
+
+_FAKE_WT_PATH = Path("/tmp/fake-worktrees/envelope-test")
+
+
+class TestEnvelopeWorktreeIsolation:
+    def test_worktree_created_and_passed_as_cwd(self, tmp_path):
+        """run_envelope_plan creates worktree and passes cwd to ProviderAdapter.run."""
+        plan = _make_provider_plan(tmp_path, dispatch_id="wt-cwd-test")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        fake_receipt = state_dir / "t0_receipts.ndjson"
+        fake_receipt.touch()
+
+        adapter_calls: list = []
+
+        def fake_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+            adapter_calls.append({"cwd": cwd})
+            return _fake_adapter_success()
+
+        with patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove, \
+             patch.object(ProviderAdapter, "run", fake_adapter_run), \
+             patch("dispatch_envelope._govern", return_value=(None, fake_receipt)):
+            result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+
+        assert result.status == "success"
+        mock_create.assert_called_once_with("wt-cwd-test")
+        assert adapter_calls, "ProviderAdapter.run was not called"
+        assert adapter_calls[0]["cwd"] == _FAKE_WT_PATH, (
+            f"expected cwd={_FAKE_WT_PATH}, got cwd={adapter_calls[0]['cwd']}"
+        )
+        mock_remove.assert_called_once_with("wt-cwd-test")
+
+    def test_worktree_removed_on_spawn_failure(self, tmp_path):
+        """remove_dispatch_worktree is called even when ProviderAdapter.run raises."""
+        plan = _make_provider_plan(tmp_path, dispatch_id="wt-rm-fail-test")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+
+        def bad_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+            raise RuntimeError("spawn exploded")
+
+        with patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove, \
+             patch.object(ProviderAdapter, "run", bad_adapter_run):
+            with pytest.raises(RuntimeError, match="spawn exploded"):
+                run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+
+        mock_remove.assert_called_once_with("wt-rm-fail-test")
+
+    def test_worktree_creation_failure_aborts_dispatch(self, tmp_path):
+        """Worktree creation failure → dispatch aborts (status=failure, rc!=0), spawn NOT called."""
+        plan = _make_provider_plan(tmp_path, dispatch_id="wt-create-fail-test")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        fake_receipt = state_dir / "t0_receipts.ndjson"
+        fake_receipt.touch()
+
+        adapter_calls: list = []
+
+        def bad_create(dispatch_id):
+            raise RuntimeError("no disk space")
+
+        def spy_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+            adapter_calls.append({"cwd": cwd})
+            return _fake_adapter_success()
+
+        with patch("dispatch_worktree_isolation.create_dispatch_worktree", side_effect=bad_create), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove, \
+             patch.object(ProviderAdapter, "run", spy_adapter_run), \
+             patch("dispatch_envelope._govern", return_value=(None, fake_receipt)) as mock_govern:
+            result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+
+        assert result.status == "failure"
+        assert result.returncode == 1
+        assert result.error is not None
+        assert "no shared-checkout fallback" in result.error
+        assert adapter_calls == [], "ProviderAdapter.run must NOT be called when worktree creation fails"
+        mock_govern.assert_called_once()
+        mock_remove.assert_not_called()

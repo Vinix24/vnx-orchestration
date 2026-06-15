@@ -858,23 +858,16 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _create_provider_worktree(dispatch_id: str) -> Optional[Path]:
+def _create_provider_worktree(dispatch_id: str) -> Path:
     """Create an isolated worktree for a provider dispatch.
 
     Only called when VNX_ISOLATED_WORKTREE=1.  Returns the worktree Path on
-    success, None on failure (logs the error and falls back to shared path).
+    success, raises RuntimeError on failure — no shared-checkout fallback.
     """
-    try:
-        from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
-        wt_path = create_dispatch_worktree(dispatch_id)
-        logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
-        return wt_path
-    except RuntimeError as exc:
-        logger.error(
-            "provider isolation: create_dispatch_worktree failed for %s: %s — running in shared worktree",
-            dispatch_id, exc,
-        )
-        return None
+    from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
+    wt_path = create_dispatch_worktree(dispatch_id)
+    logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
+    return wt_path
 
 
 def _remove_provider_worktree(dispatch_id: str) -> None:
@@ -914,7 +907,15 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     enriched_instruction = _enrich_instruction(args)
     isolation_cwd: Optional[Path] = None
     if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd = _create_provider_worktree(args.dispatch_id)
+        try:
+            isolation_cwd = _create_provider_worktree(args.dispatch_id)
+        except RuntimeError as _wt_exc:
+            logger.error(
+                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+                "for %s: %s — aborting dispatch; no shared-checkout fallback",
+                args.dispatch_id, _wt_exc,
+            )
+            return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_codex(
@@ -1212,7 +1213,15 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     enriched_instruction = _enrich_instruction(args)
     isolation_cwd_litellm: Optional[Path] = None
     if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd_litellm = _create_provider_worktree(args.dispatch_id)
+        try:
+            isolation_cwd_litellm = _create_provider_worktree(args.dispatch_id)
+        except RuntimeError as _wt_exc:
+            logger.error(
+                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+                "for %s: %s — aborting dispatch; no shared-checkout fallback",
+                args.dispatch_id, _wt_exc,
+            )
+            return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_litellm(
@@ -1281,7 +1290,15 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     enriched_instruction = _enrich_instruction(args)
     isolation_cwd_kimi: Optional[Path] = None
     if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd_kimi = _create_provider_worktree(args.dispatch_id)
+        try:
+            isolation_cwd_kimi = _create_provider_worktree(args.dispatch_id)
+        except RuntimeError as _wt_exc:
+            logger.error(
+                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+                "for %s: %s — aborting dispatch; no shared-checkout fallback",
+                args.dispatch_id, _wt_exc,
+            )
+            return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
@@ -1439,7 +1456,15 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
     enriched_instruction = _enrich_instruction(args)
     isolation_cwd_gemini: Optional[Path] = None
     if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd_gemini = _create_provider_worktree(args.dispatch_id)
+        try:
+            isolation_cwd_gemini = _create_provider_worktree(args.dispatch_id)
+        except RuntimeError as _wt_exc:
+            logger.error(
+                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+                "for %s: %s — aborting dispatch; no shared-checkout fallback",
+                args.dispatch_id, _wt_exc,
+            )
+            return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_gemini(
