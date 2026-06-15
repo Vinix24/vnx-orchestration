@@ -9,7 +9,7 @@ v30 but is physically v27) SKIPS every migration and never trips them — leavin
 migrations silently un-applied (synthesis E-F, repro-confirmed).
 
 This module replaces that fragile, scattered mechanism with ONE declarative
-INVARIANT MANIFEST per schema version (v22-v30) plus a single reconciler engine:
+INVARIANT MANIFEST per schema version (v22-v31) plus a single reconciler engine:
 
   * The manifest declares, per version, the FULL expected shape: required tables;
     columns (name + affinity + nullability); PK column ordinals; composite UNIQUE
@@ -34,7 +34,7 @@ child-table composite PK/FK) so a tenant-broken schema can NEVER validate as
 ADR-009 (docs/governance/decisions/ADR-009-schema-first-migrations.md): the
 manifest mirrors the ACTUAL semantics of `schemas/migrations/00NN_*.sql` rather
 than a hand-typed projection — built from PRAGMA introspection of a freshly
-walked DB and pinned by the fresh-DB->v30 self-consistency test. The manifest must
+walked DB and pinned by the fresh-DB->terminal-version self-consistency test. The manifest must
 match what each migration produces or the reconciler would oscillate.
 """
 
@@ -342,6 +342,142 @@ _OI_BLOCKER_IDX = (IndexInvariant("idx_track_oi_active_blockers",
                                   where="resolved_at IS NULL"),)
 
 
+# Runtime tenant tables repaired by migration 0031 (ADR-007).
+_TERMINAL_LEASE_COLS_V31 = _cols(
+    ("id", "INTEGER", False), ("terminal_id", "TEXT", True),
+    ("project_id", "TEXT", True), ("state", "TEXT", True),
+    ("dispatch_id", "TEXT", False), ("generation", "INTEGER", True),
+    ("leased_at", "TEXT", False), ("expires_at", "TEXT", False),
+    ("last_heartbeat_at", "TEXT", False), ("released_at", "TEXT", False),
+    ("worker_pid", "INTEGER", False), ("metadata_json", "TEXT", False),
+    ("lease_token", "TEXT", True),
+)
+_DISPATCH_ATTEMPT_COLS_V31 = _cols(
+    ("id", "INTEGER", False), ("attempt_id", "TEXT", True),
+    ("dispatch_id", "TEXT", True), ("project_id", "TEXT", True),
+    ("attempt_number", "INTEGER", True), ("terminal_id", "TEXT", True),
+    ("state", "TEXT", True), ("started_at", "TEXT", True),
+    ("ended_at", "TEXT", False), ("failure_reason", "TEXT", False),
+    ("metadata_json", "TEXT", False),
+)
+_HEADLESS_RUN_COLS_V31 = _cols(
+    ("id", "INTEGER", False), ("run_id", "TEXT", True),
+    ("dispatch_id", "TEXT", True), ("project_id", "TEXT", True),
+    ("attempt_id", "TEXT", True), ("target_id", "TEXT", True),
+    ("target_type", "TEXT", True), ("task_class", "TEXT", True),
+    ("terminal_id", "TEXT", False), ("pid", "INTEGER", False),
+    ("pgid", "INTEGER", False), ("state", "TEXT", True),
+    ("failure_class", "TEXT", False), ("exit_code", "INTEGER", False),
+    ("started_at", "TEXT", True), ("subprocess_started_at", "TEXT", False),
+    ("heartbeat_at", "TEXT", False), ("last_output_at", "TEXT", False),
+    ("completed_at", "TEXT", False), ("duration_seconds", "REAL", False),
+    ("log_artifact_path", "TEXT", False), ("output_artifact_path", "TEXT", False),
+    ("receipt_id", "TEXT", False), ("metadata_json", "TEXT", False),
+)
+_WORKER_STATE_COLS_V31 = _cols(
+    ("terminal_id", "TEXT", True), ("project_id", "TEXT", True),
+    ("dispatch_id", "TEXT", True), ("state", "TEXT", True),
+    ("last_output_at", "TEXT", False), ("state_entered_at", "TEXT", True),
+    ("stall_count", "INTEGER", True), ("blocked_reason", "TEXT", False),
+    ("metadata_json", "TEXT", False), ("created_at", "TEXT", True),
+    ("updated_at", "TEXT", True),
+)
+_POOL_CONFIG_PARENT_COLS_V31 = _cols(
+    ("id", "INTEGER", False), ("project_id", "TEXT", True),
+    ("pool_id", "TEXT", True),
+)
+_POOL_MEMBERSHIP_COLS_V31 = _cols(
+    ("id", "INTEGER", False), ("terminal_id", "TEXT", True),
+    ("project_id", "TEXT", True), ("pool_id", "TEXT", True),
+    ("provider", "TEXT", True), ("role", "TEXT", True),
+    ("joined_at", "TEXT", True), ("released_at", "TEXT", False),
+    ("release_reason", "TEXT", False), ("spawn_generation", "INTEGER", True),
+    ("metadata_json", "TEXT", False),
+)
+
+
+def _runtime_tables_v31() -> Tuple[TableInvariant, ...]:
+    return (
+        TableInvariant(
+            name="terminal_leases", columns=_TERMINAL_LEASE_COLS_V31, pk=("id",),
+            unique_keys=(("terminal_id", "project_id"),),
+            foreign_keys=(ForeignKeyInvariant(("dispatch_id", "project_id"), "dispatches",
+                                              ("dispatch_id", "project_id")),),
+            indexes=(
+                IndexInvariant("idx_lease_state", ("state",)),
+                IndexInvariant("idx_lease_dispatch", ("dispatch_id",)),
+                IndexInvariant("idx_lease_project", ("project_id",)),
+                IndexInvariant("idx_lease_terminal_project", ("terminal_id", "project_id")),
+                IndexInvariant("idx_terminal_leases_token", ("lease_token",), unique=True,
+                               partial=True, where="lease_token != ''"),
+            ),
+        ),
+        TableInvariant(
+            name="dispatch_attempts", columns=_DISPATCH_ATTEMPT_COLS_V31, pk=("id",),
+            unique_keys=(("attempt_id", "project_id"),),
+            foreign_keys=(ForeignKeyInvariant(("dispatch_id", "project_id"), "dispatches",
+                                              ("dispatch_id", "project_id")),),
+            indexes=(
+                IndexInvariant("idx_attempt_dispatch", ("dispatch_id", "attempt_number")),
+                IndexInvariant("idx_attempt_state", ("state", "started_at")),
+                IndexInvariant("idx_attempt_terminal", ("terminal_id", "started_at")),
+                IndexInvariant("idx_attempt_project", ("project_id",)),
+            ),
+        ),
+        TableInvariant(
+            name="headless_runs", columns=_HEADLESS_RUN_COLS_V31, pk=("id",),
+            unique_keys=(("run_id", "project_id"),),
+            foreign_keys=(
+                ForeignKeyInvariant(("dispatch_id", "project_id"), "dispatches",
+                                    ("dispatch_id", "project_id")),
+                ForeignKeyInvariant(("attempt_id", "project_id"), "dispatch_attempts",
+                                    ("attempt_id", "project_id")),
+            ),
+            indexes=(
+                IndexInvariant("idx_headless_run_state", ("state", "started_at")),
+                IndexInvariant("idx_headless_run_dispatch", ("dispatch_id",)),
+                IndexInvariant("idx_headless_run_target", ("target_id", "state")),
+                IndexInvariant("idx_headless_run_heartbeat", ("state", "heartbeat_at"),
+                               partial=True, where="state = 'running'"),
+                IndexInvariant("idx_headless_run_project", ("project_id",)),
+            ),
+        ),
+        TableInvariant(
+            name="worker_states", columns=_WORKER_STATE_COLS_V31,
+            pk=("terminal_id", "project_id"),
+            foreign_keys=(
+                ForeignKeyInvariant(("terminal_id", "project_id"), "terminal_leases",
+                                    ("terminal_id", "project_id")),
+                ForeignKeyInvariant(("dispatch_id", "project_id"), "dispatches",
+                                    ("dispatch_id", "project_id")),
+            ),
+            indexes=(
+                IndexInvariant("idx_worker_state", ("state",)),
+                IndexInvariant("idx_worker_dispatch", ("dispatch_id",)),
+                IndexInvariant("idx_worker_states_project", ("project_id",)),
+            ),
+        ),
+        TableInvariant(
+            name="pool_config", columns=_POOL_CONFIG_PARENT_COLS_V31, pk=("id",),
+            unique_keys=(("project_id", "pool_id"),),
+        ),
+        TableInvariant(
+            name="worker_pool_membership", columns=_POOL_MEMBERSHIP_COLS_V31, pk=("id",),
+            foreign_keys=(
+                ForeignKeyInvariant(("terminal_id", "project_id"), "terminal_leases",
+                                    ("terminal_id", "project_id")),
+                ForeignKeyInvariant(("project_id", "pool_id"), "pool_config",
+                                    ("project_id", "pool_id")),
+            ),
+            indexes=(
+                IndexInvariant("idx_pool_membership_active", ("terminal_id", "project_id"),
+                               unique=True, partial=True, where="released_at IS NULL"),
+                IndexInvariant("idx_pool_membership_pool", ("project_id", "pool_id")),
+            ),
+        ),
+    )
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     return {
@@ -371,12 +507,26 @@ def _build_manifest() -> Dict[int, VersionManifest]:
             _tracks_composite(_TRACKS_COLS_V29, _TRACKS_IDX_V29),
             *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX)),
             (_DELIVERABLES_VIEW,)),
+        31: VersionManifest(31, (
+            _dispatches(_DISPATCH_COLS_V27),
+            _tracks_composite(_TRACKS_COLS_V29, _TRACKS_IDX_V29),
+            *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
+            *_runtime_tables_v31()),
+            (_DELIVERABLES_VIEW,)),
     }
 
 
 SCHEMA_MANIFEST: Dict[int, VersionManifest] = _build_manifest()
 TERMINAL_VERSION: int = max(SCHEMA_MANIFEST)
 MIN_VERSION: int = min(SCHEMA_MANIFEST)
+_V31_RUNTIME_FAMILY_TABLES = frozenset((
+    "terminal_leases",
+    "dispatch_attempts",
+    "headless_runs",
+    "worker_states",
+    "worker_pool_membership",
+))
+_CONDITIONAL_V31_RUNTIME_TABLES = _V31_RUNTIME_FAMILY_TABLES | {"pool_config"}
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +693,14 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
     STRICT on PK ordinals (so a composite-PK v24+ DB never validates as v22) and on
     the declared nullability/affinity of every required column."""
     manifest = SCHEMA_MANIFEST[version]
+    skip_runtime = (
+        version == 31
+        and not any(_table_exists(conn, table) for table in _V31_RUNTIME_FAMILY_TABLES)
+    )
     out: List[str] = []
     for tbl in manifest.tables:
+        if skip_runtime and tbl.name in _CONDITIONAL_V31_RUNTIME_TABLES:
+            continue
         out += validate_table(conn, tbl)
     for view in manifest.views:
         out += validate_view(conn, view)
