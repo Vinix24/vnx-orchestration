@@ -20,9 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 from dispatch_internal import (  # noqa: E402
     ExecutionPermit,
     PlanLike,
+    is_valid_instruction_hash,
     issue_permit,
     require_permit,
 )
+
+# A well-formed 64-char lowercase hex sha256 used as the default plan hash.
+_VALID_SHA = "a" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -30,9 +34,16 @@ from dispatch_internal import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 class FakePlan:
-    def __init__(self, dispatch_id: str, digest_value: str = "abc123"):
+    def __init__(
+        self,
+        dispatch_id: str,
+        digest_value: str = "abc123",
+        instruction_sha256: str = _VALID_SHA,
+    ):
         self._dispatch_id = dispatch_id
         self._digest_value = digest_value
+        # PR-4d: PlanLike now requires a valid 64-hex instruction_sha256.
+        self.instruction_sha256 = instruction_sha256
 
     @property
     def dispatch_id(self) -> str:
@@ -143,3 +154,81 @@ class TestPlanLikeProtocol:
     def test_fake_plan_satisfies_planlike(self):
         plan = FakePlan("x")
         assert isinstance(plan, PlanLike)
+
+
+# ---------------------------------------------------------------------------
+# PR-4d — instruction_sha256 is MANDATORY at the permit layer (defense-in-depth)
+# ---------------------------------------------------------------------------
+
+class TestInstructionHashRegex:
+    """_SHA256_RE must fullmatch — no trailing-newline escape (`$` accepted `\\n`)."""
+
+    def test_valid_64_hex_accepted(self):
+        assert is_valid_instruction_hash("a" * 64)
+        assert is_valid_instruction_hash("0123456789abcdef" * 4)
+
+    def test_trailing_newline_rejected(self):
+        # PR-4d: the old `^...$` form accepted a final \n; fullmatch does not.
+        assert not is_valid_instruction_hash("a" * 64 + "\n")
+
+    def test_too_long_rejected(self):
+        assert not is_valid_instruction_hash("a" * 65)
+
+    def test_too_short_rejected(self):
+        assert not is_valid_instruction_hash("a" * 63)
+
+    def test_uppercase_rejected(self):
+        assert not is_valid_instruction_hash("A" * 64)
+
+    def test_non_hex_rejected(self):
+        assert not is_valid_instruction_hash("g" * 64)
+
+    def test_non_str_rejected(self):
+        assert not is_valid_instruction_hash(None)
+        assert not is_valid_instruction_hash(12345)
+
+
+class TestPermitHashMandatory:
+    """A hashless / malformed-hash plan must never receive a permit nor pass the gate."""
+
+    def test_issue_permit_rejects_missing_hash(self):
+        """A plan with NO instruction_sha256 attribute is refused at mint time."""
+        class HashlessPlan:
+            @property
+            def dispatch_id(self) -> str:
+                return "dispatch-nohash"
+
+            def digest(self) -> str:
+                return "digest-nohash"
+
+        with pytest.raises(PermissionError, match="instruction_sha256"):
+            issue_permit(HashlessPlan())
+
+    def test_issue_permit_rejects_empty_hash(self):
+        plan = FakePlan("dispatch-empty", instruction_sha256="")
+        with pytest.raises(PermissionError, match="instruction_sha256"):
+            issue_permit(plan)
+
+    def test_issue_permit_rejects_newline_padded_hash(self):
+        """A 64-hex value with a trailing newline (65 chars) is rejected — no permit."""
+        plan = FakePlan("dispatch-newline", instruction_sha256="b" * 64 + "\n")
+        with pytest.raises(PermissionError, match="instruction_sha256"):
+            issue_permit(plan)
+
+    def test_require_permit_rejects_hashless_plan_even_with_sentinel(self):
+        """Even a sentinel-bearing permit cannot satisfy require_permit for a
+        plan whose own instruction_sha256 is invalid (defense-in-depth at gate)."""
+        good_plan = FakePlan("dispatch-mutate", digest_value="same-digest")
+        permit = issue_permit(good_plan)  # legitimate sentinel-bearing permit
+        # Mutate the plan's hash to an invalid value after minting.
+        bad_plan = FakePlan(
+            "dispatch-mutate", digest_value="same-digest", instruction_sha256=""
+        )
+        with pytest.raises(PermissionError, match="instruction_sha256"):
+            require_permit(bad_plan, permit)
+
+    def test_valid_hash_plan_round_trips(self):
+        """Sanity: a plan with a valid 64-hex hash mints and passes the gate."""
+        plan = FakePlan("dispatch-ok", instruction_sha256="c" * 64)
+        permit = issue_permit(plan)
+        require_permit(plan, permit)  # must not raise
