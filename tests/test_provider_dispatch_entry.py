@@ -237,18 +237,32 @@ class TestModuleImportability:
         import sys
 
         # Remove spawn modules and provider_dispatch from sys.modules so we can
-        # observe what loading provider_dispatch alone pulls in.
+        # observe what loading provider_dispatch alone pulls in. Save the original
+        # module objects and restore them in `finally` — re-importing creates a NEW
+        # provider_dispatch object, and leaving that in sys.modules desyncs every
+        # later test that bound `provider_dispatch` at collection time (their
+        # patch("provider_dispatch.X") would target the new object while their code
+        # under test still references the old one). The swap must not leak.
         to_remove = [
             k for k in sys.modules
             if any(s in k for s in ("codex_spawn", "gemini_spawn", "litellm_spawn", "provider_dispatch"))
         ]
+        saved = {k: sys.modules[k] for k in to_remove}
         for k in to_remove:
             del sys.modules[k]
 
-        importlib.import_module("provider_dispatch")
+        try:
+            importlib.import_module("provider_dispatch")
 
-        # None of the optional spawn modules should have been imported as side effects.
-        for mod_name in sys.modules:
-            assert "codex_spawn" not in mod_name, f"codex_spawn imported at module load: {mod_name}"
-            assert "gemini_spawn" not in mod_name, f"gemini_spawn imported at module load: {mod_name}"
-            assert "litellm_spawn" not in mod_name, f"litellm_spawn imported at module load: {mod_name}"
+            # None of the optional spawn modules should have been imported as side effects.
+            for mod_name in sys.modules:
+                assert "codex_spawn" not in mod_name, f"codex_spawn imported at module load: {mod_name}"
+                assert "gemini_spawn" not in mod_name, f"gemini_spawn imported at module load: {mod_name}"
+                assert "litellm_spawn" not in mod_name, f"litellm_spawn imported at module load: {mod_name}"
+        finally:
+            # Restore the exact module objects every other test bound at import time.
+            for k in [k for k in sys.modules if any(
+                s in k for s in ("codex_spawn", "gemini_spawn", "litellm_spawn", "provider_dispatch")
+            )]:
+                del sys.modules[k]
+            sys.modules.update(saved)
