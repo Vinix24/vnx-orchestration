@@ -27,6 +27,7 @@ EventStore wiring and cost emission are open items for later PRs (PR-1 scope: fl
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -488,4 +489,370 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         receipt_path=receipt_path,
         completion_text=adapter_result.completion_text,
         error=adapter_result.error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR-3: ProviderAdapter + plan-based provider execution
+# ---------------------------------------------------------------------------
+
+
+def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
+    """Map codex/kimi/gemini/litellm:* spawn result to _AdapterResult.
+
+    Normalises token fields via _extract_token_usage from provider_dispatch.
+    Handles error, timeout, and success/failure by returncode. Does NOT handle
+    the deepseek-harness stopped_early or local-gemma error-condition variant —
+    those are handled inline in ProviderAdapter.run().
+    """
+    from provider_dispatch import _extract_token_usage  # noqa: PLC0415
+
+    token_usage: Dict[str, int] = _extract_token_usage(result, provider_str)
+    ewf = getattr(result, "event_writer_failures", 0)
+
+    if result.error:
+        return _AdapterResult(
+            returncode=result.returncode,
+            completion_text=(result.completion_text or ""),
+            status="failure",
+            token_usage=token_usage,
+            error=result.error,
+            event_writer_failures=ewf,
+        )
+    if result.timed_out:
+        return _AdapterResult(
+            returncode=result.returncode,
+            completion_text=(result.completion_text or ""),
+            status="timeout",
+            token_usage=token_usage,
+            timed_out=True,
+            event_writer_failures=ewf,
+        )
+    status = "success" if result.returncode == 0 else "failure"
+    return _AdapterResult(
+        returncode=result.returncode,
+        completion_text=(result.completion_text or ""),
+        status=status,
+        token_usage=token_usage,
+        event_writer_failures=ewf,
+    )
+
+
+class ProviderAdapter:
+    """Routes provider-lane ExecutionPlan to the correct spawn function.
+
+    Mirrors CodexAdapter's shape but routes by plan.provider to the correct
+    spawn function. Reuses existing resolution helpers and raw spawn functions
+    from provider_dispatch and provider_spawns.*. Does NOT call the governing
+    _dispatch_* wrappers in provider_dispatch — those govern; the envelope
+    governs once via _govern.
+
+    Supported plan.provider values: codex, kimi, gemini, litellm:deepseek,
+    litellm:zai, litellm:moonshot, deepseek-harness, local-gemma.
+    Provider.CLAUDE and Provider.AUTO are programming errors → ValueError.
+
+    event_writer is not wired in PR-3 (EventStore setup is an open item for a
+    later PR); the audit gap is documented in Open Items.
+    """
+
+    def run(
+        self,
+        plan: "ExecutionPlan",
+        instruction: str,
+        *,
+        event_writer: Optional[Callable] = None,
+        cwd: Optional[Path] = None,
+    ) -> _AdapterResult:
+        from dispatch_spec import Provider  # noqa: PLC0415
+        from provider_dispatch import (  # noqa: PLC0415
+            _MLX_MODEL_MAP,
+            _build_lane_key,
+            _extract_token_usage,
+            _resolve_codex_model,
+            _resolve_deepseek_model,
+            _resolve_kimi_model_label,
+            _resolve_moonshot_model,
+            _resolve_zai_model,
+        )
+
+        pv: "Provider" = plan.provider  # type: ignore[assignment]
+
+        # ---- codex ----
+        if pv == Provider.CODEX:
+            from provider_spawns.codex_spawn import spawn_codex  # noqa: PLC0415
+
+            model = (
+                plan.model if plan.model not in ("default", "") else _resolve_codex_model()
+            )
+            try:
+                result = spawn_codex(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"codex spawn BrokenPipeError: {exc}",
+                )
+            return _map_generic_spawn_result(result, pv.value)
+
+        # ---- kimi ----
+        if pv == Provider.KIMI:
+            from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
+
+            # None signals kimi CLI to use its own default; label used only for logging
+            model = plan.model if plan.model not in ("default", "") else None
+            try:
+                result = spawn_kimi(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"kimi spawn BrokenPipeError: {exc}",
+                )
+            return _map_generic_spawn_result(result, pv.value)
+
+        # ---- gemini ----
+        if pv == Provider.GEMINI:
+            from provider_spawns.gemini_spawn import spawn_gemini  # noqa: PLC0415
+
+            model = (
+                plan.model
+                if plan.model not in ("default", "sonnet", "")
+                else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+            )
+            try:
+                result = spawn_gemini(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"gemini spawn BrokenPipeError: {exc}",
+                )
+            return _map_generic_spawn_result(result, pv.value)
+
+        # ---- litellm:deepseek | litellm:zai | litellm:moonshot ----
+        if pv in (Provider.LITELLM_DEEPSEEK, Provider.LITELLM_ZAI, Provider.LITELLM_MOONSHOT):
+            from provider_spawns.litellm_spawn import spawn_litellm  # noqa: PLC0415
+
+            # Extract sub-provider from the enum value: "litellm:deepseek" -> "deepseek"
+            base_sub = pv.value.split(":", 1)[1]
+            if plan.model not in ("default", ""):
+                model = plan.model
+            elif pv == Provider.LITELLM_DEEPSEEK:
+                model = _resolve_deepseek_model()
+            elif pv == Provider.LITELLM_ZAI:
+                model = _resolve_zai_model()
+            else:
+                model = _resolve_moonshot_model()
+            lane_key = _build_lane_key(base_sub, None)
+            try:
+                result = spawn_litellm(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    sub_provider=base_sub,
+                    lane=lane_key,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"litellm spawn BrokenPipeError: {exc}",
+                )
+            return _map_generic_spawn_result(result, pv.value)
+
+        # ---- deepseek-harness ----
+        if pv == Provider.DEEPSEEK_HARNESS:
+            from provider_spawns.deepseek_harness_spawn import (  # noqa: PLC0415
+                resolve_harness_model,
+                spawn_deepseek_harness,
+            )
+
+            raw_model = (
+                plan.model if plan.model not in ("default", "sonnet", "") else None
+            )
+            model = resolve_harness_model(raw_model)
+            try:
+                result = spawn_deepseek_harness(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"deepseek-harness spawn BrokenPipeError: {exc}",
+                )
+            token_usage: Dict[str, int] = _extract_token_usage(result, pv.value)
+            if result.error:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="failure",
+                    token_usage=token_usage,
+                    error=result.error,
+                )
+            if result.timed_out:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="timeout",
+                    token_usage=token_usage,
+                    timed_out=True,
+                )
+            if getattr(result, "stopped_early", False):
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="success",
+                    token_usage=token_usage,
+                )
+            status = "success" if result.returncode == 0 else "failure"
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text=(result.completion_text or ""),
+                status=status,
+                token_usage=token_usage,
+            )
+
+        # ---- local-gemma ----
+        if pv == Provider.LOCAL_GEMMA:
+            from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415
+
+            raw_model = (
+                plan.model if plan.model not in ("default", "sonnet", "") else "gemma-4b-local"
+            )
+            canonical_model = _MLX_MODEL_MAP.get(raw_model, raw_model)
+            result = spawn_local_gemma(
+                instruction=instruction,
+                model=canonical_model,
+                role=None,
+                deadline_seconds=300,
+                dispatch_id=plan.dispatch_id,
+                project_id="vnx-dev",
+            )
+            token_usage = _extract_token_usage(result, pv.value)
+            if result.error and result.returncode != 0:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="failure",
+                    token_usage=token_usage,
+                    error=result.error,
+                )
+            if result.timed_out:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="timeout",
+                    token_usage=token_usage,
+                    timed_out=True,
+                )
+            status = "success" if result.returncode == 0 else "failure"
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text=(result.completion_text or ""),
+                status=status,
+                token_usage=token_usage,
+            )
+
+        # Provider.CLAUDE, Provider.AUTO, or any unexpected value — programming error
+        raise ValueError(
+            f"ProviderAdapter: unsupported provider {pv!r} — "
+            f"claude and auto do not route through the provider envelope "
+            f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
+        )
+
+
+def run_envelope_plan(
+    plan: "ExecutionPlan",
+    permit: "ExecutionPermit",
+    *,
+    state_dir: Path,
+    data_dir: Path,
+) -> EnvelopeResult:
+    """Execute a validated ExecutionPlan for the provider lane.
+
+    Provider lane covers codex, kimi, gemini, litellm:*, deepseek-harness,
+    local-gemma. The claude_tmux_subscription lane is wired separately in PR-4.
+
+    require_permit is the first action — un-evadable and cannot be moved.
+
+    Raises:
+        PermissionError: permit was not issued by issue_permit for this plan.
+        ValueError: plan.lane is not "provider".
+        EnvelopeGovernError: GOVERN cannot confirm receipt (fail-closed).
+    """
+    from dispatch_internal import require_permit  # noqa: PLC0415
+
+    require_permit(plan, permit)  # un-evadable backstop — FIRST action
+
+    if plan.lane != "provider":
+        raise ValueError(
+            f"run_envelope_plan handles the provider lane only; got lane={plan.lane!r} "
+            f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
+        )
+
+    instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
+
+    spec = EnvelopeSpec(
+        dispatch_id=plan.dispatch_id,
+        terminal_id=plan.target_id,
+        provider=plan.provider.value,
+        model=plan.model,
+        instruction=instruction,
+        role=None,
+        pr_id=None,
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+
+    enriched_instruction = _prepare(spec)
+    enriched_spec = EnvelopeSpec(
+        dispatch_id=spec.dispatch_id,
+        terminal_id=spec.terminal_id,
+        provider=spec.provider,
+        model=spec.model,
+        instruction=enriched_instruction,
+        role=spec.role,
+        pr_id=spec.pr_id,
+        state_dir=spec.state_dir,
+        data_dir=spec.data_dir,
+    )
+
+    start = datetime.now(timezone.utc)
+    result = ProviderAdapter().run(plan, enriched_spec.instruction)
+    end = datetime.now(timezone.utc)
+
+    report_path, receipt_path = _govern(enriched_spec, result, start, end)
+
+    return EnvelopeResult(
+        status=result.status,
+        returncode=0 if result.status == "success" else 1,
+        report_path=report_path,
+        receipt_path=receipt_path,
+        completion_text=result.completion_text,
+        error=result.error,
     )
