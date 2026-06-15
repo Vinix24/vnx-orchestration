@@ -1,0 +1,403 @@
+"""test_dispatch_cli.py — Tests for dispatch_cli.run_dispatch (PR-4 single-entry gate).
+
+Tests the full gate: spec load -> validate -> snapshot -> compile_plan -> permit -> execute.
+Covers both claude and provider lanes, constraint enforcement (including claude),
+dry-run mode, permit fingerprint stability, and legacy bash flag behavior.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath
+from unittest.mock import MagicMock, call, patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+
+from dispatch_cli import (
+    _execute_claude,
+    build_runtime_snapshot,
+    fingerprint,
+    load_spec,
+    run_dispatch,
+)
+from dispatch_internal import ExecutionPermit, issue_permit
+from dispatch_plan import (
+    ConstraintVerdict,
+    ExecutionPlan,
+    RuntimeSnapshot,
+    compile_plan,
+)
+from dispatch_spec import (
+    DispatchPath,
+    DispatchSpec,
+    Isolation,
+    PathAccess,
+    Provider,
+    Reject,
+    ValidatedSpec,
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _make_instruction(tmp_path: Path) -> Path:
+    f = tmp_path / "instruction.md"
+    f.write_text(
+        "# Test Dispatch\n\nRole: backend-developer\n\nDo something useful.\n",
+        encoding="utf-8",
+    )
+    return f
+
+
+def _make_spec_file(
+    tmp_path: Path,
+    *,
+    provider: str = "claude",
+    model: str | None = None,
+    target_slot: str = "T1",
+    staging_id: str = "test-stage",
+    schema_version: int = 1,
+    project_id: str = "vnx-dev",
+    dispatch_id: str = "20260615-test-dispatch",
+    extra: dict | None = None,
+) -> Path:
+    """Write a minimal dispatch-spec.json and return its path."""
+    instruction_file = _make_instruction(tmp_path)
+    spec: dict = {
+        "schema_version": schema_version,
+        "project_id": project_id,
+        "dispatch_id": dispatch_id,
+        "staging_id": staging_id,
+        "instruction_file": str(instruction_file),
+        "role": "backend-developer",
+        "target_slot": target_slot,
+        "gate": "human-promoted",
+        "dispatch_paths": [
+            {"path": "scripts/test.py", "access": "read_write", "materialize_at_cwd": False}
+        ],
+        "provider": provider,
+        "model": model,
+        "deadline_seconds": 3600,
+        "base_ref": "origin/main",
+        "isolation": "worktree",
+        "requires_mcp": False,
+    }
+    if extra:
+        spec.update(extra)
+    spec_file = tmp_path / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    return spec_file
+
+
+def _clean_snapshot(*, staging_promoted: bool = True) -> RuntimeSnapshot:
+    """A snapshot with no constraint violations and healthy targets."""
+    return RuntimeSnapshot(
+        constraint_verdicts=(),
+        staging_promoted=staging_promoted,
+        target_health={"ephemeral": "healthy", "T1": "healthy"},
+        target_capable={"ephemeral": True, "T1": True},
+        model_pins={"T0": "opus", "T1": "sonnet", "T2": "sonnet", "T3": "sonnet"},
+    )
+
+
+def _make_minimal_plan(
+    *,
+    provider: Provider = Provider.CLAUDE,
+    dispatch_id: str = "20260615-test-dispatch",
+    instruction_file: Path | None = None,
+) -> ExecutionPlan:
+    """Build a minimal ExecutionPlan for permit / fingerprint tests."""
+    if instruction_file is None:
+        instruction_file = Path("/tmp/instruction.md")
+    lane = "claude_tmux_subscription" if provider == Provider.CLAUDE else "provider"
+    adapter = "tmux_claude" if provider == Provider.CLAUDE else "provider"
+    billing = "subscription" if provider == Provider.CLAUDE else "provider_metered"
+    target_id = "ephemeral" if provider == Provider.CLAUDE else "T1"
+    serialization_class = "claude-tmux" if provider == Provider.CLAUDE else None
+    warmup = "verify_strict" if provider == Provider.CLAUDE else "n/a"
+    return ExecutionPlan(
+        dispatch_id=dispatch_id,
+        project_id="vnx-dev",
+        provider=provider,
+        model="sonnet",
+        lane=lane,
+        adapter=adapter,
+        target_id=target_id,
+        billing=billing,
+        serialization_class=serialization_class,
+        isolation=Isolation.WORKTREE,
+        require_worktree=True,
+        seed_materialize=True,
+        instruction_delivery="file_ref",
+        report_contract="required",
+        warmup=warmup,
+        deadline_seconds=3600,
+        base_ref="origin/main",
+        dispatch_paths=(),
+        instruction_file=instruction_file,
+        route_reason="D11,D3,D1,D2,D4,D5,D6,D7,D8,D9,D10,D12",
+    )
+
+
+# ---------------------------------------------------------------------------
+# test_dry_run_prints_plan_no_spawn
+# ---------------------------------------------------------------------------
+
+@patch("dispatch_cli.build_runtime_snapshot")
+@patch("dispatch_envelope.run_envelope_plan")
+@patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch")
+def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, tmp_path, capsys):
+    """--dry-run prints plan + fingerprint and calls NO executor."""
+    mock_snapshot.return_value = _clean_snapshot()
+    spec_file = _make_spec_file(tmp_path, provider="claude")
+
+    rc = run_dispatch(spec_file, dry_run=True)
+
+    assert rc == 0
+    mock_envelope.assert_not_called()
+    mock_tmux.assert_not_called()
+
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "fingerprint" in out
+    # dispatch_id and lane must appear in the printed plan
+    assert "20260615-test-dispatch" in out
+    assert "claude" in out
+
+
+# ---------------------------------------------------------------------------
+# test_claude_runs_compile_plan_and_constraints
+# ---------------------------------------------------------------------------
+
+@patch("dispatch_cli.build_runtime_snapshot")
+@patch("dispatch_cli._execute_claude")
+def test_claude_runs_compile_plan_and_constraints(mock_execute, mock_snapshot, tmp_path):
+    """Claude lane: blocking constraint → Reject (no spawn). Clean spec → routes to _execute_claude."""
+    spec_file = _make_spec_file(tmp_path, provider="claude")
+
+    # Part 1: blocking constraint verdict → compile_plan returns Reject → return 1
+    mock_snapshot.return_value = RuntimeSnapshot(
+        constraint_verdicts=(
+            ConstraintVerdict(
+                code="kimi-via-cli-only",
+                severity="blocking",
+                message="Route forbidden: Kimi models must use provider kimi.",
+                override_applied=False,
+            ),
+        ),
+        staging_promoted=True,
+        target_health={"ephemeral": "healthy"},
+        target_capable={"ephemeral": True},
+        model_pins={"T0": "opus", "T1": "sonnet", "T2": "sonnet", "T3": "sonnet"},
+    )
+
+    rc = run_dispatch(spec_file)
+    assert rc == 1
+    mock_execute.assert_not_called()
+
+    # Part 2: clean spec → routes to _execute_claude
+    mock_snapshot.return_value = _clean_snapshot()
+    mock_execute.return_value = 0
+
+    rc = run_dispatch(spec_file)
+    assert rc == 0
+    mock_execute.assert_called_once()
+    # First positional arg to _execute_claude is an ExecutionPlan
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.provider == Provider.CLAUDE
+
+
+# ---------------------------------------------------------------------------
+# test_provider_routes_to_envelope
+# ---------------------------------------------------------------------------
+
+@patch("dispatch_cli.build_runtime_snapshot")
+@patch("dispatch_cli.run_envelope_plan")
+def test_provider_routes_to_envelope(mock_envelope, mock_snapshot, tmp_path):
+    """Codex spec → run_envelope_plan called with the plan and a valid permit."""
+    mock_snapshot.return_value = _clean_snapshot()
+
+    # run_envelope_plan returns an EnvelopeResult-like object
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_envelope.return_value = mock_result
+
+    spec_file = _make_spec_file(tmp_path, provider="codex", target_slot="T1")
+
+    rc = run_dispatch(spec_file)
+    assert rc == 0
+    mock_envelope.assert_called_once()
+
+    args, kwargs = mock_envelope.call_args
+    plan_arg, permit_arg = args[0], args[1]
+
+    # Plan must be a provider-lane plan for codex
+    assert plan_arg.lane == "provider"
+    assert plan_arg.provider == Provider.CODEX
+
+    # Permit must be valid (issued by issue_permit for this plan)
+    from dispatch_internal import require_permit
+    # Should not raise — a valid permit for the correct plan
+    require_permit(plan_arg, permit_arg)
+
+
+# ---------------------------------------------------------------------------
+# test_claude_routes_to_tmux_with_permit
+# ---------------------------------------------------------------------------
+
+@patch("dispatch_cli.build_runtime_snapshot")
+def test_claude_routes_to_tmux_with_permit(mock_snapshot, tmp_path):
+    """Claude spec → _execute_claude calls require_permit then TmuxInteractiveDispatch.dispatch.
+    Tampered permit → PermissionError before tmux dispatch is reached.
+    """
+    mock_snapshot.return_value = _clean_snapshot()
+    instruction_file = _make_instruction(tmp_path)
+    spec_file = _make_spec_file(tmp_path, provider="claude")
+
+    # Part A: valid permit → TmuxInteractiveDispatch.dispatch called
+    mock_dispatch_result = MagicMock()
+    mock_dispatch_result.success = True
+
+    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch",
+               return_value=mock_dispatch_result) as mock_tmux_dispatch:
+        with patch("dispatch_cli.require_permit") as mock_require:
+            rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_require.assert_called_once()
+    mock_tmux_dispatch.assert_called_once()
+
+    # Part B: tampered permit → PermissionError raised before tmux dispatch
+    plan = _make_minimal_plan(instruction_file=instruction_file)
+    valid_permit = issue_permit(plan)
+
+    # Build a tampered permit: wrong plan_digest, sentinel is None (default)
+    tampered_permit = ExecutionPermit(
+        dispatch_id=plan.dispatch_id,
+        plan_digest="deadbeef" * 8,  # wrong digest
+    )
+    # _sentinel defaults to None, not _PERMIT_SENTINEL — require_permit will reject
+
+    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
+        with pytest.raises(PermissionError):
+            _execute_claude(
+                plan,
+                tampered_permit,
+                state_dir=tmp_path / "state",
+                data_dir=tmp_path,
+            )
+        mock_tmux.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# test_reject_on_validate_failure
+# ---------------------------------------------------------------------------
+
+def test_reject_on_validate_failure(tmp_path):
+    """Bad spec (wrong schema_version) → validate() returns Reject → return 1."""
+    spec_file = _make_spec_file(tmp_path, schema_version=99)
+
+    with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_snapshot.assert_not_called()  # gate fires before snapshot
+
+
+# ---------------------------------------------------------------------------
+# test_reject_on_unpromoted_staging
+# ---------------------------------------------------------------------------
+
+@patch("dispatch_cli.build_runtime_snapshot")
+def test_reject_on_unpromoted_staging(mock_snapshot, tmp_path):
+    """Unpromoted staging_id → compile_plan rejects (D11 gate) → return 1; no executor."""
+    mock_snapshot.return_value = _clean_snapshot(staging_promoted=False)
+    spec_file = _make_spec_file(tmp_path, provider="claude")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# test_flag_off_legacy_unchanged
+# ---------------------------------------------------------------------------
+
+def test_flag_off_legacy_unchanged(tmp_path):
+    """With VNX_SINGLE_ENTRY_DISPATCH unset, cmd_dispatch uses the legacy dry-run path."""
+    dispatch_md = tmp_path / "test-dispatch.md"
+    dispatch_md.write_text(
+        "[[TARGET:T1]]\nRole: backend-developer\nGate: human-promoted\n\nTest dispatch.\n",
+        encoding="utf-8",
+    )
+
+    dispatch_sh = _REPO_ROOT / "scripts" / "commands" / "dispatch.sh"
+    dispatches_dir = tmp_path / "dispatches"
+    dispatches_dir.mkdir()
+
+    bash_cmd = f"""
+set -e
+VNX_HOME='{_REPO_ROOT}'
+VNX_DATA_DIR='{tmp_path}'
+VNX_DISPATCH_DIR='{dispatches_dir}'
+VNX_STATE_DIR='{tmp_path}/state'
+log() {{ echo "[LOG] $*"; }}
+err() {{ echo "[ERR] $*" >&2; }}
+source '{dispatch_sh}'
+unset VNX_SINGLE_ENTRY_DISPATCH
+cmd_dispatch '{dispatch_md}' --dry-run
+"""
+    result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
+
+    assert result.returncode == 0, (
+        f"Expected legacy dry-run to succeed; rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "DRY RUN" in combined
+    # Confirms NOT the single-entry gate path
+    assert "single-entry gate" not in combined.lower()
+
+
+# ---------------------------------------------------------------------------
+# test_permit_fingerprint_stable
+# ---------------------------------------------------------------------------
+
+def test_permit_fingerprint_stable(tmp_path):
+    """Same plan → same fingerprint; different plan → different fingerprint."""
+    instruction = _make_instruction(tmp_path)
+
+    plan_a = _make_minimal_plan(dispatch_id="dispatch-alpha", instruction_file=instruction)
+    plan_b = _make_minimal_plan(dispatch_id="dispatch-alpha", instruction_file=instruction)
+    plan_c = _make_minimal_plan(dispatch_id="dispatch-beta", instruction_file=instruction)
+
+    permit_a1 = issue_permit(plan_a)
+    permit_a2 = issue_permit(plan_b)  # same plan content, different object
+    permit_c = issue_permit(plan_c)
+
+    fp_a1 = fingerprint(permit_a1)
+    fp_a2 = fingerprint(permit_a2)
+    fp_c = fingerprint(permit_c)
+
+    # Same plan → same fingerprint
+    assert fp_a1 == fp_a2, "Identical plans must produce identical fingerprints"
+
+    # Different dispatch_id → different fingerprint
+    assert fp_a1 != fp_c, "Plans with different dispatch_ids must produce different fingerprints"
+
+    # Fingerprint is <digest[:12]>-<dispatch_id>
+    assert fp_a1.startswith(permit_a1.plan_digest[:12])
+    assert fp_a1.endswith(plan_a.dispatch_id)
+    assert "-" in fp_a1
