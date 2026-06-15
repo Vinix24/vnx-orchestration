@@ -6,10 +6,10 @@ run() ordering (R2.2 — repair → version-reconcile → numbered walk):
      in-place composite-UNIQUE rebuild, a PRE-walk step. NOT a numbered migration.
   B. Numbered version reconciliation (`_run_version_reconciliation`, PR-A2) — validate
      the DB's CLAIMED `user_version` against the declarative invariant manifest
-     (scripts/lib/schema_manifest.py). A DB that LIES about its version (claims v30 but
+     (scripts/lib/schema_manifest.py). A DB that LIES about its version (claims v31 but
      is physically v27) is DOWNGRADED to the exact highest version whose invariants
      fully hold, so the numbered walk re-applies whatever the downgrade exposes.
-  C. Numbered migration walk (0022 → 0030), each idempotent via user_version.
+  C. Numbered migration walk (0022 → 0031), each idempotent via user_version.
   D. Convergence guard (`_assert_manifest_converged`) — after the walk the terminal
      version's manifest MUST hold, else a downgrade+re-walk did not converge → abort
      loudly rather than loop (oscillation guard).
@@ -30,6 +30,7 @@ PRD §7.2 (Run: migrate → backfill → bridge → reconcile). The numbered wal
   10. Apply schemas/migrations/0029_track_type_discriminator.sql (idempotent)
   11. PRAGMA pre-flight: assert track_type present (v29) before adding resolved_at
   12. Apply schemas/migrations/0030_track_oi_resolved_at.sql (idempotent)
+  13. Apply schemas/migrations/0031_runtime_tenant_fk_repair.sql (idempotent)
 
 The per-version preflights (steps 3-11) are now MANIFEST-BACKED (schema_manifest):
 the name-based column/table assertions are sourced from the declarative manifest, not
@@ -121,7 +122,7 @@ def _pytest_db_isolation_guard(project_root: Path) -> None:
 # into the composite UNIQUE(dispatch_id, project_id).
 #
 # Position in run() (R2.2): runs as a PRE-MIGRATION step — after the
-# _pytest_db_isolation_guard, BEFORE the numbered version walk (0022→0030).
+# _pytest_db_isolation_guard, BEFORE the numbered version walk (0022→0031).
 # It is a no-op when the schema is already composite (detected by parsing
 # sqlite_master / PRAGMA, NOT a bare column check), so the operator ordering in
 # PRD §6 ("migrate first") is preserved. This is the general robust repair; it
@@ -1543,12 +1544,196 @@ def apply_migration_v30(conn: sqlite3.Connection, project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 10: apply 0031 migration (ADR-007 runtime tenant + FK repair)
+# ---------------------------------------------------------------------------
+
+_RUNTIME_V31_TABLES = (
+    "terminal_leases",
+    "dispatch_attempts",
+    "headless_runs",
+    "worker_states",
+    "worker_pool_membership",
+)
+
+_RUNTIME_V30_LEGACY_COLUMNS = {
+    "terminal_leases": {
+        "id", "terminal_id", "state", "dispatch_id", "generation", "leased_at",
+        "expires_at", "last_heartbeat_at", "released_at", "worker_pid",
+        "metadata_json", "lease_token",
+    },
+    "dispatch_attempts": {
+        "id", "attempt_id", "dispatch_id", "attempt_number", "terminal_id",
+        "state", "started_at", "ended_at", "failure_reason", "metadata_json",
+    },
+    "headless_runs": {
+        "id", "run_id", "dispatch_id", "attempt_id", "target_id", "target_type",
+        "task_class", "terminal_id", "pid", "pgid", "state", "failure_class",
+        "exit_code", "started_at", "subprocess_started_at", "heartbeat_at",
+        "last_output_at", "completed_at", "duration_seconds", "log_artifact_path",
+        "output_artifact_path", "receipt_id", "metadata_json",
+    },
+    "worker_states": {
+        "terminal_id", "dispatch_id", "state", "last_output_at", "state_entered_at",
+        "stall_count", "blocked_reason", "metadata_json", "created_at", "updated_at",
+    },
+}
+
+_RUNTIME_V30_LEGACY_INDEXES = {
+    "terminal_leases": {"idx_lease_state", "idx_lease_dispatch", "idx_terminal_leases_token"},
+    "dispatch_attempts": {"idx_attempt_dispatch", "idx_attempt_state", "idx_attempt_terminal"},
+    "headless_runs": {
+        "idx_headless_run_state", "idx_headless_run_dispatch",
+        "idx_headless_run_target", "idx_headless_run_heartbeat",
+    },
+    "worker_states": {"idx_worker_state", "idx_worker_dispatch"},
+}
+
+
+def _runtime_v31_violations(conn: sqlite3.Connection) -> list[str]:
+    """Validate only the runtime tables introduced into the v31 manifest."""
+    violations: list[str] = []
+    for table in _RUNTIME_V31_TABLES:
+        invariant = schema_manifest.table_at(31, table)
+        if invariant is None:
+            violations.append(f"v31 manifest missing runtime table invariant '{table}'")
+        else:
+            violations.extend(schema_manifest.validate_table(conn, invariant))
+    return violations
+
+
+def _runtime_v31_complete(conn: sqlite3.Connection) -> bool:
+    return not _runtime_v31_violations(conn)
+
+
+def _runtime_v31_tables_absent(conn: sqlite3.Connection) -> bool:
+    """True only when the separate runtime schema has not been initialized at all."""
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    return not any(table in present for table in _RUNTIME_V31_TABLES)
+
+
+def _assert_runtime_v30_legacy_shape(conn: sqlite3.Connection) -> None:
+    """Fail before mutation if static 0031 DDL would lose unknown schema objects."""
+    _assert_required_tables(
+        conn, (*_RUNTIME_V31_TABLES, "pool_config", "dispatches"), before="0031")
+    if not _has_composite_unique(conn):
+        raise RuntimeError(
+            "0031 requires dispatches UNIQUE(dispatch_id, project_id) from PR-A1.")
+
+    for table, expected_cols in _RUNTIME_V30_LEGACY_COLUMNS.items():
+        actual_cols = {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')")}
+        if actual_cols != expected_cols:
+            raise RuntimeError(
+                f"0031 legacy-shape drift in {table}: expected columns={sorted(expected_cols)} "
+                f"actual={sorted(actual_cols)}. Refusing static rebuild to prevent data loss.")
+
+        actual_indexes = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,))
+        }
+        expected_indexes = _RUNTIME_V30_LEGACY_INDEXES[table]
+        if actual_indexes != expected_indexes:
+            raise RuntimeError(
+                f"0031 legacy-shape drift in {table}: expected indexes="
+                f"{sorted(expected_indexes)} actual={sorted(actual_indexes)}. "
+                "Refusing rebuild because every index must be recreated.")
+
+        triggers = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,))]
+        if triggers:
+            raise RuntimeError(
+                f"0031 found unexpected triggers on {table}: {triggers}. "
+                "Refusing rebuild rather than dropping them.")
+
+
+def _assert_runtime_v31_clean(conn: sqlite3.Connection) -> None:
+    violations = _runtime_v31_violations(conn)
+    if violations:
+        raise RuntimeError(f"0031 runtime manifest violations: {violations[:5]}")
+    try:
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise RuntimeError(f"0031 foreign_key_check failed structurally: {exc}") from exc
+    if fk_violations:
+        raise RuntimeError(f"0031 foreign_key_check violations: {fk_violations}")
+    integrity = conn.execute("PRAGMA integrity_check").fetchall()
+    if integrity != [("ok",)]:
+        raise RuntimeError(f"0031 integrity_check failed: {integrity}")
+
+
+def _rollback_runtime_v31(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("ROLLBACK")
+    except Exception as rollback_exc:
+        warnings.warn(
+            f"0031 runtime repair: ROLLBACK after error failed: {rollback_exc}",
+            stacklevel=2,
+        )
+
+
+def _run_runtime_v31_transaction(conn: sqlite3.Connection, statements) -> None:
+    """Execute 0031 under one validated transaction with FK enforcement suspended."""
+    if conn.in_transaction:
+        raise RuntimeError(
+            "0031 requires a connection with no open transaction; commit or roll back first.")
+    original_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        _begin_immediate_with_retry(conn)
+        try:
+            for statement in statements:
+                conn.execute(statement)
+            _assert_runtime_v31_clean(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            _rollback_runtime_v31(conn)
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON" if original_fk else "PRAGMA foreign_keys=OFF")
+        conn.isolation_level = previous_isolation
+    _verify_foreign_keys_restored(conn, original_fk)
+
+
+def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
+    migration_path = _MIGRATIONS / "0031_runtime_tenant_fk_repair.sql"
+    if not migration_path.exists():
+        raise FileNotFoundError(f"Migration not found: {migration_path}")
+
+    current_version = schema_migration.get_user_version(conn)
+    if current_version >= 31:
+        print(f"  [skip] migration 0031 already applied (user_version={current_version})")
+        return
+    if current_version != 30:
+        raise RuntimeError(
+            f"0031 requires user_version=30 after the prior numbered walk; got {current_version}.")
+
+    if _runtime_v31_tables_absent(conn):
+        print("  [skip] migration 0031 runtime tables absent; user_version → 31")
+        conn.execute("PRAGMA user_version = 31")
+        return
+
+    if _runtime_v31_complete(conn):
+        print("  [stamp] runtime tenant/FK repair already complete; user_version → 31")
+        _run_runtime_v31_transaction(conn, ("PRAGMA user_version = 31",))
+        return
+
+    _assert_runtime_v30_legacy_shape(conn)
+    sql = migration_path.read_text(encoding="utf-8")
+    print("  [apply] migration 0031_runtime_tenant_fk_repair.sql ...")
+    _run_runtime_v31_transaction(conn, schema_migration._split_sql_statements(sql))
+    print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def _run_numbered_walk(conn: sqlite3.Connection, project_root: Path) -> None:
-    """Step C of run(): apply the numbered migrations 0022 → 0030 in order, each
-    idempotent via user_version, committing after each. Preflights (steps 3-11) are
+    """Step C of run(): apply the numbered migrations 0022 → 0031 in order, each
+    idempotent via user_version, committing after each. Preflights (steps 3-12) are
     manifest-backed (schema_manifest). See the module docstring for the full ordering.
     """
     apply_migration(conn, project_root)       # 0022 — track tables; dispatches w/o track FK
@@ -1563,10 +1748,12 @@ def _run_numbered_walk(conn: sqlite3.Connection, project_root: Path) -> None:
     conn.commit()
     apply_migration_v30(conn, project_root)   # 0030 — track_open_items.resolved_at + reason
     conn.commit()
+    apply_migration_v31(conn, project_root)   # 0031 — runtime tenant/FK repair
+    conn.commit()
 
 
 def run(project_root: Path | None = None) -> None:
-    """Apply track layer migrations: 0022, 0024, 0027, 0028, 0029, 0030."""
+    """Apply future-system migrations through 0031."""
     if project_root is None:
         project_root = resolve_project_root(__file__)
     _pytest_db_isolation_guard(project_root)
@@ -1602,7 +1789,7 @@ def run(project_root: Path | None = None) -> None:
         if schema_migration.get_user_version(conn) < 22:
             _assert_dispatches_schema_intact(conn)
 
-        # (C) Numbered migration walk: 0022 → 0030 (each idempotent via user_version).
+        # (C) Numbered migration walk: 0022 → 0031 (each idempotent via user_version).
         _run_numbered_walk(conn, project_root)
 
         # (D) Oscillation guard (R2.1): the terminal version's manifest MUST hold;
