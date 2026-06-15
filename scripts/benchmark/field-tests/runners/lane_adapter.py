@@ -40,10 +40,8 @@ SKILLS_ROOT = REPO_ROOT / ".claude" / "skills"
 # Skill injection lives in scripts/lib/skill_prefix.py — provider-agnostic.
 # Used for ALL lanes (claude/kimi/codex/deepseek) so every worker gets the
 # same structured prompt: role → assignment → resources → closing.
-# Claude lanes may have their dispatcher's _inject_skill_context also fire
-# — token-cost of doubling is ~1000 extra tokens on subscription = $0,
-# resolved Sunday during skill-aware re-bench by disabling dispatcher-side
-# injection when our structured prompt is already in place.
+# Dispatcher-side enrichment is disabled for benchmark dispatches via
+# VNX_BENCH_EQUAL_CONTEXT so this structured prompt is the single context source.
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 from skill_prefix import build_structured_prompt  # noqa: E402
 
@@ -101,6 +99,7 @@ class DispatchResult:
 def _claude_subprocess_headless(
     lane: dict, dispatch_id: str, instruction: str,
     dispatch_paths: str, deadline_seconds: int,
+    role: str = "backend-developer",
 ) -> tuple[int, str, str]:
     """Route a Claude lane via subprocess_dispatch.py (headless `claude -p`).
 
@@ -115,13 +114,14 @@ def _claude_subprocess_headless(
         "VNX_DATA_DIR": ".vnx-data",
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_WORKER_SCOPED": "0",
+        "VNX_BENCH_EQUAL_CONTEXT": "1",
     }
     cmd = [
         sys.executable, str(SUBPROCESS_DISPATCH),
         "--terminal-id", "T1",
         "--dispatch-id", dispatch_id,
         "--model", lane["model_arg"],
-        "--role", "backend-developer",
+        "--role", role,
         "--pr-id", f"BENCH-{lane['id']}",
         "--dispatch-paths", dispatch_paths,
         "--instruction", instruction,
@@ -138,6 +138,7 @@ def _claude_subprocess_headless(
 def _claude_tmux_spawn(
     lane: dict, dispatch_id: str, instruction: str,
     dispatch_paths: str, deadline_seconds: int,
+    role: str = "backend-developer",
 ) -> tuple[int, str, str]:
     """Route a Claude lane via tmux_interactive_dispatch.py on the subscription.
 
@@ -153,12 +154,13 @@ def _claude_tmux_spawn(
         # Bench workers need full tool surface (Skill, etc.) for representativity.
         # Ephemeral isolated worktree = bounded blast radius; safe to drop scoping.
         "VNX_WORKER_SCOPED": "0",
+        "VNX_BENCH_EQUAL_CONTEXT": "1",
     }
     cmd = [
         sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
         "--dispatch-id", dispatch_id,
         "--model", lane["model_arg"],
-        "--role", "backend-developer",
+        "--role", role,
         "--dispatch-paths", dispatch_paths,
         "--instruction", instruction,
         "--deadline-seconds", str(deadline_seconds),
@@ -241,6 +243,7 @@ def _resolve_codex_bin_dir() -> Optional[str]:
 def _provider_dispatch(
     lane: dict, dispatch_id: str, instruction: str,
     dispatch_paths: str, deadline_seconds: int,
+    role: str = "backend-developer",
 ) -> tuple[int, str, str]:
     """Route a non-Claude provider via provider_dispatch.py."""
     env = {
@@ -248,6 +251,7 @@ def _provider_dispatch(
         "VNX_STATE_DIR": ".vnx-data/state",
         "VNX_DATA_DIR": ".vnx-data",
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
+        "VNX_BENCH_EQUAL_CONTEXT": "1",
     }
     provider_map = {
         "litellm:deepseek": "litellm:deepseek",
@@ -271,7 +275,7 @@ def _provider_dispatch(
         "--terminal-id", "headless",
         "--dispatch-id", dispatch_id,
         "--model", lane["model_arg"],
-        "--role", "backend-developer",
+        "--role", role,
         "--dispatch-paths", dispatch_paths,
         "--instruction", instruction,
     ]
@@ -308,6 +312,7 @@ def dispatch(
         instruction = build_structured_prompt(
             skill_names, instruction, SKILLS_ROOT,
         )
+    role = next((name for name in skill_names or [] if name), "backend-developer")
 
     via_tmux = False
     try:
@@ -317,16 +322,16 @@ def dispatch(
             # so a model_arg-only check missed sonnet on the 2026-06-05 retry.
             if lane["id"] in HEADLESS_FORCED_MODELS or lane["model_arg"] in HEADLESS_FORCED_MODELS:
                 rc, out, err = _claude_subprocess_headless(
-                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
                 )
             else:
                 via_tmux = True
                 rc, out, err = _claude_tmux_spawn(
-                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                    lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
                 )
         else:
             rc, out, err = _provider_dispatch(
-                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds,
+                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
             )
     except subprocess.TimeoutExpired as exc:
         wallclock = time.monotonic() - start

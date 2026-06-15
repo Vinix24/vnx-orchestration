@@ -350,6 +350,9 @@ class TmuxInteractiveDispatch:
         subprocess worker. Falls back to a legacy role label + instruction on failure.
         Always includes *instruction* in the returned string.
         """
+        if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
+            return instruction
+
         if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
             "1", "true", "yes", "on"
         ):
@@ -1450,7 +1453,9 @@ class TmuxInteractiveDispatch:
                 instruction=instruction,
                 dispatch_paths=dispatch_paths,
             )
-            if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
+            if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
+                body = _context_body
+            elif os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
                 "1", "true", "yes", "on"
             ):
                 # prepare() already includes scope-note; add completion-protocol
