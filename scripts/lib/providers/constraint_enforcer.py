@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -210,6 +211,40 @@ def _model_in_registry(provider: Optional[str], sub_provider: Optional[str], mod
     return False
 
 
+# P0-1 (PR-4c): whitespace-aware Anthropic SDK detection.
+#
+# Literal-substring matching ("import anthropic" in text) was bypassable with
+# `import\tanthropic` / `import   anthropic` (tab / multiple spaces — both valid
+# Python that reached the executor). These regexes tolerate arbitrary whitespace
+# between tokens, `import anthropic as x`, and `from anthropic import ...`, while
+# `\b` word boundaries match the import shape anywhere in the text (preserving the
+# prior "flag any occurrence" contract, not just line-leading imports). IGNORECASE
+# preserves the prior lowercase-haystack behaviour.
+_ANTHROPIC_SDK_REGEXES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bimport\s+anthropic\b", re.IGNORECASE),
+    re.compile(r"\bfrom\s+anthropic\s+import\b", re.IGNORECASE),
+    re.compile(r"\banthropic\s*\.\s*Anthropic\s*\(", re.IGNORECASE),
+)
+# Literals with no internal whitespace to make regex-tolerant — matched as substrings.
+_ANTHROPIC_SDK_LITERALS: tuple[str, ...] = (
+    "@anthropic-ai/sdk",
+)
+
+
+def scan_anthropic_sdk_text(text: Optional[str]) -> bool:
+    """True if *text* references the forbidden Anthropic SDK (whitespace-aware).
+
+    Shared by the constraint engine's forbid_import rule and the dispatch_cli
+    blocking backstop so both gates apply identical, bypass-resistant matching.
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(lit in lowered for lit in _ANTHROPIC_SDK_LITERALS):
+        return True
+    return any(rgx.search(text) for rgx in _ANTHROPIC_SDK_REGEXES)
+
+
 def _scan_anthropic_sdk_references(
     constraint: Mapping[str, Any],
     instruction_text: Optional[str],
@@ -225,8 +260,8 @@ def _scan_anthropic_sdk_references(
         env.get("VNX_PROVIDER_ENV", ""),
         env.get("VNX_INSTRUCTION", ""),
     ]
-    haystack = "\n".join([instruction_text or "", *env_fragments]).lower()
-    return any(str(pattern).lower() in haystack for pattern in patterns)
+    haystack = "\n".join([instruction_text or "", *env_fragments])
+    return scan_anthropic_sdk_text(haystack)
 
 
 def _violation_from_constraint(

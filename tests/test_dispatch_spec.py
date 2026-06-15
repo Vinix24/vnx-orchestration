@@ -194,6 +194,16 @@ class TestRule5InstructionFile:
         assert isinstance(result, Reject)
         assert result.code == "instruction-unreadable"
 
+    def test_rejects_invalid_utf8_instruction_file(self, tmp_path, monkeypatch):
+        """P1 (PR-4c): a non-UTF-8 instruction must Reject, not raise UnicodeDecodeError
+        out of the door. The 'door never panics' invariant covers validation too."""
+        ifile = tmp_path / "instruction.md"
+        ifile.write_bytes(b"# Dispatch\n\xff\xfe invalid utf-8 \x80\x81\n")
+        spec = _valid_spec(ifile)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "instruction-unreadable"
+
 
 # ---------------------------------------------------------------------------
 # Rule 6 — spawn tokens in instruction text MUST still validate (design decision)

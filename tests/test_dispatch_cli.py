@@ -540,6 +540,226 @@ cmd_dispatch '{dispatch_md}' --dry-run
 # test_permit_fingerprint_stable
 # ---------------------------------------------------------------------------
 
+def _make_bundle_spec(
+    tmp_path: Path,
+    *,
+    instruction_text: str,
+    staging_id: str = "20260615-staging-probe",
+    dispatch_id: str = "20260615-probe-dispatch",
+    provider: str = "claude",
+) -> tuple[Path, Path]:
+    """Build a promoted bundle under <tmp>/vnx-data with the given instruction.
+
+    Returns (data_dir, spec_file). spec_file + instruction live inside the bundle so
+    the staging-binding check passes and only the edge under test can reject.
+    """
+    data_dir = tmp_path / "vnx-data"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
+    inst = bundle_dir / "instruction.md"
+    inst.write_text(instruction_text, encoding="utf-8")
+    spec = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": dispatch_id,
+        "staging_id": staging_id,
+        "instruction_file": str(inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": provider,
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    return data_dir, spec_file
+
+
+# ---------------------------------------------------------------------------
+# P0-1 — whitespace-bypassable SDK block is closed (fail-CLOSED)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("evil_line", [
+    "import\tanthropic",            # codex probe: tab separator
+    "import    anthropic",          # codex probe: multiple spaces
+    "import anthropic as ant",      # aliased import
+    "    import anthropic",         # leading indentation
+    "from\tanthropic import Anthropic",
+    "from  anthropic  import  Anthropic",
+    "client = anthropic . Anthropic ( )",  # spaced attribute access + call
+])
+def test_sdk_block_is_whitespace_aware(tmp_path, monkeypatch, evil_line):
+    """codex PROVED `import\\tanthropic` / `import   anthropic` slip past literal
+    substring matching. The whitespace-aware gate must Reject all of these → no spawn."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text=f"# Dispatch\n\n{evil_line}\n",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, f"Expected fail-closed Reject for {evil_line!r}"
+    mock_execute.assert_not_called()
+
+
+def test_clean_import_mentioning_anthropic_word_not_blocked(tmp_path, monkeypatch):
+    """Sanity: prose mentioning 'anthropic' without an import statement is not blocked
+    (the regex requires an import/from/SDK-call shape, not the bare word)."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Dispatch\n\nDocument the anthropic routing policy clearly.\n",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# P0-2 — symlinked pending ROOT escaping the data root is rejected (fail-CLOSED)
+# ---------------------------------------------------------------------------
+
+def test_symlinked_pending_root_rejected(tmp_path, monkeypatch, capsys):
+    """codex PROVED: symlink <data_dir>/dispatches/pending → an external dir, drop a
+    bundle there → rc=0 + staging_promoted + executor called. Anchor the pending root:
+    if it resolves outside the data root → BLOCKING ADR-006-untrusted-root, no spawn."""
+    data_dir = tmp_path / "vnx-data"
+    (data_dir / "dispatches").mkdir(parents=True)
+
+    # External bundle OUTSIDE the data root
+    external = tmp_path / "external-pending"
+    staging_id = "20260615-external-bundle"
+    external_bundle = external / staging_id
+    external_bundle.mkdir(parents=True)
+    inst = external_bundle / "instruction.md"
+    inst.write_text("# Looks clean\n\nDo something.\n", encoding="utf-8")
+
+    # Symlink the pending ROOT to the external dir (the proven attack)
+    pending_link = data_dir / "dispatches" / "pending"
+    pending_link.symlink_to(external, target_is_directory=True)
+
+    # Spec references paths THROUGH the symlinked pending root
+    spec = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260615-symlink-probe",
+        "staging_id": staging_id,
+        "instruction_file": str(pending_link / staging_id / "instruction.md"),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = pending_link / staging_id / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_execute.assert_not_called()
+    assert "ADR-006-untrusted-root" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# P0-3 — empty-hash plan never spawns on EITHER lane (fail-CLOSED)
+# ---------------------------------------------------------------------------
+
+def test_empty_hash_plan_no_spawn_either_lane(tmp_path):
+    """codex PROVED an empty-hash plan + valid permit spawns mutated content on both
+    lanes. Defense-in-depth: issue_permit refuses to mint for an empty hash, and both
+    executors fail-closed before delivery even if require_permit were bypassed."""
+    from dataclasses import replace
+
+    instruction_file = _make_instruction(tmp_path)
+
+    claude_plan = replace(
+        _make_minimal_plan(provider=Provider.CLAUDE, instruction_file=instruction_file),
+        instruction_sha256="",
+    )
+    provider_plan = replace(
+        _make_minimal_plan(provider=Provider.CODEX, instruction_file=instruction_file),
+        instruction_sha256="",
+    )
+
+    # Defense-in-depth #4: no permit can be minted for an empty-hash plan
+    with pytest.raises(PermissionError):
+        issue_permit(claude_plan)
+    with pytest.raises(PermissionError):
+        issue_permit(provider_plan)
+
+    # Claude lane: even with require_permit bypassed, the executor refuses to spawn
+    bare_claude = ExecutionPermit(dispatch_id=claude_plan.dispatch_id, plan_digest=claude_plan.digest())
+    with patch("dispatch_cli.require_permit", lambda *a, **k: None):
+        with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
+            with pytest.raises(PermissionError):
+                _execute_claude(
+                    claude_plan, bare_claude,
+                    state_dir=tmp_path / "state", data_dir=tmp_path,
+                )
+            mock_tmux.assert_not_called()
+
+    # Provider lane: even with require_permit bypassed, the envelope fails closed
+    from dispatch_envelope import run_envelope_plan
+    bare_provider = ExecutionPermit(dispatch_id=provider_plan.dispatch_id, plan_digest=provider_plan.digest())
+    with patch("dispatch_internal.require_permit", lambda *a, **k: None):
+        with patch("dispatch_envelope.ProviderAdapter.run") as mock_run:
+            result = run_envelope_plan(
+                provider_plan, bare_provider,
+                state_dir=tmp_path / "state", data_dir=tmp_path,
+            )
+            assert result.returncode != 0
+            assert result.status == "failure"
+            mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# P1 — dispatch.sh `--spec-file` with no value emits a clean error (not set -u abort)
+# ---------------------------------------------------------------------------
+
+def test_spec_file_flag_without_value_clean_error(tmp_path):
+    """Under `set -u`, a trailing `--spec-file` with no path must produce a clean gate
+    error (return 1), not an unbound-variable shell abort."""
+    dispatch_sh = _REPO_ROOT / "scripts" / "commands" / "dispatch.sh"
+    dispatches_dir = tmp_path / "dispatches"
+    dispatches_dir.mkdir()
+
+    bash_cmd = f"""
+set -eu
+VNX_HOME='{_REPO_ROOT}'
+VNX_DATA_DIR='{tmp_path}'
+VNX_DISPATCH_DIR='{dispatches_dir}'
+VNX_STATE_DIR='{tmp_path}/state'
+VNX_SINGLE_ENTRY_DISPATCH=1
+log() {{ echo "[LOG] $*"; }}
+err() {{ echo "[ERR] $*" >&2; }}
+source '{dispatch_sh}'
+cmd_dispatch --spec-file
+rc=$?
+echo "EXITCODE=$rc"
+"""
+    result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
+    combined = result.stdout + result.stderr
+    # Clean gate error, not a bash 'unbound variable' abort
+    assert "requires a path argument" in combined, combined
+    assert "unbound variable" not in combined, combined
+
+
 def test_permit_fingerprint_stable(tmp_path):
     """Same plan → same fingerprint; different plan → different fingerprint."""
     instruction = _make_instruction(tmp_path)
