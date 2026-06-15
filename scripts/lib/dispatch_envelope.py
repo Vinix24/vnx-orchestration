@@ -873,9 +873,43 @@ def run_envelope_plan(
         data_dir=spec.data_dir,
     )
 
-    start = datetime.now(timezone.utc)
-    result = ProviderAdapter().run(plan, enriched_spec.instruction)
-    end = datetime.now(timezone.utc)
+    from dispatch_worktree_isolation import (  # noqa: PLC0415
+        create_dispatch_worktree,
+        remove_dispatch_worktree,
+    )
+
+    wt_path: Optional[Path] = None
+    try:
+        wt_path = create_dispatch_worktree(plan.dispatch_id)
+    except Exception as _wt_exc:
+        _isolation_error = (
+            f"isolation required (require_worktree) but worktree creation failed "
+            f"for {plan.dispatch_id}: {_wt_exc} — aborting; no shared-checkout fallback"
+        )
+        logger.error("run_envelope_plan: %s", _isolation_error)
+        _fail_result = _AdapterResult(
+            returncode=1,
+            completion_text="",
+            status="failure",
+            error=_isolation_error,
+        )
+        _fail_start = _fail_end = datetime.now(timezone.utc)
+        report_path, receipt_path = _govern(enriched_spec, _fail_result, _fail_start, _fail_end)
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=report_path,
+            receipt_path=receipt_path,
+            completion_text="",
+            error=_isolation_error,
+        )
+
+    try:
+        start = datetime.now(timezone.utc)
+        result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path)
+        end = datetime.now(timezone.utc)
+    finally:
+        remove_dispatch_worktree(plan.dispatch_id)
 
     report_path, receipt_path = _govern(enriched_spec, result, start, end)
 
