@@ -207,7 +207,12 @@ def _runtime_snapshot(conn: sqlite3.Connection) -> tuple:
         (table, tuple(conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid')))
         for table in mfs._RUNTIME_V31_TABLES
     )
-    return schema, rows
+    sequences = tuple(conn.execute(
+        "SELECT name, seq FROM sqlite_sequence "
+        "WHERE name IN ('terminal_leases', 'dispatch_attempts', 'headless_runs', "
+        "'worker_states', 'worker_pool_membership') ORDER BY name"
+    ))
+    return schema, rows, sequences
 
 
 def test_migration_0031_repairs_runtime_tenant_fks_losslessly_and_idempotently(
@@ -236,6 +241,7 @@ def test_migration_0031_repairs_runtime_tenant_fks_losslessly_and_idempotently(
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert schema_manifest.validate_db_at_version(conn, 31) == []
         assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        mfs._assert_manifest_converged(conn)
 
         leases_after = tuple(conn.execute(
             "SELECT id, terminal_id, state, generation, worker_pid, metadata_json, "
@@ -286,5 +292,157 @@ def test_migration_0031_repairs_runtime_tenant_fks_losslessly_and_idempotently(
         assert _runtime_snapshot(conn) == snapshot
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        conn.close()
+
+
+def test_migration_0031_preserves_runtime_autoincrement_high_water_marks(
+    tmp_path: Path,
+) -> None:
+    project_root, conn = _build_v30_db(tmp_path)
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            "INSERT INTO dispatches(dispatch_id, project_id, state) "
+            "VALUES ('d-sequence', 'vnx-dev', 'queued')"
+        )
+        conn.executemany(
+            "INSERT INTO dispatch_attempts(attempt_id, dispatch_id, terminal_id) "
+            "VALUES (?, 'd-sequence', 'T1')",
+            (("a-sequence-1",), ("a-sequence-2",), ("a-sequence-3",)),
+        )
+        conn.executemany(
+            "INSERT INTO headless_runs("
+            "run_id, dispatch_id, attempt_id, target_id, target_type, task_class"
+            ") VALUES (?, 'd-sequence', ?, 'target', 'test', 'test')",
+            (
+                ("r-sequence-1", "a-sequence-1"),
+                ("r-sequence-2", "a-sequence-2"),
+                ("r-sequence-3", "a-sequence-3"),
+            ),
+        )
+        conn.execute("DELETE FROM terminal_leases WHERE id=3")
+        conn.execute("DELETE FROM headless_runs WHERE id=3")
+        conn.execute("DELETE FROM dispatch_attempts WHERE id=3")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        deleted_high_water = dict(conn.execute(
+            "SELECT name, seq FROM sqlite_sequence "
+            "WHERE name IN ('terminal_leases', 'dispatch_attempts', 'headless_runs')"
+        ))
+        assert deleted_high_water == {
+            "terminal_leases": 3,
+            "dispatch_attempts": 3,
+            "headless_runs": 3,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_sequence WHERE name='worker_states'"
+        ).fetchone() is None
+
+        mfs._run_numbered_walk(conn, project_root)
+
+        new_lease_id = conn.execute(
+            "INSERT INTO terminal_leases(terminal_id, project_id) VALUES ('T4', 'vnx-dev')"
+        ).lastrowid
+        new_attempt_id = conn.execute(
+            "INSERT INTO dispatch_attempts("
+            "attempt_id, dispatch_id, project_id, terminal_id"
+            ") VALUES ('a-sequence-4', 'd-sequence', 'vnx-dev', 'T1')"
+        ).lastrowid
+        new_run_id = conn.execute(
+            "INSERT INTO headless_runs("
+            "run_id, dispatch_id, project_id, attempt_id, target_id, target_type, task_class"
+            ") VALUES ("
+            "'r-sequence-4', 'd-sequence', 'vnx-dev', 'a-sequence-1', "
+            "'target', 'test', 'test'"
+            ")"
+        ).lastrowid
+
+        assert new_lease_id > deleted_high_water["terminal_leases"]
+        assert new_attempt_id > deleted_high_water["dispatch_attempts"]
+        assert new_run_id > deleted_high_water["headless_runs"]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_sequence WHERE name='worker_states'"
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_migration_0031_refuses_same_name_different_index_definition(
+    tmp_path: Path,
+) -> None:
+    project_root, conn = _build_v30_db(tmp_path)
+    try:
+        conn.execute("DROP INDEX idx_lease_state")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_lease_state "
+            "ON terminal_leases(terminal_id, generation)"
+        )
+        conn.commit()
+
+        with pytest.raises(RuntimeError, match="index 'idx_lease_state'.*definition differs"):
+            mfs.apply_migration_v31(conn, project_root)
+
+        assert schema_migration.get_user_version(conn) == 30
+        assert "CREATE UNIQUE INDEX" in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_lease_state'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_v31_manifest_and_convergence_reject_nonunique_pool_config_parent(
+    tmp_path: Path,
+) -> None:
+    project_root, conn = _build_v30_db(tmp_path)
+    try:
+        mfs._run_numbered_walk(conn, project_root)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DROP TABLE pool_config")
+        conn.execute(
+            "CREATE TABLE pool_config ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, "
+            "pool_id TEXT NOT NULL DEFAULT 'default')"
+        )
+        conn.execute(
+            "INSERT INTO pool_config(project_id, pool_id) VALUES ('vnx-dev', 'default')"
+        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        violations = schema_manifest.validate_db_at_version(conn, 31)
+        assert any("pool_config: missing UNIQUE('project_id', 'pool_id')" in v
+                   for v in violations), violations
+        with pytest.raises(
+            schema_manifest.SchemaReconciliationError,
+            match="foreign_key_check failed structurally",
+        ):
+            mfs._assert_manifest_converged(conn)
+    finally:
+        conn.close()
+
+
+def test_v31_convergence_foreign_key_guard_is_independent_of_manifest(
+    tmp_path: Path,
+) -> None:
+    project_root, conn = _build_v30_db(tmp_path)
+    try:
+        mfs._run_numbered_walk(conn, project_root)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            "INSERT INTO worker_pool_membership("
+            "terminal_id, project_id, pool_id, provider, role"
+            ") VALUES ('T1', 'vnx-dev', 'missing-pool', 'codex', 'test')"
+        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        assert schema_manifest.validate_db_at_version(conn, 31) == []
+        with pytest.raises(
+            schema_manifest.SchemaReconciliationError,
+            match="foreign_key_check violations",
+        ):
+            mfs._assert_manifest_converged(conn)
     finally:
         conn.close()

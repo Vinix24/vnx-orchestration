@@ -1096,7 +1096,18 @@ def _run_version_reconciliation(conn: sqlite3.Connection, db_path) -> None:
 def _assert_manifest_converged(conn: sqlite3.Connection) -> None:
     """Oscillation guard (R2.1): after the numbered walk, the terminal version's
     manifest MUST hold. If a downgrade+re-walk did not converge, fail loudly rather
-    than leave a silently-broken DB (or loop on the next run). Cite ADR-009."""
+    than leave a silently-broken DB (or loop on the next run). The independent
+    foreign_key_check closes any gap in the declarative manifest. Cite ADR-009."""
+    try:
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise schema_manifest.SchemaReconciliationError(
+            f"terminal convergence foreign_key_check failed structurally: {exc}"
+        ) from exc
+    if fk_violations:
+        raise schema_manifest.SchemaReconciliationError(
+            f"terminal convergence foreign_key_check violations: {fk_violations[:5]}")
+
     final = schema_migration.get_user_version(conn)
     if final not in schema_manifest.SCHEMA_MANIFEST:
         return
@@ -1578,21 +1589,69 @@ _RUNTIME_V30_LEGACY_COLUMNS = {
     },
 }
 
-_RUNTIME_V30_LEGACY_INDEXES = {
-    "terminal_leases": {"idx_lease_state", "idx_lease_dispatch", "idx_terminal_leases_token"},
-    "dispatch_attempts": {"idx_attempt_dispatch", "idx_attempt_state", "idx_attempt_terminal"},
-    "headless_runs": {
-        "idx_headless_run_state", "idx_headless_run_dispatch",
-        "idx_headless_run_target", "idx_headless_run_heartbeat",
+_RUNTIME_V30_LEGACY_INDEX_SQL = {
+    "terminal_leases": {
+        "idx_lease_state": "CREATE INDEX idx_lease_state ON terminal_leases(state)",
+        "idx_lease_dispatch": "CREATE INDEX idx_lease_dispatch ON terminal_leases(dispatch_id)",
+        "idx_terminal_leases_token": (
+            "CREATE UNIQUE INDEX idx_terminal_leases_token ON terminal_leases(lease_token) "
+            "WHERE lease_token != ''"
+        ),
     },
-    "worker_states": {"idx_worker_state", "idx_worker_dispatch"},
+    "dispatch_attempts": {
+        "idx_attempt_dispatch": (
+            "CREATE INDEX idx_attempt_dispatch "
+            "ON dispatch_attempts(dispatch_id, attempt_number)"
+        ),
+        "idx_attempt_state": (
+            "CREATE INDEX idx_attempt_state ON dispatch_attempts(state, started_at DESC)"
+        ),
+        "idx_attempt_terminal": (
+            "CREATE INDEX idx_attempt_terminal ON dispatch_attempts(terminal_id, started_at DESC)"
+        ),
+    },
+    "headless_runs": {
+        "idx_headless_run_state": (
+            "CREATE INDEX idx_headless_run_state ON headless_runs(state, started_at DESC)"
+        ),
+        "idx_headless_run_dispatch": (
+            "CREATE INDEX idx_headless_run_dispatch ON headless_runs(dispatch_id)"
+        ),
+        "idx_headless_run_target": (
+            "CREATE INDEX idx_headless_run_target ON headless_runs(target_id, state)"
+        ),
+        "idx_headless_run_heartbeat": (
+            "CREATE INDEX idx_headless_run_heartbeat ON headless_runs(state, heartbeat_at) "
+            "WHERE state = 'running'"
+        ),
+    },
+    "worker_states": {
+        "idx_worker_state": "CREATE INDEX idx_worker_state ON worker_states(state)",
+        "idx_worker_dispatch": "CREATE INDEX idx_worker_dispatch ON worker_states(dispatch_id)",
+    },
 }
+
+_RUNTIME_V31_PARENT_TABLES = ("pool_config",)
+_RUNTIME_V31_AUTOINCREMENT_TABLES = (
+    "terminal_leases",
+    "dispatch_attempts",
+    "headless_runs",
+)
+
+
+def _normalize_create_index_sql(sql: str | None) -> str:
+    """Normalize formatting while preserving every index semantic."""
+    normalized = re.sub(r"\s+", " ", sql or "").strip().rstrip(";").strip().lower()
+    normalized = re.sub(r"\bif\s+not\s+exists\s+", "", normalized)
+    normalized = re.sub(r"\s*([(),])\s*", r"\1", normalized)
+    normalized = re.sub(r"\s*(<=|>=|<>|!=|=|<|>)\s*", r"\1", normalized)
+    return normalized
 
 
 def _runtime_v31_violations(conn: sqlite3.Connection) -> list[str]:
-    """Validate only the runtime tables introduced into the v31 manifest."""
+    """Validate the runtime family and its required parent invariants."""
     violations: list[str] = []
-    for table in _RUNTIME_V31_TABLES:
+    for table in (*_RUNTIME_V31_TABLES, *_RUNTIME_V31_PARENT_TABLES):
         invariant = schema_manifest.table_at(31, table)
         if invariant is None:
             violations.append(f"v31 manifest missing runtime table invariant '{table}'")
@@ -1628,16 +1687,26 @@ def _assert_runtime_v30_legacy_shape(conn: sqlite3.Connection) -> None:
                 f"actual={sorted(actual_cols)}. Refusing static rebuild to prevent data loss.")
 
         actual_indexes = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master "
+            r[0]: r[1] for r in conn.execute(
+                "SELECT name, sql FROM sqlite_master "
                 "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,))
         }
-        expected_indexes = _RUNTIME_V30_LEGACY_INDEXES[table]
-        if actual_indexes != expected_indexes:
+        expected_indexes = _RUNTIME_V30_LEGACY_INDEX_SQL[table]
+        if set(actual_indexes) != set(expected_indexes):
             raise RuntimeError(
                 f"0031 legacy-shape drift in {table}: expected indexes="
                 f"{sorted(expected_indexes)} actual={sorted(actual_indexes)}. "
                 "Refusing rebuild because every index must be recreated.")
+        for index_name, expected_sql in expected_indexes.items():
+            actual_sql = actual_indexes[index_name]
+            if _normalize_create_index_sql(actual_sql) != _normalize_create_index_sql(
+                expected_sql
+            ):
+                raise RuntimeError(
+                    f"0031 legacy-shape drift in {table}: index {index_name!r} "
+                    f"definition differs from canonical legacy definition. "
+                    f"expected={expected_sql!r} actual={actual_sql!r}. "
+                    "Refusing rebuild because index semantics would be lost.")
 
         triggers = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,))]
@@ -1672,7 +1741,36 @@ def _rollback_runtime_v31(conn: sqlite3.Connection) -> None:
         )
 
 
-def _run_runtime_v31_transaction(conn: sqlite3.Connection, statements) -> None:
+def _capture_runtime_v31_sequences(conn: sqlite3.Connection) -> dict[str, int | None]:
+    """Capture AUTOINCREMENT high-water marks before the tables are dropped."""
+    sequences: dict[str, int | None] = {}
+    for table in _RUNTIME_V31_AUTOINCREMENT_TABLES:
+        row = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name=?", (table,)
+        ).fetchone()
+        sequences[table] = row[0] if row else None
+    return sequences
+
+
+def _restore_runtime_v31_sequences(
+    conn: sqlite3.Connection, old_sequences: dict[str, int | None]
+) -> None:
+    """Restore max(pre-rebuild sequence, copied max id) after final-table rename."""
+    for table, old_seq in old_sequences.items():
+        max_id = conn.execute(
+            f'SELECT COALESCE(MAX(id), 0) FROM "{table}"'
+        ).fetchone()[0]
+        target = max(old_seq or 0, max_id or 0)
+        conn.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+        if old_seq is not None or target:
+            conn.execute(
+                "INSERT INTO sqlite_sequence(name, seq) VALUES(?, ?)", (table, target)
+            )
+
+
+def _run_runtime_v31_transaction(
+    conn: sqlite3.Connection, statements, *, preserve_runtime_sequences: bool = False
+) -> None:
     """Execute 0031 under one validated transaction with FK enforcement suspended."""
     if conn.in_transaction:
         raise RuntimeError(
@@ -1684,8 +1782,13 @@ def _run_runtime_v31_transaction(conn: sqlite3.Connection, statements) -> None:
         conn.execute("PRAGMA foreign_keys=OFF")
         _begin_immediate_with_retry(conn)
         try:
+            old_sequences = (
+                _capture_runtime_v31_sequences(conn) if preserve_runtime_sequences else {}
+            )
             for statement in statements:
                 conn.execute(statement)
+            if old_sequences:
+                _restore_runtime_v31_sequences(conn, old_sequences)
             _assert_runtime_v31_clean(conn)
             conn.execute("COMMIT")
         except Exception:
@@ -1723,7 +1826,11 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
     _assert_runtime_v30_legacy_shape(conn)
     sql = migration_path.read_text(encoding="utf-8")
     print("  [apply] migration 0031_runtime_tenant_fk_repair.sql ...")
-    _run_runtime_v31_transaction(conn, schema_migration._split_sql_statements(sql))
+    _run_runtime_v31_transaction(
+        conn,
+        schema_migration._split_sql_statements(sql),
+        preserve_runtime_sequences=True,
+    )
     print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
 
 

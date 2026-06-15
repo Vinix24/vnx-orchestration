@@ -382,6 +382,10 @@ _WORKER_STATE_COLS_V31 = _cols(
     ("metadata_json", "TEXT", False), ("created_at", "TEXT", True),
     ("updated_at", "TEXT", True),
 )
+_POOL_CONFIG_PARENT_COLS_V31 = _cols(
+    ("id", "INTEGER", False), ("project_id", "TEXT", True),
+    ("pool_id", "TEXT", True),
+)
 _POOL_MEMBERSHIP_COLS_V31 = _cols(
     ("id", "INTEGER", False), ("terminal_id", "TEXT", True),
     ("project_id", "TEXT", True), ("pool_id", "TEXT", True),
@@ -454,6 +458,10 @@ def _runtime_tables_v31() -> Tuple[TableInvariant, ...]:
             ),
         ),
         TableInvariant(
+            name="pool_config", columns=_POOL_CONFIG_PARENT_COLS_V31, pk=("id",),
+            unique_keys=(("project_id", "pool_id"),),
+        ),
+        TableInvariant(
             name="worker_pool_membership", columns=_POOL_MEMBERSHIP_COLS_V31, pk=("id",),
             foreign_keys=(
                 ForeignKeyInvariant(("terminal_id", "project_id"), "terminal_leases",
@@ -511,13 +519,14 @@ def _build_manifest() -> Dict[int, VersionManifest]:
 SCHEMA_MANIFEST: Dict[int, VersionManifest] = _build_manifest()
 TERMINAL_VERSION: int = max(SCHEMA_MANIFEST)
 MIN_VERSION: int = min(SCHEMA_MANIFEST)
-_OPTIONAL_V31_RUNTIME_TABLES = frozenset((
+_V31_RUNTIME_FAMILY_TABLES = frozenset((
     "terminal_leases",
     "dispatch_attempts",
     "headless_runs",
     "worker_states",
     "worker_pool_membership",
 ))
+_CONDITIONAL_V31_RUNTIME_TABLES = _V31_RUNTIME_FAMILY_TABLES | {"pool_config"}
 
 
 # ---------------------------------------------------------------------------
@@ -686,11 +695,11 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
     manifest = SCHEMA_MANIFEST[version]
     skip_runtime = (
         version == 31
-        and not any(_table_exists(conn, table) for table in _OPTIONAL_V31_RUNTIME_TABLES)
+        and not any(_table_exists(conn, table) for table in _V31_RUNTIME_FAMILY_TABLES)
     )
     out: List[str] = []
     for tbl in manifest.tables:
-        if skip_runtime and tbl.name in _OPTIONAL_V31_RUNTIME_TABLES:
+        if skip_runtime and tbl.name in _CONDITIONAL_V31_RUNTIME_TABLES:
             continue
         out += validate_table(conn, tbl)
     for view in manifest.views:
