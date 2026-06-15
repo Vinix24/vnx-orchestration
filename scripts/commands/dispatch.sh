@@ -106,6 +106,7 @@ _d_single_entry_dispatch() {
   local spec_file=""
   local dry_run_flag=""
   local pending_id=""
+  local force_release_class=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -121,16 +122,30 @@ _d_single_entry_dispatch() {
         spec_file="${1#*=}"; shift ;;
       --dry-run|-n)
         dry_run_flag="--dry-run"; shift ;;
+      --force-release-lock)
+        # Optional positional after the flag: next arg without leading -- is class name.
+        if [ -n "${2:-}" ] && [[ "${2:-}" != --* ]]; then
+          force_release_class="$2"; shift
+        else
+          force_release_class="claude-tmux"
+        fi
+        shift ;;
+      --force-release-lock=*)
+        force_release_class="${1#*=}"; shift ;;
       -h|--help)
         cat <<HELP
 Usage: vnx dispatch [--spec-file <abs>] [--dry-run]
        vnx dispatch <pending-id> [--dry-run]
+       vnx dispatch --force-release-lock [<class>]
 
 Single-entry gate (VNX_SINGLE_ENTRY_DISPATCH=1).
-  --spec-file <abs>   Absolute path to dispatch-spec.json
-  <pending-id>        Dispatch ID resolved to dispatches/pending/<id>/dispatch-spec.json
-  --dry-run           Print plan + fingerprint; spawn nothing
-  VNX_DISPATCH_LEGACY=1  Force legacy path even when gate is on
+  --spec-file <abs>            Absolute path to dispatch-spec.json
+  <pending-id>                 Dispatch ID resolved to dispatches/pending/<id>/dispatch-spec.json
+  --dry-run                    Print plan + fingerprint; spawn nothing
+  --force-release-lock [CLASS] Release stale serial lock for CLASS (default: claude-tmux).
+                               Prints prior holder pid+dispatch_id; removes lock file.
+                               Does NOT kill the holder — use the printed pid if needed.
+  VNX_DISPATCH_LEGACY=1        Force legacy path even when gate is on
 
 Headless (api_metered) lane: set allow_headless=true + headless_reason in dispatch-spec.json.
   The --adapter subprocess / VNX_ADAPTER / VNX_AUTO_ROUTE flags are LEGACY-ONLY
@@ -148,6 +163,19 @@ HELP
         pending_id="$1"; shift ;;
     esac
   done
+
+  # --force-release-lock: operator escape, independent of spec-file.
+  if [ -n "$force_release_class" ]; then
+    local dispatch_cli_script="${VNX_HOME}/scripts/lib/dispatch_cli.py"
+    if [ ! -f "$dispatch_cli_script" ]; then
+      err "[dispatch] single-entry gate: dispatch_cli.py not found: $dispatch_cli_script"
+      return 1
+    fi
+    log "[dispatch] force-release-lock: class=$force_release_class"
+    PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+      python3 "$dispatch_cli_script" --force-release-lock "$force_release_class"
+    return $?
+  fi
 
   if [ -z "$spec_file" ]; then
     if [ -z "$pending_id" ]; then
