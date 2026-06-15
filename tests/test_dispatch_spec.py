@@ -408,3 +408,46 @@ class TestRule11Deadline:
         spec = _valid_spec(ifile, deadline_seconds=good_deadline)
         result = _do_validate(spec, monkeypatch)
         assert isinstance(result, ValidatedSpec)
+
+
+# ---------------------------------------------------------------------------
+# Rule 12 — headless opt-in (PR-5)
+# ---------------------------------------------------------------------------
+
+class TestHeadlessOptin:
+    def test_allow_headless_requires_reason(self, tmp_path, monkeypatch):
+        """allow_headless=True + headless_reason=None → Reject(headless-reason-required)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason=None)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "headless-reason-required"
+
+    def test_allow_headless_empty_reason_rejected(self, tmp_path, monkeypatch):
+        """allow_headless=True + whitespace-only reason → Reject(headless-reason-required)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="   ")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "headless-reason-required"
+
+    def test_allow_headless_with_reason_passes(self, tmp_path, monkeypatch):
+        """allow_headless=True + non-empty reason → ValidatedSpec."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=True, headless_reason="burst benchmark run")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    def test_default_no_headless_passes(self, tmp_path, monkeypatch):
+        """Default spec (allow_headless=False, headless_reason=None) → ValidatedSpec without extra check."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    def test_allow_headless_false_with_no_reason_passes(self, tmp_path, monkeypatch):
+        """allow_headless=False + no reason → ValidatedSpec (rule only fires when allow_headless=True)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, allow_headless=False, headless_reason=None)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)

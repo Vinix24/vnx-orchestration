@@ -151,7 +151,12 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
             "AUTO must be resolved by the capability seam before compile_plan",
         )
     is_claude_lane = provider == Provider.CLAUDE
-    if is_claude_lane:
+    is_claude_headless = is_claude_lane and spec.allow_headless
+    if is_claude_headless:
+        lane = "claude_headless"
+        adapter = "claude_subprocess"
+        warnings.append(f"HEADLESS API-billing opted-in: {spec.headless_reason}")
+    elif is_claude_lane:
         lane = "claude_tmux_subscription"
         adapter = "tmux_claude"
     else:
@@ -160,7 +165,12 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     fired.append("D1")
 
     # D2 — billing
-    billing = "subscription" if is_claude_lane else "provider_metered"
+    if is_claude_headless:
+        billing = "api_metered"
+    elif is_claude_lane:
+        billing = "subscription"
+    else:
+        billing = "provider_metered"
     fired.append("D2")
 
     # D4 — model tier; warn-only pins are NOT a Reject
@@ -181,9 +191,9 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         model = spec.model or "default"
     fired.append("D4")
 
-    # D5 — serialization class
+    # D5 — serialization class; headless lane has no tmux serial lock
     serialization_class: Optional[str]
-    if is_claude_lane and snapshot.claude_serial_enabled:
+    if is_claude_lane and not is_claude_headless and snapshot.claude_serial_enabled:
         serialization_class = "claude-tmux"
     else:
         serialization_class = None
@@ -207,8 +217,8 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     report_contract = "required"
     fired.append("D9")
 
-    # D10 — warmup
-    warmup = "verify_strict" if is_claude_lane else "n/a"
+    # D10 — warmup; headless lane has no tmux warmup
+    warmup = "verify_strict" if (is_claude_lane and not is_claude_headless) else "n/a"
     fired.append("D10")
 
     # D12 — target resolution; claude lane is leaseless (ephemeral), skip health checks
