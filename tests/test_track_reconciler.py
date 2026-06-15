@@ -270,7 +270,7 @@ def test_not_blocked_when_dependency_done(tmp_path):
 def test_queued_when_no_dispatches(tmp_path):
     """derived_status='queued' when no dispatches are linked."""
     state_dir = _build_db(tmp_path)
-    _seed_track(state_dir, "T-nowork")
+    _seed_track(state_dir, "T-nowork", phase="queued")
 
     result = track_reconciler.reconcile_track(state_dir, "T-nowork", PROJECT_ID)
     assert result["derived_status"] == "queued"
@@ -365,8 +365,9 @@ def test_authoritative_phase_never_modified(tmp_path):
 def test_reconcile_all_tracks_processes_all(tmp_path):
     """reconcile_all_tracks handles multiple tracks and returns one result per track."""
     state_dir = _build_db(tmp_path)
-    for tid in ("T-all-1", "T-all-2", "T-all-3"):
+    for tid in ("T-all-1", "T-all-2"):
         _seed_track(state_dir, tid)
+    _seed_track(state_dir, "T-all-3", phase="queued")
 
     _seed_dispatch(state_dir, "D-all-1", "T-all-1", state="running")
     _seed_dispatch(state_dir, "D-all-2", "T-all-2", state="completed")
