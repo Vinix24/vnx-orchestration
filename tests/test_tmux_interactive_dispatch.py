@@ -3357,12 +3357,17 @@ class TestRobustCompletionDetection(_LaneTestCase):
 
     # ---- Signal 3: report backstop ---- #
 
-    def test_report_backstop_active_when_summary_present(self):
-        """_is_report_backstop_active returns True for a non-empty report with ## Summary."""
+    def test_report_backstop_active_when_all_four_headings_stable(self):
+        """_is_report_backstop_active returns True only after all 4 headings + mtime stable."""
         reports_dir = self.state_dir.parent / "unified_reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
-            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nWork done.\n\n## Open Items\n\nNone.\n",
+        report_path = reports_dir / f"{self.DISPATCH_ID}.md"
+        report_path.write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n"
+            "## Summary\n\nWork done.\n\n"
+            "## Changes\n\nfiles modified.\n\n"
+            "## Verification\n\nTests passed.\n\n"
+            "## Open Items\n\nNone.\n",
             encoding="utf-8",
         )
 
@@ -3371,13 +3376,20 @@ class TestRobustCompletionDetection(_LaneTestCase):
             receipts_file=self.receipts_file,
             project_root=self.state_dir,
         )
-        self.assertTrue(lane._is_report_backstop_active(self.DISPATCH_ID))
+        # First call: records mtime, not yet stable → False
+        self.assertFalse(lane._is_report_backstop_active(self.DISPATCH_ID),
+                         "First call must return False (mtime not yet seen as stable)")
+        # Second call with unchanged mtime → True
+        self.assertTrue(lane._is_report_backstop_active(self.DISPATCH_ID),
+                        "Second call must return True when all 4 headings present and mtime unchanged")
 
     def test_report_backstop_resolves_wait_no_receipt(self):
         """_wait_for_receipt detects completion via report backstop when no receipt exists.
 
         Simulates the real flow: baseline captured BEFORE report is written
-        (baseline_backstop=False), then the worker writes the report.
+        (baseline_backstop=False), then the worker writes the complete report.
+        The poll loop calls _is_report_backstop_active twice; second call sees
+        stable mtime and all 4 headings → backstop fires.
         """
         lane = TmuxInteractiveDispatch(
             self.state_dir,
@@ -3390,13 +3402,17 @@ class TestRobustCompletionDetection(_LaneTestCase):
         reports_dir = self.state_dir.parent / "unified_reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
-            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nImplementation complete.\n",
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n"
+            "## Summary\n\nImplementation complete.\n\n"
+            "## Changes\n\nScripts updated.\n\n"
+            "## Verification\n\nAll tests pass.\n\n"
+            "## Open Items\n\nNone.\n",
             encoding="utf-8",
         )
 
         result = lane._wait_for_receipt(
             self.DISPATCH_ID,
-            deadline_seconds=0.2,
+            deadline_seconds=0.5,
             poll_interval=0.01,
             completion_statuses=DEFAULT_COMPLETION_STATUSES,
             baseline_count=0,
@@ -3493,12 +3509,17 @@ class TestRobustCompletionDetection(_LaneTestCase):
     def test_stale_report_does_not_satisfy_new_run(self):
         """A pre-existing report (active at baseline) must not fire for the new run.
 
-        Simulates: report already existed when baseline was captured (baseline_backstop=True).
+        Simulates: report already existed and was backstop-active when baseline was
+        captured (baseline_backstop=True after two stable polls).
         """
         reports_dir = self.state_dir.parent / "unified_reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
-            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nOld run.\n",
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n"
+            "## Summary\n\nOld run.\n\n"
+            "## Changes\n\nOld files.\n\n"
+            "## Verification\n\nOld tests.\n\n"
+            "## Open Items\n\nNone.\n",
             encoding="utf-8",
         )
 
@@ -3507,8 +3528,10 @@ class TestRobustCompletionDetection(_LaneTestCase):
             receipts_file=self.receipts_file,
             project_root=self.state_dir,
         )
-        # Capture baseline AFTER writing the report (simulates pre-delivery state when stale)
+        # Capture baseline AFTER writing the report (simulates pre-delivery state when stale).
+        # Must call _is_report_backstop_active twice so it becomes stable (True).
         baseline = len(lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES))
+        lane._is_report_backstop_active(self.DISPATCH_ID)  # first call: records mtime
         baseline_backstop = lane._is_report_backstop_active(self.DISPATCH_ID)  # True
 
         result = lane._wait_for_receipt(
@@ -3592,6 +3615,349 @@ class TestRobustCompletionDetection(_LaneTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "done")
         self.assertEqual(result.get("source"), "tmux_interactive")
+
+
+# ---------------------------------------------------------------------------
+# PR-8b: Completion hardening — P0-1, P0-2, P1-1, P1-2
+# ---------------------------------------------------------------------------
+
+_FULL_REPORT = (
+    "Dispatch-ID: {did}\n\n"
+    "## Summary\n\nWork done.\n\n"
+    "## Changes\n\nFiles modified.\n\n"
+    "## Verification\n\nTests passed.\n\n"
+    "## Open Items\n\nNone.\n"
+)
+
+
+class TestBackstopP01Headings(_LaneTestCase):
+    """P0-1a: report backstop requires ALL FOUR contract headings, not just ## Summary."""
+
+    def _make_lane_and_reports_dir(self):
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        return lane, reports_dir
+
+    def test_only_summary_not_active(self):
+        """Mid-task draft with only ## Summary must NOT activate backstop."""
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n## Summary\n\nDraft in progress.\n",
+            encoding="utf-8",
+        )
+        # Even after two calls, mid-task draft (missing headings) must never activate.
+        lane._is_report_backstop_active(self.DISPATCH_ID)
+        self.assertFalse(
+            lane._is_report_backstop_active(self.DISPATCH_ID),
+            "Report with only ## Summary must never activate backstop",
+        )
+
+    def test_summary_and_changes_missing_verification_not_active(self):
+        """Report missing ## Verification must NOT activate backstop."""
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        (reports_dir / f"{self.DISPATCH_ID}.md").write_text(
+            f"Dispatch-ID: {self.DISPATCH_ID}\n\n"
+            "## Summary\n\nDone.\n\n## Changes\n\nStuff.\n\n## Open Items\n\nNone.\n",
+            encoding="utf-8",
+        )
+        lane._is_report_backstop_active(self.DISPATCH_ID)
+        self.assertFalse(lane._is_report_backstop_active(self.DISPATCH_ID))
+
+    def test_all_four_headings_mtime_changing_not_active(self):
+        """All four headings present but mtime still changing → NOT active until stable."""
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        report_path = reports_dir / f"{self.DISPATCH_ID}.md"
+        full = _FULL_REPORT.format(did=self.DISPATCH_ID)
+        report_path.write_text(full, encoding="utf-8")
+
+        # First call: all 4 headings, records mtime → False
+        result1 = lane._is_report_backstop_active(self.DISPATCH_ID)
+        self.assertFalse(result1, "First call must return False (mtime not yet stable)")
+
+        # Simulate file being rewritten (mtime changes)
+        report_path.write_text(full + "\nextra line\n", encoding="utf-8")
+
+        # Second call: mtime changed → still False
+        result2 = lane._is_report_backstop_active(self.DISPATCH_ID)
+        self.assertFalse(result2, "Mtime changed → must still return False")
+
+    def test_all_four_headings_mtime_stable_active(self):
+        """All four headings + stable mtime across two polls → backstop ACTIVE."""
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        report_path = reports_dir / f"{self.DISPATCH_ID}.md"
+        report_path.write_text(_FULL_REPORT.format(did=self.DISPATCH_ID), encoding="utf-8")
+
+        lane._is_report_backstop_active(self.DISPATCH_ID)  # first: records mtime
+        self.assertTrue(
+            lane._is_report_backstop_active(self.DISPATCH_ID),
+            "All 4 headings + stable mtime → backstop must be active",
+        )
+
+    def test_backstop_via_wait_still_requires_stale_guard(self):
+        """Backstop completion via _wait_for_receipt still obeys the baseline_backstop guard."""
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        report_path = reports_dir / f"{self.DISPATCH_ID}.md"
+        report_path.write_text(_FULL_REPORT.format(did=self.DISPATCH_ID), encoding="utf-8")
+
+        # Warm up lane so mtime is stable (two calls)
+        lane._is_report_backstop_active(self.DISPATCH_ID)
+        lane._is_report_backstop_active(self.DISPATCH_ID)
+
+        # Baseline captures True → stale guard must prevent this from resolving
+        baseline_backstop = lane._is_report_backstop_active(self.DISPATCH_ID)
+        self.assertTrue(baseline_backstop)
+
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.1,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_backstop=baseline_backstop,
+        )
+        self.assertIsNone(result, "Pre-existing stable report must not satisfy new-run wait")
+
+
+class TestCompletionHardeningP02(_LaneTestCase):
+    """P0-2: per-source baseline — pending file removal does not drop a new completion."""
+
+    def test_pending_removed_then_new_appears_still_detected(self):
+        """When a stale pending file is removed and a new one appears, completion is detected."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+
+        # Stale pending receipt present at baseline time
+        stale_file = pending_dir / f"{self.DISPATCH_ID}-stale.json"
+        stale_file.write_text(
+            json.dumps({"dispatch_id": self.DISPATCH_ID, "status": "done", "source": "stale"}),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+
+        # Capture per-source baselines (as dispatch() does)
+        _bl_canonical, _bl_pending = lane._matching_receipts_split(
+            self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES
+        )
+        baseline_count = len(_bl_canonical)
+        baseline_pending_ids = frozenset(r.get("_pending_file", "") for r in _bl_pending)
+
+        # Simulate processor moving stale file to processed/
+        stale_file.unlink()
+
+        # New pending receipt appears (this run's completion)
+        new_file = pending_dir / f"{self.DISPATCH_ID}-new.json"
+        new_file.write_text(
+            json.dumps({"dispatch_id": self.DISPATCH_ID, "status": "done", "source": "worker"}),
+            encoding="utf-8",
+        )
+
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=baseline_count,
+            baseline_pending_ids=baseline_pending_ids,
+        )
+        self.assertIsNotNone(result, "New pending receipt must be detected after stale file removed")
+        self.assertEqual(result.get("status"), "done")
+
+    def test_baseline_pending_receipt_does_not_count_as_new(self):
+        """A pending receipt that was present at baseline must NOT resolve this run's wait."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+
+        baseline_file = pending_dir / f"{self.DISPATCH_ID}-base.json"
+        baseline_file.write_text(
+            json.dumps({"dispatch_id": self.DISPATCH_ID, "status": "done", "source": "pre-existing"}),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        _bl_canonical, _bl_pending = lane._matching_receipts_split(
+            self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES
+        )
+        baseline_count = len(_bl_canonical)
+        baseline_pending_ids = frozenset(r.get("_pending_file", "") for r in _bl_pending)
+
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.1,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=baseline_count,
+            baseline_pending_ids=baseline_pending_ids,
+        )
+        self.assertIsNone(result, "Pre-existing pending receipt must not count as new completion")
+
+
+class TestCompletionHardeningP11(_LaneTestCase):
+    """P1-1: canonical (signal 1) is authoritative over pending (signal 2)."""
+
+    def test_canonical_failed_wins_over_pending_done(self):
+        """When canonical 'failed' and pending 'done' are both new, canonical wins → FAILURE."""
+        # New canonical 'failed' receipt
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        self.receipts_file.write_text(
+            json.dumps({
+                "event_type": "subprocess_completion",
+                "dispatch_id": self.DISPATCH_ID,
+                "status": "failed",
+                "source": "tmux_interactive",
+                "timestamp": "2026-06-15T10:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        # New pending 'done' receipt
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}-pending.json").write_text(
+            json.dumps({
+                "dispatch_id": self.DISPATCH_ID,
+                "status": "done",
+                "source": "worker",
+                "timestamp": "2026-06-15T10:01:00Z",
+            }),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),  # empty → both are "new"
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result.get("status"), "failed",
+            f"Signal 1 (canonical failed) must win over signal 2 (pending done); got: {result}",
+        )
+        self.assertEqual(result.get("source"), "tmux_interactive")
+
+    def test_pending_done_used_when_no_new_canonical(self):
+        """Pending 'done' is used as fallback when no new canonical receipt exists."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}-new.json").write_text(
+            json.dumps({"dispatch_id": self.DISPATCH_ID, "status": "done", "source": "worker"}),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),
+        )
+        self.assertIsNotNone(result, "Pending receipt must resolve when no canonical receipt exists")
+        self.assertEqual(result.get("status"), "done")
+
+
+class TestCompletionHardeningP12(_LaneTestCase):
+    """P1-2: signal 2 accepts receipts matching event_type.endswith('_completion')."""
+
+    def test_pending_event_type_completion_detected(self):
+        """Pending receipt with event_type ending '_completion' (no status match) is detected."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}-evt.json").write_text(
+            json.dumps({
+                "dispatch_id": self.DISPATCH_ID,
+                "status": "custom_status",          # not in DEFAULT_COMPLETION_STATUSES
+                "event_type": "subprocess_completion",  # ends with _completion
+                "source": "worker",
+            }),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        matches = lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES)
+        self.assertGreaterEqual(len(matches), 1,
+                                "Event_type ending _completion must be matched in signal 2")
+
+    def test_pending_event_type_completion_resolves_wait(self):
+        """_wait_for_receipt detects a pending receipt matching only event_type."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}-evt.json").write_text(
+            json.dumps({
+                "dispatch_id": self.DISPATCH_ID,
+                "status": "custom_status",
+                "event_type": "task_completion",
+                "source": "worker",
+            }),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.2,
+            poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),
+        )
+        self.assertIsNotNone(result, "Pending receipt matching event_type must resolve wait")
+
+    def test_pending_no_status_no_completion_event_ignored(self):
+        """Pending receipt with unknown status and non-_completion event_type is ignored."""
+        pending_dir = self.state_dir / "receipts" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{self.DISPATCH_ID}-bad.json").write_text(
+            json.dumps({
+                "dispatch_id": self.DISPATCH_ID,
+                "status": "in_progress",
+                "event_type": "heartbeat",
+                "source": "worker",
+            }),
+            encoding="utf-8",
+        )
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        matches = lane._matching_receipts(self.DISPATCH_ID, DEFAULT_COMPLETION_STATUSES)
+        self.assertEqual(len(matches), 0, "Non-matching pending receipt must not be returned")
 
 
 if __name__ == "__main__":
