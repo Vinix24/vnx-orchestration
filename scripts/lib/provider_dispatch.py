@@ -861,23 +861,16 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _create_provider_worktree(dispatch_id: str) -> Optional[Path]:
+def _create_provider_worktree(dispatch_id: str) -> Path:
     """Create an isolated worktree for a provider dispatch.
 
     Only called when VNX_ISOLATED_WORKTREE=1.  Returns the worktree Path on
-    success, None on failure (logs the error and falls back to shared path).
+    success, raises RuntimeError on failure — no shared-checkout fallback.
     """
-    try:
-        from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
-        wt_path = create_dispatch_worktree(dispatch_id)
-        logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
-        return wt_path
-    except RuntimeError as exc:
-        logger.error(
-            "provider isolation: create_dispatch_worktree failed for %s: %s — running in shared worktree",
-            dispatch_id, exc,
-        )
-        return None
+    from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
+    wt_path = create_dispatch_worktree(dispatch_id)
+    logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
+    return wt_path
 
 
 def _prepare_provider_workdir(
@@ -970,7 +963,21 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     enriched_instruction = _enrich_instruction(args)
-    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_codex(
@@ -1124,6 +1131,36 @@ def _resolve_kimi_model_label() -> str:
     return next(iter(cfg.models.keys()))
 
 
+def _kimi_resolve_cli_model_arg(model_key: str) -> str:
+    """Return the CLI arg form for a kimi model key.
+
+    The registry uses dashes (kimi-k2-6) but the kimi CLI 1.46.0 requires dots
+    (kimi-k2.6). The registry entry's cli_model_arg field carries the authoritative
+    CLI arg; fall back to model_key unchanged for entries without the field.
+    """
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+    except Exception as e:
+        logger.warning("provider_dispatch: registry load for kimi cli arg failed: %s", e)
+        return model_key
+    cfg = registry.get("kimi_cli")
+    if cfg is None or not cfg.models:
+        return model_key
+    # Direct registry-key lookup (e.g. model_key='kimi-k2-6')
+    entry = cfg.models.get(model_key)
+    if entry is not None:
+        cli_arg = getattr(entry, "cli_model_arg", None)
+        return cli_arg if cli_arg else model_key
+    # model_key may already be in CLI arg form (e.g. 'kimi-k2.6'); search by cli_model_arg
+    model_key_lower = model_key.lower()
+    for e in cfg.models.values():
+        cli_arg = getattr(e, "cli_model_arg", None)
+        if cli_arg and cli_arg.lower() == model_key_lower:
+            return model_key
+    return model_key
+
+
 def _resolve_deepseek_model() -> str:
     """Load DeepSeek model litellm_name from registry, fallback to hardcoded default."""
     from providers import provider_registry as _reg
@@ -1265,7 +1302,21 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         )
 
     enriched_instruction = _enrich_instruction(args)
-    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_litellm(
@@ -1328,15 +1379,31 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = os.environ.get("VNX_KIMI_MODEL", "") or None
-    model_label = model or _resolve_kimi_model_label()
+    model_key = os.environ.get("VNX_KIMI_MODEL", "") or None
+    model_label = model_key or _resolve_kimi_model_label()
+    # Resolve CLI arg form (e.g. kimi-k2-6 → kimi-k2.6 per kimi CLI 1.46.0)
+    model_cli_arg = _kimi_resolve_cli_model_arg(model_key) if model_key else None
     enriched_instruction = _enrich_instruction(args)
-    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
             prompt=enriched_instruction,
-            model=model,
+            model=model_cli_arg,
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
@@ -1489,7 +1556,21 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     model = args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     enriched_instruction = _enrich_instruction(args)
-    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_gemini(
@@ -1654,17 +1735,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if provider == "claude":
-        _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"
-        _envelope_lanes = [
-            lane.strip()
-            for lane in (os.environ.get("VNX_UNIFIED_ENVELOPE_LANES") or "").split(",")
-            if lane.strip()
-        ]
-        if _envelope_on and (
-            "claude-subprocess" in _envelope_lanes or "claude" in _envelope_lanes
-        ):
-            return _dispatch_claude_via_envelope(args)
-        return _dispatch_claude(args)
+        # PR-5: claude is not a provider-lane provider. The single-entry door owns
+        # all Claude routing. Silent headless auto-selection via provider_dispatch is
+        # removed — use DispatchSpec with allow_headless=true through the door instead.
+        print(
+            "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
+            "Claude dispatches route via the single-entry dispatch door. "
+            "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
+            "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
+            "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
+            file=sys.stderr,
+        )
+        return _EX_USAGE
 
     if provider == "codex":
         _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"

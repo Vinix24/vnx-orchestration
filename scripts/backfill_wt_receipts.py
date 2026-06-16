@@ -18,13 +18,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-DEFAULT_ARCHIVE = Path(
-    "/Users/vincentvandeth/Backups/vnx-data-wt-archive-20260614/state/"
-    "t0_receipts.ndjson"
-)
-DEFAULT_CENTRAL = Path(
-    "/Users/vincentvandeth/.vnx-data/vnx-dev/state/t0_receipts.ndjson"
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from project_root import resolve_state_dir  # noqa: E402
+
+DEFAULT_CENTRAL = resolve_state_dir(caller_file=__file__) / "t0_receipts.ndjson"
 CUTOFF_DATE = "20260515"
 BACKFILLED_FROM = "wt-archive-20260614"
 KEY_FIELDS = ("dispatch_id", "cmd_id", "trace_token", "task_id")
@@ -266,7 +263,12 @@ def print_plan(plan: BackfillPlan) -> None:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
+    parser.add_argument(
+        "--archive",
+        type=Path,
+        required=True,
+        help="Path to the worktree-archive t0_receipts.ndjson to backfill from.",
+    )
     parser.add_argument("--central", type=Path, default=DEFAULT_CENTRAL)
     parser.add_argument(
         "--apply",

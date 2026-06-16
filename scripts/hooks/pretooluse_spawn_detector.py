@@ -2,27 +2,46 @@
 """PreToolUse spawn detector — subprocess_dispatch governance enforcement.
 
 Reads the Claude Code PreToolUse hook JSON payload from stdin.
-Outputs "allow" or "block" (no newline stripping needed; shell trims).
+Outputs "allow" or "block" (shell trims the trailing newline).
+
+PR-9c model — shell-aware, per-segment, tokenized argv classification
+─────────────────────────────────────────────────────────────────────
+The raw-string regex hard-block of PR-9/9b leaked against shell quoting
+(`cl'a'ude -p`, `claude "-p"`, `codex "exec"`), masked a whole command on a
+benign first segment (`kimi --version && kimi --print x`), and produced
+arg-position false-positives (`git log --grep claude -p`). PR-9c replaces the
+regex hard-block with a tokenizer:
+
+  1. Split the command into SEGMENTS on the shell operators ; && || | & and
+     newlines (quote-aware: operators inside quotes do not split). Each segment
+     is classified on its own — this alone kills the kimi allow-mask.
+  2. Tokenize each segment with a POSIX shlex lexer (punctuation_chars=True so
+     redirects like `<<<` split off cleanly). shlex dequotes cl'a'ude→claude,
+     claude "-p"→claude -p, codex "exec"→codex exec, and resolves escapes.
+  3. HARD-BLOCK on the basename of argv[0] (strips paths: /usr/bin/claude →
+     claude) plus an exact blocked-flag token in argv[1:]. This is airtight
+     against quoting AND immune to arg-position false-positives — a provider
+     name that appears as an ARGUMENT has a different argv[0].
+  4. Recurse into `bash -c` / `sh -c` strings and transparent command-prefix
+     runners (nohup/env/setsid/stdbuf), bounded to depth 3.
+  5. Shadow-detect lane invocations on the tokenized argv (allow+log by
+     default; block when VNX_HOOK_ENFORCE=1). A lane name as a non-executable
+     argument (`echo provider_dispatch.py`) does not match.
+  6. Fail-open absolutely: any stdin → exactly one allow/block line, never a
+     traceback. An unbalanced-quote segment falls back to a best-effort legacy
+     regex scan, which still BLOCKS a raw provider spawn — no blanket allow.
 
 Hard-blocked (always, regardless of VNX_HOOK_ENFORCE):
   claude:  -p / --print / --dangerously-skip-permissions
   kimi:    --print / -p
-  codex:   exec <args>
+  codex:   exec <subcommand>
 
 Shadow-detected (allow + log when VNX_HOOK_ENFORCE unset/0; block when =1):
   Direct lane-script invocation: tmux_interactive_dispatch.py,
     subprocess_dispatch.py, provider_dispatch.py, dispatch_cli.py
   python[3] -m <lane_module>
-  python[3] -c "..." containing an import of a lane module at statement position
-
-Allowed (no rule match):
-  claude --version / claude --help / claude (interactive)
-  kimi --version / kimi login / kimi (no prompt-executing flags)
-  codex --version / codex --help (benign read-only)
-  Any command that doesn't match a block or shadow pattern.
-
-VNX_HOOK_ENFORCE: unset/0 = shadow rules log-and-allow; 1 = shadow rules block.
-  Hard-block rules ALWAYS block regardless of this flag.
+  python[3] -c "..." importing a lane module
+  importlib.import_module("<lane_module>")
 
 Telemetry: every block AND every shadow detection → one JSON line appended to
   <VNX_DATA_DIR>/events/hook_blocks.ndjson. Telemetry errors never block.
@@ -36,10 +55,11 @@ $IFS word-splitting, ANSI-C $'...', nesting beyond the recursion bound) can rout
 raw provider spawn past this hook undetected. These are accepted as out-of-scope: the
 hook is a defense-in-depth first layer that catches the common and accidental cases (the
 only kind a governed worker actually produces); the in-process ExecutionPermit
-(`require_permit`) is the authoritative, un-evadable control.
+(`require_permit`) is the authoritative, un-evadable control. Do not chase esoteric
+evasion hardening here — that arms race cannot be won.
 
 Live-proven gap (2026-06-09): a raw `kimi --print` invocation bypassed receipts
-the same way `claude -p` did. This detector now covers all three provider CLIs.
+the same way `claude -p` did. This detector covers all three provider CLIs.
 """
 
 from __future__ import annotations
@@ -62,192 +82,337 @@ try:
 except ImportError:
     project_root = None  # type: ignore[assignment]
 
-# ── Token boundary helpers ─────────────────────────────────────────────────────
-# Match the CLI binary name when preceded by string-start, whitespace, or shell
-# operators (&, ;, |, (, ), backtick via \x60, $, ', ").
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+MAX_RECURSION_DEPTH = 3
+
+# Hard-block flag tables — exact token match against the dequoted argv[1:].
+_CLAUDE_BLOCKED_FLAGS = frozenset({"-p", "--print", "--dangerously-skip-permissions"})
+_KIMI_BLOCKED_FLAGS = frozenset({"-p", "--print"})
+
+# Shell wrappers whose `-c <string>` argument is itself a command to classify.
+_SHELL_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+# Transparent command-prefix runners: argv[0] launches the real command which
+# follows after the runner's own options/assignments. nohup/setsid/stdbuf take
+# only dash-options; env additionally takes NAME=VALUE assignments. Runners with
+# positional arguments (timeout/nice) are intentionally excluded — see the
+# module "Known limitation"; the ExecutionPermit is the backstop for those.
+_PREFIX_RUNNERS = frozenset({"nohup", "setsid", "stdbuf", "env"})
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# Lane/provider module names — the only permitted entry point post-PR-12 is
+# `vnx dispatch`. Direct invocation of these bypasses governance receipts.
+_LANE_MODULE_NAMES = frozenset({
+    "tmux_interactive_dispatch",
+    "subprocess_dispatch",
+    "provider_dispatch",
+    "dispatch_cli",
+})
+# Longest-first alternation so a shorter name never shadows a longer one.
+_LANE_MODS_RE = r"(?:" + r"|".join(
+    sorted(_LANE_MODULE_NAMES, key=len, reverse=True)
+) + r")"
+
+_PYTHON_RE = re.compile(r"python[0-9.]*$")
+
+# Operator/redirect tokens produced by the punctuation-aware lexer
+# (subshell parens, redirects, any quoted-away pipe/amp remnant).
+_OP_CHARS = frozenset("();<>|&")
+
+# Lane-import detection inside a `python -c` code string. The negative
+# lookbehind blocks a string-literal mention (`print('import provider_dispatch')`)
+# while still catching a real statement-position import.
+_LANE_IMPORT_PATTERN = re.compile(
+    r"(?<!\(')(?<!\(\")(?:import\s+" + _LANE_MODS_RE
+    + r"|from\s+" + _LANE_MODS_RE + r"\s+import)"
+)
+# importlib.import_module("<lane_module>") — dynamic-import form.
+_IMPORTLIB_PATTERN = re.compile(r"import_module\([\"']" + _LANE_MODS_RE)
+
+# FP-1 fix: import must appear at statement position (line/semicolon start), not inside
+# a string literal. E.g. `s = 'import provider_dispatch'` must NOT match.
+_LANE_IMPORT_STMT_PATTERN = re.compile(
+    r"^\s*(?:import\s+" + _LANE_MODS_RE + r"|from\s+" + _LANE_MODS_RE + r"\s+import)"
+)
+
+
+# ── Legacy regex fallback (unbalanced-quote segments only) ─────────────────────
+# Used ONLY when shlex cannot tokenize a segment (unbalanced quotes). It must
+# still BLOCK a raw provider spawn — never blanket-allow malformed input.
 _TOKEN_BOUNDARY = r"(?:^|[\s;&|()\x60$'\"])"
-_CMD_SUFFIX = r"(?=\s|$|[\"';\x60\\])"
+_CMD_SUFFIX = r"(?=\s|$|[\"';\x60\\<>&])"
+_EMPTY_QUOTES_RE = re.compile(r'""' + r"|''")
+_BACKSLASH_LETTER_RE = re.compile(r"\\([A-Za-z])")
 
-# ── Hard-block patterns — claude ───────────────────────────────────────────────
-CLAUDE_TOKEN_PATTERN = re.compile(_TOKEN_BOUNDARY + r"claude" + _CMD_SUFFIX)
-CLAUDE_BLOCKED_FLAG_PATTERNS = [
-    re.compile(r"(?:^|\s)-p(?:\s|$)"),
-    re.compile(r"(?:^|\s)--print(?:\s|$)"),
-    re.compile(r"(?:^|\s)--dangerously-skip-permissions(?:\s|$)"),
+_CLAUDE_TOKEN_PATTERN = re.compile(_TOKEN_BOUNDARY + r"claude" + _CMD_SUFFIX)
+_CLAUDE_FLAG_PATTERNS = [
+    re.compile(r"(?:^|\s)-p(?:\s|$|[<>&])"),
+    re.compile(r"(?:^|\s)--print(?:\s|$|[<>&])"),
+    re.compile(r"(?:^|\s)--dangerously-skip-permissions(?:\s|$|[<>&])"),
 ]
-
-# ── Hard-block patterns — kimi ─────────────────────────────────────────────────
-KIMI_TOKEN_PATTERN = re.compile(_TOKEN_BOUNDARY + r"kimi" + _CMD_SUFFIX)
-KIMI_BLOCKED_FLAG_PATTERNS = [
-    re.compile(r"(?:^|\s)--print(?:\s|$)"),
-    re.compile(r"(?:^|\s)-p(?:\s|$)"),
+_KIMI_TOKEN_PATTERN = re.compile(_TOKEN_BOUNDARY + r"kimi" + _CMD_SUFFIX)
+_KIMI_FLAG_PATTERNS = [
+    re.compile(r"(?:^|\s)--print(?:\s|$|[<>&])"),
+    re.compile(r"(?:^|\s)-p(?:\s|$|[<>&])"),
 ]
-# login, --version, --help: benign / auth — always allowed
-KIMI_ALLOWED_PATTERN = re.compile(
+_KIMI_ALLOWED_PATTERN = re.compile(
     r"(?:^|\s)kimi\s+(?:login|--version|-v|--help|-h)(?:\s|$)"
 )
+_CODEX_TOKEN_PATTERN = re.compile(_TOKEN_BOUNDARY + r"codex" + _CMD_SUFFIX)
+_CODEX_EXEC_PATTERN = re.compile(r"(?:^|\s)codex\s+exec(?:\s|$|[<>&])")
 
-# ── Hard-block patterns — codex ────────────────────────────────────────────────
-CODEX_TOKEN_PATTERN = re.compile(_TOKEN_BOUNDARY + r"codex" + _CMD_SUFFIX)
-CODEX_EXEC_PATTERN = re.compile(r"(?:^|\s)codex\s+exec(?:\s|$)")
-
-# ── Shadow evasion patterns (new, PR-9) ────────────────────────────────────────
-# Lane/provider module names — the only permitted entry point post-PR-12 is
-# `vnx dispatch`. Direct invocation of these scripts bypasses governance.
-_LANE_MODS = (
-    r"(?:tmux_interactive_dispatch|subprocess_dispatch|provider_dispatch|dispatch_cli)"
+_EXEC_BOUNDARY = r"(?:^|[;|&(]\s*|\|\|\s*|&&\s*|\x60\s*)"
+_LANE_SCRIPT_PATTERN = re.compile(
+    r"(?:" + _TOKEN_BOUNDARY + r"python3?\s+(?:[^\s]+\s+)*(?:\S+/)?"
+    + _LANE_MODS_RE + r"\.py(?:\s|$|[\"';\x60<>&])"
+    r"|" + _EXEC_BOUNDARY + r"(?:/?(?:[^\s/]+/)*)?"
+    + _LANE_MODS_RE + r"\.py(?:\s|$|[\"';\x60<>&])"
+    r")"
 )
-
-# Direct lane-script invocation: [/any/path/]lane_module.py at a token boundary.
-# Covers: python3 scripts/lib/provider_dispatch.py, ./dispatch_cli.py, etc.
-LANE_SCRIPT_PATTERN = re.compile(
-    _TOKEN_BOUNDARY + r"(?:\S*/)?" + _LANE_MODS + r"\.py(?:\s|$|[\"';\x60])"
+_PYTHON_M_LANE_PATTERN = re.compile(
+    _TOKEN_BOUNDARY + r"python3?\s+(?:[^\s]+\s+)*-m\s*" + _LANE_MODS_RE + r"(?:\s|$)"
 )
-
-# python[3] [flags] -m <lane_module>
-PYTHON_M_LANE_PATTERN = re.compile(
-    _TOKEN_BOUNDARY + r"python3?\s+(?:[^\s]+\s+)*-m\s+" + _LANE_MODS + r"(?:\s|$)"
-)
-
-# python[3] -c "..." presence (combined with _LANE_IMPORT_PATTERN below)
 _PYTHON_C_PATTERN = re.compile(
-    _TOKEN_BOUNDARY + r"python3?\s+(?:[^\s]+\s+)*-c\s+"
+    _TOKEN_BOUNDARY + r"python3?\s+(?:[^\s]+\s+)*-c\s*"
 )
-# import / from-import of a lane module anywhere in the command string
-_LANE_IMPORT_PATTERN = re.compile(
-    r"(?:import\s+" + _LANE_MODS + r"|from\s+" + _LANE_MODS + r"\s+import)"
-)
-
-# FP-1 fix: import must be at statement position (line/semicolon start), not in a string.
-_LANE_IMPORT_STMT_PATTERN = re.compile(
-    r"^\s*(?:import\s+" + _LANE_MODS + r"|from\s+" + _LANE_MODS + r"\s+import)"
-)
-
-# FP-2 fix: match a lane .py filename at end-of-token (used by shlex-token checks).
-_LANE_PY_PAT = re.compile(r"(?:\S*/)?" + _LANE_MODS + r"\.py$")
-
-
-def _extract_python_c_code(cmd: str) -> str | None:
-    """Return the code string from `python[3] ... -c <code>`, or None."""
-    try:
-        tokens = shlex.split(cmd)
-    except ValueError:
-        return None
-    for i, tok in enumerate(tokens):
-        base = tok.rsplit("/", 1)[-1]
-        if base not in ("python", "python3"):
-            continue
-        j = i + 1
-        while j < len(tokens):
-            t = tokens[j]
-            if t == "-c":
-                return tokens[j + 1] if j + 1 < len(tokens) else None
-            if t.startswith("-c") and len(t) > 2:
-                return t[2:]
-            if not t.startswith("-") or t == "--":
-                return None  # positional before -c → not a -c invocation
-            j += 1
-        return None
-    return None
 
 
 def _has_lane_import_at_statement(code: str) -> bool:
-    """Return True iff a lane import appears at statement position in the code string."""
+    """Return True iff a lane import appears at statement position in the code string.
+
+    Splits on `;` and newlines to get individual statements, then checks each against
+    _LANE_IMPORT_STMT_PATTERN. This avoids FP-1: an import token inside a string
+    literal (e.g. `s = 'import provider_dispatch'`) does not start a statement and
+    therefore does not match.
+    """
     for stmt in re.split(r"[;\n]", code):
         if _LANE_IMPORT_STMT_PATTERN.match(stmt):
             return True
     return False
 
 
-def _lane_script_after_python_c(cmd: str) -> bool:
-    """Return True if every lane .py match appears as a program arg after `python -c <code>`.
-
-    When True the lane .py is NOT the executed script; shadow should not fire.
-    """
-    try:
-        tokens = shlex.split(cmd)
-    except ValueError:
-        return False
-    i = 0
-    while i < len(tokens):
-        base = tokens[i].rsplit("/", 1)[-1]
-        if base not in ("python", "python3"):
-            i += 1
-            continue
-        j = i + 1
-        c_consumed = False
-        while j < len(tokens):
-            t = tokens[j]
-            if t == "-c":
-                if j + 1 >= len(tokens):
-                    return False
-                j += 2
-                c_consumed = True
-                break
-            if t.startswith("-c") and len(t) > 2:
-                j += 1
-                c_consumed = True
-                break
-            if not t.startswith("-") or t == "--":
-                return False  # positional before -c → script pos, not after -c
-            j += 1
-        if c_consumed:
-            while j < len(tokens):
-                if _LANE_PY_PAT.search(tokens[j]):
-                    return True
-                j += 1
-        return False
-    return False
+def _normalize_command(cmd: str) -> str:
+    """Collapse simple obfuscation for the legacy fallback scan."""
+    out = _EMPTY_QUOTES_RE.sub("", cmd)
+    out = _BACKSLASH_LETTER_RE.sub(r"\1", out)
+    out = re.sub(r"(?<!\w)(?:[./][^\s]*/)", " ", out)
+    return out
 
 
-def _detect_shadow(cmd: str) -> str | None:
-    """Return shadow rule name if an evasion vector is detected, else None."""
-    if LANE_SCRIPT_PATTERN.search(cmd):
-        # FP-2: lane .py after `python -c <code>` is a program arg, not the executed
-        # script — do not shadow in that case.
-        if not _lane_script_after_python_c(cmd):
-            return "lane_script_direct"
-    if PYTHON_M_LANE_PATTERN.search(cmd):
+def _detect_shadow_legacy(cmd: str) -> str | None:
+    """Shadow rule name via the legacy regex patterns (fallback path)."""
+    if _LANE_SCRIPT_PATTERN.search(cmd):
+        return "lane_script_direct"
+    if _PYTHON_M_LANE_PATTERN.search(cmd):
         return "python_m_lane_module"
-    if _PYTHON_C_PATTERN.search(cmd):
-        # FP-1: only shadow when the import is at statement position in the code string,
-        # not inside a string literal.
-        code = _extract_python_c_code(cmd)
-        if code is not None and _has_lane_import_at_statement(code):
-            return "python_c_lane_import"
+    if _PYTHON_C_PATTERN.search(cmd) and _LANE_IMPORT_PATTERN.search(cmd):
+        return "python_c_lane_import"
+    if _IMPORTLIB_PATTERN.search(cmd):
+        return "importlib_lane_import"
     return None
 
 
-def _classify_full(cmd: str, enforce_mode: bool) -> tuple[str, str | None, str]:
-    """Return (decision, matched_rule, severity).
-
-    decision    : "allow" or "block"
-    matched_rule: rule name, or None for plain allow
-    severity    : "block", "shadow", or "allow"
-    """
-    if not cmd:
-        return "allow", None, "allow"
-
-    # Hard-block: claude raw CLI (always block, VNX_HOOK_ENFORCE irrelevant)
-    if CLAUDE_TOKEN_PATTERN.search(cmd):
-        for pat in CLAUDE_BLOCKED_FLAG_PATTERNS:
-            if pat.search(cmd):
+def _legacy_scan_segment(segment: str, enforce_mode: bool) -> tuple[str, str | None, str]:
+    """Best-effort scan for a segment shlex could not tokenize. Blocks a raw
+    provider spawn; never blanket-allows malformed input."""
+    norm = _normalize_command(segment)
+    if _CLAUDE_TOKEN_PATTERN.search(norm):
+        for pat in _CLAUDE_FLAG_PATTERNS:
+            if pat.search(norm):
                 return "block", "claude_raw_cli", "block"
+    if _KIMI_TOKEN_PATTERN.search(norm) and not _KIMI_ALLOWED_PATTERN.search(norm):
+        for pat in _KIMI_FLAG_PATTERNS:
+            if pat.search(norm):
+                return "block", "kimi_raw_cli", "block"
+    if _CODEX_TOKEN_PATTERN.search(norm) and _CODEX_EXEC_PATTERN.search(norm):
+        return "block", "codex_exec_cli", "block"
+    shadow_rule = _detect_shadow_legacy(segment)
+    if shadow_rule:
+        if enforce_mode:
+            return "block", shadow_rule, "block"
+        return "allow", shadow_rule, "shadow"
+    return "allow", None, "allow"
 
-    # Hard-block: kimi raw CLI
-    if KIMI_TOKEN_PATTERN.search(cmd):
-        if not KIMI_ALLOWED_PATTERN.search(cmd):
-            for pat in KIMI_BLOCKED_FLAG_PATTERNS:
-                if pat.search(cmd):
-                    return "block", "kimi_raw_cli", "block"
 
-    # Hard-block: codex exec
-    if CODEX_TOKEN_PATTERN.search(cmd):
-        if CODEX_EXEC_PATTERN.search(cmd):
-            return "block", "codex_exec_cli", "block"
+# ── Tokenized classification ───────────────────────────────────────────────────
 
-    # Shadow evasion (new rules — respect VNX_HOOK_ENFORCE)
-    shadow_rule = _detect_shadow(cmd)
+def _split_segments(command: str) -> list[str]:
+    """Quote-aware split into top-level segments on ; && || | & and newlines.
+
+    Operators inside single/double quotes (or backslash-escaped) do not split,
+    so a `bash -c "claude -p; echo"` string stays whole for recursion.
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote is not None:
+            buf.append(ch)
+            # backslash escapes the next char only inside double quotes
+            if quote == '"' and ch == "\\" and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if ch in (";", "\n"):
+            segments.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        if ch in ("&", "|"):
+            segments.append("".join(buf))
+            buf = []
+            i += 2 if (i + 1 < n and command[i + 1] == ch) else 1
+            continue
+        buf.append(ch)
+        i += 1
+    segments.append("".join(buf))
+    return [s for s in segments if s.strip()]
+
+
+def _tokenize(text: str) -> list[str]:
+    """POSIX shlex tokens with shell operators split off as their own tokens.
+
+    Raises ValueError on unbalanced quotes (handled by the caller via the
+    legacy fallback). punctuation_chars=True keeps redirects (`<<<`, `>`) from
+    gluing onto an adjacent flag, so `claude -p<<<x` → ['claude','-p','<<<','x'].
+    """
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def _is_operator_token(tok: str) -> bool:
+    """True for a token made up entirely of shell operator/redirect chars."""
+    return bool(tok) and all(c in _OP_CHARS for c in tok)
+
+
+def _value_for_flag(rest: list[str], flag: str) -> str | None:
+    """Value passed to a flag, handling both 'flag value' and 'flagvalue' forms
+    (e.g. '-m provider_dispatch' and '-mprovider_dispatch')."""
+    for i, tok in enumerate(rest):
+        if tok == flag:
+            return rest[i + 1] if i + 1 < len(rest) else None
+        if tok.startswith(flag) and len(tok) > len(flag):
+            return tok[len(flag):]
+    return None
+
+
+def _is_lane_script(basename: str) -> bool:
+    """True if a file basename is a lane module .py (provider_dispatch.py, …)."""
+    return basename.endswith(".py") and basename[:-3] in _LANE_MODULE_NAMES
+
+
+def _strip_prefix_runner(argv: list[str]) -> list[str] | None:
+    """Inner command argv if argv[0] is a transparent prefix runner, else None.
+
+    Drops the runner plus its leading dash-options and NAME=VALUE assignments;
+    returns the remaining argv (the real command), or None if nothing remains.
+    """
+    if os.path.basename(argv[0]) not in _PREFIX_RUNNERS:
+        return None
+    i = 1
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok.startswith("-") or _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        break
+    return argv[i:] if i < n else None
+
+
+def _detect_shadow_argv(argv: list[str]) -> str | None:
+    """Shadow rule name for a tokenized argv, else None."""
+    exe = os.path.basename(argv[0])
+    # Direct lane-script invocation: argv[0] IS the lane .py.
+    if _is_lane_script(exe):
+        return "lane_script_direct"
+    # python / python3 / python3.x forms.
+    if _PYTHON_RE.match(exe):
+        rest = argv[1:]
+
+        # FP-2 fix: a lane .py that appears AFTER `-c <code>` is a program argument
+        # passed to the code string, not the script python executes. Find the -c index
+        # so we can limit the lane-script scan to tokens that precede it.
+        c_idx: int | None = None
+        for j, tok in enumerate(rest):
+            if tok == "-c" or (tok.startswith("-c") and len(tok) > 2):
+                c_idx = j
+                break
+
+        # python <path>/lane.py — only tokens BEFORE the -c position are candidates.
+        scan_limit = c_idx if c_idx is not None else len(rest)
+        for tok in rest[:scan_limit]:
+            if not tok.startswith("-") and _is_lane_script(os.path.basename(tok)):
+                return "lane_script_direct"
+
+        # python -m <lane_module>
+        m_target = _value_for_flag(rest, "-m")
+        if m_target and m_target in _LANE_MODULE_NAMES:
+            return "python_m_lane_module"
+
+        # python -c "<code importing a lane>"
+        # FP-1 fix: use statement-position check instead of bare _LANE_IMPORT_PATTERN
+        # so an import token inside a string literal does not trigger shadow.
+        code = _value_for_flag(rest, "-c")
+        if code:
+            if _IMPORTLIB_PATTERN.search(code):
+                return "importlib_lane_import"
+            if _has_lane_import_at_statement(code):
+                return "python_c_lane_import"
+    return None
+
+
+def _classify_argv(argv: list[str], enforce_mode: bool, depth: int) -> tuple[str, str | None, str]:
+    """Classify a single tokenized command (one shell segment)."""
+    if not argv:
+        return "allow", None, "allow"
+    exe = os.path.basename(argv[0])
+    rest = argv[1:]
+
+    # Hard-block — always block, VNX_HOOK_ENFORCE irrelevant.
+    if exe == "claude" and any(a in _CLAUDE_BLOCKED_FLAGS for a in rest):
+        return "block", "claude_raw_cli", "block"
+    if exe == "kimi" and any(a in _KIMI_BLOCKED_FLAGS for a in rest):
+        return "block", "kimi_raw_cli", "block"
+    if exe == "codex" and "exec" in rest:
+        return "block", "codex_exec_cli", "block"
+
+    # Transparent prefix runner (nohup/env/setsid/stdbuf) → classify inner cmd.
+    if depth < MAX_RECURSION_DEPTH:
+        inner = _strip_prefix_runner(argv)
+        if inner is not None:
+            return _classify_argv(inner, enforce_mode, depth + 1)
+
+    # Shell wrapper -c "<command>" → recurse on the dequoted command string.
+    if exe in _SHELL_WRAPPERS and depth < MAX_RECURSION_DEPTH:
+        inner_code = _value_for_flag(rest, "-c")
+        if inner_code:
+            sub = _classify_command(inner_code, enforce_mode, depth + 1)
+            if sub[2] != "allow":
+                return sub
+
+    # Shadow evasion (respects VNX_HOOK_ENFORCE).
+    shadow_rule = _detect_shadow_argv(argv)
     if shadow_rule:
         if enforce_mode:
             return "block", shadow_rule, "block"
@@ -256,11 +421,53 @@ def _classify_full(cmd: str, enforce_mode: bool) -> tuple[str, str | None, str]:
     return "allow", None, "allow"
 
 
+def _classify_segment(segment: str, enforce_mode: bool, depth: int) -> tuple[str, str | None, str]:
+    """Tokenize and classify one segment; fall back to legacy scan on bad quotes."""
+    seg = segment.strip()
+    if not seg:
+        return "allow", None, "allow"
+    try:
+        tokens = _tokenize(seg)
+    except ValueError:
+        return _legacy_scan_segment(seg, enforce_mode)
+    argv = [t for t in tokens if not _is_operator_token(t)]
+    return _classify_argv(argv, enforce_mode, depth)
+
+
+_SEV_RANK = {"allow": 0, "shadow": 1, "block": 2}
+
+
+def _classify_command(command: str, enforce_mode: bool, depth: int = 0) -> tuple[str, str | None, str]:
+    """Split a command into segments and return the strongest decision.
+
+    Block beats shadow beats allow; the first block short-circuits.
+    """
+    if not command or not command.strip():
+        return "allow", None, "allow"
+    try:
+        segments = _split_segments(command)
+    except Exception:  # noqa: BLE001
+        segments = [command]
+    if not segments:
+        return "allow", None, "allow"
+    best: tuple[str, str | None, str] = ("allow", None, "allow")
+    for seg in segments:
+        dec = _classify_segment(seg, enforce_mode, depth)
+        if dec[2] == "block":
+            return dec
+        if _SEV_RANK[dec[2]] > _SEV_RANK[best[2]]:
+            best = dec
+    return best
+
+
 def classify(cmd: str) -> str:
     """Return 'allow' or 'block'. Reads VNX_HOOK_ENFORCE from environment."""
     enforce_mode = os.environ.get("VNX_HOOK_ENFORCE", "0") == "1"
-    decision, _, _ = _classify_full(cmd, enforce_mode)
-    return decision
+    try:
+        decision, _, _ = _classify_command(cmd or "", enforce_mode)
+        return decision
+    except Exception:  # noqa: BLE001
+        return "allow"  # absolute fail-open
 
 
 def _append_telemetry(cmd: str, matched_rule: str, severity: str, mode: str) -> None:
@@ -285,25 +492,49 @@ def _append_telemetry(cmd: str, matched_rule: str, severity: str, mode: str) -> 
 
 
 def main() -> None:
-    raw = sys.stdin.read()
     try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        # Malformed JSON — fail open to avoid blocking valid work
+        raw = sys.stdin.read()
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            sys.stdout.write("allow\n")
+            return
+
+        # Guard: data must be a dict
+        if not isinstance(data, dict):
+            sys.stdout.write("allow\n")
+            return
+
+        tool_input = data.get("tool_input") or {}
+
+        # Guard: tool_input must be a dict
+        if not isinstance(tool_input, dict):
+            sys.stdout.write("allow\n")
+            return
+
+        raw_cmd = tool_input.get("command", "")
+
+        # Guard: command must be a string; list commands (e.g. ["claude", "-p"]) → allow
+        if not isinstance(raw_cmd, str):
+            sys.stdout.write("allow\n")
+            return
+
+        cmd = raw_cmd
+        enforce_mode = os.environ.get("VNX_HOOK_ENFORCE", "0") == "1"
+        try:
+            decision, matched_rule, severity = _classify_command(cmd, enforce_mode)
+        except Exception:  # noqa: BLE001
+            sys.stdout.write("allow\n")
+            return
+
+        if matched_rule is not None:
+            mode = "enforce" if enforce_mode else "shadow"
+            _append_telemetry(cmd, matched_rule, severity, mode)
+
+        sys.stdout.write(decision + "\n")
+    except Exception:  # noqa: BLE001
+        # Absolute fail-open: any unexpected error → allow, never crash the hook
         sys.stdout.write("allow\n")
-        return
-
-    tool_input = data.get("tool_input") or {}
-    cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-
-    enforce_mode = os.environ.get("VNX_HOOK_ENFORCE", "0") == "1"
-    decision, matched_rule, severity = _classify_full(cmd, enforce_mode)
-
-    if matched_rule is not None:
-        mode = "enforce" if enforce_mode else "shadow"
-        _append_telemetry(cmd, matched_rule, severity, mode)
-
-    sys.stdout.write(decision + "\n")
 
 
 if __name__ == "__main__":

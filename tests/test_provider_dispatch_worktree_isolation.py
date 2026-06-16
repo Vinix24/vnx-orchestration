@@ -1,12 +1,13 @@
 """test_provider_dispatch_worktree_isolation.py — VNX_ISOLATED_WORKTREE for providers.
 
-Verifies (PR-PROVIDER-ISO):
+Verifies (PR-PROVIDER-ISO / PR-7):
 1. With VNX_ISOLATED_WORKTREE=1, each provider dispatch (codex/kimi/gemini/litellm):
    - calls create_dispatch_worktree with the dispatch_id
    - passes the worktree path as cwd to the spawn function
    - calls remove_dispatch_worktree after (success and failure paths)
 2. Without VNX_ISOLATED_WORKTREE, spawn functions receive cwd=None (no isolation).
-3. create_dispatch_worktree failure: dispatch continues in shared path (cwd=None).
+3. create_dispatch_worktree failure (VNX_ISOLATED_WORKTREE=1): dispatch ABORTS (returns 1),
+   spawn NOT called — no silent shared-checkout fallback (PR-7 fail-loud).
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def _make_spawn_result(returncode: int = 0) -> MagicMock:
     return r
 
 
-def _noop_governance(args, provider, model, result, start, end, status):
+def _noop_governance(args, provider, model, result, start, end, status, event_store=None):
     pass
 
 
@@ -385,10 +386,10 @@ class TestProviderWorktreeHelpers:
         assert result == tmp_path
         mock_create.assert_called_once_with("helper-create-test")
 
-    def test_create_returns_none_on_runtime_error(self):
+    def test_create_raises_on_runtime_error(self):
         with patch("dispatch_worktree_isolation.create_dispatch_worktree", side_effect=RuntimeError("disk full")):
-            result = provider_dispatch._create_provider_worktree("helper-fail-test")
-        assert result is None
+            with pytest.raises(RuntimeError, match="disk full"):
+                provider_dispatch._create_provider_worktree("helper-fail-test")
 
     def test_remove_is_best_effort(self):
         """_remove_provider_worktree must not raise even if underlying call fails."""
@@ -399,3 +400,127 @@ class TestProviderWorktreeHelpers:
         with patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove:
             provider_dispatch._remove_provider_worktree("remove-ok-test")
         mock_remove.assert_called_once_with("remove-ok-test")
+
+
+# ---------------------------------------------------------------------------
+# PR-7: fail-loud — VNX_ISOLATED_WORKTREE=1 + create failure → ABORT, no spawn
+# ---------------------------------------------------------------------------
+
+class TestCodexIsolationFailLoud:
+    def test_isolation_create_failure_aborts_dispatch(self):
+        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        spawn_called = []
+
+        def fake_spawn(*a, **kw):
+            spawn_called.append(kw)
+            return _make_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+        mock_event_store.clear = MagicMock()
+
+        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+             patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("provider_dispatch._resolve_codex_model", return_value="gpt-test"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.codex_spawn.spawn_codex", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", side_effect=RuntimeError("disk full")) as mock_create:
+
+            args = provider_dispatch._build_parser().parse_args(_base_argv("codex", "fail-loud-codex"))
+            exit_code = provider_dispatch._dispatch_codex(args)
+
+        assert exit_code == 1
+        mock_create.assert_called_once_with("fail-loud-codex")
+        assert spawn_called == [], "spawn_codex must NOT be called when worktree creation fails"
+
+
+class TestGeminiIsolationFailLoud:
+    def test_isolation_create_failure_aborts_dispatch(self):
+        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        spawn_called = []
+
+        def fake_spawn(*a, **kw):
+            spawn_called.append(kw)
+            return _make_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+        mock_event_store.clear = MagicMock()
+
+        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+             patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.gemini_spawn.spawn_gemini", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", side_effect=RuntimeError("disk full")) as mock_create:
+
+            args = provider_dispatch._build_parser().parse_args(_base_argv("gemini", "fail-loud-gemini"))
+            exit_code = provider_dispatch._dispatch_gemini(args)
+
+        assert exit_code == 1
+        mock_create.assert_called_once_with("fail-loud-gemini")
+        assert spawn_called == [], "spawn_gemini must NOT be called when worktree creation fails"
+
+
+class TestKimiIsolationFailLoud:
+    def test_isolation_create_failure_aborts_dispatch(self):
+        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        spawn_called = []
+
+        def fake_spawn(*a, **kw):
+            spawn_called.append(kw)
+            return _make_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+        mock_event_store.clear = MagicMock()
+
+        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+             patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("provider_dispatch._resolve_kimi_model_label", return_value="kimi-default"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.kimi_spawn.spawn_kimi", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", side_effect=RuntimeError("disk full")) as mock_create:
+
+            args = provider_dispatch._build_parser().parse_args(_base_argv("kimi", "fail-loud-kimi"))
+            exit_code = provider_dispatch._dispatch_kimi(args)
+
+        assert exit_code == 1
+        mock_create.assert_called_once_with("fail-loud-kimi")
+        assert spawn_called == [], "spawn_kimi must NOT be called when worktree creation fails"
+
+
+class TestLiteLLMIsolationFailLoud:
+    def test_isolation_create_failure_aborts_dispatch(self):
+        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        spawn_called = []
+
+        def fake_spawn(*a, **kw):
+            spawn_called.append(kw)
+            return _make_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+        mock_event_store.clear = MagicMock()
+
+        with patch.dict("os.environ", {
+            "VNX_ISOLATED_WORKTREE": "1",
+            "VNX_LITELLM_MODEL": "deepseek/deepseek-v4-pro",
+            "DEEPSEEK_API_KEY": "sk-test",
+        }, clear=False), \
+             patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.litellm_spawn.spawn_litellm", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", side_effect=RuntimeError("disk full")) as mock_create:
+
+            args = provider_dispatch._build_parser().parse_args(
+                _base_argv("litellm:deepseek", "fail-loud-litellm")
+            )
+            exit_code = provider_dispatch._dispatch_litellm(args)
+
+        assert exit_code == 1
+        mock_create.assert_called_once_with("fail-loud-litellm")
+        assert spawn_called == [], "spawn_litellm must NOT be called when worktree creation fails"

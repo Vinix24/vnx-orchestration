@@ -98,9 +98,134 @@ _d_resolve_track() {
   esac
 }
 
+# ── Single-entry dispatch (VNX_SINGLE_ENTRY_DISPATCH=1) ───────────────────
+
+_d_single_entry_dispatch() {
+  # Accepts --spec-file <abs> or <pending-id> (resolved to its bundle's dispatch-spec.json).
+  # VNX_DISPATCH_LEGACY=1 is checked by the caller — not re-checked here.
+  local spec_file=""
+  local dry_run_flag=""
+  local pending_id=""
+  local force_release_class=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --spec-file)
+        # P1 (PR-4c): guard $2 so a trailing `--spec-file` with no value emits a
+        # clean gate error instead of aborting the shell under `set -u`.
+        if [ -z "${2:-}" ]; then
+          err "[dispatch] single-entry gate: --spec-file requires a path argument"
+          return 1
+        fi
+        spec_file="$2"; shift 2 ;;
+      --spec-file=*)
+        spec_file="${1#*=}"; shift ;;
+      --dry-run|-n)
+        dry_run_flag="--dry-run"; shift ;;
+      --force-release-lock)
+        # Optional positional after the flag: next arg without leading -- is class name.
+        if [ -n "${2:-}" ] && [[ "${2:-}" != --* ]]; then
+          force_release_class="$2"; shift
+        else
+          force_release_class="claude-tmux"
+        fi
+        shift ;;
+      --force-release-lock=*)
+        force_release_class="${1#*=}"; shift ;;
+      -h|--help)
+        cat <<HELP
+Usage: vnx dispatch [--spec-file <abs>] [--dry-run]
+       vnx dispatch <pending-id> [--dry-run]
+       vnx dispatch --force-release-lock [<class>]
+
+Single-entry gate (VNX_SINGLE_ENTRY_DISPATCH=1).
+  --spec-file <abs>            Absolute path to dispatch-spec.json
+  <pending-id>                 Dispatch ID resolved to dispatches/pending/<id>/dispatch-spec.json
+  --dry-run                    Print plan + fingerprint; spawn nothing
+  --force-release-lock [CLASS] Release stale serial lock for CLASS (default: claude-tmux).
+                               Prints prior holder pid+dispatch_id; removes lock file.
+                               Does NOT kill the holder — use the printed pid if needed.
+  VNX_DISPATCH_LEGACY=1        Force legacy path even when gate is on
+
+Headless (api_metered) lane: set allow_headless=true + headless_reason in dispatch-spec.json.
+  The --adapter subprocess / VNX_ADAPTER / VNX_AUTO_ROUTE flags are LEGACY-ONLY
+  (cmd_dispatch path when VNX_SINGLE_ENTRY_DISPATCH is unset) and have no effect here.
+HELP
+        return 0 ;;
+      -*)
+        err "[dispatch] single-entry gate: unknown flag: $1"
+        return 1 ;;
+      *)
+        if [ -n "$pending_id" ]; then
+          err "[dispatch] single-entry gate: unexpected positional argument: $1"
+          return 1
+        fi
+        pending_id="$1"; shift ;;
+    esac
+  done
+
+  # --force-release-lock: operator escape, independent of spec-file.
+  if [ -n "$force_release_class" ]; then
+    local dispatch_cli_script="${VNX_HOME}/scripts/lib/dispatch_cli.py"
+    if [ ! -f "$dispatch_cli_script" ]; then
+      err "[dispatch] single-entry gate: dispatch_cli.py not found: $dispatch_cli_script"
+      return 1
+    fi
+    log "[dispatch] force-release-lock: class=$force_release_class"
+    PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+      python3 "$dispatch_cli_script" --force-release-lock "$force_release_class"
+    return $?
+  fi
+
+  if [ -z "$spec_file" ]; then
+    if [ -z "$pending_id" ]; then
+      err "[dispatch] single-entry gate: requires --spec-file <abs> or <pending-id>"
+      return 1
+    fi
+    # P0-2: validate pending-id format BEFORE interpolation into path (traversal guard)
+    if [[ ! "$pending_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+      err "[dispatch] single-entry gate: invalid pending-id format (must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$): $pending_id"
+      return 1
+    fi
+    local candidate="${VNX_DISPATCH_DIR}/pending/${pending_id}/dispatch-spec.json"
+    if [ ! -f "$candidate" ]; then
+      err "[dispatch] single-entry gate: dispatch-spec.json not found: $candidate"
+      return 1
+    fi
+    spec_file="$candidate"
+  fi
+
+  if [ ! -f "$spec_file" ]; then
+    err "[dispatch] single-entry gate: spec file not found: $spec_file"
+    return 1
+  fi
+
+  local dispatch_cli_script="${VNX_HOME}/scripts/lib/dispatch_cli.py"
+  if [ ! -f "$dispatch_cli_script" ]; then
+    err "[dispatch] single-entry gate: dispatch_cli.py not found: $dispatch_cli_script"
+    return 1
+  fi
+
+  log "[dispatch] single-entry gate: spec=$spec_file"
+
+  # P1-#7: no trailing colon (avoids CWD on sys.path when PYTHONPATH is unset)
+  PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
+  return $?
+}
+
 # ── Main command ───────────────────────────────────────────────────────────
 
 cmd_dispatch() {
+  # VNX_SINGLE_ENTRY_DISPATCH=1 delegates to the new single-entry Python gate.
+  # VNX_DISPATCH_LEGACY=1 short-circuits back to the legacy path (rollback hatch).
+  # When neither flag is set: byte-identical legacy behavior below.
+  if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]] && \
+     [[ "${VNX_DISPATCH_LEGACY:-0}" != "1" ]]; then
+    _d_single_entry_dispatch "$@"
+    return $?
+  fi
+
   local file=""
   local terminal_override=""
   local model_override="${VNX_MODEL:-sonnet}"
@@ -269,6 +394,8 @@ HELP
   # VNX_AUTO_ROUTE=1 overrides the bare default tmux lane so smart routing
   # is honoured. Yields to any explicit adapter choice (--adapter flag,
   # Adapter: header, or VNX_ADAPTER env).
+  # LEGACY PATH ONLY — has no effect when VNX_SINGLE_ENTRY_DISPATCH=1.
+  # For headless claude via the door, set allow_headless=true in dispatch-spec.json.
   if [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && \
      [[ -z "$adapter_override" ]] && \
      [[ -z "$adapter_header" ]] && \
