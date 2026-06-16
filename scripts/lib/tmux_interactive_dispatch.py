@@ -22,16 +22,15 @@ import shlex
 import shutil
 import subprocess
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 sys_path_dir = str(Path(__file__).resolve().parent)
-import sys
 
 if sys_path_dir not in sys.path:
     sys.path.insert(0, sys_path_dir)
@@ -1171,6 +1170,10 @@ class TmuxInteractiveDispatch:
                     repo_root=self._project_root,
                 )
                 cwd = worktree_handle.path
+                if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
+                    from benchmark_worker_isolation import materialize_benchmark_seed  # noqa: PLC0415
+
+                    cwd = materialize_benchmark_seed(cwd, dispatch_paths)
             except WorktreeAllocateError as exc:
                 self._emit_event(
                     "interactive_worktree_add_failed",
@@ -1184,6 +1187,31 @@ class TmuxInteractiveDispatch:
                     label=label,
                     failure_reason=f"worktree_add_failed: {exc}",
                     duration_seconds=time.monotonic() - start_time,
+                )
+            except RuntimeError as exc:
+                if worktree_handle is not None:
+                    try:
+                        reap(worktree_handle, classify(worktree_handle))
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        logger.warning(
+                            "interactive: failed to clean materialization-error "
+                            "worktree for %s: %s",
+                            dispatch_id,
+                            cleanup_exc,
+                        )
+                self._emit_event(
+                    "interactive_benchmark_seed_materialization_failed",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason=str(exc),
+                )
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    failure_reason=f"benchmark_seed_materialization_failed: {exc}",
+                    duration_seconds=time.monotonic() - start_time,
+                    worktree_path=str(worktree_handle.path) if worktree_handle else None,
                 )
 
         # Per-dispatch hook signal dir: the SessionStart / UserPromptSubmit / Stop

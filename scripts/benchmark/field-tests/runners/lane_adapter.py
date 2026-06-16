@@ -18,7 +18,6 @@ No mocking; if the dispatcher binary or credentials are missing the call fails l
 """
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -44,6 +43,7 @@ SKILLS_ROOT = REPO_ROOT / ".claude" / "skills"
 # VNX_BENCH_EQUAL_CONTEXT so this structured prompt is the single context source.
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 from skill_prefix import build_structured_prompt  # noqa: E402
+from benchmark_worker_isolation import BENCH_CELL_DIRNAME  # noqa: E402
 
 # Models where the interactive Claude Code lane is known-broken (hidden-thinking
 # loops + interactive-session hangs per Anthropic GitHub #63390 and #64153).
@@ -86,10 +86,7 @@ class DispatchResult:
     stdout: str
     stderr: str
     error: Optional[str] = None
-    # Where the worker's output lives for verify.py. None = repo root
-    # (headless/provider lanes run in the main checkout). tmux-spawn lanes
-    # work in an isolated worktree — scoring the repo root there yields
-    # false positives/negatives (codex-gate PR #831 finding).
+    # Where the worker's isolated, materialized seed output lives for verify.py.
     workdir: Optional[Path] = None
     # Temp checkout created purely for scoring (branch survived, worktree
     # reaped). The runner must remove it after score_cell.
@@ -115,6 +112,7 @@ def _claude_subprocess_headless(
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
+        "VNX_BENCH_SEED_MATERIALIZE": "1",
     }
     cmd = [
         sys.executable, str(SUBPROCESS_DISPATCH),
@@ -155,6 +153,7 @@ def _claude_tmux_spawn(
         # Ephemeral isolated worktree = bounded blast radius; safe to drop scoping.
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
+        "VNX_BENCH_SEED_MATERIALIZE": "1",
     }
     cmd = [
         sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
@@ -166,6 +165,7 @@ def _claude_tmux_spawn(
         "--deadline-seconds", str(deadline_seconds),
         "--allow-unstaged",
         "--reason", f"benchmark run {dispatch_id}",
+        "--isolated-worktree",
     ]
     proc = subprocess.run(
         cmd, env=env, capture_output=True, text=True,
@@ -193,7 +193,12 @@ def _resolve_tmux_workdir(
     """
     wt = REPO_ROOT / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
     if wt.is_dir():
-        return wt, None, None
+        worker_cwd = wt / BENCH_CELL_DIRNAME
+        if worker_cwd.is_dir():
+            return wt, None, None
+        return None, None, (
+            f"tmux benchmark output missing materialized worker CWD: {worker_cwd}"
+        )
 
     branch = f"dispatch/{dispatch_id}"
     probe = subprocess.run(
@@ -207,7 +212,16 @@ def _resolve_tmux_workdir(
             capture_output=True, text=True, check=False,
         )
         if added.returncode == 0:
-            return tmp, tmp, None
+            worker_cwd = tmp / BENCH_CELL_DIRNAME
+            if worker_cwd.is_dir():
+                return tmp, tmp, None
+            subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force", str(tmp)],
+                capture_output=True, text=True, check=False,
+            )
+            return None, None, (
+                f"tmux committed output missing materialized worker CWD: {worker_cwd}"
+            )
         shutil.rmtree(tmp, ignore_errors=True)
         return None, None, (
             f"scoring-worktree add failed for {branch}: "
@@ -252,6 +266,11 @@ def _provider_dispatch(
         "VNX_DATA_DIR": ".vnx-data",
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
+        "VNX_ISOLATED_WORKTREE": "1",
+        "VNX_BENCH_REQUIRE_ISOLATION": "1",
+        "VNX_BENCH_SEED_MATERIALIZE": "1",
+        "VNX_BENCH_PRESERVE_WORKTREE": "1",
+        "VNX_UNIFIED_ENVELOPE": "0",
     }
     provider_map = {
         "litellm:deepseek": "litellm:deepseek",
@@ -278,12 +297,48 @@ def _provider_dispatch(
         "--role", role,
         "--dispatch-paths", dispatch_paths,
         "--instruction", instruction,
+        "--no-auto-commit",
     ]
     proc = subprocess.run(
         cmd, env=env, capture_output=True, text=True,
         timeout=deadline_seconds + 60, check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _resolve_provider_workdir(
+    stdout: str,
+    stderr: str,
+) -> tuple[Optional[Path], Optional[str]]:
+    """Read the benchmark provider isolation worktree emitted by provider_dispatch."""
+    prefix = "VNX_PROVIDER_WORKDIR="
+    for line in reversed((stdout + "\n" + stderr).splitlines()):
+        if not line.startswith(prefix):
+            continue
+        workdir = Path(line[len(prefix):].strip()).resolve()
+        if workdir == REPO_ROOT.resolve():
+            return None, "provider workdir resolved to shared main checkout"
+        if workdir.is_dir() and (workdir / BENCH_CELL_DIRNAME).is_dir():
+            return workdir, None
+        return None, f"provider benchmark output missing at {workdir}"
+    return None, "provider isolation workdir marker missing"
+
+
+def _main_seed_status(dispatch_paths: str) -> tuple[str, Optional[str]]:
+    """Return porcelain status for benchmark seed paths in the main checkout."""
+    paths = [p.strip() for p in dispatch_paths.split(",") if p.strip()]
+    if not paths:
+        return "", None
+    proc = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--", *paths],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        return "", (
+            "main-repo seed invariant check failed: "
+            f"{(proc.stderr or proc.stdout).strip()[:300]}"
+        )
+    return proc.stdout.strip(), None
 
 
 def dispatch(
@@ -306,6 +361,18 @@ def dispatch(
     dispatch_id = f"bench-{lane['id']}-{task_id}-r{replication}-{ts}"
     start = time.monotonic()
 
+    seed_status, seed_status_err = _main_seed_status(dispatch_paths)
+    if seed_status_err or seed_status:
+        error = seed_status_err or (
+            "main-repo seed paths dirty before dispatch; refusing benchmark cell: "
+            f"{seed_status[:300]}"
+        )
+        return DispatchResult(
+            lane_id=lane["id"], task_id=task_id, replication=replication,
+            dispatch_id=dispatch_id, success=False, wallclock_seconds=0.0,
+            report_path=None, stdout="", stderr="", error=error,
+        )
+
     # Uniform skill injection for ALL lanes (per Vincent 2026-06-05).
     # Place T0's instruction in the middle of the role/SOP/resources frame.
     if skill_names:
@@ -315,6 +382,7 @@ def dispatch(
     role = next((name for name in skill_names or [] if name), "backend-developer")
 
     via_tmux = False
+    via_provider = lane["provider"] != "claude"
     try:
         if lane["provider"] == "claude":
             # Check BOTH lane id and model_arg — models.yaml uses short aliases
@@ -335,11 +403,16 @@ def dispatch(
             )
     except subprocess.TimeoutExpired as exc:
         wallclock = time.monotonic() - start
+        seed_status, seed_status_err = _main_seed_status(dispatch_paths)
+        invariant_error = seed_status_err or (
+            f"main-repo seed contamination after timeout: {seed_status[:300]}"
+            if seed_status else None
+        )
         return DispatchResult(
             lane_id=lane["id"], task_id=task_id, replication=replication,
             dispatch_id=dispatch_id, success=False, wallclock_seconds=wallclock,
             report_path=None, stdout="", stderr=str(exc),
-            error=f"timeout after {deadline_seconds}s",
+            error=invariant_error or f"timeout after {deadline_seconds}s",
         )
 
     wallclock = time.monotonic() - start
@@ -361,7 +434,15 @@ def dispatch(
     #   - rc_nonzero: dispatcher itself returned non-zero
     failure_reason: Optional[str] = None
     if rc != 0 and report_path is None:
-        if wallclock < MIN_REAL_WALLCLOCK_SECONDS:
+        if (
+            "benchmark provider isolation required" in err
+            or "benchmark seed materialization" in err
+        ):
+            failure_reason = (
+                "provider isolation failed; refusing shared main checkout: "
+                f"{err.strip()[-300:]}"
+            )
+        elif wallclock < MIN_REAL_WALLCLOCK_SECONDS:
             failure_reason = (
                 f"immediate_exit (wall={wallclock:.2f}s, rc={rc}); "
                 "likely subscription rate-limit or session-create failure"
@@ -373,14 +454,26 @@ def dispatch(
     elif report_path is None:
         failure_reason = "no_report (worker rc=0 but never emitted unified_report)"
 
-    # tmux lanes: locate the worker's actual output for verify.py. Headless
-    # and provider lanes work in the main checkout (workdir=None → repo root).
+    # Locate the worker's actual materialized seed output for verify.py.
     workdir: Optional[Path] = None
     scoring_worktree: Optional[Path] = None
     if via_tmux and failure_reason is None:
         workdir, scoring_worktree, workdir_err = _resolve_tmux_workdir(dispatch_id)
         if workdir_err:
             failure_reason = f"unscorable: {workdir_err}"
+    elif via_provider and failure_reason is None:
+        workdir, workdir_err = _resolve_provider_workdir(out, err)
+        if workdir_err:
+            failure_reason = f"unscorable: {workdir_err}"
+
+    seed_status, seed_status_err = _main_seed_status(dispatch_paths)
+    if seed_status_err:
+        failure_reason = seed_status_err
+    elif seed_status:
+        failure_reason = (
+            "main-repo seed contamination after dispatch: "
+            f"{seed_status[:300]}"
+        )
 
     success = failure_reason is None
 

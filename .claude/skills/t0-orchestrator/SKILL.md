@@ -466,14 +466,13 @@ Before dispatching:
 
 ```bash
 bash .claude/skills/t0-orchestrator/scripts/dispatch_guard.sh
-bash .claude/skills/t0-orchestrator/scripts/provider_capabilities.sh current
 ```
 
-1. If guard returns WAIT, do not dispatch.
-2. Use provider capability output for mode/model fields.
-3. Keep non-Claude constraints in mind (mode/model differences).
+1. If the guard returns WAIT (exit 2), do not dispatch.
+2. Pick the lane and provider string from §9.4.1 (provider-string routing cheat-sheet).
+3. Keep provider constraints in mind — the binding SSOT is `scripts/lib/providers/provider_constraints.yaml` (kimi-via-cli-only, zai-via-openrouter-only, deprecated-glm-models, t0-opus-only, workers-sonnet-pinned, no-anthropic-sdk, deepseek-harness-subscription-blocked).
 
-See full matrix in `references/provider-matrix.md`.
+Before any multi-lane or parallel dispatch, also read §9.4 (common dispatch failure modes and guardrails) — those are the mistakes that actually recur.
 
 ### 9.1 Pre-Dispatch Pane Verification
 
@@ -591,6 +590,36 @@ alternative.
 
 **Backward-compat:** existing T1/T2/T3 terminal-pin via subprocess_dispatch.py
 continues to work. Pool is additive. Migration to pool-default is post-1.0 (FUT-3+).
+
+### 9.4 Common dispatch failure modes and guardrails
+
+These are the dispatch mistakes that actually recur — observed, not hypothetical. Scan this
+table before and during any multi-lane or parallel dispatch. A dispatch that "did nothing" or
+"billed wrong" is almost always one of these.
+
+| Symptom | Root cause | Guardrail |
+|---|---|---|
+| Worker spawns but sits idle at its prompt; the instruction never runs, no start-receipt | tmux warmup/submit handshake missed on cold start (SessionStart / UserPromptSubmit hook race) — most common on claude/opus | After spawn, confirm the worker actually received the instruction (pane shows it running, or a start-receipt appears). If idle, hand-deliver: `tmux send-keys -t <pane> -l "<instruction>"` then a **separate** `tmux send-keys -t <pane> Enter`. Enter is ALWAYS its own keystroke — never combined with the text. ([[feedback-tmux-sendkeys-enter]], [[hook-driven-lane-reliability]]) |
+| Parallel claude dispatches: warmup-misses + instant ~0.1s exits | Subscription complexity-throttle under concurrent claude load (measured 2026-06-04, parallel=3) | **Serialize claude (tmux) lanes — dispatch them one at a time.** Provider lanes (codex/kimi/deepseek/glm) stay parallel. Policy: `routing_policy.yaml: claude_serial_under_load`. Benchmark runner flag: `--claude-serial`. |
+| The ENTIRE Bash dispatch command is blocked by the PreToolUse hook — nothing runs | The raw-spawn guard greps the WHOLE command string. An inline `--instruction` (or heredoc) containing the literal tokens `codex exec`, `claude -p`/`--print`, `kimi --print`/`-p`, or `--dangerously-skip-permissions` trips it. Only `subprocess_dispatch.py` and `provider_dispatch.py` are allowlisted — **`tmux_interactive_dispatch.py` is NOT** | Write the instruction to a file (Write tool) and pass it as `--instruction "$(cat /abs/path/instruction.md)"`. The hook sees the literal `$(cat …)` (pre-expansion) which carries no spawn token, so it passes; the shell expands it at run time. Keep the inline command free of those literal tokens. ([[heredoc-spawn-guard-trap]]) |
+| Worker dirties / contaminates the shared checkout; benchmark or parallel cells collide | Lane ran in the shared main checkout. tmux lane defaults `--isolated-worktree` ON; **provider lanes do NOT isolate unless `VNX_ISOLATED_WORKTREE=1`**, and worktree creation can SILENTLY fall back to the shared checkout | For provider lanes and any parallel/benchmark work, set `VNX_ISOLATED_WORKTREE=1` AND verify a worktree was actually created (do not trust the flag). For sequential safety, reset the checkout between dispatches. Never run two writers in one checkout. ([[worktree-isolation-gap-parallel-collision]]) |
+| Claude work silently bills API credits instead of the subscription | claude routed via a headless path (`claude -p` / subprocess-headless / a stale `HEADLESS_FORCED_MODELS` set) | Post 15-juni cutover, route claude (sonnet/opus) through the **tmux lane (subscription), never headless**. Headless `claude -p` = API credits; the tmux lane is the billing escape. ([[vnx-june15-tmux-escape]]) |
+| Provider dispatch rejected as a constraint violation, or routed to the wrong endpoint | Wrong provider string (see §9.4.1) | Use the exact strings in §9.4.1. `litellm:zai` is CORRECT for GLM — it resolves to OpenRouter (satisfies `zai-via-openrouter-only`), it is NOT direct Zhipu. `kimi` (CLI OAuth) is the production lane, NOT `litellm:moonshot`. |
+| Worker can't find the files the instruction names; produces no change → unscorable / no PR | Seed/target paths not materialized at the worker's effective CWD (relative paths resolve against the worktree root, not the buried seed dir) | Pass `--dispatch-paths` with the paths the worker must touch, and make the instruction's paths match what the worker actually sees at its CWD. For benchmark cells, the seed must be materialized at the worktree root. |
+
+#### 9.4.1 Provider-string routing cheat-sheet
+
+| Model(s) | Lane / provider string | Notes / constraint |
+|---|---|---|
+| sonnet / opus (claude) | `tmux_interactive_dispatch.py` (default) — `--model sonnet`\|`opus` | Subscription. NEVER headless `claude -p` (= API billing). Serialize under load. |
+| codex (gpt-5.x) | `provider_dispatch.py --provider codex` | Has tools. Retry once on lane-launch DNF (`codex_retry_once`). |
+| kimi (k2.x) | `provider_dispatch.py --provider kimi` | **kimi CLI OAuth only** (`kimi-via-cli-only`). NOT `litellm:moonshot` (bare API, violates the constraint — exists only as a benchmark baseline). |
+| GLM-5.1 | `provider_dispatch.py --provider litellm:zai` | Resolves to `openrouter/z-ai/glm-5` + `OPENROUTER_API_KEY` → satisfies `zai-via-openrouter-only`. GLM-4.5/4.6 rejected (`deprecated-glm-models`). |
+| DeepSeek (tools) | `provider_dispatch.py --provider deepseek-harness` | Anthropic-compat via harness, own `DEEPSEEK_API_KEY` + hardening. Has tools. NOT on the prod OAuth subscription. |
+| DeepSeek (bare) | `provider_dispatch.py --provider litellm:deepseek` | Chat-only, NO tools. Baseline/comparison only. |
+| local gemma | `provider_dispatch.py --provider local-gemma` | Free, local; mechanical / cutoff-resilient checks. |
+
+SSOT: constraints → `scripts/lib/providers/provider_constraints.yaml`; routing policy → `routing_policy.yaml`; pricing/registry → `wave7_models.yaml`.
 
 ## 10. Manager Block Quality Standard
 
