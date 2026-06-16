@@ -220,6 +220,12 @@ def _extract_protocol_python_path(text: str, block_index: int = 0) -> str:
     )
 
 
+# Pane content that satisfies BOTH a warmup-readiness marker ("? for shortcuts") and the
+# version-robust working indicator (token-counter shape + "esc to interrupt"), so the
+# work-started gate observes a genuinely-working worker and proceeds to the receipt wait.
+_READY_AND_WORKING = "? for shortcuts\n✢ Working… (3s · ↓ 120 tokens) · esc to interrupt"
+
+
 class _LaneTestCase(unittest.TestCase):
     DISPATCH_ID = "20260527-tmuxint-test"
 
@@ -254,6 +260,9 @@ class _LaneTestCase(unittest.TestCase):
             "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
             "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
             "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+            # Work-started gate: keep the window tiny so tests never hang on it.
+            "VNX_TMUX_WORK_START_TIMEOUT": "0.1",
+            "VNX_TMUX_WORK_START_POLL": "0.02",
         }
         with patch.dict(os.environ, _env):
             return lane.dispatch("Do the thing.", self.DISPATCH_ID, **kwargs)
@@ -463,6 +472,7 @@ class TestTimeoutTeardown(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # worker IS working → gate passes → real deadline path
         )
         lane = self._make_lane(fake)
         result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
@@ -553,12 +563,110 @@ class TestStaleReceiptGuard(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # working worker → gate passes → stale receipt still ignored at deadline
         )
         lane = self._make_lane(fake)
         result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
 
         self.assertFalse(result.success)
         self.assertIn("deadline", result.failure_reason)
+
+
+class TestWorkStartedGate(_LaneTestCase):
+    """7b-bis work-started watchdog: fast-abort a no-progress worker instead of hanging
+    to the full deadline (the warmup-miss/no-progress hang), with a guarded re-nudge."""
+
+    def test_no_progress_fast_aborts_before_deadline(self):
+        """Worker submits but never starts working: fast-abort as interactive_no_progress,
+        well before the (long) receipt deadline would fire."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,                 # never writes a receipt
+            # ready_content default ("Welcome to Claude\n? for shortcuts"): warms up
+            # but shows NO working indicator → no work ever observed.
+        )
+        lane = self._make_lane(fake)
+        # Long deadline; the gate (0.1s window via _fast_dispatch env) must abort first.
+        result = self._fast_dispatch(lane, deadline_seconds=30.0, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "interactive_no_progress")
+        # Must NOT have waited anywhere near the 30s deadline.
+        self.assertLess(result.duration_seconds, 5.0)
+        self.assertTrue(fake.killed_sessions, "kill-session must run on no-progress teardown")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn("interactive_no_progress", {e["event_type"] for e in events})
+
+    def test_working_worker_proceeds_to_receipt(self):
+        """Worker shows a working indicator (no receipt yet): gate passes, lane proceeds
+        to the receipt wait and ends on the deadline path — NOT a no-progress abort."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+        self.assertNotEqual(result.failure_reason, "interactive_no_progress")
+
+    def test_gate_disabled_restores_prior_behavior(self):
+        """VNX_TMUX_WORK_START_GATE=0: no work-started gate; a no-progress worker waits
+        the receipt deadline (the pre-fix behavior), not a fast no-progress abort."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+        with patch.dict(os.environ, {"VNX_TMUX_WORK_START_GATE": "0"}):
+            result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+
+    def test_hand_deliver_renudges_when_still_staged(self):
+        """Unit test of the gate directly: when no work is observed AND the instruction
+        is still staged in the input region, the gate sends ONE guarded re-nudge Enter
+        and emits interactive_hand_deliver, then returns False (no work)."""
+        # Persistent staged content (would trip _verify_submit in a full dispatch, so we
+        # exercise the gate method directly): capture-pane always shows the paste
+        # annotation and no working indicator.
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content="? for shortcuts\n[Pasted text #1 +900 lines]",
+        )
+        lane = self._make_lane(fake)
+        with patch.dict(os.environ, {
+            "VNX_TMUX_WORK_START_TIMEOUT": "0.1",
+            "VNX_TMUX_WORK_START_POLL": "0.02",
+        }):
+            observed = lane._await_work_started(
+                "%1",
+                self.DISPATCH_ID,
+                signal_dir=None,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                completion_statuses=frozenset({"done", "success"}),
+                label="T1",
+            )
+
+        self.assertFalse(observed, "no work was ever observed")
+        enters = [
+            c for c in fake.commands
+            if c[:1] == ["send-keys"] and c[-1] == "Enter"
+        ]
+        self.assertTrue(enters, "a guarded re-nudge Enter must be sent when still staged")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn("interactive_hand_deliver", {e["event_type"] for e in events})
 
 
 class TestHeadlessGuard(_LaneTestCase):
@@ -1135,6 +1243,7 @@ class TestUnifiedReportEmission(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # working worker → real deadline (not no-progress) path
         )
         lane = self._make_lane(fake)
 
@@ -1680,6 +1789,7 @@ class TestReceiptFallback(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # working worker → real deadline (not no-progress) path
         )
         lane = self._make_lane(fake)
 

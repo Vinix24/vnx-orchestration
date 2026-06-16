@@ -827,6 +827,97 @@ class TmuxInteractiveDispatch:
         )
         return False
 
+    def _await_work_started(
+        self,
+        pane_id: str,
+        dispatch_id: str,
+        *,
+        signal_dir: "Path | None",
+        baseline_count: int,
+        baseline_pending_ids: "frozenset[str]",
+        completion_statuses: frozenset,
+        label: str,
+    ) -> bool:
+        """Confirm the worker actually STARTED working after a verified submit.
+
+        ``_verify_submit`` confirms the input box is no longer staged, but under
+        subscription load a submit can clear the box without the worker progressing —
+        Claude idles at the prompt and never writes a receipt. Without this gate the
+        lane would then wait the FULL ``deadline_seconds`` for a receipt that never
+        comes (the recurring warmup-miss/no-progress hang in DISPATCH_RULES §7).
+
+        This bounded watchdog polls for a real work signal — the UserPromptSubmit
+        sentinel, a version-robust working indicator (``_looks_working``), or a fresh
+        receipt — and re-nudges ONCE with a guarded Enter if the instruction is still
+        staged (never a stray Enter into a running session). It returns True as soon as
+        work is observed; False if no work appears within the window, so the caller can
+        FAST-ABORT (retryable in seconds) instead of burning the full deadline.
+
+        Gate is on by default; set ``VNX_TMUX_WORK_START_GATE=0`` to restore the prior
+        proceed-straight-to-receipt-wait behavior.
+        """
+        if os.environ.get("VNX_TMUX_WORK_START_GATE", "1").strip().lower() in (
+            "0", "false", "no", "off"
+        ):
+            return True
+
+        timeout = float(os.environ.get("VNX_TMUX_WORK_START_TIMEOUT", "120"))
+        poll = float(os.environ.get("VNX_TMUX_WORK_START_POLL", "3"))
+        prompt_sentinel = (signal_dir / "prompt_received") if signal_dir else None
+
+        def _work_observed() -> bool:
+            # (a) UserPromptSubmit hook fired → worker accepted the prompt and is running.
+            try:
+                if prompt_sentinel is not None and prompt_sentinel.exists():
+                    return True
+            except OSError:
+                pass
+            # (b) version-robust working indicator anywhere in the pane.
+            cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+            content = cap.stdout if cap.returncode == 0 else ""
+            if content and self._looks_working(content):
+                return True
+            # (c) a receipt already appeared for this dispatch (a fast worker that
+            # finished before the first poll, or any progress receipt).
+            canonical, pending = self._matching_receipts_split(
+                dispatch_id, completion_statuses
+            )
+            if len(canonical) > baseline_count:
+                return True
+            if frozenset(
+                r.get("_pending_file", "") for r in pending
+            ) - baseline_pending_ids:
+                return True
+            return False
+
+        def _still_staged() -> bool:
+            cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+            content = cap.stdout if cap.returncode == 0 else ""
+            lines = content.splitlines()
+            region = "\n".join(lines[-self._INPUT_REGION_LINES:]) if lines else ""
+            return ("[Pasted text" in region) or (self._END_SENTINEL in region)
+
+        deadline = time.monotonic() + timeout
+        nudged = False
+        while time.monotonic() < deadline:
+            if _work_observed():
+                return True
+            # Guarded hand-deliver: re-submit ONCE, and only while the instruction is
+            # still staged right now — never a stray Enter into a session that just
+            # started working.
+            if not nudged and _still_staged():
+                self._emit_event(
+                    "interactive_hand_deliver",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="no work observed after submit; re-submitting staged instruction",
+                    metadata={"pane_id": pane_id},
+                )
+                self._runner.run(["send-keys", "-t", pane_id, "Enter"])
+                nudged = True
+            time.sleep(poll)
+        return _work_observed()
+
     def _paste(self, pane_id: str, content: str, max_inline: int = 50000) -> bool:
         """Load *content* into a tmux buffer and paste it into the pane."""
         if len(content) > max_inline:
@@ -1676,6 +1767,50 @@ class TmuxInteractiveDispatch:
                     window_id=window_id,
                     pane_id=pane_id,
                     failure_reason="submit_failed",
+                    duration_seconds=time.monotonic() - start_time,
+                    worktree_state=_wt_state[0],
+                )
+
+            # 7b-bis. Confirm the worker actually STARTED working. A verified submit can
+            # still clear the input box without the worker progressing under subscription
+            # load; without this gate the lane would wait the full deadline for a receipt
+            # that never comes (the warmup-miss/no-progress hang in DISPATCH_RULES §7).
+            # Fast-abort (retryable in seconds) instead of burning deadline_seconds.
+            if not self._await_work_started(
+                pane_id,
+                dispatch_id,
+                signal_dir=signal_dir,
+                baseline_count=baseline,
+                baseline_pending_ids=baseline_pending_ids,
+                completion_statuses=completion_statuses,
+                label=label,
+            ):
+                self._emit_event(
+                    "interactive_no_progress",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="worker never started working after submit; fast-abort before deadline",
+                    metadata={"session": session, "pane_id": pane_id},
+                )
+                self._govern_report(
+                    dispatch_id=dispatch_id,
+                    terminal_id=label,
+                    instruction=instruction,
+                    receipt=None,
+                    duration_seconds=time.monotonic() - start_time,
+                    base_sha=worktree_handle.base_sha if worktree_handle else None,
+                    worktree_path=worktree_handle.path if worktree_handle else None,
+                    model=model,
+                )
+                _teardown("no_progress")
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    window_id=window_id,
+                    pane_id=pane_id,
+                    failure_reason="interactive_no_progress",
                     duration_seconds=time.monotonic() - start_time,
                     worktree_state=_wt_state[0],
                 )
