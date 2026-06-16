@@ -1,4 +1,4 @@
-"""Tests for pretooluse_spawn_detector.py PR-9 / PR-9b changes.
+"""Tests for pretooluse_spawn_detector.py PR-9 / PR-9b / PR-9c changes.
 
 Covers:
   - Evasion #1 closed: ALLOWLIST_PATTERN removed; provider_dispatch.py + claude -p → block
@@ -13,6 +13,13 @@ Covers:
   - P0-B: raw-CLI bypass closures (path-form, de-quoting, redirect/here-string)
   - P1-A: enforce-mode shadow over-match (mentions vs invocations)
   - P1-A: -m/-c no-space forms; importlib.import_module detection
+
+PR-9c (shlex-tokenized argv model):
+  - Quote-dequoting closed: cl'a'ude -p, claude "-p", codex "exec", e"x"ec → block
+  - kimi allow-mask killed: kimi --version && kimi --print x → block (2nd segment)
+  - Nested bash -c: bash -c "cla""ude -p" → block
+  - Arg-position false-positives allowed: echo/ls/git ... claude -p, lane.py as arg
+  - Unbalanced-quote fallback: still blocks a raw provider spawn, never blanket-allows
 """
 
 from __future__ import annotations
@@ -541,3 +548,231 @@ class TestMalformedInput:
             with mock.patch("sys.stdout", captured):
                 det.main()
         assert captured.getvalue().strip() == "allow"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PR-9c — shlex-tokenized argv model
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Every shell-quoting bypass codex re-gated must hard-block in BOTH modes.
+QUOTE_DEQUOTE_BLOCK_CASES = [
+    "cl'a'ude -p 'x'",
+    'c"l"a"u"de -p \'x\'',
+    'claude "-p" \'x\'',
+    'kimi "--print" x',
+    "kimi '-p' x",
+    'codex "exec" --json',
+    'codex e"x"ec --json',
+    'bash -c "cla""ude -p"',          # nested: outer shlex → inner cla""ude -p → recurse
+]
+
+# kimi allow-mask: the benign segment must NOT short-circuit a sibling block.
+KIMI_MASK_BLOCK_CASES = [
+    "kimi --version && kimi --print x",
+    "kimi --print x && kimi --version",
+    "kimi login && kimi -p x",
+    "kimi --version; kimi --print x",
+]
+
+# Already-closed bypass set (regression guard under the new model).
+PRIOR_CLOSED_BLOCK_CASES = [
+    "/usr/local/bin/claude -p 'x'",   # path-form
+    "./codex exec",                    # dotslash path-form
+    "claude -p<<<'x'",                 # here-string redirect
+    "kimi --print<<<x",
+    "codex exec<<<x",
+    'co""dex exec',                    # empty-quote collapse
+]
+
+# Arg-position false-positives: provider/lane name is an ARGUMENT, not argv[0].
+FALSE_POSITIVE_ALLOW_CASES = [
+    "echo /tmp/claude -p",
+    "ls /tmp/claude -p",
+    "git log --grep claude -p",
+    "git log -p",
+    "echo provider_dispatch.py",
+    "git grep provider_dispatch.py",
+    "cat docs/provider_dispatch.py",
+    "python -c \"print('import provider_dispatch')\"",
+]
+
+# Benign invocations of the provider CLIs themselves.
+BENIGN_PROVIDER_ALLOW_CASES = [
+    "claude --version",
+    "kimi login",
+    "claude",
+    "codex --help",
+]
+
+# Shadow invocation forms: allow+log by default, block under VNX_HOOK_ENFORCE=1.
+SHADOW_CASES = [
+    "python -mprovider_dispatch",
+    "python -c'import provider_dispatch'",
+    "python3 -c 'import importlib; importlib.import_module(\"provider_dispatch\")'",
+    "tmux_interactive_dispatch.py",
+]
+
+
+class TestPR9cQuoteDequoting:
+    """Shell quoting must not evade the hard-block (codex P0)."""
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    @pytest.mark.parametrize("cmd", QUOTE_DEQUOTE_BLOCK_CASES)
+    def test_quote_dequote_blocks(self, cmd, enforce):
+        assert _classify(cmd, enforce=enforce) == "block"
+
+
+class TestPR9cKimiAllowMask:
+    """A benign kimi segment must not mask a blocking sibling segment (codex P0)."""
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    @pytest.mark.parametrize("cmd", KIMI_MASK_BLOCK_CASES)
+    def test_kimi_mask_blocks(self, cmd, enforce):
+        assert _classify(cmd, enforce=enforce) == "block"
+
+
+class TestPR9cPriorBypassesStillBlock:
+    """Path-form / here-string / empty-quote bypasses stay closed."""
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    @pytest.mark.parametrize("cmd", PRIOR_CLOSED_BLOCK_CASES)
+    def test_prior_bypass_blocks(self, cmd, enforce):
+        assert _classify(cmd, enforce=enforce) == "block"
+
+
+class TestPR9cArgPositionFalsePositives:
+    """Provider/lane name as an argument (not argv[0]) must ALLOW in both modes."""
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    @pytest.mark.parametrize("cmd", FALSE_POSITIVE_ALLOW_CASES)
+    def test_false_positive_allows(self, cmd, enforce):
+        assert _classify(cmd, enforce=enforce) == "allow"
+
+
+class TestPR9cBenignProvidersAllow:
+    """Benign provider invocations always allow."""
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    @pytest.mark.parametrize("cmd", BENIGN_PROVIDER_ALLOW_CASES)
+    def test_benign_provider_allows(self, cmd, enforce):
+        assert _classify(cmd, enforce=enforce) == "allow"
+
+
+class TestPR9cShadowForms:
+    """Shadow forms: allow+log by default, block under enforce."""
+
+    @pytest.mark.parametrize("cmd", SHADOW_CASES)
+    def test_shadow_default_allows(self, cmd):
+        assert _classify(cmd, enforce=False) == "allow"
+
+    @pytest.mark.parametrize("cmd", SHADOW_CASES)
+    def test_shadow_enforce_blocks(self, cmd):
+        assert _classify(cmd, enforce=True) == "block"
+
+    def test_lane_name_as_argument_no_shadow(self):
+        # A lane name passed to a non-python tool is not a lane invocation.
+        assert _classify("git grep provider_dispatch.py", enforce=True) == "allow"
+
+    def test_python_c_string_literal_mention_no_shadow(self):
+        # Mention inside a string literal must not match (negative lookbehind).
+        assert _classify(
+            "python -c \"print('import provider_dispatch')\"", enforce=True
+        ) == "allow"
+
+
+class TestPR9cPrefixRunners:
+    """Transparent command-prefix runners are unwrapped, then classified."""
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_nohup_claude_p_blocks(self, enforce):
+        assert _classify('nohup claude -p "task" &', enforce=enforce) == "block"
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_nohup_kimi_print_blocks(self, enforce):
+        assert _classify('nohup kimi --print "task" &', enforce=enforce) == "block"
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_nohup_codex_exec_blocks(self, enforce):
+        assert _classify("nohup codex exec --json &", enforce=enforce) == "block"
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_env_assignment_claude_p_blocks(self, enforce):
+        assert _classify('env FOO=bar claude -p "task"', enforce=enforce) == "block"
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_setsid_claude_p_blocks(self, enforce):
+        assert _classify("setsid claude -p x", enforce=enforce) == "block"
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_nohup_bash_c_claude_p_blocks(self, enforce):
+        assert _classify('nohup bash -c "claude -p"', enforce=enforce) == "block"
+
+    def test_bare_nohup_allows(self):
+        assert _classify("nohup", enforce=True) == "allow"
+
+
+class TestPR9cUnbalancedQuoteFallback:
+    """shlex.ValueError → legacy scan: still blocks a raw spawn, never blanket-allows."""
+
+    def test_unbalanced_quote_claude_p_blocks(self):
+        assert _classify('claude -p "unterminated') == "block"
+
+    def test_unbalanced_quote_kimi_print_blocks(self):
+        assert _classify("kimi --print 'unterminated") == "block"
+
+    def test_unbalanced_quote_benign_allows(self):
+        assert _classify('echo "unterminated') == "allow"
+
+    def test_unbalanced_quote_main_single_line(self, tmp_path):
+        # main() must emit exactly one decision line, never a traceback.
+        payload = json.dumps({"tool_input": {"command": 'claude -p "unterminated'}})
+        data_dir = tmp_path / "_vnx_test_data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        env = {"VNX_DATA_DIR": str(data_dir), "VNX_DATA_DIR_EXPLICIT": "1"}
+        captured = io.StringIO()
+        with mock.patch.dict(os.environ, env):
+            with mock.patch("sys.stdin", io.StringIO(payload)):
+                with mock.patch("sys.stdout", captured):
+                    det.main()
+        out = captured.getvalue()
+        assert out.count("\n") == 1
+        assert out.strip() == "block"
+
+
+class TestPR9cFailOpenExtras:
+    """Additional fail-open payloads emit exactly one line, never a traceback."""
+
+    def test_list_command_claude_p_allows(self, tmp_path):
+        payload = json.dumps({"tool_input": {"command": ["claude", "-p"]}})
+        assert _run_main_raw(payload, tmp_path) == "allow"
+
+    def test_tool_input_int_allows(self, tmp_path):
+        assert _run_main_raw(json.dumps({"tool_input": 42}), tmp_path) == "allow"
+
+    def test_empty_stdin_allows(self, tmp_path):
+        assert _run_main_raw("", tmp_path) == "allow"
+
+    def test_list_payload_allows(self, tmp_path):
+        assert _run_main_raw("[]", tmp_path) == "allow"
+
+
+class TestPR9cTelemetryRules:
+    """Matched-rule names are stable under the tokenized model."""
+
+    def test_kimi_mask_second_segment_logs_kimi_rule(self, tmp_path):
+        decision, entries = _run_main("kimi --version && kimi --print x", tmp_path)
+        assert decision == "block"
+        assert len(entries) == 1
+        assert entries[0]["matched_rule"] == "kimi_raw_cli"
+        assert entries[0]["severity"] == "block"
+
+    def test_dequote_claude_logs_claude_rule(self, tmp_path):
+        decision, entries = _run_main("cl'a'ude -p 'x'", tmp_path)
+        assert decision == "block"
+        assert len(entries) == 1
+        assert entries[0]["matched_rule"] == "claude_raw_cli"
+
+    def test_false_positive_writes_no_telemetry(self, tmp_path):
+        decision, entries = _run_main("git log --grep claude -p", tmp_path, enforce=True)
+        assert decision == "allow"
+        assert entries == []
