@@ -776,3 +776,57 @@ class TestPR9cTelemetryRules:
         decision, entries = _run_main("git log --grep claude -p", tmp_path, enforce=True)
         assert decision == "allow"
         assert entries == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PR-9d — enforce-mode shadow false-positive fixes
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFP1StringLiteralImport:
+    """FP-1: import inside a string literal must NOT trigger shadow block under enforce."""
+
+    def test_string_assign_import_enforce_allows(self):
+        # `s = 'import provider_dispatch'` — import is a string value, not a statement.
+        cmd = """python -c "s = 'import provider_dispatch'" """
+        assert _classify(cmd, enforce=True) == "allow"
+
+    def test_print_string_import_enforce_allows(self):
+        # `print('import provider_dispatch')` — import is inside a function call string.
+        cmd = """python -c "print('import provider_dispatch')" """
+        assert _classify(cmd, enforce=True) == "allow"
+
+    def test_string_assign_import_shadow_allows(self):
+        cmd = """python -c "s = 'import provider_dispatch'" """
+        assert _classify(cmd, enforce=False) == "allow"
+
+    def test_real_statement_import_enforce_blocks(self):
+        # A genuine statement-position import must still shadow-block under enforce.
+        assert _classify("python -c 'import provider_dispatch'", enforce=True) == "block"
+
+    def test_real_statement_import_shadow_allows(self):
+        assert _classify("python -c 'import provider_dispatch'", enforce=False) == "allow"
+
+    def test_semicolon_statement_import_enforce_blocks(self):
+        # `x=1; import provider_dispatch` — the import IS at statement position.
+        assert _classify("python -c 'x=1; import provider_dispatch'", enforce=True) == "block"
+
+
+class TestFP2LaterArgNotExecutedScript:
+    """FP-2: lane.py appearing after `python -c <code>` is a program arg — must not shadow."""
+
+    def test_python_c_code_then_lane_py_enforce_allows(self):
+        assert _classify('python -c "print(1)" provider_dispatch.py', enforce=True) == "allow"
+
+    def test_python_c_code_then_lane_py_shadow_allows(self):
+        assert _classify('python -c "print(1)" provider_dispatch.py', enforce=False) == "allow"
+
+    def test_python_script_first_positional_enforce_blocks(self):
+        # Script as first positional arg (no -c) must still shadow-block under enforce.
+        assert _classify("python provider_dispatch.py", enforce=True) == "block"
+
+    def test_python3_script_first_positional_enforce_blocks(self):
+        assert _classify("python3 scripts/lib/provider_dispatch.py", enforce=True) == "block"
+
+    def test_python_script_first_positional_shadow_allows(self):
+        assert _classify("python provider_dispatch.py", enforce=False) == "allow"
