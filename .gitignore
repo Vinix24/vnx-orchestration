@@ -58,6 +58,10 @@ index.html
 # Claude Code runtime lock files
 .claude/scheduled_tasks.lock
 
+# Claude Code local overrides (per-maintainer, never published)
+CLAUDE.local.md
+.claude/settings.local.json
+
 # Local runtime logs
 scripts/*.log
 scripts/smart_tap.log
