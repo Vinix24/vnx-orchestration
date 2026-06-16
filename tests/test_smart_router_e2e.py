@@ -254,9 +254,9 @@ class TestParseRouteModelIdAllProviders:
         assert provider.startswith("litellm:")
         assert "deepseek" in provider
 
-    def test_glm_returns_litellm_openrouter(self):
+    def test_glm_returns_litellm_zai(self):
         provider, model = parse_route_model_id("glm-5-1")
-        assert "openrouter" in provider
+        assert provider == "litellm:zai"
 
     def test_claude_sonnet_returns_claude_provider(self):
         provider, model = parse_route_model_id("claude-sonnet-4-6")

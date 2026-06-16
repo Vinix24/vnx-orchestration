@@ -30,6 +30,8 @@ class ProviderModel:
     supports_tool_calls: bool
     context_window: Optional[int] = None
     task_classes: List[str] = field(default_factory=list)
+    cli_model_arg: Optional[str] = None
+    dispatch_allowed: bool = True
 
 
 @dataclass
@@ -41,6 +43,8 @@ class ProviderConfig:
 
 def _parse_model(data: dict) -> ProviderModel:
     context_window_raw = data.get("context_window")
+    cli_model_arg_raw = data.get("cli_model_arg")
+    dispatch_allowed_raw = data.get("dispatch_allowed")
     return ProviderModel(
         litellm_name=str(data["litellm_name"]),
         cost_input_per_mtok=float(data["cost_input_per_mtok"]),
@@ -50,6 +54,8 @@ def _parse_model(data: dict) -> ProviderModel:
         supports_tool_calls=bool(data["supports_tool_calls"]),
         context_window=int(context_window_raw) if context_window_raw is not None else None,
         task_classes=list(data.get("task_classes") or []),
+        cli_model_arg=str(cli_model_arg_raw) if cli_model_arg_raw is not None else None,
+        dispatch_allowed=bool(dispatch_allowed_raw) if dispatch_allowed_raw is not None else True,
     )
 
 
