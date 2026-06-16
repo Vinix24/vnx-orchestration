@@ -1,3 +1,4 @@
+<!-- VNX:BEGIN BOOTSTRAP -->
 ## VNX Governance System
 
 This project uses **VNX Glass Box Governance** for multi-agent orchestration.
@@ -63,3 +64,66 @@ Two lanes ship on main; T0 picks per task. Full decision rule, provider strings,
 - **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (Wave 5 smart-context, lease, triple-gate). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`. Use for single-worker PRs that benefit from prior-round findings, or work expected to run >30 min. **No Anthropic SDK** — only `subprocess.Popen(["claude", ...])`.
 
 For full documentation: `.vnx/docs/`
+<!-- VNX:END BOOTSTRAP -->
+
+<important if="working on schemas/migrations">
+ADR-007 binding: every new central-DB table requires composite UNIQUE/PK over project_id.
+See `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md`.
+T0 must cite this explicitly in review-gate prompts.
+</important>
+
+<important if="working on review-gates or codex/kimi/gemini providers">
+Per CC-COMMUNITY-SYNTHESIS-2026-05-29.md: codex for strict diff-mode, kimi for synthesis/operational angle.
+Parallel review pattern proven 3x. Raw vs gate-routed dispatch = different audit trail — audit concern applies.
+</important>
+
+<important if="working on dispatch infrastructure or subprocess adapter">
+Wave 6 elastic pool shipped 2026-05-16 (ADR-018, 9 PRs). Use `bin/vnx pool {status,scale,config,reap}`.
+Backward-compat: terminal-pin via subprocess_dispatch.py still works.
+SubprocessAdapter path: `scripts/lib/subprocess_adapter.py` + `scripts/lib/subprocess_dispatch.py`.
+Single dispatch entry is the door (`vnx dispatch`): decision-tree enforced in code + side-door blocking.
+Dispatch mechanics, lanes, and failure modes: `docs/core/DISPATCH_RULES.md`.
+</important>
+
+<important if="working on receipt processor or governance/audit trail">
+GOV-1/2/3 receipt-gap: raw `claude -p` bypasses receipts. rc9 shipped cheap-lane fixes.
+Self-learning loop is dormant. Receipt processor must be running for audit trail integrity.
+`.vnx-data/` is runtime state — never commit it.
+</important>
+
+<important if="working on tmux delivery or session hooks">
+Hard rule: Enter ALWAYS as a separate tmux keystroke — combined send-keys misses delivery.
+Leaseless lane live on main (#663+#664). Known bugs: timestamp drift, env-not-inherited.
+</important>
+
+## Path Resolution
+
+All scripts must resolve project root via helper libraries — never hardcode paths or rely solely on env vars. Python: `scripts/lib/project_root.py`. Bash: `scripts/lib/vnx_resolve_root.sh`. Background: issue #225.
+
+## Event Streams
+
+`.vnx-data/events/T{n}.ndjson` is a **per-dispatch ring buffer**, not a long-running log. At the end of each subprocess-adapter dispatch, the live file is archived to `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson` and truncated to 0 bytes. If you're debugging "the live file is empty", look in the archive directory instead.
+
+Only subprocess-routed terminals produce this stream. TmuxAdapter-routed terminals (T0 default; T2/T3 unless `VNX_ADAPTER_T{n}=subprocess`) produce no per-terminal NDJSON.
+
+## Supervisor Mode
+
+Set per-project to enable unified supervisor (auto-respawn, lease sweep, runtime supervision):
+
+```
+VNX_SUPERVISOR_MODE=unified   # opt in to supervisor
+```
+
+Default (unset or `legacy`): no behavior change.
+
+When enabled:
+- Dispatcher prelude ticks `lease_sweep` every 30s
+- Dispatcher prelude ticks `runtime_supervise` every 60s
+- Recommend wrapping daemons via `dispatcher_supervisor.sh` and `receipt_processor_supervisor.sh`
+
+See `docs/operations/UNIFIED_SUPERVISOR.md` for full guide.
+
+<!-- Local maintainer overrides (optional, gitignored): machine-specific VNX notes live in
+     ~/.claude/vnx-local.md; repo-local private notes in CLAUDE.local.md. Both load after this
+     file and win on conflict. Keep secrets and absolute local paths out of this tracked file. -->
+@~/.claude/vnx-local.md
