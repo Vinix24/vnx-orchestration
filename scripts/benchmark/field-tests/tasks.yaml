@@ -14,7 +14,7 @@ tiers:
       - claude-sonnet-4-6
       - codex-gpt-5-4
       - codex-gpt-5-5
-      - kimi-k2-6
+      - kimi-k2-7-code
       - glm-5-1
       - deepseek-v4-pro-harness
       - deepseek-v4-flash-harness
