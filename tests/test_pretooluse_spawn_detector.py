@@ -1,4 +1,4 @@
-"""Tests for pretooluse_spawn_detector.py PR-9 changes.
+"""Tests for pretooluse_spawn_detector.py PR-9 / PR-9b changes.
 
 Covers:
   - Evasion #1 closed: ALLOWLIST_PATTERN removed; provider_dispatch.py + claude -p → block
@@ -9,6 +9,10 @@ Covers:
   - Benign commands unchanged
   - Telemetry: shadow/block → one ndjson line; failure → fail-open
   - Malformed stdin JSON → allow
+  - P0-A: fail-open invariant for all malformed payloads
+  - P0-B: raw-CLI bypass closures (path-form, de-quoting, redirect/here-string)
+  - P1-A: enforce-mode shadow over-match (mentions vs invocations)
+  - P1-A: -m/-c no-space forms; importlib.import_module detection
 """
 
 from __future__ import annotations
@@ -59,6 +63,167 @@ def _run_main(cmd: str, tmp_path: Path, enforce: bool = False) -> tuple[str, lis
             if line.strip():
                 entries.append(json.loads(line))
     return decision, entries
+
+
+def _run_main_raw(raw_stdin: str, tmp_path: Path, enforce: bool = False) -> str:
+    """Run main() with raw stdin string; return decision only."""
+    data_dir = tmp_path / "_vnx_test_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        "VNX_DATA_DIR": str(data_dir),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_HOOK_ENFORCE": "1" if enforce else "0",
+    }
+    captured = io.StringIO()
+    with mock.patch.dict(os.environ, env):
+        with mock.patch("sys.stdin", io.StringIO(raw_stdin)):
+            with mock.patch("sys.stdout", captured):
+                det.main()
+    return captured.getvalue().strip()
+
+
+# ── P0-A: Fail-open invariant ─────────────────────────────────────────────────
+
+class TestFailOpen:
+    """main() must emit exactly 'allow' for every malformed payload — no traceback."""
+
+    def test_list_payload_allows(self, tmp_path):
+        # [] is valid JSON but not a dict → allow
+        result = _run_main_raw("[]", tmp_path)
+        assert result == "allow"
+
+    def test_list_command_allows(self, tmp_path):
+        # command is a list instead of str → allow
+        payload = json.dumps({"tool_input": {"command": ["claude", "-p"]}})
+        result = _run_main_raw(payload, tmp_path)
+        assert result == "allow"
+
+    def test_tool_input_int_allows(self, tmp_path):
+        # tool_input is not a dict → allow
+        payload = json.dumps({"tool_input": 42})
+        result = _run_main_raw(payload, tmp_path)
+        assert result == "allow"
+
+    def test_empty_stdin_allows(self, tmp_path):
+        result = _run_main_raw("", tmp_path)
+        assert result == "allow"
+
+    def test_non_json_allows(self, tmp_path):
+        result = _run_main_raw("not valid json {", tmp_path)
+        assert result == "allow"
+
+    def test_null_json_allows(self, tmp_path):
+        # null is valid JSON but not a dict
+        result = _run_main_raw("null", tmp_path)
+        assert result == "allow"
+
+    def test_number_json_allows(self, tmp_path):
+        result = _run_main_raw("42", tmp_path)
+        assert result == "allow"
+
+
+# ── P0-B: Raw-CLI bypass closures ─────────────────────────────────────────────
+
+class TestHardBlockBypasses:
+    """Bypass vectors that previously evaded hard-block must now BLOCK."""
+
+    # Path-form
+    def test_path_claude_p_blocks(self):
+        assert _classify("/usr/local/bin/claude -p 'x'") == "block"
+
+    def test_path_kimi_print_blocks(self):
+        assert _classify("/usr/bin/kimi --print x") == "block"
+
+    def test_path_codex_exec_blocks(self):
+        assert _classify("/usr/bin/codex exec") == "block"
+
+    def test_dotslash_claude_p_blocks(self):
+        assert _classify("./claude -p 'x'") == "block"
+
+    # De-quoting (empty quote pair collapse)
+    def test_dequote_claude_p_blocks(self):
+        assert _classify("cla\"\"ude -p 'x'") == "block"
+
+    def test_dequote_kimi_print_blocks(self):
+        assert _classify("ki\"\"mi --print x") == "block"
+
+    def test_dequote_codex_exec_blocks(self):
+        assert _classify("co\"\"dex exec") == "block"
+
+    def test_dequote_codex_exec2_blocks(self):
+        assert _classify("codex e\"\"xec --json") == "block"
+
+    # Here-string / redirect suffix
+    def test_redirect_claude_p_blocks(self):
+        assert _classify("claude -p<<<'x'") == "block"
+
+    def test_redirect_kimi_print_blocks(self):
+        assert _classify("kimi --print<<<x") == "block"
+
+    def test_redirect_codex_exec_blocks(self):
+        assert _classify("codex exec<<<x") == "block"
+
+    # Wrapped in bash -c
+    def test_bash_c_claude_p_blocks(self):
+        assert _classify('bash -c "claude -p<<<x"') == "block"
+
+    # Both modes block for hard-block rules
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_path_claude_p_both_modes(self, enforce):
+        assert _classify("/usr/local/bin/claude -p 'x'", enforce=enforce) == "block"
+
+    @pytest.mark.parametrize("enforce", [False, True])
+    def test_dequote_kimi_both_modes(self, enforce):
+        assert _classify("ki\"\"mi --print x", enforce=enforce) == "block"
+
+
+# ── P1-A: Enforce-mode over-match (mentions must NOT block) ───────────────────
+
+class TestEnforceModeOverMatch:
+    """Commands that mention a lane .py as an argument must NOT be blocked."""
+
+    def test_echo_provider_dispatch_allows(self):
+        assert _classify("echo provider_dispatch.py", enforce=True) == "allow"
+
+    def test_cat_provider_dispatch_allows(self):
+        assert _classify("cat docs/provider_dispatch.py", enforce=True) == "allow"
+
+    def test_git_grep_provider_dispatch_allows(self):
+        assert _classify("git grep provider_dispatch.py", enforce=True) == "allow"
+
+    def test_python_c_string_mention_allows(self):
+        # Mention in a string literal — best-effort: not a statement-position import
+        # Residual known: some nested-quote forms may still match; documented.
+        assert _classify("python -c \"print('import provider_dispatch')\"", enforce=True) == "allow"
+
+
+# ── P1-A: Shadow invocation forms must still DETECT ───────────────────────────
+
+class TestShadowInvocationDetected:
+    """These forms must be shadow-detected (block in enforce mode)."""
+
+    def test_python_m_nospace_provider_dispatch_enforce(self):
+        assert _classify("python -mprovider_dispatch", enforce=True) == "block"
+
+    def test_python_m_nospace_provider_dispatch_shadow(self):
+        assert _classify("python -mprovider_dispatch", enforce=False) == "allow"
+
+    def test_python3_m_nospace_subprocess_dispatch_enforce(self):
+        assert _classify("python3 -msubprocess_dispatch", enforce=True) == "block"
+
+    def test_python_c_nospace_import_enforce(self):
+        assert _classify("python -c'import provider_dispatch'", enforce=True) == "block"
+
+    def test_python3_c_nospace_import_shadow(self):
+        assert _classify("python3 -c'import provider_dispatch'", enforce=False) == "allow"
+
+    def test_importlib_import_module_enforce(self):
+        cmd = "python3 -c 'import importlib; importlib.import_module(\"provider_dispatch\")'"
+        assert _classify(cmd, enforce=True) == "block"
+
+    def test_importlib_import_module_shadow(self):
+        cmd = "python3 -c 'import importlib; importlib.import_module(\"provider_dispatch\")'"
+        assert _classify(cmd, enforce=False) == "allow"
 
 
 # ── Evasion #1: old allowlist bypass is closed ───────────────────────────────
