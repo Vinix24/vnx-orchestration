@@ -37,7 +37,7 @@ tasks:
     source: "MC PR #236 worker queues YAML"
     skill: backend-developer
     target_loc: 60
-    deadline_seconds: 600
+    deadline_seconds: 1200  # was 600; thinking models need >10min (no timeout-DNF)
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 5
@@ -48,7 +48,7 @@ tasks:
     source: "SEOcrawler PR #125 enable RLS on scan_quota"
     skill: database-engineer
     target_loc: 30
-    deadline_seconds: 600
+    deadline_seconds: 1200  # was 600; opus exceeded 605s on this rls_policy task
     pattern: "pattern-match-bounded"
     verify_type: "sql_constraint_check"
 
@@ -58,7 +58,7 @@ tasks:
     source: "SEOcrawler PR #119 add load_dotenv()"
     skill: backend-developer
     target_loc: 15
-    deadline_seconds: 300
+    deadline_seconds: 1200  # was 300 (5min, far too tight for thinking models)
     pattern: "pattern-match-bounded"
     verify_type: "runtime_smoke"
 
