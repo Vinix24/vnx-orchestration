@@ -48,12 +48,15 @@ Telemetry: every block AND every shadow detection → one JSON line appended to
 
 Exit code is always 0. Decision is stdout text.
 
-Known limitation: a renamed copy of a lane script (e.g. `python /tmp/pd.py`)
-cannot be detected by static command inspection — no lane name appears in the
-command. Likewise a non-listed command-prefix runner that takes positional
-arguments (e.g. `timeout 5 claude -p`) is not unwrapped. The in-process
-ExecutionPermit (require_permit) is the real backstop for those vectors; this
-hook is the first layer, not the only one.
+Known limitation (accepted by design): static command-string inspection cannot be
+airtight against a Turing-complete shell; esoteric constructs (command/process
+substitution, backticks, brace/case groups, prefix runners like sudo/timeout/xargs,
+$IFS word-splitting, ANSI-C $'...', nesting beyond the recursion bound) can route a
+raw provider spawn past this hook undetected. These are accepted as out-of-scope: the
+hook is a defense-in-depth first layer that catches the common and accidental cases (the
+only kind a governed worker actually produces); the in-process ExecutionPermit
+(`require_permit`) is the authoritative, un-evadable control. Do not chase esoteric
+evasion hardening here — that arms race cannot be won.
 
 Live-proven gap (2026-06-09): a raw `kimi --print` invocation bypassed receipts
 the same way `claude -p` did. This detector covers all three provider CLIs.
@@ -127,6 +130,12 @@ _LANE_IMPORT_PATTERN = re.compile(
 # importlib.import_module("<lane_module>") — dynamic-import form.
 _IMPORTLIB_PATTERN = re.compile(r"import_module\([\"']" + _LANE_MODS_RE)
 
+# FP-1 fix: import must appear at statement position (line/semicolon start), not inside
+# a string literal. E.g. `s = 'import provider_dispatch'` must NOT match.
+_LANE_IMPORT_STMT_PATTERN = re.compile(
+    r"^\s*(?:import\s+" + _LANE_MODS_RE + r"|from\s+" + _LANE_MODS_RE + r"\s+import)"
+)
+
 
 # ── Legacy regex fallback (unbalanced-quote segments only) ─────────────────────
 # Used ONLY when shlex cannot tokenize a segment (unbalanced quotes). It must
@@ -167,6 +176,20 @@ _PYTHON_M_LANE_PATTERN = re.compile(
 _PYTHON_C_PATTERN = re.compile(
     _TOKEN_BOUNDARY + r"python3?\s+(?:[^\s]+\s+)*-c\s*"
 )
+
+
+def _has_lane_import_at_statement(code: str) -> bool:
+    """Return True iff a lane import appears at statement position in the code string.
+
+    Splits on `;` and newlines to get individual statements, then checks each against
+    _LANE_IMPORT_STMT_PATTERN. This avoids FP-1: an import token inside a string
+    literal (e.g. `s = 'import provider_dispatch'`) does not start a statement and
+    therefore does not match.
+    """
+    for stmt in re.split(r"[;\n]", code):
+        if _LANE_IMPORT_STMT_PATTERN.match(stmt):
+            return True
+    return False
 
 
 def _normalize_command(cmd: str) -> str:
@@ -326,20 +349,35 @@ def _detect_shadow_argv(argv: list[str]) -> str | None:
     # python / python3 / python3.x forms.
     if _PYTHON_RE.match(exe):
         rest = argv[1:]
-        # python <path>/lane.py  (the lane .py is the script being executed)
-        for tok in rest:
+
+        # FP-2 fix: a lane .py that appears AFTER `-c <code>` is a program argument
+        # passed to the code string, not the script python executes. Find the -c index
+        # so we can limit the lane-script scan to tokens that precede it.
+        c_idx: int | None = None
+        for j, tok in enumerate(rest):
+            if tok == "-c" or (tok.startswith("-c") and len(tok) > 2):
+                c_idx = j
+                break
+
+        # python <path>/lane.py — only tokens BEFORE the -c position are candidates.
+        scan_limit = c_idx if c_idx is not None else len(rest)
+        for tok in rest[:scan_limit]:
             if not tok.startswith("-") and _is_lane_script(os.path.basename(tok)):
                 return "lane_script_direct"
+
         # python -m <lane_module>
         m_target = _value_for_flag(rest, "-m")
         if m_target and m_target in _LANE_MODULE_NAMES:
             return "python_m_lane_module"
+
         # python -c "<code importing a lane>"
+        # FP-1 fix: use statement-position check instead of bare _LANE_IMPORT_PATTERN
+        # so an import token inside a string literal does not trigger shadow.
         code = _value_for_flag(rest, "-c")
         if code:
             if _IMPORTLIB_PATTERN.search(code):
                 return "importlib_lane_import"
-            if _LANE_IMPORT_PATTERN.search(code):
+            if _has_lane_import_at_statement(code):
                 return "python_c_lane_import"
     return None
 
