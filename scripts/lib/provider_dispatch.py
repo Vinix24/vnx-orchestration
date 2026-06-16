@@ -1070,6 +1070,36 @@ def _resolve_kimi_model_label() -> str:
     return next(iter(cfg.models.keys()))
 
 
+def _kimi_resolve_cli_model_arg(model_key: str) -> str:
+    """Return the CLI arg form for a kimi model key.
+
+    The registry uses dashes (kimi-k2-6) but the kimi CLI 1.46.0 requires dots
+    (kimi-k2.6). The registry entry's cli_model_arg field carries the authoritative
+    CLI arg; fall back to model_key unchanged for entries without the field.
+    """
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+    except Exception as e:
+        logger.warning("provider_dispatch: registry load for kimi cli arg failed: %s", e)
+        return model_key
+    cfg = registry.get("kimi_cli")
+    if cfg is None or not cfg.models:
+        return model_key
+    # Direct registry-key lookup (e.g. model_key='kimi-k2-6')
+    entry = cfg.models.get(model_key)
+    if entry is not None:
+        cli_arg = getattr(entry, "cli_model_arg", None)
+        return cli_arg if cli_arg else model_key
+    # model_key may already be in CLI arg form (e.g. 'kimi-k2.6'); search by cli_model_arg
+    model_key_lower = model_key.lower()
+    for e in cfg.models.values():
+        cli_arg = getattr(e, "cli_model_arg", None)
+        if cli_arg and cli_arg.lower() == model_key_lower:
+            return model_key
+    return model_key
+
+
 def _resolve_deepseek_model() -> str:
     """Load DeepSeek model litellm_name from registry, fallback to hardcoded default."""
     from providers import provider_registry as _reg
@@ -1285,8 +1315,10 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = os.environ.get("VNX_KIMI_MODEL", "") or None
-    model_label = model or _resolve_kimi_model_label()
+    model_key = os.environ.get("VNX_KIMI_MODEL", "") or None
+    model_label = model_key or _resolve_kimi_model_label()
+    # Resolve CLI arg form (e.g. kimi-k2-6 → kimi-k2.6 per kimi CLI 1.46.0)
+    model_cli_arg = _kimi_resolve_cli_model_arg(model_key) if model_key else None
     enriched_instruction = _enrich_instruction(args)
     isolation_cwd_kimi: Optional[Path] = None
     if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
@@ -1303,7 +1335,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     try:
         result = spawn_kimi(
             prompt=enriched_instruction,
-            model=model,
+            model=model_cli_arg,
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,

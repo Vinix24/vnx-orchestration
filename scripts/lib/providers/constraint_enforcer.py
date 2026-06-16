@@ -151,6 +151,8 @@ def _registry_key_for(provider: Optional[str], sub_provider: Optional[str]) -> O
         return "google"
     if base_norm == "kimi":
         return "kimi_cli"
+    if base_norm in ("deepseek-harness", "deepseek_harness"):
+        return "deepseek"
     if base_norm == "litellm":
         return sub_norm or None
     return base_norm.replace("-", "_") or None
@@ -199,7 +201,24 @@ def _model_matches(model: Optional[str], spec: Any) -> bool:
 def _model_in_registry(provider: Optional[str], sub_provider: Optional[str], model: Optional[str]) -> bool:
     if not model:
         return True
+    model_norm = _norm(model)
     registry_key = _registry_key_for(provider, sub_provider)
+
+    if model_norm == "default":
+        # Sentinel: check if the provider has any dispatch-allowed registered model.
+        # Non-claude lanes pass "default" when no explicit model is set; a literal
+        # "default" registry lookup always fails, so we treat it as "use provider default".
+        if not registry_key:
+            return True
+        try:
+            registry = _load_registry()
+        except Exception:
+            return True
+        cfg = registry.get(registry_key)
+        if cfg is None or not cfg.enabled or not cfg.models:
+            return False
+        return any(getattr(entry, "dispatch_allowed", True) for entry in cfg.models.values())
+
     if not registry_key:
         return True
     registry = _load_registry()
@@ -208,7 +227,12 @@ def _model_in_registry(provider: Optional[str], sub_provider: Optional[str], mod
         return False
     requested = _model_aliases(model)
     for key, entry in cfg.models.items():
+        if not getattr(entry, "dispatch_allowed", True):
+            continue
+        cli_arg = _norm(getattr(entry, "cli_model_arg", "") or "")
         aliases = {_norm(key), *_model_aliases(getattr(entry, "litellm_name", ""))}
+        if cli_arg:
+            aliases.add(cli_arg)
         if requested & aliases:
             return True
     return False
