@@ -386,6 +386,27 @@ def dispatch(
         )
     role = next((name for name in skill_names or [] if name), "backend-developer")
 
+    # Equal-context strips the skill's completion protocol. Providers exit on
+    # completion (provider_dispatch reads the exit code), but the INTERACTIVE
+    # Claude tmux lane never exits — it needs an explicit completion signal or it
+    # DNFs at the deadline. Append a UNIFORM completion instruction (identical for
+    # every lane → fairness preserved) pointing at the exact absolute report path
+    # that BOTH the tmux lane's PR-8 report-backstop and this adapter's report
+    # search poll. The worker writes the 4-heading report there on completion.
+    _report_sink = (REPORT_DIR_CANDIDATES[0] / f"{dispatch_id}.md") if REPORT_DIR_CANDIDATES else None
+    if _report_sink is not None:
+        _report_sink.parent.mkdir(parents=True, exist_ok=True)
+        instruction = (
+            instruction
+            + "\n\n# COMPLETION PROTOCOL (required)\n"
+            + "When the assignment is fully done and verified, write a brief completion "
+            + "report to this EXACT absolute path:\n"
+            + f"  {_report_sink}\n"
+            + "The report MUST contain these markdown headings: `## Summary`, `## Changes`, "
+            + "`## Verification`, `## Open Items`. The harness detects completion from this "
+            + "file; without it the run is recorded as a DNF even if your work is correct.\n"
+        )
+
     via_tmux = False
     via_provider = lane["provider"] != "claude"
     try:
