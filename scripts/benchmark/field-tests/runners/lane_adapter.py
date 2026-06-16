@@ -288,6 +288,11 @@ def _provider_dispatch(
         codex_bin_dir = _resolve_codex_bin_dir()
         if codex_bin_dir:
             env["PATH"] = codex_bin_dir + os.pathsep + env.get("PATH", "")
+    # kimi: dispatched via the CLI OAuth (managed:kimi-code), which serves exactly
+    # ONE model — K2.7-Code (kimi-code/kimi-for-coding, the CLI default), reached by
+    # passing NO -m. An explicit -m for any other id is rejected by both the
+    # registry constraint and the CLI OAuth endpoint. So VNX_KIMI_MODEL is left
+    # unset and the lane runs the CLI default (K2.7-Code). kimi-via-cli-only compliant.
     cmd = [
         sys.executable, str(PROVIDER_DISPATCH),
         "--provider", provider,

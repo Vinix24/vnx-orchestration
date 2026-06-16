@@ -57,17 +57,12 @@ models:
     cost_output_mtok: 0.28
     notes: "LiteLLM bare-API path, chat-only, no tools."
 
-  - id: kimi-k2-6
-    provider: litellm:moonshot
-    model_arg: kimi-k2.6
+  - id: kimi-k2-7-code
+    provider: kimi   # kimi CLI OAuth (managed:kimi-code) — serves K2.7-Code only
+    model_arg: kimi-default   # CLI default = kimi-code/kimi-for-coding (K2.7 Code); no -m passed
     cost_input_mtok: 0.95
     cost_output_mtok: 4.00
-
-  - id: kimi-k2-0905
-    provider: litellm:moonshot
-    model_arg: kimi-k2-0905
-    cost_input_mtok: 0.60
-    cost_output_mtok: 2.50
+    notes: "K2.7-Code via kimi CLI OAuth (the only CLI-dispatchable model). K2.6/k2-0905 are API-only (violate kimi-via-cli-only), excluded."
 
   - id: local-gemma-4b
     provider: local-gemma

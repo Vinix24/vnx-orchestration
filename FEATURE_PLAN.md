@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-16T12:24:20.067762+00:00
+**Last updated**: 2026-06-16T13:04:04.569288+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
