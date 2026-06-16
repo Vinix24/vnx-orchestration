@@ -101,6 +101,7 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding", "review", "analysis"]
+        dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
       kimi-k2-6:
         litellm_name: "moonshot/kimi-k2.6"
         cost_input_per_mtok: 0.95
@@ -109,6 +110,7 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding-premium"]
+        dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
   zai:
     enabled: true
     api_key_env: OPENROUTER_API_KEY  # via OpenRouter, not direct Zhipu
@@ -159,6 +161,7 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding", "review", "analysis"]
+        dispatch_allowed: true
       kimi-k2-6:
         litellm_name: ""  # kimi CLI direct; not via LiteLLM
         cost_input_per_mtok: 0.95
@@ -167,3 +170,5 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding-premium"]
+        dispatch_allowed: true
+        cli_model_arg: "kimi-k2.6"  # kimi CLI 1.46.0 requires dots; registry key uses dashes
