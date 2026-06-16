@@ -410,7 +410,7 @@ def parse_route_model_id(model_id: str) -> tuple[str, str]:
     if model_id.startswith("deepseek-"):
         return f"litellm:deepseek:{model_id}", model_id
     if model_id.startswith("glm-"):
-        return f"litellm:openrouter:{model_id}", model_id
+        return "litellm:zai", model_id
     if model_id.startswith("kimi-"):
         return "kimi", model_id
     return "litellm", model_id

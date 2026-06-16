@@ -74,7 +74,12 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
     def _wp_resolve_worker_profile(role):  # type: ignore[misc]
         return None
 
-DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
+DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked", "task_complete", "success"})
+
+# P0-1: all four contract headings must be present for the report backstop to fire.
+_REQUIRED_REPORT_HEADINGS = frozenset({
+    "## Summary", "## Changes", "## Verification", "## Open Items"
+})
 
 # Receipt dedup — prefer worker-authored over lane-synthesized.
 # Imported defensively; fallback returns the last receipt by list order.
@@ -278,6 +283,8 @@ class TmuxInteractiveDispatch:
             if receipts_file
             else self._state_dir / "t0_receipts.ndjson"
         )
+        # P0-1: mtime stability cache for report backstop.
+        self._report_mtime_cache: dict[str, float] = {}
 
     @staticmethod
     def _resolve_project_root() -> Path:
@@ -536,7 +543,7 @@ class TmuxInteractiveDispatch:
             return f'"{escaped}"'
 
         env_prefix = (
-            f"VNX_STATE_DIR={state_dir_q} VNX_DATA_DIR={data_dir_q}"
+            f"VNX_STATE_DIR={state_dir_q} VNX_DATA_DIR={data_dir_q} VNX_DATA_DIR_EXPLICIT=1"
         )
         py_cmd = (
             f"python3 {append_receipt_q} "
@@ -990,24 +997,54 @@ class TmuxInteractiveDispatch:
             )
 
     # -- receipt polling ---------------------------------------------------
-    def _matching_receipts(
+    def _matching_receipts_split(
         self,
         dispatch_id: str,
         completion_statuses: frozenset,
-    ) -> list[dict]:
-        """Return parsed completion receipts for *dispatch_id*, in file order."""
-        if not self._receipts_file.exists():
-            return []
-        out: list[dict] = []
-        try:
-            with self._receipts_file.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or dispatch_id not in line:
-                        continue
+    ) -> "tuple[list[dict], list[dict]]":
+        """Return (canonical, pending) completion receipts separately.
+
+        Signal 1 (canonical): t0_receipts.ndjson — append-only, position-stable.
+        Signal 2 (pending): receipts/pending/*.json — MUTABLE (processor moves files).
+
+        Keeping sources separate lets _wait_for_receipt apply the correct guard:
+        position-based for signal 1, identity-set-based for signal 2 (P0-2).
+        Each pending receipt carries ``_pending_file`` (filename) as its identity key.
+        """
+        canonical: list[dict] = []
+        pending_out: list[dict] = []
+
+        # Signal 1: canonical ndjson
+        if self._receipts_file.exists():
+            try:
+                with self._receipts_file.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or dispatch_id not in line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(rec, dict):
+                            continue
+                        if rec.get("dispatch_id") != dispatch_id:
+                            continue
+                        status = (rec.get("status") or "").lower()
+                        event_type = (rec.get("event_type") or "")
+                        if status in completion_statuses or event_type.endswith("_completion"):
+                            canonical.append(rec)
+            except OSError as exc:
+                logger.debug("interactive: receipts read failed: %s", exc)
+
+        # Signal 2: raw pending receipts (P1-2: also accept event_type ending in _completion)
+        pending_dir = self._state_dir / "receipts" / "pending"
+        if pending_dir.is_dir():
+            try:
+                for pending_file in sorted(pending_dir.glob("*.json")):
                     try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
+                        rec = json.loads(pending_file.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
                         continue
                     if not isinstance(rec, dict):
                         continue
@@ -1015,13 +1052,55 @@ class TmuxInteractiveDispatch:
                         continue
                     status = (rec.get("status") or "").lower()
                     event_type = (rec.get("event_type") or "")
-                    if status in completion_statuses or event_type.endswith(
-                        "_completion"
-                    ):
-                        out.append(rec)
-        except OSError as exc:
-            logger.debug("interactive: receipts read failed: %s", exc)
-        return out
+                    if status in completion_statuses or event_type.endswith("_completion"):
+                        rec.setdefault("_signal", "raw_pending")
+                        rec["_pending_file"] = pending_file.name
+                        pending_out.append(rec)
+            except OSError as exc:
+                logger.debug("interactive: pending receipts scan failed: %s", exc)
+
+        return canonical, pending_out
+
+    def _matching_receipts(
+        self,
+        dispatch_id: str,
+        completion_statuses: frozenset,
+    ) -> list[dict]:
+        """Return parsed completion receipts for *dispatch_id* (signals 1+2), in file order.
+
+        Signal 3 (report backstop) is handled separately in _wait_for_receipt.
+        For per-source baseline guards use _matching_receipts_split directly.
+        """
+        canonical, pending = self._matching_receipts_split(dispatch_id, completion_statuses)
+        return canonical + pending
+
+    def _is_report_backstop_active(self, dispatch_id: str) -> bool:
+        """Return True when the report is finished AND mtime-stable (P0-1).
+
+        Requires ALL FOUR contract headings (## Summary, ## Changes, ## Verification,
+        ## Open Items) AND an unchanged mtime across two consecutive calls.  A mid-task
+        draft typically lacks the later headings; a report still being written keeps
+        changing its mtime, so neither half-written state trips this signal.
+        """
+        report_path = self._state_dir.parent / "unified_reports" / f"{dispatch_id}.md"
+        try:
+            if not report_path.exists():
+                self._report_mtime_cache.pop(dispatch_id, None)
+                return False
+            content = report_path.read_text(encoding="utf-8", errors="replace")
+            if not content.strip():
+                return False
+            # All four contract headings must be present (not a mid-task draft).
+            if not all(h in content for h in _REQUIRED_REPORT_HEADINGS):
+                self._report_mtime_cache.pop(dispatch_id, None)
+                return False
+            # Mtime stability: record current mtime; require one prior stable observation.
+            current_mtime = report_path.stat().st_mtime
+            last_mtime = self._report_mtime_cache.get(dispatch_id)
+            self._report_mtime_cache[dispatch_id] = current_mtime
+            return last_mtime is not None and current_mtime == last_mtime
+        except OSError:
+            return False
 
     def _wait_for_receipt(
         self,
@@ -1031,22 +1110,82 @@ class TmuxInteractiveDispatch:
         completion_statuses: frozenset,
         *,
         baseline_count: int = 0,
+        baseline_pending_ids: "frozenset[str] | None" = None,
+        baseline_backstop: "bool | None" = None,
     ) -> "dict | None":
-        """Poll the canonical receipts NDJSON until a NEW completion appears.
+        """Poll signals 1–3 until a NEW completion appears beyond the baseline.
 
-        Only counts receipts beyond *baseline_count* (F3: stale-receipt guard).
-        Returns the newest matching receipt beyond baseline, or None on deadline.
+        *baseline_count* guards signal 1 (canonical ndjson count before delivery).
+        *baseline_pending_ids* guards signal 2 (filenames of pending receipts at baseline).
+          When None, falls back to legacy combined position-based baseline (backward compat).
+        *baseline_backstop* guards signal 3 (True if report was backstop-active at baseline).
+          When None, captured at call time (conservative default).
+
+        Priority: signal 1 (canonical) > signal 2 (pending) > signal 3 (backstop).
+        Returns the best matching receipt, or None on deadline.
         """
         deadline = time.monotonic() + deadline_seconds
+        # Stale guard for signal 3: report must NOT have been backstop-active at baseline.
+        # When baseline_backstop is None (direct caller), prime the mtime cache first so that
+        # any pre-existing complete+stable report is immediately identified as stale.
+        if baseline_backstop is None:
+            self._is_report_backstop_active(dispatch_id)  # prime
+            _bl_backstop: bool = self._is_report_backstop_active(dispatch_id)
+        else:
+            _bl_backstop = baseline_backstop
         while True:
-            matches = self._matching_receipts(dispatch_id, completion_statuses)
-            if len(matches) > baseline_count:
-                # Apply dedup: authored > synthesized; newest timestamp within tier.
-                preferred = _dedup_receipts(matches[baseline_count:])
-                return preferred if preferred is not None else matches[-1]
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(poll_interval)
+            if baseline_pending_ids is not None:
+                # P0-2: per-source baseline — correct guard for each mutable source
+                canonical, pending = self._matching_receipts_split(dispatch_id, completion_statuses)
+                new_canonical = canonical[baseline_count:]
+                new_pending = [
+                    r for r in pending
+                    if r.get("_pending_file") not in baseline_pending_ids
+                ]
+            else:
+                # Legacy: combined position-based (backward compat for call sites that
+                # do not pass baseline_pending_ids, e.g. direct test calls)
+                all_matches = self._matching_receipts(dispatch_id, completion_statuses)
+                new_canonical = all_matches[baseline_count:]
+                new_pending = []
+
+            # Signal 3: report backstop — last resort, only when newly active
+            new_backstop: list[dict] = []
+            if not _bl_backstop and self._is_report_backstop_active(dispatch_id):
+                new_backstop = [{
+                    "dispatch_id": dispatch_id,
+                    "status": "done",
+                    "event_type": "subprocess_completion",
+                    "source": "report_backstop",
+                    "_signal": "report_backstop",
+                    "report_path": str(
+                        self._state_dir.parent / "unified_reports" / f"{dispatch_id}.md"
+                    ),
+                }]
+
+            # P1-1: signal 1 is authoritative; signal 2 only when no new canonical;
+            # signal 3 (backstop) only when neither 1 nor 2 has a new receipt.
+            if new_canonical:
+                candidates = new_canonical
+            elif new_pending:
+                candidates = new_pending
+            elif new_backstop:
+                candidates = new_backstop
+            else:
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(poll_interval)
+                continue
+
+            preferred = _dedup_receipts(candidates)
+            receipt = preferred if preferred is not None else candidates[-1]
+            logger.info(
+                "interactive: completion detected dispatch=%s signal=%s status=%s",
+                dispatch_id,
+                (receipt.get("_signal") or receipt.get("source") or "canonical"),
+                receipt.get("status"),
+            )
+            return receipt
 
     # -- handle persistence ------------------------------------------------
     def _persist_handle(self, dispatch_id: str, handle: dict) -> None:
@@ -1470,7 +1609,16 @@ class TmuxInteractiveDispatch:
                 self._attach(session)
 
             # 5. Baseline snapshot BEFORE delivery (F3: stale-receipt guard)
-            baseline = len(self._matching_receipts(dispatch_id, completion_statuses))
+            # P0-2: capture per-source baselines so pending file removals don't drop completions.
+            _bl_canonical, _bl_pending = self._matching_receipts_split(dispatch_id, completion_statuses)
+            baseline = len(_bl_canonical)
+            baseline_pending_ids: frozenset[str] = frozenset(
+                r.get("_pending_file", "") for r in _bl_pending
+            )
+            # P0-1: double-call to prime the mtime cache — any pre-existing complete+stable report
+            # is immediately identified as stale (same mtime across both rapid calls → True → blocked).
+            self._is_report_backstop_active(dispatch_id)
+            baseline_backstop = self._is_report_backstop_active(dispatch_id)
 
             # 6. Assemble body (skill body + intelligence + instruction via enrichers)
             _context_body = self._assemble_context(
@@ -1577,6 +1725,8 @@ class TmuxInteractiveDispatch:
                 poll_interval,
                 completion_statuses,
                 baseline_count=baseline,
+                baseline_pending_ids=baseline_pending_ids,
+                baseline_backstop=baseline_backstop,
             )
 
             if receipt is None:

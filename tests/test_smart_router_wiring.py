@@ -98,7 +98,7 @@ class TestParseRouteModelId:
 
     def test_glm(self):
         provider, model = parse_route_model_id("glm-5-1")
-        assert provider == "litellm:openrouter:glm-5-1"
+        assert provider == "litellm:zai"
         assert model == "glm-5-1"
 
     def test_kimi_k2(self):
