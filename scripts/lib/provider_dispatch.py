@@ -880,6 +880,44 @@ def _create_provider_worktree(dispatch_id: str) -> Optional[Path]:
         return None
 
 
+def _prepare_provider_workdir(
+    args: argparse.Namespace,
+) -> tuple[Optional[Path], Optional[Path]]:
+    """Create isolation and, for benchmark cells, materialize the seed at CWD."""
+    isolation_worktree: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_worktree = _create_provider_worktree(args.dispatch_id)
+
+    if (
+        os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1"
+        and isolation_worktree is None
+    ):
+        raise RuntimeError(
+            "benchmark provider isolation required but worktree creation failed; "
+            "refusing shared main checkout"
+        )
+
+    worker_cwd = isolation_worktree
+    if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
+        if isolation_worktree is None:
+            raise RuntimeError(
+                "benchmark seed materialization requires an isolated provider worktree"
+            )
+        from benchmark_worker_isolation import materialize_benchmark_seed  # noqa: PLC0415
+
+        worker_cwd = materialize_benchmark_seed(
+            isolation_worktree,
+            _resolve_dispatch_paths(args.dispatch_paths),
+        )
+
+    if (
+        isolation_worktree is not None
+        and os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1"
+    ):
+        print(f"VNX_PROVIDER_WORKDIR={isolation_worktree}", file=sys.stderr)
+    return isolation_worktree, worker_cwd
+
+
 def _remove_provider_worktree(dispatch_id: str) -> None:
     """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent."""
     try:
@@ -891,6 +929,23 @@ def _remove_provider_worktree(dispatch_id: str) -> None:
             "provider isolation: remove_dispatch_worktree failed for %s: %s",
             dispatch_id, exc,
         )
+
+
+def _finish_provider_worktree(
+    dispatch_id: str,
+    isolation_worktree: Optional[Path],
+) -> None:
+    """Remove normal provider worktrees while preserving benchmark output."""
+    if isolation_worktree is None:
+        return
+    if os.environ.get("VNX_BENCH_PRESERVE_WORKTREE") == "1":
+        logger.info(
+            "provider isolation: preserving benchmark worktree %s (dispatch=%s)",
+            isolation_worktree,
+            dispatch_id,
+        )
+        return
+    _remove_provider_worktree(dispatch_id)
 
 
 def _dispatch_codex(args: argparse.Namespace) -> int:
@@ -915,9 +970,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd = _create_provider_worktree(args.dispatch_id)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_codex(
@@ -926,7 +979,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
-            cwd=isolation_cwd,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -954,8 +1007,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
@@ -1213,9 +1265,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         )
 
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd_litellm: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd_litellm = _create_provider_worktree(args.dispatch_id)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_litellm(
@@ -1227,7 +1277,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             lane=lane_key,
             tool_call_shape=_tool_call_shape,
             event_writer=event_store.append if event_store is not None else None,
-            cwd=isolation_cwd_litellm,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -1255,8 +1305,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd_litellm is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -1282,9 +1331,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
     model_label = model or _resolve_kimi_model_label()
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd_kimi: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd_kimi = _create_provider_worktree(args.dispatch_id)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
@@ -1293,7 +1340,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
-            cwd=isolation_cwd_kimi,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -1321,8 +1368,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd_kimi is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
@@ -1390,6 +1436,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
 
     model = resolve_harness_model(args.model if args.model != "sonnet" else None)
     enriched_instruction = _enrich_instruction(args)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
     # start_time already set at top of function (before the missing-key guard).
     try:
         result = spawn_deepseek_harness(
@@ -1397,6 +1444,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             model=model,
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -1418,6 +1466,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -1440,9 +1489,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     model = args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd_gemini: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_cwd_gemini = _create_provider_worktree(args.dispatch_id)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_gemini(
@@ -1451,7 +1498,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append,
-            cwd=isolation_cwd_gemini,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -1479,8 +1526,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd_gemini is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 _MLX_MODEL_MAP: dict[str, str] = {
