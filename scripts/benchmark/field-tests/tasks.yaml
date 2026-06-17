@@ -15,7 +15,9 @@ tiers:
       - codex-gpt-5-4
       - codex-gpt-5-5
       - kimi-k2-7-code
-      - glm-5-1
+      - glm-5          # base GLM-5 (Feb 2026) baseline
+      - glm-5-1        # real GLM-5.1 (was wrongly mapped to base glm-5)
+      - glm-5-2        # GLM-5.2 (2026-06-16)
       - deepseek-v4-pro-harness
       - deepseek-v4-flash-harness
     n_replications: 3
