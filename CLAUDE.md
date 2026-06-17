@@ -54,54 +54,16 @@ Your report MUST contain these exact headings (aliases accepted):
 | `## Verification` | `## Test Results`, `## Evidence`, `## Tests` |
 | `## Open Items` | — |
 
-`## Summary` must be at least 50 non-whitespace characters.  
-`## Open Items` may contain "None" explicitly.
+`## Summary` must be at least 50 non-whitespace characters. `## Open Items` may contain "None" explicitly. Include your dispatch ID as a plain-text or bold field (e.g. `Dispatch-ID: 20260601-213416-myfeature`). Full contract: `scripts/lib/report_body_contract.py`.
 
-Include your dispatch ID as a plain-text header or bold field:
+### Dispatch lanes
 
-```markdown
-Dispatch-ID: 20260601-213416-myfeature
-```
+Two lanes ship on main; T0 picks per task. Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (tmux-spawn lane detail: `docs/operations/TMUX_SPAWN_LANE.md`).
 
-or
-
-```markdown
-**Dispatch-ID**: 20260601-213416-myfeature
-```
-
-Full contract: `scripts/lib/report_body_contract.py`
+- **`scripts/lib/tmux_interactive_dispatch.py`** (default) — leaseless ephemeral, isolated worktree per dispatch, drives an interactive `claude` worker on the subscription. Use for parallel/independent feature work.
+- **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (Wave 5 smart-context, lease, triple-gate). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`. Use for single-worker PRs that benefit from prior-round findings, or work expected to run >30 min. **No Anthropic SDK** — only `subprocess.Popen(["claude", ...])`.
 
 For full documentation: `.vnx/docs/`
-
-## Subprocess Adapter Feature Flag
-
-Set per-terminal to route delivery through a headless subprocess instead of tmux send-keys:
-
-```
-VNX_ADAPTER_T1=subprocess   # route T1 via SubprocessAdapter
-VNX_ADAPTER_T2=subprocess   # route T2 via SubprocessAdapter
-```
-
-Default (unset or `tmux`): uses existing tmux delivery — fully backward compatible.
-
-The subprocess path spawns `claude -p --output-format stream-json` via `SubprocessAdapter`
-(see `scripts/lib/subprocess_adapter.py` and `scripts/lib/subprocess_dispatch.py`).
-
-**No Anthropic SDK is used.** Only `subprocess.Popen(["claude", ...])`.
-
-## Tmux-Spawn Dispatch Lane
-
-`scripts/lib/tmux_interactive_dispatch.py` is the leaseless ephemeral lane the README
-documents as default for parallel and independent feature work. Each dispatch spawns a
-fresh tmux session in an isolated git worktree, drives an interactive `claude` worker on
-the subscription (the 15-juni billing escape), waits for the receipt, and tears down.
-No reuse, no warm-open, no terminal pin.
-
-Use this lane when work is independent and can run alongside other dispatches without
-shared-checkout collisions. Use `subprocess_dispatch.py` instead when you need terminal-
-pinning (Wave 5 smart-context, lease management) or when the worker may run >30 min
-(tmux-spawn has receipt-deadline failures on long workers). See t0-orchestrator skill
-§9.2 for the full decision rule and known gaps, and §9.4 for common dispatch failure modes.
 <!-- VNX:END BOOTSTRAP -->
 
 <important if="working on schemas/migrations">
@@ -119,8 +81,8 @@ Parallel review pattern proven 3x. Raw vs gate-routed dispatch = different audit
 Wave 6 elastic pool shipped 2026-05-16 (ADR-018, 9 PRs). Use `bin/vnx pool {status,scale,config,reap}`.
 Backward-compat: terminal-pin via subprocess_dispatch.py still works.
 SubprocessAdapter path: `scripts/lib/subprocess_adapter.py` + `scripts/lib/subprocess_dispatch.py`.
-Dispatch-determinism refactor in progress (2026-06-15): single `vnx dispatch` entry + decision-tree
-enforced in code + side-door blocking. See claudedocs/dispatch-determinism-2026-06-15/.
+Single dispatch entry is the door (`vnx dispatch`): decision-tree enforced in code + side-door blocking.
+Dispatch mechanics, lanes, and failure modes: `docs/core/DISPATCH_RULES.md`.
 </important>
 
 <important if="working on receipt processor or governance/audit trail">
@@ -160,3 +122,8 @@ When enabled:
 - Recommend wrapping daemons via `dispatcher_supervisor.sh` and `receipt_processor_supervisor.sh`
 
 See `docs/operations/UNIFIED_SUPERVISOR.md` for full guide.
+
+<!-- Local maintainer overrides (optional, gitignored): machine-specific VNX notes live in
+     ~/.claude/vnx-local.md; repo-local private notes in CLAUDE.local.md. Both load after this
+     file and win on conflict. Keep secrets and absolute local paths out of this tracked file. -->
+@~/.claude/vnx-local.md
