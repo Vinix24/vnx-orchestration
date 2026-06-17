@@ -434,6 +434,7 @@ class TmuxInteractiveDispatch:
         base_sha: "str | None" = None,
         worktree_path: "Path | None" = None,
         model: "str | None" = None,
+        failure_reason: str = "tmux_receipt_deadline_exceeded",
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -464,7 +465,11 @@ class TmuxInteractiveDispatch:
             worktree_path=worktree_path,
             model=model,
         )
-        raw = GovernRaw(receipt=receipt, duration_seconds=duration_seconds)
+        raw = GovernRaw(
+            receipt=receipt,
+            duration_seconds=duration_seconds,
+            failure_reason=failure_reason,
+        )
         outcome = govern(spec, raw, lane="tmux_interactive")
         if outcome.report_path:
             logger.info(
@@ -835,7 +840,7 @@ class TmuxInteractiveDispatch:
         signal_dir: "Path | None",
         baseline_count: int,
         baseline_pending_ids: "frozenset[str]",
-        completion_statuses: frozenset,
+        completion_statuses: "frozenset[str]",
         label: str,
     ) -> bool:
         """Confirm the worker actually STARTED working after a verified submit.
@@ -855,6 +860,12 @@ class TmuxInteractiveDispatch:
 
         Gate is on by default; set ``VNX_TMUX_WORK_START_GATE=0`` to restore the prior
         proceed-straight-to-receipt-wait behavior.
+
+        Known limitation: a worker blocked on an interactive permission prompt shows no
+        working indicator, so for an attended/permissioned session enable the permission
+        relay (``VNX_PERMISSION_RELAY=1``) so the prompt is answered before the window
+        elapses. Autonomous (skip-permissions) workers — the benchmark and headless lanes
+        — are unaffected.
         """
         if os.environ.get("VNX_TMUX_WORK_START_GATE", "1").strip().lower() in (
             "0", "false", "no", "off"
@@ -884,8 +895,11 @@ class TmuxInteractiveDispatch:
             )
             if len(canonical) > baseline_count:
                 return True
+            # Filter empty _pending_file values: a pending receipt without a file would
+            # otherwise contribute "" and read as fresh progress unless "" is already in
+            # the baseline (making the gate falsely lenient).
             if frozenset(
-                r.get("_pending_file", "") for r in pending
+                f for f in (r.get("_pending_file", "") for r in pending) if f
             ) - baseline_pending_ids:
                 return True
             return False
@@ -903,9 +917,9 @@ class TmuxInteractiveDispatch:
             if _work_observed():
                 return True
             # Guarded hand-deliver: re-submit ONCE, and only while the instruction is
-            # still staged right now — never a stray Enter into a session that just
-            # started working.
-            if not nudged and _still_staged():
+            # still staged AND not working as of this instant (both re-checked right
+            # before the send) — never a stray Enter into a session that just started.
+            if not nudged and _still_staged() and not _work_observed():
                 self._emit_event(
                     "interactive_hand_deliver",
                     dispatch_id=dispatch_id,
@@ -1652,6 +1666,7 @@ class TmuxInteractiveDispatch:
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
+                    failure_reason="interactive_ready_timeout",
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -1757,6 +1772,7 @@ class TmuxInteractiveDispatch:
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
+                    failure_reason="submit_failed",
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -1776,6 +1792,8 @@ class TmuxInteractiveDispatch:
             # load; without this gate the lane would wait the full deadline for a receipt
             # that never comes (the warmup-miss/no-progress hang in DISPATCH_RULES §7).
             # Fast-abort (retryable in seconds) instead of burning deadline_seconds.
+            # baseline / baseline_pending_ids are the PRE-DELIVERY snapshot (step 5),
+            # so a pre-existing/stale receipt is never miscounted as fresh progress.
             if not self._await_work_started(
                 pane_id,
                 dispatch_id,
@@ -1785,12 +1803,21 @@ class TmuxInteractiveDispatch:
                 completion_statuses=completion_statuses,
                 label=label,
             ):
+                # Capture the pane tail so operators can see WHY no work was observed
+                # (idle prompt, permission prompt, error) and tune the heuristic.
+                _pane_tail = ""
+                try:
+                    _cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+                    if _cap.returncode == 0 and _cap.stdout:
+                        _pane_tail = _cap.stdout[-600:]
+                except Exception as _cap_exc:  # noqa: BLE001
+                    logger.debug("interactive: no-progress pane capture failed (%s)", _cap_exc)
                 self._emit_event(
                     "interactive_no_progress",
                     dispatch_id=dispatch_id,
                     label=label,
                     reason="worker never started working after submit; fast-abort before deadline",
-                    metadata={"session": session, "pane_id": pane_id},
+                    metadata={"session": session, "pane_id": pane_id, "pane_tail": _pane_tail},
                 )
                 self._govern_report(
                     dispatch_id=dispatch_id,
@@ -1801,6 +1828,7 @@ class TmuxInteractiveDispatch:
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
+                    failure_reason="interactive_no_progress",
                 )
                 _teardown("no_progress")
                 return InteractiveDispatchResult(

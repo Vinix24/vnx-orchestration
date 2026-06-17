@@ -1714,6 +1714,7 @@ class TestReceiptFallback(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # working worker → real deadline synthesis path
         )
         lane = self._make_lane(fake)
 
@@ -1741,6 +1742,7 @@ class TestReceiptFallback(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # working worker → real deadline synthesis path
         )
         lane = self._make_lane(fake)
 
@@ -1815,6 +1817,7 @@ class TestReceiptFallback(_LaneTestCase):
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
             emit_receipt=False,
+            ready_content=_READY_AND_WORKING,  # working worker → real deadline synthesis path
         )
         lane = self._make_lane(fake)
 
@@ -2752,6 +2755,7 @@ class TestCaptureNormalizerCloseout(_LaneTestCase):
         fake = FakeTmux(
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
+            ready_content=_READY_AND_WORKING,  # working worker → real deadline path (not no-progress)
             emit_receipt=False,
         )
         lane = self._make_lane(fake)
