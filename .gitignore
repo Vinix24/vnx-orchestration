@@ -98,6 +98,10 @@ schemas/prep_migrations/
 # Environment files
 .env
 .env.*
+# ...but benchmark task seed .env fixtures ARE tracked (dummy placeholders only) so a
+# clean worktree checkout materializes them. Without this the seed .env is absent in the
+# worker worktree → verify.py crashes (infra-fail, not a model capability fail).
+!scripts/benchmark/field-tests/tasks/**/seed/.env
 
 # VNX provider secrets
 vnx.env
