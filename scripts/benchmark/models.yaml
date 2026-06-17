@@ -70,11 +70,23 @@ models:
     cost_input_mtok: 0.00
     cost_output_mtok: 0.00
 
-  - id: glm-5-1
-    provider: litellm:zai   # resolves to openrouter/z-ai/glm-5 + OPENROUTER_API_KEY (PROVIDER_MODEL_MAP) — OpenRouter, NOT direct Zhipu; satisfies zai-via-openrouter-only
+  - id: glm-5
+    provider: litellm:zai   # default alias glm-5.1-default → openrouter/z-ai/glm-5 = BASE GLM-5 (Feb 2026), baseline
     model_arg: glm-5
-    cost_input_mtok: 0.50
-    cost_output_mtok: 2.50
+    cost_input_mtok: 0.60
+    cost_output_mtok: 1.92
+
+  - id: glm-5-1
+    provider: litellm:zai:glm-5.1   # the REAL GLM-5.1 → openrouter/z-ai/glm-5.1 (was wrongly mapped to base glm-5)
+    model_arg: glm-5.1
+    cost_input_mtok: 0.60
+    cost_output_mtok: 1.92
+
+  - id: glm-5-2
+    provider: litellm:zai:glm-5.2   # GLM-5.2 (2026-06-16) → openrouter/z-ai/glm-5.2; satisfies zai-via-openrouter-only
+    model_arg: glm-5.2
+    cost_input_mtok: 0.60
+    cost_output_mtok: 1.92
 
   - id: codex-gpt-5-4
     provider: codex
