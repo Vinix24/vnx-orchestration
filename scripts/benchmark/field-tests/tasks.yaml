@@ -37,7 +37,7 @@ tasks:
     source: "MC PR #236 worker queues YAML"
     skill: backend-developer
     target_loc: 60
-    deadline_seconds: 1200  # was 600; thinking models need >10min (no timeout-DNF)
+    deadline_seconds: 1800  # all-night claude run: generous headroom for thinking models
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 5
@@ -48,7 +48,7 @@ tasks:
     source: "SEOcrawler PR #125 enable RLS on scan_quota"
     skill: database-engineer
     target_loc: 30
-    deadline_seconds: 1200  # was 600; opus exceeded 605s on this rls_policy task
+    deadline_seconds: 1800  # all-night claude run: opus warmup-miss observed, give retries room
     pattern: "pattern-match-bounded"
     verify_type: "sql_constraint_check"
 
@@ -58,7 +58,7 @@ tasks:
     source: "SEOcrawler PR #119 add load_dotenv()"
     skill: backend-developer
     target_loc: 15
-    deadline_seconds: 1200  # was 300 (5min, far too tight for thinking models)
+    deadline_seconds: 1800  # all-night claude run: generous headroom for thinking models
     pattern: "pattern-match-bounded"
     verify_type: "runtime_smoke"
 
@@ -68,7 +68,7 @@ tasks:
     source: "MC PR #244 visibility_comment_scorer"
     skill: backend-developer
     target_loc: 350
-    deadline_seconds: 1800
+    deadline_seconds: 2700  # all-night claude run: medium tier headroom
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 15
@@ -79,7 +79,7 @@ tasks:
     source: "SEOcrawler new BaseExtractor pattern"
     skill: backend-developer
     target_loc: 250
-    deadline_seconds: 1800
+    deadline_seconds: 2700  # all-night claude run: medium tier headroom
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 5
@@ -90,7 +90,7 @@ tasks:
     source: "SEOcrawler PR #123 mock-paginatie fix"
     skill: debugger
     target_loc: 80
-    deadline_seconds: 1200
+    deadline_seconds: 1800  # all-night claude run: introspection headroom
     pattern: "introspection-heavy"
     verify_type: "test_no_timeout"
     timeout_seconds: 5
