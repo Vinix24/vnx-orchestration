@@ -121,7 +121,7 @@ def ensure_receipt(
         "status": "failed",
         "source": "tmux_interactive_lane_synthesized",
         "synthesized": True,
-        "failure_reason": "tmux_receipt_deadline_exceeded",
+        "failure_reason": raw.failure_reason,
         "contract_status": contract_status,
         "permission_enforcement": permission_enforcement,
         "timestamp": ts,
@@ -170,6 +170,10 @@ class GovernSpec:
 class GovernRaw:
     receipt: Optional[dict] = None
     duration_seconds: float = 0.0
+    # Reason recorded on a lane-synthesized fallback receipt (raw.receipt is None).
+    # Defaults to the deadline case; abort paths (ready_timeout / submit_failed /
+    # no_progress) pass their own reason so the audit trail does not mislabel them.
+    failure_reason: str = "tmux_receipt_deadline_exceeded"
 
 
 @dataclass
