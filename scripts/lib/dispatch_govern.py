@@ -174,6 +174,10 @@ class GovernRaw:
     # Defaults to the deadline case; abort paths (ready_timeout / submit_failed /
     # no_progress) pass their own reason so the audit trail does not mislabel them.
     failure_reason: str = "tmux_receipt_deadline_exceeded"
+    # Lane-parsed token counts {input, output, cache_read} for lanes with no usage API
+    # (e.g. the claude tmux subscription lane, parsed from the pane TUI counter). Used as
+    # a fallback for the report frontmatter when the worker receipt carries no token_usage.
+    token_usage: Optional[dict] = None
 
 
 @dataclass
@@ -371,7 +375,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     receipt_data = raw.receipt or {}
     _model = (receipt_data.get("model") or "unknown")
     _exit_code = int(receipt_data.get("exit_code", 0) or 0)
-    _raw_token = receipt_data.get("token_usage") or {}
+    _raw_token = receipt_data.get("token_usage") or raw.token_usage or {}
     _token_usage = {
         "input": int(_raw_token.get("input") or 0),
         "output": int(_raw_token.get("output") or 0),

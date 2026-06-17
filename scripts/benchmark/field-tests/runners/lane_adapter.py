@@ -113,6 +113,7 @@ def _claude_subprocess_headless(
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
+        "VNX_BENCH_ESTIMATE_TOKENS": "1",
     }
     cmd = [
         sys.executable, str(SUBPROCESS_DISPATCH),
@@ -154,6 +155,7 @@ def _claude_tmux_spawn(
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
+        "VNX_BENCH_ESTIMATE_TOKENS": "1",
     }
     cmd = [
         sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
@@ -269,6 +271,7 @@ def _provider_dispatch(
         "VNX_ISOLATED_WORKTREE": "1",
         "VNX_BENCH_REQUIRE_ISOLATION": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
+        "VNX_BENCH_ESTIMATE_TOKENS": "1",
         "VNX_BENCH_PRESERVE_WORKTREE": "1",
         "VNX_UNIFIED_ENVELOPE": "0",
     }

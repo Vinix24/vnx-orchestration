@@ -81,8 +81,26 @@ class KimiSpawnResult:
         """
         return self.token_usage is not None
 
+    def _effective_token_usage(self) -> Dict[str, Any]:
+        """Real token_usage when measured, else a best-effort estimate.
+
+        kimi-cli 1.44.0 stream-json reports no token accounting, so when nothing was
+        observed we estimate output tokens from the completion text length (~4 chars per
+        token). token_usage_measured stays False (the estimate does not set token_usage),
+        so consumers can tell a measured count from an estimate.
+        """
+        if self.token_usage is not None:
+            return self.token_usage
+        # Bench-only best-effort estimate (kimi-cli 1.44.0 reports no usage). OFF by
+        # default so production reports keep the honest "unavailable" zeros contract
+        # (token_usage_measured stays False); the benchmark opts in via the env flag.
+        if os.environ.get("VNX_BENCH_ESTIMATE_TOKENS") == "1":
+            est_out = max(0, len(self.completion_text or "") // 4)
+            return {"input_tokens": 0, "output_tokens": est_out, "cache_read_tokens": 0}
+        return {}
+
     def frontmatter_fields(self) -> Dict[str, Any]:
-        usage = self.token_usage or {}
+        usage = self._effective_token_usage()
         return {
             "provider": "kimi",
             "sub_provider": "moonshot",
