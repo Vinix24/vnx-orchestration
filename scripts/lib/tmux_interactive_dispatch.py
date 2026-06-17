@@ -437,6 +437,7 @@ class TmuxInteractiveDispatch:
         worktree_path: "Path | None" = None,
         model: "str | None" = None,
         failure_reason: str = "tmux_receipt_deadline_exceeded",
+        token_usage: "dict | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -471,6 +472,7 @@ class TmuxInteractiveDispatch:
             receipt=receipt,
             duration_seconds=duration_seconds,
             failure_reason=failure_reason,
+            token_usage=token_usage,
         )
         outcome = govern(spec, raw, lane="tmux_interactive")
         if outcome.report_path:
@@ -486,6 +488,39 @@ class TmuxInteractiveDispatch:
                 dispatch_id, outcome.contract_status, outcome.error,
             )
         return outcome.report_path
+
+    # Pane TUI cumulative token counter, e.g. "(18s · ↓ 739 tokens)" (output / down) and
+    # "(↑ 12 tokens)" (input / up). Best-effort: the subscription lane has no usage API.
+    _PANE_OUTPUT_TOKENS_RE = re.compile(r"[↓⬇]\s*([\d,]+)\s*tokens?\b", re.IGNORECASE)
+    _PANE_INPUT_TOKENS_RE = re.compile(r"[↑⬆]\s*([\d,]+)\s*tokens?\b", re.IGNORECASE)
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    def _parse_token_usage_from_log(self, raw_log: "Path | None") -> "dict | None":
+        """Best-effort token counts for the claude subscription lane (no usage API).
+
+        The interactive TUI prints a cumulative counter like "(18s · ↓ 739 tokens)".
+        pipe-pane records every redraw, so the MAX ↓/↑ value across the captured log is
+        the final output/input token total. Returns {"input","output","cache_read"} or
+        None when nothing parseable was seen (then the report frontmatter stays at 0 and
+        the scorer reports tokens/sec as n/a rather than a fabricated number).
+        """
+        if raw_log is None:
+            return None
+        try:
+            text = Path(raw_log).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        text = self._ANSI_RE.sub("", text)
+
+        def _max_tokens(rx: "re.Pattern") -> int:
+            vals = [int(m.replace(",", "")) for m in rx.findall(text) if m]
+            return max(vals) if vals else 0
+
+        out = _max_tokens(self._PANE_OUTPUT_TOKENS_RE)
+        inp = _max_tokens(self._PANE_INPUT_TOKENS_RE)
+        if out == 0 and inp == 0:
+            return None
+        return {"input": inp, "output": out, "cache_read": 0}
 
     def _build_completion_protocol(
         self, dispatch_id: str, label: str, model: str = "unknown"
@@ -1928,6 +1963,10 @@ class TmuxInteractiveDispatch:
                 "failed",
                 "blocked",
             )
+            # Best-effort token usage parsed from the pane TUI counter (no usage API on
+            # the subscription lane) — used only as a frontmatter fallback when the
+            # worker receipt carries none.
+            _pane_tokens = self._parse_token_usage_from_log(_raw_log[0])
             emitted_report = self._govern_report(
                 dispatch_id=dispatch_id,
                 terminal_id=label,
@@ -1937,6 +1976,7 @@ class TmuxInteractiveDispatch:
                 base_sha=worktree_handle.base_sha if worktree_handle else None,
                 worktree_path=worktree_handle.path if worktree_handle else None,
                 model=model,
+                token_usage=_pane_tokens,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.
