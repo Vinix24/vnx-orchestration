@@ -82,8 +82,14 @@ def write_per_lane_md(scores: list, output_path: Path) -> None:
         total_cost = sum(c.cost_usd for c in cells)
         wins = [c for c in cells if c.composite >= 4.0]
         losses = [c for c in cells if c.composite <= 1.5]
+        tps_vals = [c.tokens_per_second for c in cells if c.tokens_per_second > 0]
+        tps_str = (
+            f"median {statistics.median(tps_vals):.1f} tok/s (N={len(tps_vals)} measured)"
+            if tps_vals else "n/a (no token data — subscription/unmeasured lane)"
+        )
         lines.append(f"## {lane}")
         lines.append(f"- Cells: {len(cells)} | Median composite: {median_composite:.2f} | Total cost: ${total_cost:.4f}")
+        lines.append(f"- Throughput: {tps_str}")
         lines.append(f"- Wins ({len(wins)}): {', '.join(sorted({c.task_id for c in wins})) or 'none'}")
         lines.append(f"- Losses ({len(losses)}): {', '.join(sorted({c.task_id for c in losses})) or 'none'}")
         lines.append("")

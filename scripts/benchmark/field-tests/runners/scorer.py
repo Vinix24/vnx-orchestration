@@ -44,6 +44,9 @@ class CellScore:
     judge_reasoning: str
     cost_usd: float
     wallclock_seconds: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_per_second: float = 0.0   # output_tokens / wallclock (effective throughput)
 
 
 def _load_verify_module(task_folder: Path):
@@ -231,6 +234,46 @@ def _extract_cost_from_report(report_path: Path) -> float:
     return 0.0
 
 
+def _extract_tokens_from_report(report_path: Path) -> "tuple[int, int]":
+    """Parse (input_tokens, output_tokens) from the report frontmatter token_usage block.
+
+    Frontmatter shape:
+        token_usage:
+          input: 1234
+          output: 567
+    Returns (0, 0) when absent or unparseable (e.g. subscription lanes that report no
+    usage). A 0 here means "not measured", not "zero work".
+    """
+    if not report_path or not report_path.exists():
+        return 0, 0
+
+    def _safe_int(s: str) -> int:
+        try:
+            return int(float(s.strip()))
+        except ValueError:
+            return 0
+
+    try:
+        lines = report_path.read_text(encoding="utf-8", errors="ignore").splitlines()[:40]
+    except OSError:
+        return 0, 0
+    in_block = False
+    inp = out = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("token_usage:"):
+            in_block = True
+            continue
+        if in_block:
+            if stripped.startswith("input:"):
+                inp = _safe_int(stripped.split(":", 1)[1])
+            elif stripped.startswith("output:"):
+                out = _safe_int(stripped.split(":", 1)[1])
+            elif stripped and not line.startswith((" ", "\t")):
+                break  # dedent to a new top-level key → left the token_usage block
+    return inp, out
+
+
 def score_cell(
     dispatch_result, task_meta: dict, task_folder: Path,
     instruction: str, expected_files: list[str],
@@ -277,6 +320,11 @@ def score_cell(
 
     cost_usd = _extract_cost_from_report(dispatch_result.report_path)
     cost_eff = _compute_cost_efficiency(cost_usd, task_meta.get("tier", ""))
+    input_tokens, output_tokens = _extract_tokens_from_report(dispatch_result.report_path)
+    _wall = dispatch_result.wallclock_seconds
+    tokens_per_second = (
+        round(output_tokens / _wall, 2) if _wall > 0 and output_tokens else 0.0
+    )
     wall_eff = _compute_wallclock_efficiency(
         dispatch_result.wallclock_seconds, task_meta.get("deadline_seconds", 600),
     )
@@ -315,4 +363,7 @@ def score_cell(
         judge_reasoning=judge_reasoning[:300],
         cost_usd=cost_usd,
         wallclock_seconds=dispatch_result.wallclock_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        tokens_per_second=tokens_per_second,
     )
