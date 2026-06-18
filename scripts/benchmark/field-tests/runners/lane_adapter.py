@@ -275,6 +275,10 @@ def _provider_dispatch(
         "VNX_BENCH_SEED_MATERIALIZE": "1",
         "VNX_BENCH_PRESERVE_WORKTREE": "1",
         "VNX_UNIFIED_ENVELOPE": "0",
+        # Agentic tool-loop for litellm lanes (GLM via OpenRouter): the model must
+        # write files / run tests itself, else deliverable tasks score correctness 0
+        # by construction. Ignored by non-litellm providers (kimi/codex/deepseek-harness).
+        "VNX_LITELLM_AGENTIC": "1",
     }
     provider_map = {
         "litellm:deepseek": "litellm:deepseek",

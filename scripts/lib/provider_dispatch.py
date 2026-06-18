@@ -1233,7 +1233,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     or "anthropic/claude-sonnet-4-6" fallback. Wires EventStore for NDJSON audit.
     DeepSeek requires DEEPSEEK_API_KEY env var (fast-fail before subprocess spawn).
     """
-    from provider_spawns.litellm_spawn import spawn_litellm
+    from provider_spawns.litellm_spawn import spawn_litellm, spawn_litellm_agentic
 
     event_store = None
     try:
@@ -1319,17 +1319,33 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         return 1
     start_time = datetime.now(timezone.utc)
     try:
-        result = spawn_litellm(
-            prompt=enriched_instruction,
-            model=model,
-            dispatch_id=args.dispatch_id,
-            terminal_id=args.terminal_id,
-            sub_provider=base_sub or None,
-            lane=lane_key,
-            tool_call_shape=_tool_call_shape,
-            event_writer=event_store.append if event_store is not None else None,
-            cwd=worker_cwd,
-        )
+        # Agentic mode (VNX_LITELLM_AGENTIC=1): drive a tool-use loop so the model
+        # actually writes files / runs tests in the isolated cell. Without it the
+        # one-shot path gives the model no tools, so any deliverable-producing task
+        # scores correctness 0 by construction (observed 2026-06-18 GLM run).
+        if os.environ.get("VNX_LITELLM_AGENTIC") == "1":
+            result = spawn_litellm_agentic(
+                prompt=enriched_instruction,
+                model=model,
+                dispatch_id=args.dispatch_id,
+                terminal_id=args.terminal_id,
+                sub_provider=base_sub or None,
+                lane=lane_key,
+                event_writer=event_store.append if event_store is not None else None,
+                cwd=worker_cwd,
+            )
+        else:
+            result = spawn_litellm(
+                prompt=enriched_instruction,
+                model=model,
+                dispatch_id=args.dispatch_id,
+                terminal_id=args.terminal_id,
+                sub_provider=base_sub or None,
+                lane=lane_key,
+                tool_call_shape=_tool_call_shape,
+                event_writer=event_store.append if event_store is not None else None,
+                cwd=worker_cwd,
+            )
         end_time = datetime.now(timezone.utc)
 
         if result.error:
