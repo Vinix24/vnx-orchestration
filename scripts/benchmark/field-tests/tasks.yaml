@@ -50,7 +50,7 @@ tasks:
     source: "SEOcrawler PR #125 enable RLS on scan_quota"
     skill: database-engineer
     target_loc: 30
-    deadline_seconds: 1800  # all-night claude run: opus warmup-miss observed, give retries room
+    deadline_seconds: 900   # lowered 1800→900: genuine opus completions are 537-777s; stalls now fail fast (retryable) instead of burning 1813s. #893 fast-aborts warmup-miss at 125s.
     pattern: "pattern-match-bounded"
     verify_type: "sql_constraint_check"
 
