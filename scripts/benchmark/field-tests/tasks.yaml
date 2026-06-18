@@ -144,3 +144,14 @@ tasks:
     pattern: "adversarial-graded"
     verify_type: "adversarial_matrix_graded"
     expected_checks_pass: 17
+
+  - id: "t4_02_subtle_bugfix"
+    tier: t4_frontier
+    folder: "tasks/t4_frontier/02_subtle_bugfix"
+    source: "SWE-bench style: subtle TTLCache eviction bug — fix without breaking the suite"
+    skill: debugger
+    target_loc: 60
+    deadline_seconds: 1800
+    pattern: "swe-bench-bugfix-graded"
+    verify_type: "existing_suite_plus_hidden_regression"
+    expected_checks_pass: 16
