@@ -486,3 +486,182 @@ def spawn_litellm(
         sub_provider=sub_provider,
         lane=lane,
     )
+
+
+# ---------------------------------------------------------------------------
+# Agentic spawn — drives _litellm_agentic_runner.py (tool-use loop)
+# ---------------------------------------------------------------------------
+
+# Agentic runner: gives the model file/shell tools and iterates until it
+# finishes (vs the one-shot _RUNNER_PATH which gives no tools). Required for
+# agentic coding tasks where the model must actually write files and run tests.
+_AGENTIC_RUNNER_PATH = Path(__file__).resolve().parents[1] / "adapters" / "_litellm_agentic_runner.py"
+
+
+def _agentic_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def spawn_litellm_agentic(
+    prompt: str,
+    model: str,
+    dispatch_id: str,
+    terminal_id: str,
+    *,
+    sub_provider: Optional[str] = None,
+    lane: Optional[str] = None,
+    event_writer: Optional[Callable[..., None]] = None,
+    extra_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[Any] = None,
+    runner_path: Optional[str] = None,
+    max_turns: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    command_timeout: Optional[int] = None,
+    total_deadline: Optional[float] = None,
+    **kwargs: Any,
+) -> LiteLLMSpawnResult:
+    """Agentic counterpart of spawn_litellm.
+
+    Drives ``_litellm_agentic_runner.py``, which gives the model
+    read_file / write_file / list_dir / run_command tools and iterates the
+    tool-use loop until the model stops or hits max_turns. The model writes its
+    deliverables directly into ``cwd`` (the isolated worker cell), so agentic
+    coding tasks produce real files — unlike the one-shot ``spawn_litellm``.
+
+    Returns the same LiteLLMSpawnResult shape so callers (_emit_governance,
+    frontmatter token_usage) need no special-casing.
+    """
+    max_turns = max_turns or _agentic_int_env("VNX_LITELLM_AGENTIC_MAX_TURNS", 30)
+    max_tokens = max_tokens or _agentic_int_env("VNX_LITELLM_AGENTIC_MAX_TOKENS", 8192)
+    command_timeout = command_timeout or _agentic_int_env("VNX_LITELLM_AGENTIC_CMD_TIMEOUT", 120)
+    if total_deadline is None:
+        total_deadline = float(_agentic_int_env("VNX_LITELLM_AGENTIC_DEADLINE", 1800))
+
+    if not model:
+        model = (
+            os.environ.get("VNX_LITELLM_MODEL", "")
+            or (f"{sub_provider}/default" if sub_provider else "anthropic/claude-sonnet-4-6")
+        )
+
+    _runner = runner_path or str(_AGENTIC_RUNNER_PATH)
+    payload_json = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "cwd": str(cwd) if cwd is not None else os.getcwd(),
+        "max_turns": max_turns,
+        "max_tokens": max_tokens,
+        "command_timeout": command_timeout,
+    })
+
+    # Start the runner ourselves and drive stdin/stdout via communicate(input=...).
+    # (We can't reuse _start_litellm_subprocess: it pre-writes AND closes stdin, which
+    # makes a later communicate() raise "flush of closed file".)
+    cmd = _build_litellm_cmd(_runner)
+    env = {**os.environ, **(extra_env or {})}
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, env=env, cwd=str(cwd) if cwd is not None else None,
+        )
+    except FileNotFoundError as exc:
+        return LiteLLMSpawnResult(
+            returncode=127, completion_text="", events_written=0, session_id=None,
+            timed_out=False, error=f"agentic runner not found: {exc}",
+        )
+    except OSError as exc:
+        return LiteLLMSpawnResult(
+            returncode=126, completion_text="", events_written=0, session_id=None,
+            timed_out=False, error=f"failed to spawn agentic runner: {exc}",
+        )
+
+    timed_out = False
+    try:
+        stdout_b, _stderr_b = proc.communicate(input=payload_json.encode("utf-8"), timeout=total_deadline)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout_b, _stderr_b = proc.communicate()
+        timed_out = True
+
+    completion_parts: list = []
+    token_usage: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    events_written = 0
+    ew_failures = 0
+
+    def _canon(etype: str, data: dict) -> CanonicalEvent:
+        return CanonicalEvent(
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            provider="litellm",
+            event_type=etype,
+            data=data,
+            observability_tier=_TIER_STREAMING,
+            sub_provider=sub_provider,
+            provider_meta={"lane": lane} if lane is not None else {},
+        )
+
+    text = stdout_b.decode("utf-8", "replace") if stdout_b else ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        events_written += 1
+
+        if "error_type" in evt:
+            error = evt.get("message") or evt.get("error_type")
+            canonical = _canon("error", {"error_type": evt.get("error_type"), "message": evt.get("message", "")})
+        else:
+            etype = evt.get("event_type") or "info"
+            if etype == "text":
+                content = evt.get("content") or ""
+                if content:
+                    completion_parts.append(content)
+                canonical = _canon("text", {"content": evt.get("content", "")})
+            elif etype == "usage_complete":
+                usage = evt.get("usage")
+                if isinstance(usage, dict):
+                    token_usage = {
+                        "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                    }
+                canonical = _canon("usage_complete", {"usage": evt.get("usage") or {}})
+            else:
+                canonical = _canon(etype, {k: v for k, v in evt.items() if k != "event_type"})
+
+        if event_writer is not None:
+            try:
+                event_writer(terminal_id, canonical.to_dict(), dispatch_id=dispatch_id)
+            except Exception as _exc:  # noqa: BLE001
+                logger.error(
+                    "spawn_litellm_agentic: event_writer callback failed (dispatch=%s): %s",
+                    dispatch_id, _exc,
+                )
+                ew_failures += 1
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    rc = proc.returncode if proc.returncode is not None else 1
+    if error and rc == 0:
+        rc = 1
+
+    return LiteLLMSpawnResult(
+        returncode=rc,
+        completion_text="".join(completion_parts),
+        events_written=events_written,
+        session_id=None,
+        timed_out=timed_out,
+        stopped_early=False,
+        event_writer_failures=ew_failures,
+        error=error,
+        token_usage=token_usage,
+    )
