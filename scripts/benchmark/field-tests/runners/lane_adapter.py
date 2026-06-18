@@ -279,6 +279,8 @@ def _provider_dispatch(
         # write files / run tests itself, else deliverable tasks score correctness 0
         # by construction. Ignored by non-litellm providers (kimi/codex/deepseek-harness).
         "VNX_LITELLM_AGENTIC": "1",
+        # claude -p benchmark deadline (only the claude-headless path reads this).
+        "VNX_BENCH_CLAUDE_DEADLINE": str(deadline_seconds),
     }
     provider_map = {
         "litellm:deepseek": "litellm:deepseek",
@@ -416,9 +418,20 @@ def dispatch(
         )
 
     via_tmux = False
-    via_provider = lane["provider"] != "claude"
+    # VNX_BENCH_CLAUDE_HEADLESS=1 (operator-authorized `claude -p` for the benchmark):
+    # route claude through provider_dispatch --provider claude, which materializes the
+    # cell + runs `claude -p` (spawn_claude) + emits a governed report — same path as the
+    # other provider lanes, scored via VNX_PROVIDER_WORKDIR. Avoids the tmux warmup-miss.
+    _claude_headless_p = (
+        lane["provider"] == "claude" and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
+    )
+    via_provider = lane["provider"] != "claude" or _claude_headless_p
     try:
-        if lane["provider"] == "claude":
+        if _claude_headless_p:
+            rc, out, err = _provider_dispatch(
+                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
+            )
+        elif lane["provider"] == "claude":
             # Check BOTH lane id and model_arg — models.yaml uses short aliases
             # for some lanes (e.g. claude-sonnet-4-6's model_arg is "sonnet"),
             # so a model_arg-only check missed sonnet on the 2026-06-05 retry.

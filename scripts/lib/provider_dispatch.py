@@ -805,12 +805,86 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
+    """Benchmark claude lane via `claude -p` in a materialized isolated cell.
+
+    Vincent-authorized `claude -p` FOR THE BENCHMARK ONLY (the tmux subscription
+    lane hits a warmup-miss/stall that is a known unsupported-for-batch tmux issue;
+    headless `claude -p` avoids it). Mirrors the provider lanes: _prepare_provider_workdir
+    (materialize + from-scratch + worktree lock) → spawn_claude (the CLI, not the SDK —
+    `no-anthropic-sdk` intact) → governed report via _emit_governance. NOTE: post the
+    2026-06-15 subscription-escape cutover this bills API credits, not the subscription.
+    """
+    from provider_spawns.claude_spawn import spawn_claude
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_claude_benchmark: EventStore init failed; cannot proceed without "
+            "audit sink (ADR-005): %s", _es_exc,
+        )
+        return 1
+
+    role = args.role or "backend-developer"
+    instruction = _enrich_instruction(args)
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error("claude benchmark isolation failed for %s — aborting", args.dispatch_id)
+        return 1
+
+    try:
+        total_deadline = float(os.environ.get("VNX_BENCH_CLAUDE_DEADLINE", "1800"))
+    except (TypeError, ValueError):
+        total_deadline = 1800.0
+
+    start_time = datetime.now(timezone.utc)
+    try:
+        result = spawn_claude(
+            prompt=instruction,
+            model=args.model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            cwd=worker_cwd,
+            role=role,
+            skip_permissions=True,  # benchmark: no human to answer tool-permission prompts
+            event_writer=event_store.append if event_store is not None else None,
+            total_deadline=total_deadline,
+            requires_mcp=getattr(args, "requires_mcp", False),
+        )
+        end_time = datetime.now(timezone.utc)
+
+        if result.error or result.timed_out:
+            status = "timeout" if result.timed_out else "failure"
+            _emit_governance(args, "claude", args.model, result, start_time, end_time, status, event_store=event_store)
+            print(f"spawn_claude failed: {result.error or 'timeout'}", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "claude", args.model, result, start_time, end_time, "failure", event_store=event_store)
+            return 1
+        _emit_governance(args, "claude", args.model, result, start_time, end_time, "success", event_store=event_store)
+        return 0
+    finally:
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+
+
 def _dispatch_claude(args: argparse.Namespace) -> int:
     """Delegate to subprocess_dispatch.deliver_with_recovery (claude path).
 
     Produces byte-identical NDJSON + receipt as direct subprocess_dispatch
     invocation — the delegation preserves all argument semantics unchanged.
     """
+    # Benchmark mode (VNX_BENCH_SEED_MATERIALIZE=1): route claude through the
+    # materialized-cell `claude -p` path so the benchmark scores it like the provider
+    # lanes (the legacy delegate below does NOT materialize the seed/cell).
+    if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
+        return _dispatch_claude_benchmark(args)
+
     import subprocess_dispatch as sd
 
     # OI-1107: fall back to Role: header in instruction, then to documented default.
@@ -1751,6 +1825,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if provider == "claude":
+        # Benchmark exemption: the measurement harness is exempt from the single-entry
+        # door (it dispatches lanes directly; PR-12 plan). When the operator has
+        # explicitly authorized `claude -p` for the benchmark (VNX_BENCH_CLAUDE_HEADLESS=1)
+        # AND we are in benchmark seed-materialize mode, route claude through the governed
+        # materialized-cell `claude -p` path instead of rejecting to the door.
+        if (
+            os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1"
+            and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
+        ):
+            return _dispatch_claude(args)
         # PR-5: claude is not a provider-lane provider. The single-entry door owns
         # all Claude routing. Silent headless auto-selection via provider_dispatch is
         # removed — use DispatchSpec with allow_headless=true through the door instead.

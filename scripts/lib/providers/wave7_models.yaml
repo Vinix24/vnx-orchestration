@@ -14,6 +14,24 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding-premium", "review", "analysis"]
+      opus-4-8:
+        litellm_name: "anthropic/claude-opus-4-8"
+        cost_input_per_mtok: 15.00
+        cost_output_per_mtok: 75.00
+        max_tokens: 32000
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+      opus-4-6:
+        litellm_name: "anthropic/claude-opus-4-6"
+        cost_input_per_mtok: 15.00
+        cost_output_per_mtok: 75.00
+        max_tokens: 32000
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
       sonnet:
         litellm_name: "anthropic/claude-sonnet-4-6"
         cost_input_per_mtok: 3.00
