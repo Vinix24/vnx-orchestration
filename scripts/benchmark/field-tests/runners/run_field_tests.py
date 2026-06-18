@@ -89,7 +89,11 @@ def run_one_cell(
 
     instruction = instruction_path.read_text(encoding="utf-8")
     seed_dir = task_folder / "seed"
-    dispatch_paths = str(seed_dir.relative_to(REPO_ROOT)) if seed_dir.exists() else ""
+    # Always pass the conventional seed-rel path. When the dir exists the worker gets
+    # the materialized seed; when it does NOT (from-scratch tasks like t3 07/08 that
+    # build everything themselves) the harness starts the worker in an empty cell and
+    # plants the SEED_REL symlink, so verify.py's `workdir / SEED_REL` resolves either way.
+    dispatch_paths = str(seed_dir.relative_to(REPO_ROOT))
 
     deadline = deadline_override if deadline_override is not None else task.get("deadline_seconds", 600)
     # Skill-binding: tasks.yaml may declare `skill: <name>` or `skills: [a, b]`.
