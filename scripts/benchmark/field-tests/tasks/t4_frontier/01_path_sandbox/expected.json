@@ -1,0 +1,18 @@
+{
+  "expected_files": ["safe_path.py", "tests/test_safe_path.py"],
+  "expected_checks_pass": 17,
+  "expected_style": {
+    "language": "python",
+    "must_use": [
+      "os.path.realpath or Path.resolve (resolve symlinks BEFORE the containment check)",
+      "containment check via Path.relative_to / os.path.commonpath",
+      "raise UnsafePath on reject"
+    ],
+    "anti_patterns": [
+      "no string-only '..' substring check",
+      "no os.path.normpath without realpath (misses the symlink escape)",
+      "must never RETURN an out-of-base path under any input"
+    ]
+  },
+  "rubric_for_llm_judge": "High quality: resolves real paths (realpath/resolve) BEFORE the containment check so symlinked-subdir escapes are caught; decodes percent-encoding; rejects null bytes, absolute paths and backslash separators; raises UnsafePath with a clear reason taxonomy. Low quality: string-match-only '..' check, normpath without symlink resolution (a symlinked subdir escapes), or silently returns an out-of-base path for any vector."
+}
