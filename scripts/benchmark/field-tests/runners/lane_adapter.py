@@ -113,6 +113,8 @@ def _claude_subprocess_headless(
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
+        "VNX_ISOLATED_WORKTREE": "1",
+        "VNX_BENCH_REQUIRE_ISOLATION": "1",   # fail-loud on isolation failure; never run a worker in the shared checkout
     }
     cmd = [
         sys.executable, str(SUBPROCESS_DISPATCH),
@@ -154,6 +156,8 @@ def _claude_tmux_spawn(
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
+        "VNX_ISOLATED_WORKTREE": "1",
+        "VNX_BENCH_REQUIRE_ISOLATION": "1",   # fail-loud on isolation failure; never run a worker in the shared checkout
     }
     cmd = [
         sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
