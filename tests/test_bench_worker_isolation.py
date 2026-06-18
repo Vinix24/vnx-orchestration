@@ -151,6 +151,33 @@ def test_adapter_parity_scores_both_isolated_outputs_and_keeps_main_seed_clean(
     assert _git(main_repo, "status", "--porcelain", "--", str(SEED_REL)) == ""
 
 
+def test_materialize_from_scratch_creates_empty_cell_and_symlink(tmp_path):
+    # FROM-SCRATCH task (t3 07/08): the seed path does NOT exist in the worktree.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert not (wt / SEED_REL).exists()
+
+    cell = materialize_benchmark_seed(wt, [str(SEED_REL)])
+
+    assert cell == wt / BENCH_CELL_DIRNAME
+    assert cell.is_dir()
+    assert not any(cell.iterdir())  # worker starts in an empty cell
+    # SEED_REL is now a symlink → the cell, so verify.py's `workdir / SEED_REL` resolves.
+    seed_link = wt / SEED_REL
+    assert seed_link.is_symlink()
+    (cell / "state_machine.py").write_text("ok", encoding="utf-8")
+    assert (seed_link / "state_machine.py").read_text(encoding="utf-8") == "ok"
+
+
+def test_materialize_from_scratch_refuses_main_checkout(tmp_path):
+    # The .git-is-dir guard must still fire even on the from-scratch path.
+    main = tmp_path / "main"
+    main.mkdir()
+    (main / ".git").mkdir()
+    with pytest.raises(RuntimeError, match="refusing shared main checkout"):
+        materialize_benchmark_seed(main, [str(SEED_REL)])
+
+
 class _TmuxRunner:
     def __init__(self, receipts_file: Path, dispatch_id: str) -> None:
         self.receipts_file = receipts_file
