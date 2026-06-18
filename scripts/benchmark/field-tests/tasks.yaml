@@ -32,6 +32,11 @@ tiers:
     lanes: *bench_lanes_10
     n_replications: 2
 
+  t4_frontier:
+    description: "Frontier discriminators — graded 0-5 rubric, naive ~2-3, deep ~5; separates top models"
+    lanes: *bench_lanes_10
+    n_replications: 2
+
 tasks:
   - id: "01_yaml_config_refactor"
     tier: t1_trivial
@@ -50,7 +55,7 @@ tasks:
     source: "SEOcrawler PR #125 enable RLS on scan_quota"
     skill: database-engineer
     target_loc: 30
-    deadline_seconds: 900   # lowered 1800→900: genuine opus completions are 537-777s; stalls now fail fast (retryable) instead of burning 1813s. #893 fast-aborts warmup-miss at 125s.
+    deadline_seconds: 1200  # 900 cut off genuine opus completions in the tmux lane (911s/908s observed under load: warmup overhead the API lanes don't have). 1200 gives headroom; #893 (125s warmup-abort) + work-started watchdog still fast-abort true stalls, so this only costs time on legitimately-slow work, never on hangs.
     pattern: "pattern-match-bounded"
     verify_type: "sql_constraint_check"
 
@@ -128,3 +133,14 @@ tasks:
     pattern: "introspection-heavy"
     verify_type: "iterations_and_hang_detection"
     hang_threshold_minutes: 10
+
+  - id: "t4_01_path_sandbox"
+    tier: t4_frontier
+    folder: "tasks/t4_frontier/01_path_sandbox"
+    source: "security: directory-traversal sandbox — graded adversarial bypass matrix"
+    skill: security-engineer
+    target_loc: 120
+    deadline_seconds: 1800
+    pattern: "adversarial-graded"
+    verify_type: "adversarial_matrix_graded"
+    expected_checks_pass: 17
