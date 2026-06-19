@@ -294,7 +294,14 @@ def score_cell(
     # SAFE for from-scratch / new-file tasks (a no-op leaves no deliverable → verify scores 0);
     # for seed-based tasks verify checks the actual change, not the untouched seed.
     _score_on_failure = os.environ.get("VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE") == "1"
-    if not dispatch_result.success and not _score_on_failure:
+    # Only honor score-on-failure when the cell ACTUALLY RAN. An immediate-exit
+    # (harness never launched, rate-limit, session-create fail) makes no proxy/API
+    # calls and leaves only the materialized seed, so verifying it would award the
+    # bogus naive baseline (e.g. a seed-based t4 task scoring ~3.5 for doing nothing).
+    # A genuine rc=1-with-deliverable run (glm-harness cosmetic loop-close) takes real
+    # wallclock; gate on it so immediate-exits stay DNF.
+    _ran_for_real = dispatch_result.wallclock_seconds >= 5.0
+    if not dispatch_result.success and not (_score_on_failure and _ran_for_real):
         return CellScore(
             lane_id=dispatch_result.lane_id,
             task_id=dispatch_result.task_id,
