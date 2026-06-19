@@ -315,8 +315,27 @@ def _resolve_codex_model(model: Optional[str]) -> str:
 
 
 def _build_cmd(model: Optional[str]) -> list:
-    """Build the codex exec argv."""
-    return ["codex", "exec", "--json", "--model", _resolve_codex_model(model)]
+    """Build the codex exec argv.
+
+    `codex exec` runs non-interactively so approvals auto-downgrade to `never`, BUT the
+    SANDBOX still applies. Without an explicit sandbox flag codex runs read-only and cannot
+    write files or run commands — so any multi-file worker task fails fast (rc=1) after a
+    few seconds. This was the t2+ "launch-flakiness": not launch/quota, the sandbox blocking
+    file ops (t1 squeaked through on minimal ops). Worker dispatch needs file+command access.
+
+    Default to the full bypass — the worker runs in an ISOLATED worktree cell (same posture
+    as claude's --dangerously-skip-permissions in the bench). Override via VNX_CODEX_SANDBOX
+    ("workspace-write" = recommended safer level that still allows workspace edits + sandboxed
+    command exec; "read-only"/"danger-full-access" also accepted).
+    """
+    cmd = ["codex", "exec", "--json"]
+    sandbox = (os.environ.get("VNX_CODEX_SANDBOX", "") or "").strip()
+    if sandbox in ("workspace-write", "read-only", "danger-full-access"):
+        cmd += ["--sandbox", sandbox]
+    else:
+        cmd += ["--dangerously-bypass-approvals-and-sandbox"]
+    cmd += ["--model", _resolve_codex_model(model)]
+    return cmd
 
 
 # ---------------------------------------------------------------------------
