@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -31,6 +32,15 @@ def _sanitize_dispatch_id(dispatch_id: str) -> str:
 
 def _dispatch_worktree_dir(project_root: Path, dispatch_id: str) -> Path:
     safe_id = _sanitize_dispatch_id(dispatch_id)
+    # VNX_BENCH_WORKTREE_ROOT: place worktrees OUTSIDE the main repo so an UNSANDBOXED
+    # worker (claude -p, deepseek-harness) cannot reach the main checkout via repo-relative
+    # navigation and leak its output into the committed seed. From-scratch / introspection
+    # tasks (t3 07/08/09, t4) triggered exactly this when worktrees lived under
+    # <repo>/.vnx-data/worktrees/. The GLM agentic runner is sandboxed and is unaffected.
+    # Default (unset): the in-repo path — production dispatch behaviour is unchanged.
+    root_override = os.environ.get("VNX_BENCH_WORKTREE_ROOT", "").strip()
+    if root_override:
+        return Path(root_override).expanduser().resolve() / f"dispatch-{safe_id}"
     return project_root / ".vnx-data" / "worktrees" / f"dispatch-{safe_id}"
 
 
