@@ -37,8 +37,19 @@ from reporter import (  # noqa: E402
 
 
 def load_tasks_config() -> dict:
-    cfg_path = FIELD_TESTS / "tasks.yaml"
-    return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((FIELD_TESTS / "tasks.yaml").read_text(encoding="utf-8"))
+    # Optional gitignored overlay for INTERNAL tasks (e.g. the t6 real-codebase-review
+    # tier, whose instruction/verify reference proprietary repos and must not be
+    # committed/published). Merges its tiers + tasks on top of the public config.
+    local = FIELD_TESTS / "tasks.local.yaml"
+    if local.exists():
+        lcfg = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
+        cfg.setdefault("tiers", {}).update(lcfg.get("tiers", {}))
+        seen = {t["id"] for t in cfg.get("tasks", [])}
+        cfg.setdefault("tasks", []).extend(
+            t for t in lcfg.get("tasks", []) if t["id"] not in seen
+        )
+    return cfg
 
 
 def filter_cells(

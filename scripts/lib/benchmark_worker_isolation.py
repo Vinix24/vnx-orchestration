@@ -10,6 +10,34 @@ from pathlib import Path
 BENCH_CELL_DIRNAME = ".vnx-benchmark-cell"
 
 
+def _overlay_external_seed(worker_cwd: Path) -> None:
+    """Inject an EXTERNAL (uncommitted) seed into the worker cell.
+
+    Gated on VNX_BENCH_EXTERNAL_SEED. Used by the t6 real-codebase-review tier: the
+    review digest is proprietary and must NOT be committed to the repo, so it lives
+    in an external gitignored location and is copied into every worker cell here.
+    Copying it into the cell (rather than pointing at an absolute path) keeps the
+    input identical for ALL lanes, including the sandboxed litellm runner that can
+    only read inside its cwd — so the comparison stays fair.
+
+    No-op when the env var is unset; production / other-tier behaviour is unchanged.
+    """
+    ext = os.environ.get("VNX_BENCH_EXTERNAL_SEED", "").strip()
+    if not ext:
+        return
+    src = Path(ext).expanduser()
+    if not src.is_dir():
+        raise RuntimeError(
+            f"VNX_BENCH_EXTERNAL_SEED set but not a directory: {src}"
+        )
+    for item in src.iterdir():
+        dest = worker_cwd / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
+
+
 def materialize_benchmark_seed(
     worktree: Path,
     dispatch_paths: "list[str] | str | None",
@@ -83,6 +111,10 @@ def materialize_benchmark_seed(
         # SEED_REL symlink can be planted (verify.py still reads workdir/SEED_REL).
         worker_cwd.mkdir(parents=True)
         seed_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    # Optional external-seed overlay (t6 private-codebase digest). No-op unless
+    # VNX_BENCH_EXTERNAL_SEED is set — keeps the same input in every cell, fairly.
+    _overlay_external_seed(worker_cwd)
 
     seed_dir.symlink_to(
         os.path.relpath(worker_cwd, seed_dir.parent),
