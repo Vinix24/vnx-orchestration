@@ -432,6 +432,29 @@ def main() -> int:
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"[run_field_tests] {len(cells)} cells → {results_dir}", file=sys.stderr)
 
+    # Preflight: OpenRouter (glm / litellm:zai) lanes silently DNF at ~2s when credits are
+    # depleted (a 402 reads identically to a throttle from outside). Catch it loudly here
+    # instead of burning a whole run — 2026-06-19 a GLM t4/t5 run instant-rejected for hours
+    # on an empty balance. Aborts only when EVERY lane is an OpenRouter lane; mixed runs warn.
+    or_lanes = [
+        l for (l, _t, _r) in cells
+        if str(l.get("id", "")).startswith("glm")
+        or "zai" in str(l.get("provider", "")).lower()
+        or "openrouter" in str(l.get("provider", "")).lower()
+    ]
+    if or_lanes:
+        try:
+            import check_openrouter_credits as _orc
+            rc = _orc.check()
+        except Exception as exc:  # never block a run on the guard itself
+            print(f"[credits] guard error (continuing): {exc}", file=sys.stderr)
+            rc = 3
+        if rc == 2 and len(or_lanes) == len(cells):
+            print("[run_field_tests] ABORT: OpenRouter credits depleted and every lane in this "
+                  "run is an OpenRouter lane. Top up at https://openrouter.ai/credits, then re-run.",
+                  file=sys.stderr)
+            return 2
+
     scores, failures = _run_cells(cells, args, run_judge=not args.no_judge)
 
     # Consolidate: a retry-run output must contain the full matrix, not only
