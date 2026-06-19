@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "local-gemma"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "glm-harness", "local-gemma"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -201,7 +201,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         usage["cache_hit"] = int(
             raw.get("cache_read_tokens", raw.get("cache_read", raw.get("cache_hit", 0))) or 0
         )
-    elif provider in ("claude", "deepseek-harness"):
+    elif provider in ("claude", "deepseek-harness", "glm-harness"):
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
@@ -228,6 +228,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "gemini": "google",
     "kimi": "kimi",
     "deepseek-harness": "deepseek",
+    "glm-harness": "zai",
     "local-gemma": "local_gemma",
 }
 
@@ -631,6 +632,10 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
         from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
 
         return resolve_harness_model(args.model if args.model != "sonnet" else None)
+    if provider == "glm-harness":
+        from provider_spawns.glm_harness_spawn import resolve_harness_model as _glm_rhm  # noqa: PLC0415
+
+        return _glm_rhm(args.model if args.model != "sonnet" else None)
     if provider.startswith("litellm:") or provider == "litellm":
         base_sub, model_alias = _litellm_parts(provider)
         env_model = os.environ.get("VNX_LITELLM_MODEL", "")
@@ -660,6 +665,10 @@ def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) 
         # not a litellm-registry-driven route. The forbid_route subscription
         # block is the real safety gate, not registry membership.
         return False
+    if provider == "glm-harness":
+        # GLM-harness governs its model via resolve_harness_model (default glm-5.2)
+        # and routes via the local litellm proxy → OpenRouter; not registry-driven.
+        return False
     if not (provider.startswith("litellm:") or provider == "litellm"):
         return True
     base_sub, model_alias = _litellm_parts(provider)
@@ -685,6 +694,11 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
         # redirect). This measured-safe lane runs the own DeepSeek key in key-auth
         # mode, so it routes via=claude_harness_keyed and clears pre-flight.
         return "claude_harness_keyed"
+    if provider == "glm-harness":
+        # GLM via the claude CLI but pointed at a LOCAL litellm proxy that fronts
+        # OpenRouter — inference flows through OpenRouter, so via=openrouter clears
+        # zai-via-openrouter-only (no direct z.ai/Zhipu route).
+        return "openrouter"
     if provider in ("claude", "codex", "gemini", "kimi"):
         return "cli"
     if provider == "local-gemma":
@@ -742,6 +756,9 @@ def _check_constraints(args: argparse.Namespace, provider: str):
         # constraint match on forbidden_route.provider=deepseek; the keyed via
         # (set below) is what keeps this own-key lane clear of the block.
         sub_provider = "deepseek"
+    elif provider == "glm-harness":
+        # sub_provider=zai + via=openrouter (set above) clears zai-via-openrouter-only.
+        sub_provider = "zai"
     model = _constraint_model_for_provider(args, provider)
     via = _constraint_via_for_provider(provider, sub_provider)
     violations = check_constraints(
@@ -1626,6 +1643,55 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
+def _dispatch_glm_harness(args: argparse.Namespace) -> int:
+    """Route to spawn_glm_harness — GLM through the full claude-CLI harness via the
+    local litellm→OpenRouter proxy. Mirrors the deepseek-harness lane; spawn_glm_harness
+    fail-closes if the proxy is unreachable. zai-via-openrouter-only intact (proxy fronts
+    OpenRouter), no-anthropic-sdk intact (CLI not SDK). Benchmark "harness vs runner" lane.
+    """
+    from provider_spawns.glm_harness_spawn import resolve_harness_model, spawn_glm_harness
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error("_dispatch_glm_harness: EventStore init failed (ADR-005): %s", _es_exc)
+        return 1
+
+    model = resolve_harness_model(args.model if args.model != "sonnet" else None)
+    enriched_instruction = _enrich_instruction(args)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    start_time = datetime.now(timezone.utc)
+    try:
+        result = spawn_glm_harness(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            cwd=worker_cwd,
+            event_writer=event_store.append if event_store is not None else None,
+        )
+        end_time = datetime.now(timezone.utc)
+        model_used = result.model or model
+        if result.error:
+            _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
+            print(f"spawn_glm_harness failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "timeout", event_store=event_store)
+            print("spawn_glm_harness timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
+            return 1
+        _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
+        return 0
+    finally:
+        _event_store_safety_net(event_store, args)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+
+
 def _dispatch_gemini(args: argparse.Namespace) -> int:
     """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
 
@@ -1867,6 +1933,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if provider == "deepseek-harness":
         return _dispatch_deepseek_harness(args)
+
+    if provider == "glm-harness":
+        return _dispatch_glm_harness(args)
 
     if provider == "local-gemma":
         return _dispatch_local_gemma(args)
