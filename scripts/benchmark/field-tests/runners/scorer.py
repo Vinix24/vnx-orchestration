@@ -287,7 +287,14 @@ def score_cell(
     for cells where the worker did literally nothing — inflating failed cells
     above the no-show-deserves-zero line.
     """
-    if not dispatch_result.success:
+    # VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE: some harness lanes (glm-harness) produce a
+    # CORRECT deliverable but the claude CLI exits rc=1 (GLM doesn't close the agentic loop
+    # cleanly), so dispatch_result.success is False even though the work is done. When set,
+    # fall through to verify the on-disk deliverable instead of recording an automatic DNF.
+    # SAFE for from-scratch / new-file tasks (a no-op leaves no deliverable → verify scores 0);
+    # for seed-based tasks verify checks the actual change, not the untouched seed.
+    _score_on_failure = os.environ.get("VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE") == "1"
+    if not dispatch_result.success and not _score_on_failure:
         return CellScore(
             lane_id=dispatch_result.lane_id,
             task_id=dispatch_result.task_id,
