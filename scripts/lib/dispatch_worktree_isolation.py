@@ -95,21 +95,29 @@ def create_dispatch_worktree(
     safe_id = _sanitize_dispatch_id(dispatch_id)
     branch_name = f"dispatch/{safe_id}"
 
+    # VNX_BENCH_WORKTREE_BASE_REF: base the worktree on a given ref instead of origin/main.
+    # The benchmark sets this to the bench checkout's HEAD so worktrees carry the bench
+    # branch's committed task seeds (e.g. the t4_02 SWE-bench seed) without merging WIP
+    # benchmark tasks to main. Default (unset) keeps origin/main — production unchanged.
+    base_ref = os.environ.get("VNX_BENCH_WORKTREE_BASE_REF", "").strip() or "origin/main"
+    is_remote = base_ref.startswith("origin/")
+
     wt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin", "main"],
-            cwd=str(root),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        log.warning(
-            "create_dispatch_worktree: git fetch origin main failed (continuing): %s",
-            (exc.stderr or "").strip(),
-        )
+    if is_remote:
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", base_ref[len("origin/"):]],
+                cwd=str(root),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            log.warning(
+                "create_dispatch_worktree: git fetch %s failed (continuing): %s",
+                base_ref, (exc.stderr or "").strip(),
+            )
 
     try:
         with _worktree_lock(root):
@@ -118,7 +126,7 @@ def create_dispatch_worktree(
                     "git", "worktree", "add",
                     str(wt_path),
                     "-b", branch_name,
-                    "origin/main",
+                    base_ref,
                 ],
                 cwd=str(root),
                 check=True,

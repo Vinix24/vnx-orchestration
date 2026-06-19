@@ -285,6 +285,10 @@ def _provider_dispatch(
         # can't reach the main checkout via repo-relative navigation, so from-scratch /
         # introspection tasks (t3 07/08/09, t4) can't leak into the committed seed.
         "VNX_BENCH_WORKTREE_ROOT": str(Path.home() / ".vnx-bench-worktrees"),
+        # Base worktrees on the bench checkout's HEAD so they carry the bench branch's
+        # committed task seeds (e.g. the seed-based t4_02 SWE-bench task), without merging
+        # WIP benchmark tasks to origin/main.
+        "VNX_BENCH_WORKTREE_BASE_REF": "HEAD",
     }
     provider_map = {
         "litellm:deepseek": "litellm:deepseek",
