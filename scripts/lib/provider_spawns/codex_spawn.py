@@ -403,6 +403,28 @@ def _launch_codex_proc(
             session_id=None, timed_out=False, error=str(exc),
         )
 
+    # Drain codex stderr in a daemon thread. Unlike SubprocessAdapter (claude/deepseek),
+    # which logs stderr to a file (the H1 fix), codex_spawn's _drain_stream reads ONLY stdout
+    # and never proc.stderr. With an undrained PIPE, codex BLOCKS once it emits >~64KB of
+    # stderr — and codex with model_reasoning_effort=xhigh (config.toml) emits a lot — which
+    # surfaced as the codex "flakiness" (t1 stayed under 64KB and passed; t2+ filled the pipe
+    # in 5-17s, the review task in ~92s, all exiting rc=1 with incomplete work). Drain it and
+    # keep a bounded tail for error reporting.
+    import threading
+    proc._vnx_stderr_tail = []  # type: ignore[attr-defined]
+    if proc.stderr is not None:
+        def _drain_stderr(p, buf):
+            try:
+                for line in iter(p.stderr.readline, b""):
+                    buf.append(line)
+                    if len(buf) > 200:
+                        del buf[:100]
+            except (ValueError, OSError):
+                pass
+        threading.Thread(
+            target=_drain_stderr, args=(proc, proc._vnx_stderr_tail), daemon=True,
+        ).start()
+
     if proc.stdin:
         try:
             proc.stdin.write(prompt.encode("utf-8"))
@@ -607,6 +629,13 @@ def spawn_codex(
         _wait_proc(proc, timeout=10.0)
 
     returncode = proc.returncode if proc.returncode is not None else 1
+
+    # Surface codex's stderr tail on failure (previously discarded → "rc=1" with no reason).
+    if returncode != 0 or error:
+        tail_lines = getattr(proc, "_vnx_stderr_tail", None) or []
+        tail = b"".join(tail_lines[-60:]).decode("utf-8", "ignore").strip()[-1200:]
+        if tail:
+            error = ((error + " | ") if error else "") + f"codex stderr tail: {tail}"
 
     if event_writer_strict and _event_writer_failures > 0:
         raise RuntimeError(
