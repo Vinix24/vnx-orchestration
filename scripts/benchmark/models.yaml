@@ -88,6 +88,29 @@ models:
     cost_input_mtok: 0.60
     cost_output_mtok: 1.92
 
+  # GLM-harness lanes: SAME GLM models on OpenRouter, but driven by the FULL claude-CLI
+  # harness (tools/agentic loop) via a local litellm proxy → OpenRouter. Run ALONGSIDE the
+  # litellm:zai lanes above to measure "harness vs simple tool-call" for the same model.
+  # zai-via-openrouter-only intact (proxy fronts OpenRouter); no-anthropic-sdk intact (CLI).
+  - id: glm-5-harness
+    provider: glm-harness
+    model_arg: glm-5
+    cost_input_mtok: 0.20
+    cost_output_mtok: 0.80
+    notes: "GLM-5 (base) via full claude-CLI harness (litellm proxy → OpenRouter). Compare vs glm-5."
+  - id: glm-5-1-harness
+    provider: glm-harness
+    model_arg: glm-5.1
+    cost_input_mtok: 0.40
+    cost_output_mtok: 1.60
+    notes: "GLM-5.1 via full claude-CLI harness. Compare vs glm-5-1 (litellm tool-loop)."
+  - id: glm-5-2-harness
+    provider: glm-harness
+    model_arg: glm-5.2
+    cost_input_mtok: 0.60
+    cost_output_mtok: 1.92
+    notes: "GLM-5.2 via full claude-CLI harness. Compare vs glm-5-2 (litellm tool-loop)."
+
   - id: codex-gpt-5-4
     provider: codex
     model_arg: gpt-5.4

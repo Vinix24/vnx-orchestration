@@ -20,6 +20,9 @@ tiers:
       - glm-5-2        # GLM-5.2 (2026-06-16)
       - deepseek-v4-pro-harness
       - deepseek-v4-flash-harness
+      - glm-5-harness    # GLM via full claude-CLI harness (litellm proxy → OpenRouter); harness-vs-runner comparison
+      - glm-5-1-harness
+      - glm-5-2-harness
     n_replications: 3
 
   t2_medium:
