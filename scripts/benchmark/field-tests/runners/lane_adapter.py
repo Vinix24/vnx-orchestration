@@ -281,6 +281,10 @@ def _provider_dispatch(
         "VNX_LITELLM_AGENTIC": "1",
         # claude -p benchmark deadline (only the claude-headless path reads this).
         "VNX_BENCH_CLAUDE_DEADLINE": str(deadline_seconds),
+        # Worktrees OUTSIDE the main repo: an unsandboxed worker (claude -p / deepseek-harness)
+        # can't reach the main checkout via repo-relative navigation, so from-scratch /
+        # introspection tasks (t3 07/08/09, t4) can't leak into the committed seed.
+        "VNX_BENCH_WORKTREE_ROOT": str(Path.home() / ".vnx-bench-worktrees"),
     }
     provider_map = {
         "litellm:deepseek": "litellm:deepseek",
