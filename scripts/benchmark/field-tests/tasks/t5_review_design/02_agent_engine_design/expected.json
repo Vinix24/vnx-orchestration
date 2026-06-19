@@ -1,0 +1,16 @@
+{
+  "expected_files": ["DESIGN.md"],
+  "expected_checks_pass": 16,
+  "coverage_dimensions": [
+    "agent_decomposition_>=3_roles", "decomposition_rationale", "tools_per_agent",
+    "research_workflow", "daily_checks_workflow", "reporting_workflow",
+    "endpoint_families_>=2", "rate_limit_strategy", "cost_control", "caching_strategy",
+    "backend_integration", "scheduling", "idempotency", "failure_retry_timeout",
+    "governance_audit", "human_in_the_loop"
+  ],
+  "expected_style": {
+    "deliverable": "DESIGN.md (design document, no implementation code)",
+    "note": "scored deterministically by verify.py 16-point coverage checklist; run with --no-judge. Depth preserved as artifact + optional post-hoc rubric."
+  },
+  "rubric_for_llm_judge": "Not judged in-harness. Coverage measures breadth across the 7 required dimensions. For the published depth comparison, score each preserved DESIGN.md 0-5 on: agent decomposition quality, tool-fit, DataForSEO depth (endpoint/mode/cost/cache specificity), backend integration correctness, operational rigor (scheduling/idempotency/failure), governance (audit + HITL)."
+}

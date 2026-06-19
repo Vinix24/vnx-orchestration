@@ -37,6 +37,11 @@ tiers:
     lanes: *bench_lanes_10
     n_replications: 2
 
+  t5_review_design:
+    description: "Review/design CHARACTER — not who writes correct code, but which defect classes a model catches and how it decomposes a system. Deterministic detection-rate + coverage checklist; run with --no-judge."
+    lanes: *bench_lanes_10
+    n_replications: 2
+
 tasks:
   - id: "01_yaml_config_refactor"
     tier: t1_trivial
@@ -154,4 +159,26 @@ tasks:
     deadline_seconds: 1800
     pattern: "swe-bench-bugfix-graded"
     verify_type: "existing_suite_plus_hidden_regression"
+    expected_checks_pass: 16
+
+  - id: "t5_01_planted_review"
+    tier: t5_review_design
+    folder: "tasks/t5_review_design/01_planted_review"
+    source: "review-character profile: 15 planted defects (3 per category) — deterministic detection-rate fingerprint"
+    skill: reviewer
+    target_loc: 0
+    deadline_seconds: 1800
+    pattern: "review-detection-graded"
+    verify_type: "planted_issue_detection_rate"
+    expected_checks_pass: 15
+
+  - id: "t5_02_agent_engine_design"
+    tier: t5_review_design
+    folder: "tasks/t5_review_design/02_agent_engine_design"
+    source: "design-character profile: agent-team backend engine for a SEO-audit SaaS via a SERP/SEO-data API (DataForSEO)"
+    skill: architect
+    target_loc: 0
+    deadline_seconds: 2400
+    pattern: "design-coverage-graded"
+    verify_type: "design_coverage_checklist"
     expected_checks_pass: 16
