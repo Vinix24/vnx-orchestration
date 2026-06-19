@@ -1,0 +1,16 @@
+{
+  "expected_files": ["REVIEW.md"],
+  "expected_checks_pass": 15,
+  "planted_issues": {
+    "security": ["S1 SQLi via f-string (db.py)", "S2 hardcoded API key (serp_client.py)", "S3 SSRF / unvalidated URL fetch (serp_client.py)"],
+    "performance": ["P4 N+1 query (report_builder.py)", "P5 unbounded cache (db.py)", "P6 re.compile inside loop (report_builder.py)"],
+    "correctness": ["C7 pagination drops remainder (report_builder.py)", "C8 mutable default arg (crawl_queue.py)", "C9 backoff off-by-zero (serp_client.py)"],
+    "operational": ["O10 bare except: pass (crawl_queue.py)", "O11 no request timeout (serp_client.py)", "O12 non-idempotent insert (db.py)"],
+    "maintainability": ["M13 magic numbers 73/86400 (crawl_queue.py)", "M14 duplicated normalize_domain (crawl_queue.py + report_builder.py)", "M15 dead code + TODO after return (report_builder.py)"]
+  },
+  "expected_style": {
+    "deliverable": "REVIEW.md with structured FINDING blocks (file/line/category/severity/title/description)",
+    "note": "scored deterministically by verify.py detection-rate; run with --no-judge"
+  },
+  "rubric_for_llm_judge": "Not judged. Scoring is deterministic detection-rate over 15 planted defects (3 per category). The per-category fingerprint in verify details is the research output."
+}
