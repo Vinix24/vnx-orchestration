@@ -47,6 +47,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -67,6 +68,9 @@ _DEFAULT_MAX_TURNS = 30
 _DEFAULT_MAX_TOKENS = 8192
 _DEFAULT_COMMAND_TIMEOUT = 120
 _MAX_TOOL_RESULT_CHARS = 16000  # cap fed-back tool output so context stays bounded
+_MAX_API_RETRIES = 4            # transient completion() errors (rate-limit / 5xx / credits) get backed-off, not fatal
+_RETRY_BASE_DELAY = 2.0         # seconds; exponential backoff base
+_MAX_TOOL_NUDGES = 2            # times to nudge a model that stops WITHOUT using the tools (GLM-5.2 explains instead of writing)
 
 _TOOLS = [
     {
@@ -262,6 +266,24 @@ def _classify_error(msg: str) -> tuple[str, int]:
     return "completion_error", _EXIT_ERR
 
 
+def _is_retryable(msg: str) -> bool:
+    """A transient completion() error worth a backoff-retry (NOT an auth/credential failure).
+
+    The single biggest cause of GLM-lane immediate-exits was a one-shot OpenRouter
+    402 ("requested N tokens, can only afford M — adjust the key's daily limit") or a
+    429/5xx killing the whole run on turn 1 with zero retries. Those are transient;
+    auth failures are not.
+    """
+    low = msg.lower()
+    if any(k in low for k in ("authentication", "unauthorized", "forbidden", "api key", "apikey")):
+        return False
+    return any(k in low for k in (
+        "rate limit", "rate_limit", "429", " 500", "502", "503", "504", "overloaded",
+        "timeout", "timed out", "connection", "unavailable", "temporarily",
+        "more credits", "fewer max_tokens", "try again", "please retry", "retry",
+    ))
+
+
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
@@ -309,18 +331,27 @@ def main() -> int:
     totals = {"prompt_tokens": 0, "completion_tokens": 0}
     stop_reason = "max_turns"
     turns = 0
+    nudges_left = _MAX_TOOL_NUDGES
 
     for turn in range(max_turns):
         turns = turn + 1
-        try:
-            resp = litellm.completion(
-                model=model, messages=messages, tools=_TOOLS, tool_choice="auto",
-                max_tokens=max_tokens, api_key=api_key,
-            )
-        except Exception as exc:  # noqa: BLE001
-            err_type, code = _classify_error(str(exc))
-            _emit({"error_type": err_type, "message": str(exc)})
-            return code
+        resp = None
+        for attempt in range(_MAX_API_RETRIES + 1):
+            try:
+                resp = litellm.completion(
+                    model=model, messages=messages, tools=_TOOLS, tool_choice="auto",
+                    max_tokens=max_tokens, api_key=api_key,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 — surface/retry any completion failure
+                err_type, code = _classify_error(str(exc))
+                if not _is_retryable(str(exc)) or attempt >= _MAX_API_RETRIES:
+                    _emit({"error_type": err_type, "message": str(exc)})
+                    return code
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                _emit({"event_type": "retry", "attempt": attempt + 1,
+                       "delay_s": round(delay, 1), "message": str(exc)[:200]})
+                time.sleep(delay)
 
         _accumulate_usage(getattr(resp, "usage", None), totals)
         choice = resp.choices[0]
@@ -345,6 +376,19 @@ def main() -> int:
         messages.append(assistant_entry)
 
         if not tool_calls:
+            # Model stopped without calling tools. GLM-5.2 especially tends to EXPLAIN
+            # the solution instead of writing it, which left cells with no deliverable
+            # (correctness 0 by construction). Nudge it to actually USE the tools before
+            # accepting a no-op exit; bounded so a genuinely-finished model still stops.
+            if nudges_left > 0 and turn < max_turns - 1:
+                nudges_left -= 1
+                messages.append({"role": "user", "content": (
+                    "You stopped without using the tools. Do not just describe the "
+                    "solution — use write_file to create the required deliverable file(s) "
+                    "now, then run the tests to verify your work. Continue."
+                )})
+                _emit({"event_type": "nudge", "remaining": nudges_left})
+                continue
             stop_reason = choice.finish_reason or "stop"
             break
 
