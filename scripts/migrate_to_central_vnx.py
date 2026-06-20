@@ -710,6 +710,13 @@ COMPOSITE_UNIQUE_TABLES_QI: dict[str, str] = {
     "dispatch_quality_context": "dispatch_id",
     "dispatch_metadata": "dispatch_id",
     "dispatch_experiments": "dispatch_id",
+    # Round-7: surfaced by the vnx-dev verify failure. nightly_digests has
+    # a single-column ``digest_date UNIQUE`` (one digest per calendar day),
+    # a date that repeats verbatim across every tenant. Two projects with a
+    # digest for 2026-06-15 collide on UNIQUE(digest_date) → INSERT OR
+    # IGNORE silently drops the second tenant's row. The audit below missed
+    # it because ``*_date`` was not in the suspect pattern (now fixed).
+    "nightly_digests": "digest_date",
 }
 COMPOSITE_UNIQUE_TABLES_RC: dict[str, str] = {
     "terminal_leases": "terminal_id",
@@ -723,7 +730,7 @@ COMPOSITE_UNIQUE_TABLES_RC: dict[str, str] = {
 # columns whose value is already globally unique by construction (e.g.
 # random UUIDs prefixed with project_id, or schema_version pkeys).
 _T3_SUSPECT_COLUMN_PATTERN = re.compile(
-    r"^(.*_id|.*_path|.*_key|.*_hash|.*_tuple|tag_tuple|session_id|file_path|dispatch_id)$",
+    r"^(.*_id|.*_path|.*_key|.*_hash|.*_tuple|.*_date|tag_tuple|session_id|file_path|dispatch_id)$",
     re.IGNORECASE,
 )
 
