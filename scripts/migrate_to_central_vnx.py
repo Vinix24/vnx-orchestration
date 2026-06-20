@@ -230,7 +230,7 @@ def _check_backup_access(
     """
     failures: list[tuple[str, str, str]] = []
     for project in projects:
-        src_dir = project.path / ".vnx-data"
+        src_dir = project.data_dir  # override-aware: home-dir stores (vnx-dev) resolve correctly, not the stale repo-local dir
         if not src_dir.is_dir():
             continue  # missing dir caught later by BackupFailure
         try:
@@ -253,7 +253,7 @@ def backup_projects(projects: list[ProjectEntry], backup_base: Path) -> Path:
     manifest_lines: list[str] = []
     for project in projects:
         check_abort()
-        src_dir = project.path / ".vnx-data"
+        src_dir = project.data_dir  # override-aware: home-dir stores (vnx-dev) resolve correctly, not the stale repo-local dir
         archive = out_dir / f"{project.project_id}.tar.gz"
         if not src_dir.is_dir():
             LOG.warning(
