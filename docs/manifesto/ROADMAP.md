@@ -210,12 +210,16 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ## Next (After Committed Scope)
 
 ## Centralization Rollout
-**Status**: `Completed` for reference project; rollout to satellite projects ongoing.
-**Why**: Wave 8 shipped; central install path validated on vnx-orchestration-system.
+**Status**: Data centralization `Completed` for all 4 projects; runtime cutover ongoing.
+**Why**: Wave 8 shipped; the multi-tenant central corpus is validated. All four projects' governance history now lives in the shared multi-tenant DB (`~/.vnx-data/state/`, `project_id`-stamped).
 
-**Rollout order**
-1. vnx-orchestration-system (reference) — done, 1.0.0 production
-2. SEOcrawler_v2, mission-control, sales-copilot — per project burn-in schedule
+**Model**: the live runtime writes to the per-project central dir (`~/.vnx-data/<project_id>/`, resolved by `resolve_central_data_dir`); the shared corpus is the federation/analytics layer. ADR-007 composite-key compliance is enforced — the `nightly_digests` cross-tenant `digest_date` collision was the last gap, fixed 2026-06-20 (composite `UNIQUE(project_id, digest_date)` + the audit pattern now flags `*_date`).
+
+**Rollout status (2026-06-20)**
+1. vnx-orchestration (`vnx-dev`) — data migrated + verified (356,301 rows, non-destructive, `--verify-only` clean).
+2. SEOcrawler_v2 — data migrated (727,101 code_snippets); runtime cutover to 1.0 + per-project central dir IN PROGRESS (selective-relocate plan, multi-LLM reviewed).
+3. mission-control — data migrated (14,152 rows); runtime cutover queued (#2, all-providers gate).
+4. sales-copilot — data migrated (37,652 rows); runtime cutover queued.
 
 ---
 
@@ -425,6 +429,28 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 **Constraints**
 - No full rewrite commitment in this phase.
 - Governance contracts and receipt compatibility stay non-negotiable.
+
+---
+
+## 14) Provider-Launch Layer as a Standalone Package
+**Status**: `Exploring`
+**Why**: The hardened multi-provider launch layer (`provider_dispatch` + `provider_spawns/*` + `adapters/*` + provider config, ~50 files with a clean `DispatchResult` contract) is the most reusable, self-contained part of VNX. Could ship as a slim standalone project for those who want only the orchestrator + provider lanes.
+
+**Scope**
+- Sever coupling to `project_root`, `canonical_event`, the report/receipt contract, and `provider_constraints`.
+- Positioning: carry the no-SDK/CLI-driven + constraint-enforcement story (the differentiator), not bare routing (commodity vs litellm/aisuite).
+- Next step: a dependency-audit (import-graph) to scope the exact extraction effort.
+
+---
+
+## 15) Harness-vs-Harness Model Comparison (Kimi CLI vs OpenRouter-via-Claude-harness)
+**Status**: `Exploring`
+**Why**: The GLM-5.2 benchmark showed a flat runner systematically underselling a model the full Claude harness reveals as top-tier. Open question: when a model already ships its own agentic CLI (Kimi K2.7), does the Claude harness add the same lift? This tests "two harnesses" rather than "harness vs flat" — a different, clarifying comparison.
+
+**Scope**
+- Run Kimi K2 through the litellm→OpenRouter proxy + Claude harness, compare vs the native `kimi` CLI lane on the same tasks.
+- Brushes `kimi-via-cli-only` (a second Kimi lane for cost-tracking consistency); benchmark-only measurement, operator-gated.
+- Generalizes: the same proxy can drive the full OpenRouter catalog through one harness.
 
 ---
 
