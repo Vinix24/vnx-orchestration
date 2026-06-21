@@ -65,11 +65,32 @@ from project_root import resolve_project_root
 import schema_migration
 import schema_manifest
 from atomic_io import audit_event_append
+import tenant_stamping
 
 
 # ---------------------------------------------------------------------------
 # Test isolation guard (R8.6 / PR-0) — active only under pytest
 # ---------------------------------------------------------------------------
+
+def _resolve_data_dir(project_root: Path, *, project_root_provided: bool = False) -> Path:
+    """Resolve the VNX data directory for migrate_future_system.run().
+
+    Priority (mirrors dispatch_cli.py:69-74):
+    1. Explicit project_root argument (project_root_provided=True): always use
+       project_root / ".vnx-data". An explicit caller argument wins.
+    2. VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set (and no explicit project_root):
+       use VNX_DATA_DIR directly. This allows targeting ~/.vnx-data/<pid>/
+       (central store) without changing project_root.
+    3. Fallback: project_root / ".vnx-data" (legacy local layout).
+    """
+    if project_root_provided:
+        return (project_root / ".vnx-data").resolve()
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    explicit_val = (os.environ.get("VNX_DATA_DIR") or "").strip()
+    if explicit_flag and explicit_val:
+        return Path(explicit_val).resolve()
+    return (project_root / ".vnx-data").resolve()
+
 
 def _pytest_db_isolation_guard(project_root: Path) -> None:
     """Refuse to open any DB when running under pytest without explicit isolation.
@@ -77,7 +98,7 @@ def _pytest_db_isolation_guard(project_root: Path) -> None:
     Active only when PYTEST_CURRENT_TEST is set (i.e. inside a pytest process).
     Two conditions must hold:
     1. VNX_DATA_DIR_EXPLICIT=1 must be set.
-    2. The resolved .vnx-data root derived from project_root must be under
+    2. The resolved data_dir (via _resolve_data_dir) MUST be under
        tempfile.gettempdir() and NOT under ~/.vnx-data.
 
     The second check prevents tests from passing the flag while still resolving
@@ -94,8 +115,15 @@ def _pytest_db_isolation_guard(project_root: Path) -> None:
             "Ensure the _fsr_migration_module_isolation fixture is active (tests/conftest.py), "
             "or set VNX_DATA_DIR_EXPLICIT=1 and VNX_DATA_DIR=<tmp_path> in your test."
         )
-    # Flag is set — validate the resolved data root is actually temp-owned.
-    data_root = (project_root / ".vnx-data").resolve()
+    # Flag is set — validate the resolved data dir is actually temp-owned.
+    # The guard always checks the VNX_DATA_DIR path (not project_root) because
+    # the guard's job is to prevent opening ~/.vnx-data regardless of how the
+    # caller arrived here.
+    explicit_val = (os.environ.get("VNX_DATA_DIR") or "").strip()
+    if explicit_val:
+        data_root = Path(explicit_val).resolve()
+    else:
+        data_root = (project_root / ".vnx-data").resolve()
     tmp_root = Path(tempfile.gettempdir()).resolve()
     canonical = (Path.home() / ".vnx-data").resolve()
     _sep = os.sep
@@ -112,7 +140,8 @@ def _pytest_db_isolation_guard(project_root: Path) -> None:
             f"[TEST ISOLATION GUARD] VNX_DATA_DIR_EXPLICIT=1 is set but the resolved "
             f"data root '{data_root}' is NOT under the system temp directory ('{tmp_root}'). "
             "Setting the flag while pointing at the canonical ~/.vnx-data location is unsafe. "
-            "Pass a pytest tmp_path-based project_root to migrate_future_system.run()."
+            "Set VNX_DATA_DIR to a pytest tmp_path-based path, or pass an explicit "
+            "project_root under tempfile.gettempdir() to migrate_future_system.run()."
         )
 
 
@@ -1859,13 +1888,47 @@ def _run_numbered_walk(conn: sqlite3.Connection, project_root: Path) -> None:
     conn.commit()
 
 
+def _run_w1_rc_migration(db_path: Path) -> None:
+    """Run the W1 3-phase tenant-stamping migration on runtime_coordination.db.
+
+    W1 spec (1.0-blocker): Phase 1 repairs UNIQUE/PK constraints to include
+    project_id; Phase 2 re-stamps legacy (NULL/'vnx-dev'/'') rows; Phase 3
+    enforces NOT NULL with no DEFAULT 'vnx-dev'. All three phases are idempotent.
+
+    The QI half runs via quality_db_init.run_qi_three_phase_migration() and is
+    called separately. The two-DB coupled post-condition lives in the caller
+    that orchestrates both (tenant_stamping.run_three_phase_migration).
+    """
+    print("  [W1] Running tenant-stamping Phase 1+2+3 on RC ...")
+    ts_result = tenant_stamping.run_three_phase_migration_on_db(
+        db_path, _resolve_validated_project_id(db_path), db_label="RC"
+    )
+    rebuilt1 = ts_result.get("phase1_rebuilt", [])
+    updated2 = ts_result.get("phase2_updated", {})
+    rebuilt3 = ts_result.get("phase3_rebuilt", [])
+    if rebuilt1 or any(n for n in updated2.values()) or rebuilt3:
+        print(f"  [W1] Phase 1 rebuilt: {rebuilt1}")
+        print(f"  [W1] Phase 2 updated: { {t: n for t, n in updated2.items() if n} }")
+        print(f"  [W1] Phase 3 rebuilt: {rebuilt3}")
+    else:
+        print("  [W1] No tenant-stamping changes needed (already clean).")
+
+
 def run(project_root: Path | None = None) -> None:
-    """Apply future-system migrations through 0031."""
+    """Apply future-system migrations through 0031.
+
+    DB path resolution (mirrors dispatch_cli.py:69-74):
+    - VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set: use VNX_DATA_DIR/state/
+      (allows targeting ~/.vnx-data/<pid>/state/ for central-store migrations).
+    - Fallback: project_root/.vnx-data/state/ (local layout).
+    """
+    _project_root_provided = project_root is not None
     if project_root is None:
         project_root = resolve_project_root(__file__)
     _pytest_db_isolation_guard(project_root)
 
-    state_dir = project_root / ".vnx-data" / "state"
+    data_dir = _resolve_data_dir(project_root, project_root_provided=_project_root_provided)
+    state_dir = data_dir / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / "runtime_coordination.db"
 
@@ -1903,13 +1966,23 @@ def run(project_root: Path | None = None) -> None:
         # a downgrade+re-walk that did not converge aborts here rather than looping.
         _assert_manifest_converged(conn)
 
-        print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")
+        # (E) W1 tenant-stamping (1.0-blocker) — close conn before the 3-phase
+        # runner opens a new connection (avoids WAL reader/writer conflicts).
+        conn.close()
+        conn = None
+        _run_w1_rc_migration(db_path)
+        print(f"\n  Migration complete. Schema at user_version (RC verified by manifest converge).\n")
 
     except Exception:
-        conn.rollback()
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":
