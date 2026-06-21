@@ -25,6 +25,7 @@ fallback). Callers that cannot supply an explicit pid call
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
@@ -33,16 +34,24 @@ from typing import Dict, Iterable, Optional
 
 DEFAULT_PROJECT_ID = "vnx-dev"
 
+log = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # W-init: fail-closed project_id resolution for init / ADD COLUMN backfill.
 #
 # Resolution order (anchored on the DB file path, not cwd — same anchor as
 # migrate_future_system._resolve_validated_project_id):
-#   1. .vnx-project-id marker file walking UP from the DB directory.
-#   2. VNX_PROJECT_ID environment variable.
+#   1. DB PATH — parse owning pid from .../.vnx-data/<pid>/state/<db> layout.
+#   2. .vnx-project-id marker file walking UP from the DB directory.
+#   3. VNX_PROJECT_ID environment variable.
 #
 # All present sources MUST agree.  Any conflict → RuntimeError (fail-closed).
-# No sources at all → RuntimeError (no silent 'vnx-dev' default).
+# No sources at all → default to 'vnx-dev' with a warning (backward-compat).
+#
+# Rationale for the fallback: real central stores ALWAYS have a
+# ~/.vnx-data/<pid>/ path and therefore resolve via (1); only genuinely
+# contextless calls (tests, default installs) reach the fallback, and
+# 'vnx-dev' is the correct legacy default for those.
 #
 # This is intentionally a stripped-down resolver — it avoids importing the
 # full vnx_identity chain (which requires the vnx_paths bootstrap) so that
@@ -51,6 +60,23 @@ DEFAULT_PROJECT_ID = "vnx-dev"
 
 _PROJECT_FILE_NAME = ".vnx-project-id"
 _INIT_PID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+
+
+def _pid_from_db_path(db_path: Path) -> Optional[str]:
+    """Parse the owning project_id from a canonical .vnx-data layout.
+
+    Canonical layout: <root>/.vnx-data/<project_id>/state/<db_file>
+    Returns the project_id directory name when the path matches, else None.
+    Mirrors migrate_future_system._project_id_from_db_path exactly.
+    """
+    p = db_path.resolve()
+    state_dir = p.parent
+    if state_dir.name != "state":
+        return None
+    pid_dir = state_dir.parent
+    if pid_dir.parent.name != ".vnx-data":
+        return None
+    return pid_dir.name or None
 
 
 def _read_marker_from_path(db_path: Path) -> Optional[str]:
@@ -71,21 +97,31 @@ def resolve_init_project_id(db_path: Path) -> str:
     """Resolve the owning project_id for an init-time ADD COLUMN backfill.
 
     Anchor: the resolved DB file path (not cwd).  Resolution order:
-      1. .vnx-project-id marker file, walking UP from the DB directory.
-      2. VNX_PROJECT_ID environment variable.
+      1. DB path layout — parses pid from .../.vnx-data/<pid>/state/<db>.
+      2. .vnx-project-id marker file, walking UP from the DB directory.
+      3. VNX_PROJECT_ID environment variable.
 
-    All present sources must agree — any conflict raises RuntimeError (fail-closed).
-    No sources → RuntimeError.  No silent 'vnx-dev' fallback.
+    All present sources must agree — any conflict raises RuntimeError
+    (fail-closed: the real contamination guard).
 
-    ADR-007 compliance: callers must invoke this and pass the returned value
+    No sources at all → defaults to 'vnx-dev' with a logging.warning.
+    Rationale: real non-vnx-dev central stores always carry their pid in
+    the path (source 1) so they never reach this default.  Only contextless
+    callers (tests, fresh default installs) reach it, and 'vnx-dev' is the
+    correct legacy default for those.  This restores backward-compat without
+    reintroducing contamination.
+
+    ADR-007 compliance: callers may invoke this and pass the returned value
     as ``default_project_id`` to ``run_runtime_coordination_migration`` /
-    ``run_quality_intelligence_migration``.  Passing ``DEFAULT_PROJECT_ID``
-    directly (hardcoding 'vnx-dev') is now a linter violation.
+    ``run_quality_intelligence_migration``.
     """
+    path_pid = _pid_from_db_path(Path(db_path))
     marker_pid = _read_marker_from_path(Path(db_path))
     env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip() or None
 
     sources: Dict[str, str] = {}
+    if path_pid:
+        sources["db-path"] = path_pid
     if marker_pid:
         sources["marker"] = marker_pid
     if env_pid:
@@ -99,12 +135,14 @@ def resolve_init_project_id(db_path: Path) -> str:
             "All sources must agree. Resolve the conflict before running init."
         )
     if not distinct:
-        raise RuntimeError(
-            "ADR-007 fail-closed: cannot resolve project_id for init ADD COLUMN "
-            "backfill. No .vnx-project-id marker found walking up from "
-            f"'{Path(db_path).resolve().parent}', and VNX_PROJECT_ID is unset. "
-            "Set VNX_PROJECT_ID or place a .vnx-project-id marker at the project root."
+        log.warning(
+            "resolve_init_project_id: no project_id source found (no .vnx-data path "
+            "layout, no .vnx-project-id marker walking up from '%s', VNX_PROJECT_ID "
+            "unset). Defaulting to 'vnx-dev'. Real central stores always resolve via "
+            "path layout — this default is safe only for local/test contexts.",
+            Path(db_path).resolve().parent,
         )
+        return DEFAULT_PROJECT_ID
 
     pid = distinct.pop()
     if not _INIT_PID_RE.match(pid):

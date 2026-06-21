@@ -111,12 +111,52 @@ class TestResolveInitProjectId:
         with pytest.raises(RuntimeError, match="conflict"):
             pim.resolve_init_project_id(db)
 
-    def test_fails_closed_when_no_source(self, tmp_path, monkeypatch):
-        """No marker, no env → RuntimeError (no silent vnx-dev fallback)."""
+    def test_defaults_to_vnx_dev_when_no_source(self, tmp_path, monkeypatch):
+        """No marker, no env, no .vnx-data path → defaults to 'vnx-dev' with a warning."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         db = _make_db(tmp_path)
-        with pytest.raises(RuntimeError, match="cannot resolve project_id"):
-            pim.resolve_init_project_id(db)
+        with self._capture_log(pim) as records:
+            pid = pim.resolve_init_project_id(db)
+        assert pid == "vnx-dev"
+        assert any("vnx-dev" in r.getMessage() for r in records), (
+            "Expected a warning mentioning 'vnx-dev' fallback in the log records"
+        )
+
+    def test_resolves_from_db_path_layout(self, tmp_path, monkeypatch):
+        """DB at <root>/.vnx-data/<pid>/state/<db> resolves pid from path alone."""
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        # Build the canonical central-store layout in tmp_path
+        state_dir = tmp_path / ".vnx-data" / "seocrawler-v2" / "state"
+        state_dir.mkdir(parents=True)
+        db = _make_db(state_dir, filename="runtime_coordination.db")
+        # No marker, no env — path layout is the only source
+        pid = pim.resolve_init_project_id(db)
+        assert pid == "seocrawler-v2"
+
+    @staticmethod
+    def _capture_log(module):
+        """Context manager to capture log records emitted by module's logger."""
+        import logging
+        records: list = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Capture()
+        logger = logging.getLogger(module.__name__)
+        logger.addHandler(handler)
+        orig_level = logger.level
+        logger.setLevel(logging.WARNING)
+
+        class _CM:
+            def __enter__(self):
+                return records
+            def __exit__(self, *_):
+                logger.removeHandler(handler)
+                logger.setLevel(orig_level)
+
+        return _CM()
 
     def test_fails_closed_on_invalid_pid_format(self, tmp_path, monkeypatch):
         """A pid that fails the VNX id regex → RuntimeError."""
@@ -202,12 +242,19 @@ class TestRunRuntimeCoordinationMigration:
         )
         assert result["status"] == "skipped_no_db"
 
-    def test_fails_closed_when_no_pid_resolvable(self, tmp_path, monkeypatch):
-        """No marker, no env → RuntimeError from resolve_init_project_id."""
+    def test_defaults_to_vnx_dev_when_no_pid_resolvable(self, tmp_path, monkeypatch):
+        """No marker, no env, no .vnx-data path → defaults to 'vnx-dev' (backward-compat)."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         db = self._make_rc_db(tmp_path)
-        with pytest.raises(RuntimeError, match="cannot resolve project_id"):
-            pim.run_runtime_coordination_migration(db)
+        result = pim.run_runtime_coordination_migration(db)
+        assert result["status"] == "ok"
+
+        conn = sqlite3.connect(str(db))
+        row = conn.execute(
+            "SELECT project_id FROM dispatches WHERE id='d1'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "vnx-dev"
 
 
 # ---------------------------------------------------------------------------
@@ -264,12 +311,19 @@ class TestRunQualityIntelligenceMigration:
         conn.close()
         assert row[0] == "test-qi-pid"
 
-    def test_fails_closed_when_no_pid_resolvable(self, tmp_path, monkeypatch):
-        """No marker, no env → RuntimeError (no vnx-dev fallback)."""
+    def test_defaults_to_vnx_dev_when_no_pid_resolvable(self, tmp_path, monkeypatch):
+        """No marker, no env, no .vnx-data path → defaults to 'vnx-dev' (backward-compat)."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         db = self._make_qi_db(tmp_path)
-        with pytest.raises(RuntimeError, match="cannot resolve project_id"):
-            pim.run_quality_intelligence_migration(db)
+        result = pim.run_quality_intelligence_migration(db)
+        assert result["status"] == "ok"
+
+        conn = sqlite3.connect(str(db))
+        row = conn.execute(
+            "SELECT project_id FROM success_patterns WHERE id=1"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "vnx-dev"
 
 
 # ---------------------------------------------------------------------------
