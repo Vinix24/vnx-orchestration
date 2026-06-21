@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import os
 import subprocess
 import sys
 import uuid
@@ -257,6 +258,7 @@ def _make_default_dispatcher(
     base = Path(data_dir) if data_dir else None
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
+        env = dict(os.environ)
         if provider in _CLAUDE_PROVIDERS:
             cmd = [
                 sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
@@ -274,6 +276,11 @@ def _make_default_dispatcher(
                 "--reason", f"plan-gate panel {dispatch_id}",
             ]
             run_timeout = timeout_seconds + 180  # tmux warmup + teardown headroom
+            # The plan doc is inlined into the instruction; a large doc makes the worker spend
+            # >120s ingesting it before it "visibly works", tripping the tmux lane's
+            # WORK_START_GATE fast-abort (default 120s). Give the gate room. (Deeper fix:
+            # pass the doc by file reference instead of inlining a 50k-char instruction.)
+            env["VNX_TMUX_WORK_START_TIMEOUT"] = str(max(600, timeout_seconds))
         else:
             cmd = [
                 sys.executable, str(PROVIDER_DISPATCH),
@@ -287,7 +294,7 @@ def _make_default_dispatcher(
             ]
             run_timeout = timeout_seconds
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=run_timeout, check=False,
+            cmd, capture_output=True, text=True, timeout=run_timeout, check=False, env=env,
         )
         report = _read_report(base, dispatch_id, proc.stderr)
         if report is None:
