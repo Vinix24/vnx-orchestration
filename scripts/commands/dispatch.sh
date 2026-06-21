@@ -462,7 +462,19 @@ HELP
   fi
 
   local exit_code=0
-  if [ "$adapter" = "tmux" ]; then
+  if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]]; then
+    # PR-12 single-entry door (gated; OFF default = the legacy lanes below, byte-identical).
+    # The door owns lane selection (claude -> tmux-spawn subscription, providers -> provider
+    # lane). Gap (canary-blocker): --auto-route is not yet on the bridge CLI.
+    printf '%s' "$instruction" | PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
+    python3 "$VNX_HOME/scripts/lib/dispatch_bridge.py" \
+      --dispatch-id "$dispatch_id" \
+      --terminal "$terminal" \
+      --model "$model_override" \
+      ${role:+--role "$role"} \
+      --instruction-stdin \
+      || exit_code=$?
+  elif [ "$adapter" = "tmux" ]; then
     # DEFAULT lane: subscription-preserving ephemeral tmux-spawn.
     # Leaseless — pass the resolved terminal as the worker label for audit parity.
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
