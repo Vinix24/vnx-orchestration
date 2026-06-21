@@ -454,6 +454,18 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 ---
 
+## 16) Defect-Recall Benchmark (gate-model calibration)
+**Status**: `Exploring`
+**Why**: The t1-t6 field-tests measure WORKER quality (how well a model produces). Review GATES need a different thing — DEFECT-RECALL (how reliably a model finds flaws in others' code). The worker composite does not capture it (a model can be a mediocre producer but an excellent critic — e.g. codex's low worker score vs its proven "always finds something" on PR-4/PR-9). Gate-model selection currently rests on a heuristic; this makes it empirical, the gate analog of the worker benchmark.
+
+**Scope**
+- Corpus of PRs/diffs with a known ground-truth defect set (planted across categories: security, correctness, ADR-007, rollback-safety, races). t5_01 planted-review is the seed; scale it to multiple PRs.
+- Every model reviews every PR, with launch-retry so lane reliability does not skew recall.
+- Score recall (caught / planted), precision (real findings / total — penalize false-positive noise), and a per-category breakdown (which model catches which defect class).
+- Output: a gate-model matrix (defect-recall per model per category) that calibrates the PM-skill gate-panel composition, separate from the worker-routing matrix.
+
+---
+
 ## Living Roadmap (ROADMAP.yaml)
 
 `ROADMAP.yaml` in the repository root is the single source of truth for the active feature roadmap. The document you are reading captures the architecture principles and wave history; per-feature planning, milestone assignments, and PR queues live in `ROADMAP.yaml`. Two generated views are derived from it: `FEATURE_PLAN.md` and `PR_QUEUE.md`.
