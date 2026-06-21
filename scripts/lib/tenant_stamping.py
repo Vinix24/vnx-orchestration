@@ -340,6 +340,25 @@ def _get_views_referencing(conn: sqlite3.Connection, table: str) -> list[tuple[s
     return result
 
 
+def _get_triggers_for_table(conn: sqlite3.Connection, table: str) -> list[tuple[str, str]]:
+    """Return (name, sql) for all triggers whose tbl_name is ``table``.
+
+    Mirrors the approach in migrate_future_system._triggers_for().
+    Used to capture triggers before DROP TABLE (cascade-drops them) and
+    recreate them verbatim after the rename, preserving FTS-sync triggers
+    (e.g. adrs_ai/adrs_ad/adrs_au) and any other table-level triggers.
+    Only rows with non-NULL sql are returned — auto-generated system triggers
+    have sql=NULL and cannot be recreated from DDL.
+    """
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL "
+        "ORDER BY name",
+        (table,),
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def _get_table_columns(conn: sqlite3.Connection, table: str) -> list[dict]:
     """Return full column info for a table."""
     rows = conn.execute(f"PRAGMA table_info({_safe_ident(table)[1:-1]})").fetchall()
@@ -464,6 +483,14 @@ def _rebuild_table_phase1(
             f" ON UPDATE {on_update} ON DELETE {on_delete}"
         )
 
+    # Capture triggers BEFORE the DROP+RENAME sequence.
+    # DROP TABLE cascade-drops all triggers on the table; they are never
+    # automatically recreated after a rename. We must capture them here and
+    # recreate them verbatim after the rename — mirroring migrate_future_system
+    # _triggers_for / _recreate_dependent_objects. This preserves FTS-sync
+    # triggers (e.g. adrs_ai/adrs_ad/adrs_au) so adrs_fts does not go stale.
+    dependent_triggers = _get_triggers_for_table(conn, table)
+
     # Drop views that reference this table before the DROP+RENAME sequence.
     # SQLite validates views at rename time and will raise if a view references
     # the old name while it's temporarily absent. We recreate them after.
@@ -476,19 +503,47 @@ def _rebuild_table_phase1(
     conn.execute(f"DROP TABLE IF EXISTS {_safe_ident(staging)}")
     conn.execute(f"CREATE TABLE {_safe_ident(staging)} (\n{col_defs_sql}\n)")
 
-    # Copy all columns except we need to handle the project_id nullable shift
+    # Count source rows before copy so we can assert no rows were silently dropped.
+    source_rowcount = conn.execute(
+        f"SELECT COUNT(*) FROM {_safe_ident(table)}"
+    ).fetchone()[0]
+
+    # Copy all columns (project_id is kept nullable in Phase 1).
     all_col_names = [c["name"] for c in cols]
     col_list = ", ".join(_safe_ident(n) for n in all_col_names)
     conn.execute(
         f"INSERT OR IGNORE INTO {_safe_ident(staging)} ({col_list}) "
         f"SELECT {col_list} FROM {_safe_ident(table)}"
     )
+
+    # Assert every source row was copied.  INSERT OR IGNORE silently discards
+    # rows that collide on the widened composite key — that must never happen
+    # (data loss masked as success).  If a collision occurs the widened key is
+    # not self-consistent with the existing data; fail loud so the operator can
+    # investigate before any data is committed.
+    rows_copied = conn.execute(
+        f"SELECT COUNT(*) FROM {_safe_ident(staging)}"
+    ).fetchone()[0]
+    if rows_copied != source_rowcount:
+        raise RuntimeError(
+            f"Phase 1 row-copy mismatch for table '{table}': "
+            f"{source_rowcount} source rows but only {rows_copied} copied. "
+            "The widened composite key produced collisions — this indicates "
+            "duplicate rows that would silently be dropped. "
+            "Investigate the data before rerunning W1. ROLLBACK."
+        )
+
     conn.execute(f"DROP TABLE {_safe_ident(table)}")
     conn.execute(f"ALTER TABLE {_safe_ident(staging)} RENAME TO {_safe_ident(table)}")
 
     # Recreate dependent views after the rename.
     for _, view_sql in dependent_views:
         conn.execute(view_sql)
+
+    # Recreate triggers after the rename.  Triggers are recreated AFTER views
+    # so any trigger body that references a view finds it already present.
+    for _, trigger_sql in dependent_triggers:
+        conn.execute(trigger_sql)
 
 
 def run_phase1_ddl(
@@ -786,6 +841,12 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
             f" ON UPDATE {on_update} ON DELETE {on_delete}"
         )
 
+    # Capture triggers BEFORE the DROP+RENAME sequence.
+    # Phase 3 uses the same copy-and-rename pattern as Phase 1 and has the same
+    # trigger-loss risk: DROP TABLE cascade-drops all triggers. Capture them now
+    # and recreate verbatim after the rename.
+    dependent_triggers = _get_triggers_for_table(conn, table)
+
     # Drop views referencing this table before DROP+RENAME (SQLite validates at rename).
     dependent_views = _get_views_referencing(conn, table)
     for view_name, _ in dependent_views:
@@ -808,6 +869,11 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
     # Recreate dependent views after the rename.
     for _, view_sql in dependent_views:
         conn.execute(view_sql)
+
+    # Recreate triggers after the rename (after views, so trigger bodies that
+    # reference views find them already present).
+    for _, trigger_sql in dependent_triggers:
+        conn.execute(trigger_sql)
 
 
 def run_phase3_enforce(
@@ -888,6 +954,24 @@ def run_phase3_enforce(
 # Orchestrator: run all 3 phases on a single DB
 # ---------------------------------------------------------------------------
 
+def _cleanup_checkpoint(ckpt: Path) -> None:
+    """Delete a checkpoint file and its sha256 manifest if they exist.
+
+    Called on successful migration to reclaim disk space.  The 1.65 GB
+    seocrawler-v2 QI DB produces ~1.65 GB per checkpoint; four copies
+    per DB run exhausted the disk on a 92%-full volume.  We keep only
+    the premigration checkpoint (taken before any mutation) and delete it
+    on success.  On failure the premigration checkpoint is intentionally
+    left in place for operator recovery; only its path is logged.
+    """
+    for path in (ckpt, Path(str(ckpt) + ".sha256")):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass  # best-effort; do not mask the primary result
+
+
 def run_three_phase_migration_on_db(
     db_path: Path,
     pid: str,
@@ -903,8 +987,10 @@ def run_three_phase_migration_on_db(
     This ensures 'Restored from checkpoint' always means the DB is back to its
     original pre-migration state, never a partially-migrated intermediate.
 
-    Per-phase checkpoints are still taken (for operational visibility / debugging),
-    but the restore on failure always falls back to the pre-migration copy.
+    Per-phase checkpoints are NOT taken (disk blowup fix): the 1.65 GB QI DB
+    would produce ~6.6 GB of checkpoint files; the premigration copy suffices.
+    On success, the premigration checkpoint is deleted to reclaim disk space.
+    On failure, it is left in place for operator recovery and its path is logged.
 
     This is the single-DB runner. The two-DB orchestrator
     (run_three_phase_migration) calls this for RC and QI separately
@@ -913,7 +999,7 @@ def run_three_phase_migration_on_db(
     """
     result: dict = {"db": str(db_path), "pid": pid}
 
-    # B3(b) fix: take the pre-migration checkpoint BEFORE any mutation.
+    # Take the pre-migration checkpoint BEFORE any mutation.
     # All phase failures restore from this single safe copy.
     ckpt_premigration = checkpoint_db(db_path, "premigration")
     result["checkpoint_premigration"] = str(ckpt_premigration)
@@ -926,9 +1012,6 @@ def run_three_phase_migration_on_db(
         result["tables"] = tables
 
         # --- Phase 1 ---
-        # Per-phase checkpoint kept for operational visibility; restore uses pre-migration.
-        ckpt1 = checkpoint_db(db_path, "phase1")
-        result["checkpoint_phase1"] = str(ckpt1)
         try:
             rebuilt1 = run_phase1_ddl(conn, tables)
             result["phase1_rebuilt"] = rebuilt1
@@ -936,11 +1019,11 @@ def run_three_phase_migration_on_db(
             conn.close()
             conn = None
             restore_checkpoint(ckpt_premigration, db_path)
-            # Verify schema after restore so the message is accurate.
             _verify_restore(db_path, ckpt_premigration, db_label)
+            # Leave premigration checkpoint on disk for operator recovery.
             raise RuntimeError(
                 f"[{db_label}] Phase 1 (DDL constraint repair) failed: {exc}. "
-                "Restored from pre-migration checkpoint."
+                f"Restored from pre-migration checkpoint: {ckpt_premigration}"
             ) from exc
 
         # Re-enumerate after Phase 1 DDL rebuild (table shapes changed)
@@ -948,8 +1031,6 @@ def run_three_phase_migration_on_db(
         tables = topological_sort_tables(conn, tables_raw)
 
         # --- Phase 2 ---
-        ckpt2 = checkpoint_db(db_path, "phase2")
-        result["checkpoint_phase2"] = str(ckpt2)
         try:
             updated = run_phase2_restamp(conn, tables, pid, db_label=db_label)
             result["phase2_updated"] = updated
@@ -960,13 +1041,11 @@ def run_three_phase_migration_on_db(
             _verify_restore(db_path, ckpt_premigration, db_label)
             raise RuntimeError(
                 f"[{db_label}] Phase 2 (data re-stamp) failed: {exc}. "
-                "Restored from pre-migration checkpoint."
+                f"Restored from pre-migration checkpoint: {ckpt_premigration}"
             ) from exc
 
         # --- Phase 3 ---
         if not skip_phase3:
-            ckpt3 = checkpoint_db(db_path, "phase3")
-            result["checkpoint_phase3"] = str(ckpt3)
             try:
                 rebuilt3 = run_phase3_enforce(conn, tables, db_label=db_label)
                 result["phase3_rebuilt"] = rebuilt3
@@ -977,13 +1056,16 @@ def run_three_phase_migration_on_db(
                 _verify_restore(db_path, ckpt_premigration, db_label)
                 raise RuntimeError(
                     f"[{db_label}] Phase 3 (NOT NULL enforcement) failed: {exc}. "
-                    "Restored from pre-migration checkpoint."
+                    f"Restored from pre-migration checkpoint: {ckpt_premigration}"
                 ) from exc
 
         result["ok"] = True
     finally:
         if conn is not None:
             conn.close()
+
+    # On success: delete the premigration checkpoint to reclaim disk space.
+    _cleanup_checkpoint(ckpt_premigration)
 
     return result
 
@@ -1076,36 +1158,50 @@ def run_three_phase_migration(
         qi_conn2.close()
 
     # --- Phase 3 on RC ---
+    # Take a premigration-for-phase3 checkpoint (state after Phases 1+2 succeeded).
+    # Delete it on success; leave it for operator recovery on failure.
+    rc_ckpt_p3 = checkpoint_db(rc_db_path, "premigration_phase3")
     rc_conn3 = sqlite3.connect(str(rc_db_path), timeout=30.0)
     try:
         tables_raw = enumerate_project_id_tables(rc_conn3)
         tables = topological_sort_tables(rc_conn3, tables_raw)
-        ckpt = checkpoint_db(rc_db_path, "phase3")
         try:
             rebuilt = run_phase3_enforce(rc_conn3, tables, db_label="RC")
             combined["rc_phase3"] = rebuilt
         except Exception as exc:
             rc_conn3.close()
-            restore_checkpoint(ckpt, rc_db_path)
-            raise RuntimeError(f"RC Phase 3 failed: {exc}. Restored from checkpoint.") from exc
+            rc_conn3 = None
+            restore_checkpoint(rc_ckpt_p3, rc_db_path)
+            raise RuntimeError(
+                f"RC Phase 3 failed: {exc}. "
+                f"Restored from checkpoint: {rc_ckpt_p3}"
+            ) from exc
     finally:
-        rc_conn3.close()
+        if rc_conn3 is not None:
+            rc_conn3.close()
+    _cleanup_checkpoint(rc_ckpt_p3)
 
     # --- Phase 3 on QI ---
+    qi_ckpt_p3 = checkpoint_db(qi_db_path, "premigration_phase3")
     qi_conn3 = sqlite3.connect(str(qi_db_path), timeout=30.0)
     try:
         tables_raw = enumerate_project_id_tables(qi_conn3)
         tables = topological_sort_tables(qi_conn3, tables_raw)
-        ckpt = checkpoint_db(qi_db_path, "phase3")
         try:
             rebuilt = run_phase3_enforce(qi_conn3, tables, db_label="QI")
             combined["qi_phase3"] = rebuilt
         except Exception as exc:
             qi_conn3.close()
-            restore_checkpoint(ckpt, qi_db_path)
-            raise RuntimeError(f"QI Phase 3 failed: {exc}. Restored from checkpoint.") from exc
+            qi_conn3 = None
+            restore_checkpoint(qi_ckpt_p3, qi_db_path)
+            raise RuntimeError(
+                f"QI Phase 3 failed: {exc}. "
+                f"Restored from checkpoint: {qi_ckpt_p3}"
+            ) from exc
     finally:
-        qi_conn3.close()
+        if qi_conn3 is not None:
+            qi_conn3.close()
+    _cleanup_checkpoint(qi_ckpt_p3)
 
     combined["ok"] = True
     return combined
