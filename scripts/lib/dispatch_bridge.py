@@ -201,6 +201,43 @@ def bridge_dispatch(*, dry_run: bool = False, **stage_kwargs) -> int:
     return run_dispatch(spec_file, dry_run=dry_run)
 
 
+def deliver_via_door(
+    legacy,
+    *,
+    instruction_text: str,
+    dispatch_id: str,
+    target_slot: str,
+    role: Optional[str] = None,
+    provider: str = "claude",
+    model: Optional[str] = None,
+    gate: str = "",
+    pr_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> bool:
+    """Gated delivery for the in-process python callers (pool_worker_runner, claude_adapter,
+    headless_dispatch_daemon). When ``VNX_SINGLE_ENTRY_DISPATCH=1`` route through the door
+    (``bridge_dispatch``); otherwise run ``legacy`` — the caller's existing lane delivery,
+    passed as a zero-arg callable. Returns True on success (normalizes the bridge's exit code
+    and the legacy bool). OFF (default) = the legacy path, byte-for-byte unchanged.
+
+    ``project_id`` may be None: the door resolves + validates it fail-closed (ADR-007). Pass it
+    explicitly when the caller already knows it (preferred).
+    """
+    if os.environ.get("VNX_SINGLE_ENTRY_DISPATCH") == "1":
+        return bridge_dispatch(
+            instruction_text=instruction_text,
+            dispatch_id=dispatch_id,
+            role=role or "backend-developer",
+            target_slot=target_slot,
+            provider=provider,
+            model=model,
+            gate=gate,
+            pr_id=pr_id,
+            project_id=project_id,
+        ) == 0
+    return bool(legacy())
+
+
 # ---------------------------------------------------------------------------
 # Thin CLI — for the bash caller (dispatch_deliver.sh) which shells in like it
 # already shells into dispatch_cli.py. Instruction text arrives on stdin to avoid

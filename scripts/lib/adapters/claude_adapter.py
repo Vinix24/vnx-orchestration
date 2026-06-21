@@ -75,19 +75,26 @@ class ClaudeAdapter(ProviderAdapter):
         max_retries = int(context.get("max_retries", 1))
 
         t0 = time.monotonic()
-        success = deliver_with_recovery(
-            terminal_id=terminal_id,
-            instruction=instruction,
-            model=model,
-            dispatch_id=dispatch_id,
-            role=role,
-            max_retries=max_retries,
-            lease_generation=lease_generation,
-            heartbeat_interval=heartbeat_interval,
-            chunk_timeout=chunk_timeout,
-            total_deadline=total_deadline,
-            auto_commit=auto_commit,
-            gate=gate,
+        # PR-12: route through the single-entry door when VNX_SINGLE_ENTRY_DISPATCH=1; OFF
+        # default = the legacy deliver_with_recovery call (the lambda), byte-identical.
+        import dispatch_bridge  # noqa: PLC0415
+        success = dispatch_bridge.deliver_via_door(
+            lambda: deliver_with_recovery(
+                terminal_id=terminal_id,
+                instruction=instruction,
+                model=model,
+                dispatch_id=dispatch_id,
+                role=role,
+                max_retries=max_retries,
+                lease_generation=lease_generation,
+                heartbeat_interval=heartbeat_interval,
+                chunk_timeout=chunk_timeout,
+                total_deadline=total_deadline,
+                auto_commit=auto_commit,
+                gate=gate,
+            ),
+            instruction_text=instruction, dispatch_id=dispatch_id, role=role,
+            target_slot=terminal_id, provider="claude", model=model, gate=gate,
         )
         duration = time.monotonic() - t0
 
