@@ -906,11 +906,20 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
                 print(f"      · {finding}")
 
     if result["decision"] == "PASS":
-        resolved = _resolve_plan_blocker(state_dir, args.track_id, args.project_id)
         # A PASS verdict only counts as "unblocked" if the track actually reconciled
         # away from blocked. If a second blocker (a hard dependency, another OI) or a
-        # schema gap leaves it blocked, say so — never claim unblocked dishonestly.
-        post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+        # schema gap leaves it blocked, say so — never claim unblocked dishonestly. A
+        # DB/reconciler failure here returns a defined exit code, not a crash.
+        try:
+            resolved = _resolve_plan_blocker(state_dir, args.track_id, args.project_id)
+            post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+        except Exception as exc:
+            print(
+                f"PASS verdict, but unblocking track {args.track_id} failed: {exc}. "
+                "Track state unchanged — investigate before promoting.",
+                file=sys.stderr,
+            )
+            return 1
         derived = post.get("derived_status") if isinstance(post, dict) else None
         if derived == "blocked":
             print(

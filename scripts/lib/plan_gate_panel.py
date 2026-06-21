@@ -67,8 +67,24 @@ _VERDICT_CONTRACT = (
 )
 
 
+# The plan doc is untrusted input inlined into each panelist's instruction. Two guards:
+#  - a doc must not be able to inject its own verdict fence (verdict spoofing);
+#  - a doc must not blow argv past ARG_MAX when passed as --instruction.
+MAX_DOC_CHARS = 60000
+
+
+def _sanitize_doc(doc_text: str) -> str:
+    # Neutralize any embedded verdict fence so a plan doc cannot spoof a PASS: a space
+    # after the backticks breaks the exact ```vnx-plan-verdict opener parse_verdict matches.
+    safe = doc_text.replace("```" + VERDICT_FENCE, "``` " + VERDICT_FENCE + " (neutralized)")
+    if len(safe) > MAX_DOC_CHARS:
+        safe = safe[:MAX_DOC_CHARS] + f"\n\n[... plan doc truncated at {MAX_DOC_CHARS} chars for the gate ...]"
+    return safe
+
+
 def build_plan_review_instruction(doc_text: str, track_id: str) -> str:
     """Render the plan-review instruction handed to each panelist."""
+    doc_text = _sanitize_doc(doc_text)
     return (
         f"You are an independent plan reviewer for track {track_id}. Review the "
         "IMPLEMENTATION PLAN below. The plan only — no code exists yet. Judge it on:\n"
@@ -154,6 +170,9 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     Parse errors already map to ``revise`` (see ``parse_verdict``), so a garbled
     verdict counts against PASS rather than being ignored.
     """
+    if not results:
+        # An empty panel must never fall through to PASS (misconfigured panel=[]).
+        return _decision("REVISE", 0, 0, 0, "no panelists ran — empty panel, cannot certify")
     block = sum(1 for r in results if r.verdict == "block")
     revise = sum(1 for r in results if r.verdict == "revise")
     passes = sum(1 for r in results if r.verdict == "pass")
