@@ -106,16 +106,28 @@ PYEOF
 
 echo "[dispatch-agent] Created dispatch: $DISPATCH_ID"
 
-# --- execute via subprocess_dispatch.py ---
+# --- execute via the single-entry door (gated; OFF default = legacy subprocess lane) ---
+# PR-12: when VNX_SINGLE_ENTRY_DISPATCH=1, route through dispatch_bridge -> run_dispatch so
+# this delivery funnels through the door. OFF = the legacy subprocess_dispatch call, unchanged.
+# Gap (canary-blocker): --auto-route is not yet on the bridge CLI.
 _ar_flag=()
 [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
 
-python3 "$SCRIPTS_LIB/subprocess_dispatch.py" \
-  --terminal-id "T1" \
-  --dispatch-id "$DISPATCH_ID" \
-  --instruction "$INSTRUCTION" \
-  --model "$MODEL" \
-  --role "$AGENT" \
-  "${_ar_flag[@]}"
+if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]]; then
+  printf '%s' "$INSTRUCTION" | python3 "$SCRIPTS_LIB/dispatch_bridge.py" \
+    --dispatch-id "$DISPATCH_ID" \
+    --terminal "T1" \
+    --model "$MODEL" \
+    --role "$AGENT" \
+    --instruction-stdin
+else
+  python3 "$SCRIPTS_LIB/subprocess_dispatch.py" \
+    --terminal-id "T1" \
+    --dispatch-id "$DISPATCH_ID" \
+    --instruction "$INSTRUCTION" \
+    --model "$MODEL" \
+    --role "$AGENT" \
+    "${_ar_flag[@]}"
+fi
 
 echo "[dispatch-agent] Agent dispatch complete: $DISPATCH_ID"
