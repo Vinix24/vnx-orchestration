@@ -37,6 +37,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
+TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
+
+# Claude is NOT a provider-lane provider — provider_dispatch refuses it. Claude lanes
+# route via the TMUX-SPAWN lane (interactive `claude` in an ephemeral isolated worktree),
+# which keeps billing on the SUBSCRIPTION (CLAUDE.md "June-15 escape"). They must NOT use
+# headless `claude -p`: post-cutover that bills API credits.
+_CLAUDE_PROVIDERS = {"claude"}
 
 # Default diverse-family panel: (label, provider string, model_arg).
 DEFAULT_PANEL: List[Dict[str, str]] = [
@@ -235,22 +242,48 @@ def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optiona
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
 ) -> DispatcherFn:
-    """Real dispatcher: run a panelist via provider_dispatch and return its report text."""
+    """Real dispatcher: run a panelist through its governed lane, return the report text.
+
+    INTERIM — PR-12 consolidation target. This calls the lane scripts DIRECTLY, which is a
+    side door. Once the single-entry dispatch door (`vnx dispatch` / dispatch_bridge) is
+    wired and flipped, this MUST route through that one door instead. The split below is
+    exactly what the door decides internally:
+      claude            -> tmux-spawn lane (interactive claude, ephemeral worktree;
+                           billing stays on the SUBSCRIPTION per the June-15 escape).
+                           NOT provider_dispatch (refuses claude), NOT headless `claude -p`
+                           (bills API credits post-cutover).
+      kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
+    """
     base = Path(data_dir) if data_dir else None
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
-        cmd = [
-            sys.executable, str(PROVIDER_DISPATCH),
-            "--provider", provider,
-            "--terminal-id", "plan-gate",
-            "--dispatch-id", dispatch_id,
-            "--model", model_arg,
-            "--role", "plan-reviewer",
-            "--instruction", instruction,
-            "--no-auto-commit",
-        ]
+        if provider in _CLAUDE_PROVIDERS:
+            cmd = [
+                sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
+                "--dispatch-id", dispatch_id,
+                "--model", model_arg,
+                "--role", "plan-reviewer",
+                "--instruction", instruction,
+                "--deadline-seconds", str(timeout_seconds),
+                "--isolated-worktree",
+                "--allow-unstaged",
+                "--reason", f"plan-gate panel {dispatch_id}",
+            ]
+            run_timeout = timeout_seconds + 180  # tmux warmup + teardown headroom
+        else:
+            cmd = [
+                sys.executable, str(PROVIDER_DISPATCH),
+                "--provider", provider,
+                "--terminal-id", "plan-gate",
+                "--dispatch-id", dispatch_id,
+                "--model", model_arg,
+                "--role", "plan-reviewer",
+                "--instruction", instruction,
+                "--no-auto-commit",
+            ]
+            run_timeout = timeout_seconds
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_seconds, check=False,
+            cmd, capture_output=True, text=True, timeout=run_timeout, check=False,
         )
         report = _read_report(base, dispatch_id, proc.stderr)
         if report is None:

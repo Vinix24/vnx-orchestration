@@ -68,12 +68,20 @@ a diverse-family panel BEFORE any implementation.
   on the prod subscription, not own-key). **Codex is reserved** for security/schema/governance
   plans, never a default panelist.
 - **Run it**: `planning_cli.py plan-gate run <track> --doc <plan.md> --project-id <pid>`. The
-  panel runs on the **governed worker path** — each panelist dispatches via
-  `provider_dispatch.py` (opus=`claude`, kimi=`kimi`, glm=`litellm:zai`), so every panelist
-  emits a report -> receipt (the gate that gates everything is itself in the audit trail) and
-  every provider constraint is enforced by construction. Each panelist appends a fenced
-  `vnx-plan-verdict` JSON block; the runner parses it (a missing/garbled verdict fails safe to
-  REVISE, never a silent PASS). Engine: `scripts/lib/plan_gate_panel.py`.
+  panel runs on the **governed worker path**, and each panelist routes by its lane (the
+  single-entry dispatch door decides this; until PR-12 wires/flips that door, the engine calls
+  the lanes directly as a marked interim):
+  - **opus / any `claude` panelist → the TMUX-SPAWN lane** (`tmux_interactive_dispatch.py`):
+    interactive `claude` in an ephemeral isolated worktree, billing stays on the
+    **subscription** (CLAUDE.md "June-15 escape"). NEVER `provider_dispatch` (it refuses
+    claude — claude is not a provider-lane provider) and NEVER headless `claude -p` (API
+    credits post-cutover). This is the correction to an earlier wrong note ("force_headless").
+  - **kimi / glm / deepseek → `provider_dispatch.py`** (constraint-safe per provider).
+
+  Every panelist emits a report -> receipt (the gate that gates everything is in the audit
+  trail). Each appends a fenced `vnx-plan-verdict` JSON block; the runner parses it (a
+  missing/garbled verdict fails safe to REVISE, never a silent PASS). Engine:
+  `scripts/lib/plan_gate_panel.py`.
 - **Pass/fail**: any BLOCK -> revise the blocking sections, re-run the delta only; >=2 REVISE
   -> one revise round; <=1 REVISE no BLOCK -> PASS, fold the lone dissent in as a tracked
   note (do NOT re-loop for one voice). Tie -> safety-first REVISE. CAP at 2 rounds, then
