@@ -477,6 +477,37 @@ def _append_coordination_event(
         )
 
 
+def cmd_objective_add(args: argparse.Namespace) -> int:
+    """Add an ad-hoc objective (track) without a ROADMAP edit.
+
+    Thin wrapper over ``tracks_lib.create_track`` (the single-writer), so the PM
+    can queue a feature directly while keeping tracks.py the only writer of
+    track-authored fields. The ROADMAP seeder remains the path for
+    ROADMAP-authored tracks; this is for ad-hoc PM-driven features. New tracks
+    start ``queued`` — the plan-first gate must pass before any deliverable
+    promotes (see cmd_deliverable_promote).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    try:
+        track = tracks_lib.create_track(
+            state_dir,
+            args.track_id,
+            args.project_id,
+            args.title,
+            args.goal_state,
+            phase="queued",
+            horizon=args.horizon,
+            priority=args.priority,
+        )
+    except Exception as exc:  # duplicate id, invalid horizon/priority, etc.
+        print(f"objective add failed: {exc}", file=sys.stderr)
+        return 1
+
+    tid = track.get("track_id", args.track_id) if isinstance(track, dict) else args.track_id
+    print(f"Added objective {tid} (phase=queued, horizon={args.horizon or 'unset'})")
+    return 0
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -663,6 +694,25 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
             )
             return 1
 
+        # PM plan-first lock (PM-SKILL-DESIGN-2026-06-20 step 3): refuse promotion
+        # while the deliverable's track is blocked — e.g. an open synthetic
+        # OI-PLAN-<track> gate (plan-first panel not passed) or an unmet hard
+        # dependency. The reconciler writes derived_status; the PM seeds/closes the
+        # blocker. The CLI itself rejects, so a worker that never loaded the PM skill
+        # still cannot bypass the gate. Graceful: a deliverable with no track, or a
+        # track whose derived_status is unset, is not gated here.
+        track_id = row["track"] if _has_col(conn, "dispatches", "track") else None
+        if track_id:
+            trk = tracks_lib.get_track(state_dir, track_id, project_id)
+            if trk and (trk.get("derived_status") if isinstance(trk, dict) else None) == "blocked":
+                print(
+                    f"Cannot promote {dispatch_id!r}: track {track_id!r} is blocked "
+                    "(plan-first gate not passed, or a hard dependency is open). "
+                    "Close the blocking open-items first, then re-run promote.",
+                    file=sys.stderr,
+                )
+                return 1
+
         now = _now_utc()
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         if has_oaa:
@@ -741,6 +791,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_drift)
     p_drift.set_defaults(func=cmd_objective_drift)
+
+    p_add = obj_sub.add_parser(
+        "add",
+        help="add an ad-hoc objective/track (thin wrapper over the single-writer)",
+    )
+    _common(p_add)
+    p_add.add_argument("track_id")
+    p_add.add_argument("title")
+    p_add.add_argument("goal_state", help="what 'done' looks like for this track")
+    p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
+    p_add.add_argument("--priority", default=None)
+    p_add.set_defaults(func=cmd_objective_add)
 
     # ------------------------------------------------------------------
     # deliverable subcommand (Phase 2)
