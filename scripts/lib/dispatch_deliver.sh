@@ -492,14 +492,33 @@ _ddt_subprocess_delivery() {
     local _mcp_flag=()
     [[ "$_requires_mcp" == "true" ]] && _mcp_flag=(--requires-mcp)
 
-    if ! python3 "$VNX_DIR/scripts/lib/subprocess_dispatch.py" \
+    # PR-12 single-entry door (gated; VNX_SINGLE_ENTRY_DISPATCH default OFF = legacy path,
+    # byte-identical to before). When ON, route through dispatch_bridge → run_dispatch so this
+    # delivery funnels through validate→snapshot→compile_plan→permit→execute like every other.
+    # GAPS to close before the PR-11 flip (canary-blockers, see PR12-PR2-CALLER-AUDIT):
+    #   * --auto-route is not yet on the bridge CLI (this caller passes _ar_flag);
+    #   * provider defaults to claude → the door's tmux-spawn lane — a lane change from the
+    #     subprocess lane; assert the receipt's lane in the canary before flipping.
+    local _deliver_rc=0
+    if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]]; then
+        printf '%s' "$complete_prompt" | python3 "$VNX_DIR/scripts/lib/dispatch_bridge.py" \
+            --dispatch-id "$dispatch_id" \
+            --terminal "$terminal_id" \
+            --model "$model" \
+            ${agent_role:+--role "$agent_role"} \
+            "${_mcp_flag[@]}" \
+            --instruction-stdin || _deliver_rc=$?
+    else
+        python3 "$VNX_DIR/scripts/lib/subprocess_dispatch.py" \
             --terminal-id "$terminal_id" \
             --instruction "$complete_prompt" \
             --model "$model" \
             --dispatch-id "$dispatch_id" \
             ${agent_role:+--role "$agent_role"} \
             "${_mcp_flag[@]}" \
-            "${_ar_flag[@]}"; then
+            "${_ar_flag[@]}" || _deliver_rc=$?
+    fi
+    if [[ "$_deliver_rc" != "0" ]]; then
         log_structured_failure "subprocess_delivery_failed" \
             "SubprocessAdapter delivery failed" \
             "terminal=$terminal_id dispatch=$dispatch_id"
