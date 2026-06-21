@@ -66,9 +66,14 @@ a diverse-family panel BEFORE any implementation.
 - **Panel = Opus + Kimi + GLM-5.2-via-harness** (three families -> real disagreement).
   DeepSeek-via-harness-with-own-key is an equally legal third (constraint blocks DeepSeek only
   on the prod subscription, not own-key). **Codex is reserved** for security/schema/governance
-  plans, never a default panelist. Run via the existing `ReviewGateManager` (headless) with a
-  `[kimi_gate, deepseek_gate, opus_gate]` stack. The Claude panelist MUST go headless
-  (`force_headless` — interactive tmux hangs).
+  plans, never a default panelist.
+- **Run it**: `planning_cli.py plan-gate run <track> --doc <plan.md> --project-id <pid>`. The
+  panel runs on the **governed worker path** — each panelist dispatches via
+  `provider_dispatch.py` (opus=`claude`, kimi=`kimi`, glm=`litellm:zai`), so every panelist
+  emits a report -> receipt (the gate that gates everything is itself in the audit trail) and
+  every provider constraint is enforced by construction. Each panelist appends a fenced
+  `vnx-plan-verdict` JSON block; the runner parses it (a missing/garbled verdict fails safe to
+  REVISE, never a silent PASS). Engine: `scripts/lib/plan_gate_panel.py`.
 - **Pass/fail**: any BLOCK -> revise the blocking sections, re-run the delta only; >=2 REVISE
   -> one revise round; <=1 REVISE no BLOCK -> PASS, fold the lone dissent in as a tracked
   note (do NOT re-loop for one voice). Tie -> safety-first REVISE. CAP at 2 rounds, then
