@@ -265,7 +265,11 @@ def _make_default_dispatcher(
                 "--role", "plan-reviewer",
                 "--instruction", instruction,
                 "--deadline-seconds", str(timeout_seconds),
-                "--isolated-worktree",
+                # A plan review is READ-ONLY (reads the inlined doc, writes a verdict report) —
+                # it needs no isolated worktree. --shared-worktree skips the expensive
+                # `git worktree add`, which on a large repo (e.g. SEOcrawler) blows the deadline
+                # and times opus out; it also grounds the review against the REAL checkout.
+                "--shared-worktree",
                 "--allow-unstaged",
                 "--reason", f"plan-gate panel {dispatch_id}",
             ]
