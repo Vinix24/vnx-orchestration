@@ -1483,7 +1483,8 @@ class TestB3Phase1IntegrityAndPreMigrationRestore:
         assert ic == [("ok",)]
 
     def test_pre_migration_checkpoint_taken_before_phase1(self, tmp_path: Path) -> None:
-        """run_three_phase_migration_on_db takes a pre-migration checkpoint."""
+        """run_three_phase_migration_on_db takes a pre-migration checkpoint and
+        cleans it up on success to avoid disk blowup on large DBs."""
         db = _db(tmp_path)
         conn = _open(db)
         _make_simple_tenant_table(conn)
@@ -1493,10 +1494,14 @@ class TestB3Phase1IntegrityAndPreMigrationRestore:
 
         result = ts.run_three_phase_migration_on_db(db, "my-pid", db_label="TEST")
         assert result["ok"] is True
-        # The pre-migration checkpoint must exist.
+        # The result records the checkpoint path (for logging / error messages).
         assert "checkpoint_premigration" in result
+        # On SUCCESS the checkpoint is deleted to reclaim disk space.
         ckpt = Path(result["checkpoint_premigration"])
-        assert ckpt.exists(), "Pre-migration checkpoint file must exist after migration"
+        assert not ckpt.exists(), (
+            "Pre-migration checkpoint must be DELETED after successful migration "
+            "(disk-cleanup fix — 1.65 GB DB × 4 checkpoints = ~6.6 GB otherwise)"
+        )
 
     def test_phase2_failure_restores_to_pre_migration_state(self, tmp_path: Path) -> None:
         """When Phase 2 fails (third tenant guard), DB is restored to pre-migration state.
@@ -1646,3 +1651,205 @@ class TestB4WalCheckpointConsistency:
 
         assert not wal.exists(), "-wal must be deleted by restore_checkpoint"
         assert not shm.exists(), "-shm must be deleted by restore_checkpoint"
+
+
+# ===========================================================================
+# 20. Trigger preservation through Phase 1 and Phase 3
+# ===========================================================================
+
+class TestTriggerPreservation:
+    """BLOCKER fix: Phase 1 and Phase 3 rebuild tables via DROP+CREATE+rename.
+    DROP TABLE cascade-drops all triggers. They must be captured before DROP
+    and recreated verbatim after the rename — mirroring migrate_future_system
+    _triggers_for/_recreate_dependent_objects.
+
+    Real-world case: the 'adrs' table in the seocrawler-v2 QI DB has
+    adrs_ai/adrs_ad/adrs_au triggers that sync rows into adrs_fts.  Without
+    this fix, Phase 3 rebuilds 'adrs' (it has DEFAULT 'vnx-dev'), the triggers
+    vanish silently, and adrs_fts goes permanently stale on future inserts.
+    integrity_check stays green — this is the 'green but broken' regression.
+
+    The tests here prove the trigger actually FIRES after each phase (not just
+    that it exists in sqlite_master), by using an AFTER INSERT pattern that
+    writes to a sync table, then asserting the sync table received the row.
+    """
+
+    @staticmethod
+    def _make_fts_style_schema(conn: sqlite3.Connection) -> None:
+        """Create an 'adrs'-style table with a sync table and AFTER INSERT trigger.
+
+        adrs: the source table (carries project_id, will be rebuilt by Phase 1 + 3)
+        adrs_sync: the sync/shadow table (no project_id, excluded from migration)
+        adrs_ai: AFTER INSERT trigger that propagates inserts to adrs_sync
+
+        This mimics the adrs/adrs_fts pattern from the seocrawler-v2 QI DB.
+        """
+        conn.execute("""
+            CREATE TABLE adrs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                body TEXT,
+                project_id TEXT DEFAULT 'vnx-dev',
+                UNIQUE (title)
+            )
+        """)
+        # Sync table: no project_id column, so it is excluded from migration enumeration.
+        conn.execute("""
+            CREATE TABLE adrs_sync (
+                rowid INTEGER PRIMARY KEY,
+                title TEXT,
+                body TEXT
+            )
+        """)
+        # AFTER INSERT trigger: mimics FTS content-sync triggers (adrs_ai pattern).
+        conn.execute("""
+            CREATE TRIGGER adrs_ai AFTER INSERT ON adrs BEGIN
+                INSERT INTO adrs_sync(rowid, title, body)
+                VALUES (new.id, new.title, new.body);
+            END
+        """)
+        conn.commit()
+
+    def test_trigger_exists_and_fires_after_phase1(self, tmp_path: Path) -> None:
+        """After Phase 1 rebuilds 'adrs', adrs_ai must exist in sqlite_master
+        AND fire on INSERT (propagating into adrs_sync)."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        self._make_fts_style_schema(conn)
+        conn.close()
+
+        # Phase 1: widen UNIQUE(title) → UNIQUE(title, project_id).
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        assert "adrs" in tables
+        rebuilt = ts.run_phase1_ddl(conn, tables)
+        conn.close()
+        assert "adrs" in rebuilt, "adrs must be rebuilt by Phase 1 (UNIQUE(title) not composite)"
+
+        # 1. Trigger must exist in sqlite_master.
+        conn = sqlite3.connect(str(db))
+        trigger_names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='adrs'"
+            ).fetchall()
+        }
+        assert "adrs_ai" in trigger_names, (
+            "adrs_ai trigger must still exist in sqlite_master after Phase 1 rebuild. "
+            "Phase 1 DROP TABLE cascade-dropped it and it was not recreated."
+        )
+
+        # 2. Trigger must actually FIRE: insert a row and confirm adrs_sync received it.
+        conn.execute(
+            "INSERT INTO adrs (title, body, project_id) VALUES ('post-p1', 'content', 'vnx-dev')"
+        )
+        conn.commit()
+        sync_row = conn.execute(
+            "SELECT title FROM adrs_sync WHERE title='post-p1'"
+        ).fetchone()
+        conn.close()
+        assert sync_row is not None, (
+            "adrs_ai trigger must FIRE on INSERT after Phase 1 rebuild. "
+            "adrs_sync received no row — the trigger exists in sqlite_master "
+            "but is not functional, or was never recreated."
+        )
+
+    def test_trigger_exists_and_fires_after_phase3(self, tmp_path: Path) -> None:
+        """After the full 3-phase migration, adrs_ai must exist AND fire.
+
+        Phase 3 rebuilds 'adrs' to enforce NOT NULL on project_id — this is
+        the exact path that triggered the original bug on the seocrawler-v2 QI DB.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        self._make_fts_style_schema(conn)
+        # Seed with a legacy row so Phase 2 has something to re-stamp.
+        conn.execute("INSERT INTO adrs (title, body, project_id) VALUES ('seed', 'data', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        # Run the full 3-phase migration.
+        result = ts.run_three_phase_migration_on_db(db, "seocrawler-v2", db_label="TEST")
+        assert result["ok"] is True
+        assert "adrs" in result.get("phase3_rebuilt", []), (
+            "adrs must be rebuilt by Phase 3 (it had DEFAULT 'vnx-dev')"
+        )
+
+        # 1. Trigger must exist in sqlite_master after Phase 3.
+        conn = sqlite3.connect(str(db))
+        trigger_names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='adrs'"
+            ).fetchall()
+        }
+        assert "adrs_ai" in trigger_names, (
+            "adrs_ai trigger must still exist in sqlite_master after Phase 3 rebuild. "
+            "Phase 3 DROP TABLE cascade-dropped it and it was not recreated — "
+            "adrs_fts will go permanently stale on future inserts (silent corruption)."
+        )
+
+        # 2. Trigger must actually FIRE post-Phase-3.
+        conn.execute(
+            "INSERT INTO adrs (title, body, project_id) "
+            "VALUES ('post-p3', 'new content', 'seocrawler-v2')"
+        )
+        conn.commit()
+        sync_row = conn.execute(
+            "SELECT title FROM adrs_sync WHERE title='post-p3'"
+        ).fetchone()
+        conn.close()
+        assert sync_row is not None, (
+            "adrs_ai trigger must FIRE on INSERT after Phase 3 rebuild. "
+            "adrs_sync received no row — silent FTS corruption path confirmed."
+        )
+
+    def test_trigger_fires_after_phase1_and_phase3_independently(self, tmp_path: Path) -> None:
+        """Verify trigger fires at EACH phase boundary, not just at the end.
+
+        Runs Phase 1, inserts + checks, then runs Phases 2+3, inserts + checks.
+        This catches any regression where Phase 1 recreates the trigger but
+        Phase 3 drops it again.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        self._make_fts_style_schema(conn)
+        conn.close()
+
+        # Phase 1 only.
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        ts.run_phase1_ddl(conn, tables)
+        conn.close()
+
+        # Assert fires after Phase 1.
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO adrs (title, body, project_id) VALUES ('after-p1', 'x', 'vnx-dev')"
+        )
+        conn.commit()
+        row_p1 = conn.execute(
+            "SELECT title FROM adrs_sync WHERE title='after-p1'"
+        ).fetchone()
+        conn.close()
+        assert row_p1 is not None, "Trigger must fire after Phase 1"
+
+        # Phase 2 + 3.
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        ts.run_phase2_restamp(conn, tables, "seocrawler-v2", db_label="TEST")
+        ts.run_phase3_enforce(conn, tables, db_label="TEST")
+        conn.close()
+
+        # Assert fires after Phase 3.
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO adrs (title, body, project_id) "
+            "VALUES ('after-p3', 'y', 'seocrawler-v2')"
+        )
+        conn.commit()
+        row_p3 = conn.execute(
+            "SELECT title FROM adrs_sync WHERE title='after-p3'"
+        ).fetchone()
+        conn.close()
+        assert row_p3 is not None, (
+            "Trigger must fire after Phase 3 — Phase 3 must not re-drop it"
+        )
