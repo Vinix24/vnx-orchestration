@@ -1888,30 +1888,71 @@ def _run_numbered_walk(conn: sqlite3.Connection, project_root: Path) -> None:
     conn.commit()
 
 
-def _run_w1_rc_migration(db_path: Path) -> None:
-    """Run the W1 3-phase tenant-stamping migration on runtime_coordination.db.
+def _run_w1_coupled_migration(rc_db_path: Path) -> None:
+    """B1 fix: Run the W1 3-phase tenant-stamping migration on BOTH RC and QI.
 
-    W1 spec (1.0-blocker): Phase 1 repairs UNIQUE/PK constraints to include
-    project_id; Phase 2 re-stamps legacy (NULL/'vnx-dev'/'') rows; Phase 3
-    enforces NOT NULL with no DEFAULT 'vnx-dev'. All three phases are idempotent.
+    The previous implementation only migrated RC (run_three_phase_migration_on_db
+    called with db_label="RC"). The QI half (quality_intelligence.db) was dead
+    code: quality_db_init.run_qi_three_phase_migration had zero production callers,
+    and the coupled two-DB orchestrator (tenant_stamping.run_three_phase_migration)
+    that runs assert_phase2_postcondition also had zero production callers.
 
-    The QI half runs via quality_db_init.run_qi_three_phase_migration() and is
-    called separately. The two-DB coupled post-condition lives in the caller
-    that orchestrates both (tenant_stamping.run_three_phase_migration).
+    This function:
+    1. Resolves pid ONCE (fail-closed) from the RC DB path.
+    2. Resolves the QI DB path as the sibling of RC in the same state dir.
+    3. If the QI DB does not exist, migrates RC alone and logs the skip.
+    4. If the QI DB exists, invokes the COUPLED two-DB orchestrator
+       (tenant_stamping.run_three_phase_migration) which runs:
+         RC Phase 1+2, QI Phase 1+2,
+         coupled post-condition (assert BOTH DBs hold zero legacy rows),
+         RC Phase 3, QI Phase 3.
+    5. Is idempotent — reruns find nothing to do on already-clean DBs.
     """
-    print("  [W1] Running tenant-stamping Phase 1+2+3 on RC ...")
-    ts_result = tenant_stamping.run_three_phase_migration_on_db(
-        db_path, _resolve_validated_project_id(db_path), db_label="RC"
-    )
-    rebuilt1 = ts_result.get("phase1_rebuilt", [])
-    updated2 = ts_result.get("phase2_updated", {})
-    rebuilt3 = ts_result.get("phase3_rebuilt", [])
-    if rebuilt1 or any(n for n in updated2.values()) or rebuilt3:
-        print(f"  [W1] Phase 1 rebuilt: {rebuilt1}")
-        print(f"  [W1] Phase 2 updated: { {t: n for t, n in updated2.items() if n} }")
-        print(f"  [W1] Phase 3 rebuilt: {rebuilt3}")
+    pid = _resolve_validated_project_id(rc_db_path)
+    qi_db_path = rc_db_path.parent / "quality_intelligence.db"
+
+    if not qi_db_path.exists():
+        print(f"  [W1] QI DB not found at {qi_db_path} — skipping QI (RC only).")
+        print("  [W1] Running tenant-stamping Phase 1+2+3 on RC ...")
+        ts_result = tenant_stamping.run_three_phase_migration_on_db(
+            rc_db_path, pid, db_label="RC"
+        )
+        rebuilt1 = ts_result.get("phase1_rebuilt", [])
+        updated2 = ts_result.get("phase2_updated", {})
+        rebuilt3 = ts_result.get("phase3_rebuilt", [])
+        if rebuilt1 or any(n for n in updated2.values()) or rebuilt3:
+            print(f"  [W1] Phase 1 rebuilt: {rebuilt1}")
+            print(f"  [W1] Phase 2 updated: { {t: n for t, n in updated2.items() if n} }")
+            print(f"  [W1] Phase 3 rebuilt: {rebuilt3}")
+        else:
+            print("  [W1] No tenant-stamping changes needed on RC (already clean).")
+        return
+
+    print(f"  [W1] Running coupled tenant-stamping Phase 1+2+3 on RC + QI ...")
+    print(f"  [W1] RC: {rc_db_path}")
+    print(f"  [W1] QI: {qi_db_path}")
+    combined = tenant_stamping.run_three_phase_migration(rc_db_path, qi_db_path, pid)
+
+    rc_p1 = combined.get("rc_phase1", [])
+    rc_p2 = combined.get("rc_phase2", {})
+    rc_p3 = combined.get("rc_phase3", [])
+    qi_p1 = combined.get("qi_phase1", [])
+    qi_p2 = combined.get("qi_phase2", {})
+    qi_p3 = combined.get("qi_phase3", [])
+
+    any_rc = rc_p1 or any(n for n in rc_p2.values()) or rc_p3
+    any_qi = qi_p1 or any(n for n in qi_p2.values()) or qi_p3
+    if any_rc or any_qi:
+        if any_rc:
+            print(f"  [W1] RC Phase 1 rebuilt: {rc_p1}")
+            print(f"  [W1] RC Phase 2 updated: { {t: n for t, n in rc_p2.items() if n} }")
+            print(f"  [W1] RC Phase 3 rebuilt: {rc_p3}")
+        if any_qi:
+            print(f"  [W1] QI Phase 1 rebuilt: {qi_p1}")
+            print(f"  [W1] QI Phase 2 updated: { {t: n for t, n in qi_p2.items() if n} }")
+            print(f"  [W1] QI Phase 3 rebuilt: {qi_p3}")
     else:
-        print("  [W1] No tenant-stamping changes needed (already clean).")
+        print("  [W1] No tenant-stamping changes needed (RC + QI already clean).")
 
 
 def run(project_root: Path | None = None) -> None:
@@ -1967,10 +2008,12 @@ def run(project_root: Path | None = None) -> None:
         _assert_manifest_converged(conn)
 
         # (E) W1 tenant-stamping (1.0-blocker) — close conn before the 3-phase
-        # runner opens a new connection (avoids WAL reader/writer conflicts).
+        # runner opens new connections (avoids WAL reader/writer conflicts).
+        # B1 fix: call the COUPLED two-DB orchestrator so BOTH RC and QI are
+        # migrated. The QI sibling path is resolved inside _run_w1_coupled_migration.
         conn.close()
         conn = None
-        _run_w1_rc_migration(db_path)
+        _run_w1_coupled_migration(db_path)
         print(f"\n  Migration complete. Schema at user_version (RC verified by manifest converge).\n")
 
     except Exception:

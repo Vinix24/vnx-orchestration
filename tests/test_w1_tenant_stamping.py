@@ -1192,3 +1192,457 @@ class TestCheckpointRestore:
         count = conn.execute("SELECT COUNT(*) FROM things").fetchone()[0]
         conn.close()
         assert count == 1
+
+
+# ===========================================================================
+# 16. B1 — Production path wires BOTH RC and QI (the coupled two-DB orchestrator)
+# ===========================================================================
+
+def _make_state_layout(tmp_path: Path, pid: str) -> tuple[Path, Path]:
+    """Create tmp_path/.vnx-data/<pid>/state/ layout so path-anchored pid resolution works.
+
+    Returns (rc_db_path, qi_db_path).
+    """
+    state = tmp_path / ".vnx-data" / pid / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    rc_db = state / "runtime_coordination.db"
+    qi_db = state / "quality_intelligence.db"
+    return rc_db, qi_db
+
+
+class TestB1ProductionPathCoupledMigration:
+    """B1 fix: _run_w1_coupled_migration wires BOTH DBs via the coupled orchestrator."""
+
+    def test_coupled_orchestrator_migrates_both_dbs(self, tmp_path: Path) -> None:
+        """Both RC and QI are re-stamped; coupled post-condition asserts zero legacy rows."""
+        import migrate_future_system as mfs
+
+        pid = "seocrawler-v2"
+        rc_db, qi_db = _make_state_layout(tmp_path, pid)
+
+        # Seed RC with contaminated rows (nullable to allow NULL inserts).
+        conn = _open(rc_db)
+        _make_nullable_tenant_table(conn, "rc_dispatches")
+        conn.execute("INSERT INTO rc_dispatches (name, project_id) VALUES ('d1', 'vnx-dev')")
+        conn.execute("INSERT INTO rc_dispatches (name, project_id) VALUES ('d2', NULL)")
+        conn.commit()
+        conn.close()
+
+        # Seed QI with contaminated rows (the bulk contamination case from the spec).
+        conn = _open(qi_db)
+        _make_nullable_tenant_table(conn, "quality_rows")
+        conn.execute("INSERT INTO quality_rows (name, project_id) VALUES ('q1', 'vnx-dev')")
+        conn.execute("INSERT INTO quality_rows (name, project_id) VALUES ('q2', NULL)")
+        conn.execute("INSERT INTO quality_rows (name, project_id) VALUES ('q3', '')")
+        conn.commit()
+        conn.close()
+
+        # Call the production wiring function directly (this is what run() calls at step E).
+        mfs._run_w1_coupled_migration(rc_db)
+
+        # Assert RC is clean.
+        rc_conn = sqlite3.connect(str(rc_db))
+        rc_vals = {r[0] for r in rc_conn.execute("SELECT project_id FROM rc_dispatches").fetchall()}
+        rc_conn.close()
+        assert rc_vals == {pid}, f"RC still has legacy project_ids: {rc_vals}"
+
+        # Assert QI is clean.
+        qi_conn = sqlite3.connect(str(qi_db))
+        qi_vals = {r[0] for r in qi_conn.execute("SELECT project_id FROM quality_rows").fetchall()}
+        qi_conn.close()
+        assert qi_vals == {pid}, f"QI still has legacy project_ids: {qi_vals}"
+
+        # Assert coupled post-condition: zero legacy rows in BOTH DBs.
+        rc_conn2 = sqlite3.connect(str(rc_db))
+        qi_conn2 = sqlite3.connect(str(qi_db))
+        rc_tables = ts.topological_sort_tables(rc_conn2, ts.enumerate_project_id_tables(rc_conn2))
+        qi_tables = ts.topological_sort_tables(qi_conn2, ts.enumerate_project_id_tables(qi_conn2))
+        ts.assert_phase2_postcondition(rc_conn2, qi_conn2, rc_tables, qi_tables, pid)
+        rc_conn2.close()
+        qi_conn2.close()
+
+    def test_qi_missing_skips_cleanly(self, tmp_path: Path) -> None:
+        """If QI DB does not exist, RC is migrated alone and no exception is raised."""
+        import migrate_future_system as mfs
+
+        pid = "solo-project"
+        rc_db, _qi_db = _make_state_layout(tmp_path, pid)
+        assert not _qi_db.exists()
+
+        conn = _open(rc_db)
+        _make_simple_tenant_table(conn, "rc_things")
+        conn.execute("INSERT INTO rc_things (name, project_id) VALUES ('r1', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        # Must not raise even though QI is absent.
+        mfs._run_w1_coupled_migration(rc_db)
+
+        rc_conn = sqlite3.connect(str(rc_db))
+        vals = {r[0] for r in rc_conn.execute("SELECT project_id FROM rc_things").fetchall()}
+        rc_conn.close()
+        assert vals == {pid}
+
+    def test_coupled_migration_idempotent(self, tmp_path: Path) -> None:
+        """Running the coupled migration twice is a no-op on the second run."""
+        import migrate_future_system as mfs
+
+        pid = "idempotent-pid"
+        rc_db, qi_db = _make_state_layout(tmp_path, pid)
+
+        for db in [rc_db, qi_db]:
+            conn = _open(db)
+            _make_simple_tenant_table(conn, "rows")
+            conn.execute("INSERT INTO rows (name, project_id) VALUES ('x', 'vnx-dev')")
+            conn.commit()
+            conn.close()
+
+        mfs._run_w1_coupled_migration(rc_db)
+        # Second run must not raise and must not change any data.
+        mfs._run_w1_coupled_migration(rc_db)
+
+        for db, label in [(rc_db, "RC"), (qi_db, "QI")]:
+            conn = sqlite3.connect(str(db))
+            vals = {r[0] for r in conn.execute("SELECT project_id FROM rows").fetchall()}
+            conn.close()
+            assert vals == {pid}, f"{label} has wrong project_ids after idempotent rerun: {vals}"
+
+
+# ===========================================================================
+# 17. B2 — Single-column non-INTEGER TEXT PRIMARY KEY is NOT dropped by Phase 1
+# ===========================================================================
+
+class TestB2SingleColTextPK:
+    """B2 fix: a TEXT PRIMARY KEY table gets (k, project_id) composite PK, never drops PK."""
+
+    def test_text_pk_becomes_composite_after_phase1(self, tmp_path: Path) -> None:
+        """A table with `k TEXT PRIMARY KEY` must get PRIMARY KEY (k, project_id) in Phase 1."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE tokens (
+                k TEXT PRIMARY KEY,
+                value TEXT,
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        conn.execute("INSERT INTO tokens (k, value, project_id) VALUES ('t1', 'alpha', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        assert "tokens" in tables
+        ts.run_phase1_ddl(conn, tables)
+        conn.close()
+
+        # Verify the rebuilt table has a composite PK including project_id.
+        conn = sqlite3.connect(str(db))
+        pk_cols = [
+            r[1] for r in conn.execute("PRAGMA table_info(tokens)").fetchall()
+            if r[5] > 0
+        ]
+        conn.close()
+        assert "k" in pk_cols, "Original PK column 'k' must remain in PK"
+        assert "project_id" in pk_cols, (
+            "project_id must be added to the composite PK (ADR-007 shape), not dropped"
+        )
+
+    def test_text_pk_table_survives_full_migration(self, tmp_path: Path) -> None:
+        """A TEXT-PK table goes through all 3 phases without losing uniqueness."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE slugs (
+                slug TEXT PRIMARY KEY,
+                body TEXT,
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        conn.execute("INSERT INTO slugs (slug, body, project_id) VALUES ('hello', 'world', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        result = ts.run_three_phase_migration_on_db(db, "new-tenant", db_label="TEST")
+        assert result["ok"] is True
+
+        conn = sqlite3.connect(str(db))
+        # PK must include both slug and project_id.
+        pk_cols = [
+            r[1] for r in conn.execute("PRAGMA table_info(slugs)").fetchall()
+            if r[5] > 0
+        ]
+        project_id_val = conn.execute("SELECT project_id FROM slugs WHERE slug='hello'").fetchone()[0]
+        conn.close()
+        assert "slug" in pk_cols, "slug must remain a PK column"
+        assert "project_id" in pk_cols, "project_id must be in the composite PK"
+        assert project_id_val == "new-tenant"
+
+    def test_fk_to_text_pk_catches_damage_and_restores_original(self, tmp_path: Path) -> None:
+        """B3 spec: FK-to-single-col-PK → Phase 1 integrity check catches damage + restores ORIGINAL.
+
+        When a parent table has TEXT PRIMARY KEY and a child FK references that single-col key,
+        Phase 1 rebuilds the parent to a composite PK (code, project_id). The child's FK
+        (cat_code) REFERENCES categories(code) now has a "foreign key mismatch" because 'code'
+        is no longer the full PK. The B3(a) integrity check fires before COMMIT and forces
+        ROLLBACK, and the B3(b) pre-migration restore brings the DB back to the original state
+        (before Phase 1 DDL ran). This is the exact scenario the spec describes.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # Parent table with TEXT PRIMARY KEY (single-col, non-integer).
+        conn.execute("""
+            CREATE TABLE categories (
+                code TEXT PRIMARY KEY,
+                label TEXT,
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        # Child table with FK referencing the single-col PK.
+        conn.execute("""
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cat_code TEXT,
+                project_id TEXT DEFAULT 'vnx-dev',
+                FOREIGN KEY (cat_code) REFERENCES categories(code)
+            )
+        """)
+        conn.execute("INSERT INTO categories (code, label) VALUES ('A', 'Alpha')")
+        conn.execute("INSERT INTO items (cat_code, project_id) VALUES ('A', 'vnx-dev')")
+        conn.commit()
+
+        # Capture the original schema before migration.
+        cat_pk_before = [r[1] for r in conn.execute("PRAGMA table_info(categories)").fetchall() if r[5] > 0]
+        item_count_before = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        conn.close()
+
+        # Phase 1 rebuild of 'categories' makes the child FK a mismatch.
+        # B3(a): foreign_key_check detects this and forces ROLLBACK before COMMIT.
+        # B3(b): the pre-migration restore brings the DB back to original state.
+        with pytest.raises(RuntimeError, match="(?i)(foreign key mismatch|Phase 1.*failed)"):
+            ts.run_three_phase_migration_on_db(db, "tenant-x", db_label="TEST")
+
+        # The DB must be restored to its pre-migration state (B3(b)).
+        conn = sqlite3.connect(str(db))
+        cat_pk_after = [r[1] for r in conn.execute("PRAGMA table_info(categories)").fetchall() if r[5] > 0]
+        item_count_after = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        conn.close()
+
+        # Schema must be back to original (Phase 1 DDL rolled back).
+        assert cat_pk_after == cat_pk_before, (
+            f"Schema not restored after Phase 1 failure. "
+            f"Before: {cat_pk_before}, After: {cat_pk_after}"
+        )
+        # Data must be intact.
+        assert item_count_after == item_count_before
+
+
+# ===========================================================================
+# 18. B3 — Phase 1 integrity check + pre-migration restore on failure
+# ===========================================================================
+
+class TestB3Phase1IntegrityAndPreMigrationRestore:
+    """B3 fix: Phase 1 runs integrity_check before COMMIT; failures restore to pre-migration."""
+
+    def test_phase1_integrity_check_is_run(self, tmp_path: Path) -> None:
+        """run_phase1_ddl exposes integrity violations instead of silently committing.
+
+        We verify the check runs by inspecting a successful migration — if
+        integrity_check returns 'ok', Phase 1 committed clean.  The pathological
+        case (Phase 1 DDL produces a corrupt DB) is hard to trigger without
+        monkey-patching SQLite internals, so we verify the check path through
+        normal successful operation.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # A table with a composite PK excluding project_id — Phase 1 will rebuild it.
+        conn.execute("""
+            CREATE TABLE events (
+                event_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                project_id TEXT DEFAULT 'vnx-dev',
+                payload TEXT,
+                PRIMARY KEY (event_id, seq)
+            )
+        """)
+        conn.execute("INSERT INTO events VALUES ('e1', 1, 'vnx-dev', 'data')")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        # Phase 1 must succeed (integrity_check passes internally before COMMIT).
+        rebuilt = ts.run_phase1_ddl(conn, tables)
+        conn.close()
+        assert "events" in rebuilt
+
+        # Post-check: DB is still integral after Phase 1.
+        conn = sqlite3.connect(str(db))
+        ic = conn.execute("PRAGMA integrity_check").fetchall()
+        conn.close()
+        assert ic == [("ok",)]
+
+    def test_pre_migration_checkpoint_taken_before_phase1(self, tmp_path: Path) -> None:
+        """run_three_phase_migration_on_db takes a pre-migration checkpoint."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        _make_simple_tenant_table(conn)
+        conn.execute("INSERT INTO things (name, project_id) VALUES ('a', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        result = ts.run_three_phase_migration_on_db(db, "my-pid", db_label="TEST")
+        assert result["ok"] is True
+        # The pre-migration checkpoint must exist.
+        assert "checkpoint_premigration" in result
+        ckpt = Path(result["checkpoint_premigration"])
+        assert ckpt.exists(), "Pre-migration checkpoint file must exist after migration"
+
+    def test_phase2_failure_restores_to_pre_migration_state(self, tmp_path: Path) -> None:
+        """When Phase 2 fails (third tenant guard), DB is restored to pre-migration state.
+
+        The key property: the restore brings the DB back to the ORIGINAL state
+        (before Phase 1 DDL), not to a mid-Phase-1 intermediate.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # Table with UNIQUE(name) so Phase 1 rebuilds it.
+        conn.execute("""
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        # Two rows: one with pid, one with a THIRD genuine tenant — guard will abort Phase 2.
+        conn.execute("INSERT INTO items (name, project_id) VALUES ('a', 'owner-pid')")
+        conn.execute("INSERT INTO items (name, project_id) VALUES ('b', 'alien-tenant')")
+        conn.commit()
+
+        # Capture original schema before migration.
+        pk_before = [r[1] for r in conn.execute("PRAGMA table_info(items)").fetchall() if r[5] > 0]
+        original_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        conn.close()
+
+        # Migration must fail at Phase 2 (third tenant guard).
+        with pytest.raises(RuntimeError):
+            ts.run_three_phase_migration_on_db(db, "owner-pid", db_label="TEST")
+
+        # Verify DB is restored to its pre-migration state.
+        conn = sqlite3.connect(str(db))
+        pk_after = [r[1] for r in conn.execute("PRAGMA table_info(items)").fetchall() if r[5] > 0]
+        count_after = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        alien_still_present = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE project_id = 'alien-tenant'"
+        ).fetchone()[0]
+        conn.close()
+
+        # PK shape must be the original (Phase 1 DDL rebuild rolled back).
+        assert pk_after == pk_before, (
+            f"Schema was not restored to pre-migration state. "
+            f"Before: {pk_before}, After: {pk_after}"
+        )
+        # Row count unchanged — no data lost.
+        assert count_after == original_count
+        # The alien tenant row is still present (restore brought it back).
+        assert alien_still_present == 1
+
+
+# ===========================================================================
+# 19. B4 — WAL-mode: committed rows survive checkpoint + restore cycle
+# ===========================================================================
+
+class TestB4WalCheckpointConsistency:
+    """B4 fix: checkpoint_db folds WAL; restore_checkpoint purges stale WAL/SHM."""
+
+    def test_committed_rows_survive_wal_checkpoint_restore(self, tmp_path: Path) -> None:
+        """Rows committed to WAL (not yet checkpointed) survive checkpoint+restore.
+
+        Scenario:
+        1. Open DB in WAL mode, insert a row, commit (row may be in WAL).
+        2. checkpoint_db — must fold WAL via TRUNCATE so the copy is self-consistent.
+        3. Write a second row to the live DB (post-checkpoint mutation).
+        4. restore_checkpoint — must bring back the pre-second-write state.
+        5. The first row must be present; the second row must be gone.
+        6. No stale -wal/-shm must remain after restore.
+        """
+        db = tmp_path / "wal_test.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE rows (id INTEGER PRIMARY KEY, v TEXT, project_id TEXT)")
+        conn.execute("INSERT INTO rows VALUES (1, 'committed-before-checkpoint', 'pid')")
+        conn.commit()
+        conn.close()
+
+        # checkpoint_db must fold the WAL (B4).
+        ckpt = ts.checkpoint_db(db, "wal-test")
+        assert ckpt.exists()
+        # sha256 manifest must exist.
+        manifest = Path(str(ckpt) + ".sha256")
+        assert manifest.exists(), "checkpoint_db must write a sha256 manifest (B4)"
+
+        # Mutate the live DB after checkpointing.
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("INSERT INTO rows VALUES (2, 'added-after-checkpoint', 'pid')")
+        conn.commit()
+        conn.close()
+
+        # Restore from checkpoint.
+        ts.restore_checkpoint(ckpt, db)
+
+        # Stale WAL/SHM must be gone.
+        wal = Path(str(db) + "-wal")
+        shm = Path(str(db) + "-shm")
+        assert not wal.exists(), "stale -wal must be deleted after restore (B4)"
+        assert not shm.exists(), "stale -shm must be deleted after restore (B4)"
+
+        # The first row must survive; the second must be absent.
+        conn = sqlite3.connect(str(db))
+        rows = {r[0]: r[1] for r in conn.execute("SELECT id, v FROM rows").fetchall()}
+        conn.close()
+        assert 1 in rows, "Row committed before checkpoint must survive restore"
+        assert rows[1] == "committed-before-checkpoint"
+        assert 2 not in rows, "Row added after checkpoint must be absent after restore"
+
+    def test_checkpoint_sha256_manifest_verified_on_restore(self, tmp_path: Path) -> None:
+        """restore_checkpoint rejects a tampered checkpoint (sha256 mismatch)."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        _make_simple_tenant_table(conn)
+        conn.execute("INSERT INTO things (name, project_id) VALUES ('x', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        ckpt = ts.checkpoint_db(db, "tamper-test")
+        manifest = Path(str(ckpt) + ".sha256")
+        assert manifest.exists()
+
+        # Tamper the manifest to simulate a corrupt checkpoint.
+        manifest.write_text("0000000000000000000000000000000000000000000000000000000000000000")
+
+        with pytest.raises(RuntimeError, match="sha256 mismatch"):
+            ts.restore_checkpoint(ckpt, db)
+
+    def test_restore_deletes_stale_wal_shm(self, tmp_path: Path) -> None:
+        """restore_checkpoint deletes any existing -wal and -shm files."""
+        db = tmp_path / "stale_wal.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, project_id TEXT)")
+        conn.execute("INSERT INTO t VALUES (1, 'pid')")
+        conn.commit()
+        conn.close()
+
+        ckpt = ts.checkpoint_db(db, "stale")
+
+        # Manually create stale WAL and SHM files to simulate leftover files.
+        wal = Path(str(db) + "-wal")
+        shm = Path(str(db) + "-shm")
+        wal.write_bytes(b"stale_wal_data")
+        shm.write_bytes(b"stale_shm_data")
+
+        ts.restore_checkpoint(ckpt, db)
+
+        assert not wal.exists(), "-wal must be deleted by restore_checkpoint"
+        assert not shm.exists(), "-shm must be deleted by restore_checkpoint"

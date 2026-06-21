@@ -209,16 +209,56 @@ def _sha256(path: Path) -> str:
 def checkpoint_db(db_path: Path, label: str) -> Path:
     """Copy the DB file to <db_path>.w1_checkpoint_<label> before mutation.
 
+    B4 fix: before copying, run PRAGMA wal_checkpoint(TRUNCATE) so any
+    committed-but-not-checkpointed WAL data is folded into the main file.
+    This ensures the checkpoint copy is self-consistent (no orphaned WAL).
+    The sha256 manifest is written alongside for integrity verification.
+
     Returns the checkpoint path. Existing checkpoint is overwritten (idempotent rerun).
     """
     checkpoint = Path(str(db_path) + f".w1_checkpoint_{label}")
+    # Fold WAL into the main file before copying (B4).
+    try:
+        tmp_conn = sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            tmp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            tmp_conn.close()
+    except Exception:
+        pass  # If DB is not WAL-mode or doesn't exist yet, skip silently.
     shutil.copy2(str(db_path), str(checkpoint))
+    # Write sha256 manifest for integrity verification.
+    manifest = Path(str(checkpoint) + ".sha256")
+    manifest.write_text(_sha256(checkpoint), encoding="ascii")
     return checkpoint
 
 
 def restore_checkpoint(checkpoint: Path, db_path: Path) -> None:
-    """Restore a DB from its checkpoint after a failed phase."""
+    """Restore a DB from its checkpoint after a failed phase.
+
+    B4 fix: verify the checkpoint's sha256 before restoring (integrity check).
+    After copying, delete any live -wal/-shm files so a stale WAL cannot
+    replay over the restored file and silently corrupt it.
+    """
+    manifest = Path(str(checkpoint) + ".sha256")
+    if manifest.exists():
+        expected = manifest.read_text(encoding="ascii").strip()
+        actual = _sha256(checkpoint)
+        if actual != expected:
+            raise RuntimeError(
+                f"Checkpoint integrity failure: sha256 mismatch for {checkpoint}. "
+                f"Expected {expected}, got {actual}. "
+                "The checkpoint copy is corrupt — cannot restore safely."
+            )
     shutil.copy2(str(checkpoint), str(db_path))
+    # Remove any stale WAL/SHM so they cannot replay over the restored file (B4).
+    for suffix in ("-wal", "-shm"):
+        stale = Path(str(db_path) + suffix)
+        if stale.exists():
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +390,22 @@ def _rebuild_table_phase1(
             if len(pk_cols) == 1 and ctype.upper() == "INTEGER":
                 col_defs.append(f"  {_safe_ident(cname)} {ctype} PRIMARY KEY AUTOINCREMENT")
                 continue
+            # B2 fix: single-column NON-integer PK (e.g. TEXT PRIMARY KEY).
+            # We MUST NOT emit `PRIMARY KEY` inline on the column — that would keep
+            # the old single-column PK.  Instead emit the column as a plain column
+            # and fall through to the table-constraint block below, which emits a
+            # composite PRIMARY KEY (original_pk_col, project_id) per ADR-007.
+            # (Multi-column PK is handled in the table-constraint block below.)
+            if len(pk_cols) == 1 and ctype.upper() != "INTEGER":
+                # Emit the column without PRIMARY KEY; the composite table constraint
+                # will be added in the block below.
+                parts = [_safe_ident(cname), ctype]
+                if notnull:
+                    parts.append(notnull)
+                if dflt:
+                    parts.append(dflt)
+                col_defs.append("  " + " ".join(p for p in parts if p))
+                continue
 
         parts = [_safe_ident(cname), ctype]
         if notnull:
@@ -358,8 +414,14 @@ def _rebuild_table_phase1(
             parts.append(dflt)
         col_defs.append("  " + " ".join(p for p in parts if p))
 
-    # Composite PK table constraint (multi-col PK only)
-    if len(pk_cols) > 1:
+    # Composite PK table constraint.
+    # B2 fix: emit for BOTH multi-col PK AND single-col non-INTEGER PK so the
+    # PK is never silently dropped.  For single-col non-INTEGER PK, expand to
+    # (original_pk_col, project_id) — the ADR-007 shape.
+    single_nonint_pk = (
+        len(pk_cols) == 1 and pk_cols[0]["type"].upper() != "INTEGER"
+    )
+    if len(pk_cols) > 1 or single_nonint_pk:
         pk_names = sorted(pk_cols, key=lambda c: c["pk"])
         pk_col_list = pk_names
         # If project_id is not already in PK columns, add it
@@ -447,11 +509,17 @@ def run_phase1_ddl(
 
     for table in tables:
         non_composite = _get_unique_indexes(conn, table)
-        # Also check if a multi-col PK exists without project_id
+        # Also check if a PK exists without project_id (multi-col OR single-col non-INTEGER).
+        # B2 fix: include single-col non-INTEGER PK tables so we never drop a PK.
         pk_cols = [
             c for c in _get_table_columns(conn, table) if c["pk"] > 0
         ]
-        pk_lacks_pid = len(pk_cols) > 1 and "project_id" not in {c["name"] for c in pk_cols}
+        pk_name_set = {c["name"] for c in pk_cols}
+        pk_lacks_pid = (
+            len(pk_cols) > 0
+            and "project_id" not in pk_name_set
+            and not (len(pk_cols) == 1 and pk_cols[0]["type"].upper() == "INTEGER")
+        )
         if non_composite or pk_lacks_pid:
             tables_needing_rebuild.append((table, non_composite))
 
@@ -468,6 +536,21 @@ def run_phase1_ddl(
             for table, non_composite in tables_needing_rebuild:
                 _rebuild_table_phase1(conn, table, non_composite)
                 rebuilt.append(table)
+            # B3(a) fix: run integrity checks before committing Phase 1 DDL.
+            # A rebuild that silently damages the schema is caught here and
+            # rolled back, never committed.
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_violations:
+                raise RuntimeError(
+                    f"Phase 1 foreign_key_check failed after DDL rebuild: "
+                    f"{fk_violations[:5]} (showing up to 5 violations). ROLLBACK."
+                )
+            ic_result = conn.execute("PRAGMA integrity_check").fetchall()
+            if ic_result != [("ok",)]:
+                raise RuntimeError(
+                    f"Phase 1 integrity_check failed after DDL rebuild: "
+                    f"{ic_result[:5]}. ROLLBACK."
+                )
             conn.execute("COMMIT")
         except Exception:
             try:
@@ -814,14 +897,26 @@ def run_three_phase_migration_on_db(
 ) -> dict:
     """Run Phases 1, 2, 3 on a single DB file.
 
-    Each phase has its own checkpoint + rollback safety net.
-    Returns a result dict with per-phase outcomes.
+    B3(b) fix: keep ONE single pre-migration checkpoint taken BEFORE Phase 1.
+    On ANY phase failure, restore from this pre-migration checkpoint — not from
+    a per-phase checkpoint taken after earlier phases already mutated the DB.
+    This ensures 'Restored from checkpoint' always means the DB is back to its
+    original pre-migration state, never a partially-migrated intermediate.
+
+    Per-phase checkpoints are still taken (for operational visibility / debugging),
+    but the restore on failure always falls back to the pre-migration copy.
 
     This is the single-DB runner. The two-DB orchestrator
     (run_three_phase_migration) calls this for RC and QI separately
     and checks the coupled post-condition after both Phase 2s.
+    Returns a result dict with per-phase outcomes.
     """
     result: dict = {"db": str(db_path), "pid": pid}
+
+    # B3(b) fix: take the pre-migration checkpoint BEFORE any mutation.
+    # All phase failures restore from this single safe copy.
+    ckpt_premigration = checkpoint_db(db_path, "premigration")
+    result["checkpoint_premigration"] = str(ckpt_premigration)
 
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -831,16 +926,21 @@ def run_three_phase_migration_on_db(
         result["tables"] = tables
 
         # --- Phase 1 ---
+        # Per-phase checkpoint kept for operational visibility; restore uses pre-migration.
         ckpt1 = checkpoint_db(db_path, "phase1")
         result["checkpoint_phase1"] = str(ckpt1)
         try:
             rebuilt1 = run_phase1_ddl(conn, tables)
             result["phase1_rebuilt"] = rebuilt1
         except Exception as exc:
-            restore_checkpoint(ckpt1, db_path)
+            conn.close()
+            conn = None
+            restore_checkpoint(ckpt_premigration, db_path)
+            # Verify schema after restore so the message is accurate.
+            _verify_restore(db_path, ckpt_premigration, db_label)
             raise RuntimeError(
                 f"[{db_label}] Phase 1 (DDL constraint repair) failed: {exc}. "
-                "Restored from checkpoint."
+                "Restored from pre-migration checkpoint."
             ) from exc
 
         # Re-enumerate after Phase 1 DDL rebuild (table shapes changed)
@@ -854,10 +954,13 @@ def run_three_phase_migration_on_db(
             updated = run_phase2_restamp(conn, tables, pid, db_label=db_label)
             result["phase2_updated"] = updated
         except Exception as exc:
-            restore_checkpoint(ckpt2, db_path)
+            conn.close()
+            conn = None
+            restore_checkpoint(ckpt_premigration, db_path)
+            _verify_restore(db_path, ckpt_premigration, db_label)
             raise RuntimeError(
                 f"[{db_label}] Phase 2 (data re-stamp) failed: {exc}. "
-                "Restored from checkpoint."
+                "Restored from pre-migration checkpoint."
             ) from exc
 
         # --- Phase 3 ---
@@ -868,17 +971,44 @@ def run_three_phase_migration_on_db(
                 rebuilt3 = run_phase3_enforce(conn, tables, db_label=db_label)
                 result["phase3_rebuilt"] = rebuilt3
             except Exception as exc:
-                restore_checkpoint(ckpt3, db_path)
+                conn.close()
+                conn = None
+                restore_checkpoint(ckpt_premigration, db_path)
+                _verify_restore(db_path, ckpt_premigration, db_label)
                 raise RuntimeError(
                     f"[{db_label}] Phase 3 (NOT NULL enforcement) failed: {exc}. "
-                    "Restored from checkpoint."
+                    "Restored from pre-migration checkpoint."
                 ) from exc
 
         result["ok"] = True
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     return result
+
+
+def _verify_restore(db_path: Path, ckpt: Path, db_label: str) -> None:
+    """Verify that a restored DB matches its checkpoint by sha256.
+
+    Called after restore_checkpoint to confirm the DB is genuinely restored.
+    Logs a warning if verification fails (the restore still happened; this
+    is a defence-in-depth check, not a second failure path).
+    """
+    manifest = Path(str(ckpt) + ".sha256")
+    if not manifest.exists():
+        return
+    expected = manifest.read_text(encoding="ascii").strip()
+    actual = _sha256(db_path)
+    if actual != expected:
+        import warnings as _warnings
+        _warnings.warn(
+            f"[{db_label}] Post-restore sha256 mismatch for {db_path}. "
+            f"Expected {expected}, got {actual}. "
+            "The DB may not have been fully restored.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 # ---------------------------------------------------------------------------
