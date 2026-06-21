@@ -197,9 +197,19 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
             "REVISE", block, revise, passes,
             f"{revise} REVISE verdicts — one revise round",
         )
-    dissent = [r.label for r in results if r.verdict != "pass"]
-    note = f"folded dissent (tracked): {', '.join(dissent)}" if dissent else "unanimous pass"
-    return _decision("PASS", block, revise, passes, note)
+    # <=1 REVISE, no BLOCK. PASS only if the passing voices OUTNUMBER the dissent —
+    # otherwise the "lone dissent" is not lone (a degenerate 1-/2-member panel, or a
+    # 1-1 tie). This keeps the canonical 3-member result (2 pass + 1 revise -> PASS)
+    # while closing the fail-open a 1-member smoke surfaced: a single REVISE must not
+    # fold to PASS. (SKILL: "tie -> safety-first REVISE".)
+    if passes > revise:
+        dissent = [r.label for r in results if r.verdict != "pass"]
+        note = f"folded dissent (tracked): {', '.join(dissent)}" if dissent else "unanimous pass"
+        return _decision("PASS", block, revise, passes, note)
+    return _decision(
+        "REVISE", block, revise, passes,
+        "no passing majority — the dissent is not outnumbered",
+    )
 
 
 def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional[str]:

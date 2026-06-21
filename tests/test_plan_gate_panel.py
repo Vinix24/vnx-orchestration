@@ -373,3 +373,24 @@ def test_rule_empty_panel_is_not_pass():
     d = pgp.apply_panel_rule([])
     assert d["decision"] == "REVISE"
     assert "empty panel" in d["rationale"]
+
+
+# --- smoke-surfaced: "lone dissent" must actually be outnumbered to fold to PASS ---
+
+def test_rule_lone_revise_without_majority_is_not_pass():
+    # a 1-member panel that says revise must NOT fold to PASS (the live smoke caught this)
+    assert pgp.apply_panel_rule([_r("solo", "revise")])["decision"] == "REVISE"
+
+
+def test_rule_tie_pass_revise_is_not_pass():
+    # 1 pass + 1 revise is a tie, not a passing majority
+    assert pgp.apply_panel_rule([_r("a", "pass"), _r("b", "revise")])["decision"] == "REVISE"
+
+
+def test_rule_single_pass_is_pass():
+    assert pgp.apply_panel_rule([_r("solo", "pass")])["decision"] == "PASS"
+
+
+def test_rule_canonical_3panel_one_revise_still_passes():
+    # the production case is unchanged: 2 pass + 1 revise -> PASS
+    assert pgp.apply_panel_rule([_r("a", "pass"), _r("b", "pass"), _r("c", "revise")])["decision"] == "PASS"
