@@ -33,7 +33,7 @@ def test_tier_mid_uses_sonnet():
 def test_tier_high_uses_opus():
     route = resolve_tier_route(TIER_HIGH, env={})
     assert route.provider == "claude"
-    assert route.model == "claude-opus-4-7"
+    assert route.model == "claude-opus-4-8"
 
 
 def test_tier_low_no_key_uses_kimi_cli():
@@ -78,7 +78,7 @@ def test_deepseek_harness_fallback_is_kimi():
 def test_unknown_tier_defaults_to_opus():
     """Unknown tier strings default to tier-high (safe over silent skip)."""
     route = resolve_tier_route("tier-unknown", env={})
-    assert route.model == "claude-opus-4-7"
+    assert route.model == "claude-opus-4-8"
 
 
 def test_route_dispatch_default_off():
@@ -108,4 +108,4 @@ def test_route_dispatch_high_loc():
     result = route_dispatch({"instruction": "implement feature"}, ["x.py"], 350, env=env)
     assert result is not None
     assert result.tier == TIER_HIGH
-    assert result.model == "claude-opus-4-7"
+    assert result.model == "claude-opus-4-8"

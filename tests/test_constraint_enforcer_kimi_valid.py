@@ -103,5 +103,8 @@ class TestExistingConstraintsNotRegressed:
     def test_litellm_deepseek_via_litellm_allowed(self, enforcer: ConstraintEnforcer):
         enforcer.enforce(provider="litellm", sub_provider="deepseek", via="litellm")
 
-    def test_zai_via_openrouter_allowed(self, enforcer: ConstraintEnforcer):
+    def test_zai_via_openrouter_allowed(self, enforcer: ConstraintEnforcer, monkeypatch):
+        # glm-via-harness-only now blocks plain litellm:zai entirely (GLM must run via
+        # glm-harness); override it to isolate the zai-via-openrouter-only behavior under test.
+        monkeypatch.setenv("VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY", "1")
         enforcer.enforce(provider="litellm", sub_provider="zai", via="openrouter")
