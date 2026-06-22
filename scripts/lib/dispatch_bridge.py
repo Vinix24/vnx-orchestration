@@ -192,6 +192,13 @@ def bridge_dispatch(*, dry_run: bool = False, **stage_kwargs) -> int:
     error (e.g. unsafe dispatch_id, symlink escape) is surfaced as a clean 1 so a
     caller never falls back to a side-door delivery.
     """
+    if stage_kwargs.get("allow_headless") and os.environ.get("VNX_OVERRIDE_CLAUDE_HEADLESS") != "1":
+        print(
+            "[dispatch_bridge] REJECT [headless-blocked]: claude_headless lane blocked by default; "
+            "set VNX_OVERRIDE_CLAUDE_HEADLESS=1 to opt in",
+            file=sys.stderr,
+        )
+        return 1
     try:
         spec_file = stage_spec_bundle(**stage_kwargs)
     except (ValueError, OSError) as exc:
