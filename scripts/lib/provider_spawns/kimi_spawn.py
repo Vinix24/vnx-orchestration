@@ -324,6 +324,25 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
     return cmd
 
 
+# Inherited venv-activation vars that point Python at a FOREIGN site-packages.
+# The kimi CLI is a standalone `uv tool` with its own isolated venv; if VNX is
+# invoked from inside an unrelated project's virtualenv (e.g. a worker spawned
+# under SEOcrawler's .venv), these vars shadow kimi's own dependencies and the
+# CLI dies on an import collision (live-proven: `mcp.types` clash → exit 1 in
+# ~0.6s, 0 tokens, no review). kimi must always run with a clean Python env.
+_VENV_POLLUTION_VARS = ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME")
+
+
+def _isolate_kimi_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Return *env* without the venv-activation vars that break the kimi CLI.
+
+    Stripped unconditionally (after any extra_env merge): a standalone uv tool
+    has no legitimate use for an inherited VIRTUAL_ENV/PYTHONPATH/PYTHONHOME, and
+    leaving them in lets a foreign venv's site-packages shadow kimi's own deps.
+    """
+    return {k: v for k, v in env.items() if k not in _VENV_POLLUTION_VARS}
+
+
 def _start_kimi_subprocess(
     cmd: list,
     env: Dict[str, str],
@@ -579,7 +598,7 @@ def spawn_kimi(
     except (TypeError, ValueError):
         pass
 
-    env = {**os.environ, **(extra_env or {})}
+    env = _isolate_kimi_env({**os.environ, **(extra_env or {})})
     cwd_str = str(cwd) if cwd is not None else None
 
     cmd = _build_kimi_cmd(prompt, model, cwd)
