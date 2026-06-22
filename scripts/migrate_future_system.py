@@ -1829,6 +1829,621 @@ def _run_runtime_v31_transaction(
     _verify_foreign_keys_restored(conn, original_fk)
 
 
+# ---------------------------------------------------------------------------
+# 0031 adaptive branch — repair stores that already carry an out-of-band
+# project_id but lack composite FKs (e.g. seocrawler-v2 "mixed" state).
+# Called when the cluster is NEITHER v31-complete (early exit above) NOR
+# clean-v30-legacy (the static-DDL guard). Follows the W1B spec exactly.
+# ---------------------------------------------------------------------------
+
+# The 4 tables the adaptive branch rebuilds to the v31 manifest shape.
+_ADAPTIVE_RUNTIME_TABLES = (
+    "dispatch_attempts",
+    "headless_runs",
+    "terminal_leases",
+    "worker_states",
+)
+
+# The exact v31 DDL for each of the 4 runtime tables (matches 0031 SQL + manifest).
+# project_id column is always TEXT NOT NULL — NULL/''/absent cells are
+# deterministic-filled to the resolved pid by the row-copy logic.
+_V31_TABLE_DDL: dict[str, str] = {
+    "dispatch_attempts": """\
+CREATE TABLE {staging} (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id      TEXT    NOT NULL,
+    dispatch_id     TEXT    NOT NULL,
+    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+    attempt_number  INTEGER NOT NULL DEFAULT 1,
+    terminal_id     TEXT    NOT NULL,
+    state           TEXT    NOT NULL DEFAULT 'pending',
+    started_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ended_at        TEXT,
+    failure_reason  TEXT,
+    metadata_json   TEXT    DEFAULT '{{}}',
+    UNIQUE(attempt_id, project_id),
+    FOREIGN KEY (dispatch_id, project_id)
+        REFERENCES dispatches(dispatch_id, project_id)
+)""",
+    "headless_runs": """\
+CREATE TABLE {staging} (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                  TEXT    NOT NULL,
+    dispatch_id             TEXT    NOT NULL,
+    project_id              TEXT    NOT NULL DEFAULT 'vnx-dev',
+    attempt_id              TEXT    NOT NULL,
+    target_id               TEXT    NOT NULL,
+    target_type             TEXT    NOT NULL,
+    task_class              TEXT    NOT NULL,
+    terminal_id             TEXT,
+    pid                     INTEGER,
+    pgid                    INTEGER,
+    state                   TEXT    NOT NULL DEFAULT 'init',
+    failure_class           TEXT,
+    exit_code               INTEGER,
+    started_at              TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    subprocess_started_at   TEXT,
+    heartbeat_at            TEXT,
+    last_output_at          TEXT,
+    completed_at            TEXT,
+    duration_seconds        REAL,
+    log_artifact_path       TEXT,
+    output_artifact_path    TEXT,
+    receipt_id              TEXT,
+    metadata_json           TEXT    DEFAULT '{{}}',
+    UNIQUE(run_id, project_id),
+    FOREIGN KEY (dispatch_id, project_id)
+        REFERENCES dispatches(dispatch_id, project_id),
+    FOREIGN KEY (attempt_id, project_id)
+        REFERENCES dispatch_attempts(attempt_id, project_id)
+)""",
+    "terminal_leases": """\
+CREATE TABLE {staging} (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    terminal_id         TEXT    NOT NULL,
+    project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+    state               TEXT    NOT NULL DEFAULT 'idle',
+    dispatch_id         TEXT,
+    generation          INTEGER NOT NULL DEFAULT 1,
+    leased_at           TEXT,
+    expires_at          TEXT,
+    last_heartbeat_at   TEXT,
+    released_at         TEXT,
+    worker_pid          INTEGER,
+    metadata_json       TEXT    DEFAULT '{{}}',
+    lease_token         TEXT    NOT NULL DEFAULT '',
+    UNIQUE(terminal_id, project_id),
+    FOREIGN KEY (dispatch_id, project_id)
+        REFERENCES dispatches(dispatch_id, project_id)
+)""",
+    "worker_states": """\
+CREATE TABLE {staging} (
+    terminal_id      TEXT    NOT NULL,
+    project_id       TEXT    NOT NULL DEFAULT 'vnx-dev',
+    dispatch_id      TEXT    NOT NULL,
+    state            TEXT    NOT NULL DEFAULT 'initializing',
+    last_output_at   TEXT,
+    state_entered_at TEXT    NOT NULL,
+    stall_count      INTEGER NOT NULL DEFAULT 0,
+    blocked_reason   TEXT,
+    metadata_json    TEXT,
+    created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (terminal_id, project_id),
+    FOREIGN KEY (terminal_id, project_id)
+        REFERENCES terminal_leases(terminal_id, project_id),
+    FOREIGN KEY (dispatch_id, project_id)
+        REFERENCES dispatches(dispatch_id, project_id)
+)""",
+}
+
+# Per-table secondary indexes to recreate after rebuild (matches 0031 SQL).
+_V31_TABLE_INDEXES: dict[str, list[str]] = {
+    "dispatch_attempts": [
+        "CREATE INDEX idx_attempt_dispatch ON dispatch_attempts(dispatch_id, attempt_number)",
+        "CREATE INDEX idx_attempt_state ON dispatch_attempts(state, started_at DESC)",
+        "CREATE INDEX idx_attempt_terminal ON dispatch_attempts(terminal_id, started_at DESC)",
+        "CREATE INDEX idx_attempt_project ON dispatch_attempts(project_id)",
+    ],
+    "headless_runs": [
+        "CREATE INDEX idx_headless_run_state ON headless_runs(state, started_at DESC)",
+        "CREATE INDEX idx_headless_run_dispatch ON headless_runs(dispatch_id)",
+        "CREATE INDEX idx_headless_run_target ON headless_runs(target_id, state)",
+        "CREATE INDEX idx_headless_run_heartbeat ON headless_runs(state, heartbeat_at) "
+        "WHERE state = 'running'",
+        "CREATE INDEX idx_headless_run_project ON headless_runs(project_id)",
+    ],
+    "terminal_leases": [
+        "CREATE INDEX idx_lease_state ON terminal_leases(state)",
+        "CREATE INDEX idx_lease_dispatch ON terminal_leases(dispatch_id)",
+        "CREATE INDEX idx_lease_project ON terminal_leases(project_id)",
+        "CREATE INDEX idx_lease_terminal_project ON terminal_leases(terminal_id, project_id)",
+        "CREATE UNIQUE INDEX idx_terminal_leases_token ON terminal_leases(lease_token) "
+        "WHERE lease_token != ''",
+    ],
+    "worker_states": [
+        "CREATE INDEX idx_worker_state ON worker_states(state)",
+        "CREATE INDEX idx_worker_dispatch ON worker_states(dispatch_id)",
+        "CREATE INDEX idx_worker_states_project ON worker_states(project_id)",
+    ],
+}
+
+# Columns present in v30-legacy tables (those WITHOUT project_id yet) and
+# columns present in the "mixed" shape (those WITH project_id already).
+# The copy logic detects which shape each table is in at runtime.
+_V31_COPY_COLS: dict[str, list[str]] = {
+    "dispatch_attempts": [
+        "id", "attempt_id", "dispatch_id", "attempt_number", "terminal_id",
+        "state", "started_at", "ended_at", "failure_reason", "metadata_json",
+    ],
+    "headless_runs": [
+        "id", "run_id", "dispatch_id", "attempt_id", "target_id", "target_type",
+        "task_class", "terminal_id", "pid", "pgid", "state", "failure_class",
+        "exit_code", "started_at", "subprocess_started_at", "heartbeat_at",
+        "last_output_at", "completed_at", "duration_seconds", "log_artifact_path",
+        "output_artifact_path", "receipt_id", "metadata_json",
+    ],
+    "terminal_leases": [
+        "id", "terminal_id", "state", "dispatch_id", "generation", "leased_at",
+        "expires_at", "last_heartbeat_at", "released_at", "worker_pid",
+        "metadata_json", "lease_token",
+    ],
+    "worker_states": [
+        "terminal_id", "dispatch_id", "state", "last_output_at", "state_entered_at",
+        "stall_count", "blocked_reason", "metadata_json", "created_at", "updated_at",
+    ],
+}
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if ``table`` has a column named ``column``."""
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')")}
+    return column in cols
+
+
+def _adaptive_foreign_tenant_preflight(
+    conn: sqlite3.Connection,
+    tables: list[str],
+    resolved_pid: str,
+) -> None:
+    """D1: Assert that every runtime table with project_id holds only
+    {resolved_pid, 'vnx-dev'}. Skip tables that lack the column entirely.
+    Abort on any third tenant value — this is a fail-closed gate.
+    """
+    for table in tables:
+        if not _table_has_column(conn, table, "project_id"):
+            continue  # table lacks project_id — nothing to assert
+        rows = conn.execute(
+            f"SELECT DISTINCT project_id FROM \"{table}\" "
+            "WHERE project_id IS NOT NULL AND project_id != ''"
+        ).fetchall()
+        for (val,) in rows:
+            if val != resolved_pid and val != "vnx-dev":
+                raise RuntimeError(
+                    f"0031 adaptive pre-flight: table '{table}' contains a third "
+                    f"tenant '{val}' (resolved_pid='{resolved_pid}'). "
+                    "Refusing to mutate a multi-tenant store. "
+                    "Resolve the foreign tenant manually before retrying."
+                )
+
+
+def _adaptive_orphan_preflight(conn: sqlite3.Connection) -> None:
+    """D1 + orphan policy (CONSERVATIVE): count headless_runs rows whose
+    dispatch_id or attempt_id have no matching parent row. If ANY orphans exist
+    → ABORT with a clear report. We NEVER silently exclude governance data.
+
+    Also checks if any other tables reference headless_runs (deepseek finding)
+    so the operator is informed of the full FK graph.
+    """
+    if not _table_has_column(conn, "headless_runs", "dispatch_id"):
+        # headless_runs has no dispatch_id column at all — cannot have orphans
+        return
+
+    # Count orphans via LEFT JOIN to dispatches
+    dispatch_orphans_count = conn.execute(
+        "SELECT COUNT(*) FROM headless_runs hr "
+        "LEFT JOIN dispatches d ON hr.dispatch_id = d.dispatch_id "
+        "WHERE d.dispatch_id IS NULL"
+    ).fetchone()[0]
+
+    attempt_orphans_count = 0
+    if _table_has_column(conn, "headless_runs", "attempt_id") and (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatch_attempts'"
+        ).fetchone()
+    ):
+        attempt_orphans_count = conn.execute(
+            "SELECT COUNT(*) FROM headless_runs hr "
+            "LEFT JOIN dispatch_attempts da ON hr.attempt_id = da.attempt_id "
+            "WHERE da.attempt_id IS NULL"
+        ).fetchone()[0]
+
+    if dispatch_orphans_count == 0 and attempt_orphans_count == 0:
+        return  # clean — proceed
+
+    # Gather sample rows for the abort report
+    sample_dispatch_orphans = conn.execute(
+        "SELECT hr.id, hr.run_id, hr.dispatch_id FROM headless_runs hr "
+        "LEFT JOIN dispatches d ON hr.dispatch_id = d.dispatch_id "
+        "WHERE d.dispatch_id IS NULL LIMIT 5"
+    ).fetchall()
+    sample_attempt_orphans: list = []
+    if attempt_orphans_count > 0:
+        sample_attempt_orphans = conn.execute(
+            "SELECT hr.id, hr.run_id, hr.attempt_id FROM headless_runs hr "
+            "LEFT JOIN dispatch_attempts da ON hr.attempt_id = da.attempt_id "
+            "WHERE da.attempt_id IS NULL LIMIT 5"
+        ).fetchall()
+
+    # Check for any tables referencing headless_runs (deepseek finding)
+    referencing_tables = []
+    all_tables = [
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    ]
+    for tbl in all_tables:
+        fks = conn.execute(f"PRAGMA foreign_key_list('{tbl}')").fetchall()
+        if any(r[2] == "headless_runs" for r in fks):
+            referencing_tables.append(tbl)
+
+    msg = (
+        f"0031 adaptive orphan pre-flight ABORT: headless_runs contains orphan rows "
+        f"that would violate the composite FK after repair.\n"
+        f"  dispatch orphans: {dispatch_orphans_count} "
+        f"(sample: {sample_dispatch_orphans})\n"
+        f"  attempt orphans: {attempt_orphans_count} "
+        f"(sample: {sample_attempt_orphans})\n"
+        f"  tables referencing headless_runs: {referencing_tables}\n"
+        "Operator action required: inspect and resolve orphan rows before retrying. "
+        "No governance data will be silently deleted."
+    )
+    raise RuntimeError(msg)
+
+
+def _validate_col_references(sql: str, valid_cols: set[str], object_name: str) -> None:
+    """Warn (not abort) if a dependent-object SQL references a column name that
+    no longer exists in the rebuilt table. The check is conservative (name-based,
+    no full SQL parse), so it only catches obviously dangling references.
+    """
+    # Extract bare identifiers from the SQL — simple tokenization
+    # by removing quoted strings and splitting on non-identifier chars.
+    stripped = re.sub(r'"[^"]*"', " ", sql)
+    stripped = re.sub(r"'[^']*'", " ", stripped)
+    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stripped.lower()))
+    # SQL keywords that look like column names but are not
+    _SQL_KEYWORDS = {
+        "create", "index", "on", "where", "table", "unique", "not", "null",
+        "primary", "key", "foreign", "references", "default", "and", "or",
+        "is", "in", "like", "select", "from", "insert", "update", "delete",
+        "trigger", "before", "after", "instead", "of", "for", "each", "row",
+        "begin", "end", "when", "if", "exists", "view", "as", "asc", "desc",
+        "int", "integer", "text", "real", "blob", "numeric", "boolean",
+        "running", "idle", "pending", "initializing",  # state values
+    }
+    col_tokens = tokens - _SQL_KEYWORDS
+    dangling = col_tokens - valid_cols
+    if dangling:
+        warnings.warn(
+            f"0031 adaptive: dependent object '{object_name}' may reference "
+            f"columns not in the rebuilt table: {dangling}. "
+            "Recreating verbatim — verify manually if this causes an error.",
+            stacklevel=3,
+        )
+
+
+def _adaptive_rebuild_table(
+    conn: sqlite3.Connection,
+    table: str,
+    resolved_pid: str,
+    staging_suffix: str = "_v31_new",
+) -> None:
+    """D2: Rebuild one runtime table to its exact v31 manifest shape.
+
+    Per-table project_id handling:
+    - If project_id column PRESENT: preserve existing non-NULL/non-'' values;
+      fill NULL/'' cells with resolved_pid (cannot hold NULL in a composite key).
+    - If project_id column ABSENT (e.g. headless_runs in mixed state): add it
+      set to resolved_pid for all rows.
+
+    Dependent objects (views, triggers, secondary indexes) are captured before
+    DROP and recreated verbatim after rename. Index/trigger SQL is validated
+    against the new column set and a warning is emitted on any dangling reference
+    (not a hard abort — the operator verifies).
+
+    Row-copy uses an exact count-assert (rows_copied == source_rowcount). Any
+    composite-key collision fails loud — no silent data loss.
+
+    FK-off must already be active on the connection (set by _run_runtime_v31_transaction).
+    """
+    ddl_template = _V31_TABLE_DDL[table]
+    base_copy_cols = _V31_COPY_COLS[table]
+    staging = f"{table}{staging_suffix}"
+
+    has_pid = _table_has_column(conn, table, "project_id")
+
+    # --- Capture dependent objects BEFORE drop ---
+    views = tenant_stamping._get_views_referencing(conn, table)
+    triggers = tenant_stamping._get_triggers_for_table(conn, table)
+    secondary_indexes = tenant_stamping._get_secondary_indexes(conn, table)
+
+    # Build the set of valid column names for the rebuilt table (v31 shape).
+    # Validate views/triggers against this — a view/trigger referencing a column
+    # that no longer exists after the rebuild would error at recreation time.
+    # Secondary indexes are NOT validated here: we replace them with authoritative
+    # v31 DDL from _V31_TABLE_INDEXES, so the old captured SQL is only kept as
+    # a fallback and is never re-executed for the 4 core tables.
+    v31_cols_for_table = set(base_copy_cols) | {"project_id"}
+
+    for view_name, view_sql in views:
+        _validate_col_references(view_sql, v31_cols_for_table, f"view:{view_name}")
+        conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+
+    for trig_name, trig_sql in triggers:
+        _validate_col_references(trig_sql, v31_cols_for_table, f"trigger:{trig_name}")
+
+    # Count source rows for the count-assert
+    source_rowcount = conn.execute(
+        f'SELECT COUNT(*) FROM "{table}"'
+    ).fetchone()[0]
+
+    # Build + populate the staging table
+    conn.execute(f'DROP TABLE IF EXISTS "{staging}"')
+    conn.execute(ddl_template.format(staging=f'"{staging}"'))
+
+    if has_pid:
+        # project_id column exists: copy it, filling NULL/'' with resolved_pid
+        copy_cols_with_pid = base_copy_cols + ["project_id"]
+        src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
+        dst_col_list = ", ".join(f'"{c}"' for c in copy_cols_with_pid)
+        pid_expr = (
+            "CASE WHEN \"project_id\" IS NULL OR \"project_id\" = '' "
+            f"THEN '{resolved_pid}' ELSE \"project_id\" END"
+        )
+        try:
+            conn.execute(
+                f'INSERT INTO "{staging}" ({dst_col_list}) '
+                f'SELECT {src_col_list}, {pid_expr} FROM "{table}"'
+            )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError(
+                f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
+                "Two or more rows resolve to the same (key, project_id) after NULL/'' fill. "
+                "Investigate duplicates before retrying. ROLLBACK."
+            ) from exc
+    else:
+        # project_id column absent: add it set to resolved_pid for all rows
+        src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
+        dst_col_list = ", ".join(f'"{c}"' for c in base_copy_cols) + ', "project_id"'
+        try:
+            conn.execute(
+                f'INSERT INTO "{staging}" ({dst_col_list}) '
+                f"SELECT {src_col_list}, '{resolved_pid}' FROM \"{table}\""
+            )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError(
+                f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
+                "Investigate duplicates before retrying. ROLLBACK."
+            ) from exc
+
+    # Count-assert: every source row must be copied (no composite-key collision allowed).
+    # This fires when the INSERT succeeded but produced fewer rows than the source
+    # (e.g. if future INSERT OR IGNORE semantics are ever used). Belt-and-suspenders.
+    rows_copied = conn.execute(f'SELECT COUNT(*) FROM "{staging}"').fetchone()[0]
+    if rows_copied != source_rowcount:
+        raise RuntimeError(
+            f"0031 adaptive row-copy mismatch for '{table}': "
+            f"{source_rowcount} source rows but {rows_copied} copied. "
+            "Composite-key collision or data loss detected — investigate before retrying. "
+            "ROLLBACK."
+        )
+
+    # Drop source table and rename staging into place
+    conn.execute(f'DROP TABLE "{table}"')
+    conn.execute(f'ALTER TABLE "{staging}" RENAME TO "{table}"')
+
+    # Recreate secondary indexes from the v31 manifest (authoritative shape)
+    for idx_sql in _V31_TABLE_INDEXES[table]:
+        conn.execute(idx_sql)
+
+    # Recreate any captured views and triggers verbatim
+    for _, view_sql in views:
+        conn.execute(view_sql)
+    for _, trigger_sql in triggers:
+        conn.execute(trigger_sql)
+
+
+def _wpm_has_composite_fk_to_terminal_leases(conn: sqlite3.Connection) -> bool:
+    """D5: Return True if worker_pool_membership's FK to terminal_leases is
+    composite (terminal_id, project_id). Return False if single-column or absent.
+    """
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_pool_membership'"
+    ).fetchone():
+        return True  # table absent — nothing to fix
+
+    fk_rows = conn.execute(
+        "PRAGMA foreign_key_list('worker_pool_membership')"
+    ).fetchall()
+    # Find FK group(s) referencing terminal_leases
+    for fk_id in {r[0] for r in fk_rows if r[2] == "terminal_leases"}:
+        fk_cols = [r[3] for r in fk_rows if r[0] == fk_id and r[2] == "terminal_leases"]
+        if set(fk_cols) == {"terminal_id", "project_id"}:
+            return True
+    return False
+
+
+def _adaptive_rebuild_worker_pool_membership(
+    conn: sqlite3.Connection,
+    staging_suffix: str = "_v31_new",
+) -> None:
+    """D5: Rebuild worker_pool_membership to give it a composite FK
+    (terminal_id, project_id) → terminal_leases if it currently has a
+    single-column FK. Captures and restores dependent objects verbatim.
+    No-op if already composite (caller checks first).
+    """
+    table = "worker_pool_membership"
+    staging = f"{table}{staging_suffix}"
+
+    views = tenant_stamping._get_views_referencing(conn, table)
+    triggers = tenant_stamping._get_triggers_for_table(conn, table)
+    secondary_indexes = tenant_stamping._get_secondary_indexes(conn, table)
+
+    for view_name, _ in views:
+        conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+
+    source_rowcount = conn.execute(
+        f'SELECT COUNT(*) FROM "{table}"'
+    ).fetchone()[0]
+
+    conn.execute(f'DROP TABLE IF EXISTS "{staging}"')
+    conn.execute(f"""
+CREATE TABLE "{staging}" (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    terminal_id         TEXT    NOT NULL,
+    project_id          TEXT    NOT NULL,
+    pool_id             TEXT    NOT NULL DEFAULT 'default',
+    provider            TEXT    NOT NULL
+                            CHECK (provider IN ('claude', 'codex', 'gemini', 'litellm')),
+    role                TEXT    NOT NULL,
+    joined_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    released_at         TEXT,
+    release_reason      TEXT,
+    spawn_generation    INTEGER NOT NULL DEFAULT 1,
+    metadata_json       TEXT    DEFAULT '{{}}',
+    FOREIGN KEY (terminal_id, project_id)
+        REFERENCES terminal_leases(terminal_id, project_id),
+    FOREIGN KEY (project_id, pool_id)
+        REFERENCES pool_config(project_id, pool_id)
+)""")
+
+    conn.execute(
+        f'INSERT INTO "{staging}" '
+        '(id, terminal_id, project_id, pool_id, provider, role, joined_at, '
+        'released_at, release_reason, spawn_generation, metadata_json) '
+        f'SELECT id, terminal_id, project_id, pool_id, provider, role, joined_at, '
+        f'released_at, release_reason, spawn_generation, metadata_json FROM "{table}"'
+    )
+
+    rows_copied = conn.execute(f'SELECT COUNT(*) FROM "{staging}"').fetchone()[0]
+    if rows_copied != source_rowcount:
+        raise RuntimeError(
+            f"0031 adaptive WPM row-copy mismatch: "
+            f"{source_rowcount} source rows but {rows_copied} copied. ROLLBACK."
+        )
+
+    conn.execute(f'DROP TABLE "{table}"')
+    conn.execute(f'ALTER TABLE "{staging}" RENAME TO "{table}"')
+
+    # Recreate the authoritative v31 indexes for worker_pool_membership
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_pool_membership_active "
+        f"ON {table}(terminal_id, project_id) WHERE released_at IS NULL"
+    )
+    conn.execute(
+        f"CREATE INDEX idx_pool_membership_pool ON {table}(project_id, pool_id)"
+    )
+
+    for _, view_sql in views:
+        conn.execute(view_sql)
+    for _, trigger_sql in triggers:
+        conn.execute(trigger_sql)
+
+    # Recreate any non-standard secondary indexes verbatim (exclude the above two)
+    authoritative_names = {"idx_pool_membership_active", "idx_pool_membership_pool"}
+    for idx_name, idx_sql in secondary_indexes:
+        if idx_name not in authoritative_names:
+            conn.execute(idx_sql)
+
+
+def _build_adaptive_repair_statements(
+    conn: sqlite3.Connection,
+    resolved_pid: str,
+) -> list:
+    """D4: Build the list of callables that implement the adaptive repair.
+
+    Returns a list of zero-argument callables to be executed inside
+    _run_runtime_v31_transaction. Each callable executes one logical step
+    (table rebuild or WPM rebuild) using the already-open connection.
+
+    The ordering respects FK dependency:
+      terminal_leases (no runtime parent among the 4)
+      dispatch_attempts (FK → dispatches, but dispatch_id already there)
+      headless_runs (FK → dispatches + dispatch_attempts — must come after DA)
+      worker_states (FK → terminal_leases + dispatches — must come after TL)
+      worker_pool_membership (FK → terminal_leases — must come after TL)
+    """
+    # Ordered to satisfy FK dependency (parent-before-child within the runtime cluster)
+    ordered_tables = [
+        "terminal_leases",
+        "dispatch_attempts",
+        "headless_runs",
+        "worker_states",
+    ]
+
+    stmts = []
+    for table in ordered_tables:
+        t = table  # capture for closure
+        p = resolved_pid
+        stmts.append(lambda _conn=conn, _t=t, _p=p: _adaptive_rebuild_table(_conn, _t, _p))
+
+    # D5: worker_pool_membership — rebuild if FK is not already composite
+    if not _wpm_has_composite_fk_to_terminal_leases(conn):
+        stmts.append(
+            lambda _conn=conn: _adaptive_rebuild_worker_pool_membership(_conn)
+        )
+
+    # Stamp user_version=31 inside the same transaction
+    stmts.append(lambda _conn=conn: _conn.execute("PRAGMA user_version = 31"))
+
+    return stmts
+
+
+def _run_adaptive_v31_repair(
+    conn: sqlite3.Connection,
+    resolved_pid: str,
+) -> None:
+    """D4 branch orchestration: run the full adaptive repair inside one
+    FK-off + BEGIN IMMEDIATE transaction, then _assert_runtime_v31_clean
+    (FK+integrity check) before COMMIT, then _assert_manifest_converged.
+
+    Reuses _run_runtime_v31_transaction for the transaction envelope and
+    _capture/_restore_runtime_v31_sequences for AUTOINCREMENT preservation.
+    """
+    if conn.in_transaction:
+        raise RuntimeError(
+            "0031 adaptive repair requires no open transaction; commit or roll back first."
+        )
+
+    original_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None
+
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        _begin_immediate_with_retry(conn)
+        try:
+            # Capture AUTOINCREMENT sequences after BEGIN (inside transaction, matches
+            # the pattern in _run_runtime_v31_transaction).
+            old_sequences = _capture_runtime_v31_sequences(conn)
+
+            stmts = _build_adaptive_repair_statements(conn, resolved_pid)
+            for stmt in stmts:
+                stmt()  # each callable operates on conn
+
+            _restore_runtime_v31_sequences(conn, old_sequences)
+            _assert_runtime_v31_clean(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            _rollback_runtime_v31(conn)
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON" if original_fk else "PRAGMA foreign_keys=OFF")
+        conn.isolation_level = previous_isolation
+
+    _verify_foreign_keys_restored(conn, original_fk)
+
+
 def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
     migration_path = _MIGRATIONS / "0031_runtime_tenant_fk_repair.sql"
     if not migration_path.exists():
@@ -1852,7 +2467,40 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         _run_runtime_v31_transaction(conn, ("PRAGMA user_version = 31",))
         return
 
-    _assert_runtime_v30_legacy_shape(conn)
+    # Adaptive branch (W1B spec): when the cluster is NEITHER v31-complete (above)
+    # NOR clean-v30-legacy (the guard below would refuse), run the adaptive FK-repair.
+    # This handles the "mixed" state where runtime tables already carry an out-of-band
+    # project_id but FKs are not yet composite (e.g. seocrawler-v2 at v30).
+    try:
+        _assert_runtime_v30_legacy_shape(conn)
+        is_legacy_clean = True
+    except RuntimeError:
+        is_legacy_clean = False
+
+    if not is_legacy_clean:
+        # Mixed/contaminated store — run the adaptive repair path.
+        # Resolve the DB path from the connection (PRAGMA database_list row 0, col 2).
+        db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+        if not db_file:
+            raise RuntimeError(
+                "0031 adaptive: cannot resolve project_id — connection has no database file "
+                "(in-memory or unnamed). Pass a real DB path."
+            )
+        resolved_pid = _resolve_validated_project_id(db_file)
+        print(
+            f"  [adapt] 0031 mixed store detected (project_id already present but FKs not composite). "
+            f"Running adaptive FK-repair for pid='{resolved_pid}' ..."
+        )
+        # D1: foreign-tenant pre-flight (tables that have project_id)
+        _adaptive_foreign_tenant_preflight(conn, list(_ADAPTIVE_RUNTIME_TABLES), resolved_pid)
+        # D1: orphan pre-flight (conservative — abort on any orphans)
+        _adaptive_orphan_preflight(conn)
+        # D2–D5 + stamp user_version=31 in one FK-off BEGIN IMMEDIATE transaction
+        _run_adaptive_v31_repair(conn, resolved_pid)
+        print(f"  [ok]    adaptive repair complete; user_version → {schema_migration.get_user_version(conn)}")
+        return
+
+    # Clean v30-legacy shape — use the static 0031 DDL path (original behavior).
     sql = migration_path.read_text(encoding="utf-8")
     print("  [apply] migration 0031_runtime_tenant_fk_repair.sql ...")
     _run_runtime_v31_transaction(
