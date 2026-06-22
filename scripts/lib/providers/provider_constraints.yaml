@@ -44,7 +44,7 @@ constraints:
     rule: require_route
     required_route:
       role: T0
-      model: claude-opus-4-7
+      model: claude-opus-4-8
     reason: >-
       T0 orchestrator performs gate evaluation across the full NDJSON ledger
       under multi-PR concurrency. Sonnet-grade reasoning regresses on missed

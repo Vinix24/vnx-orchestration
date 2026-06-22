@@ -6,7 +6,7 @@ It is a local control plane for the AI coding CLIs that already sit on your mach
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
 
-I built this for my own work, across 2,000+ hours of Claude Code and 1,450+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+I built this for my own work, across 3,000+ hours of Claude Code and 15,000+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
@@ -107,7 +107,7 @@ The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interact
 
 Memory is the unsolved problem in agentic AI. Most systems bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
 
-The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with thousands of receipts behind it.
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with 13,000+ receipts in the audit trail behind it.
 
 The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. As of 1.0.1 the `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 

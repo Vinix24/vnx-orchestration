@@ -211,7 +211,7 @@ def _default_launch_command(
     if not _SAFE_MODEL_RE.match(model):
         raise ValueError(
             f"model {model!r} must be a simple identifier (e.g. 'sonnet', "
-            f"'claude-opus-4-7'); whitespace and shell metacharacters are not allowed"
+            f"'claude-opus-4-8'); whitespace and shell metacharacters are not allowed"
         )
     if extra_flags:
         try:
@@ -1456,7 +1456,7 @@ class TmuxInteractiveDispatch:
         if not _SAFE_MODEL_RE.match(model):
             raise ValueError(
                 f"model {model!r} must be a simple identifier (e.g. 'sonnet', "
-                f"'claude-opus-4-7'); whitespace and shell metacharacters are not allowed"
+                f"'claude-opus-4-8'); whitespace and shell metacharacters are not allowed"
             )
 
         # Worktree isolation: allocate before session creation so a failed add
