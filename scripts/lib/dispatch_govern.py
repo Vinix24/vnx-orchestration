@@ -164,6 +164,11 @@ class GovernSpec:
     base_sha: Optional[str] = None
     worktree_path: Optional[Path] = None
     model: Optional[str] = None
+    # When role="plan-reviewer" the worker's report is a free-form review ending
+    # with a vnx-plan-verdict fence — it intentionally lacks the standard contract
+    # headings (## Changes / ## Verification / ## Open Items).  govern() must not
+    # synthesize over it: synthesis strips the fence and breaks parse_verdict.
+    role: Optional[str] = None
 
 
 @dataclass
@@ -320,17 +325,40 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     if worker_report_path.exists():
         try:
             candidate = worker_report_path.read_text(encoding="utf-8")
-            bv = validate_body(candidate, pr_id=spec.pr_id)
-            if bv.valid and not bv.placeholder:
-                # Authored report passes — use it.
-                body = candidate
-                contract_status = "authored"
+            # plan-reviewer role: the worker writes a free-form review that ends with
+            # a vnx-plan-verdict fence.  It intentionally lacks ## Changes / ## Verification
+            # / ## Open Items — applying standard contract validation would always fail and
+            # trigger synthesis, which strips the fence and breaks parse_verdict in the
+            # plan-gate panel.  Accept the report as authored when it is non-empty and
+            # contains the verdict fence opener; do not overwrite it with a git-diff body.
+            if spec.role == "plan-reviewer":
+                _verdict_marker = "```vnx-plan-verdict"
+                if candidate.strip() and _verdict_marker in candidate:
+                    body = candidate
+                    contract_status = "authored"
+                    logger.info(
+                        "govern: plan-reviewer report accepted as authored for dispatch=%s"
+                        " (verdict fence present, standard contract validation skipped)",
+                        dispatch_id,
+                    )
+                else:
+                    logger.info(
+                        "govern: plan-reviewer report exists but has no verdict fence for"
+                        " dispatch=%s — synthesizing (parse_error will surface to panel)",
+                        dispatch_id,
+                    )
             else:
-                logger.info(
-                    "govern: worker report exists but invalid (missing=%s placeholder=%s)"
-                    " for dispatch=%s — synthesizing",
-                    bv.missing, bv.placeholder, dispatch_id,
-                )
+                bv = validate_body(candidate, pr_id=spec.pr_id)
+                if bv.valid and not bv.placeholder:
+                    # Authored report passes — use it.
+                    body = candidate
+                    contract_status = "authored"
+                else:
+                    logger.info(
+                        "govern: worker report exists but invalid (missing=%s placeholder=%s)"
+                        " for dispatch=%s — synthesizing",
+                        bv.missing, bv.placeholder, dispatch_id,
+                    )
         except OSError as exc:
             logger.warning("govern: could not read worker report for %s: %s", dispatch_id, exc)
 
@@ -340,8 +368,16 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         contract_status = "synthesized"
 
     # -- c. Validate final body — applies to BOTH authored and synthesized ----
-    final_bv = validate_body(body, pr_id=spec.pr_id)
-    if not final_bv.valid:
+    # plan-reviewer authored bodies skip standard contract validation: the reviewer
+    # writes a free-form analysis + verdict fence, not a ## Changes / ## Verification
+    # report.  Applying validate_body would always flag it as "violated" and (under
+    # enforce mode) block the emit.  Since the fence check already ran in step (a),
+    # accept the authored body as-is and skip the heading scan entirely.
+    if spec.role == "plan-reviewer" and contract_status == "authored":
+        final_bv = None  # type: ignore[assignment]
+    else:
+        final_bv = validate_body(body, pr_id=spec.pr_id)
+    if final_bv is not None and not final_bv.valid:
         logger.warning(
             "govern: %s body failed validation for dispatch=%s "
             "(missing=%s, placeholder=%s) — flagging violated%s",

@@ -438,6 +438,7 @@ class TmuxInteractiveDispatch:
         model: "str | None" = None,
         failure_reason: str = "tmux_receipt_deadline_exceeded",
         token_usage: "dict | None" = None,
+        role: "str | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -447,6 +448,9 @@ class TmuxInteractiveDispatch:
 
         Returns the emitted report path on success, None on critical import failure.
         A None return is an audit-trail gap and must be surfaced by the caller.
+
+        ``role`` is forwarded to GovernSpec so govern() can apply role-specific
+        validation logic (e.g. plan-reviewer bodies skip standard heading validation).
         """
         try:
             from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
@@ -467,6 +471,7 @@ class TmuxInteractiveDispatch:
             base_sha=base_sha,
             worktree_path=worktree_path,
             model=model,
+            role=role,
         )
         raw = GovernRaw(
             receipt=receipt,
@@ -1733,6 +1738,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     failure_reason="interactive_ready_timeout",
+                    role=role,
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -1841,6 +1847,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     failure_reason="submit_failed",
+                    role=role,
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -1897,6 +1904,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     failure_reason="interactive_no_progress",
+                    role=role,
                 )
                 _teardown("no_progress")
                 return InteractiveDispatchResult(
@@ -1937,6 +1945,7 @@ class TmuxInteractiveDispatch:
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
+                    role=role,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -1977,6 +1986,7 @@ class TmuxInteractiveDispatch:
                 worktree_path=worktree_handle.path if worktree_handle else None,
                 model=model,
                 token_usage=_pane_tokens,
+                role=role,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.
