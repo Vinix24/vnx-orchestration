@@ -949,7 +949,13 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
             continue
 
         parts = [_safe_ident(cname), ctype]
-        if col["notnull"] and pk_ord == 0:
+        # Preserve NOT NULL for ALL columns including composite-PK members (e.g.
+        # tracks.track_id, track_open_items.oi_id/link_type). The single-INTEGER-PK
+        # case already `continue`d above; project_id is handled above. A prior
+        # `and pk_ord == 0` here dropped NOT NULL from non-project_id PK columns,
+        # leaving the rebuilt table violating the v31 manifest (nullability drift)
+        # on the idempotent re-run.
+        if col["notnull"]:
             parts.append("NOT NULL")
         dflt_clause = _format_default(col["dflt_value"])
         if dflt_clause:
