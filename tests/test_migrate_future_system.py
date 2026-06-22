@@ -3,7 +3,7 @@
 Tests:
 - PRAGMA preflight raises on missing project_id (v9-style schema)
 - PRAGMA preflight passes on v21 schema with proper UNIQUE constraint
-- Bidirectional preflight: raises on extra columns, raises on missing UNIQUE
+- Bidirectional preflight: extra columns are preserved (dynamic rebuild), raises on missing UNIQUE
 - Preflight hook triggers via direct apply_script_if_below call
 """
 
@@ -78,6 +78,10 @@ def _init_project(tmp_path: Path) -> Path:
     conn.commit()
     conn.close()
 
+    # W1 coupled migration is fail-closed: needs a resolvable project_id.
+    # Write the marker so _marker_project_id() finds it walking up from the DB.
+    (project_dir / ".vnx-project-id").write_text("test-project\n", encoding="utf-8")
+
     return project_dir
 
 
@@ -150,7 +154,7 @@ class TestPragmaPreflightAssertion:
 
 
 class TestBidirectionalPreflight:
-    """_assert_dispatches_schema_intact raises on extra columns AND missing UNIQUE."""
+    """_assert_dispatches_schema_intact: allows extra columns, raises on missing UNIQUE."""
 
     def _db_with_extra_column(self, tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
         project_dir = tmp_path / "extra_col"
@@ -186,12 +190,35 @@ class TestBidirectionalPreflight:
         conn.commit()
         return project_dir, conn
 
-    def test_raises_on_extra_column(self, tmp_path):
+    def test_extra_column_preserved_by_dynamic_rebuild(self, tmp_path):
+        """Extra columns beyond the 15-column required set are preserved (not rejected).
+
+        The guard was relaxed (only missing required columns fail): a pre-v22 store
+        carrying an extra column uses the dynamic rebuild path, which copies ALL
+        non-generated columns so nothing is silently dropped.
+        """
         project_dir, conn = self._db_with_extra_column(tmp_path)
+        conn.execute("PRAGMA user_version = 20")
+        conn.commit()
         conn.close()
         mod = _get_migrate_module()
-        with pytest.raises(RuntimeError, match="extra="):
-            mod.run(project_dir)
+
+        # apply_migration directly (bypass run() which requires tenant resolution).
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        conn2 = _sqlite3.connect(str(db_path))
+        try:
+            mod.apply_migration(conn2, project_dir)
+            conn2.commit()
+            cols = {row[1] for row in conn2.execute("PRAGMA table_info('dispatches')")}
+            version = conn2.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn2.close()
+
+        assert "extra_column" in cols, "extra_column was dropped by the dynamic rebuild"
+        assert "operator_approved_at" in cols, "operator_approved_at missing after 0022"
+        assert version == 22
 
     def test_raises_on_missing_unique(self, tmp_path, monkeypatch):
         """A dispatches table missing UNIQUE(dispatch_id, project_id) must not migrate silently.
