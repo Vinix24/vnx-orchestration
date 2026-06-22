@@ -193,8 +193,9 @@ class TestGlmModelAliasResolution:
         assert zai.api_key_env == "OPENROUTER_API_KEY", (
             f"unexpected api_key_env: {zai.api_key_env!r}"
         )
-        assert len(zai.models) == 1, (
-            f"expected 1 zai model, got {len(zai.models)}"
+        assert len(zai.models) == 3, (
+            # glm-5.1-default + glm-5.1 + glm-5.2 (grew from the original 1 as GLM versions landed)
+            f"expected 3 zai models, got {len(zai.models)}"
         )
 
     def test_glm51_default_model_schema(self):
