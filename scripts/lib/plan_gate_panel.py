@@ -31,6 +31,7 @@ import re
 import os
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,23 +91,64 @@ def _sanitize_doc(doc_text: str) -> str:
     return safe
 
 
+_RUBRIC = (
+    "Judge the plan on:\n"
+    "1. Problem: is the problem stated, and is it real?\n"
+    "2. Approach: is it sound, or are there unaddressed failure modes?\n"
+    "3. Deliverables: each scoped, independently shippable, task_class tagged?\n"
+    "4. Risks: are the real risks named, each with a mitigation?\n"
+    "5. Model-routing plan: a sane quality FLOOR per deliverable (not a hand-picked lane)?\n"
+    "6. ADR-007: if it touches a central-DB table, does it carry a composite key over project_id?\n\n"
+    "Be a skeptic. Surface concrete, fixable gaps. Do not rubber-stamp.\n"
+)
+
+
 def build_plan_review_instruction(doc_text: str, track_id: str) -> str:
-    """Render the plan-review instruction handed to each panelist."""
+    """Render the plan-review instruction handed to each panelist (inline-doc form).
+
+    Used by provider lanes (kimi, glm) where the instruction is passed as a
+    subprocess argument and the full inline doc is acceptable.  The claude/tmux
+    lane uses ``build_plan_review_instruction_fileref`` instead so the ~50k-char
+    doc body never inflates the instruction string.
+    """
     doc_text = _sanitize_doc(doc_text)
     return (
         f"You are an independent plan reviewer for track {track_id}. Review the "
-        "IMPLEMENTATION PLAN below. The plan only — no code exists yet. Judge it on:\n"
-        "1. Problem: is the problem stated, and is it real?\n"
-        "2. Approach: is it sound, or are there unaddressed failure modes?\n"
-        "3. Deliverables: each scoped, independently shippable, task_class tagged?\n"
-        "4. Risks: are the real risks named, each with a mitigation?\n"
-        "5. Model-routing plan: a sane quality FLOOR per deliverable (not a hand-picked lane)?\n"
-        "6. ADR-007: if it touches a central-DB table, does it carry a composite key over project_id?\n\n"
-        "Be a skeptic. Surface concrete, fixable gaps. Do not rubber-stamp.\n\n"
-        "----- PLAN UNDER REVIEW -----\n"
+        "IMPLEMENTATION PLAN below. The plan only — no code exists yet.\n\n"
+        + _RUBRIC
+        + "\n----- PLAN UNDER REVIEW -----\n"
         f"{doc_text}\n"
         "----- END PLAN -----\n\n"
         + _VERDICT_CONTRACT
+    )
+
+
+def build_plan_review_instruction_fileref(
+    doc_path: str, track_id: str, report_path: str
+) -> str:
+    """Render the plan-review instruction for the claude/tmux lane.
+
+    The plan doc is passed by FILE REFERENCE (not inlined) so the instruction
+    string stays short — avoiding the >120s bracketed-paste ingestion that trips
+    the WORK_START_GATE timeout on a large doc.
+
+    ``report_path``: the absolute path where the worker MUST write its report.
+    This makes the expectation explicit so the worker does not have to guess the
+    unified_reports location, and govern() can find the authored file.
+    """
+    return (
+        f"You are an independent plan reviewer for track {track_id}.\n\n"
+        f"Read the IMPLEMENTATION PLAN from this file:\n\n"
+        f"  {doc_path}\n\n"
+        "Review the plan only — no code exists yet.\n\n"
+        + _RUBRIC
+        + "\n"
+        + _VERDICT_CONTRACT
+        + f"\n\nREPORT FILE (MANDATORY): Write your complete review — including the "
+        f"```{VERDICT_FENCE}``` block at the end — to this exact file path:\n\n"
+        f"  {report_path}\n\n"
+        "Do NOT write to any other path. The panel reads only that file. "
+        "Your review is not recorded unless it lands there with the verdict fence intact."
     )
 
 
@@ -259,50 +301,95 @@ def _make_default_dispatcher(
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
         env = dict(os.environ)
-        if provider in _CLAUDE_PROVIDERS:
-            cmd = [
-                sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
-                "--dispatch-id", dispatch_id,
-                "--model", model_arg,
-                "--role", "plan-reviewer",
-                "--instruction", instruction,
-                "--deadline-seconds", str(timeout_seconds),
-                # A plan review is READ-ONLY (reads the inlined doc, writes a verdict report) —
-                # it needs no isolated worktree. --shared-worktree skips the expensive
-                # `git worktree add`, which on a large repo (e.g. SEOcrawler) blows the deadline
-                # and times opus out; it also grounds the review against the REAL checkout.
-                "--shared-worktree",
-                "--allow-unstaged",
-                "--reason", f"plan-gate panel {dispatch_id}",
-            ]
-            run_timeout = timeout_seconds + 180  # tmux warmup + teardown headroom
-            # The plan doc is inlined into the instruction; a large doc makes the worker spend
-            # >120s ingesting it before it "visibly works", tripping the tmux lane's
-            # WORK_START_GATE fast-abort (default 120s). Give the gate room. (Deeper fix:
-            # pass the doc by file reference instead of inlining a 50k-char instruction.)
-            env["VNX_TMUX_WORK_START_TIMEOUT"] = str(max(600, timeout_seconds))
-        else:
-            cmd = [
-                sys.executable, str(PROVIDER_DISPATCH),
-                "--provider", provider,
-                "--terminal-id", "plan-gate",
-                "--dispatch-id", dispatch_id,
-                "--model", model_arg,
-                "--role", "plan-reviewer",
-                "--instruction", instruction,
-                "--no-auto-commit",
-            ]
-            run_timeout = timeout_seconds
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=run_timeout, check=False, env=env,
-        )
-        report = _read_report(base, dispatch_id, proc.stderr)
-        if report is None:
-            raise RuntimeError(
-                f"no report for {dispatch_id} (rc={proc.returncode}): "
-                f"{(proc.stderr or '')[-400:]}"
+        _tmp_doc_path: Optional[str] = None
+        try:
+            if provider in _CLAUDE_PROVIDERS:
+                # BUG-2 FIX (file-ref): the instruction already has the full plan doc inlined
+                # by run_panel's build_plan_review_instruction call. For the claude/tmux lane
+                # we replace it with a compact file-ref instruction so the ~50k-char body never
+                # inflates the bracketed-paste and does not trip the WORK_START_GATE timeout.
+                #
+                # We write the original inline instruction to a temp file so the worker can
+                # read the plan + rubric + verdict contract from a stable on-disk path.
+                # The expected report path is derived from data_dir so the file-ref instruction
+                # can tell the worker exactly where to write its verdict report.
+                report_path_str: str
+                if base is not None:
+                    report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
+                else:
+                    # Fallback: derive from VNX_DATA_DIR or a tmp path
+                    report_path_str = str(
+                        Path(os.environ.get("VNX_DATA_DIR", tempfile.gettempdir()))
+                        / "unified_reports" / f"{dispatch_id}.md"
+                    )
+
+                # Write the full inline instruction (plan + rubric + contract) to a temp file.
+                # The worker reads this file; the short file-ref instruction points to it.
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".vnx_plan_review.md",
+                    delete=False,
+                    encoding="utf-8",
+                    prefix=f"plan_gate_{dispatch_id}_",
+                ) as fh:
+                    fh.write(instruction)
+                    _tmp_doc_path = fh.name
+
+                # Short instruction: rubric + verdict contract + explicit report-path directive.
+                # No 50k doc body — the worker reads it from _tmp_doc_path.
+                claude_instruction = build_plan_review_instruction_fileref(
+                    doc_path=_tmp_doc_path,
+                    track_id="<see file>",
+                    report_path=report_path_str,
+                )
+
+                cmd = [
+                    sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
+                    "--dispatch-id", dispatch_id,
+                    "--model", model_arg,
+                    "--role", "plan-reviewer",
+                    "--instruction", claude_instruction,
+                    "--deadline-seconds", str(timeout_seconds),
+                    # A plan review is READ-ONLY (reads the doc file, writes a verdict report) —
+                    # it needs no isolated worktree. --shared-worktree skips the expensive
+                    # `git worktree add`, which on a large repo (e.g. SEOcrawler) blows the
+                    # deadline and times opus out; it also grounds the review against the REAL
+                    # checkout.
+                    "--shared-worktree",
+                    "--allow-unstaged",
+                    "--reason", f"plan-gate panel {dispatch_id}",
+                ]
+                run_timeout = timeout_seconds + 180  # tmux warmup + teardown headroom
+            else:
+                claude_instruction = instruction  # provider lane: inline doc OK
+                cmd = [
+                    sys.executable, str(PROVIDER_DISPATCH),
+                    "--provider", provider,
+                    "--terminal-id", "plan-gate",
+                    "--dispatch-id", dispatch_id,
+                    "--model", model_arg,
+                    "--role", "plan-reviewer",
+                    "--instruction", instruction,
+                    "--no-auto-commit",
+                ]
+                run_timeout = timeout_seconds
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=run_timeout, check=False, env=env,
             )
-        return report
+            report = _read_report(base, dispatch_id, proc.stderr)
+            if report is None:
+                raise RuntimeError(
+                    f"no report for {dispatch_id} (rc={proc.returncode}): "
+                    f"{(proc.stderr or '')[-400:]}"
+                )
+            return report
+        finally:
+            # Always clean up the temp doc file regardless of success or failure.
+            if _tmp_doc_path is not None:
+                try:
+                    os.unlink(_tmp_doc_path)
+                except OSError:
+                    pass
 
     return _dispatch
 

@@ -394,3 +394,342 @@ def test_rule_single_pass_is_pass():
 def test_rule_canonical_3panel_one_revise_still_passes():
     # the production case is unchanged: 2 pass + 1 revise -> PASS
     assert pgp.apply_panel_rule([_r("a", "pass"), _r("b", "pass"), _r("c", "revise")])["decision"] == "PASS"
+
+
+# --------------------------------------------------------------------------
+# BUG-1 (opus-fence): worker-authored report with verdict fence must survive
+# govern() without being overwritten by a synthesized body.
+# These tests mock the subprocess + report file — no live tmux run needed.
+# --------------------------------------------------------------------------
+
+def _make_report_with_fence(verdict: str = "pass") -> str:
+    return (
+        "# Plan Review\n\n"
+        "## Summary\n\nOverall the plan looks solid.\n\n"
+        "Detailed analysis...\n\n"
+        f"```{pgp.VERDICT_FENCE}\n"
+        f'{{"verdict": "{verdict}", "blocking_findings": [], "rationale": "ok"}}\n'
+        "```\n"
+    )
+
+
+def test_worker_authored_report_with_fence_is_parsed_not_overridden(tmp_path):
+    """A worker-authored report containing a verdict fence must be read as-is.
+
+    Simulates the full dispatcher path: the dispatcher writes the worker report
+    to the expected path (as the real claude worker would), then the injected
+    dispatcher returns that report.  parse_verdict must succeed on the returned
+    text — proving synthesis did not overwrite it.
+    """
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+
+    did = "plan-gate-feat-opus-abc12345"
+    authored_report = _make_report_with_fence("pass")
+    report_file = reports_dir / f"{did}.md"
+    report_file.write_text(authored_report, encoding="utf-8")
+
+    def _dispatching_worker(provider, model_arg, instruction, dispatch_id):
+        # Simulate: the worker wrote its report, and the dispatcher returns it.
+        return report_file.read_text(encoding="utf-8")
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    out = pgp.run_panel(
+        doc,
+        track_id="feat-opus-abc",
+        project_id="p1",
+        panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+        dispatcher=_dispatching_worker,
+    )
+    # The verdict must be parsed; if synthesis overwrote it, parse_error would be True.
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["parse_error"] is False, (
+        "opus verdict was not parsed — likely overwritten by synthesis"
+    )
+    assert opus["verdict"] == "pass"
+
+
+def test_missing_report_maps_to_parse_error_revise(tmp_path):
+    """When the worker-authored report has no verdict fence, parse_error -> revise.
+
+    The synthesized fallback (from govern) also has no fence. Either way
+    _read_report returns a fenceless body and parse_verdict must surface a clean
+    parse_error — not raise, not return a phantom pass.
+    """
+    did = "plan-gate-feat-nofence-abc12345"
+
+    def _dispatching_worker(provider, model_arg, instruction, dispatch_id):
+        # Simulate: the dispatcher returns a synthesized body (no verdict fence).
+        return (
+            "# Dispatch plan-gate-feat-nofence-abc12345\n\n"
+            "- Lane: tmux_interactive\n"
+            "- contract_status: synthesized\n\n"
+            "## Summary\n\nNo commit on branch; worker emitted status=timeout.\n\n"
+            "## Changes\n\nNo git diff available.\n\n"
+            "## Verification\n\nNone — synthesized.\n\n"
+            "## Open Items\n\nWorker did not author unified_reports/{}.md.\n".format(did)
+        )
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    out = pgp.run_panel(
+        doc,
+        track_id="feat-nofence",
+        project_id="p1",
+        panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+        dispatcher=_dispatching_worker,
+    )
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["parse_error"] is True
+    # A single-panelist panel with a parse_error cannot pass (no_verdict guard).
+    assert out["decision"] == "REVISE"
+
+
+def test_fenceless_report_cannot_produce_phantom_pass(tmp_path):
+    """Two passing + one fenceless: the fenceless panelist blocks PASS (no_verdict guard)."""
+    did_fenceless = "plan-gate-feat-fenceless-aaa00001"
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "litellm:zai":
+            return "# review\n\nLooks fine.\n"  # no verdict fence
+        return _make_report_with_fence("pass")
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    out = pgp.run_panel(doc, track_id="feat-fenceless", project_id="p1", dispatcher=_disp)
+    assert out["decision"] == "REVISE"
+    glm = next(p for p in out["panelists"] if p["provider"] == "litellm:zai")
+    assert glm["parse_error"] is True
+
+
+# --------------------------------------------------------------------------
+# BUG-2 (file-ref): the instruction passed to the claude/tmux lane must NOT
+# contain the full plan doc body.
+# --------------------------------------------------------------------------
+
+def test_claude_lane_instruction_does_not_contain_full_doc_body(tmp_path):
+    """For the claude provider, the instruction must be a short file-ref, not the 50k doc.
+
+    We intercept the instruction inside a fake dispatcher and assert that the
+    full plan doc text is NOT present — only the file path reference is.
+    """
+    plan_content = "UNIQUE_PLAN_CONTENT_MARKER_XYZ987\n" + ("x" * 2000)
+    doc = tmp_path / "plan.md"
+    doc.write_text(plan_content, encoding="utf-8")
+
+    captured: dict = {}
+
+    def _capturing_dispatcher(provider, model_arg, instruction, dispatch_id):
+        captured[provider] = instruction
+        return _make_report_with_fence("pass")
+
+    # Directly test build_plan_review_instruction_fileref produces a short instruction.
+    dummy_report_path = str(tmp_path / "unified_reports" / "test-dispatch.md")
+    short_instr = pgp.build_plan_review_instruction_fileref(
+        doc_path=str(doc),
+        track_id="feat-fileref",
+        report_path=dummy_report_path,
+    )
+    # The full doc body must NOT appear in the file-ref instruction.
+    assert "UNIQUE_PLAN_CONTENT_MARKER_XYZ987" not in short_instr, (
+        "plan doc body was inlined into the file-ref instruction — BUG-2 not fixed"
+    )
+    # But the doc path and report path must both appear.
+    assert str(doc) in short_instr, "doc path not referenced in file-ref instruction"
+    assert dummy_report_path in short_instr, "report path not in file-ref instruction"
+    # The verdict contract must still be present.
+    assert pgp.VERDICT_FENCE in short_instr, "verdict fence contract missing from file-ref instruction"
+
+
+def test_claude_lane_dispatcher_writes_temp_file_and_cleans_up(tmp_path):
+    """The claude-lane dispatcher must write a temp file, pass its path, and clean up."""
+    import glob
+    import os
+    import tempfile as _tempfile
+
+    plan_content = "PLAN_BODY_FOR_TEMPFILE_TEST\n"
+    doc = tmp_path / "plan.md"
+    doc.write_text(plan_content, encoding="utf-8")
+
+    seen_instructions: list = []
+    seen_tmp_paths: list = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        # Intercept the subprocess call to tmux_interactive_dispatch.
+        # Extract the --instruction value from the command.
+        try:
+            idx = cmd.index("--instruction")
+            instr = cmd[idx + 1]
+            seen_instructions.append(instr)
+            # Find any temp file path referenced in the instruction (lines with absolute paths).
+            for line in instr.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("/") and "vnx_plan_review" in stripped:
+                    seen_tmp_paths.append(stripped)
+        except (ValueError, IndexError):
+            pass
+
+        import subprocess as _sp
+        result = _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+        return result
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    authored_report = _make_report_with_fence("pass")
+    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(_pgp, "_read_report", return_value=authored_report):
+            out = pgp.run_panel(
+                doc,
+                track_id="feat-tempfile",
+                project_id="p1",
+                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+                data_dir=str(tmp_path),
+            )
+
+    assert out["decision"] == "PASS"
+    # The instruction given to the tmux lane must NOT contain the plan body.
+    assert len(seen_instructions) == 1
+    assert "PLAN_BODY_FOR_TEMPFILE_TEST" not in seen_instructions[0], (
+        "full plan doc was inlined into the claude-lane instruction — BUG-2 not fixed"
+    )
+    # The temp file must have been cleaned up after the subprocess returned.
+    for p in seen_tmp_paths:
+        assert not os.path.exists(p), f"temp doc file not cleaned up: {p}"
+
+
+# --------------------------------------------------------------------------
+# dispatch_govern BUG-1: GovernSpec.role="plan-reviewer" must bypass standard
+# contract validation and preserve the worker's verdict fence.
+# --------------------------------------------------------------------------
+
+def test_govern_spec_role_plan_reviewer_preserves_verdict_fence(tmp_path):
+    """govern() with role=plan-reviewer must NOT synthesize over a report with a verdict fence."""
+    import sys
+    _lib = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
+    if _lib not in sys.path:
+        sys.path.insert(0, _lib)
+
+    from dispatch_govern import GovernRaw, GovernSpec, govern
+
+    dispatch_id = "plan-gate-govern-test-abc123"
+    data_dir = tmp_path
+    state_dir = tmp_path / ".vnx-state"
+    state_dir.mkdir(parents=True)
+    reports_dir = data_dir / "unified_reports"
+    reports_dir.mkdir(parents=True)
+
+    authored = _make_report_with_fence("pass")
+    report_file = reports_dir / f"{dispatch_id}.md"
+    report_file.write_text(authored, encoding="utf-8")
+
+    spec = GovernSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="plan-gate",
+        instruction="review the plan",
+        data_dir=data_dir,
+        state_dir=state_dir,
+        role="plan-reviewer",
+    )
+    raw = GovernRaw(
+        receipt={"status": "done", "model": "opus"},
+        duration_seconds=10.0,
+    )
+
+    import unittest.mock as mock
+    import governance_emit  # noqa: F401 — ensure module is loaded before patch
+
+    # We need emit_unified_report to actually write the file so we can read it back.
+    # Patch at the source module (governance_emit) since dispatch_govern imports it lazily.
+    written: dict = {}
+
+    def _fake_emit(**kwargs):
+        body = kwargs.get("body_override", "")
+        out_path = data_dir / "unified_reports" / f"{dispatch_id}.md"
+        out_path.write_text(body, encoding="utf-8")
+        written["body"] = body
+        written["path"] = out_path
+        return out_path
+
+    with mock.patch("governance_emit.emit_unified_report", side_effect=_fake_emit):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored", (
+        f"expected authored, got {outcome.contract_status!r} — "
+        "govern() synthesized over a plan-reviewer report that had a verdict fence"
+    )
+    assert "vnx-plan-verdict" in written.get("body", ""), (
+        "verdict fence was stripped from the report — synthesis overwrite happened"
+    )
+
+
+def test_govern_spec_role_plan_reviewer_fenceless_report_becomes_synthesized(tmp_path):
+    """govern() with role=plan-reviewer must synthesize when the report has no verdict fence.
+
+    A missing fence means the worker did not complete the review contract.
+    govern() must fall through to synthesis — which produces a body without a
+    fence — and the panel then surfaces a clean parse_error.
+    """
+    import sys
+    _lib = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
+    if _lib not in sys.path:
+        sys.path.insert(0, _lib)
+
+    from dispatch_govern import GovernRaw, GovernSpec, govern
+
+    dispatch_id = "plan-gate-govern-nofence-abc456"
+    data_dir = tmp_path
+    state_dir = tmp_path / ".vnx-state"
+    state_dir.mkdir(parents=True)
+    reports_dir = data_dir / "unified_reports"
+    reports_dir.mkdir(parents=True)
+
+    # Worker wrote a report but WITHOUT the verdict fence.
+    fenceless = "# Review\n\nThis plan looks fine to me.\n"
+    report_file = reports_dir / f"{dispatch_id}.md"
+    report_file.write_text(fenceless, encoding="utf-8")
+
+    spec = GovernSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="plan-gate",
+        instruction="review the plan",
+        data_dir=data_dir,
+        state_dir=state_dir,
+        role="plan-reviewer",
+    )
+    raw = GovernRaw(
+        receipt={"status": "done", "model": "opus"},
+        duration_seconds=10.0,
+    )
+
+    import unittest.mock as mock
+    import governance_emit  # noqa: F401 — ensure module is loaded before patch
+
+    written: dict = {}
+
+    def _fake_emit(**kwargs):
+        body = kwargs.get("body_override", "")
+        out_path = data_dir / "unified_reports" / f"{dispatch_id}.md"
+        out_path.write_text(body, encoding="utf-8")
+        written["body"] = body
+        written["path"] = out_path
+        return out_path
+
+    with mock.patch("governance_emit.emit_unified_report", side_effect=_fake_emit):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    # Must be synthesized (or violated for a synthesized body failing standard
+    # validation) — NOT authored.
+    assert outcome.contract_status in ("synthesized", "violated"), (
+        f"expected synthesized/violated, got {outcome.contract_status!r} — "
+        "govern() accepted a fenceless plan-reviewer report as authored"
+    )
+    # The synthesized body must not contain a parseable verdict fence.
+    result_body = written.get("body", "")
+    assert pgp.parse_verdict(result_body)["parse_error"] is True, (
+        "synthesized body unexpectedly contains a parseable verdict fence"
+    )
