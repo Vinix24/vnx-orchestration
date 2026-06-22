@@ -1153,16 +1153,21 @@ def _assert_manifest_converged(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def _assert_dispatches_schema_intact(conn: sqlite3.Connection) -> None:
+    """Assert that dispatches carries all columns required by the 0022 rebuild.
+
+    Only raises on MISSING required columns. Extra columns (e.g. VNX-canonical v4
+    forward-scaffolding: task_class, target_type, target_id, channel_origin,
+    intelligence_payload) are explicitly allowed — they are preserved, not dropped.
+    """
     cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
     expected = {'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
                 'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
                 'expires_after', 'metadata_json'}
     missing = expected - cols
-    extra = cols - expected
-    if missing or extra:
+    if missing:
         raise RuntimeError(
-            f'dispatches schema drift: missing={missing} extra={extra}. '
-            'Refusing rebuild — please add migration logic for the new columns first.'
+            f'dispatches schema drift: missing required columns={missing}. '
+            'Refusing rebuild — the 0022 INSERT...SELECT depends on these columns.'
         )
     if not _has_composite_unique(conn):
         raise RuntimeError(
@@ -1177,6 +1182,265 @@ schema_migration.register_preflight(22, _assert_dispatches_schema_intact)
 
 
 # ---------------------------------------------------------------------------
+# 0022 shape-detection: is dispatches ALREADY in post-v22 form?
+# ---------------------------------------------------------------------------
+
+#: Columns that 0022 adds to dispatches (operator_approved_at).
+#: When this column is present AND the composite UNIQUE holds, the dispatches
+#: table is already in v22-shape — the rebuild is a no-op and must be skipped.
+_V22_DISPATCHES_NEW_COLS = frozenset({"operator_approved_at"})
+
+#: Required 15-column base that 0022's INSERT…SELECT depends on.
+_V22_DISPATCHES_REQUIRED = frozenset({
+    'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
+    'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
+    'expires_after', 'metadata_json',
+})
+
+
+def _dispatches_already_v22_shape(conn: sqlite3.Connection) -> bool:
+    """True when dispatches is already in post-v22 shape: composite UNIQUE + v22 new cols.
+
+    MC's runtime_coordination.db is a concrete case: it was hand-migrated to v22-shape
+    (added operator_approved_at + UNIQUE(dispatch_id, project_id)) before the schema walk
+    ran.  The 0022 dispatches rebuild is therefore a no-op for that store — and must be
+    skipped to avoid dropping the 5 VNX-canonical v4 forward-scaffolding columns
+    (task_class, target_type, target_id, channel_origin, intelligence_payload).
+
+    The detection uses two orthogonal signals:
+      1. Column presence: operator_approved_at (the column 0022 introduces).
+      2. Constraint: UNIQUE(dispatch_id, project_id) already composite.
+
+    Both must hold.  A store that has the composite but NOT operator_approved_at
+    has a partial state that we should let the full rebuild handle.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    return (
+        _V22_DISPATCHES_NEW_COLS.issubset(cols)
+        and _has_composite_unique(conn)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 0022 DDL fragments: applied conditionally by the skip-rebuild and dynamic paths.
+# All statements use CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS
+# so they are safe to run on any store regardless of prior state.
+#
+# Splitting into two parts is required because idx_dispatches_ready references
+# operator_approved_at, which only exists on dispatches AFTER the v22 rebuild.
+# The dynamic rebuild path applies _0022_TRACK_TABLES_ONLY_DDL first, rebuilds
+# dispatches, then applies _0022_INDEXES_DDL.  The skip-rebuild path can apply
+# both in sequence because dispatches already has operator_approved_at.
+# ---------------------------------------------------------------------------
+
+_0022_TRACK_TABLES_ONLY_DDL = """\
+CREATE TABLE IF NOT EXISTS tracks (
+    track_id                TEXT    NOT NULL PRIMARY KEY,
+    title                   TEXT    NOT NULL,
+    goal_state              TEXT    NOT NULL,
+    phase                   TEXT    NOT NULL DEFAULT 'queued'
+                                    CHECK (phase IN ('queued', 'active', 'parked', 'done')),
+    next_up                 INTEGER NOT NULL DEFAULT 0,
+    sort_order              INTEGER NOT NULL DEFAULT 0,
+    priority                TEXT,
+    requires_operator_promotion INTEGER NOT NULL DEFAULT 1,
+    instruction_template    TEXT,
+    context_composer_rules  TEXT,
+    pr_ref                  TEXT,
+    trigger_condition       TEXT,
+    project_id              TEXT    NOT NULL DEFAULT 'vnx-dev',
+    created_at              TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    phase_changed_at        TEXT,
+    completed_at            TEXT,
+    metadata_json           TEXT    DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS track_phase_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id    TEXT    NOT NULL REFERENCES tracks(track_id),
+    from_phase  TEXT,
+    to_phase    TEXT    NOT NULL,
+    actor       TEXT    NOT NULL CHECK (actor IN ('operator', 'T0', 'system')),
+    reason      TEXT,
+    approval_id TEXT,
+    occurred_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS track_dependencies (
+    from_track_id       TEXT    NOT NULL REFERENCES tracks(track_id),
+    to_track_id         TEXT    NOT NULL REFERENCES tracks(track_id),
+    kind                TEXT    NOT NULL CHECK (kind IN ('hard', 'soft', 'overlap')),
+    derivation_source   TEXT    NOT NULL
+                                CHECK (derivation_source IN (
+                                    'manual', 'git_ancestry', 'path_overlap', 'oi_ref', 'pr_ref'
+                                )),
+    confidence          REAL    NOT NULL DEFAULT 1.0,
+    evidence_json       TEXT,
+    derived_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (from_track_id, to_track_id)
+);
+CREATE TABLE IF NOT EXISTS track_open_items (
+    track_id    TEXT    NOT NULL REFERENCES tracks(track_id),
+    oi_id       TEXT    NOT NULL,
+    link_type   TEXT    NOT NULL CHECK (link_type IN ('blocks', 'warns', 'related')),
+    link_source TEXT    NOT NULL CHECK (link_source IN ('file_path', 'mention', 'manual')),
+    linked_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (track_id, oi_id, link_type)
+);
+"""
+
+# All 0022 indexes — applied AFTER dispatches is in v22-shape (operator_approved_at present).
+_0022_INDEXES_DDL = """\
+CREATE INDEX IF NOT EXISTS idx_dispatch_state
+    ON dispatches (state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dispatch_terminal
+    ON dispatches (terminal_id, state);
+CREATE INDEX IF NOT EXISTS idx_dispatch_created
+    ON dispatches (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_phase_nextup
+    ON tracks(project_id, phase, next_up DESC, sort_order);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tracks_next_up
+    ON tracks(project_id) WHERE next_up = 1 AND phase = 'queued';
+CREATE INDEX IF NOT EXISTS idx_dispatches_ready
+    ON dispatches(state, operator_approved_at)
+    WHERE state = 'proposed' OR state = 'ready';
+CREATE INDEX IF NOT EXISTS idx_track_deps_from
+    ON track_dependencies(from_track_id);
+CREATE INDEX IF NOT EXISTS idx_track_phase_history
+    ON track_phase_history(track_id, occurred_at DESC);
+"""
+
+
+def _apply_0022_skip_dispatches_rebuild(conn: sqlite3.Connection) -> None:
+    """Apply the track-layer portion of 0022 WITHOUT rebuilding dispatches.
+
+    Called when dispatches is already in v22-shape (composite UNIQUE + operator_approved_at
+    present).  Creates all track tables and indexes idempotently, then bumps user_version
+    to 22.  The dispatches table is left untouched — its v4 forward-scaffolding columns
+    (task_class, target_type, target_id, channel_origin, intelligence_payload) are preserved.
+
+    Applies _0022_TRACK_TABLES_ONLY_DDL first (tables only), then _0022_INDEXES_DDL
+    (which references operator_approved_at — safe because dispatches already has it).
+    """
+    sp = '"vnx_ver_22_skip_rebuild"'
+    conn.execute(f"SAVEPOINT {sp}")
+    try:
+        for stmt in schema_migration._split_sql_statements(_0022_TRACK_TABLES_ONLY_DDL):
+            conn.execute(stmt)
+        for stmt in schema_migration._split_sql_statements(_0022_INDEXES_DDL):
+            conn.execute(stmt)
+        conn.execute("PRAGMA user_version = 22")
+        conn.execute(f"RELEASE SAVEPOINT {sp}")
+    except Exception:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception as rb_exc:
+            warnings.warn(
+                f"0022 skip-rebuild ROLLBACK failed: {rb_exc}",
+                stacklevel=2,
+            )
+        raise
+
+
+def _apply_0022_dynamic_rebuild(conn: sqlite3.Connection) -> None:
+    """Apply the full 0022 migration using a dynamic column copy.
+
+    Used for genuine pre-v22 stores that carry extra columns beyond the 15-column
+    baseline.  Rather than the hardcoded INSERT list in 0022_track_layer.sql, this
+    path copies ALL non-generated columns dynamically via _dispatch_table_columns,
+    so no extra column is ever silently dropped.
+
+    The sequence-preservation logic mirrors the 0022 SQL DELETE+INSERT pattern.
+    """
+    col_info = _dispatch_table_columns(conn)
+    copy_cols = [c for c, gen in col_info if not gen]
+    col_list = ", ".join(f'"{c}"' for c in copy_cols)
+
+    sp = '"vnx_ver_22_dynamic_rebuild"'
+    conn.execute(f"SAVEPOINT {sp}")
+    try:
+        # Track-layer tables only (no indexes yet — idx_dispatches_ready references
+        # operator_approved_at which does not exist until AFTER the dispatches rebuild).
+        for stmt in schema_migration._split_sql_statements(_0022_TRACK_TABLES_ONLY_DDL):
+            conn.execute(stmt)
+
+        # Dispatches rebuild: rename → create v22 shape → dynamic copy → seq fix → drop.
+        conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_v22")
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id     TEXT    NOT NULL,
+                project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+                state           TEXT    NOT NULL DEFAULT 'proposed'
+                                        CHECK (state IN (
+                                            'proposed', 'ready', 'active', 'completed', 'failed',
+                                            'queued', 'claimed', 'delivering', 'accepted', 'running',
+                                            'timed_out', 'failed_delivery', 'expired', 'recovered',
+                                            'dead_letter'
+                                        )),
+                terminal_id     TEXT,
+                track           TEXT,
+                priority        TEXT    DEFAULT 'P2',
+                pr_ref          TEXT,
+                gate            TEXT,
+                attempt_count   INTEGER NOT NULL DEFAULT 0,
+                bundle_path     TEXT,
+                created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                expires_after   TEXT,
+                metadata_json   TEXT    DEFAULT '{}',
+                operator_approved_at TEXT,
+                UNIQUE(dispatch_id, project_id)
+            )
+        """)
+
+        # Add any extra columns (beyond the 0022 schema) back via ALTER TABLE.
+        v22_cols = {
+            'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
+            'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
+            'expires_after', 'metadata_json', 'operator_approved_at',
+        }
+        extra_cols = [c for c, gen in col_info if not gen and c not in v22_cols]
+        for extra_col in extra_cols:
+            conn.execute(f"ALTER TABLE dispatches ADD COLUMN \"{extra_col}\" TEXT")
+
+        conn.execute(
+            f"INSERT INTO dispatches ({col_list}) "
+            f"SELECT {col_list} FROM dispatches_pre_v22"
+        )
+
+        # Sequence preservation (mirrors 0022 SQL DELETE+INSERT pattern, PR #685).
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dispatches'")
+        conn.execute("""
+            INSERT INTO sqlite_sequence(name, seq)
+            SELECT 'dispatches',
+                   COALESCE(
+                       (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v22'),
+                       (SELECT MAX(id) FROM dispatches),
+                       0
+                   )
+        """)
+
+        conn.execute("DROP TABLE dispatches_pre_v22")
+
+        # Indexes — applied AFTER dispatches rebuild so operator_approved_at exists.
+        for stmt in schema_migration._split_sql_statements(_0022_INDEXES_DDL):
+            conn.execute(stmt)
+
+        conn.execute("PRAGMA user_version = 22")
+        conn.execute(f"RELEASE SAVEPOINT {sp}")
+    except Exception:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception as rb_exc:
+            warnings.warn(
+                f"0022 dynamic-rebuild ROLLBACK failed: {rb_exc}",
+                stacklevel=2,
+            )
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Step 1: apply 0022 migration
 # ---------------------------------------------------------------------------
 
@@ -1185,14 +1449,39 @@ def apply_migration(conn: sqlite3.Connection, project_root: Path) -> None:
     if not migration_path.exists():
         raise FileNotFoundError(f"Migration not found: {migration_path}")
 
-    sql = migration_path.read_text(encoding="utf-8")
-
     current_version = schema_migration.get_user_version(conn)
     if current_version >= 22:
         print(f"  [skip] migration 0022 already applied (user_version={current_version})")
         return
 
     _assert_dispatches_schema_intact(conn)
+
+    if _dispatches_already_v22_shape(conn):
+        # Dispatches is already in post-v22 form (composite UNIQUE + operator_approved_at).
+        # This happens when a store (e.g. Mission Control's runtime_coordination.db) was
+        # hand-migrated ahead of the schema walk.  Rebuilding dispatches here would drop
+        # any extra columns (e.g. v4 forward-scaffolding).  Skip the rebuild; create only
+        # the track-layer tables and bump user_version to 22.
+        print("  [skip-rebuild] 0022 dispatches already in v22-shape; "
+              "creating track tables only ...")
+        _apply_0022_skip_dispatches_rebuild(conn)
+        print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    extra_cols = cols - _V22_DISPATCHES_REQUIRED - {'operator_approved_at'}
+    if extra_cols:
+        # Genuine pre-v22 store with extra columns beyond the required baseline.
+        # Use the dynamic rebuild path to preserve them rather than the hardcoded
+        # INSERT list in 0022_track_layer.sql.
+        print(f"  [dynamic] 0022 dispatches has extra columns {extra_cols!r}; "
+              "using dynamic column copy to preserve them ...")
+        _apply_0022_dynamic_rebuild(conn)
+        print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+        return
+
+    # Standard path: run the SQL file as-is.
+    sql = migration_path.read_text(encoding="utf-8")
     print("  [apply] migration 0022_track_layer.sql ...")
     schema_migration.apply_script_if_below(conn, 22, sql)
     print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
@@ -1677,10 +1966,23 @@ def _normalize_create_index_sql(sql: str | None) -> str:
     return normalized
 
 
-def _runtime_v31_violations(conn: sqlite3.Connection) -> list[str]:
-    """Validate the runtime family and its required parent invariants."""
+def _runtime_v31_violations(conn: sqlite3.Connection, skip_absent: bool = False) -> list[str]:
+    """Validate the runtime family and its required parent invariants.
+
+    When *skip_absent* is True, tables that do not exist in the DB are silently
+    skipped.  This is used by the adaptive repair path to validate only the subset
+    of runtime tables that were actually rebuilt (e.g. MC's headless_runs-only shape).
+    """
     violations: list[str] = []
+    present = None  # lazy — only computed when skip_absent=True
     for table in (*_RUNTIME_V31_TABLES, *_RUNTIME_V31_PARENT_TABLES):
+        if skip_absent:
+            if present is None:
+                present = {r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )}
+            if table not in present:
+                continue
         invariant = schema_manifest.table_at(31, table)
         if invariant is None:
             violations.append(f"v31 manifest missing runtime table invariant '{table}'")
@@ -1745,8 +2047,17 @@ def _assert_runtime_v30_legacy_shape(conn: sqlite3.Connection) -> None:
                 "Refusing rebuild rather than dropping them.")
 
 
-def _assert_runtime_v31_clean(conn: sqlite3.Connection) -> None:
-    violations = _runtime_v31_violations(conn)
+def _assert_runtime_v31_clean(
+    conn: sqlite3.Connection, skip_absent: bool = False
+) -> None:
+    """Assert that every present runtime table satisfies the v31 manifest invariants.
+
+    When *skip_absent* is True, tables that are not present in the DB are skipped
+    in the manifest check.  The FK + integrity checks always run over the full DB.
+    Used by the adaptive repair path so a partial-runtime store (e.g. MC's
+    headless_runs-only shape) does not fail on tables that were never created.
+    """
+    violations = _runtime_v31_violations(conn, skip_absent=skip_absent)
     if violations:
         raise RuntimeError(f"0031 runtime manifest violations: {violations[:5]}")
     try:
@@ -1784,8 +2095,17 @@ def _capture_runtime_v31_sequences(conn: sqlite3.Connection) -> dict[str, int | 
 def _restore_runtime_v31_sequences(
     conn: sqlite3.Connection, old_sequences: dict[str, int | None]
 ) -> None:
-    """Restore max(pre-rebuild sequence, copied max id) after final-table rename."""
+    """Restore max(pre-rebuild sequence, copied max id) after final-table rename.
+
+    Skips tables that are not present in the DB (partial-runtime stores such as
+    MC's headless_runs-only shape may have only a subset of the AUTOINCREMENT tables).
+    """
+    present_tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
     for table, old_seq in old_sequences.items():
+        if table not in present_tables:
+            continue
         max_id = conn.execute(
             f'SELECT COALESCE(MAX(id), 0) FROM "{table}"'
         ).fetchone()[0]
@@ -2373,16 +2693,23 @@ def _build_adaptive_repair_statements(
       worker_states (FK → terminal_leases + dispatches — must come after TL)
       worker_pool_membership (FK → terminal_leases — must come after TL)
     """
-    # Ordered to satisfy FK dependency (parent-before-child within the runtime cluster)
+    # Ordered to satisfy FK dependency (parent-before-child within the runtime cluster).
+    # Only include tables that ACTUALLY EXIST in the DB — a store that has a partial
+    # runtime setup (e.g. MC's headless_runs-only shape) must not fail on missing tables.
     ordered_tables = [
         "terminal_leases",
         "dispatch_attempts",
         "headless_runs",
         "worker_states",
     ]
+    present_tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
 
     stmts = []
     for table in ordered_tables:
+        if table not in present_tables:
+            continue
         t = table  # capture for closure
         p = resolved_pid
         stmts.append(lambda _conn=conn, _t=t, _p=p: _adaptive_rebuild_table(_conn, _t, _p))
@@ -2432,7 +2759,10 @@ def _run_adaptive_v31_repair(
                 stmt()  # each callable operates on conn
 
             _restore_runtime_v31_sequences(conn, old_sequences)
-            _assert_runtime_v31_clean(conn)
+            # skip_absent=True: a partial-runtime store (e.g. MC's headless_runs-only
+            # shape) must not fail manifest validation for runtime tables that simply
+            # were never created.  Only tables that exist in the DB are validated.
+            _assert_runtime_v31_clean(conn, skip_absent=True)
             conn.execute("COMMIT")
         except Exception:
             _rollback_runtime_v31(conn)
