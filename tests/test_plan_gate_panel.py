@@ -136,7 +136,7 @@ def test_run_panel_all_pass(tmp_path):
     disp = _fake_dispatcher({
         "claude": '{"verdict": "pass"}',
         "kimi": '{"verdict": "pass"}',
-        "litellm:zai": '{"verdict": "pass"}',
+        "glm-harness": '{"verdict": "pass"}',
     })
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=disp)
     assert out["decision"] == "PASS"
@@ -149,7 +149,7 @@ def test_run_panel_one_block_revises(tmp_path):
     disp = _fake_dispatcher({
         "claude": '{"verdict": "pass"}',
         "kimi": '{"verdict": "block", "blocking_findings": ["unsafe"]}',
-        "litellm:zai": '{"verdict": "pass"}',
+        "glm-harness": '{"verdict": "pass"}',
     })
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=disp)
     assert out["decision"] == "REVISE"
@@ -271,13 +271,13 @@ def test_run_panel_garbled_verdict_blocks_pass(tmp_path):
     doc.write_text("## Problem\n", encoding="utf-8")
 
     def _disp(provider, model_arg, instruction, dispatch_id):
-        if provider == "litellm:zai":
+        if provider == "glm-harness":
             return "# review\n\nlooks good, but no verdict block emitted\n"
         return _report('{"verdict": "pass"}')
 
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
     assert out["decision"] == "REVISE"
-    glm = next(p for p in out["panelists"] if p["provider"] == "litellm:zai")
+    glm = next(p for p in out["panelists"] if p["provider"] == "glm-harness")
     assert glm["parse_error"] is True
 
 
@@ -493,7 +493,7 @@ def test_fenceless_report_cannot_produce_phantom_pass(tmp_path):
     did_fenceless = "plan-gate-feat-fenceless-aaa00001"
 
     def _disp(provider, model_arg, instruction, dispatch_id):
-        if provider == "litellm:zai":
+        if provider == "glm-harness":
             return "# review\n\nLooks fine.\n"  # no verdict fence
         return _make_report_with_fence("pass")
 
@@ -502,7 +502,7 @@ def test_fenceless_report_cannot_produce_phantom_pass(tmp_path):
 
     out = pgp.run_panel(doc, track_id="feat-fenceless", project_id="p1", dispatcher=_disp)
     assert out["decision"] == "REVISE"
-    glm = next(p for p in out["panelists"] if p["provider"] == "litellm:zai")
+    glm = next(p for p in out["panelists"] if p["provider"] == "glm-harness")
     assert glm["parse_error"] is True
 
 
