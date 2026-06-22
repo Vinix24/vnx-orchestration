@@ -1853,3 +1853,455 @@ class TestTriggerPreservation:
         assert row_p3 is not None, (
             "Trigger must fire after Phase 3 — Phase 3 must not re-drop it"
         )
+
+
+# ===========================================================================
+# 21. Secondary index preservation (partial unique + non-unique)
+# ===========================================================================
+
+class TestSecondaryIndexPreservation:
+    """Regression: Phase 1 and Phase 3 DROP+RENAME removed CREATE [UNIQUE] INDEX
+    indexes permanently. Partial UNIQUE indexes lost their WHERE clause by being
+    folded into full table-level UNIQUE constraints, causing data collisions.
+    Non-unique indexes were silently dropped, causing perf and functional regressions.
+
+    Real cases from seocrawler-v2 RC DB:
+      - idx_terminal_leases_token: CREATE UNIQUE INDEX ... WHERE lease_token != ''
+      - idx_pool_membership_active: CREATE UNIQUE INDEX ... WHERE released_at IS NULL
+      - idx_terminal_leases_project, idx_lease_dispatch, idx_lease_state: non-unique
+    """
+
+    def test_partial_unique_index_preserved_through_phase1(self, tmp_path: Path) -> None:
+        """A partial UNIQUE index (WHERE tok != '') survives Phase 1 with WHERE intact.
+
+        Three rows all with tok='' are excluded by the WHERE clause so they are
+        currently legal. Phase 1 must NOT widen this to a full UNIQUE(tok, project_id)
+        constraint — that would collapse the 3 rows (all share tok='') and cause
+        silent data loss caught only by the row-copy mismatch guard.
+
+        After Phase 1:
+        - All 3 rows still present (no collapse).
+        - The partial index exists in sqlite_master with its WHERE clause.
+        - A 4th tok='' row can still be inserted (partial uniqueness preserved).
+        - A duplicate non-empty tok is still rejected.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tok TEXT NOT NULL DEFAULT '',
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX ix_leases_tok ON leases(tok) WHERE tok != ''"
+        )
+        conn.execute("INSERT INTO leases (tok, project_id) VALUES ('', 'vnx-dev')")
+        conn.execute("INSERT INTO leases (tok, project_id) VALUES ('', 'vnx-dev')")
+        conn.execute("INSERT INTO leases (tok, project_id) VALUES ('', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        ts.run_phase1_ddl(conn, tables)
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+
+        # All 3 rows must survive (no collapse from partial-to-full UNIQUE widening).
+        count = conn.execute("SELECT COUNT(*) FROM leases").fetchone()[0]
+        assert count == 3, (
+            f"Expected 3 rows after Phase 1 but got {count}. "
+            "Partial UNIQUE index was folded into full constraint, collapsing rows."
+        )
+
+        # The partial index must exist in sqlite_master with its WHERE clause.
+        idx_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='ix_leases_tok'"
+        ).fetchone()
+        assert idx_row is not None, "ix_leases_tok must exist in sqlite_master after Phase 1"
+        assert "WHERE" in idx_row[0].upper(), (
+            f"Partial index WHERE clause lost after Phase 1. Got sql: {idx_row[0]!r}"
+        )
+
+        # A 4th tok='' row must still be insertable (excluded by the WHERE).
+        conn.execute("INSERT INTO leases (tok, project_id) VALUES ('', 'vnx-dev')")
+        conn.commit()
+        count2 = conn.execute("SELECT COUNT(*) FROM leases").fetchone()[0]
+        assert count2 == 4, "tok='' rows must remain insertable (partial WHERE excludes them)"
+
+        # A duplicate non-empty tok must still be rejected.
+        conn.execute("INSERT INTO leases (tok, project_id) VALUES ('abc', 'vnx-dev')")
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO leases (tok, project_id) VALUES ('abc', 'vnx-dev')")
+            conn.commit()
+
+        conn.close()
+
+    def test_non_unique_secondary_index_preserved_through_phase1_and_phase3(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-unique secondary index survives both Phase 1 and Phase 3.
+
+        Before this fix, DROP TABLE in Phase 1 removed the index and the rebuild
+        never recreated it — permanent silent index loss.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                terminal_id TEXT NOT NULL UNIQUE,
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX idx_leases_project ON leases(project_id)"
+        )
+        conn.execute("INSERT INTO leases (terminal_id, project_id) VALUES ('t1', 'vnx-dev')")
+        conn.commit()
+        conn.close()
+
+        # Run full 3-phase migration.
+        result = ts.run_three_phase_migration_on_db(db, "my-project", db_label="TEST")
+        assert result["ok"] is True
+
+        conn = sqlite3.connect(str(db))
+        idx_names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='leases'"
+            ).fetchall()
+        }
+        conn.close()
+
+        assert "idx_leases_project" in idx_names, (
+            "Non-unique secondary index idx_leases_project must survive Phase 1 + Phase 3. "
+            "It was permanently dropped by the DROP TABLE in the rebuild."
+        )
+
+    def test_terminal_leases_exact_shape_three_phase_migration(self, tmp_path: Path) -> None:
+        """Exact terminal_leases shape from seocrawler-v2 RC DB: full 3-phase migration.
+
+        Schema:
+          id INTEGER PK AUTOINCREMENT
+          terminal_id TEXT UNIQUE (declared inline — origin='u', will be widened)
+          lease_token TEXT DEFAULT '' (partial unique index WHERE lease_token != '')
+          project_id TEXT DEFAULT 'vnx-dev'
+
+        3 rows all with lease_token='' (excluded by the WHERE, currently legal).
+
+        After full migration (Phases 1+2+3):
+        - All 3 rows survive and are re-stamped to the resolved pid.
+        - The partial unique index on lease_token still has its WHERE clause.
+        - The UNIQUE on terminal_id is widened to (terminal_id, project_id).
+        - integrity_check and foreign_key_check pass.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE terminal_leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                terminal_id TEXT NOT NULL UNIQUE,
+                lease_token TEXT NOT NULL DEFAULT '',
+                project_id TEXT DEFAULT 'vnx-dev'
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_terminal_leases_token "
+            "ON terminal_leases(lease_token) WHERE lease_token != ''"
+        )
+        conn.execute(
+            "CREATE INDEX idx_terminal_leases_project ON terminal_leases(project_id)"
+        )
+        conn.execute(
+            "INSERT INTO terminal_leases (terminal_id, lease_token, project_id) "
+            "VALUES ('T0', '', 'vnx-dev')"
+        )
+        conn.execute(
+            "INSERT INTO terminal_leases (terminal_id, lease_token, project_id) "
+            "VALUES ('T1', '', 'vnx-dev')"
+        )
+        conn.execute(
+            "INSERT INTO terminal_leases (terminal_id, lease_token, project_id) "
+            "VALUES ('T2', '', 'vnx-dev')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = ts.run_three_phase_migration_on_db(db, "seocrawler-v2", db_label="TEST")
+        assert result["ok"] is True
+
+        conn = sqlite3.connect(str(db))
+
+        # All 3 rows survive and are re-stamped.
+        rows = conn.execute(
+            "SELECT terminal_id, project_id FROM terminal_leases ORDER BY terminal_id"
+        ).fetchall()
+        assert len(rows) == 3, f"Expected 3 rows, got {len(rows)}: {rows}"
+        assert all(r[1] == "seocrawler-v2" for r in rows), (
+            f"Not all rows re-stamped to seocrawler-v2: {rows}"
+        )
+
+        # Partial unique index must survive with WHERE clause intact.
+        idx_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND name='idx_terminal_leases_token'"
+        ).fetchone()
+        assert idx_row is not None, "idx_terminal_leases_token must exist after Phase 3"
+        assert "WHERE" in idx_row[0].upper(), (
+            f"Partial index WHERE clause must survive Phase 3. Got: {idx_row[0]!r}"
+        )
+
+        # Non-unique project index must survive.
+        idx_names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='terminal_leases'"
+            ).fetchall()
+        }
+        assert "idx_terminal_leases_project" in idx_names, (
+            "Non-unique index idx_terminal_leases_project must survive Phase 3"
+        )
+
+        # integrity_check and foreign_key_check must pass.
+        ic = conn.execute("PRAGMA integrity_check").fetchall()
+        assert ic == [("ok",)], f"integrity_check failed: {ic}"
+        fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+        assert fk == [], f"foreign_key_check failed: {fk}"
+
+        conn.close()
+
+
+# ===========================================================================
+# 22. BUG 1+2 regression — origin='c' partial index must not trigger rebuild;
+#     rebuild must preserve all declared (origin='u') UNIQUE constraints
+# ===========================================================================
+
+class TestBug1AndBug2Regressions:
+    """Regression tests for the two bugs reproduced against the post-0031
+    terminal_leases shape (composite declared UNIQUE + origin='c' partial index).
+
+    BUG 1: run_phase1_ddl triggered a spurious rebuild on a table that was
+    already in correct v31 shape because _get_unique_indexes returned an
+    origin='c' partial-index entry lacking project_id. The rebuild trigger
+    must check ONLY origin='u' declared UNIQUE constraints.
+
+    BUG 2: When a rebuild DID run, _rebuild_table_phase1 only iterated the
+    non_composite_uniques argument (the subset lacking project_id). Any
+    already-composite declared UNIQUE (origin='u', already has project_id)
+    was filtered out before being passed and was never re-emitted — the
+    rebuilt table silently lost it, breaking FK constraints that referenced
+    the composite unique key.
+    """
+
+    def test_composite_declared_unique_plus_partial_index_no_spurious_rebuild(
+        self, tmp_path: Path
+    ) -> None:
+        """BUG 1 regression (a): a table with BOTH a composite declared UNIQUE(x, project_id)
+        AND an origin='c' partial unique index must NOT be spuriously rebuilt by Phase 1,
+        AND the composite UNIQUE must survive untouched.
+
+        Pre-0031 fix: _get_unique_indexes returned the origin='c' index (it lacks project_id),
+        which caused the rebuild trigger to fire even though the table was already in v31 shape.
+        After the fix: only origin='u' constraints drive the rebuild trigger; origin='c' indexes
+        are preserved verbatim by _get_secondary_indexes and must never force a rebuild.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                terminal_id TEXT NOT NULL,
+                lease_token TEXT NOT NULL DEFAULT '',
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                UNIQUE(terminal_id, project_id)
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_leases_token ON leases(lease_token) WHERE lease_token != ''"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        assert "leases" in tables
+
+        # BUG 1: must return [] — no spurious rebuild
+        rebuilt = ts.run_phase1_ddl(conn, tables)
+        assert rebuilt == [], (
+            f"Phase 1 spuriously rebuilt 'leases' even though it was already in v31 shape. "
+            f"rebuilt={rebuilt}. An origin='c' partial unique index (without project_id) must "
+            f"NOT trigger a rebuild — only origin='u' declared UNIQUE constraints drive that decision."
+        )
+
+        # BUG 2 (would manifest on rebuild): composite UNIQUE must still be present
+        s = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='leases'"
+        ).fetchone()[0]
+        assert "terminal_id" in s and "project_id" in s and "UNIQUE" in s, (
+            f"composite UNIQUE(terminal_id, project_id) must still exist in schema after no-rebuild. "
+            f"schema={s!r}"
+        )
+
+        # Partial unique index must be intact with WHERE clause
+        idx_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_leases_token'"
+        ).fetchone()
+        assert idx_row is not None, "idx_leases_token must still exist"
+        assert "WHERE" in idx_row[0].upper(), (
+            f"Partial index WHERE clause must be intact. Got: {idx_row[0]!r}"
+        )
+        conn.close()
+
+    def test_rebuild_preserves_composite_declared_unique_alongside_non_composite(
+        self, tmp_path: Path
+    ) -> None:
+        """BUG 2 regression (b): when a rebuild IS triggered (by a non-composite declared UNIQUE),
+        any already-composite declared UNIQUE on the same table must ALSO be re-emitted verbatim.
+
+        Pre-fix: _rebuild_table_phase1 only iterated the non_composite_uniques argument (the subset
+        lacking project_id). An already-composite UNIQUE was filtered out before being passed and
+        silently lost in the rebuilt table.
+        After fix: all origin='u' UNIQUEs are fetched fresh inside _rebuild_table_phase1;
+        composites are re-emitted verbatim, non-composites are widened by appending project_id.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # Table with TWO declared UNIQUEs:
+        #   UNIQUE(name)          — non-composite, must be widened to UNIQUE(name, project_id)
+        #   UNIQUE(code, project_id) — already composite, must be re-emitted verbatim
+        conn.execute("""
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                code TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                UNIQUE(name),
+                UNIQUE(code, project_id)
+            )
+        """)
+        conn.execute(
+            "INSERT INTO items (name, code, project_id) VALUES ('alpha', 'A1', 'vnx-dev')"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+        rebuilt = ts.run_phase1_ddl(conn, tables)
+        assert "items" in rebuilt, "items must be rebuilt (has non-composite UNIQUE(name))"
+
+        # UNIQUE(name) must be widened to UNIQUE(name, project_id)
+        indexes = conn.execute("PRAGMA index_list(items)").fetchall()
+        unique_col_sets = []
+        for idx in indexes:
+            if idx[2]:  # unique
+                cols = [
+                    r[2] for r in conn.execute(f"PRAGMA index_info({idx[1]})").fetchall()
+                ]
+                unique_col_sets.append(frozenset(cols))
+
+        assert frozenset(["name", "project_id"]) in unique_col_sets, (
+            f"UNIQUE(name) must be widened to UNIQUE(name, project_id). "
+            f"Found unique col sets: {unique_col_sets}"
+        )
+        # BUG 2: UNIQUE(code, project_id) must still exist (was already composite, must survive verbatim)
+        assert frozenset(["code", "project_id"]) in unique_col_sets, (
+            f"UNIQUE(code, project_id) must survive the rebuild verbatim. "
+            f"BUG 2: it was silently dropped because only non_composite_uniques were re-emitted. "
+            f"Found unique col sets: {unique_col_sets}"
+        )
+
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        assert fk_violations == [], f"FK check must be clean after rebuild: {fk_violations}"
+        ic = conn.execute("PRAGMA integrity_check").fetchall()
+        assert ic == [("ok",)], f"integrity_check must pass after rebuild: {ic}"
+        conn.close()
+
+    def test_terminal_leases_post_0031_shape_fk_clean(self, tmp_path: Path) -> None:
+        """BUG 1+2 regression (c): the exact terminal_leases post-0031 shape.
+
+        After 0031 repairs the store:
+          - terminal_leases has UNIQUE(terminal_id, project_id) [origin='u', already composite]
+          - terminal_leases has idx_terminal_leases_token partial index [origin='c']
+          - worker_pool_membership has FK (terminal_id, project_id) -> terminal_leases
+
+        Phase 1 must NOT spuriously rebuild terminal_leases (BUG 1).
+        After Phase 1, foreign_key_check must be clean (BUG 2: if the rebuild lost the
+        composite UNIQUE, the FK would have no matching unique key -> fk mismatch).
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE terminal_leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                terminal_id TEXT NOT NULL,
+                lease_token TEXT NOT NULL DEFAULT '',
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                UNIQUE(terminal_id, project_id)
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_terminal_leases_token "
+            "ON terminal_leases(lease_token) WHERE lease_token != ''"
+        )
+        conn.execute("""
+            CREATE TABLE worker_pool_membership (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                terminal_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                FOREIGN KEY (terminal_id, project_id)
+                    REFERENCES terminal_leases(terminal_id, project_id)
+            )
+        """)
+        conn.execute(
+            "INSERT INTO terminal_leases (terminal_id, lease_token, project_id) "
+            "VALUES ('T0', '', 'vnx-dev')"
+        )
+        conn.execute(
+            "INSERT INTO worker_pool_membership (terminal_id, project_id) "
+            "VALUES ('T0', 'vnx-dev')"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.topological_sort_tables(conn, ts.enumerate_project_id_tables(conn))
+
+        # BUG 1: no spurious rebuild of terminal_leases
+        rebuilt = ts.run_phase1_ddl(conn, tables)
+        assert "terminal_leases" not in rebuilt, (
+            f"terminal_leases must NOT be spuriously rebuilt — it is already in v31 shape. "
+            f"BUG 1: origin='c' partial index triggered a rebuild. rebuilt={rebuilt}"
+        )
+
+        # BUG 2: FK check must be clean — the composite UNIQUE(terminal_id, project_id) must
+        # still exist so the FK in worker_pool_membership has a matching unique key
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        assert fk_violations == [], (
+            f"foreign_key_check mismatch after Phase 1: {fk_violations}. "
+            f"BUG 2: rebuild lost UNIQUE(terminal_id, project_id) from terminal_leases, "
+            f"breaking the FK from worker_pool_membership."
+        )
+
+        # The partial index must remain verbatim
+        idx_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_terminal_leases_token'"
+        ).fetchone()
+        assert idx_row is not None, "idx_terminal_leases_token must still exist"
+        assert "WHERE" in idx_row[0].upper(), (
+            f"Partial index WHERE clause must be intact. Got: {idx_row[0]!r}"
+        )
+
+        # Composite UNIQUE must still be present in the terminal_leases schema
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='terminal_leases'"
+        ).fetchone()[0]
+        assert "terminal_id" in schema and "project_id" in schema and "UNIQUE" in schema, (
+            f"UNIQUE(terminal_id, project_id) must still be in terminal_leases schema. "
+            f"schema={schema!r}"
+        )
+        conn.close()
