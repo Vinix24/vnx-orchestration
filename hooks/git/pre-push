@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# VNX Git Hook: pre-push
+# Blocks a push to `main` that originates from a VNX worker context.
+#
+# This is a LOCAL defense-in-depth layer (OI-098). It is bypassable with
+# `git push --no-verify`; the durable, un-evadable slot is server-side branch
+# protection on origin/main. A governed worker, however, does not push
+# --no-verify, so this hook catches the accidental/cowboy case it actually
+# produces.
+#
+# Worker context = either VNX_DISPATCH_ID is set, OR the repository toplevel is
+# an isolated dispatch worktree (.vnx-data/worktrees/dispatch-*). Vincent's
+# normal checkout (no dispatch id, not a worktree) is never affected.
+#
+# Operator escape hatch: VNX_OVERRIDE_WORKER_PUSH_MAIN=1 allows the push.
+#
+# git invokes: pre-push <remote-name> <remote-url>; stdin carries one line per
+# ref being pushed: <local-ref> <local-sha> <remote-ref> <remote-sha>.
+
+set -euo pipefail
+
+# 1. Operator override — explicit opt-in, allow.
+if [ "${VNX_OVERRIDE_WORKER_PUSH_MAIN:-}" = "1" ]; then
+    exit 0
+fi
+
+# 2. Worker-context detection. Not a worker → allow (Vincent's checkout).
+is_worker=0
+if [ -n "${VNX_DISPATCH_ID:-}" ]; then
+    is_worker=1
+else
+    toplevel="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+    case "$toplevel" in
+        */.vnx-data/worktrees/dispatch-*) is_worker=1 ;;
+    esac
+fi
+
+if [ "$is_worker" -ne 1 ]; then
+    exit 0
+fi
+
+# 3. Worker context: reject any ref pushed to main.
+blocked=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "${remote_ref:-}" ] && continue
+    case "$remote_ref" in
+        refs/heads/main|main)
+            blocked=1
+            ;;
+    esac
+done
+
+if [ "$blocked" -eq 1 ]; then
+    {
+        echo "[vnx pre-push] BLOCKED: VNX worker push to main."
+        echo "  Workers must not push to main — open a PR for human review (T0 merges)."
+        echo "  Override (operator only): VNX_OVERRIDE_WORKER_PUSH_MAIN=1 git push ..."
+    } >&2
+    exit 1
+fi
+
+exit 0
