@@ -42,6 +42,7 @@ Shadow-detected (allow + log when VNX_HOOK_ENFORCE unset/0; block when =1):
   python[3] -m <lane_module>
   python[3] -c "..." importing a lane module
   importlib.import_module("<lane_module>")
+  --allow-headless flag in any dispatch command (governed headless opt-in; NOT --adapter)
 
 Telemetry: every block AND every shadow detection → one JSON line appended to
   <VNX_DATA_DIR>/events/hook_blocks.ndjson. Telemetry errors never block.
@@ -115,6 +116,10 @@ _LANE_MODS_RE = r"(?:" + r"|".join(
 ) + r")"
 
 _PYTHON_RE = re.compile(r"python[0-9.]*$")
+
+# Headless opt-in flag — shadow-detected (allow+log default; block when VNX_HOOK_ENFORCE=1).
+# VNX_ADAPTER / --adapter is NOT detected here (legitimate subprocess-pin lane, Wave 5).
+_CLAUDE_HEADLESS_FLAG = "--allow-headless"
 
 # Operator/redirect tokens produced by the punctuation-aware lexer
 # (subshell parens, redirects, any quoted-away pipe/amp remnant).
@@ -210,6 +215,8 @@ def _detect_shadow_legacy(cmd: str) -> str | None:
         return "python_c_lane_import"
     if _IMPORTLIB_PATTERN.search(cmd):
         return "importlib_lane_import"
+    if re.search(r"(?<!\S)--allow-headless(?!\S)", cmd):
+        return "claude_allow_headless"
     return None
 
 
@@ -379,6 +386,8 @@ def _detect_shadow_argv(argv: list[str]) -> str | None:
                 return "importlib_lane_import"
             if _has_lane_import_at_statement(code):
                 return "python_c_lane_import"
+    if _CLAUDE_HEADLESS_FLAG in argv:
+        return "claude_allow_headless"
     return None
 
 
