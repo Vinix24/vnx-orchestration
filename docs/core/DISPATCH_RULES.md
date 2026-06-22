@@ -8,6 +8,9 @@
 > routing policy → `scripts/lib/providers/routing_policy.yaml`; pricing/registry →
 > `scripts/lib/providers/wave7_models.yaml`. The single dispatch entry is the door
 > (`vnx dispatch` / `scripts/lib/dispatch_cli.py`); it runs `compile_plan` + a permit for every lane.
+> The door is built and tested but **default-OFF** (`VNX_SINGLE_ENTRY_DISPATCH` resolves to disabled
+> via `scripts/lib/dispatch_flags.py`; `VNX_DISPATCH_LEGACY=1` is the absolute rollback) until the
+> flip lands. Until then, dispatches route through the per-lane paths in §5/§8.
 
 ## 1. Decision tree (first matching rule wins)
 
@@ -57,7 +60,7 @@ Efficiency: risk ≤ 0.3 + success + no blockers → fast path, skip deep verifi
 | PR review gate | `review_gate_manager.py` / `t0_gate_enforcement.sh` |
 | Pure utility (no PR, no gate) | direct Bash |
 
-All PR/gate work routes through the door (`vnx dispatch`). `tmux_interactive_dispatch.py` defaults: `--isolated-worktree` on, `--model sonnet`, `--base-ref origin/main`; staging gate via `--from-staging-id` (ADR-006). Required: `--dispatch-id`, `--instruction`.
+PR/gate work is routed through `vnx dispatch`, which selects the lane; the single-entry door is the eventual single funnel for that selection but is still default-OFF (see header). `tmux_interactive_dispatch.py` defaults: `--isolated-worktree` on, `--model sonnet`, `--base-ref origin/main`; staging gate via `--from-staging-id` (ADR-006). Required: `--dispatch-id`, `--instruction`.
 
 **Known gap (OI-188):** no lane reliably edits files under `.claude/skills/` — Claude treats the loaded skill dir as read-only. Edit skill files manually from T0/operator.
 
@@ -88,10 +91,10 @@ These recur — observed, not hypothetical. A dispatch that "did nothing" or "bi
 
 | Model(s) | Lane / provider string | Constraint |
 |---|---|---|
-| sonnet / opus (claude) | `tmux_interactive_dispatch.py` `--model sonnet`\|`opus` | Subscription. NEVER headless `claude -p` (= API). Serialize under load (§6). |
+| sonnet / opus (claude) | `tmux_interactive_dispatch.py` `--model sonnet`\|`opus` | Subscription. Headless `claude -p` is opt-in and blocked by default (`claude-headless` constraint; `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it, = API). Serialize under load (§6). |
 | codex (gpt-5.x) | `provider_dispatch.py --provider codex` | Has tools. Retry once on lane-launch DNF (`codex_retry_once`). |
 | kimi (k2.x) | `provider_dispatch.py --provider kimi` | **kimi CLI OAuth only** (`kimi-via-cli-only`). The CLI OAuth serves the current coding model (K2.7-Code, the default — no `-m`). NOT `litellm:moonshot` (bare API; violates the constraint; baseline-only). |
-| GLM-5.1 | `provider_dispatch.py --provider litellm:zai` | Resolves to `openrouter/z-ai/glm-5` + `OPENROUTER_API_KEY` → satisfies `zai-via-openrouter-only`. GLM-4.5/4.6 rejected (`deprecated-glm-models`). |
+| GLM-5.1 | `provider_dispatch.py --provider litellm:zai` | Released path: resolves to `openrouter/z-ai/glm-5` + `OPENROUTER_API_KEY` → satisfies `zai-via-openrouter-only`. On `feat/dispatch-flip` the door normalizes this to the `glm-harness` lane (`glm-via-harness-only`); not on the released default. GLM-4.5/4.6 rejected (`deprecated-glm-models`). |
 | DeepSeek (tools) | `provider_dispatch.py --provider deepseek-harness` | Anthropic-compat via harness, own `DEEPSEEK_API_KEY` + hardening. NOT on the prod OAuth subscription (`deepseek-harness-subscription-blocked`). |
 | DeepSeek (bare) | `provider_dispatch.py --provider litellm:deepseek` | Chat-only, NO tools. Baseline only. |
 | local gemma | `provider_dispatch.py --provider local-gemma` | Free, local; mechanical / cutoff-resilient checks. |

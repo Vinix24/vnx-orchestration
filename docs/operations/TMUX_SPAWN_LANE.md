@@ -4,7 +4,7 @@
 
 `scripts/lib/tmux_interactive_dispatch.py` is the leaseless ephemeral dispatch lane VNX uses as default for parallel and independent feature work. Each dispatch spawns a fresh unique tmux session, drives an interactive `claude` worker on the subscription (the 15-juni billing escape), waits for the receipt, and tears down. No reuse, no warm-open, no terminal pin.
 
-This lane runs Claude workers on the **subscription** (interactive `claude`, never `claude -p`) — that keeps the dispatcher off API-credit billing. It complements `subprocess_dispatch.py` (Wave 5 smart-context + terminal pinning) rather than replacing it.
+This lane runs Claude workers on the **subscription** (interactive `claude`, never `claude -p`) — that keeps the dispatcher off API-credit billing. It complements `subprocess_dispatch.py` (Wave 5 smart-context + terminal pinning), which runs headless `claude -p` and, after the June 15, 2026 billing change, bills API credits — so the subprocess lane is opt-in and blocked by default (`claude-headless` constraint; `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it).
 
 ## When to use which lane
 
