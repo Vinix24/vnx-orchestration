@@ -461,11 +461,7 @@ class ConstraintEnforcer:
             rule = constraint.get("rule")
             code = str(constraint.get("id") or constraint.get("code") or "unknown")
             override_allowed = bool(constraint.get("override_allowed", False))
-            override_applied = (
-                str(constraint.get("audit_severity") or "") == "warn"
-                and override_allowed
-                and env_map.get(_override_key(code)) == "1"
-            )
+            override_applied = override_allowed and env_map.get(_override_key(code)) == "1"
 
             violation: Optional[ConstraintViolation] = None
             if rule == "forbid_import":
@@ -481,6 +477,7 @@ class ConstraintEnforcer:
                     violation = _violation_from_constraint(
                         constraint,
                         "Route forbidden",
+                        severity_override="warn" if override_applied else None,
                         override_applied=override_applied,
                     )
             elif rule == "require_route":
