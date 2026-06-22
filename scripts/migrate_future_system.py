@@ -1350,94 +1350,117 @@ def _apply_0022_dynamic_rebuild(conn: sqlite3.Connection) -> None:
     so no extra column is ever silently dropped.
 
     The sequence-preservation logic mirrors the 0022 SQL DELETE+INSERT pattern.
+
+    FK guard: the rename→drop sequence triggers FOREIGN KEY constraint failures on
+    stores (e.g. Mission Control) where a child table carries a ghost FK referencing
+    dispatches_pre_v22.  PRAGMA foreign_keys is a no-op inside a transaction, so it
+    MUST be set to OFF before the SAVEPOINT opens.  The caller pattern mirrors
+    _run_runtime_v31_transaction: capture original state → set OFF outside the
+    transaction → do work → restore in finally.  The dangling child FK is fixed later
+    by the adaptive 0031-branch (_ADAPTIVE_RUNTIME_TABLES rebuild).
     """
     col_info = _dispatch_table_columns(conn)
     copy_cols = [c for c, gen in col_info if not gen]
     col_list = ", ".join(f'"{c}"' for c in copy_cols)
 
-    sp = '"vnx_ver_22_dynamic_rebuild"'
-    conn.execute(f"SAVEPOINT {sp}")
+    # Capture FK state and disable BEFORE opening any transaction/savepoint.
+    # PRAGMA foreign_keys is silently ignored inside a transaction (SQLite docs).
+    original_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None  # switch to explicit-transaction control
     try:
-        # Track-layer tables only (no indexes yet — idx_dispatches_ready references
-        # operator_approved_at which does not exist until AFTER the dispatches rebuild).
-        for stmt in schema_migration._split_sql_statements(_0022_TRACK_TABLES_ONLY_DDL):
-            conn.execute(stmt)
+        conn.execute("PRAGMA foreign_keys=OFF")  # must precede SAVEPOINT
 
-        # Dispatches rebuild: rename → create v22 shape → dynamic copy → seq fix → drop.
-        conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_v22")
-        conn.execute("""
-            CREATE TABLE dispatches (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                dispatch_id     TEXT    NOT NULL,
-                project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
-                state           TEXT    NOT NULL DEFAULT 'proposed'
-                                        CHECK (state IN (
-                                            'proposed', 'ready', 'active', 'completed', 'failed',
-                                            'queued', 'claimed', 'delivering', 'accepted', 'running',
-                                            'timed_out', 'failed_delivery', 'expired', 'recovered',
-                                            'dead_letter'
-                                        )),
-                terminal_id     TEXT,
-                track           TEXT,
-                priority        TEXT    DEFAULT 'P2',
-                pr_ref          TEXT,
-                gate            TEXT,
-                attempt_count   INTEGER NOT NULL DEFAULT 0,
-                bundle_path     TEXT,
-                created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                expires_after   TEXT,
-                metadata_json   TEXT    DEFAULT '{}',
-                operator_approved_at TEXT,
-                UNIQUE(dispatch_id, project_id)
-            )
-        """)
-
-        # Add any extra columns (beyond the 0022 schema) back via ALTER TABLE.
-        v22_cols = {
-            'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
-            'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
-            'expires_after', 'metadata_json', 'operator_approved_at',
-        }
-        extra_cols = [c for c, gen in col_info if not gen and c not in v22_cols]
-        for extra_col in extra_cols:
-            conn.execute(f"ALTER TABLE dispatches ADD COLUMN \"{extra_col}\" TEXT")
-
-        conn.execute(
-            f"INSERT INTO dispatches ({col_list}) "
-            f"SELECT {col_list} FROM dispatches_pre_v22"
-        )
-
-        # Sequence preservation (mirrors 0022 SQL DELETE+INSERT pattern, PR #685).
-        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dispatches'")
-        conn.execute("""
-            INSERT INTO sqlite_sequence(name, seq)
-            SELECT 'dispatches',
-                   COALESCE(
-                       (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v22'),
-                       (SELECT MAX(id) FROM dispatches),
-                       0
-                   )
-        """)
-
-        conn.execute("DROP TABLE dispatches_pre_v22")
-
-        # Indexes — applied AFTER dispatches rebuild so operator_approved_at exists.
-        for stmt in schema_migration._split_sql_statements(_0022_INDEXES_DDL):
-            conn.execute(stmt)
-
-        conn.execute("PRAGMA user_version = 22")
-        conn.execute(f"RELEASE SAVEPOINT {sp}")
-    except Exception:
+        sp = '"vnx_ver_22_dynamic_rebuild"'
+        conn.execute(f"SAVEPOINT {sp}")
         try:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-            conn.execute(f"RELEASE SAVEPOINT {sp}")
-        except Exception as rb_exc:
-            warnings.warn(
-                f"0022 dynamic-rebuild ROLLBACK failed: {rb_exc}",
-                stacklevel=2,
+            # Track-layer tables only (no indexes yet — idx_dispatches_ready references
+            # operator_approved_at which does not exist until AFTER the dispatches rebuild).
+            for stmt in schema_migration._split_sql_statements(_0022_TRACK_TABLES_ONLY_DDL):
+                conn.execute(stmt)
+
+            # Dispatches rebuild: rename → create v22 shape → dynamic copy → seq fix → drop.
+            conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_v22")
+            conn.execute("""
+                CREATE TABLE dispatches (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dispatch_id     TEXT    NOT NULL,
+                    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+                    state           TEXT    NOT NULL DEFAULT 'proposed'
+                                            CHECK (state IN (
+                                                'proposed', 'ready', 'active', 'completed', 'failed',
+                                                'queued', 'claimed', 'delivering', 'accepted', 'running',
+                                                'timed_out', 'failed_delivery', 'expired', 'recovered',
+                                                'dead_letter'
+                                            )),
+                    terminal_id     TEXT,
+                    track           TEXT,
+                    priority        TEXT    DEFAULT 'P2',
+                    pr_ref          TEXT,
+                    gate            TEXT,
+                    attempt_count   INTEGER NOT NULL DEFAULT 0,
+                    bundle_path     TEXT,
+                    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    expires_after   TEXT,
+                    metadata_json   TEXT    DEFAULT '{}',
+                    operator_approved_at TEXT,
+                    UNIQUE(dispatch_id, project_id)
+                )
+            """)
+
+            # Add any extra columns (beyond the 0022 schema) back via ALTER TABLE.
+            v22_cols = {
+                'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
+                'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
+                'expires_after', 'metadata_json', 'operator_approved_at',
+            }
+            extra_cols = [c for c, gen in col_info if not gen and c not in v22_cols]
+            for extra_col in extra_cols:
+                conn.execute(f"ALTER TABLE dispatches ADD COLUMN \"{extra_col}\" TEXT")
+
+            conn.execute(
+                f"INSERT INTO dispatches ({col_list}) "
+                f"SELECT {col_list} FROM dispatches_pre_v22"
             )
-        raise
+
+            # Sequence preservation (mirrors 0022 SQL DELETE+INSERT pattern, PR #685).
+            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dispatches'")
+            conn.execute("""
+                INSERT INTO sqlite_sequence(name, seq)
+                SELECT 'dispatches',
+                       COALESCE(
+                           (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v22'),
+                           (SELECT MAX(id) FROM dispatches),
+                           0
+                       )
+            """)
+
+            # DROP succeeds because foreign_keys=OFF (set above, outside the savepoint).
+            # Ghost FKs on child tables referencing dispatches_pre_v22 are tolerated here;
+            # the adaptive 0031-branch rebuilds those child tables with correct composite FKs.
+            conn.execute("DROP TABLE dispatches_pre_v22")
+
+            # Indexes — applied AFTER dispatches rebuild so operator_approved_at exists.
+            for stmt in schema_migration._split_sql_statements(_0022_INDEXES_DDL):
+                conn.execute(stmt)
+
+            conn.execute("PRAGMA user_version = 22")
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                conn.execute(f"RELEASE SAVEPOINT {sp}")
+            except Exception as rb_exc:
+                warnings.warn(
+                    f"0022 dynamic-rebuild ROLLBACK failed: {rb_exc}",
+                    stacklevel=2,
+                )
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON" if original_fk else "PRAGMA foreign_keys=OFF")
+        conn.isolation_level = previous_isolation
+    _verify_foreign_keys_restored(conn, original_fk)
 
 
 # ---------------------------------------------------------------------------

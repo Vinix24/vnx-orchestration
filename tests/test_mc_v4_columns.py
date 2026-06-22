@@ -644,3 +644,189 @@ class TestFullWalkMCShape:
             assert all(v is None for v in row), f"Expected NULL v4 cols, got {row!r}"
         finally:
             conn.close()
+
+
+# ===========================================================================
+# (e) FK-guard: ghost FK on child table does NOT block the dynamic rebuild DROP
+# ===========================================================================
+
+class TestDynamicRebuildGhostFKGuard:
+    """Regression test for the MC ghost-FK bug.
+
+    Scenario: a genuine pre-v22 dispatches table WITH an extra column, plus a child
+    table carrying a FOREIGN KEY referencing the soon-to-be-renamed/dropped shadow
+    table (dispatches_pre_v22).  With foreign_keys ON and the PRAGMA set INSIDE the
+    savepoint (the old, broken behaviour), the DROP TABLE dispatches_pre_v22 raises
+    sqlite3.IntegrityError.  The fix sets foreign_keys=OFF BEFORE the SAVEPOINT, so
+    the DROP succeeds.  The dangling child FK is tolerated here (it is repaired by the
+    adaptive 0031-branch in later migration steps).
+    """
+
+    def _build_store_with_ghost_fk(self, db_path: Path) -> None:
+        """Create a pre-v22 dispatches with one extra column AND a headless_runs-like
+        child table that has a GHOST FK pointing at dispatches_pre_v22.
+
+        The real MC artifact: headless_runs carries a FK referencing dispatches_pre_v22,
+        but dispatches_pre_v22 does NOT exist yet.  The migration RENAMES dispatches →
+        dispatches_pre_v22, which instantiates the shadow; then tries to DROP it, which
+        fails (FOREIGN KEY constraint) with foreign_keys=ON unless the PRAGMA is set OFF
+        before the savepoint.  We must create the child table with foreign_keys=OFF so
+        SQLite accepts the dangling FK without error at schema-creation time.
+        """
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            # Pre-v22 dispatches with one extra column (triggers the dynamic path).
+            conn.execute("""
+                CREATE TABLE dispatches (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dispatch_id     TEXT    NOT NULL,
+                    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+                    state           TEXT    NOT NULL DEFAULT 'proposed',
+                    terminal_id     TEXT,
+                    track           TEXT,
+                    priority        TEXT    DEFAULT 'P2',
+                    pr_ref          TEXT,
+                    gate            TEXT,
+                    attempt_count   INTEGER NOT NULL DEFAULT 0,
+                    bundle_path     TEXT,
+                    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    expires_after   TEXT,
+                    metadata_json   TEXT    DEFAULT '{}',
+                    mc_extra        TEXT,
+                    UNIQUE(dispatch_id, project_id)
+                )
+            """)
+
+            # Child table with a GHOST FK referencing dispatches_pre_v22, which does NOT
+            # exist at this point.  This mirrors the real MC schema oddity.  Created with
+            # foreign_keys=OFF so SQLite accepts the dangling reference.
+            # During migration, RENAME dispatches → dispatches_pre_v22 makes this FK
+            # "real"; the subsequent DROP TABLE dispatches_pre_v22 then fails with
+            # IntegrityError when foreign_keys=ON — exactly the bug being fixed.
+            conn.execute("""
+                CREATE TABLE child_with_ghost_fk (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dispatch_id TEXT NOT NULL,
+                    FOREIGN KEY (dispatch_id) REFERENCES dispatches_pre_v22(dispatch_id)
+                )
+            """)
+
+            # Seed one dispatches row to verify data survives.
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, project_id, mc_extra) "
+                "VALUES ('d-ghost-001', 'mc-ghost', 'ghost-sentinel')"
+            )
+
+            conn.execute("PRAGMA user_version = 20")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_dynamic_rebuild_succeeds_with_ghost_fk(self, tmp_path: Path) -> None:
+        """_apply_0022_dynamic_rebuild must not raise IntegrityError when a child table
+        carries a FK referencing dispatches_pre_v22 (the dropped shadow table).
+        """
+        db_path = tmp_path / "ghost_fk.db"
+        self._build_store_with_ghost_fk(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")  # matches the MC production setting
+        try:
+            # Must not raise sqlite3.IntegrityError: FOREIGN KEY constraint failed.
+            mfs._apply_0022_dynamic_rebuild(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_extra_column_preserved_despite_ghost_fk(self, tmp_path: Path) -> None:
+        """The mc_extra column survives the dynamic rebuild even with the ghost FK present."""
+        db_path = tmp_path / "ghost_fk_col.db"
+        self._build_store_with_ghost_fk(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            mfs._apply_0022_dynamic_rebuild(conn)
+            conn.commit()
+            present = {r[1] for r in conn.execute("PRAGMA table_info('dispatches')")}
+            assert "mc_extra" in present, "mc_extra column was dropped by dynamic rebuild"
+        finally:
+            conn.close()
+
+    def test_user_version_reaches_22_with_ghost_fk(self, tmp_path: Path) -> None:
+        """user_version is 22 after the dynamic rebuild completes with ghost FK present."""
+        db_path = tmp_path / "ghost_fk_ver.db"
+        self._build_store_with_ghost_fk(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            mfs._apply_0022_dynamic_rebuild(conn)
+            conn.commit()
+            assert schema_migration.get_user_version(conn) == 22
+        finally:
+            conn.close()
+
+    def test_row_data_preserved_despite_ghost_fk(self, tmp_path: Path) -> None:
+        """Seeded row data (including the extra column value) survives the rebuild."""
+        db_path = tmp_path / "ghost_fk_data.db"
+        self._build_store_with_ghost_fk(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            mfs._apply_0022_dynamic_rebuild(conn)
+            conn.commit()
+            row = conn.execute(
+                "SELECT dispatch_id, project_id, mc_extra FROM dispatches "
+                "WHERE dispatch_id='d-ghost-001'"
+            ).fetchone()
+            assert row is not None, "Seeded row missing after dynamic rebuild"
+            assert row[0] == "d-ghost-001"
+            assert row[1] == "mc-ghost"
+            assert row[2] == "ghost-sentinel", f"mc_extra value lost: {row[2]!r}"
+        finally:
+            conn.close()
+
+    def test_dangling_child_fk_tolerated_not_strict_check(self, tmp_path: Path) -> None:
+        """The rebuild does NOT run a strict foreign_key_check after DROP; the dangling
+        child FK on child_with_ghost_fk is left for the 0031-branch to repair.
+        """
+        db_path = tmp_path / "ghost_fk_tolerant.db"
+        self._build_store_with_ghost_fk(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            # Must complete without raising — the dangling ref is not our problem here.
+            mfs._apply_0022_dynamic_rebuild(conn)
+            conn.commit()
+
+            # Verify child_with_ghost_fk still exists (not nuked by the rebuild).
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            assert "child_with_ghost_fk" in tables, (
+                "child_with_ghost_fk was unexpectedly dropped by the 0022 rebuild"
+            )
+        finally:
+            conn.close()
+
+    def test_via_apply_migration_entry_point(self, tmp_path: Path) -> None:
+        """The ghost-FK scenario succeeds via the public apply_migration entry point."""
+        db_path = tmp_path / "ghost_fk_entry.db"
+        self._build_store_with_ghost_fk(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            mfs.apply_migration(conn, _PROJECT_ROOT)
+            conn.commit()
+            assert schema_migration.get_user_version(conn) == 22
+            present = {r[1] for r in conn.execute("PRAGMA table_info('dispatches')")}
+            assert "mc_extra" in present, "mc_extra dropped via apply_migration entry point"
+            assert "operator_approved_at" in present
+        finally:
+            conn.close()
