@@ -319,6 +319,27 @@ def _format_default(dflt_value: str | None) -> str | None:
     return f"DEFAULT ({dflt_value})"
 
 
+def _get_secondary_indexes(conn: sqlite3.Connection, table: str) -> list[tuple[str, str]]:
+    """Return (name, sql) for all explicitly-created indexes on ``table``.
+
+    Queries sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL.
+    The ``sql IS NOT NULL`` filter excludes auto-indexes created by SQLite for
+    declared UNIQUE / PRIMARY KEY constraints (those have sql=NULL and origin='u'
+    or origin='pk' in PRAGMA index_list). Only indexes from CREATE [UNIQUE] INDEX
+    statements have non-NULL sql — these are origin='c' indexes in PRAGMA index_list.
+
+    This captures the verbatim CREATE INDEX DDL including any partial WHERE clause
+    and expression columns, so they can be recreated exactly after DROP+RENAME.
+    """
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL "
+        "ORDER BY name",
+        (table,),
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def _get_views_referencing(conn: sqlite3.Connection, table: str) -> list[tuple[str, str]]:
     """Return (name, sql) for all views that reference ``table`` by name.
 
@@ -373,6 +394,40 @@ def _get_table_columns(conn: sqlite3.Connection, table: str) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _get_all_declared_unique_indexes(conn: sqlite3.Connection, table: str) -> list[dict]:
+    """Return ALL declared (origin='u') UNIQUE indexes on ``table``, regardless of whether
+    they include project_id or not.
+
+    origin='u' means the constraint was declared inline in CREATE TABLE as UNIQUE(...).
+    origin='c' means a standalone CREATE [UNIQUE] INDEX statement — those are captured
+    verbatim via _get_secondary_indexes and must never drive a rebuild decision.
+    origin='pk' means the PRIMARY KEY auto-index — handled separately.
+
+    Used by _rebuild_table_phase1 to ensure no declared UNIQUE is lost during a rebuild:
+    composites are re-emitted verbatim; non-composites are widened by appending project_id.
+    """
+    indexes = conn.execute(f"PRAGMA index_list({_safe_ident(table)[1:-1]})").fetchall()
+    result = []
+    for idx in indexes:
+        idx_name = idx[1]
+        unique = idx[2]
+        origin = idx[3] if len(idx) > 3 else "c"
+        if not unique:
+            continue
+        if origin != "u":
+            continue  # only declared UNIQUE constraints (not CREATE INDEX or PK auto-index)
+        cols = [
+            r[2]
+            for r in conn.execute(f"PRAGMA index_info({_safe_ident(idx_name)[1:-1]})").fetchall()
+        ]
+        result.append({
+            "name": idx_name,
+            "cols": cols,
+            "origin": origin,
+        })
+    return result
 
 
 def _rebuild_table_phase1(
@@ -454,13 +509,27 @@ def _rebuild_table_phase1(
             existing_pk = ", ".join(_safe_ident(c["name"]) for c in pk_col_list)
             col_defs.append(f"  PRIMARY KEY ({existing_pk})")
 
-    # Rebuild UNIQUE constraints: add project_id to any that lack it
-    for uidx in non_composite_uniques:
+    # Rebuild UNIQUE constraints: re-emit ALL declared (origin='u') UNIQUE constraints.
+    # - Already-composite ones (contain project_id) are re-emitted verbatim to avoid loss.
+    # - Non-composite ones (lack project_id) are widened by appending project_id.
+    # origin='c' indexes come from CREATE [UNIQUE] INDEX statements and carry verbatim
+    # DDL including any partial WHERE clause — they are recreated verbatim after the
+    # rename via _get_secondary_indexes. Never fold them into table-level UNIQUE constraints
+    # as that would lose any WHERE clause and silently change a partial index into a full one.
+    #
+    # BUG 2 fix: enumerate the full set of origin='u' UNIQUEs from the live schema, not
+    # just the non_composite_uniques subset passed by the caller. The caller only passes
+    # the uniques that LACK project_id (the ones W1 actually widens), but a rebuild must
+    # also preserve any already-composite declared UNIQUE that was filtered out of that
+    # subset — otherwise the rebuilt table silently loses it, breaking FK constraints that
+    # reference the composite unique key.
+    all_declared_uniques = _get_all_declared_unique_indexes(conn, table)
+    for uidx in all_declared_uniques:
         existing_cols = uidx["cols"]
         if "project_id" not in existing_cols:
             extended = existing_cols + ["project_id"]
         else:
-            extended = existing_cols
+            extended = existing_cols  # already composite — re-emit verbatim
         uc_list = ", ".join(_safe_ident(c) for c in extended)
         col_defs.append(f"  UNIQUE ({uc_list})")
 
@@ -482,6 +551,13 @@ def _rebuild_table_phase1(
             f"  FOREIGN KEY ({from_cols}) REFERENCES {_safe_ident(ref_table)} ({to_cols})"
             f" ON UPDATE {on_update} ON DELETE {on_delete}"
         )
+
+    # Capture secondary indexes (CREATE [UNIQUE] INDEX) BEFORE DROP+RENAME.
+    # DROP TABLE cascade-removes all associated indexes. The origin='c' indexes
+    # captured here include verbatim DDL with any partial WHERE clause and
+    # expression columns. They are recreated verbatim after the rename so no
+    # WHERE clause is lost and non-unique indexes are not permanently dropped.
+    secondary_indexes = _get_secondary_indexes(conn, table)
 
     # Capture triggers BEFORE the DROP+RENAME sequence.
     # DROP TABLE cascade-drops all triggers on the table; they are never
@@ -545,6 +621,13 @@ def _rebuild_table_phase1(
     for _, trigger_sql in dependent_triggers:
         conn.execute(trigger_sql)
 
+    # Recreate secondary indexes verbatim (CREATE [UNIQUE] INDEX).
+    # DROP TABLE removed them; origin='c' indexes are not re-emitted as table-level
+    # UNIQUE constraints (to preserve partial WHERE clauses). Execute the original
+    # sql exactly — this preserves WHERE clauses, expression columns, and collations.
+    for _, idx_sql in secondary_indexes:
+        conn.execute(idx_sql)
+
 
 def run_phase1_ddl(
     conn: sqlite3.Connection,
@@ -564,6 +647,15 @@ def run_phase1_ddl(
 
     for table in tables:
         non_composite = _get_unique_indexes(conn, table)
+        # BUG 1 fix: the rebuild trigger must consider ONLY origin='u' declared UNIQUE
+        # constraints that lack project_id — those are the ones W1 actually widens.
+        # origin='c' CREATE-INDEX uniques (e.g. partial indexes with WHERE clauses) are
+        # preserved verbatim by _get_secondary_indexes and must NOT on their own force a
+        # table rebuild. A table that is already in correct v31 shape (composite declared
+        # UNIQUE present) but also carries an origin='c' partial unique index would
+        # otherwise be spuriously rebuilt, losing the composite declared UNIQUE (BUG 2)
+        # and breaking FK constraints that reference it.
+        non_composite_declared = [u for u in non_composite if u.get("origin") == "u"]
         # Also check if a PK exists without project_id (multi-col OR single-col non-INTEGER).
         # B2 fix: include single-col non-INTEGER PK tables so we never drop a PK.
         pk_cols = [
@@ -575,7 +667,7 @@ def run_phase1_ddl(
             and "project_id" not in pk_name_set
             and not (len(pk_cols) == 1 and pk_cols[0]["type"].upper() == "INTEGER")
         )
-        if non_composite or pk_lacks_pid:
+        if non_composite_declared or pk_lacks_pid:
             tables_needing_rebuild.append((table, non_composite))
 
     if not tables_needing_rebuild:
@@ -805,7 +897,11 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
         pk_col_list = ", ".join(_safe_ident(c["name"]) for c in pk_ordered)
         col_defs.append(f"  PRIMARY KEY ({pk_col_list})")
 
-    # Existing UNIQUE indexes (post-Phase 1 they already include project_id)
+    # Existing UNIQUE constraints (post-Phase 1 they already include project_id).
+    # Only emit table-level UNIQUE for origin='u' (declared UNIQUE constraints with
+    # sql=NULL / SQLite auto-index). origin='c' indexes come from CREATE [UNIQUE] INDEX
+    # statements and carry verbatim DDL (including any partial WHERE clause) — they are
+    # recreated verbatim after the rename via secondary_indexes below, NOT emitted here.
     indexes = conn.execute(f"PRAGMA index_list({_safe_ident(table)[1:-1]})").fetchall()
     for idx in indexes:
         idx_name = idx[1]
@@ -815,6 +911,8 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
             continue
         if origin == "pk":
             continue  # already handled as PRIMARY KEY
+        if origin == "c":
+            continue  # recreated verbatim via secondary_indexes after rename
         idx_cols = [
             r[2]
             for r in conn.execute(f"PRAGMA index_info({_safe_ident(idx_name)[1:-1]})").fetchall()
@@ -840,6 +938,11 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
             f"  FOREIGN KEY ({from_cols}) REFERENCES {_safe_ident(ref_table)} ({to_cols})"
             f" ON UPDATE {on_update} ON DELETE {on_delete}"
         )
+
+    # Capture secondary indexes (CREATE [UNIQUE] INDEX) BEFORE DROP+RENAME.
+    # DROP TABLE cascade-removes them. Verbatim DDL is preserved here so any
+    # partial WHERE clause, expression columns, and collations survive Phase 3.
+    secondary_indexes = _get_secondary_indexes(conn, table)
 
     # Capture triggers BEFORE the DROP+RENAME sequence.
     # Phase 3 uses the same copy-and-rename pattern as Phase 1 and has the same
@@ -874,6 +977,12 @@ def _rebuild_table_phase3(conn: sqlite3.Connection, table: str) -> None:
     # reference views find them already present).
     for _, trigger_sql in dependent_triggers:
         conn.execute(trigger_sql)
+
+    # Recreate secondary indexes verbatim (CREATE [UNIQUE] INDEX).
+    # DROP TABLE removed them; they are not emitted as table-level UNIQUE constraints
+    # to preserve any partial WHERE clause and expression columns.
+    for _, idx_sql in secondary_indexes:
+        conn.execute(idx_sql)
 
 
 def run_phase3_enforce(
