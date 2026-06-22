@@ -17,8 +17,10 @@ legitimately produce no diff, so REVIEW_ROLES are exempt.
 Decision rule (a delivery worker is a phantom when):
     role NOT in REVIEW_ROLES
     AND status claims completion (done/success)
-    AND no LLM tokens were measured as spent (token_usage is None/0)
     AND the worktree diff is empty
+token_usage is corroborating DETAIL only — token>0 does NOT exempt (it means an LLM thought, not
+that a deliverable was produced; a delivery task that changed nothing is a phantom even if tokens
+were spent). Reviews are exempt; a legitimate no-op delivery uses VNX_OVERRIDE_PHANTOM_GUARD.
 """
 from __future__ import annotations
 
@@ -61,17 +63,20 @@ def phantom_guard(
         return _ok(f"review role {role!r} — a verdict, not a diff, is expected")
     if (status or "").strip().lower() not in COMPLETION_STATUSES:
         return _ok(f"status {status!r} is not a completion claim — nothing to falsify")
-    if token_usage is not None and token_usage > 0:
-        return _ok(f"token_usage={token_usage} (>0) — an LLM ran, work occurred")
     if (worktree_diff or "").strip():
         return _ok("non-empty worktree diff — work is present")
+    # Empty diff on a delivery completion claim = PHANTOM, REGARDLESS of token_usage. token>0
+    # means an LLM thought/read, NOT that a deliverable was produced — a delivery task that
+    # changed nothing is a phantom even if tokens were spent (the earlier token>0 short-circuit
+    # made the guard inert on token-reporting lanes like claude — panel P0.2 finding). Reviews
+    # are exempt above; a legitimate no-op delivery uses VNX_OVERRIDE_PHANTOM_GUARD.
     tok = "0/unmeasured" if not token_usage else str(token_usage)
     return PhantomVerdict(
         is_phantom=True,
         reason=(
-            f"PHANTOM: status={status!r} claims completion but the worktree diff is EMPTY and "
-            f"token_usage={tok}. A delivery worker reported success with no change and no measured "
-            f"LLM work — receipt is not backed by evidence."
+            f"PHANTOM: status={status!r} claims completion but the worktree diff is EMPTY "
+            f"(token_usage={tok}). A delivery worker reported success with no change — the receipt "
+            f"is not backed by a deliverable."
         ),
     )
 
