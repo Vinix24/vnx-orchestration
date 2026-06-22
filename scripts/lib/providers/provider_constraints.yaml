@@ -110,6 +110,24 @@ constraints:
     audit_severity: blocking
     override_allowed: false
 
+  - id: glm-via-harness-only
+    rule: forbid_route
+    forbidden_route:
+      provider: zai
+      via: [openrouter, litellm]
+    reason: >-
+      GLM must run via the claude-CLI harness lane (provider glm-harness → the local
+      :4141 litellm proxy → OpenRouter), never the plain single-shot litellm runner
+      (litellm:zai). The plain runner is far less capable (no agentic tool-use; proven
+      live to echo bash instead of running it). The door normalizes litellm:zai → glm-harness
+      at the bridge (dispatch_bridge alias); this constraint is the BACKSTOP for any direct
+      spec that still presents the plain zai runner (via=openrouter/litellm). glm-harness
+      carries the distinct via=claude_harness_openrouter, so it clears. Benchmark baselines
+      that intentionally measure the plain litellm:zai runner set VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY=1.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: true
+
   - id: deepseek-harness-subscription-blocked
     rule: forbid_route
     forbidden_route:

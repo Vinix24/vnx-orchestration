@@ -500,7 +500,9 @@ _ddt_subprocess_delivery() {
     #   * provider defaults to claude → the door's tmux-spawn lane — a lane change from the
     #     subprocess lane; assert the receipt's lane in the canary before flipping.
     local _deliver_rc=0
-    if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]]; then
+    # shellcheck source=/dev/null
+    source "$VNX_DIR/scripts/lib/vnx_dispatch_flags.sh"
+    if vnx_single_entry_enabled; then
         printf '%s' "$complete_prompt" | python3 "$VNX_DIR/scripts/lib/dispatch_bridge.py" \
             --dispatch-id "$dispatch_id" \
             --terminal "$terminal_id" \
