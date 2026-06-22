@@ -357,6 +357,10 @@ def _make_default_dispatcher(
                     # checkout.
                     "--shared-worktree",
                     "--allow-unstaged",
+                    # D2.2: a plan-review is working-tree-only — it reads the doc and
+                    # writes a verdict report; it must NOT commit/push (OI-097). The
+                    # flag denies git commit/push at the tool-permission layer.
+                    "--working-tree-only",
                     "--reason", f"plan-gate panel {dispatch_id}",
                 ]
                 run_timeout = timeout_seconds + 180  # tmux warmup + teardown headroom
