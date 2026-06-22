@@ -15,9 +15,17 @@ def test_non_completion_status_is_not_phantom():
     assert not v.is_phantom
 
 
-def test_tokens_spent_is_not_phantom():
-    # an LLM measurably ran → real work, even if the diff arg is empty here
+def test_tokens_spent_but_empty_diff_is_phantom():
+    # token>0 does NOT exempt a delivery role: an LLM thought but produced no deliverable
+    # (empty diff) → phantom. (The old token>0 short-circuit made the guard inert on
+    # token-reporting lanes like claude — panel P0.2 finding.)
     v = pg.phantom_guard(status="done", worktree_diff="", token_usage=1234, role="backend-developer")
+    assert v.is_phantom
+
+
+def test_tokens_spent_with_real_diff_is_not_phantom():
+    v = pg.phantom_guard(status="done", worktree_diff="diff --git a/x b/x\n+y\n",
+                         token_usage=1234, role="backend-developer")
     assert not v.is_phantom
 
 
@@ -41,11 +49,11 @@ def test_codex_zero_token_empty_diff_is_phantom():
 
 
 def test_guard_receipt_extracts_status_role_tokens():
-    # token_usage as a mapping (codex/claude shape) with real work
+    # real work: a non-empty diff → not phantom (and status/role/token extraction works)
     receipt = {"status": "done", "role": "backend-developer",
                "token_usage": {"input": 10, "output": 5}}
-    v = pg.guard_receipt(receipt, worktree_diff="")
-    assert not v.is_phantom  # tokens>0 → real work
+    v = pg.guard_receipt(receipt, worktree_diff="diff --git a/x b/x\n+y\n")
+    assert not v.is_phantom
 
     # kimi-shaped receipt: no token_usage, empty diff, delivery role → phantom
     phantom = {"status": "done", "agent": "backend-developer"}
