@@ -64,11 +64,13 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
             "off",
         )
 
-    def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False):  # type: ignore[misc]
+    def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False, working_tree_only=False):  # type: ignore[misc]
         args = ["--permission-mode", permission_mode]
         if not requires_mcp:
             args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
         args += ["--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob"]
+        if working_tree_only:
+            args += ["--disallowedTools", "Bash(git commit),Bash(git commit:*),Bash(git push),Bash(git push:*)"]
         return args
 
     def _wp_resolve_worker_profile(role):  # type: ignore[misc]
@@ -190,6 +192,7 @@ def _default_launch_command(
     extra_flags: str = "",
     role: "str | None" = None,
     requires_mcp: bool = False,
+    working_tree_only: bool = False,
 ) -> str:
     """Build the interactive ``claude`` launch line (NOT ``claude -p``).
 
@@ -242,6 +245,7 @@ def _default_launch_command(
             scope_args = _wp_build_claude_scope_args(
                 profile,
                 requires_mcp=requires_mcp,
+                working_tree_only=working_tree_only,
             )
             flags = " " + " ".join(shlex.quote(a) for a in scope_args)
         else:
@@ -1406,6 +1410,7 @@ class TmuxInteractiveDispatch:
         isolated_worktree: bool = True,
         base_ref: str = "origin/main",
         requires_mcp: bool = False,
+        working_tree_only: bool = False,
     ) -> InteractiveDispatchResult:
         """Spawn -> drive -> collect -> teardown. Single-shot; no warm-open.
 
@@ -1425,6 +1430,22 @@ class TmuxInteractiveDispatch:
 
         if skip_permissions is None:
             skip_permissions = not attach
+
+        # D2.2 scoping precondition (fail-closed): a working-tree-only dispatch's
+        # commit/push deny only binds in the scoped detached spawn (the path where
+        # _wp_build_claude_scope_args is invoked). Reject every other path —
+        # attached, --dangerously-skip-permissions, or VNX_WORKER_SCOPED=0 — so an
+        # unscoped working-tree-only worker can never silently reach git commit/push.
+        if working_tree_only and not (skip_permissions and worker_scoped_enabled()):
+            return InteractiveDispatchResult(
+                success=False,
+                dispatch_id=dispatch_id,
+                failure_reason=(
+                    "working_tree_only requires a scoped detached spawn "
+                    "(skip_permissions + VNX_WORKER_SCOPED!=0); refusing unscoped "
+                    "dispatch where the commit/push deny would not bind"
+                ),
+            )
 
         label = worker_label or dispatch_id
         session = _sanitize_session_name(f"vnx-{dispatch_id}")
@@ -1652,6 +1673,7 @@ class TmuxInteractiveDispatch:
                 extra_flags=extra_flags,
                 role=role,
                 requires_mcp=requires_mcp,
+                working_tree_only=working_tree_only,
             )
 
             # FIX 1: Final-command guard — bites regardless of how the command
@@ -2069,6 +2091,12 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--skip-permissions", action="store_true", default=None)
     parser.add_argument("--extra-flags", default="")
     parser.add_argument("--attach", action="store_true")
+    parser.add_argument(
+        "--working-tree-only", action="store_true", default=False,
+        dest="working_tree_only",
+        help="Plan-review/plan-write dispatch: deny git commit/push (scoped spawn "
+             "required; the dispatch is rejected if it would run unscoped).",
+    )
     wt_group = parser.add_mutually_exclusive_group()
     wt_group.add_argument(
         "--isolated-worktree",
@@ -2125,6 +2153,7 @@ def main(argv: "list[str] | None" = None) -> int:
         attach=args.attach,
         isolated_worktree=args.isolated_worktree,
         base_ref=args.base_ref,
+        working_tree_only=args.working_tree_only,
     )
     print(json.dumps(result.__dict__, default=str))
     return 0 if result.success else 1
