@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -1073,8 +1074,12 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 @patch("dispatch_cli.build_runtime_snapshot")
 @patch("dispatch_cli.run_envelope_headless_plan")
 def test_headless_optin_routes_to_subprocess_adapter(mock_headless, mock_snapshot, tmp_path):
-    """allow_headless=True + non-empty reason → routes to run_envelope_headless_plan.
-    tmux NOT called; permit is passed to the envelope.
+    """allow_headless=True + non-empty reason + VNX_OVERRIDE_CLAUDE_HEADLESS=1 →
+    routes to run_envelope_headless_plan. tmux NOT called; permit passed to the envelope.
+
+    The headless lane is blocked fail-closed by default (claude-headless constraint +
+    _execute_claude_headless guard); the override flag is the explicit opt-in, so the
+    routing path is only reachable with it set.
     """
     mock_snapshot.return_value = _clean_snapshot()
     mock_result = MagicMock()
@@ -1086,7 +1091,8 @@ def test_headless_optin_routes_to_subprocess_adapter(mock_headless, mock_snapsho
         "headless_reason": "burst benchmark run",
     })
 
-    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
+    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux, \
+         patch.dict(os.environ, {"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
