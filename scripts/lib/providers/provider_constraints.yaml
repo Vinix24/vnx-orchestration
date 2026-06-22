@@ -131,3 +131,16 @@ constraints:
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false
+
+  - id: claude-headless
+    rule: forbid_route
+    forbidden_route:
+      provider: claude
+      via: headless
+    reason: >-
+      Account-protection and billing: the claude_headless lane runs `claude -p`
+      via subprocess_adapter on api-metered billing. Blocked by default; opened
+      explicitly with VNX_OVERRIDE_CLAUDE_HEADLESS=1.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: true

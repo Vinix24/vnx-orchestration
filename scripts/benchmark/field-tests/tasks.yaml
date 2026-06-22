@@ -7,45 +7,42 @@ version: 1
 tiers:
   t1_trivial:
     description: "Mechanical refactor, single/few-file, ~5 min wallclock"
-    lanes:
+    lanes: &bench_lanes_10
       - claude-opus-4-8
       - claude-opus-4-7
       - claude-opus-4-6
       - claude-sonnet-4-6
-      - claude-haiku-4-5
+      - codex-gpt-5-4
+      - codex-gpt-5-5
+      - kimi-k2-7-code
+      - glm-5          # base GLM-5 (Feb 2026) baseline
+      - glm-5-1        # real GLM-5.1 (was wrongly mapped to base glm-5)
+      - glm-5-2        # GLM-5.2 (2026-06-16)
       - deepseek-v4-pro-harness
-      - deepseek-v4-pro-bare
       - deepseek-v4-flash-harness
-      - deepseek-v4-flash-bare
-      - kimi-k2-6
-      - kimi-k2-0905
-      - local-gemma-4b
+      - glm-5-harness    # GLM via full claude-CLI harness (litellm proxy → OpenRouter); harness-vs-runner comparison
+      - glm-5-1-harness
+      - glm-5-2-harness
     n_replications: 3
 
   t2_medium:
     description: "Multi-file refactor + tests + migration, bounded scope, ~15-25 min"
-    lanes:
-      - claude-opus-4-8
-      - claude-opus-4-7
-      - claude-opus-4-6
-      - claude-sonnet-4-6
-      - deepseek-v4-pro-harness
-      - deepseek-v4-pro-bare
-      - deepseek-v4-flash-harness
-      - kimi-k2-6
-      - kimi-k2-0905
+    lanes: *bench_lanes_10
     n_replications: 3
 
   t3_complex:
     description: "Cross-module state, security boundaries, introspection-heavy, >1h"
-    lanes:
-      - claude-opus-4-8
-      - claude-opus-4-7
-      - claude-sonnet-4-6
-      - deepseek-v4-pro-harness
-      - kimi-k2-6
-      - kimi-k2-0905
-      - codex-gpt-5-4
+    lanes: *bench_lanes_10
+    n_replications: 2
+
+  t4_frontier:
+    description: "Frontier discriminators — graded 0-5 rubric, naive ~2-3, deep ~5; separates top models"
+    lanes: *bench_lanes_10
+    n_replications: 2
+
+  t5_review_design:
+    description: "Review/design CHARACTER — not who writes correct code, but which defect classes a model catches and how it decomposes a system. Deterministic detection-rate + coverage checklist; run with --no-judge."
+    lanes: *bench_lanes_10
     n_replications: 2
 
 tasks:
@@ -55,7 +52,7 @@ tasks:
     source: "MC PR #236 worker queues YAML"
     skill: backend-developer
     target_loc: 60
-    deadline_seconds: 600
+    deadline_seconds: 1800  # all-night claude run: generous headroom for thinking models
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 5
@@ -66,7 +63,7 @@ tasks:
     source: "SEOcrawler PR #125 enable RLS on scan_quota"
     skill: database-engineer
     target_loc: 30
-    deadline_seconds: 600
+    deadline_seconds: 1200  # 900 cut off genuine opus completions in the tmux lane (911s/908s observed under load: warmup overhead the API lanes don't have). 1200 gives headroom; #893 (125s warmup-abort) + work-started watchdog still fast-abort true stalls, so this only costs time on legitimately-slow work, never on hangs.
     pattern: "pattern-match-bounded"
     verify_type: "sql_constraint_check"
 
@@ -76,7 +73,7 @@ tasks:
     source: "SEOcrawler PR #119 add load_dotenv()"
     skill: backend-developer
     target_loc: 15
-    deadline_seconds: 300
+    deadline_seconds: 1800  # all-night claude run: generous headroom for thinking models
     pattern: "pattern-match-bounded"
     verify_type: "runtime_smoke"
 
@@ -86,7 +83,7 @@ tasks:
     source: "MC PR #244 visibility_comment_scorer"
     skill: backend-developer
     target_loc: 350
-    deadline_seconds: 1800
+    deadline_seconds: 2700  # all-night claude run: medium tier headroom
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 15
@@ -97,7 +94,7 @@ tasks:
     source: "SEOcrawler new BaseExtractor pattern"
     skill: backend-developer
     target_loc: 250
-    deadline_seconds: 1800
+    deadline_seconds: 2700  # all-night claude run: medium tier headroom
     pattern: "pattern-match-bounded"
     verify_type: "test_pass_count"
     expected_tests: 5
@@ -108,7 +105,7 @@ tasks:
     source: "SEOcrawler PR #123 mock-paginatie fix"
     skill: debugger
     target_loc: 80
-    deadline_seconds: 1200
+    deadline_seconds: 1800  # all-night claude run: introspection headroom
     pattern: "introspection-heavy"
     verify_type: "test_no_timeout"
     timeout_seconds: 5
@@ -144,3 +141,47 @@ tasks:
     pattern: "introspection-heavy"
     verify_type: "iterations_and_hang_detection"
     hang_threshold_minutes: 10
+
+  - id: "t4_01_path_sandbox"
+    tier: t4_frontier
+    folder: "tasks/t4_frontier/01_path_sandbox"
+    source: "security: directory-traversal sandbox — graded adversarial bypass matrix"
+    skill: security-engineer
+    target_loc: 120
+    deadline_seconds: 1800
+    pattern: "adversarial-graded"
+    verify_type: "adversarial_matrix_graded"
+    expected_checks_pass: 17
+
+  - id: "t4_02_subtle_bugfix"
+    tier: t4_frontier
+    folder: "tasks/t4_frontier/02_subtle_bugfix"
+    source: "SWE-bench style: subtle TTLCache eviction bug — fix without breaking the suite"
+    skill: debugger
+    target_loc: 60
+    deadline_seconds: 1800
+    pattern: "swe-bench-bugfix-graded"
+    verify_type: "existing_suite_plus_hidden_regression"
+    expected_checks_pass: 16
+
+  - id: "t5_01_planted_review"
+    tier: t5_review_design
+    folder: "tasks/t5_review_design/01_planted_review"
+    source: "review-character profile: 15 planted defects (3 per category) — deterministic detection-rate fingerprint"
+    skill: reviewer
+    target_loc: 0
+    deadline_seconds: 1800
+    pattern: "review-detection-graded"
+    verify_type: "planted_issue_detection_rate"
+    expected_checks_pass: 15
+
+  - id: "t5_02_agent_engine_design"
+    tier: t5_review_design
+    folder: "tasks/t5_review_design/02_agent_engine_design"
+    source: "design-character profile: agent-team backend engine for a SEO-audit SaaS via a SERP/SEO-data API (DataForSEO)"
+    skill: architect
+    target_loc: 0
+    deadline_seconds: 2400
+    pattern: "design-coverage-graded"
+    verify_type: "design_coverage_checklist"
+    expected_checks_pass: 16

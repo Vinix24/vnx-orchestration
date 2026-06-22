@@ -63,6 +63,8 @@ Two lanes ship on main; T0 picks per task. Full decision rule, provider strings,
 - **`scripts/lib/tmux_interactive_dispatch.py`** (default) — leaseless ephemeral, isolated worktree per dispatch, drives an interactive `claude` worker on the subscription. Use for parallel/independent feature work.
 - **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (Wave 5 smart-context, lease, triple-gate). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`. Use for single-worker PRs that benefit from prior-round findings, or work expected to run >30 min. **No Anthropic SDK** — only `subprocess.Popen(["claude", ...])`.
 
+**Provider→lane rule (hard).** `claude`/Opus/Sonnet panelists and workers route via the **tmux-spawn lane** (subscription, June-15 escape) — NEVER `provider_dispatch` (it refuses claude: claude is not a provider-lane provider) and NEVER headless `claude -p` (API credits post-cutover). `kimi`/`glm`(litellm:zai)/`deepseek` route via `provider_dispatch.py`. Everything dispatches through the **single-entry door** (`vnx dispatch`), which decides the lane; calling a lane script directly is a side door (PR-12 consolidates the remaining ones, incl. the plan-gate panel). The plan-first gate (`plan_gate_panel.py`) honors this split.
+
 For full documentation: `.vnx/docs/`
 <!-- VNX:END BOOTSTRAP -->
 

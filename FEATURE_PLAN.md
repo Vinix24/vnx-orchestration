@@ -1,12 +1,20 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-14T16:02:17.164488+00:00
+**Last updated**: 2026-06-16T13:04:04.569288+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #879 — fix(migration): 0031 ADR-007 runtime tenant + FK repair (#879) (2026-06-15)
+- #878 — chore(audit): backfill utility for recent worktree-only receipts (dry-run-first) (#878) (2026-06-15)
+- #876 — fix(reconciler): defer to declared phase when no dispatch/PR evidence (prevents done→queued downgrade) (#876) (2026-06-15)
+- #877 — docs(operations): add transcript backup & archive guide + index entry (#877) (2026-06-15)
+- #875 — docs(fsr): sync docs to the future-state reconciliation batch (1.0.1) (#875) (2026-06-14)
+- #871 — feat(fsr-d): wire OI→track bridge + reconcile into autopilot_tick, gate advance on sync failure (#871) (2026-06-14)
+- #873 — feat(roadmap): local-model PM-gate plan (1.x) + honest FSR batch status (1.0.1) (#873) (2026-06-14)
+- #872 — feat(skill-preapprove): pre-approve worker-role skills so detached lanes don't stall (#872) (2026-06-14)
 - #862 — feat(fsr-c): open-item→track bridge through tracks.py (R4.1–R4.4, D1/D3/D5) (#862) (2026-06-14)
 - #863 — feat(fsr-b): tenant-scoped canonical tracks in build_t0_state (#863) (2026-06-14)
 - #861 — feat(fsr-a2): version reconciliation via declarative invariant manifest (#861) (2026-06-14)
@@ -69,49 +77,6 @@ _Last 14 days — sourced from git merge commits._
 - #800 — feat(planning): turn-on — vnx objective sync (auto-seed, human-gated) + advisory drift-gate (#800) (2026-06-02)
 - #799 — feat(governance): worker-permission relay — auto-accept window + catastrophic hard-list + escalation (no silent hangs) (#799) (2026-06-02)
 - #798 — fix(tmux): hook-driven version-agnostic lane signals + wire subagent-block (#798) (2026-06-02)
-- #797 — docs(t0): document the live planning/tracks method + worker-dispatch policy in T0 CLAUDE.md (#797) (2026-06-02)
-- #796 — chore(roadmap): postpone launch +1 week + reflect 2026-06-02 overnight merges + activate 1.x queue (#796) (2026-06-02)
-- #794 — fix(db-maintenance): atomic prune transaction (OI-2328) (#794) (2026-06-01)
-- #793 — feat(planning): Phase 3 — advisory rollup reconciler (derived_status, idempotent, never auto-writes ROADMAP) (#793) (2026-06-01)
-- #792 — fix(intelligence): repair 4 regressed nightly pipeline phases (OI-2331) (#792) (2026-06-01)
-- #791 — feat(dashboard): planning kanban — objectives/deliverables/open-items by horizon (reuses design system) (#791) (2026-06-01)
-- #790 — feat(planning): Phase 2 — deliverable plane + proposed->ready human gate (vnx deliverable add/list/promote) (#790) (2026-06-01)
-- #789 — feat(dispatch): PR-1 flag-gated dispatch envelope (codex lane, VNX_UNIFIED_ENVELOPE, legacy default) (#789) (2026-06-01)
-- #788 — feat(governance): unified_report as universal interface — AGENTS.md report-contract + generic report->receipt conversion (no hooks) (#788) (2026-06-01)
-- #787 — feat(planning): Phase 1 — tracks seeder + horizon + deliverables view + vnx objective list (#787) (2026-06-01)
-- #786 — feat(receipts): per-append hash-chain wiring, flag-gated VNX_CHAIN_RECEIPTS (GAP 3b) (#786) (2026-06-01)
-- #785 — docs: provider-lanes USP doc + README hash-chain honesty fix (#785) (2026-06-01)
-- #784 — feat(strategy): project ROADMAP -> strategy/roadmap.yaml + seed decisions (light up strategic_state boot surface) (#784) (2026-06-01)
-- #783 — chore(roadmap): backfill 2026-06-01 work + fix tmux-lane drift (SSOT reconcile) (#783) (2026-06-01)
-- #782 — feat(doctor): structural-doctor for tracks-layer activation (dry-run default, backup-on-apply) (#782) (2026-06-01)
-- #781 — fix(tmux): bounded guarded-retry + adaptive settle for submit reliability (GAP 6) (#781) (2026-06-01)
-- #780 — feat(intelligence): install nightly intelligence pipeline cron (GAP 4 — reactivate self-learning loop) (#780) (2026-06-01)
-- #779 — feat(ops): opt-in DB maintenance for quality_intelligence.db (GAP 3a) (#779) (2026-06-01)
-- #778 — feat(intelligence): dispatch_metadata provider/model column + idempotent migration (GAP 2) (#778) (2026-06-01)
-- #777 — feat(reports): stamp uniform frontmatter on worker-authored reports (schema-uniform with synthesized) (#777) (2026-06-01)
-- #776 — feat(receipts): uniform provider/model/lane across all lanes + resolve unknown-intermediate (#776) (2026-06-01)
-- #775 — feat(tmux): CAPTURE — tmux-spawn conversation into EventStore (observable + minable, uniform) (#775) (2026-06-01)
-- #774 — fix(tmux): tmux-spawn delivery — v2.1.159 readiness + verified submit (the worker now actually executes) (#774) (2026-06-01)
-- #773 — feat(tmux): RECEIPT step — F1 receipt-presence guarantee (no lost subscription session) + dedup (#773) (2026-06-01)
-- #772 — feat(tmux): GOVERN step — git-derived report synthesis + validate_body (shadow), kill placeholder report (#772) (2026-06-01)
-- #771 — feat(tmux): T1 shared prepare() — permission preamble + worker-rules footer + report-contract directive (June-15 parity) (#771) (2026-06-01)
-- #768 — chore(roadmap): consolidate SSOTs — ROADMAP.yaml current 1.0/1.x state, views derived (S0) (#768) (2026-06-01)
-- #769 — docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope (#769) (2026-06-01)
-- #751 — docs(contract): parallel multi-track execution contract supersedes chain contract (ADR-020) (#751) (2026-06-01)
-- #767 — feat(dispatch): route default Claude lane through enriched tmux-spawn (dogfood + Wave-1b) (#767) (2026-06-01)
-- #766 — fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report (dogfood the default lane) (#766) (2026-06-01)
-- #758 — chore(scrub): remove residual private-project artifacts from repo + wheel (#758) (2026-06-01)
-- #757 — docs(readme): control-plane repositioning + governed-memory + architecture/ADRs + blog series (#757) (2026-06-01)
-- #765 — feat(provider): governed DeepSeek-harness lane (own-key, key-auth, MCP-off — account-safe) (#765) (2026-06-01)
-- #763 — fix(kimi): 1.44.0 content-block stream-json parser + fail-loud on empty extraction (incl. robust spawn) (#763) (2026-06-01)
-- #770 — fix(dispatch): place prompt before variadic scope flags so the worker receives it (#770) (2026-06-01)
-- #764 — fix(security): scope worker capabilities — drop skip-permissions + empty ambient MCP (interim, pre-full-binding) (#764) (2026-06-01)
-- #761 — feat(governance): provider-aware intelligence + receipt token/cost capture (non-Claude parity) (#761) (2026-06-01)
-- #760 — chore(governance): thin-T0 role + role-based manager block + auto-inject footer (packaged/wheel) (#760) (2026-06-01)
-- #759 — refactor(rename): _vN scripts -> canonical names + compat shims (remove in 1.0.1) (#759) (2026-05-31)
-
-**WAVE0**
-- #756 — chore(wave0): untrack .venv+scratch (keep FEATURE_PLAN/PR_QUEUE), strip emoji/buzzwords (#756) (2026-05-31)
 
 ## Active features
 
@@ -119,8 +84,8 @@ _No active features._
 
 ## Completed
 
-### F1–F2
-All PRs merged. (#773 + #847)
+### F2
+All PRs merged. (#847)
 
 ## Planned (from ROADMAP.yaml)
 

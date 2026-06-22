@@ -1,0 +1,27 @@
+# litellm proxy config for the glm-harness lane.
+#
+# Exposes an ANTHROPIC-compatible /v1/messages endpoint (what the `claude` CLI speaks)
+# backed by GLM models on OPENROUTER. This lets the full Claude Code harness drive GLM
+# while inference still flows through OpenRouter — so `zai-via-openrouter-only` stays
+# intact (no direct z.ai/Zhipu account) and it's the CLI not the SDK (`no-anthropic-sdk`
+# intact). The key is read from OPENROUTER_API_KEY in the proxy's env; never hardcoded.
+model_list:
+  - model_name: glm-5
+    litellm_params:
+      model: openrouter/z-ai/glm-5
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: glm-5.1
+    litellm_params:
+      model: openrouter/z-ai/glm-5.1
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: glm-5.2
+    litellm_params:
+      model: openrouter/z-ai/glm-5.2
+      api_key: os.environ/OPENROUTER_API_KEY
+
+litellm_settings:
+  drop_params: true        # tolerate Anthropic params litellm/OpenRouter doesn't map 1:1
+  telemetry: false
+
+general_settings:
+  master_key: sk-glm-harness-local   # local-only auth between the claude CLI and this proxy

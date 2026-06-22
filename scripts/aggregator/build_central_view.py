@@ -58,10 +58,22 @@ class ProjectEntry:
     name: str
     path: Path
     project_id: str
+    # Optional override for projects whose governance state does NOT live at the
+    # default `path/.vnx-data` — e.g. vnx-orchestration, whose real data is the
+    # home-dir central store `~/.vnx-data/vnx-dev` (the default resolves to a 56 KB
+    # stale repo-local DB, so a path-only registry would silently import 0 rows).
+    # All call sites construct ProjectEntry with keyword args, so this trailing
+    # optional field is backward-compatible.
+    data_dir_override: "Path | None" = None
+
+    @property
+    def data_dir(self) -> Path:
+        """The project's `.vnx-data` dir — the override if set, else `path/.vnx-data`."""
+        return self.data_dir_override if self.data_dir_override is not None else self.path / ".vnx-data"
 
     @property
     def state_dir(self) -> Path:
-        return self.path / ".vnx-data" / "state"
+        return self.data_dir / "state"
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -90,7 +102,11 @@ def load_registry(path: Path) -> list[ProjectEntry]:
         name = entry["name"]
         proj_path = Path(entry["path"]).expanduser()
         pid = entry.get("project_id") or synthesize_project_id(name)
-        out.append(ProjectEntry(name=name, path=proj_path, project_id=pid))
+        _dd = entry.get("data_dir")
+        data_dir_override = Path(_dd).expanduser() if _dd else None
+        out.append(ProjectEntry(
+            name=name, path=proj_path, project_id=pid, data_dir_override=data_dir_override,
+        ))
     return out
 
 

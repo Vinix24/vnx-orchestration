@@ -28,6 +28,10 @@ parallel path:
   `dispatch_cli.py --spec-file`). The door runs `compile_plan` + an ExecutionPermit
   for every lane. Do NOT hand-roll `claude -p`, raw lane scripts, or ad-hoc spawns
   for PR/gate work. Routing/lanes/constraints: `docs/core/DISPATCH_RULES.md`.
+  Lane rule the door enforces: **`claude`/Opus → tmux-spawn lane** (subscription, June-15
+  escape; never `provider_dispatch`, never headless `claude -p`); `kimi`/`glm`/`deepseek`
+  → `provider_dispatch`. Known interim side door being consolidated by PR-12: the PM
+  plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
 - **Feature/build planning** goes through the roadmap layer (`vnx roadmap`,
   `roadmap_manager.py`, `build_strategy_projection.py` — waves/objectives), NOT
   ad-hoc plan docs scattered in `claudedocs/`.

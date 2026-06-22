@@ -372,6 +372,11 @@ def build_runtime_snapshot(
     else:
         effective_model = spec.model or "default"
 
+    # claude-headless enforcement: allow_headless=True sets via to 'headless', which
+    # triggers the claude-headless forbid_route constraint. Normal tmux lane keeps via='cli'.
+    if is_claude_lane and spec.allow_headless:
+        via = "headless"
+
     # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
     constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
     try:
@@ -507,6 +512,10 @@ def _execute_claude_headless(
     Delegates all permit verification, TOCTOU check, and GOVERN to
     run_envelope_headless_plan — same security contract as the provider lane.
     """
+    if os.environ.get("VNX_OVERRIDE_CLAUDE_HEADLESS") != "1":
+        raise PermissionError(
+            "claude_headless lane blocked by default; set VNX_OVERRIDE_CLAUDE_HEADLESS=1 to opt in"
+        )
     result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role)
     return result.returncode
 

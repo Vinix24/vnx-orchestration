@@ -1186,6 +1186,38 @@ def generate_status_report() -> dict:
         log('ERROR', f'Failed to generate status report: {e}')
         return {'status': 'error', 'error': str(e)}
 
+def run_qi_three_phase_migration(
+    qi_db_path: Path,
+    pid: str,
+) -> dict:
+    """Run the W1 3-phase tenant-isolation migration on quality_intelligence.db.
+
+    This is the QI-specific runner (separate transaction from RC, same 3-phase
+    logic). Called by the two-DB orchestrator in tenant_stamping.py.
+
+    Phase 1 (DDL): add project_id to composite UNIQUE/PK for tables lacking it.
+    Phase 2 (data): re-stamp NULL/'vnx-dev'/'' -> pid (fail-closed guard).
+    Phase 3 (DDL): enforce project_id TEXT NOT NULL (no DEFAULT 'vnx-dev').
+
+    Each phase has its own checkpoint + rollback. The function is idempotent:
+    already-correct tables are skipped by the phase-level guards.
+
+    Returns a result dict with per-phase outcomes (same schema as RC runner).
+    """
+    import sys as _sys
+    _scripts_lib = Path(__file__).resolve().parent / "lib"
+    if str(_scripts_lib) not in _sys.path:
+        _sys.path.insert(0, str(_scripts_lib))
+    from tenant_stamping import run_three_phase_migration_on_db  # noqa: PLC0415
+
+    return run_three_phase_migration_on_db(
+        Path(qi_db_path),
+        pid,
+        db_label="QI",
+        skip_phase3=False,
+    )
+
+
 def main():
     """Main execution flow"""
     print(f"\n{Colors.BLUE}{'='*70}")

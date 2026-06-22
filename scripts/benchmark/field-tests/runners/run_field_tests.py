@@ -37,8 +37,19 @@ from reporter import (  # noqa: E402
 
 
 def load_tasks_config() -> dict:
-    cfg_path = FIELD_TESTS / "tasks.yaml"
-    return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((FIELD_TESTS / "tasks.yaml").read_text(encoding="utf-8"))
+    # Optional gitignored overlay for INTERNAL tasks (e.g. the t6 real-codebase-review
+    # tier, whose instruction/verify reference proprietary repos and must not be
+    # committed/published). Merges its tiers + tasks on top of the public config.
+    local = FIELD_TESTS / "tasks.local.yaml"
+    if local.exists():
+        lcfg = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
+        cfg.setdefault("tiers", {}).update(lcfg.get("tiers", {}))
+        seen = {t["id"] for t in cfg.get("tasks", [])}
+        cfg.setdefault("tasks", []).extend(
+            t for t in lcfg.get("tasks", []) if t["id"] not in seen
+        )
+    return cfg
 
 
 def filter_cells(
@@ -89,7 +100,11 @@ def run_one_cell(
 
     instruction = instruction_path.read_text(encoding="utf-8")
     seed_dir = task_folder / "seed"
-    dispatch_paths = str(seed_dir.relative_to(REPO_ROOT)) if seed_dir.exists() else ""
+    # Always pass the conventional seed-rel path. When the dir exists the worker gets
+    # the materialized seed; when it does NOT (from-scratch tasks like t3 07/08 that
+    # build everything themselves) the harness starts the worker in an empty cell and
+    # plants the SEED_REL symlink, so verify.py's `workdir / SEED_REL` resolves either way.
+    dispatch_paths = str(seed_dir.relative_to(REPO_ROOT))
 
     deadline = deadline_override if deadline_override is not None else task.get("deadline_seconds", 600)
     # Skill-binding: tasks.yaml may declare `skill: <name>` or `skills: [a, b]`.
@@ -416,6 +431,29 @@ def main() -> int:
     )
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"[run_field_tests] {len(cells)} cells → {results_dir}", file=sys.stderr)
+
+    # Preflight: OpenRouter (glm / litellm:zai) lanes silently DNF at ~2s when credits are
+    # depleted (a 402 reads identically to a throttle from outside). Catch it loudly here
+    # instead of burning a whole run — 2026-06-19 a GLM t4/t5 run instant-rejected for hours
+    # on an empty balance. Aborts only when EVERY lane is an OpenRouter lane; mixed runs warn.
+    or_lanes = [
+        l for (l, _t, _r) in cells
+        if str(l.get("id", "")).startswith("glm")
+        or "zai" in str(l.get("provider", "")).lower()
+        or "openrouter" in str(l.get("provider", "")).lower()
+    ]
+    if or_lanes:
+        try:
+            import check_openrouter_credits as _orc
+            rc = _orc.check()
+        except Exception as exc:  # never block a run on the guard itself
+            print(f"[credits] guard error (continuing): {exc}", file=sys.stderr)
+            rc = 3
+        if rc == 2 and len(or_lanes) == len(cells):
+            print("[run_field_tests] ABORT: OpenRouter credits depleted and every lane in this "
+                  "run is an OpenRouter lane. Top up at https://openrouter.ai/credits, then re-run.",
+                  file=sys.stderr)
+            return 2
 
     scores, failures = _run_cells(cells, args, run_judge=not args.no_judge)
 
