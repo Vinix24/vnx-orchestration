@@ -691,15 +691,33 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
 
     Lenient on EXTRA columns/indexes/FKs (a later-version DB may carry more) but
     STRICT on PK ordinals (so a composite-PK v24+ DB never validates as v22) and on
-    the declared nullability/affinity of every required column."""
+    the declared nullability/affinity of every required column.
+
+    For v31: the runtime-pool family (terminal_leases, dispatch_attempts, headless_runs,
+    worker_states, worker_pool_membership, pool_config) is optional — a store that was
+    never initialized with the runtime-pool schema is still valid at v31. This covers
+    two cases:
+      - ALL absent: skip_runtime=True → skip the entire conditional family.
+      - SOME absent (partial-runtime, e.g. MC's headless_runs-only shape): each absent
+        conditional table is skipped individually; present tables are still validated.
+    """
     manifest = SCHEMA_MANIFEST[version]
     skip_runtime = (
         version == 31
         and not any(_table_exists(conn, table) for table in _V31_RUNTIME_FAMILY_TABLES)
     )
+    # For partial-runtime stores: track which conditional tables to skip individually.
+    partial_skip_tables: frozenset[str] = frozenset()
+    if (version == 31 and not skip_runtime):
+        partial_skip_tables = frozenset(
+            t for t in _CONDITIONAL_V31_RUNTIME_TABLES
+            if not _table_exists(conn, t)
+        )
     out: List[str] = []
     for tbl in manifest.tables:
         if skip_runtime and tbl.name in _CONDITIONAL_V31_RUNTIME_TABLES:
+            continue
+        if tbl.name in partial_skip_tables:
             continue
         out += validate_table(conn, tbl)
     for view in manifest.views:

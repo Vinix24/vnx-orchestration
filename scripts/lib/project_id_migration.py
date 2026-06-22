@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """VNX Migration 0010 — project_id column runner (Phase 0 single-VNX).
 
-Idempotently adds ``project_id TEXT NOT NULL DEFAULT 'vnx-dev'`` plus a
+Idempotently adds ``project_id TEXT NOT NULL DEFAULT '<resolved-pid>'`` plus a
 single-column index to hot tables in both ``quality_intelligence.db`` and
 ``runtime_coordination.db``. Reapplying is a no-op:
 
@@ -14,16 +14,143 @@ This module mirrors that file via a Python runner because SQLite's
 ``ALTER TABLE ... ADD COLUMN`` does not support ``IF NOT EXISTS``.
 
 Companion plan: ``claudedocs/2026-04-30-single-vnx-migration-plan.md`` §6 Phase 0.
+
+W-init (1.0-blocker): run_runtime_coordination_migration and
+run_quality_intelligence_migration now accept an explicit ``default_project_id``
+and expose a ``resolve_init_project_id()`` helper that resolves the owning
+project_id fail-closed (marker file → VNX_PROJECT_ID env; no silent 'vnx-dev'
+fallback). Callers that cannot supply an explicit pid call
+``resolve_init_project_id(db_path)`` before invoking the runners.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Optional
 
 DEFAULT_PROJECT_ID = "vnx-dev"
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# W-init: fail-closed project_id resolution for init / ADD COLUMN backfill.
+#
+# Resolution order (anchored on the DB file path, not cwd — same anchor as
+# migrate_future_system._resolve_validated_project_id):
+#   1. DB PATH — parse owning pid from .../.vnx-data/<pid>/state/<db> layout.
+#   2. .vnx-project-id marker file walking UP from the DB directory.
+#   3. VNX_PROJECT_ID environment variable.
+#
+# All present sources MUST agree.  Any conflict → RuntimeError (fail-closed).
+# No sources at all → default to 'vnx-dev' with a warning (backward-compat).
+#
+# Rationale for the fallback: real central stores ALWAYS have a
+# ~/.vnx-data/<pid>/ path and therefore resolve via (1); only genuinely
+# contextless calls (tests, default installs) reach the fallback, and
+# 'vnx-dev' is the correct legacy default for those.
+#
+# This is intentionally a stripped-down resolver — it avoids importing the
+# full vnx_identity chain (which requires the vnx_paths bootstrap) so that
+# project_id_migration.py can be imported from lightweight init scripts.
+# ---------------------------------------------------------------------------
+
+_PROJECT_FILE_NAME = ".vnx-project-id"
+_INIT_PID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+
+
+def _pid_from_db_path(db_path: Path) -> Optional[str]:
+    """Parse the owning project_id from a canonical .vnx-data layout.
+
+    Canonical layout: <root>/.vnx-data/<project_id>/state/<db_file>
+    Returns the project_id directory name when the path matches, else None.
+    Mirrors migrate_future_system._project_id_from_db_path exactly.
+    """
+    p = db_path.resolve()
+    state_dir = p.parent
+    if state_dir.name != "state":
+        return None
+    pid_dir = state_dir.parent
+    if pid_dir.parent.name != ".vnx-data":
+        return None
+    return pid_dir.name or None
+
+
+def _read_marker_from_path(db_path: Path) -> Optional[str]:
+    """Walk UP from db_path's directory, return the first-line pid from .vnx-project-id."""
+    start = db_path.resolve().parent
+    for ancestor in [start, *start.parents]:
+        marker = ancestor / _PROJECT_FILE_NAME
+        if marker.is_file():
+            try:
+                first = marker.read_text(encoding="utf-8").splitlines()[0].strip()
+            except (OSError, IndexError):
+                return None
+            return first or None
+    return None
+
+
+def resolve_init_project_id(db_path: Path) -> str:
+    """Resolve the owning project_id for an init-time ADD COLUMN backfill.
+
+    Anchor: the resolved DB file path (not cwd).  Resolution order:
+      1. DB path layout — parses pid from .../.vnx-data/<pid>/state/<db>.
+      2. .vnx-project-id marker file, walking UP from the DB directory.
+      3. VNX_PROJECT_ID environment variable.
+
+    All present sources must agree — any conflict raises RuntimeError
+    (fail-closed: the real contamination guard).
+
+    No sources at all → defaults to 'vnx-dev' with a logging.warning.
+    Rationale: real non-vnx-dev central stores always carry their pid in
+    the path (source 1) so they never reach this default.  Only contextless
+    callers (tests, fresh default installs) reach it, and 'vnx-dev' is the
+    correct legacy default for those.  This restores backward-compat without
+    reintroducing contamination.
+
+    ADR-007 compliance: callers may invoke this and pass the returned value
+    as ``default_project_id`` to ``run_runtime_coordination_migration`` /
+    ``run_quality_intelligence_migration``.
+    """
+    path_pid = _pid_from_db_path(Path(db_path))
+    marker_pid = _read_marker_from_path(Path(db_path))
+    env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip() or None
+
+    sources: Dict[str, str] = {}
+    if path_pid:
+        sources["db-path"] = path_pid
+    if marker_pid:
+        sources["marker"] = marker_pid
+    if env_pid:
+        sources["env:VNX_PROJECT_ID"] = env_pid
+
+    distinct = set(sources.values())
+    if len(distinct) > 1:
+        detail = ", ".join(f"{k}={v!r}" for k, v in sources.items())
+        raise RuntimeError(
+            f"ADR-007 fail-closed: project_id conflict for init backfill — {detail}. "
+            "All sources must agree. Resolve the conflict before running init."
+        )
+    if not distinct:
+        log.warning(
+            "resolve_init_project_id: no project_id source found (no .vnx-data path "
+            "layout, no .vnx-project-id marker walking up from '%s', VNX_PROJECT_ID "
+            "unset). Defaulting to 'vnx-dev'. Real central stores always resolve via "
+            "path layout — this default is safe only for local/test contexts.",
+            Path(db_path).resolve().parent,
+        )
+        return DEFAULT_PROJECT_ID
+
+    pid = distinct.pop()
+    if not _INIT_PID_RE.match(pid):
+        raise RuntimeError(
+            f"ADR-007 fail-closed: resolved project_id {pid!r} is not a valid VNX id "
+            f"(must match {_INIT_PID_RE.pattern}). Fix the marker or VNX_PROJECT_ID."
+        )
+    return pid
 
 # Quality Intelligence: hot tables that need project_id at Phase 0.
 # (Migration plan §4.1 P0 set + dispatch's confidence_events addition.)
@@ -185,22 +312,38 @@ def apply_project_id_migration(
     return results
 
 
-def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]:
+def run_runtime_coordination_migration(
+    db_path: str | Path,
+    *,
+    default_project_id: Optional[str] = None,
+) -> Dict[str, object]:
     """Apply migration 0010 to runtime_coordination.db. Idempotent.
 
     Stamps ``runtime_schema_version`` to 10 if not already present.
     Creates the table first when absent — on some pip-wheel paths init_schema
     may resolve a different schema directory and skip the base schema that would
     normally create it, leaving the INSERT below to hit "no such table".
+
+    W-init (ADR-007): ``default_project_id`` controls the DEFAULT clause of
+    the ADD COLUMN backfill.  When ``None``, it is resolved fail-closed via
+    ``resolve_init_project_id(db_path)``.  Callers should pass the owning
+    project_id explicitly; the auto-resolve path is a convenience for
+    library-level use.  Passing ``'vnx-dev'`` explicitly is intentional for
+    the vnx-dev project store only.
     """
     path = Path(db_path)
     if not path.exists():
         return {"status": "skipped_no_db", "db_path": str(path), "results": {}}
 
+    if default_project_id is None:
+        default_project_id = resolve_init_project_id(path)
+
     conn = sqlite3.connect(str(path))
     try:
         conn.execute("PRAGMA foreign_keys = ON")
-        results = apply_project_id_migration(conn, RUNTIME_COORDINATION_TABLES)
+        results = apply_project_id_migration(
+            conn, RUNTIME_COORDINATION_TABLES, default_project_id=default_project_id
+        )
         # Self-heal the 2nd schema-code drift: terminal_leases.worker_pid.
         # Independent of the project_id columns above; nullable INTEGER.
         worker_pid_status = ensure_worker_pid_column(conn)
@@ -228,19 +371,32 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
     }
 
 
-def run_quality_intelligence_migration(db_path: str | Path) -> Dict[str, object]:
+def run_quality_intelligence_migration(
+    db_path: str | Path,
+    *,
+    default_project_id: Optional[str] = None,
+) -> Dict[str, object]:
     """Apply migration 0010 to quality_intelligence.db. Idempotent.
 
     Stamps ``schema_version`` (TEXT-keyed) with ``8.3.0-project-id`` if absent.
+
+    W-init (ADR-007): ``default_project_id`` controls the DEFAULT clause of
+    the ADD COLUMN backfill.  When ``None``, it is resolved fail-closed via
+    ``resolve_init_project_id(db_path)``.
     """
     path = Path(db_path)
     if not path.exists():
         return {"status": "skipped_no_db", "db_path": str(path), "results": {}}
 
+    if default_project_id is None:
+        default_project_id = resolve_init_project_id(path)
+
     conn = sqlite3.connect(str(path))
     try:
         conn.execute("PRAGMA foreign_keys = ON")
-        results = apply_project_id_migration(conn, QUALITY_INTELLIGENCE_TABLES)
+        results = apply_project_id_migration(
+            conn, QUALITY_INTELLIGENCE_TABLES, default_project_id=default_project_id
+        )
         # schema_version table may not exist on a fresh DB; create idempotently.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_version ("

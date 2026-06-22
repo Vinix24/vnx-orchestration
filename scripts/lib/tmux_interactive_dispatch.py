@@ -22,16 +22,15 @@ import shlex
 import shutil
 import subprocess
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 sys_path_dir = str(Path(__file__).resolve().parent)
-import sys
 
 if sys_path_dir not in sys.path:
     sys.path.insert(0, sys_path_dir)
@@ -65,11 +64,13 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
             "off",
         )
 
-    def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False):  # type: ignore[misc]
+    def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False, working_tree_only=False):  # type: ignore[misc]
         args = ["--permission-mode", permission_mode]
         if not requires_mcp:
             args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
         args += ["--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob"]
+        if working_tree_only:
+            args += ["--disallowedTools", "Bash(git commit),Bash(git commit:*),Bash(git push),Bash(git push:*)"]
         return args
 
     def _wp_resolve_worker_profile(role):  # type: ignore[misc]
@@ -191,6 +192,7 @@ def _default_launch_command(
     extra_flags: str = "",
     role: "str | None" = None,
     requires_mcp: bool = False,
+    working_tree_only: bool = False,
 ) -> str:
     """Build the interactive ``claude`` launch line (NOT ``claude -p``).
 
@@ -243,6 +245,7 @@ def _default_launch_command(
             scope_args = _wp_build_claude_scope_args(
                 profile,
                 requires_mcp=requires_mcp,
+                working_tree_only=working_tree_only,
             )
             flags = " " + " ".join(shlex.quote(a) for a in scope_args)
         else:
@@ -357,6 +360,9 @@ class TmuxInteractiveDispatch:
         subprocess worker. Falls back to a legacy role label + instruction on failure.
         Always includes *instruction* in the returned string.
         """
+        if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
+            return instruction
+
         if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
             "1", "true", "yes", "on"
         ):
@@ -435,6 +441,8 @@ class TmuxInteractiveDispatch:
         worktree_path: "Path | None" = None,
         model: "str | None" = None,
         failure_reason: str = "tmux_receipt_deadline_exceeded",
+        token_usage: "dict | None" = None,
+        role: "str | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -444,6 +452,9 @@ class TmuxInteractiveDispatch:
 
         Returns the emitted report path on success, None on critical import failure.
         A None return is an audit-trail gap and must be surfaced by the caller.
+
+        ``role`` is forwarded to GovernSpec so govern() can apply role-specific
+        validation logic (e.g. plan-reviewer bodies skip standard heading validation).
         """
         try:
             from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
@@ -464,11 +475,13 @@ class TmuxInteractiveDispatch:
             base_sha=base_sha,
             worktree_path=worktree_path,
             model=model,
+            role=role,
         )
         raw = GovernRaw(
             receipt=receipt,
             duration_seconds=duration_seconds,
             failure_reason=failure_reason,
+            token_usage=token_usage,
         )
         outcome = govern(spec, raw, lane="tmux_interactive")
         if outcome.report_path:
@@ -484,6 +497,39 @@ class TmuxInteractiveDispatch:
                 dispatch_id, outcome.contract_status, outcome.error,
             )
         return outcome.report_path
+
+    # Pane TUI cumulative token counter, e.g. "(18s · ↓ 739 tokens)" (output / down) and
+    # "(↑ 12 tokens)" (input / up). Best-effort: the subscription lane has no usage API.
+    _PANE_OUTPUT_TOKENS_RE = re.compile(r"[↓⬇]\s*([\d,]+)\s*tokens?\b", re.IGNORECASE)
+    _PANE_INPUT_TOKENS_RE = re.compile(r"[↑⬆]\s*([\d,]+)\s*tokens?\b", re.IGNORECASE)
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    def _parse_token_usage_from_log(self, raw_log: "Path | None") -> "dict | None":
+        """Best-effort token counts for the claude subscription lane (no usage API).
+
+        The interactive TUI prints a cumulative counter like "(18s · ↓ 739 tokens)".
+        pipe-pane records every redraw, so the MAX ↓/↑ value across the captured log is
+        the final output/input token total. Returns {"input","output","cache_read"} or
+        None when nothing parseable was seen (then the report frontmatter stays at 0 and
+        the scorer reports tokens/sec as n/a rather than a fabricated number).
+        """
+        if raw_log is None:
+            return None
+        try:
+            text = Path(raw_log).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        text = self._ANSI_RE.sub("", text)
+
+        def _max_tokens(rx: "re.Pattern") -> int:
+            vals = [int(m.replace(",", "")) for m in rx.findall(text) if m]
+            return max(vals) if vals else 0
+
+        out = _max_tokens(self._PANE_OUTPUT_TOKENS_RE)
+        inp = _max_tokens(self._PANE_INPUT_TOKENS_RE)
+        if out == 0 and inp == 0:
+            return None
+        return {"input": inp, "output": out, "cache_read": 0}
 
     def _build_completion_protocol(
         self, dispatch_id: str, label: str, model: str = "unknown"
@@ -1364,6 +1410,7 @@ class TmuxInteractiveDispatch:
         isolated_worktree: bool = True,
         base_ref: str = "origin/main",
         requires_mcp: bool = False,
+        working_tree_only: bool = False,
     ) -> InteractiveDispatchResult:
         """Spawn -> drive -> collect -> teardown. Single-shot; no warm-open.
 
@@ -1383,6 +1430,22 @@ class TmuxInteractiveDispatch:
 
         if skip_permissions is None:
             skip_permissions = not attach
+
+        # D2.2 scoping precondition (fail-closed): a working-tree-only dispatch's
+        # commit/push deny only binds in the scoped detached spawn (the path where
+        # _wp_build_claude_scope_args is invoked). Reject every other path —
+        # attached, --dangerously-skip-permissions, or VNX_WORKER_SCOPED=0 — so an
+        # unscoped working-tree-only worker can never silently reach git commit/push.
+        if working_tree_only and not (skip_permissions and worker_scoped_enabled()):
+            return InteractiveDispatchResult(
+                success=False,
+                dispatch_id=dispatch_id,
+                failure_reason=(
+                    "working_tree_only requires a scoped detached spawn "
+                    "(skip_permissions + VNX_WORKER_SCOPED!=0); refusing unscoped "
+                    "dispatch where the commit/push deny would not bind"
+                ),
+            )
 
         label = worker_label or dispatch_id
         session = _sanitize_session_name(f"vnx-{dispatch_id}")
@@ -1412,6 +1475,10 @@ class TmuxInteractiveDispatch:
                     repo_root=self._project_root,
                 )
                 cwd = worktree_handle.path
+                if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
+                    from benchmark_worker_isolation import materialize_benchmark_seed  # noqa: PLC0415
+
+                    cwd = materialize_benchmark_seed(cwd, dispatch_paths)
             except WorktreeAllocateError as exc:
                 self._emit_event(
                     "interactive_worktree_add_failed",
@@ -1425,6 +1492,31 @@ class TmuxInteractiveDispatch:
                     label=label,
                     failure_reason=f"worktree_add_failed: {exc}",
                     duration_seconds=time.monotonic() - start_time,
+                )
+            except RuntimeError as exc:
+                if worktree_handle is not None:
+                    try:
+                        reap(worktree_handle, classify(worktree_handle))
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        logger.warning(
+                            "interactive: failed to clean materialization-error "
+                            "worktree for %s: %s",
+                            dispatch_id,
+                            cleanup_exc,
+                        )
+                self._emit_event(
+                    "interactive_benchmark_seed_materialization_failed",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason=str(exc),
+                )
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    failure_reason=f"benchmark_seed_materialization_failed: {exc}",
+                    duration_seconds=time.monotonic() - start_time,
+                    worktree_path=str(worktree_handle.path) if worktree_handle else None,
                 )
 
         # Per-dispatch hook signal dir: the SessionStart / UserPromptSubmit / Stop
@@ -1581,6 +1673,7 @@ class TmuxInteractiveDispatch:
                 extra_flags=extra_flags,
                 role=role,
                 requires_mcp=requires_mcp,
+                working_tree_only=working_tree_only,
             )
 
             # FIX 1: Final-command guard — bites regardless of how the command
@@ -1667,6 +1760,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     failure_reason="interactive_ready_timeout",
+                    role=role,
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -1704,7 +1798,9 @@ class TmuxInteractiveDispatch:
                 instruction=instruction,
                 dispatch_paths=dispatch_paths,
             )
-            if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
+            if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
+                body = _context_body
+            elif os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
                 "1", "true", "yes", "on"
             ):
                 # prepare() already includes scope-note; add completion-protocol
@@ -1773,6 +1869,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     failure_reason="submit_failed",
+                    role=role,
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -1829,6 +1926,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     failure_reason="interactive_no_progress",
+                    role=role,
                 )
                 _teardown("no_progress")
                 return InteractiveDispatchResult(
@@ -1869,6 +1967,7 @@ class TmuxInteractiveDispatch:
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
+                    role=role,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -1895,6 +1994,10 @@ class TmuxInteractiveDispatch:
                 "failed",
                 "blocked",
             )
+            # Best-effort token usage parsed from the pane TUI counter (no usage API on
+            # the subscription lane) — used only as a frontmatter fallback when the
+            # worker receipt carries none.
+            _pane_tokens = self._parse_token_usage_from_log(_raw_log[0])
             emitted_report = self._govern_report(
                 dispatch_id=dispatch_id,
                 terminal_id=label,
@@ -1904,6 +2007,8 @@ class TmuxInteractiveDispatch:
                 base_sha=worktree_handle.base_sha if worktree_handle else None,
                 worktree_path=worktree_handle.path if worktree_handle else None,
                 model=model,
+                token_usage=_pane_tokens,
+                role=role,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.
@@ -1986,6 +2091,12 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--skip-permissions", action="store_true", default=None)
     parser.add_argument("--extra-flags", default="")
     parser.add_argument("--attach", action="store_true")
+    parser.add_argument(
+        "--working-tree-only", action="store_true", default=False,
+        dest="working_tree_only",
+        help="Plan-review/plan-write dispatch: deny git commit/push (scoped spawn "
+             "required; the dispatch is rejected if it would run unscoped).",
+    )
     wt_group = parser.add_mutually_exclusive_group()
     wt_group.add_argument(
         "--isolated-worktree",
@@ -2042,6 +2153,7 @@ def main(argv: "list[str] | None" = None) -> int:
         attach=args.attach,
         isolated_worktree=args.isolated_worktree,
         base_ref=args.base_ref,
+        working_tree_only=args.working_tree_only,
     )
     print(json.dumps(result.__dict__, default=str))
     return 0 if result.success else 1

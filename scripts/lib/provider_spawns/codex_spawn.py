@@ -315,8 +315,27 @@ def _resolve_codex_model(model: Optional[str]) -> str:
 
 
 def _build_cmd(model: Optional[str]) -> list:
-    """Build the codex exec argv."""
-    return ["codex", "exec", "--json", "--model", _resolve_codex_model(model)]
+    """Build the codex exec argv.
+
+    `codex exec` runs non-interactively so approvals auto-downgrade to `never`, BUT the
+    SANDBOX still applies. Without an explicit sandbox flag codex runs read-only and cannot
+    write files or run commands — so any multi-file worker task fails fast (rc=1) after a
+    few seconds. This was the t2+ "launch-flakiness": not launch/quota, the sandbox blocking
+    file ops (t1 squeaked through on minimal ops). Worker dispatch needs file+command access.
+
+    Default to the full bypass — the worker runs in an ISOLATED worktree cell (same posture
+    as claude's --dangerously-skip-permissions in the bench). Override via VNX_CODEX_SANDBOX
+    ("workspace-write" = recommended safer level that still allows workspace edits + sandboxed
+    command exec; "read-only"/"danger-full-access" also accepted).
+    """
+    cmd = ["codex", "exec", "--json"]
+    sandbox = (os.environ.get("VNX_CODEX_SANDBOX", "") or "").strip()
+    if sandbox in ("workspace-write", "read-only", "danger-full-access"):
+        cmd += ["--sandbox", sandbox]
+    else:
+        cmd += ["--dangerously-bypass-approvals-and-sandbox"]
+    cmd += ["--model", _resolve_codex_model(model)]
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +402,28 @@ def _launch_codex_proc(
             returncode=1, completion_text="", events_written=0,
             session_id=None, timed_out=False, error=str(exc),
         )
+
+    # Drain codex stderr in a daemon thread. Unlike SubprocessAdapter (claude/deepseek),
+    # which logs stderr to a file (the H1 fix), codex_spawn's _drain_stream reads ONLY stdout
+    # and never proc.stderr. With an undrained PIPE, codex BLOCKS once it emits >~64KB of
+    # stderr — and codex with model_reasoning_effort=xhigh (config.toml) emits a lot — which
+    # surfaced as the codex "flakiness" (t1 stayed under 64KB and passed; t2+ filled the pipe
+    # in 5-17s, the review task in ~92s, all exiting rc=1 with incomplete work). Drain it and
+    # keep a bounded tail for error reporting.
+    import threading
+    proc._vnx_stderr_tail = []  # type: ignore[attr-defined]
+    if proc.stderr is not None:
+        def _drain_stderr(p, buf):
+            try:
+                for line in iter(p.stderr.readline, b""):
+                    buf.append(line)
+                    if len(buf) > 200:
+                        del buf[:100]
+            except (ValueError, OSError):
+                pass
+        threading.Thread(
+            target=_drain_stderr, args=(proc, proc._vnx_stderr_tail), daemon=True,
+        ).start()
 
     if proc.stdin:
         try:
@@ -588,6 +629,13 @@ def spawn_codex(
         _wait_proc(proc, timeout=10.0)
 
     returncode = proc.returncode if proc.returncode is not None else 1
+
+    # Surface codex's stderr tail on failure (previously discarded → "rc=1" with no reason).
+    if returncode != 0 or error:
+        tail_lines = getattr(proc, "_vnx_stderr_tail", None) or []
+        tail = b"".join(tail_lines[-60:]).decode("utf-8", "ignore").strip()[-1200:]
+        if tail:
+            error = ((error + " | ") if error else "") + f"codex stderr tail: {tail}"
 
     if event_writer_strict and _event_writer_failures > 0:
         raise RuntimeError(

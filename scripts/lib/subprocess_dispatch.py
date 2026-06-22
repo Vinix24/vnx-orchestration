@@ -60,7 +60,7 @@ from subprocess_dispatch_internals.git_helpers import (
     _set_active_worktree,
 )
 from subprocess_dispatch_internals.handover import (
-    _build_continuation_prompt,
+    _build_continuation_prompt as _standard_build_continuation_prompt,
     _detect_pending_handover,
     _write_rotation_handover,
 )
@@ -86,11 +86,11 @@ from subprocess_dispatch_internals.receipt_writer import (
     _write_receipt,
 )
 from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: F401 — re-exported for callers
-from subprocess_dispatch_internals.recovery import deliver_with_recovery
+from subprocess_dispatch_internals.recovery import deliver_with_recovery as _deliver_with_recovery
 from subprocess_dispatch_internals.skill_injection import (
     _build_intelligence_section,
-    _inject_permission_profile,
-    _inject_skill_context,
+    _inject_permission_profile as _standard_inject_permission_profile,
+    _inject_skill_context as _standard_inject_skill_context,
     _load_agent_profile,
     _resolve_agent_cwd,
 )
@@ -152,6 +152,126 @@ __all__ = [
     "_get_active_worktree",
     "_set_active_worktree",
 ]
+
+
+def _bench_equal_context_enabled() -> bool:
+    """Return whether benchmark dispatches must receive their instruction verbatim."""
+    return os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1"
+
+
+def _inject_skill_context(
+    terminal_id: str,
+    instruction: str,
+    role: str | None = None,
+    dispatch_metadata: "dict | None" = None,
+) -> str:
+    """Inject normal skill context unless benchmark equal-context mode is active."""
+    if _bench_equal_context_enabled():
+        return instruction
+    return _standard_inject_skill_context(
+        terminal_id,
+        instruction,
+        role=role,
+        dispatch_metadata=dispatch_metadata,
+    )
+
+
+def _inject_permission_profile(
+    terminal_id: str,
+    role: str | None,
+    instruction: str,
+) -> str:
+    """Inject normal permission context unless benchmark equal-context mode is active."""
+    if _bench_equal_context_enabled():
+        return instruction
+    return _standard_inject_permission_profile(terminal_id, role, instruction)
+
+
+def _build_continuation_prompt(handover_path, original_instruction: str) -> str:
+    """Preserve the benchmark instruction instead of adding handover context."""
+    if _bench_equal_context_enabled():
+        return original_instruction
+    return _standard_build_continuation_prompt(handover_path, original_instruction)
+
+
+def _enrich_cli_instruction(instruction: str, role: str) -> str:
+    """Apply direct-CLI repo-map and footer enrichment outside benchmark mode."""
+    if _bench_equal_context_enabled():
+        return instruction
+
+    try:
+        from dispatch_enricher import apply_repo_map_layer as _apply_repo_map  # noqa: PLC0415
+        instruction = _apply_repo_map(instruction, {"role": role})
+    except Exception as _repo_map_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(
+            "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
+            _repo_map_exc,
+        )
+
+    try:
+        from dispatch_footer import append_dispatch_footer as _append_footer  # noqa: PLC0415
+        instruction = _append_footer(instruction)
+    except Exception as _footer_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(
+            "subprocess_dispatch: footer injection failed (%s) — proceeding without",
+            _footer_exc,
+        )
+    return instruction
+
+
+def deliver_with_recovery(
+    terminal_id: str,
+    instruction: str,
+    model: str,
+    dispatch_id: str,
+    *,
+    role: str | None = None,
+    requires_mcp: bool = False,
+    repo_map: str | None = None,
+    max_retries: int = 3,
+    lease_generation: int | None = None,
+    heartbeat_interval: float = 300.0,
+    chunk_timeout: float = 300.0,
+    total_deadline: float = 900.0,
+    auto_commit: bool = True,
+    gate: str = "",
+    dispatch_paths: "list[str] | None" = None,
+    pr_id: str | None = None,
+) -> bool:
+    """Deliver while suppressing shared preparation in benchmark equal-context mode."""
+    kwargs = {
+        "role": role,
+        "requires_mcp": requires_mcp,
+        "repo_map": repo_map,
+        "max_retries": max_retries,
+        "lease_generation": lease_generation,
+        "heartbeat_interval": heartbeat_interval,
+        "chunk_timeout": chunk_timeout,
+        "total_deadline": total_deadline,
+        "auto_commit": auto_commit,
+        "gate": gate,
+        "dispatch_paths": dispatch_paths,
+        "pr_id": pr_id,
+    }
+    if not _bench_equal_context_enabled():
+        return _deliver_with_recovery(
+            terminal_id, instruction, model, dispatch_id, **kwargs,
+        )
+
+    previous_shared_prepare = os.environ.get("VNX_SHARED_PREPARE")
+    os.environ["VNX_SHARED_PREPARE"] = "0"
+    kwargs["repo_map"] = None
+    try:
+        return _deliver_with_recovery(
+            terminal_id, instruction, model, dispatch_id, **kwargs,
+        )
+    finally:
+        if previous_shared_prepare is None:
+            os.environ.pop("VNX_SHARED_PREPARE", None)
+        else:
+            os.environ["VNX_SHARED_PREPARE"] = previous_shared_prepare
 
 
 def _select_dispatch_path(
@@ -396,35 +516,9 @@ if __name__ == "__main__":
     if args.role is None:
         args.role = _extract_role_from_instruction(args.instruction) or _ROLE_FALLBACK
 
-    # Repo-map enrichment: apply before delivery so direct invocations (dispatch_deliver.sh,
-    # cheap-lane delegation) receive the same repo-map layer that the daemon provides.
-    # The double-injection guard in apply_repo_map_layer prevents re-injection when the
-    # instruction was already enriched (e.g. passed through from a daemon run).
-    try:
-        from dispatch_enricher import apply_repo_map_layer as _apply_repo_map  # noqa: PLC0415
-        args.instruction = _apply_repo_map(
-            args.instruction,
-            {"role": args.role},
-        )
-    except Exception as _repo_map_exc:
-        import logging as _log_mod
-        _log_mod.getLogger(__name__).warning(
-            "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
-            _repo_map_exc,
-        )
-
-    # Footer injection: append T0 action-request footer so every dispatch instruction
-    # carries the orchestration prompt that tells T0 what to do after receiving the receipt.
-    # Mode is resolved from VNX_DISPATCH_FOOTER_MODE env var (normal|autonomous|enhanced).
-    try:
-        from dispatch_footer import append_dispatch_footer as _append_footer  # noqa: PLC0415
-        args.instruction = _append_footer(args.instruction)
-    except Exception as _footer_exc:
-        import logging as _log_mod
-        _log_mod.getLogger(__name__).warning(
-            "subprocess_dispatch: footer injection failed (%s) — proceeding without",
-            _footer_exc,
-        )
+    # Direct-CLI enrichment happens before delivery; equal-context mode preserves
+    # the benchmark-owned structured prompt unchanged.
+    args.instruction = _enrich_cli_instruction(args.instruction, args.role)
 
     _dispatch_paths: "list[str] | None" = None
     if args.dispatch_paths.strip():

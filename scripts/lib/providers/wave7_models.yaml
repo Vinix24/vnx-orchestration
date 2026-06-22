@@ -14,6 +14,24 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding-premium", "review", "analysis"]
+      opus-4-8:
+        litellm_name: "anthropic/claude-opus-4-8"
+        cost_input_per_mtok: 15.00
+        cost_output_per_mtok: 75.00
+        max_tokens: 32000
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+      opus-4-6:
+        litellm_name: "anthropic/claude-opus-4-6"
+        cost_input_per_mtok: 15.00
+        cost_output_per_mtok: 75.00
+        max_tokens: 32000
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
       sonnet:
         litellm_name: "anthropic/claude-sonnet-4-6"
         cost_input_per_mtok: 3.00
@@ -117,7 +135,7 @@ providers:
     direct_provider_note: "Native Zhipu integration deferred; PR-7.3 uses OpenRouter fallback"
     models:
       glm-5.1-default:
-        litellm_name: "openrouter/z-ai/glm-5"
+        litellm_name: "openrouter/z-ai/glm-5"  # NB: base GLM-5 (Feb 2026), NOT 5.1 — kept as baseline
         cost_input_per_mtok: 0.50  # OpenRouter pass-through cost
         cost_output_per_mtok: 2.50
         max_tokens: 8192
@@ -125,6 +143,28 @@ providers:
         supports_tool_calls: true
         task_classes: ["coding", "review"]
         deprecated_models:  # explicit guard against legacy
+          - "glm-4.5"
+          - "glm-4.6"
+      glm-5.1:
+        litellm_name: "openrouter/z-ai/glm-5.1"  # the real GLM-5.1 (distinct from base glm-5)
+        cost_input_per_mtok: 0.60  # OpenRouter pass-through cost
+        cost_output_per_mtok: 1.92
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review"]
+        deprecated_models:
+          - "glm-4.5"
+          - "glm-4.6"
+      glm-5.2:
+        litellm_name: "openrouter/z-ai/glm-5.2"  # GLM-5.2 (released 2026-06-16)
+        cost_input_per_mtok: 0.60
+        cost_output_per_mtok: 1.92
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review"]
+        deprecated_models:
           - "glm-4.5"
           - "glm-4.6"
   local_gemma:

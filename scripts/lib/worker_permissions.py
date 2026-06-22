@@ -189,6 +189,7 @@ def build_claude_scope_args(
     *,
     permission_mode: str = "acceptEdits",
     requires_mcp: bool = False,
+    working_tree_only: bool = False,
 ) -> list[str]:
     """Materialize a PermissionProfile into scoping CLI args for a headless ``claude``.
 
@@ -214,8 +215,18 @@ def build_claude_scope_args(
         args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
     if allowed:
         args += ["--allowedTools", ",".join(allowed)]
-    if profile.denied_tools:
-        args += ["--disallowedTools", ",".join(profile.denied_tools)]
+    disallowed = list(profile.denied_tools)
+    if working_tree_only:
+        # Working-tree-only dispatches (plan-review / plan-write) must not mutate
+        # git history. Deny commit/push at the tool-permission layer — the SLOT —
+        # not just the instruction preamble (the gids). The bare and `:*` forms
+        # cover both `git commit` and `git commit -m ...`.
+        disallowed += [
+            "Bash(git commit)", "Bash(git commit:*)",
+            "Bash(git push)", "Bash(git push:*)",
+        ]
+    if disallowed:
+        args += ["--disallowedTools", ",".join(disallowed)]
     return args
 
 

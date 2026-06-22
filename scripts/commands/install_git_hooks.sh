@@ -27,7 +27,7 @@ cmd_install_git_hooks() {
     local installed=0
     local skipped=0
 
-    for hook_name in prepare-commit-msg commit-msg; do
+    for hook_name in prepare-commit-msg commit-msg pre-push; do
         local source="$vnx_hooks_dir/$hook_name"
         local target="$git_hooks_dir/$hook_name"
 
@@ -79,7 +79,7 @@ cmd_uninstall_git_hooks() {
     local git_hooks_dir
     git_hooks_dir="$(git rev-parse --git-common-dir 2>/dev/null)/hooks"
 
-    for hook_name in prepare-commit-msg commit-msg; do
+    for hook_name in prepare-commit-msg commit-msg pre-push; do
         local target="$git_hooks_dir/$hook_name"
         if [ -L "$target" ]; then
             local link_target

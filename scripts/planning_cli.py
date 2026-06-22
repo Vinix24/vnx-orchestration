@@ -477,6 +477,127 @@ def _append_coordination_event(
         )
 
 
+_PLAN_OI_PREFIX = "OI-PLAN-"
+
+
+def _plan_blocker_oi(track_id: str) -> str:
+    return f"{_PLAN_OI_PREFIX}{track_id}"
+
+
+def _plan_gate_supported(conn: sqlite3.Connection) -> bool:
+    """True when the DB can both BLOCK and later CLEAR a plan-gate: track_open_items
+    with resolved_at (clearable) + tracks.derived_status (the promote-lock's signal).
+
+    resolved_at (migration 0030) is required at SEED time too — without it the
+    reconciler counts any 'blocks' row forever, so seeding would create a blocker
+    this same gate could never resolve (a permanently stuck track)."""
+    return (
+        _has_table(conn, "track_open_items")
+        and _has_col(conn, "track_open_items", "resolved_at")
+        and _has_col(conn, "tracks", "derived_status")
+    )
+
+
+def _seed_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
+    """Seed the synthetic OI-PLAN-<track> blocker so the track is born plan-gated.
+
+    Idempotent (INSERT OR IGNORE on the track_open_items PK). Returns True once the
+    blocker exists and the track reconciles to blocked; False on a DB that predates
+    the plan-gate schema (graceful no-op).
+    """
+    conn = _db_conn(state_dir)
+    try:
+        # _plan_gate_supported requires resolved_at (0030), which implies project_id
+        # (0024) — both are present here by migration ordering.
+        if not _plan_gate_supported(conn):
+            return False
+        oi = _plan_blocker_oi(track_id)
+        conn.execute(
+            "INSERT OR IGNORE INTO track_open_items "
+            "(track_id, project_id, oi_id, link_type, link_source) "
+            "VALUES (?, ?, ?, 'blocks', 'manual')",
+            (track_id, project_id, oi),
+        )
+        # Re-seed must RE-block: clear resolved_at so a track whose plan gate
+        # previously passed is gated again (e.g. a mid-flight plan change). Without
+        # this, INSERT OR IGNORE silently no-ops on the resolved row.
+        conn.execute(
+            "UPDATE track_open_items SET resolved_at = NULL "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+            (track_id, project_id, oi),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    track_reconciler.reconcile_track(state_dir, track_id, project_id)
+    return True
+
+
+def _resolve_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
+    """Resolve the OI-PLAN-<track> blocker (the plan gate passed). Returns True when a
+    row was resolved; reconciles the track so derived_status reflects the unblock."""
+    conn = _db_conn(state_dir)
+    rowcount = 0
+    try:
+        if not _plan_gate_supported(conn):
+            return False
+        oi = _plan_blocker_oi(track_id)
+        cur = conn.execute(
+            "UPDATE track_open_items SET resolved_at = ? "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? "
+            "AND link_type = 'blocks' AND resolved_at IS NULL",
+            (_now_utc(), track_id, project_id, oi),
+        )
+        rowcount = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    track_reconciler.reconcile_track(state_dir, track_id, project_id)
+    return rowcount > 0
+
+
+def cmd_objective_add(args: argparse.Namespace) -> int:
+    """Add an ad-hoc objective (track) without a ROADMAP edit.
+
+    Thin wrapper over ``tracks_lib.create_track`` (the single-writer), so the PM
+    can queue a feature directly while keeping tracks.py the only writer of
+    track-authored fields. The ROADMAP seeder remains the path for
+    ROADMAP-authored tracks; this is for ad-hoc PM-driven features. New tracks
+    start ``queued`` — the plan-first gate must pass before any deliverable
+    promotes (see cmd_deliverable_promote).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    try:
+        track = tracks_lib.create_track(
+            state_dir,
+            args.track_id,
+            args.project_id,
+            args.title,
+            args.goal_state,
+            phase="queued",
+            horizon=args.horizon,
+            priority=args.priority,
+        )
+    except Exception as exc:  # duplicate id, invalid horizon/priority, etc.
+        print(f"objective add failed: {exc}", file=sys.stderr)
+        return 1
+
+    tid = track.get("track_id", args.track_id) if isinstance(track, dict) else args.track_id
+
+    # Plan-first: seed the synthetic OI-PLAN blocker so the track is born blocked.
+    # Nothing promotes until the plan gate passes (PM-SKILL). Graceful no-op on DBs
+    # that predate the plan-gate schema.
+    plan_gated = False
+    try:
+        plan_gated = _seed_plan_blocker(state_dir, tid, args.project_id)
+    except Exception as exc:  # never let gate-seeding break track creation
+        print(f"warning: could not seed plan-first blocker for {tid}: {exc}", file=sys.stderr)
+
+    gate_note = " — plan-gated (blocked until the plan panel passes)" if plan_gated else ""
+    print(f"Added objective {tid} (phase=queued, horizon={args.horizon or 'unset'}){gate_note}")
+    return 0
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -663,6 +784,25 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
             )
             return 1
 
+        # PM plan-first lock (PM-SKILL-DESIGN-2026-06-20 step 3): refuse promotion
+        # while the deliverable's track is blocked — e.g. an open synthetic
+        # OI-PLAN-<track> gate (plan-first panel not passed) or an unmet hard
+        # dependency. The reconciler writes derived_status; the PM seeds/closes the
+        # blocker. The CLI itself rejects, so a worker that never loaded the PM skill
+        # still cannot bypass the gate. Graceful: a deliverable with no track, or a
+        # track whose derived_status is unset, is not gated here.
+        track_id = row["track"] if _has_col(conn, "dispatches", "track") else None
+        if track_id:
+            trk = tracks_lib.get_track(state_dir, track_id, project_id)
+            if trk and (trk.get("derived_status") if isinstance(trk, dict) else None) == "blocked":
+                print(
+                    f"Cannot promote {dispatch_id!r}: track {track_id!r} is blocked "
+                    "(plan-first gate not passed, or a hard dependency is open). "
+                    "Close the blocking open-items first, then re-run promote.",
+                    file=sys.stderr,
+                )
+                return 1
+
         now = _now_utc()
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         if has_oaa:
@@ -699,6 +839,142 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
         conn.close()
 
     print(f"Promoted {dispatch_id}: proposed -> ready")
+    return 0
+
+
+def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
+    state_dir = _resolve_state_dir(args.state_dir)
+    track = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+    if not track:
+        print(f"track not found: {args.track_id!r} (project {args.project_id!r})", file=sys.stderr)
+        return 1
+    if not _seed_plan_blocker(state_dir, args.track_id, args.project_id):
+        print(
+            "plan-gate schema absent (need track_open_items + tracks.derived_status); "
+            "apply migrations 0022/0028 first",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"Seeded plan-first blocker {_plan_blocker_oi(args.track_id)} — "
+        f"track {args.track_id} is blocked until the plan panel passes"
+    )
+    return 0
+
+
+def cmd_plan_gate_run(args: argparse.Namespace) -> int:
+    """Run the plan-first panel over a plan doc; on PASS, resolve the OI-PLAN blocker.
+
+    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK (track stays blocked),
+    1 = infra error (doc/track missing, panel could not run).
+    """
+    import plan_gate_panel
+
+    state_dir = _resolve_state_dir(args.state_dir)
+    doc = Path(args.doc)
+    if not doc.is_file():
+        print(f"plan doc not found: {doc}", file=sys.stderr)
+        return 1
+    track = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+    if not track:
+        print(f"track not found: {args.track_id!r} (project {args.project_id!r})", file=sys.stderr)
+        return 1
+
+    data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
+    try:
+        result = plan_gate_panel.run_panel(
+            doc, track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
+        )
+    except Exception as exc:
+        print(f"plan-gate run failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        s = result["summary"]
+        print(
+            f"Plan gate: {result['decision']}  "
+            f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
+        )
+        print(f"  {s['rationale']}")
+        for p in result["panelists"]:
+            mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
+            detail = p.get("rationale") or p.get("error") or ""
+            print(f"  - {p['label']:16} {mark}  {detail}")
+            for finding in p.get("blocking_findings", []):
+                print(f"      · {finding}")
+
+    if result["decision"] == "PASS":
+        # A PASS verdict only counts as "unblocked" if the track actually reconciled
+        # away from blocked. If a second blocker (a hard dependency, another OI) or a
+        # schema gap leaves it blocked, say so — never claim unblocked dishonestly. A
+        # DB/reconciler failure here returns a defined exit code, not a crash.
+        try:
+            resolved = _resolve_plan_blocker(state_dir, args.track_id, args.project_id)
+            post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+        except Exception as exc:
+            print(
+                f"PASS verdict, but unblocking track {args.track_id} failed: {exc}. "
+                "Track state unchanged — investigate before promoting.",
+                file=sys.stderr,
+            )
+            return 1
+        derived = post.get("derived_status") if isinstance(post, dict) else None
+        if derived == "blocked":
+            print(
+                f"PASS verdict, but track {args.track_id} is STILL blocked "
+                f"(plan blocker resolved={resolved}; another blocker or hard dependency "
+                "remains). Promote stays refused — clear the remaining blocker first.",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"PASS — plan gate cleared. {_plan_blocker_oi(args.track_id)} "
+            f"resolved={resolved}; track derived_status={derived}."
+        )
+        return 0
+    print(
+        f"{result['decision']} — plan gate NOT cleared; track stays blocked. "
+        "Revise the plan and re-run."
+    )
+    return 2
+
+
+def cmd_plan_gate_status(args: argparse.Namespace) -> int:
+    state_dir = _resolve_state_dir(args.state_dir)
+    track = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+    if not track:
+        print(f"track not found: {args.track_id!r} (project {args.project_id!r})", file=sys.stderr)
+        return 1
+    derived = track.get("derived_status") if isinstance(track, dict) else None
+
+    conn = _db_conn(state_dir)
+    try:
+        has_resolved = _has_col(conn, "track_open_items", "resolved_at")
+        oi = _plan_blocker_oi(args.track_id)
+        if _has_col(conn, "track_open_items", "project_id"):
+            row = conn.execute(
+                "SELECT resolved_at FROM track_open_items "
+                "WHERE track_id=? AND project_id=? AND oi_id=? AND link_type='blocks'",
+                (args.track_id, args.project_id, oi),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT resolved_at FROM track_open_items "
+                "WHERE track_id=? AND oi_id=? AND link_type='blocks'",
+                (args.track_id, oi),
+            ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        gate = "not-seeded"
+    elif has_resolved and row["resolved_at"]:
+        gate = f"passed (resolved {row['resolved_at']})"
+    else:
+        gate = "open (blocking)"
+    print(f"track {args.track_id}: derived_status={derived}  plan-gate={gate}")
     return 0
 
 
@@ -742,6 +1018,18 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_drift)
     p_drift.set_defaults(func=cmd_objective_drift)
 
+    p_add = obj_sub.add_parser(
+        "add",
+        help="add an ad-hoc objective/track (thin wrapper over the single-writer)",
+    )
+    _common(p_add)
+    p_add.add_argument("track_id")
+    p_add.add_argument("title")
+    p_add.add_argument("goal_state", help="what 'done' looks like for this track")
+    p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
+    p_add.add_argument("--priority", default=None)
+    p_add.set_defaults(func=cmd_objective_add)
+
     # ------------------------------------------------------------------
     # deliverable subcommand (Phase 2)
     # ------------------------------------------------------------------
@@ -769,6 +1057,37 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_dpromote)
     p_dpromote.add_argument("dispatch_id")
     p_dpromote.set_defaults(func=cmd_deliverable_promote)
+
+    # ------------------------------------------------------------------
+    # plan-gate subcommand (PM plan-first gate)
+    # ------------------------------------------------------------------
+    pg = sub.add_parser(
+        "plan-gate",
+        help="plan-first gate: a multi-model panel reviews a plan before any build",
+    )
+    pg_sub = pg.add_subparsers(dest="action", required=True)
+
+    p_pseed = pg_sub.add_parser(
+        "seed", help="seed the OI-PLAN blocker (track stays blocked until the gate passes)",
+    )
+    _common(p_pseed)
+    p_pseed.add_argument("track_id")
+    p_pseed.set_defaults(func=cmd_plan_gate_seed)
+
+    p_prun = pg_sub.add_parser(
+        "run", help="run the panel over a plan doc; on PASS, resolve the blocker",
+    )
+    _common(p_prun)
+    p_prun.add_argument("track_id")
+    p_prun.add_argument("--doc", required=True, help="path to the plan doc under review")
+    p_prun.set_defaults(func=cmd_plan_gate_run)
+
+    p_pstat = pg_sub.add_parser(
+        "status", help="show a track's plan-gate state + derived_status",
+    )
+    _common(p_pstat)
+    p_pstat.add_argument("track_id")
+    p_pstat.set_defaults(func=cmd_plan_gate_status)
 
     return parser
 

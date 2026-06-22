@@ -1,0 +1,18 @@
+{
+  "expected_files": ["cache.py", "tests/test_cache.py"],
+  "expected_checks_pass": 16,
+  "expected_style": {
+    "language": "python",
+    "must_use": [
+      "purge expired entries before evicting a live LRU entry in set()",
+      "preserve the public API and the existing LRU/TTL semantics",
+      "a regression test reproducing the expired-non-LRU + capacity scenario"
+    ],
+    "anti_patterns": [
+      "no enlarging capacity or disabling eviction",
+      "no breaking the existing test suite",
+      "no purging only the LRU slot (must reclaim ANY expired entry, not just the oldest)"
+    ]
+  },
+  "rubric_for_llm_judge": "High quality: set() reclaims expired entries before evicting a live LRU entry (e.g. drop all expired, or scan for an expired slot) so a live entry is never lost while a stale one survives; existing tests untouched; a focused regression test added that fails against the original code. Low quality: special-cases only the LRU entry, mutates capacity, disables eviction, or breaks the existing LRU/TTL tests."
+}

@@ -33,6 +33,7 @@ from runtime_coordination import (  # noqa: E402
 )
 from project_id_migration import (  # noqa: E402
     RUNTIME_SCHEMA_VERSION,
+    resolve_init_project_id,
     run_quality_intelligence_migration,
     run_runtime_coordination_migration,
 )
@@ -211,9 +212,27 @@ def main() -> int:
 
     # Apply migration 0010: project_id columns (Phase 0 single-VNX).
     # Idempotent — safe to rerun after init_schema on every invocation.
+    #
+    # W-init (ADR-007): resolve the owning project_id fail-closed before
+    # passing it to both runners.  This prevents new ADD COLUMN backfills from
+    # silently stamping 'vnx-dev' on a project that owns a different tenant id.
+    # Resolution: .vnx-project-id marker (anchored on DB path) → VNX_PROJECT_ID.
+    # If neither is present, init aborts with a clear ADR-007 error.
     log("INFO", f"Applying migration 0010 (project_id, v{RUNTIME_SCHEMA_VERSION})...")
     try:
-        runtime_result = run_runtime_coordination_migration(db)
+        # Resolve the owning pid from the RC DB path (fail-closed, no 'vnx-dev' default).
+        # On a plain vnx-dev install the marker will contain 'vnx-dev' so the
+        # result is equivalent to the old hardcoded path; on any other project
+        # the correct tenant id is stamped instead.
+        try:
+            owning_pid = resolve_init_project_id(db)
+        except RuntimeError as pid_err:
+            log("ERROR", f"ADR-007: cannot resolve project_id for init backfill: {pid_err}")
+            return 1
+
+        log("INFO", f"  Resolved owning project_id: {owning_pid!r}")
+
+        runtime_result = run_runtime_coordination_migration(db, default_project_id=owning_pid)
         for table, status in runtime_result.get("results", {}).items():
             if status == "added":
                 log("SUCCESS", f"  runtime_coordination.{table}: project_id added")
@@ -227,7 +246,16 @@ def main() -> int:
             log("WARNING", "  runtime_coordination.terminal_leases: not present, worker_pid skipped")
 
         qi_db = Path(state_dir) / "quality_intelligence.db"
-        qi_result = run_quality_intelligence_migration(qi_db)
+        # For QI, resolve from the QI DB path; use the RC-resolved pid if QI has no marker
+        # (common when both DBs live in the same directory).
+        try:
+            qi_pid = resolve_init_project_id(qi_db)
+        except RuntimeError:
+            # QI DB not yet present or no marker reachable from QI path — fall back to
+            # the already-resolved RC pid so both DBs are stamped consistently.
+            qi_pid = owning_pid
+
+        qi_result = run_quality_intelligence_migration(qi_db, default_project_id=qi_pid)
         if qi_result.get("status") == "skipped_no_db":
             log("INFO", f"  quality_intelligence.db not found at {qi_db}; skipping")
         else:

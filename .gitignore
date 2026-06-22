@@ -120,3 +120,7 @@ tests/test_carina_*.py
 claudedocs/
 .vnx-intelligence/
 *.tsbuildinfo
+
+# t6 real-codebase-review tier — INTERNAL ONLY (reviews proprietary repos; never publish)
+scripts/benchmark/field-tests/tasks/t6_real_review/
+scripts/benchmark/field-tests/tasks.local.yaml

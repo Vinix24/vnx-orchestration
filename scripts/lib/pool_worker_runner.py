@@ -69,11 +69,18 @@ def _resolve_dispatch_dir() -> Path:
 
 def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
                     model: str, role: Optional[str], gate: str) -> int:
+    # PR-12: route through the single-entry door when VNX_SINGLE_ENTRY_DISPATCH=1; OFF default =
+    # the legacy deliver_with_recovery call (the lambda), byte-identical.
     try:
         from subprocess_dispatch import deliver_with_recovery  # noqa: PLC0415
-        ok = deliver_with_recovery(
-            terminal_id=terminal_id, instruction=instruction, model=model,
-            dispatch_id=dispatch_id, role=role, gate=gate, max_retries=1,
+        import dispatch_bridge  # noqa: PLC0415
+        ok = dispatch_bridge.deliver_via_door(
+            lambda: deliver_with_recovery(
+                terminal_id=terminal_id, instruction=instruction, model=model,
+                dispatch_id=dispatch_id, role=role, gate=gate, max_retries=1,
+            ),
+            instruction_text=instruction, dispatch_id=dispatch_id, role=role,
+            target_slot=terminal_id, provider="claude", model=model, gate=gate,
         )
         return EXIT_OK if ok else EXIT_DELIVERY_FAILED
     except Exception as exc:
@@ -85,13 +92,22 @@ def _deliver_provider(provider: str, terminal_id: str, dispatch_id: str,
                       instruction: str, model: str, role: Optional[str], gate: str) -> int:
     try:
         import provider_dispatch as pd  # noqa: PLC0415
-        argv = ["--provider", provider, "--terminal-id", terminal_id,
-                "--dispatch-id", dispatch_id, "--instruction", instruction, "--model", model]
-        if role:
-            argv += ["--role", role]
-        if gate:
-            argv += ["--gate", gate]
-        return EXIT_OK if (pd.main(argv) or 0) == 0 else EXIT_DELIVERY_FAILED
+        import dispatch_bridge  # noqa: PLC0415
+
+        def _legacy() -> bool:
+            argv = ["--provider", provider, "--terminal-id", terminal_id,
+                    "--dispatch-id", dispatch_id, "--instruction", instruction, "--model", model]
+            if role:
+                argv += ["--role", role]
+            if gate:
+                argv += ["--gate", gate]
+            return (pd.main(argv) or 0) == 0
+
+        ok = dispatch_bridge.deliver_via_door(
+            _legacy, instruction_text=instruction, dispatch_id=dispatch_id, role=role,
+            target_slot=terminal_id, provider=provider, model=model, gate=gate,
+        )
+        return EXIT_OK if ok else EXIT_DELIVERY_FAILED
     except Exception as exc:
         logger.error("Provider delivery exception for %r: %s", dispatch_id, exc)
         return EXIT_DELIVERY_FAILED

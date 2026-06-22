@@ -3185,3 +3185,28 @@ def test_import_table_uses_fetchmany_streaming(tmp_path: Path, monkeypatch):
             ("test-proj",),
         ).fetchone()[0]
         assert n == 10, f"streaming import lost rows: imported {n}/10"
+
+
+def test_data_dir_override_resolves_home_dir_store(tmp_path):
+    """Registry `data_dir` override resolves a project's state_dir to a home-dir
+    central store (vnx-orchestration -> ~/.vnx-data/vnx-dev), NOT the stale
+    repo-local path/.vnx-data. Without it the migrator would attach the 56 KB
+    stale DB, import ~0 rows, and report a FALSE SUCCESS on --fresh-central
+    (the silent-data-loss trap caught in the adversarial review)."""
+    home_store = tmp_path / "central" / "vnx-dev"
+    (home_store / "state").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / ".vnx-data" / "state").mkdir(parents=True)
+    reg = tmp_path / "projects.json"
+    reg.write_text(json.dumps({"projects": [
+        {"name": "vnx-orchestration", "path": str(repo),
+         "project_id": "vnx-dev", "data_dir": str(home_store)},
+        {"name": "seocrawler-v2", "path": str(repo)},  # no override -> repo-local fallback
+    ]}))
+    entries = {e.name: e for e in load_registry(reg)}
+
+    assert entries["vnx-orchestration"].project_id == "vnx-dev"
+    assert entries["vnx-orchestration"].data_dir == home_store
+    assert entries["vnx-orchestration"].state_dir == home_store / "state"
+    assert entries["seocrawler-v2"].data_dir == repo / ".vnx-data"
+    assert entries["seocrawler-v2"].state_dir == repo / ".vnx-data" / "state"

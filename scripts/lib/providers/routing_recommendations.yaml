@@ -1,249 +1,528 @@
 routing_by_task:
   01_code_generation:
-  - avg_duration_seconds: 512.145
-    composite_score: 8.0
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 5.2
-    composite_score: 6.0
-    cost_usd_per_call: null
-    cost_tier: 0
-    model_id: gemma-4b-local
-  - avg_duration_seconds: 330.317
-    composite_score: 7.5
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 56.119
-    composite_score: 5.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 212.345
-    composite_score: 5.0
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 222.333
-    composite_score: 4.5
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 0.807
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.217
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.611
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
-  02_code_review:
-    min_quality_tier: 3
     candidates:
-    - avg_duration_seconds: 90.934
-      composite_score: 10.0
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 9.53
+      quality_tier: 3
       cost_usd_per_call: null
-      model_id: claude-opus-4-6
-    - avg_duration_seconds: 72.516
-      composite_score: 9.5
+      avg_duration_seconds: 230.5
+      launch_success_rate: 1.0
+      n: 28
+    - model_id: claude-opus-4-6
+      runner: subscription
+      composite_score: 9.4
+      quality_tier: 3
       cost_usd_per_call: null
-      model_id: claude-sonnet-4-6
-    - avg_duration_seconds: 29.571
-      composite_score: 9.5
+      avg_duration_seconds: 134.3
+      launch_success_rate: 1.0
+      n: 28
+    - model_id: claude-opus-4-7
+      runner: subscription
+      composite_score: 9.35
+      quality_tier: 3
       cost_usd_per_call: null
-      model_id: deepseek-v4-flash
-    - avg_duration_seconds: 152.5
-      composite_score: 9.5
+      avg_duration_seconds: 264.6
+      launch_success_rate: 1.0
+      n: 28
+    - model_id: deepseek-v4-flash
+      runner: claude-harness
+      composite_score: 9.02
+      quality_tier: 3
+      cost_usd_per_call: 0.0104
+      avg_duration_seconds: 195.2
+      launch_success_rate: 0.44
+      n: 25
+    - model_id: claude-opus-4-8
+      runner: subscription
+      composite_score: 8.76
+      quality_tier: 3
       cost_usd_per_call: null
-      model_id: deepseek-v4-pro
-    - avg_duration_seconds: 25.713
-      composite_score: 1.0
+      avg_duration_seconds: 358.1
+      launch_success_rate: 0.97
+      n: 31
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 8.61
+      quality_tier: 3
+      cost_usd_per_call: 0.0175
+      avg_duration_seconds: 160.6
+      launch_success_rate: 0.61
+      n: 33
+    - model_id: glm-5-2
+      runner: claude-harness
+      composite_score: 8.15
+      quality_tier: 3
       cost_usd_per_call: null
-      model_id: claude-haiku-4-5
-    - avg_duration_seconds: 0.775
-      composite_score: 1.0
+      avg_duration_seconds: 197.3
+      launch_success_rate: 1.0
+      n: 3
+    - model_id: glm-5
+      runner: flat-runner
+      composite_score: 6.75
+      quality_tier: 2
+      cost_usd_per_call: 0.0578
+      avg_duration_seconds: 106.8
+      launch_success_rate: 0.65
+      n: 28
+    - model_id: kimi-k2-7-code
+      runner: kimi-cli
+      composite_score: 6.5
+      quality_tier: 2
       cost_usd_per_call: null
-      model_id: glm-5-1
-    - avg_duration_seconds: 1.163
-      composite_score: 1.0
+      avg_duration_seconds: 161.9
+      launch_success_rate: 0.77
+      n: 46
+    - model_id: glm-5-2
+      runner: flat-runner
+      composite_score: 5.92
+      quality_tier: 2
+      cost_usd_per_call: 0.0536
+      avg_duration_seconds: 281.3
+      launch_success_rate: 0.61
+      n: 30
+    - model_id: glm-5-1
+      runner: flat-runner
+      composite_score: 4.83
+      quality_tier: 1
+      cost_usd_per_call: 0.007
+      avg_duration_seconds: 118.8
+      launch_success_rate: 0.68
+      n: 48
+    - model_id: codex-gpt-5-5
+      runner: codex-cli
+      composite_score: 4.03
+      quality_tier: 1
       cost_usd_per_call: null
-      model_id: kimi-k2-0905
-    - avg_duration_seconds: 1.121
-      composite_score: 1.0
+      avg_duration_seconds: 180.8
+      launch_success_rate: 0.84
+      n: 43
+    - model_id: codex-gpt-5-4
+      runner: codex-cli
+      composite_score: 3.72
+      quality_tier: 1
       cost_usd_per_call: null
-      model_id: kimi-k2-6
+      avg_duration_seconds: 145.8
+      launch_success_rate: 0.93
+      n: 25
+  02_code_review:
+    candidates:
+    - model_id: glm-5-2
+      runner: claude-harness
+      composite_score: 8.7
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 384.9
+      launch_success_rate: 1.0
+      n: 5
+    - model_id: claude-opus-4-7
+      runner: subscription
+      composite_score: 8.69
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 337.2
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: claude-opus-4-8
+      runner: subscription
+      composite_score: 8.66
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 368.8
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: kimi-k2-7-code
+      runner: kimi-cli
+      composite_score: 8.65
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 223.5
+      launch_success_rate: 1.0
+      n: 7
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 8.61
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 184.2
+      launch_success_rate: 0.75
+      n: 6
+    - model_id: deepseek-v4-flash
+      runner: claude-harness
+      composite_score: 8.58
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 146.4
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 8.5
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 278.9
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: claude-opus-4-6
+      runner: subscription
+      composite_score: 8.49
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 303.7
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: glm-5-1
+      runner: flat-runner
+      composite_score: 7.82
+      quality_tier: 3
+      cost_usd_per_call: 0.5188
+      avg_duration_seconds: 247.8
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: glm-5
+      runner: flat-runner
+      composite_score: 7.67
+      quality_tier: 3
+      cost_usd_per_call: 0.4682
+      avg_duration_seconds: 138.8
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: glm-5-2
+      runner: flat-runner
+      composite_score: 5.9
+      quality_tier: 2
+      cost_usd_per_call: 0.8547
+      avg_duration_seconds: 381.1
+      launch_success_rate: 1.0
+      n: 6
+    - model_id: codex-gpt-5-5
+      runner: codex-cli
+      composite_score: 2.2
+      quality_tier: 1
+      cost_usd_per_call: null
+      avg_duration_seconds: 122.5
+      launch_success_rate: 0.71
+      n: 12
+    - model_id: codex-gpt-5-4
+      runner: codex-cli
+      composite_score: 0.0
+      quality_tier: 1
+      cost_usd_per_call: null
+      avg_duration_seconds: 6.8
+      launch_success_rate: 1.0
+      n: 2
+    min_quality_tier: 3
   03_refactoring:
-  - avg_duration_seconds: 209.001
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 19.278
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 108.872
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 29.261
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 35.453
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 0.853
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.143
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.234
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
-  04_documentation:
-  - avg_duration_seconds: 4.8
-    composite_score: 8.5
-    cost_usd_per_call: null
-    cost_tier: 0
-    model_id: gemma-4b-local
-  - avg_duration_seconds: 12.627
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 62.115
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 55.474
-    composite_score: 1.5
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 15.821
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 49.27
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 0.868
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.096
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.196
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
+    candidates:
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 9.93
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 48.0
+      launch_success_rate: 0.86
+      n: 12
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 9.46
+      quality_tier: 3
+      cost_usd_per_call: 0.0204
+      avg_duration_seconds: 52.5
+      launch_success_rate: 0.52
+      n: 13
+    - model_id: claude-opus-4-7
+      runner: subscription
+      composite_score: 9.19
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 65.5
+      launch_success_rate: 1.0
+      n: 13
+    - model_id: claude-opus-4-8
+      runner: subscription
+      composite_score: 9.17
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 72.0
+      launch_success_rate: 1.0
+      n: 14
+    - model_id: claude-opus-4-6
+      runner: subscription
+      composite_score: 9.14
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 45.7
+      launch_success_rate: 1.0
+      n: 13
+    - model_id: deepseek-v4-flash
+      runner: claude-harness
+      composite_score: 9.1
+      quality_tier: 3
+      cost_usd_per_call: 0.0058
+      avg_duration_seconds: 47.3
+      launch_success_rate: 0.44
+      n: 11
+    - model_id: kimi-k2-7-code
+      runner: kimi-cli
+      composite_score: 7.84
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 59.6
+      launch_success_rate: 0.79
+      n: 23
+    - model_id: codex-gpt-5-5
+      runner: codex-cli
+      composite_score: 6.47
+      quality_tier: 2
+      cost_usd_per_call: 1.0529
+      avg_duration_seconds: 97.2
+      launch_success_rate: 0.88
+      n: 15
+    - model_id: glm-5
+      runner: flat-runner
+      composite_score: 5.67
+      quality_tier: 2
+      cost_usd_per_call: 0.0067
+      avg_duration_seconds: 25.7
+      launch_success_rate: 0.94
+      n: 17
+    - model_id: glm-5-2
+      runner: flat-runner
+      composite_score: 5.62
+      quality_tier: 2
+      cost_usd_per_call: 0.0115
+      avg_duration_seconds: 68.1
+      launch_success_rate: 1.0
+      n: 18
+    - model_id: glm-5-1
+      runner: flat-runner
+      composite_score: 5.26
+      quality_tier: 2
+      cost_usd_per_call: 0.0019
+      avg_duration_seconds: 51.4
+      launch_success_rate: 0.78
+      n: 25
+    - model_id: codex-gpt-5-4
+      runner: codex-cli
+      composite_score: 4.7
+      quality_tier: 1
+      cost_usd_per_call: 1.4002
+      avg_duration_seconds: 73.1
+      launch_success_rate: 1.0
+      n: 13
+    - model_id: glm-5-2
+      runner: claude-harness
+      composite_score: 4.63
+      quality_tier: 1
+      cost_usd_per_call: null
+      avg_duration_seconds: 286.4
+      launch_success_rate: 0.75
+      n: 3
   05_debugging:
-  - avg_duration_seconds: 148.798
-    composite_score: 7.5
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 43.752
-    composite_score: 6.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 417.102
-    composite_score: 6.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 13.443
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 91.1
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 0.911
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.319
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.134
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
+    candidates:
+    - model_id: claude-opus-4-8
+      runner: subscription
+      composite_score: 9.57
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 112.5
+      launch_success_rate: 0.8
+      n: 12
+    - model_id: claude-opus-4-6
+      runner: subscription
+      composite_score: 9.56
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 46.6
+      launch_success_rate: 0.71
+      n: 10
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 9.53
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 88.4
+      launch_success_rate: 0.62
+      n: 10
+    - model_id: claude-opus-4-7
+      runner: subscription
+      composite_score: 9.52
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 88.6
+      launch_success_rate: 0.71
+      n: 10
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 9.47
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 83.2
+      launch_success_rate: 0.55
+      n: 11
+    - model_id: deepseek-v4-flash
+      runner: claude-harness
+      composite_score: 9.47
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 76.7
+      launch_success_rate: 0.42
+      n: 11
+    - model_id: glm-5-2
+      runner: claude-harness
+      composite_score: 8.86
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 161.5
+      launch_success_rate: 0.75
+      n: 3
+    - model_id: glm-5
+      runner: flat-runner
+      composite_score: 8.28
+      quality_tier: 3
+      cost_usd_per_call: 0.0156
+      avg_duration_seconds: 99.9
+      launch_success_rate: 0.65
+      n: 11
+    - model_id: glm-5-2
+      runner: flat-runner
+      composite_score: 7.61
+      quality_tier: 3
+      cost_usd_per_call: 0.0045
+      avg_duration_seconds: 149.3
+      launch_success_rate: 0.43
+      n: 9
+    - model_id: glm-5-1
+      runner: flat-runner
+      composite_score: 6.76
+      quality_tier: 2
+      cost_usd_per_call: 0.0225
+      avg_duration_seconds: 83.7
+      launch_success_rate: 0.58
+      n: 18
+    - model_id: kimi-k2-7-code
+      runner: kimi-cli
+      composite_score: 6.24
+      quality_tier: 2
+      cost_usd_per_call: null
+      avg_duration_seconds: 94.8
+      launch_success_rate: 0.76
+      n: 19
+    - model_id: codex-gpt-5-5
+      runner: codex-cli
+      composite_score: 4.76
+      quality_tier: 1
+      cost_usd_per_call: null
+      avg_duration_seconds: 113.3
+      launch_success_rate: 0.68
+      n: 13
+    - model_id: codex-gpt-5-4
+      runner: codex-cli
+      composite_score: 0.0
+      quality_tier: 1
+      cost_usd_per_call: null
+      avg_duration_seconds: 11.1
+      launch_success_rate: 0.6
+      n: 6
+    min_quality_tier: 2
   06_design:
-  - avg_duration_seconds: 151.936
-    composite_score: 9.5
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 273.321
-    composite_score: 9.0
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 321.34
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 56.228
-    composite_score: 7.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 288.278
-    composite_score: 6.5
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 0.98
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.29
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.317
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
-  07_translation:
-  - avg_duration_seconds: 4.1
-    composite_score: 8.5
-    cost_usd_per_call: null
-    cost_tier: 0
-    model_id: gemma-4b-local
-  - avg_duration_seconds: 4.251
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-flash
-  - avg_duration_seconds: 50.202
-    composite_score: 8.5
-    cost_usd_per_call: null
-    model_id: deepseek-v4-pro
-  - avg_duration_seconds: 31.572
-    composite_score: 5.5
-    cost_usd_per_call: null
-    model_id: claude-haiku-4-5
-  - avg_duration_seconds: 75.225
-    composite_score: 5.0
-    cost_usd_per_call: null
-    model_id: claude-opus-4-6
-  - avg_duration_seconds: 59.843
-    composite_score: 5.0
-    cost_usd_per_call: null
-    model_id: claude-sonnet-4-6
-  - avg_duration_seconds: 0.888
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: glm-5-1
-  - avg_duration_seconds: 1.243
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-0905
-  - avg_duration_seconds: 1.249
-    composite_score: 1.0
-    cost_usd_per_call: null
-    model_id: kimi-k2-6
+    candidates:
+    - model_id: glm-5-2
+      runner: claude-harness
+      composite_score: 8.9
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 173.9
+      launch_success_rate: 1.0
+      n: 1
+    - model_id: deepseek-v4-flash
+      runner: claude-harness
+      composite_score: 8.89
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 177.1
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: kimi-k2-7-code
+      runner: kimi-cli
+      composite_score: 8.89
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 187.7
+      launch_success_rate: 0.25
+      n: 2
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 8.84
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 261.6
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: claude-opus-4-6
+      runner: subscription
+      composite_score: 8.84
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 249.5
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 8.81
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 309.6
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: claude-opus-4-7
+      runner: subscription
+      composite_score: 8.78
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 351.5
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: claude-opus-4-8
+      runner: subscription
+      composite_score: 8.69
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 500.9
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: glm-5
+      runner: flat-runner
+      composite_score: 8.59
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 645.6
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: glm-5-2
+      runner: flat-runner
+      composite_score: 5.87
+      quality_tier: 2
+      cost_usd_per_call: 0.0155
+      avg_duration_seconds: 203.8
+      launch_success_rate: 1.0
+      n: 2
+    - model_id: glm-5-1
+      runner: flat-runner
+      composite_score: 4.05
+      quality_tier: 1
+      cost_usd_per_call: null
+      avg_duration_seconds: 1613.1
+      launch_success_rate: 0.33
+      n: 2
+    min_quality_tier: 3
+_meta:
+  source: field-tests t1-t6 benchmark (export_routing_matrix.py)
+  scale: composite_score 0-10 (benchmark 0-5 x2)
+  honesty: score = genuine attempts (wall>=5s, capability-0s included); launch_success_rate
+    carries reliability; runner is first-class
+  scope: 'WORKER lane routing ONLY. A model''s score here = how well it PRODUCES a
+    scored deliverable. It is NOT the gate-model policy: gate-panel composition (adversarial
+    defect-finding, e.g. codex ''almost always finds something'' on PR-4/PR-9) is
+    a SEPARATE PM-skill policy driven by proven defect-recall + family diversity.
+    A low worker score NEVER removes a model from the gate role.'

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "local-gemma"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "glm-harness", "local-gemma"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -130,6 +130,9 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
 
     Returns the original instruction unchanged on any failure.
     """
+    if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
+        return args.instruction
+
     # Layer: intelligence injection (existing)
     try:
         from intelligence_injection import build_intelligence_section  # noqa: PLC0415
@@ -198,7 +201,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         usage["cache_hit"] = int(
             raw.get("cache_read_tokens", raw.get("cache_read", raw.get("cache_hit", 0))) or 0
         )
-    elif provider in ("claude", "deepseek-harness"):
+    elif provider in ("claude", "deepseek-harness", "glm-harness"):
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
@@ -225,6 +228,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "gemini": "google",
     "kimi": "kimi",
     "deepseek-harness": "deepseek",
+    "glm-harness": "zai",
     "local-gemma": "local_gemma",
 }
 
@@ -628,6 +632,10 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
         from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
 
         return resolve_harness_model(args.model if args.model != "sonnet" else None)
+    if provider == "glm-harness":
+        from provider_spawns.glm_harness_spawn import resolve_harness_model as _glm_rhm  # noqa: PLC0415
+
+        return _glm_rhm(args.model if args.model != "sonnet" else None)
     if provider.startswith("litellm:") or provider == "litellm":
         base_sub, model_alias = _litellm_parts(provider)
         env_model = os.environ.get("VNX_LITELLM_MODEL", "")
@@ -657,6 +665,10 @@ def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) 
         # not a litellm-registry-driven route. The forbid_route subscription
         # block is the real safety gate, not registry membership.
         return False
+    if provider == "glm-harness":
+        # GLM-harness governs its model via resolve_harness_model (default glm-5.2)
+        # and routes via the local litellm proxy → OpenRouter; not registry-driven.
+        return False
     if not (provider.startswith("litellm:") or provider == "litellm"):
         return True
     base_sub, model_alias = _litellm_parts(provider)
@@ -682,6 +694,11 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
         # redirect). This measured-safe lane runs the own DeepSeek key in key-auth
         # mode, so it routes via=claude_harness_keyed and clears pre-flight.
         return "claude_harness_keyed"
+    if provider == "glm-harness":
+        # GLM via the claude CLI but pointed at a LOCAL litellm proxy that fronts
+        # OpenRouter — inference flows through OpenRouter, so via=openrouter clears
+        # zai-via-openrouter-only (no direct z.ai/Zhipu route).
+        return "openrouter"
     if provider in ("claude", "codex", "gemini", "kimi"):
         return "cli"
     if provider == "local-gemma":
@@ -739,6 +756,9 @@ def _check_constraints(args: argparse.Namespace, provider: str):
         # constraint match on forbidden_route.provider=deepseek; the keyed via
         # (set below) is what keeps this own-key lane clear of the block.
         sub_provider = "deepseek"
+    elif provider == "glm-harness":
+        # sub_provider=zai + via=openrouter (set above) clears zai-via-openrouter-only.
+        sub_provider = "zai"
     model = _constraint_model_for_provider(args, provider)
     via = _constraint_via_for_provider(provider, sub_provider)
     violations = check_constraints(
@@ -802,12 +822,86 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
+    """Benchmark claude lane via `claude -p` in a materialized isolated cell.
+
+    Vincent-authorized `claude -p` FOR THE BENCHMARK ONLY (the tmux subscription
+    lane hits a warmup-miss/stall that is a known unsupported-for-batch tmux issue;
+    headless `claude -p` avoids it). Mirrors the provider lanes: _prepare_provider_workdir
+    (materialize + from-scratch + worktree lock) → spawn_claude (the CLI, not the SDK —
+    `no-anthropic-sdk` intact) → governed report via _emit_governance. NOTE: post the
+    2026-06-15 subscription-escape cutover this bills API credits, not the subscription.
+    """
+    from provider_spawns.claude_spawn import spawn_claude
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_claude_benchmark: EventStore init failed; cannot proceed without "
+            "audit sink (ADR-005): %s", _es_exc,
+        )
+        return 1
+
+    role = args.role or "backend-developer"
+    instruction = _enrich_instruction(args)
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error("claude benchmark isolation failed for %s — aborting", args.dispatch_id)
+        return 1
+
+    try:
+        total_deadline = float(os.environ.get("VNX_BENCH_CLAUDE_DEADLINE", "1800"))
+    except (TypeError, ValueError):
+        total_deadline = 1800.0
+
+    start_time = datetime.now(timezone.utc)
+    try:
+        result = spawn_claude(
+            prompt=instruction,
+            model=args.model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            cwd=worker_cwd,
+            role=role,
+            skip_permissions=True,  # benchmark: no human to answer tool-permission prompts
+            event_writer=event_store.append if event_store is not None else None,
+            total_deadline=total_deadline,
+            requires_mcp=getattr(args, "requires_mcp", False),
+        )
+        end_time = datetime.now(timezone.utc)
+
+        if result.error or result.timed_out:
+            status = "timeout" if result.timed_out else "failure"
+            _emit_governance(args, "claude", args.model, result, start_time, end_time, status, event_store=event_store)
+            print(f"spawn_claude failed: {result.error or 'timeout'}", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "claude", args.model, result, start_time, end_time, "failure", event_store=event_store)
+            return 1
+        _emit_governance(args, "claude", args.model, result, start_time, end_time, "success", event_store=event_store)
+        return 0
+    finally:
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+
+
 def _dispatch_claude(args: argparse.Namespace) -> int:
     """Delegate to subprocess_dispatch.deliver_with_recovery (claude path).
 
     Produces byte-identical NDJSON + receipt as direct subprocess_dispatch
     invocation — the delegation preserves all argument semantics unchanged.
     """
+    # Benchmark mode (VNX_BENCH_SEED_MATERIALIZE=1): route claude through the
+    # materialized-cell `claude -p` path so the benchmark scores it like the provider
+    # lanes (the legacy delegate below does NOT materialize the seed/cell).
+    if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
+        return _dispatch_claude_benchmark(args)
+
     import subprocess_dispatch as sd
 
     # OI-1107: fall back to Role: header in instruction, then to documented default.
@@ -870,6 +964,44 @@ def _create_provider_worktree(dispatch_id: str) -> Path:
     return wt_path
 
 
+def _prepare_provider_workdir(
+    args: argparse.Namespace,
+) -> tuple[Optional[Path], Optional[Path]]:
+    """Create isolation and, for benchmark cells, materialize the seed at CWD."""
+    isolation_worktree: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_worktree = _create_provider_worktree(args.dispatch_id)
+
+    if (
+        os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1"
+        and isolation_worktree is None
+    ):
+        raise RuntimeError(
+            "benchmark provider isolation required but worktree creation failed; "
+            "refusing shared main checkout"
+        )
+
+    worker_cwd = isolation_worktree
+    if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
+        if isolation_worktree is None:
+            raise RuntimeError(
+                "benchmark seed materialization requires an isolated provider worktree"
+            )
+        from benchmark_worker_isolation import materialize_benchmark_seed  # noqa: PLC0415
+
+        worker_cwd = materialize_benchmark_seed(
+            isolation_worktree,
+            _resolve_dispatch_paths(args.dispatch_paths),
+        )
+
+    if (
+        isolation_worktree is not None
+        and os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1"
+    ):
+        print(f"VNX_PROVIDER_WORKDIR={isolation_worktree}", file=sys.stderr)
+    return isolation_worktree, worker_cwd
+
+
 def _remove_provider_worktree(dispatch_id: str) -> None:
     """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent."""
     try:
@@ -881,6 +1013,23 @@ def _remove_provider_worktree(dispatch_id: str) -> None:
             "provider isolation: remove_dispatch_worktree failed for %s: %s",
             dispatch_id, exc,
         )
+
+
+def _finish_provider_worktree(
+    dispatch_id: str,
+    isolation_worktree: Optional[Path],
+) -> None:
+    """Remove normal provider worktrees while preserving benchmark output."""
+    if isolation_worktree is None:
+        return
+    if os.environ.get("VNX_BENCH_PRESERVE_WORKTREE") == "1":
+        logger.info(
+            "provider isolation: preserving benchmark worktree %s (dispatch=%s)",
+            isolation_worktree,
+            dispatch_id,
+        )
+        return
+    _remove_provider_worktree(dispatch_id)
 
 
 def _dispatch_codex(args: argparse.Namespace) -> int:
@@ -905,17 +1054,21 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        try:
-            isolation_cwd = _create_provider_worktree(args.dispatch_id)
-        except RuntimeError as _wt_exc:
-            logger.error(
-                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
-                "for %s: %s — aborting dispatch; no shared-checkout fallback",
-                args.dispatch_id, _wt_exc,
-            )
-            return 1
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_codex(
@@ -924,7 +1077,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
-            cwd=isolation_cwd,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -952,8 +1105,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
@@ -1172,7 +1324,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     or "anthropic/claude-sonnet-4-6" fallback. Wires EventStore for NDJSON audit.
     DeepSeek requires DEEPSEEK_API_KEY env var (fast-fail before subprocess spawn).
     """
-    from provider_spawns.litellm_spawn import spawn_litellm
+    from provider_spawns.litellm_spawn import spawn_litellm, spawn_litellm_agentic
 
     event_store = None
     try:
@@ -1241,30 +1393,50 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         )
 
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd_litellm: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        try:
-            isolation_cwd_litellm = _create_provider_worktree(args.dispatch_id)
-        except RuntimeError as _wt_exc:
-            logger.error(
-                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
-                "for %s: %s — aborting dispatch; no shared-checkout fallback",
-                args.dispatch_id, _wt_exc,
-            )
-            return 1
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
-        result = spawn_litellm(
-            prompt=enriched_instruction,
-            model=model,
-            dispatch_id=args.dispatch_id,
-            terminal_id=args.terminal_id,
-            sub_provider=base_sub or None,
-            lane=lane_key,
-            tool_call_shape=_tool_call_shape,
-            event_writer=event_store.append if event_store is not None else None,
-            cwd=isolation_cwd_litellm,
-        )
+        # Agentic mode (VNX_LITELLM_AGENTIC=1): drive a tool-use loop so the model
+        # actually writes files / runs tests in the isolated cell. Without it the
+        # one-shot path gives the model no tools, so any deliverable-producing task
+        # scores correctness 0 by construction (observed 2026-06-18 GLM run).
+        if os.environ.get("VNX_LITELLM_AGENTIC") == "1":
+            result = spawn_litellm_agentic(
+                prompt=enriched_instruction,
+                model=model,
+                dispatch_id=args.dispatch_id,
+                terminal_id=args.terminal_id,
+                sub_provider=base_sub or None,
+                lane=lane_key,
+                event_writer=event_store.append if event_store is not None else None,
+                cwd=worker_cwd,
+            )
+        else:
+            result = spawn_litellm(
+                prompt=enriched_instruction,
+                model=model,
+                dispatch_id=args.dispatch_id,
+                terminal_id=args.terminal_id,
+                sub_provider=base_sub or None,
+                lane=lane_key,
+                tool_call_shape=_tool_call_shape,
+                event_writer=event_store.append if event_store is not None else None,
+                cwd=worker_cwd,
+            )
         end_time = datetime.now(timezone.utc)
 
         if result.error:
@@ -1291,8 +1463,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd_litellm is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -1320,17 +1491,21 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     # Resolve CLI arg form (e.g. kimi-k2-6 → kimi-k2.6 per kimi CLI 1.46.0)
     model_cli_arg = _kimi_resolve_cli_model_arg(model_key) if model_key else None
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd_kimi: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        try:
-            isolation_cwd_kimi = _create_provider_worktree(args.dispatch_id)
-        except RuntimeError as _wt_exc:
-            logger.error(
-                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
-                "for %s: %s — aborting dispatch; no shared-checkout fallback",
-                args.dispatch_id, _wt_exc,
-            )
-            return 1
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
@@ -1339,7 +1514,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
-            cwd=isolation_cwd_kimi,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -1367,8 +1542,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd_kimi is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
@@ -1436,6 +1610,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
 
     model = resolve_harness_model(args.model if args.model != "sonnet" else None)
     enriched_instruction = _enrich_instruction(args)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
     # start_time already set at top of function (before the missing-key guard).
     try:
         result = spawn_deepseek_harness(
@@ -1443,6 +1618,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             model=model,
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -1464,6 +1640,56 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+
+
+def _dispatch_glm_harness(args: argparse.Namespace) -> int:
+    """Route to spawn_glm_harness — GLM through the full claude-CLI harness via the
+    local litellm→OpenRouter proxy. Mirrors the deepseek-harness lane; spawn_glm_harness
+    fail-closes if the proxy is unreachable. zai-via-openrouter-only intact (proxy fronts
+    OpenRouter), no-anthropic-sdk intact (CLI not SDK). Benchmark "harness vs runner" lane.
+    """
+    from provider_spawns.glm_harness_spawn import resolve_harness_model, spawn_glm_harness
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error("_dispatch_glm_harness: EventStore init failed (ADR-005): %s", _es_exc)
+        return 1
+
+    model = resolve_harness_model(args.model if args.model != "sonnet" else None)
+    enriched_instruction = _enrich_instruction(args)
+    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    start_time = datetime.now(timezone.utc)
+    try:
+        result = spawn_glm_harness(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            cwd=worker_cwd,
+            event_writer=event_store.append if event_store is not None else None,
+        )
+        end_time = datetime.now(timezone.utc)
+        model_used = result.model or model
+        if result.error:
+            _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
+            print(f"spawn_glm_harness failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "timeout", event_store=event_store)
+            print("spawn_glm_harness timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
+            return 1
+        _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
+        return 0
+    finally:
+        _event_store_safety_net(event_store, args)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -1486,17 +1712,21 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     model = args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     enriched_instruction = _enrich_instruction(args)
-    isolation_cwd_gemini: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        try:
-            isolation_cwd_gemini = _create_provider_worktree(args.dispatch_id)
-        except RuntimeError as _wt_exc:
-            logger.error(
-                "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
-                "for %s: %s — aborting dispatch; no shared-checkout fallback",
-                args.dispatch_id, _wt_exc,
-            )
-            return 1
+    # Isolation + (bench) seed materialization. Fail-loud by design, never a
+    # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
+    # propagate the RuntimeError so the run DNFs loud and the lane parses the
+    # non-zero exit. Otherwise (PR-7 legacy path): clean abort, return 1.
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_gemini(
@@ -1505,7 +1735,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append,
-            cwd=isolation_cwd_gemini,
+            cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -1533,8 +1763,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        if isolation_cwd_gemini is not None:
-            _remove_provider_worktree(args.dispatch_id)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
 _MLX_MODEL_MAP: dict[str, str] = {
@@ -1662,6 +1891,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if provider == "claude":
+        # Benchmark exemption: the measurement harness is exempt from the single-entry
+        # door (it dispatches lanes directly; PR-12 plan). When the operator has
+        # explicitly authorized `claude -p` for the benchmark (VNX_BENCH_CLAUDE_HEADLESS=1)
+        # AND we are in benchmark seed-materialize mode, route claude through the governed
+        # materialized-cell `claude -p` path instead of rejecting to the door.
+        if (
+            os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1"
+            and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
+        ):
+            return _dispatch_claude(args)
         # PR-5: claude is not a provider-lane provider. The single-entry door owns
         # all Claude routing. Silent headless auto-selection via provider_dispatch is
         # removed — use DispatchSpec with allow_headless=true through the door instead.
@@ -1694,6 +1933,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if provider == "deepseek-harness":
         return _dispatch_deepseek_harness(args)
+
+    if provider == "glm-harness":
+        return _dispatch_glm_harness(args)
 
     if provider == "local-gemma":
         return _dispatch_local_gemma(args)

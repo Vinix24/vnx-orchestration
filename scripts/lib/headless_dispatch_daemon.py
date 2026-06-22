@@ -483,14 +483,22 @@ def _deliver(
         return False, eff_terminal, eff_generation
 
     try:
-        success = deliver_with_recovery(
-            terminal_id=meta.target_terminal,
-            instruction=meta.raw_instruction,
-            model=model,
-            dispatch_id=meta.dispatch_id,
-            role=meta.role,
-            max_retries=1,
-            pr_id=meta.pr_id,  # CFX-W5-2: forward pr_id so prior_round_finding fires
+        # PR-12: route through the single-entry door when VNX_SINGLE_ENTRY_DISPATCH=1; OFF
+        # default = the legacy deliver_with_recovery call (the lambda), byte-identical.
+        import dispatch_bridge  # noqa: PLC0415
+        success = dispatch_bridge.deliver_via_door(
+            lambda: deliver_with_recovery(
+                terminal_id=meta.target_terminal,
+                instruction=meta.raw_instruction,
+                model=model,
+                dispatch_id=meta.dispatch_id,
+                role=meta.role,
+                max_retries=1,
+                pr_id=meta.pr_id,  # CFX-W5-2: forward pr_id so prior_round_finding fires
+            ),
+            instruction_text=meta.raw_instruction, dispatch_id=meta.dispatch_id,
+            role=meta.role, target_slot=meta.target_terminal, provider="claude",
+            model=model, pr_id=meta.pr_id,
         )
         return bool(success), eff_terminal, eff_generation
     except Exception as exc:
