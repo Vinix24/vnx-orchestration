@@ -63,29 +63,94 @@ def _safe_ident(name: str) -> str:
 # Schema-driven table enumeration
 # ---------------------------------------------------------------------------
 
+def _fts_shadow_table_names(conn: sqlite3.Connection) -> set[str]:
+    """Return the set of FTS shadow table names for all FTS virtual tables in this DB.
+
+    FTS5 (and FTS3/FTS4) virtual tables each produce a family of hidden shadow
+    tables named <ftsname>_data, <ftsname>_idx, <ftsname>_content, <ftsname>_docsize,
+    <ftsname>_config (FTS5), and for FTS3/4: <ftsname>_segments, <ftsname>_segdir.
+    These are implementation internals — they never carry a project_id column and
+    must not be treated as tenant tables.
+
+    Detection: find every virtual table in sqlite_master whose sql contains
+    'USING fts5', 'USING fts4', or 'USING fts3' (case-insensitive), then derive
+    the shadow names from the virtual table name.
+
+    This is the correct approach: shadow tables are defined by the *existence of a
+    parent FTS virtual table*, not by their name suffix.  A real table named
+    pool_config (which has a project_id column) has no parent FTS virtual table
+    named 'pool', so it is NOT in the shadow set.
+    """
+    fts_suffixes = ("_data", "_idx", "_content", "_docsize", "_config",
+                    "_segments", "_segdir")
+    shadow_names: set[str] = set()
+
+    fts_rows = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND ("
+        "  sql LIKE '%USING fts5%' OR sql LIKE '%using fts5%' OR "
+        "  sql LIKE '%USING fts4%' OR sql LIKE '%using fts4%' OR "
+        "  sql LIKE '%USING fts3%' OR sql LIKE '%using fts3%'"
+        ")"
+    ).fetchall()
+
+    for (fts_name,) in fts_rows:
+        for suffix in fts_suffixes:
+            shadow_names.add(fts_name + suffix)
+
+    return shadow_names
+
+
 def enumerate_project_id_tables(conn: sqlite3.Connection) -> list[str]:
     """Return every table carrying a project_id column in this DB.
 
     Uses sqlite_master + pragma_table_info — no hardcoded table list.
-    Excludes FTS5 shadow tables and virtual tables (they have no direct
-    UNIQUE constraints we can rebuild).
+    Excludes FTS5/FTS4/FTS3 shadow tables and virtual tables (they have no
+    direct UNIQUE constraints we can rebuild).
+
+    The correct exclusion rule:
+      1. A table that HAS a project_id column is, by definition, a real tenant
+         table and must be included — regardless of its name suffix.  This means
+         pool_config (ends in _config, but carries project_id) IS included.
+      2. Real FTS shadow tables (xxx_data, xxx_idx, etc.) never carry project_id
+         so they are naturally excluded by the EXISTS check alone.  We additionally
+         build the explicit FTS shadow set (belt-and-suspenders) and exclude any
+         table in that set.  This guards against edge cases where an FTS shadow
+         table might somehow surface a project_id column in future SQLite versions.
+
+    Replaces the previous brittle name-suffix NOT LIKE filters (%_config,
+    %_data, %_idx, etc.) which incorrectly excluded legitimate tenant tables
+    whose names happen to end in those suffixes (C4 concern, now manifested
+    as a FK violation: worker_pools FK to pool_config broken by Phase 2).
     """
+    fts_shadows = _fts_shadow_table_names(conn)
+
+    # Collect FTS virtual table names so we can exclude the parent too.
+    # FTS virtual tables report their content columns (e.g. 'project_id') via
+    # PRAGMA table_info, even though the virtual table itself has no real schema.
+    # Treating an FTS virtual table as a tenant table would break Phase 1 DDL
+    # (which attempts to rebuild it via DROP+CREATE — not valid for virtual tables).
+    fts_virtual_names: set[str] = {name for (name,) in conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND ("
+        "  sql LIKE '%USING fts5%' OR sql LIKE '%using fts5%' OR "
+        "  sql LIKE '%USING fts4%' OR sql LIKE '%using fts4%' OR "
+        "  sql LIKE '%USING fts3%' OR sql LIKE '%using fts3%'"
+        ")"
+    ).fetchall()}
+
+    excluded = fts_shadows | fts_virtual_names
+
     rows = conn.execute(
         "SELECT m.name FROM sqlite_master m "
         "WHERE m.type='table' "
-        "AND m.name NOT LIKE '%_fts%' "
-        "AND m.name NOT LIKE '%_data' "
-        "AND m.name NOT LIKE '%_idx' "
-        "AND m.name NOT LIKE '%_content' "
-        "AND m.name NOT LIKE '%_docsize' "
-        "AND m.name NOT LIKE '%_config' "
         "AND EXISTS ("
         "  SELECT 1 FROM pragma_table_info(m.name) WHERE name='project_id'"
         ") "
         "ORDER BY m.name"
     ).fetchall()
-    # Filter out SQLite internal virtual table rows
-    return [r[0] for r in rows]
+
+    return [r[0] for r in rows if r[0] not in excluded]
 
 
 # ---------------------------------------------------------------------------
