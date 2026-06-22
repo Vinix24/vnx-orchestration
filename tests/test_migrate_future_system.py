@@ -78,6 +78,10 @@ def _init_project(tmp_path: Path) -> Path:
     conn.commit()
     conn.close()
 
+    # W1 coupled migration is fail-closed: needs a resolvable project_id.
+    # Write the marker so _marker_project_id() finds it walking up from the DB.
+    (project_dir / ".vnx-project-id").write_text("test-project\n", encoding="utf-8")
+
     return project_dir
 
 
