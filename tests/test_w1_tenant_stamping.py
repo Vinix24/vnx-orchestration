@@ -2305,3 +2305,286 @@ class TestBug1AndBug2Regressions:
             f"schema={schema!r}"
         )
         conn.close()
+
+
+# ===========================================================================
+# 23. C4 regression — FTS5 shadow exclusion must not evict project_id tables
+#     whose names share a shadow suffix (pool_config, foo_data, foo_idx, etc.)
+# ===========================================================================
+
+class TestFtsShadowExclusion:
+    """C4 fix: enumerate_project_id_tables must use PROPER FTS5 shadow detection
+    instead of name-suffix filtering.
+
+    The old implementation excluded tables matching %_config, %_data, %_idx,
+    %_content, %_docsize by name suffix — this incorrectly excluded pool_config
+    (a real tenant table with project_id that ends in _config) and any other
+    legitimate table whose name happens to share a shadow suffix.
+
+    The correct rule: FTS5 shadow tables are identified by deriving their names
+    from the parent FTS virtual table (e.g. 'notes' -> notes_data, notes_idx,
+    notes_config, ...).  A table named pool_config has no parent FTS virtual
+    table named 'pool', so it is NOT a shadow table and must be included.
+
+    Real-world impact: worker_pools has a composite FK (project_id, pool_id)
+    referencing pool_config(project_id, pool_id).  Phase 2 re-stamped worker_pools
+    but skipped pool_config (excluded by the suffix filter) -> FK violation ->
+    Phase 2 ROLLBACK.  This is the manifested C4 concern from the first review.
+    """
+
+    def test_pool_config_named_table_with_project_id_is_enumerated(
+        self, tmp_path: Path
+    ) -> None:
+        """A table named 'pool_config' that carries project_id must be included
+        in enumerate_project_id_tables, not excluded by a name-suffix filter."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE pool_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                pool_id TEXT NOT NULL,
+                max_workers INTEGER NOT NULL DEFAULT 4
+            )
+        """)
+        conn.execute("INSERT INTO pool_config (project_id, pool_id) VALUES ('vnx-dev', 'default')")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.enumerate_project_id_tables(conn)
+        conn.close()
+
+        assert "pool_config" in tables, (
+            "pool_config must be included in enumeration — it carries project_id "
+            "and is a real tenant table, not an FTS5 shadow table.  The old name-suffix "
+            "filter (%_config) incorrectly excluded it."
+        )
+
+    def test_fts5_shadow_tables_not_enumerated(self, tmp_path: Path) -> None:
+        """Real FTS5 shadow tables (notes_data, notes_idx, notes_config) must
+        NOT be enumerated, even if we somehow injected a project_id column into them.
+
+        The test creates:
+          - 'notes' FTS5 virtual table (parent)
+          - Its shadow tables: notes_data, notes_idx, notes_config are auto-created
+          - A real table 'documents' with project_id (must be included)
+
+        Verifies: notes_data, notes_idx, notes_config are excluded;
+                  documents is included.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # Create a real tenant table.
+        conn.execute("""
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            )
+        """)
+        conn.execute("INSERT INTO documents (title) VALUES ('test doc')")
+        # Create an FTS5 virtual table — SQLite auto-creates its shadow tables.
+        conn.execute("""
+            CREATE VIRTUAL TABLE notes USING fts5(
+                title,
+                body,
+                content='documents',
+                content_rowid='id'
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.enumerate_project_id_tables(conn)
+        conn.close()
+
+        assert "documents" in tables, (
+            "documents (real tenant table with project_id) must be included"
+        )
+        fts_shadows = [t for t in tables if t.startswith("notes_")]
+        assert fts_shadows == [], (
+            f"FTS5 shadow tables for 'notes' must NOT be enumerated: {fts_shadows}"
+        )
+
+    def test_real_table_ending_in_data_with_project_id_is_enumerated(
+        self, tmp_path: Path
+    ) -> None:
+        """A table named 'event_data' (ends in _data) that carries project_id
+        must be included — it has no parent FTS virtual table named 'event'."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE event_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                payload TEXT
+            )
+        """)
+        conn.execute("INSERT INTO event_data (payload) VALUES ('x')")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.enumerate_project_id_tables(conn)
+        conn.close()
+
+        assert "event_data" in tables, (
+            "event_data (project_id-bearing table ending in _data) must be included. "
+            "There is no FTS virtual table named 'event', so event_data is not a shadow."
+        )
+
+    def test_real_table_ending_in_idx_with_project_id_is_enumerated(
+        self, tmp_path: Path
+    ) -> None:
+        """A table named 'search_idx' (ends in _idx) that carries project_id
+        must be included — it has no parent FTS virtual table named 'search'."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        conn.execute("""
+            CREATE TABLE search_idx (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                term TEXT NOT NULL
+            )
+        """)
+        conn.execute("INSERT INTO search_idx (term) VALUES ('hello')")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.enumerate_project_id_tables(conn)
+        conn.close()
+
+        assert "search_idx" in tables, (
+            "search_idx (project_id-bearing table ending in _idx) must be included. "
+            "There is no FTS virtual table named 'search', so search_idx is not a shadow."
+        )
+
+    def test_pool_config_and_fts_shadow_coexist_correctly(
+        self, tmp_path: Path
+    ) -> None:
+        """pool_config (real, project_id) is enumerated; notes_config (FTS shadow) is not —
+        even when both exist in the same DB.
+
+        This is the exact mixed scenario from the seocrawler-v2 production DB:
+        pool_config is a worker-pool config table (real tenant data);
+        notes_config is an FTS5 shadow (internal metadata).
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # Real tenant table (must be included).
+        conn.execute("""
+            CREATE TABLE pool_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                pool_id TEXT NOT NULL,
+                max_workers INTEGER NOT NULL DEFAULT 4
+            )
+        """)
+        conn.execute("INSERT INTO pool_config (project_id, pool_id) VALUES ('vnx-dev', 'default')")
+        # Real parent table for FTS content tracking.
+        conn.execute("""
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            )
+        """)
+        # FTS5 virtual table 'notes' — auto-creates notes_config, notes_data, notes_idx, etc.
+        conn.execute("""
+            CREATE VIRTUAL TABLE notes USING fts5(title, body)
+        """)
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(str(db))
+        tables = ts.enumerate_project_id_tables(conn)
+        conn.close()
+
+        assert "pool_config" in tables, (
+            "pool_config must be enumerated — it is a real tenant table with project_id, "
+            "not an FTS shadow (no FTS virtual table named 'pool' exists)."
+        )
+        assert "documents" in tables, "documents must be enumerated"
+        fts_shadows = [t for t in tables if t.startswith("notes_")]
+        assert fts_shadows == [], (
+            f"FTS5 shadows for 'notes' must NOT be enumerated: {fts_shadows}"
+        )
+
+    def test_pool_config_included_in_full_migration_fk_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """Full end-to-end: worker_pools FK to pool_config must survive Phase 2.
+
+        This is the exact FK topology that caused the Phase 2 ROLLBACK in the
+        seocrawler-v2 dry-run.  With the fix, pool_config is enumerated, re-stamped
+        before worker_pools (topological order: parent pool_config before child
+        worker_pools), and the FK check passes after Phase 2.
+        """
+        db = _db(tmp_path)
+        conn = _open(db)
+        # pool_config is the FK parent.
+        conn.execute("""
+            CREATE TABLE pool_config (
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                pool_id TEXT NOT NULL,
+                max_workers INTEGER NOT NULL DEFAULT 4,
+                PRIMARY KEY (project_id, pool_id)
+            )
+        """)
+        # worker_pools has a composite FK to pool_config.
+        conn.execute("""
+            CREATE TABLE worker_pools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                pool_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                FOREIGN KEY (project_id, pool_id)
+                    REFERENCES pool_config(project_id, pool_id)
+                    ON UPDATE NO ACTION ON DELETE NO ACTION
+            )
+        """)
+        conn.execute(
+            "INSERT INTO pool_config (project_id, pool_id, max_workers) "
+            "VALUES ('vnx-dev', 'default', 8)"
+        )
+        conn.execute(
+            "INSERT INTO worker_pools (project_id, pool_id, status) "
+            "VALUES ('vnx-dev', 'default', 'active')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Full 3-phase migration must succeed without FK violation.
+        result = ts.run_three_phase_migration_on_db(db, "seocrawler-v2", db_label="TEST")
+        assert result["ok"] is True, f"Migration failed: {result}"
+
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        # Both tables must be re-stamped.
+        pc_val = conn.execute(
+            "SELECT project_id FROM pool_config WHERE pool_id='default'"
+        ).fetchone()[0]
+        wp_val = conn.execute(
+            "SELECT project_id FROM worker_pools WHERE pool_id='default'"
+        ).fetchone()[0]
+        assert pc_val == "seocrawler-v2", (
+            f"pool_config not re-stamped: got {pc_val!r}. "
+            "pool_config was excluded from enumeration and skipped by Phase 2."
+        )
+        assert wp_val == "seocrawler-v2", (
+            f"worker_pools not re-stamped: got {wp_val!r}"
+        )
+
+        # FK check must be clean — the original failure mode.
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        assert fk_violations == [], (
+            f"FK violations after migration: {fk_violations}. "
+            "pool_config was not re-stamped, leaving worker_pools FK broken."
+        )
+        ic = conn.execute("PRAGMA integrity_check").fetchall()
+        assert ic == [("ok",)], f"integrity_check failed: {ic}"
+        conn.close()
