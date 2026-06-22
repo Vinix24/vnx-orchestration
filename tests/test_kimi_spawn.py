@@ -671,5 +671,65 @@ class TestDispatchKimiEventStoreFailure(unittest.TestCase):
         self.assertNotEqual(rc, 0)
 
 
+class TestKimiEnvIsolation(unittest.TestCase):
+    """The kimi CLI must run with a clean Python env — a foreign venv's
+    VIRTUAL_ENV/PYTHONPATH/PYTHONHOME shadows kimi's own deps (mcp.types clash →
+    0.6s crash, live-proven on a SEOcrawler .venv-spawned plan-gate panel)."""
+
+    def test_isolate_strips_venv_pollution(self) -> None:
+        from provider_spawns.kimi_spawn import _isolate_kimi_env
+
+        dirty = {
+            "VIRTUAL_ENV": "/x/.venv",
+            "PYTHONPATH": "/x/.venv/lib/site-packages",
+            "PYTHONHOME": "/x/.venv",
+            "PATH": "/usr/bin",
+            "HOME": "/Users/me",
+        }
+        clean = _isolate_kimi_env(dirty)
+        self.assertNotIn("VIRTUAL_ENV", clean)
+        self.assertNotIn("PYTHONPATH", clean)
+        self.assertNotIn("PYTHONHOME", clean)
+        # non-pollution vars are preserved untouched
+        self.assertEqual(clean["PATH"], "/usr/bin")
+        self.assertEqual(clean["HOME"], "/Users/me")
+
+    def test_spawn_kimi_passes_clean_env_to_subprocess(self) -> None:
+        """End-to-end wiring: even with a polluted os.environ AND extra_env, the
+        env handed to the subprocess carries none of the venv-pollution vars."""
+        from provider_spawns import kimi_spawn
+
+        polluted = {
+            **os.environ,
+            "VIRTUAL_ENV": "/foreign/.venv",
+            "PYTHONPATH": "/foreign/site-packages",
+            "PYTHONHOME": "/foreign",
+        }
+        captured: dict = {}
+
+        def _fake_start(cmd, env, cwd_str):
+            captured["env"] = env
+            return None, KimiSpawnResult(
+                returncode=127, completion_text="", events_written=0,
+                session_id=None, timed_out=False, stopped_early=False,
+                token_usage=None, error="stub",
+            )
+
+        with patch.dict(os.environ, polluted, clear=True), \
+                patch.object(kimi_spawn, "_start_kimi_subprocess", _fake_start):
+            # extra_env also tries to inject pollution — it must still be stripped.
+            kimi_spawn.spawn_kimi(
+                prompt="review this",
+                dispatch_id="d-iso",
+                terminal_id="T1",
+                extra_env={"PYTHONPATH": "/also/foreign"},
+            )
+
+        env = captured["env"]
+        self.assertNotIn("VIRTUAL_ENV", env)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONHOME", env)
+
+
 if __name__ == "__main__":
     unittest.main()
