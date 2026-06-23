@@ -336,7 +336,7 @@ class TestBuildIntegration:
         }
         missing = required - set(state.keys())
         assert not missing, f"build_t0_state lost legacy keys: {missing}"
-        assert state["schema_version"] == "2.1"
+        assert state["schema_version"] == "2.2"
 
 
 # ---------------------------------------------------------------------------

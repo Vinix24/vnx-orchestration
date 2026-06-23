@@ -37,7 +37,7 @@ import build_t0_state as bts  # noqa: E402
 
 class TestRunsClean:
     def test_build_t0_state_runs_clean_on_main(self, tmp_path: Path) -> None:
-        """Script exits 0 and produces valid schema_version:2.1 JSON."""
+        """Script exits 0 and produces valid schema_version:2.2 JSON."""
         out = tmp_path / "t0_state_smoke.json"
         result = subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "build_t0_state.py"), "--output", str(out)],
@@ -50,7 +50,7 @@ class TestRunsClean:
         )
         assert out.exists(), "output file not created"
         data = json.loads(out.read_text())
-        assert data.get("schema_version") == "2.1"
+        assert data.get("schema_version") == "2.2"
 
 
 # ---------------------------------------------------------------------------
