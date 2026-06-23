@@ -334,6 +334,44 @@ def reconcile_track(
         conn.close()
 
 
+def peek_derived_status(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+) -> Dict[str, Any]:
+    """READ-ONLY: compute derived_status for one track WITHOUT persisting it.
+
+    Same derivation as reconcile_track (all sources: dispatch states, blocker
+    OIs, dependency tracks, and the merged-PR evidence path) but writes nothing —
+    so a dry-run preview never mutates DB state. Returns the same dict shape as
+    reconcile_track (track_id, project_id, derived_status, declared_phase, drifted).
+
+    Raises RuntimeError if the derived_status column is absent (migration 0028).
+    """
+    conn = _get_conn(state_dir)
+    try:
+        if not _has_col(conn, "tracks", "derived_status"):
+            raise RuntimeError(
+                "tracks.derived_status column absent; apply migration 0028 first."
+            )
+        merged = _load_merged_pr_numbers(state_dir)
+        derived = _compute_derived_status(conn, track_id, project_id, merged)
+        track_row = conn.execute(
+            "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        declared = track_row["phase"] if track_row else None
+        return {
+            "track_id": track_id,
+            "project_id": project_id,
+            "derived_status": derived,
+            "declared_phase": declared,
+            "drifted": declared != derived,
+        }
+    finally:
+        conn.close()
+
+
 def reconcile_all_tracks(
     state_dir: str | Path,
     project_id: str,

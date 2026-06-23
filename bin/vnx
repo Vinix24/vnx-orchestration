@@ -328,6 +328,9 @@ Planning commands (strategic-layer read surface):
   objective list      List objectives (tracks) grouped by horizon (now/next/later)
                         Options: --horizon, --phase, --json
   objective show <id> Show one objective: phase/horizon/deps/pr_ref
+  objective drift     Advisory: report tracks whose declared phase != derived status
+  objective close <id> Close-the-loop: advance declared phase to a terminal derived
+                        status (human-gated: dry-run default; --apply --approval-id to write)
 
 Process commands (visibility and control):
   status             Show terminal health, dispatch queue, and gate results
