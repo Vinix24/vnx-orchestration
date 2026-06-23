@@ -455,15 +455,12 @@ class TmuxInteractiveDispatch:
             "0", "false", "no", "off"
         ):
             return body
-        try:
-            import report_body_contract as _rbc  # noqa: PLC0415
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "_append_report_contract_directive: report_body_contract import "
-                "failed (%s); skipping directive",
-                exc,
-            )
-            return body
+        # Import unguarded — same fail-closed semantics as dispatch_prepare.prepare():
+        # report_body_contract is a core lib present in every tree. If it cannot be
+        # imported the runtime is broken; surface that loudly rather than silently
+        # shipping an ungoverned (directive-less) body, which is the exact failure
+        # this directive exists to prevent.
+        import report_body_contract as _rbc  # noqa: PLC0415
         return body + "\n\n" + _rbc.build_directive(dispatch_id or "", pr_id=pr_id)
 
     def _govern_report(
