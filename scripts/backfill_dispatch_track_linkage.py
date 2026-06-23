@@ -763,7 +763,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         # backfill used to default to repo-local while seed_tracks + the daemons
         # resolved central (~/.vnx-data/<project>), so its track-linkage landed in a
         # different store than the future-state it was meant to reconcile (WS2 split).
-        from project_root import resolve_central_data_dir
+        # vnx_paths (NOT project_root): vnx_paths.resolve_central_data_dir validates
+        # project_id against ^[a-z][a-z0-9-]{1,31}$ (OI-1369), rejecting dots/slashes
+        # that would escape the ~/.vnx-data sandbox via a crafted --project-id.
+        from vnx_paths import resolve_central_data_dir
         if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
             data_dir = Path(os.environ["VNX_DATA_DIR"]).resolve()
         else:
