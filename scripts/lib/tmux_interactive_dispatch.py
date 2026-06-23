@@ -1389,19 +1389,6 @@ class TmuxInteractiveDispatch:
                 except OSError:
                     pass
 
-    def _load_handle(self, dispatch_id: str) -> "dict | None":
-        path = self._handle_path(dispatch_id)
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else None
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "interactive: handle read failed for %s: %s", dispatch_id, exc
-            )
-            return None
-
     def _remove_handle(self, dispatch_id: str) -> None:
         path = self._handle_path(dispatch_id)
         try:
