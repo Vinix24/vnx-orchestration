@@ -29,9 +29,10 @@ class Provider(str, Enum):
     KIMI              = "kimi"             # CLI OAuth (kimi-via-cli-only)
     GEMINI            = "gemini"
     LITELLM_DEEPSEEK  = "litellm:deepseek"
-    LITELLM_ZAI       = "litellm:zai"      # GLM via OpenRouter (NOT direct Zhipu)
+    LITELLM_ZAI       = "litellm:zai"      # BENCHMARK-BASELINE ONLY (prod GLM uses Provider.GLM_HARNESS; glm-via-harness-only)
     LITELLM_MOONSHOT  = "litellm:moonshot"  # BENCHMARK-BASELINE ONLY (prod kimi uses Provider.KIMI)
     DEEPSEEK_HARNESS  = "deepseek-harness"
+    GLM_HARNESS       = "glm-harness"      # GLM via claude-CLI harness → local :4141 litellm proxy → OpenRouter (prod GLM lane)
     LOCAL_GEMMA       = "local-gemma"
 
 

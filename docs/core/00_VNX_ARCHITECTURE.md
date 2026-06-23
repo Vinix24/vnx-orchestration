@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-06-11
+**Last Updated**: 2026-06-22
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -1139,6 +1139,40 @@ python .claude/vnx-system/scripts/pr_queue_manager.py promote <dispatch-id>
 
 ## Multi-Provider Dispatch
 
+### Dispatch lanes and provider routing
+
+VNX drives every provider as a CLI subprocess and never imports a vendor SDK
+(the `no-anthropic-sdk` constraint enforces this in CI). The hard guard-rails on
+which provider may serve which lane live in one machine-readable SSOT:
+`scripts/lib/providers/provider_constraints.yaml`.
+
+Two Claude worker lanes exist:
+
+- **claude-tmux-spawn** (`scripts/lib/tmux_interactive_dispatch.py`) — the
+  default. Interactive `claude` (never `claude -p`) in a single-shot tmux
+  session, on the subscription. `dispatch.sh` selects it unless a dispatch opts
+  into the burst lane.
+- **claude-subprocess** (`scripts/lib/subprocess_dispatch.py`) — the headless
+  `claude -p` burst lane. After the June 15, 2026 billing change it bills API
+  credits, so it is opt-in and blocked by default (`claude-headless` constraint;
+  `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it).
+
+Non-Claude providers (codex, gemini, kimi, deepseek-harness, litellm sub-providers,
+local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth
+only (`kimi-via-cli-only`); GLM-5.1 routes via OpenRouter (`zai-via-openrouter-only`);
+DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subscription-blocked`
+gates the subscription variant). Full lane map: `docs/core/PROVIDER_LANES.md`;
+dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
+
+**Single-entry door (in progress, default-OFF).** Lane selection is moving behind
+one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot →
+compile_plan → permit → execute. It is built and tested but disabled by default
+(`VNX_SINGLE_ENTRY_DISPATCH` resolves off via `scripts/lib/dispatch_flags.py`;
+`VNX_DISPATCH_LEGACY=1` is the absolute rollback). The flip that turns it on, the
+GLM→harness normalization, and a phantom-guard that rejects evidence-free
+GATE-GREEN receipts are committed on `feat/dispatch-flip`, not on the released
+default path.
+
 ### Provider Capability Matrix
 
 | Provider | Skill Format | Model Control | Context Clear | Status |
@@ -1314,8 +1348,8 @@ Creates a complete LeadFlow SaaS project with:
 
 ---
 
-**Document Status**: Production Active (V1.0.0 — Dashboard Attention Model + Self-Learning Pipeline)
-**Last Major Update**: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
+**Document Status**: Active (VNX 1.0.0 release candidate — Dashboard Attention Model + intelligence injection). The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
+**Last Major Update**: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction). Prior: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
 **Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs; VNX 1.0.0)
 **Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
 **Intelligence Version**: v2.0.0 (Adoption tracking, worker injection, pairwise tag matching, 3-section digest)

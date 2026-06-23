@@ -41,6 +41,7 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
+from dispatch_flags import single_entry_enabled  # noqa: E402
 from dispatch_spec import _ID_RE, Provider  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
@@ -56,7 +57,14 @@ _PROVIDER_ALIASES = {
     "gemini": "gemini",
     "gemini_cli": "gemini",
     "litellm:deepseek": "litellm:deepseek",
-    "litellm:zai": "litellm:zai",
+    # glm-via-harness-only: GLM ALWAYS runs via the claude-CLI harness (glm-harness), never the
+    # plain single-shot litellm runner. Any legacy caller emitting litellm:zai / zai / glm is
+    # normalized to glm-harness AT THE DOOR. The benchmark does NOT go through this bridge (it
+    # dispatches via provider_dispatch directly), so its litellm:zai baselines are untouched.
+    "litellm:zai": "glm-harness",
+    "zai": "glm-harness",
+    "glm": "glm-harness",
+    "glm-harness": "glm-harness",
     "litellm:moonshot": "litellm:moonshot",
     "deepseek-harness": "deepseek-harness",
     "local-gemma": "local-gemma",
@@ -229,8 +237,11 @@ def deliver_via_door(
 
     ``project_id`` may be None: the door resolves + validates it fail-closed (ADR-007). Pass it
     explicitly when the caller already knows it (preferred).
+
+    Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
+    and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
     """
-    if os.environ.get("VNX_SINGLE_ENTRY_DISPATCH") == "1":
+    if single_entry_enabled():
         return bridge_dispatch(
             instruction_text=instruction_text,
             dispatch_id=dispatch_id,

@@ -113,7 +113,9 @@ echo "[dispatch-agent] Created dispatch: $DISPATCH_ID"
 _ar_flag=()
 [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
 
-if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]]; then
+# shellcheck source=/dev/null
+source "$SCRIPTS_LIB/vnx_dispatch_flags.sh"
+if vnx_single_entry_enabled; then
   printf '%s' "$INSTRUCTION" | python3 "$SCRIPTS_LIB/dispatch_bridge.py" \
     --dispatch-id "$DISPATCH_ID" \
     --terminal "T1" \

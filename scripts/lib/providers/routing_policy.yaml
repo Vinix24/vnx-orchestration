@@ -82,7 +82,7 @@ lane_safety:
   force_headless:
     models:
       - claude-opus-4-8
-      - claude-opus-4-7
+      - claude-opus-4-8
       - claude-sonnet-4-6
     reason: "Anthropic interactive-hang (#63390 + #64153)"
     review_trigger: "Anthropic fix-release OR 2026-06-15 billing cutover"

@@ -5,6 +5,8 @@
 > `CLAUDE.md` under "Subprocess Adapter Feature Flag".
 >
 > For provider-specific adapter configuration see:
+> - `docs/core/PROVIDER_LANES.md` — the full per-provider lane map (claude tmux/headless, codex, gemini, kimi, deepseek-harness, ollama) and the single-entry door
+> - `docs/core/DISPATCH_RULES.md` — provider-string routing cheat-sheet and lane selection
 > - `docs/operations/SUBPROCESS_ADAPTER_FEATURE_FLAG.md` — per-terminal adapter env vars
 > - `docs/operations/RECEIPT_PIPELINE.md` — multi-provider receipt handling
 >

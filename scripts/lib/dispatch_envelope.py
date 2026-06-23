@@ -356,6 +356,7 @@ def _govern(
     adapter_result: _AdapterResult,
     start_time: datetime,
     end_time: datetime,
+    phantom_diff: Optional[str] = None,
 ) -> tuple:
     """Emit unified_report then dispatch receipt. Returns (report_path, receipt_path).
 
@@ -442,6 +443,28 @@ def _govern(
         report_path,
         receipt_path,
     )
+    # P0.2: inline phantom-guard (provider lanes — the kimi/glm/deepseek text-only fabrication
+    # vector). A delivery worker that reports success with no worktree/branch diff is rejected via
+    # a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
+    # the dispatch/<id> branch (isolated dispatches) or abstains (never false-rejects). Non-fatal.
+    try:
+        from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+        _tok = adapter_result.token_usage or {}
+        record_phantom_if_any(
+            dispatch_id=spec.dispatch_id,
+            role=spec.role,
+            status=adapter_result.status,
+            token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
+            worktree_path=None,
+            base_sha=None,
+            worktree_diff=phantom_diff,  # F1: pre-captured before the worktree teardown
+            receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "envelope._govern: phantom-guard check failed (non-fatal) dispatch=%s: %s",
+            spec.dispatch_id, exc,
+        )
     return report_path, receipt_path
 
 
@@ -738,6 +761,64 @@ class ProviderAdapter:
                 token_usage=token_usage,
             )
 
+        # ---- glm-harness ---- (codex flip-PR F2: the door normalizes GLM -> glm-harness, so the
+        # provider envelope MUST be able to execute it, not raise unsupported.)
+        if pv == Provider.GLM_HARNESS:
+            from provider_spawns.glm_harness_spawn import (  # noqa: PLC0415
+                resolve_harness_model,
+                spawn_glm_harness,
+            )
+
+            raw_model = (
+                plan.model if plan.model not in ("default", "sonnet", "") else None
+            )
+            model = resolve_harness_model(raw_model)
+            try:
+                result = spawn_glm_harness(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"glm-harness spawn BrokenPipeError: {exc}",
+                )
+            token_usage = _extract_token_usage(result, pv.value)
+            if result.error:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="failure",
+                    token_usage=token_usage,
+                    error=result.error,
+                )
+            if result.timed_out:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="timeout",
+                    token_usage=token_usage,
+                    timed_out=True,
+                )
+            if getattr(result, "stopped_early", False):
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="success",
+                    token_usage=token_usage,
+                )
+            status = "success" if result.returncode == 0 else "failure"
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text=(result.completion_text or ""),
+                status=status,
+                token_usage=token_usage,
+            )
+
         # ---- local-gemma ----
         if pv == Provider.LOCAL_GEMMA:
             from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415
@@ -854,7 +935,7 @@ def run_envelope_plan(
         provider=plan.provider.value,
         model=plan.model,
         instruction=instruction,
-        role=None,
+        role=plan.role,  # F2 (codex): carry the role so the phantom-guard review-exemption applies
         pr_id=None,
         state_dir=state_dir,
         data_dir=data_dir,
@@ -904,14 +985,26 @@ def run_envelope_plan(
             error=_isolation_error,
         )
 
+    _phantom_diff: Optional[str] = None
     try:
         start = datetime.now(timezone.utc)
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path)
         end = datetime.now(timezone.utc)
+        # F1 (codex): capture the worker's diff from the LIVE worktree BEFORE the teardown below —
+        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id> branch, so
+        # the phantom-guard inside _govern could not otherwise resolve the provider lane's diff and
+        # would abstain, letting the exact kimi/glm/deepseek phantom slip through.
+        try:
+            from phantom_guard import compute_worktree_diff  # noqa: PLC0415
+            # F3 (codex): use the plan's actual base_ref, not a hardcoded origin/main — a seeded /
+            # non-main base would make an empty worker run look non-empty and let a phantom pass.
+            _phantom_diff = compute_worktree_diff(wt_path, base_ref=plan.base_ref or "origin/main")
+        except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
+            _phantom_diff = None
     finally:
         remove_dispatch_worktree(plan.dispatch_id)
 
-    report_path, receipt_path = _govern(enriched_spec, result, start, end)
+    report_path, receipt_path = _govern(enriched_spec, result, start, end, phantom_diff=_phantom_diff)
 
     return EnvelopeResult(
         status=result.status,

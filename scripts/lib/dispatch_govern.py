@@ -67,6 +67,14 @@ def dedup_completion_receipts(receipts: list) -> "dict | None":
     if len(receipts) == 1:
         return receipts[0]
 
+    # Tier 0 (phantom override): a govern-time phantom rejection is FINAL — it overrides the
+    # worker's own claim regardless of authored/synthesized status or a same-second timestamp tie
+    # (codex P0.2 F4). The worker's original receipt stays on the ledger; this only decides which
+    # one is authoritative for gate evaluation.
+    phantom = [r for r in receipts if r.get("phantom_rejected")]
+    if phantom:
+        return max(phantom, key=lambda r: str(r.get("timestamp") or ""))
+
     # Tier 1: authoritative status outranks unknown
     authoritative = [r for r in receipts if _receipt_authority(r)]
     pool = authoritative if authoritative else receipts
@@ -250,13 +258,32 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """
     dispatch_id = spec.dispatch_id
     try:
-        return _govern_impl(spec, raw, lane)
+        outcome = _govern_impl(spec, raw, lane)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "govern: unhandled error dispatch=%s lane=%s: %s — emitting error body",
             dispatch_id, lane, exc,
         )
         return _govern_error_fallback(spec, raw, lane, exc)
+    # P0.2: inline phantom-guard backstop — reject an evidence-free GATE-GREEN (a delivery worker
+    # that claims completion but produced no worktree/branch diff). The provider lanes run the same
+    # check in dispatch_envelope._govern. Best-effort: never fatal to govern (a guard failure must
+    # not lose the report). guard_at_govern abstains on an unresolvable ref (never false-rejects).
+    try:
+        from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+        _tok = raw.token_usage or {}
+        record_phantom_if_any(
+            dispatch_id=spec.dispatch_id,
+            role=spec.role,
+            status=(raw.receipt.get("status") if isinstance(raw.receipt, dict) else None),
+            token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
+            worktree_path=spec.worktree_path,
+            base_sha=spec.base_sha,
+            receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)
+    return outcome
 
 
 def _govern_error_fallback(

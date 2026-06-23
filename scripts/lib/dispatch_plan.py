@@ -75,6 +75,9 @@ class ExecutionPlan:
     route_reason: str                   # comma-joined rule ids, e.g. "D11,D3,D1,D2,D4,D5,D6,D7,D8,D9,D10,D12"
     instruction_sha256: str = ""        # P0-3: sha256 of instruction content at validate() time
     warnings: tuple[str, ...] = ()
+    role: Optional[str] = None          # carried from DispatchSpec for the phantom-guard review
+                                        # exemption (codex P0.2 F2). NOT in digest() — advisory only,
+                                        # must not perturb the permit fingerprint.
 
     def digest(self) -> str:
         """Stable sha256 over the canonical, order-independent field set.
@@ -254,6 +257,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         dispatch_paths=dispatch_paths,
         instruction_file=spec.instruction_file,
         route_reason=",".join(fired),
+        role=spec.role,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )

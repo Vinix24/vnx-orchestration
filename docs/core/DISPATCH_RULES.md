@@ -8,6 +8,9 @@
 > routing policy → `scripts/lib/providers/routing_policy.yaml`; pricing/registry →
 > `scripts/lib/providers/wave7_models.yaml`. The single dispatch entry is the door
 > (`vnx dispatch` / `scripts/lib/dispatch_cli.py`); it runs `compile_plan` + a permit for every lane.
+> The door is built and tested but **default-OFF** (`VNX_SINGLE_ENTRY_DISPATCH` resolves to disabled
+> via `scripts/lib/dispatch_flags.py`; `VNX_DISPATCH_LEGACY=1` is the absolute rollback) until the
+> flip lands. Until then, dispatches route through the per-lane paths in §5/§8.
 
 ## 1. Decision tree (first matching rule wins)
 
@@ -57,7 +60,7 @@ Efficiency: risk ≤ 0.3 + success + no blockers → fast path, skip deep verifi
 | PR review gate | `review_gate_manager.py` / `t0_gate_enforcement.sh` |
 | Pure utility (no PR, no gate) | direct Bash |
 
-All PR/gate work routes through the door (`vnx dispatch`). `tmux_interactive_dispatch.py` defaults: `--isolated-worktree` on, `--model sonnet`, `--base-ref origin/main`; staging gate via `--from-staging-id` (ADR-006). Required: `--dispatch-id`, `--instruction`.
+PR/gate work is routed through `vnx dispatch`, which selects the lane; the single-entry door is the eventual single funnel for that selection but is still default-OFF (see header). `tmux_interactive_dispatch.py` defaults: `--isolated-worktree` on, `--model sonnet`, `--base-ref origin/main`; staging gate via `--from-staging-id` (ADR-006). Required: `--dispatch-id`, `--instruction`.
 
 **Known gap (OI-188):** no lane reliably edits files under `.claude/skills/` — Claude treats the loaded skill dir as read-only. Edit skill files manually from T0/operator.
 
@@ -88,10 +91,10 @@ These recur — observed, not hypothetical. A dispatch that "did nothing" or "bi
 
 | Model(s) | Lane / provider string | Constraint |
 |---|---|---|
-| sonnet / opus (claude) | `tmux_interactive_dispatch.py` `--model sonnet`\|`opus` | Subscription. NEVER headless `claude -p` (= API). Serialize under load (§6). |
+| sonnet / opus (claude) | `tmux_interactive_dispatch.py` `--model sonnet`\|`opus` | Subscription. Headless `claude -p` is opt-in and blocked by default (`claude-headless` constraint; `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it, = API). Serialize under load (§6). |
 | codex (gpt-5.x) | `provider_dispatch.py --provider codex` | Has tools. Retry once on lane-launch DNF (`codex_retry_once`). |
 | kimi (k2.x) | `provider_dispatch.py --provider kimi` | **kimi CLI OAuth only** (`kimi-via-cli-only`). The CLI OAuth serves the current coding model (K2.7-Code, the default — no `-m`). NOT `litellm:moonshot` (bare API; violates the constraint; baseline-only). |
-| GLM-5.1 | `provider_dispatch.py --provider litellm:zai` | Resolves to `openrouter/z-ai/glm-5` + `OPENROUTER_API_KEY` → satisfies `zai-via-openrouter-only`. GLM-4.5/4.6 rejected (`deprecated-glm-models`). |
+| GLM-5.1 | `provider_dispatch.py --provider litellm:zai` | Released path: resolves to `openrouter/z-ai/glm-5` + `OPENROUTER_API_KEY` → satisfies `zai-via-openrouter-only`. On `feat/dispatch-flip` the door normalizes this to the `glm-harness` lane (`glm-via-harness-only`); not on the released default. GLM-4.5/4.6 rejected (`deprecated-glm-models`). |
 | DeepSeek (tools) | `provider_dispatch.py --provider deepseek-harness` | Anthropic-compat via harness, own `DEEPSEEK_API_KEY` + hardening. NOT on the prod OAuth subscription (`deepseek-harness-subscription-blocked`). |
 | DeepSeek (bare) | `provider_dispatch.py --provider litellm:deepseek` | Chat-only, NO tools. Baseline only. |
 | local gemma | `provider_dispatch.py --provider local-gemma` | Free, local; mechanical / cutoff-resilient checks. |
@@ -103,3 +106,21 @@ Every dispatch: `[[TARGET:A|B|C]]` … `[[DONE]]`, headers `Role/Track/Terminal/
 ## 10. Operational runbooks (not inlined — see scripts)
 
 Startup reconciliation, post-crash lease recovery, orphaned-dispatch handling, OI lifecycle, and PR-queue ops are operational recipes, not always-loaded skill content. Use: `scripts/queue_status.sh`, `scripts/deliverable_review.sh`, `.claude/skills/t0-orchestrator/scripts/dispatch_guard.sh`, `scripts/provider_capabilities.sh`, `scripts/runtime_core_cli.py`, `bin/vnx pool {status,scale,config,reap}` (Wave 6 elastic pool, ADR-018).
+
+## 11. 1.0 transition-flag sunset list
+
+The single-entry-door rollout ships behind transition flags. At the 1.0 release these are retired so the door is the one and only path (no dual-path branches left to drift). Disposition per flag:
+
+| Flag | Disposition at 1.0 |
+|---|---|
+| `VNX_SINGLE_ENTRY_DISPATCH` | REMOVE — the door becomes the only path; the flag becomes a no-op, then deleted |
+| `VNX_DISPATCH_LEGACY` | REMOVE — the legacy lane is deleted after one stable release on the door |
+| `VNX_AUTO_ROUTE` | REMOVE — legacy-only smart-route; the door's compile_plan owns routing. `dispatch-agent.sh`'s `--auto-route` path is inert under the door and is removed with it |
+| `VNX_USE_CENTRAL_DB` | REVIEW — the central store is the default; confirm no dual-write path remains before removing |
+| `VNX_STATE_DUAL_WRITE_LEGACY` | REMOVE — a one-time migration aid |
+| `VNX_OVERRIDE_CLAUDE_HEADLESS` | KEEP — a real account-safety override, not transition scaffolding |
+| `VNX_OVERRIDE_WORKER_PUSH_MAIN` | KEEP — a real governance override |
+| `VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY` | KEEP — the benchmark baseline escape for `glm-via-harness-only` |
+| `VNX_OVERRIDE_PHANTOM_GUARD` | KEEP — operator escape for a legitimate no-op delivery |
+
+KEEP = a genuine safety/operator override. REMOVE = transition scaffolding that only existed to make the flip reversible. The default-flip itself (`dispatch_flags._DEFAULT_ENABLED`) is the operator-gated cutover; the REMOVE flags are deleted only after it has run stably.
