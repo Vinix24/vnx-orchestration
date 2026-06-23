@@ -69,3 +69,30 @@ def test_benchmark_override_downgrades_to_warn():
     key = _override_key("glm-via-harness-only")
     assert key == "VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY"
     assert _glm_via("litellm:zai", "zai", "openrouter", {key: "1"}) == [("warn", True)]
+
+
+# --- END-TO-END coverage: the door must not just NORMALIZE to glm-harness, it must be able to
+# --- CLEAR its own registry check and EXECUTE it. (codex flip-PR F1/F2 — the gap that let the
+# --- isolated-alias/constraint tests pass while the full door->registry->envelope path was broken.)
+
+def test_glm_harness_registry_key_is_zai():
+    # GLM models register under `zai` in wave7_models.yaml; the door's registry check must look there.
+    from providers.constraint_enforcer import _registry_key_for
+    assert _registry_key_for("glm-harness", "zai") == "zai"
+
+
+def test_glm_harness_clears_door_registry_check():
+    # The single-entry door calls check_constraints(check_registry=True). Before F1, glm-harness was
+    # rejected with model-not-in-current-registry BEFORE execution.
+    v = check_constraints(provider="glm-harness", sub_provider="zai", model="glm-5.2",
+                          terminal_id="T1", role="backend-developer", via="claude_harness_openrouter",
+                          check_registry=True, env={})
+    assert not [x for x in v if "registry" in x.code and x.severity == "blocking"]
+
+
+def test_envelope_adapter_can_execute_glm_harness():
+    # Before F2 the provider envelope raised ValueError("unsupported provider") for GLM_HARNESS.
+    import inspect
+    import dispatch_envelope
+    src = inspect.getsource(dispatch_envelope.ProviderAdapter.run)
+    assert "Provider.GLM_HARNESS" in src and "spawn_glm_harness" in src
