@@ -442,6 +442,27 @@ def _govern(
         report_path,
         receipt_path,
     )
+    # P0.2: inline phantom-guard (provider lanes — the kimi/glm/deepseek text-only fabrication
+    # vector). A delivery worker that reports success with no worktree/branch diff is rejected via
+    # a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
+    # the dispatch/<id> branch (isolated dispatches) or abstains (never false-rejects). Non-fatal.
+    try:
+        from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+        _tok = adapter_result.token_usage or {}
+        record_phantom_if_any(
+            dispatch_id=spec.dispatch_id,
+            role=spec.role,
+            status=adapter_result.status,
+            token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
+            worktree_path=None,
+            base_sha=None,
+            receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "envelope._govern: phantom-guard check failed (non-fatal) dispatch=%s: %s",
+            spec.dispatch_id, exc,
+        )
     return report_path, receipt_path
 
 
