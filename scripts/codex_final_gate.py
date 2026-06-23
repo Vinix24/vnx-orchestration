@@ -97,12 +97,6 @@ def _get_deleted_files(project_root: Path) -> Optional[List[str]]:
     return None
 
 
-def _count_deleted_files(project_root: Path) -> int:
-    """Count files deleted in current PR vs origin/main. Returns -1 on git failure."""
-    files = _get_deleted_files(project_root)
-    return len(files) if files is not None else -1
-
-
 def _parse_numstat_net(numstat_output: str) -> int:
     """Parse git diff --numstat output, return net line deletion (removed - added).
 

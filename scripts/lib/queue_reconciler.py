@@ -199,16 +199,6 @@ def _parse_dispatch_pr_id(dispatch_file: Path) -> Optional[str]:
     return m.group(1).strip() if m else None
 
 
-def _parse_dispatch_id(dispatch_file: Path) -> Optional[str]:
-    """Extract Dispatch-ID from a dispatch file's metadata block."""
-    try:
-        content = dispatch_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    m = re.search(r"^Dispatch-ID:\s*(\S+)", content, re.MULTILINE)
-    return m.group(1).strip() if m else None
-
-
 @dataclass
 class DispatchRecord:
     dispatch_id: str

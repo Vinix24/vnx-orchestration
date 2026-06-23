@@ -134,14 +134,6 @@ def _group_by_table(events: list[dict]) -> dict[tuple[str, str], int]:
     return dict(groups)
 
 
-def _group_by_metric(events: list[dict]) -> dict[int, list[dict]]:
-    groups: dict[int, list[dict]] = defaultdict(list)
-    for ev in events:
-        mid = ev.get("metric_id", 0)
-        groups[mid].append(ev)
-    return dict(groups)
-
-
 def _human_report(events: list[dict], since_label: str, skipped_count: int = 0) -> str:
     lines: list[str] = []
     lines.append(f"Shadow divergence report — last {since_label}")
