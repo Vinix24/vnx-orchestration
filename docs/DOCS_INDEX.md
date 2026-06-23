@@ -20,6 +20,7 @@
 | Document | Path | Description |
 |----------|------|-------------|
 | Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | Complete system architecture and data flow, incl. *Future-State Reconciliation* (open-item → track → dispatch lifecycle, the autopilot loop, and the precise `derived_status` rule) |
+| Dispatch & Intelligence Architecture | `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` | Current end-to-end flow: single-entry door → assembly (skill + intelligence injection + report-contract) → lane delivery (tmux-signal hook contract) → govern (phantom-guard) → intelligence injection + self-learning loop |
 | Scripts Index | `docs/SCRIPTS_INDEX.md` | Active script surface map |
 | Architecture Decisions | `docs/governance/decisions/` | ADRs — incl. ADR-005 (NDJSON audit ledger; D3 at-most-once bridge events) and ADR-007 (multi-tenant `project_id` / composite-key `dispatches`) |
 | Core Contracts | `docs/core/` | Operational contracts and technical references |
