@@ -1015,6 +1015,28 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
 
         log('SUCCESS', 'Database schema initialized successfully')
         conn.close()
+
+        # WS2 / ADR-007: the V19/V20/V22 migrations stamp project_id with a literal
+        # ``DEFAULT 'vnx-dev'`` (and _migrate_v22 backfills legacy rows the same way).
+        # On a fresh QI store owned by a NON-vnx-dev project that silently contaminates
+        # the store with the wrong tenant. The W1 3-phase runner already re-stamps
+        # 'vnx-dev'/NULL/'' -> the owning pid and drops the DEFAULT (fail-closed), but it
+        # was only invoked by tenant_stamping.py's orchestrator — never on fresh init.
+        # Wire it here so bootstrap self-heals. Idempotent (phase guards skip correct
+        # tables); only runs for non-vnx-dev pids (vnx-dev IS the correct legacy default).
+        try:
+            import sys as _sys  # noqa: PLC0415
+            _lib = Path(__file__).resolve().parent / "lib"
+            if str(_lib) not in _sys.path:
+                _sys.path.insert(0, str(_lib))
+            from project_id_migration import resolve_init_project_id  # noqa: PLC0415
+            _pid = resolve_init_project_id(Path(db_path))
+            if _pid and _pid != 'vnx-dev':
+                run_qi_three_phase_migration(Path(db_path), _pid)
+                log('INFO', f'QI tenant-stamping reconciled to project_id={_pid!r}')
+        except Exception as _exc:  # never fail init on reconciliation (idempotent + retryable)
+            log('WARNING', f'QI tenant-stamping reconciliation skipped: {_exc}')
+
         return True
 
     except Exception as e:
