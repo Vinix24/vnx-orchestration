@@ -877,7 +877,7 @@ def run_envelope_plan(
         provider=plan.provider.value,
         model=plan.model,
         instruction=instruction,
-        role=None,
+        role=plan.role,  # F2 (codex): carry the role so the phantom-guard review-exemption applies
         pr_id=None,
         state_dir=state_dir,
         data_dir=data_dir,
@@ -938,7 +938,9 @@ def run_envelope_plan(
         # would abstain, letting the exact kimi/glm/deepseek phantom slip through.
         try:
             from phantom_guard import compute_worktree_diff  # noqa: PLC0415
-            _phantom_diff = compute_worktree_diff(wt_path, base_ref="origin/main")
+            # F3 (codex): use the plan's actual base_ref, not a hardcoded origin/main — a seeded /
+            # non-main base would make an empty worker run look non-empty and let a phantom pass.
+            _phantom_diff = compute_worktree_diff(wt_path, base_ref=plan.base_ref or "origin/main")
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
     finally:
