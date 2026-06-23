@@ -379,6 +379,236 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
     return 0
 
 
+def _close_evidence(state_dir: Path, track_id: str, project_id: str) -> dict[str, Any]:
+    """Summarize WHY a track derives terminal, so the operator gate is INFORMED.
+
+    The reconciler's 'done' counts ALL terminal dispatch states — including the
+    FAILURE states expired/dead_letter (track_reconciler.TERMINAL_DISPATCH_STATES).
+    So a track whose every dispatch failed (no completed run, no merged PR) still
+    derives 'done'. Surface the breakdown + a ``has_success_signal`` flag so the
+    operator does not blind-close a failed track. Best-effort; never raises.
+    """
+    ev: dict[str, Any] = {
+        "completed": 0, "failed_terminal": 0, "in_flight": 0,
+        "pr_ref": None, "pr_merged": False, "has_success_signal": False,
+    }
+    db = Path(state_dir) / "runtime_coordination.db"
+    try:
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            for r in conn.execute(
+                "SELECT state, COUNT(*) c FROM dispatches "
+                "WHERE track=? AND project_id=? GROUP BY state",
+                (track_id, project_id),
+            ):
+                st = (r["state"] or "").lower()
+                if st == "completed":
+                    ev["completed"] += r["c"]
+                elif st in ("expired", "dead_letter"):
+                    ev["failed_terminal"] += r["c"]
+                else:
+                    ev["in_flight"] += r["c"]
+            row = conn.execute(
+                "SELECT pr_ref FROM tracks WHERE track_id=? AND project_id=?",
+                (track_id, project_id),
+            ).fetchone()
+            ev["pr_ref"] = row["pr_ref"] if row else None
+            merged = conn.execute(
+                "SELECT COUNT(*) FROM coordination_events "
+                "WHERE event_type='pr_merged' AND project_id=? AND entity_id IN "
+                "(SELECT dispatch_id FROM dispatches WHERE track=? AND project_id=?)",
+                (project_id, track_id, project_id),
+            ).fetchone()[0]
+            ev["pr_merged"] = merged > 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("close evidence query failed: %s", exc)
+    # Match the reconciler's OTHER merge source: pr_ref against the local
+    # merged-PR set (not only coordination_events), so the signal does not
+    # falsely read 'no merge' when the reconciler in fact saw one.
+    try:
+        if ev["pr_ref"]:
+            num = track_reconciler._parse_pr_number(ev["pr_ref"])
+            if num is not None and num in track_reconciler._load_merged_pr_numbers(state_dir):
+                ev["pr_merged"] = True
+    except Exception as exc:
+        logger.debug("close evidence merged-PR check failed: %s", exc)
+    ev["has_success_signal"] = ev["completed"] > 0 or ev["pr_merged"]
+    return ev
+
+
+def _phase_path_to(start: str, target: str) -> Optional[list[str]]:
+    """Shortest list of phases to transition THROUGH to reach ``target`` from
+    ``start``, following ``tracks.ALLOWED_TRANSITIONS``. Excludes ``start``;
+    returns ``[]`` when already at target, ``None`` when unreachable.
+
+    BFS over the (tiny, fixed) phase graph; ``seen`` guards the parked<->queued
+    cycle.
+    """
+    if start == target:
+        return []
+    seen = {start}
+    queue: list[tuple[str, list[str]]] = [(start, [])]
+    while queue:
+        node, path = queue.pop(0)
+        for nxt in sorted(tracks_lib.ALLOWED_TRANSITIONS.get(node, frozenset())):
+            if nxt in seen:
+                continue
+            new_path = path + [nxt]
+            if nxt == target:
+                return new_path
+            seen.add(nxt)
+            queue.append((nxt, new_path))
+    return None
+
+
+def cmd_objective_close(args: argparse.Namespace) -> int:
+    """Close-the-loop: resolve phase_drift by advancing a track's DECLARED phase
+    to its derived_status when the work is genuinely done (PR merged).
+
+    `objective drift` / `objective sync` only REPORT drift; nothing advances the
+    declared phase, so a merged-and-deployed track stays queued/parked forever
+    (the gap that bit the MC #284 sprint). This closes that loop — but as a
+    HUMAN-GATED operation, never an automatic side effect of merge:
+
+      - Default is a dry-run (--check); --apply is required to write.
+      - --apply additionally requires --approval-id (the operator's gate token).
+      - Only a TERMINAL derived_status ('done') closes; a non-terminal derived
+        status is a no-op (nothing to close yet).
+      - The write goes through tracks.transition_phase (the single-writer): it
+        enforces ALLOWED_TRANSITIONS, stamps completed_at, and records a
+        track_phase_history row + event with the approval_id (full audit trail).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    try:
+        # Dry-run is READ-ONLY: peek computes derived_status without persisting.
+        # --apply reconciles fresh (and persists derived_status) right before the
+        # write, so the transition acts on current state.
+        if args.apply:
+            result = track_reconciler.reconcile_track(state_dir, track_id, project_id)
+        else:
+            result = track_reconciler.peek_derived_status(state_dir, track_id, project_id)
+    except Exception as exc:
+        print(f"objective close failed: cannot reconcile {track_id}: {exc}", file=sys.stderr)
+        return 1
+
+    derived = result["derived_status"]
+    declared = result["declared_phase"]
+    target = "done"  # only 'done' closes the loop; other derived states are interim
+
+    payload = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "declared_phase": declared,
+        "derived_status": derived,
+        "action": None,
+        "applied": False,
+    }
+
+    def _emit(action: str, applied: bool, message: str, rc: int) -> int:
+        payload["action"] = action
+        payload["applied"] = applied
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close — {track_id} (project '{project_id}')\n")
+            print(f"  declared={declared or '-'}  derived={derived}")
+            ev = payload.get("evidence")
+            if ev:
+                print(
+                    f"  evidence: completed={ev['completed']} "
+                    f"failed_terminal={ev['failed_terminal']} in_flight={ev['in_flight']} "
+                    f"pr_ref={ev['pr_ref'] or '-'} pr_merged={ev['pr_merged']}"
+                )
+                if not ev["has_success_signal"]:
+                    print("  ! WARNING: derived 'done' has NO success signal "
+                          "(no completed dispatch, no merged PR) — likely all-failed. "
+                          "Confirm this is really done before --apply.")
+            print(f"  {message}\n")
+        return rc
+
+    if derived != target:
+        return _emit(
+            "noop_not_terminal", False,
+            f"nothing to close: derived_status={derived} is not terminal ('{target}').", 0,
+        )
+    if declared == target:
+        return _emit("noop_already_closed", False, f"already closed (phase={declared}).", 0)
+
+    # 'parked' is a DELIBERATE human stop-signal (stronger than 'queued'). Walking
+    # parked -> queued -> active -> done would silently un-park it. Require an
+    # explicit --include-parked so closing a parked track is never accidental.
+    if declared == "parked" and not getattr(args, "include_parked", False):
+        return _emit(
+            "rejected_parked", False,
+            "track is PARKED (a deliberate stop). Pass --include-parked to close "
+            "it anyway, or un-park it first. No change made.", 2,
+        )
+
+    # Surface the done-evidence so the operator gate is informed: the reconciler
+    # derives 'done' from ANY terminal dispatch state, including expired/dead_letter.
+    payload["evidence"] = _close_evidence(state_dir, track_id, project_id)
+
+    # The state machine forbids skips (e.g. queued -> done is illegal: a track
+    # must pass through 'active'). A merged track stuck at queued/parked is
+    # exactly the MC scenario, so walk the SHORTEST legal path to 'done' rather
+    # than reject it. No path -> reject (don't force an illegal write).
+    path = _phase_path_to(declared, target)
+    if path is None:
+        return _emit("rejected_no_path", False,
+                     f"ERROR: no legal transition path {declared} -> {target} "
+                     f"(ALLOWED_TRANSITIONS). No change made.", 2)
+    payload["path"] = [declared, *path]
+
+    if not args.apply:
+        return _emit(
+            "dry_run", False,
+            f"[dry-run] would transition {' -> '.join([declared, *path])}. "
+            f"Re-run with --apply --approval-id <id> to write.", 0,
+        )
+    if not args.approval_id:
+        return _emit(
+            "rejected_no_approval", False,
+            "ERROR: --apply requires --approval-id (the human gate). No change made.", 2,
+        )
+
+    # The walk is NOT atomic: each transition_phase commits on its own
+    # (tracks.py), so a mid-path failure (e.g. a concurrent writer moved the
+    # phase) leaves the track at an intermediate phase. That is recoverable —
+    # this command re-walks from the CURRENT declared phase, so re-running it
+    # resumes and finishes. We surface where it stopped so the operator can.
+    cur = declared
+    try:
+        for step in path:
+            tracks_lib.transition_phase(
+                state_dir, track_id, project_id, step,
+                actor="operator",
+                reason=f"close-the-loop ({declared}->{target}, derived={derived})",
+                approval_id=args.approval_id,
+            )
+            cur = step
+    except tracks_lib.TrackNotFoundError as exc:
+        return _emit("rejected_not_found", False, f"ERROR: {exc}", 2)
+    except Exception as exc:
+        # Any mid-walk failure (illegal transition from a concurrent writer, a DB
+        # error, etc.) leaves the track at the last committed phase. Never crash
+        # with a traceback — report where it stopped; the walk is resumable.
+        payload["declared_phase"] = cur
+        return _emit("rejected_walk_failed", False,
+                     f"ERROR: transition failed at '{cur}': {type(exc).__name__}: {exc}. "
+                     f"Track left at '{cur}' — re-run `objective close` to resume.", 2)
+
+    payload["declared_phase"] = target
+    return _emit("closed", True,
+                 f"closed: {' -> '.join([declared, *path])} "
+                 f"(actor=operator, approval={args.approval_id}).", 0)
+
+
 def maybe_auto_seed(
     state_dir: str | Path | None = None,
     roadmap_path: str | Path | None = None,
@@ -1017,6 +1247,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_drift)
     p_drift.set_defaults(func=cmd_objective_drift)
+
+    p_close = obj_sub.add_parser(
+        "close",
+        help="close-the-loop: advance declared phase to a terminal derived_status (human-gated)",
+    )
+    _common(p_close)
+    p_close.add_argument("track_id")
+    p_close.add_argument("--apply", action="store_true",
+                         help="write the transition (default: dry-run check)")
+    p_close.add_argument("--approval-id", default="",
+                         help="operator approval token (REQUIRED with --apply)")
+    p_close.add_argument("--include-parked", action="store_true",
+                         help="allow closing a PARKED track (un-parks it; off by default)")
+    p_close.set_defaults(func=cmd_objective_close)
 
     p_add = obj_sub.add_parser(
         "add",
