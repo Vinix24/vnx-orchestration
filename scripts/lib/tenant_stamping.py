@@ -354,16 +354,6 @@ def _get_unique_indexes(conn: sqlite3.Connection, table: str) -> list[dict]:
     return result
 
 
-def _table_has_project_id_in_pk(conn: sqlite3.Connection, table: str) -> bool:
-    """Return True if the table's PK already includes project_id."""
-    pk_cols = [
-        r[1]
-        for r in conn.execute(f"PRAGMA table_info({_safe_ident(table)[1:-1]})").fetchall()
-        if r[5] > 0  # pk ordinal > 0
-    ]
-    return "project_id" in pk_cols
-
-
 def _format_default(dflt_value: str | None) -> str | None:
     """Format a PRAGMA table_info dflt_value for use in a CREATE TABLE statement.
 

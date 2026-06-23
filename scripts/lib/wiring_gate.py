@@ -76,19 +76,6 @@ def _load_skip_list(state_dir: Optional[Path] = None) -> set:
     return symbols
 
 
-def _get_pr_diff_files(pr_number: int) -> str:
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "diff", str(pr_number), "--name-only"],
-            capture_output=True, text=True, timeout=15, check=True,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise WiringGateError(f"gh pr diff --name-only timed out for PR #{pr_number}") from e
-    except (subprocess.CalledProcessError, OSError) as e:
-        raise WiringGateError(f"gh pr diff --name-only failed for PR #{pr_number}: {e}") from e
-    return proc.stdout
-
-
 def _get_pr_diff(pr_number: int) -> str:
     try:
         proc = subprocess.run(
@@ -100,13 +87,6 @@ def _get_pr_diff(pr_number: int) -> str:
     except (subprocess.CalledProcessError, OSError) as e:
         raise WiringGateError(f"gh pr diff failed for PR #{pr_number}: {e}") from e
     return proc.stdout
-
-
-def _extract_added_python_files(diff_names: str) -> List[str]:
-    return [
-        f.strip() for f in diff_names.splitlines()
-        if f.strip().endswith(".py")
-    ]
 
 
 _ADDED_DEF_RE = re.compile(r"^\+(?:async\s+)?(?:def|class)\s+([A-Za-z]\w*)")

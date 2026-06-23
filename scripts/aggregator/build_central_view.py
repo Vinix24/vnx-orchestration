@@ -136,32 +136,6 @@ def _create_unified_table(con: sqlite3.Connection, table: str, columns: list[str
     con.execute(f"CREATE TABLE {table}_unified ({col_defs})")
 
 
-def _copy_table(
-    con: sqlite3.Connection,
-    alias: str,
-    table: str,
-    columns: list[str],
-    project_id: str,
-    has_project_id: bool,
-) -> int:
-    quoted = ", ".join(f'"{c}"' for c in columns)
-    rows = con.execute(f"SELECT {quoted} FROM {alias}.{table}").fetchall()
-    if not rows:
-        return 0
-    if has_project_id:
-        idx = columns.index("project_id")
-        rows = [
-            tuple(project_id if i == idx and v in (None, "") else v for i, v in enumerate(r))
-            for r in rows
-        ]
-    placeholders = ", ".join("?" for _ in columns)
-    con.executemany(
-        f"INSERT INTO {table}_unified ({quoted}) VALUES ({placeholders})",
-        rows,
-    )
-    return len(rows)
-
-
 _POOL_STATE_DDL = """
 CREATE TABLE IF NOT EXISTS pool_state_unified (
     project_id    TEXT NOT NULL,
