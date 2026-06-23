@@ -24,10 +24,13 @@ were spent). Reviews are exempt; a legitimate no-op delivery uses VNX_OVERRIDE_P
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+_LOG = logging.getLogger(__name__)
 
 # SSOT for review roles — kept in sync with the kimi-routing predicate (item C). A reviewer's
 # job is a verdict, not a diff, so it is never a phantom for "no changes".
@@ -143,6 +146,90 @@ def guard_receipt(
         token_usage=_extract_token_usage(receipt),
         role=receipt.get("role") or receipt.get("agent"),
     )
+
+
+def guard_at_govern(
+    *,
+    dispatch_id: str,
+    role: Optional[str] = None,
+    status: Optional[str] = None,
+    token_usage: Optional[int] = None,
+    worktree_path: Optional[Path] = None,
+    base_sha: Optional[str] = None,
+) -> PhantomVerdict:
+    """Inline govern-time phantom check for BOTH lanes (claude tmux via dispatch_govern.govern,
+    providers via dispatch_envelope._govern — the kimi/glm/deepseek fabrication vector).
+
+    Resolves the WORKER's diff in this order and NEVER raises / NEVER false-rejects:
+      1. ``worktree_path`` if it exists (the claude tmux lane carries it on GovernSpec),
+      2. else the dispatch's own branch ``dispatch/<sanitized id>`` (isolated provider dispatches),
+      3. else ABSTAIN — return ok with an abstain reason (an unresolvable/torn-down ref must never
+         be read as "empty diff" and false-reject real work).
+
+    Honors ``VNX_OVERRIDE_PHANTOM_GUARD=1`` (operator escape for a legitimate no-op delivery). This
+    function performs NO receipt I/O — the caller appends the corrective ``failed`` receipt on a
+    phantom verdict (keeps phantom_guard free of the append_receipt dependency).
+    """
+    import os  # noqa: PLC0415
+
+    if os.environ.get("VNX_OVERRIDE_PHANTOM_GUARD") == "1":
+        return _ok("phantom-guard overridden (VNX_OVERRIDE_PHANTOM_GUARD=1)")
+    base = (base_sha or "").strip() or "origin/main"
+    try:
+        if worktree_path is not None and Path(worktree_path).exists():
+            diff = compute_worktree_diff(Path(worktree_path), base_ref=base)
+        else:
+            from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
+            branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+            diff = compute_branch_diff(branch, base_ref=base)
+    except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
+        return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
+    return phantom_guard(status=status, worktree_diff=diff, token_usage=token_usage, role=role)
+
+
+def record_phantom_if_any(
+    *,
+    dispatch_id: str,
+    role: Optional[str] = None,
+    status: Optional[str] = None,
+    token_usage: Optional[int] = None,
+    worktree_path: Optional[Path] = None,
+    base_sha: Optional[str] = None,
+    receipts_file: Optional[str] = None,
+) -> PhantomVerdict:
+    """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
+
+    ``dedup_completion_receipts`` then picks the corrective receipt as authoritative (latest of the
+    done/failed tier), so the dispatch resolves as FAILED — while the worker's original ``done``
+    receipt is PRESERVED on the ledger (the contradiction is recorded, not overwritten: audit-honest,
+    the ISAE lens). Never raises: a corrective-append failure is logged, not propagated, and the
+    govern flow continues. The guard verdict is always returned for the caller to log.
+    """
+    verdict = guard_at_govern(
+        dispatch_id=dispatch_id, role=role, status=status,
+        token_usage=token_usage, worktree_path=worktree_path, base_sha=base_sha,
+    )
+    if verdict.is_phantom and receipts_file:
+        try:
+            from datetime import datetime, timezone  # noqa: PLC0415
+            from append_receipt import append_receipt_payload  # noqa: PLC0415
+            append_receipt_payload(
+                {
+                    "dispatch_id": dispatch_id,
+                    "status": "failed",
+                    "event_type": "phantom_rejected",
+                    "phantom_rejected": True,
+                    "phantom_reason": verdict.reason,
+                    "source": "phantom_guard",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                receipts_file=str(receipts_file),
+                cache_window_seconds=0,
+            )
+            _LOG.warning("phantom_guard: REJECTED dispatch=%s — %s", dispatch_id, verdict.reason)
+        except Exception as exc:  # noqa: BLE001 — never break govern on a corrective-append failure
+            _LOG.warning("phantom_guard: corrective receipt append failed dispatch=%s: %s", dispatch_id, exc)
+    return verdict
 
 
 def _extract_token_usage(receipt: Mapping[str, Any]) -> Optional[int]:

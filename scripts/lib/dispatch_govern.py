@@ -250,13 +250,32 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """
     dispatch_id = spec.dispatch_id
     try:
-        return _govern_impl(spec, raw, lane)
+        outcome = _govern_impl(spec, raw, lane)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "govern: unhandled error dispatch=%s lane=%s: %s — emitting error body",
             dispatch_id, lane, exc,
         )
         return _govern_error_fallback(spec, raw, lane, exc)
+    # P0.2: inline phantom-guard backstop — reject an evidence-free GATE-GREEN (a delivery worker
+    # that claims completion but produced no worktree/branch diff). The provider lanes run the same
+    # check in dispatch_envelope._govern. Best-effort: never fatal to govern (a guard failure must
+    # not lose the report). guard_at_govern abstains on an unresolvable ref (never false-rejects).
+    try:
+        from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+        _tok = raw.token_usage or {}
+        record_phantom_if_any(
+            dispatch_id=spec.dispatch_id,
+            role=spec.role,
+            status=(raw.receipt.get("status") if isinstance(raw.receipt, dict) else None),
+            token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
+            worktree_path=spec.worktree_path,
+            base_sha=spec.base_sha,
+            receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)
+    return outcome
 
 
 def _govern_error_fallback(
