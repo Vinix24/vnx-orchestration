@@ -76,6 +76,7 @@ def vnx_dispatch_agent(args) -> int:
 
     try:
         from subprocess_dispatch import deliver_with_recovery  # type: ignore[import]
+        from dispatch_bridge import deliver_via_door  # type: ignore[import]
     except ImportError as exc:
         print(
             f"Error: could not import subprocess_dispatch: {exc}\n"
@@ -86,12 +87,22 @@ def vnx_dispatch_agent(args) -> int:
 
     print(f"Dispatching to agent '{agent}' (dispatch_id={dispatch_id}) ...")
 
-    success = deliver_with_recovery(
-        terminal_id=agent,
-        instruction=instruction,
-        model=model,
+    # Route through the single-entry door (gated by VNX_SINGLE_ENTRY_DISPATCH / VNX_DISPATCH_LEGACY);
+    # the legacy subprocess lane runs only when the door is off. codex flip-PR F3: the shipped
+    # `vnx dispatch-agent` must honor the flags like scripts/commands/dispatch-agent.sh, not bypass them.
+    success = deliver_via_door(
+        lambda: deliver_with_recovery(
+            terminal_id=agent,
+            instruction=instruction,
+            model=model,
+            dispatch_id=dispatch_id,
+            role=agent,
+        ),
+        instruction_text=instruction,
         dispatch_id=dispatch_id,
+        target_slot="T1",
         role=agent,
+        model=model,
     )
 
     status = "done" if success else "failed"

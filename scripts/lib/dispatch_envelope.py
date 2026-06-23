@@ -761,6 +761,64 @@ class ProviderAdapter:
                 token_usage=token_usage,
             )
 
+        # ---- glm-harness ---- (codex flip-PR F2: the door normalizes GLM -> glm-harness, so the
+        # provider envelope MUST be able to execute it, not raise unsupported.)
+        if pv == Provider.GLM_HARNESS:
+            from provider_spawns.glm_harness_spawn import (  # noqa: PLC0415
+                resolve_harness_model,
+                spawn_glm_harness,
+            )
+
+            raw_model = (
+                plan.model if plan.model not in ("default", "sonnet", "") else None
+            )
+            model = resolve_harness_model(raw_model)
+            try:
+                result = spawn_glm_harness(
+                    prompt=instruction,
+                    model=model,
+                    dispatch_id=plan.dispatch_id,
+                    terminal_id=plan.target_id,
+                    event_writer=event_writer,
+                    cwd=cwd,
+                )
+            except BrokenPipeError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"glm-harness spawn BrokenPipeError: {exc}",
+                )
+            token_usage = _extract_token_usage(result, pv.value)
+            if result.error:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="failure",
+                    token_usage=token_usage,
+                    error=result.error,
+                )
+            if result.timed_out:
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="timeout",
+                    token_usage=token_usage,
+                    timed_out=True,
+                )
+            if getattr(result, "stopped_early", False):
+                return _AdapterResult(
+                    returncode=result.returncode,
+                    completion_text=(result.completion_text or ""),
+                    status="success",
+                    token_usage=token_usage,
+                )
+            status = "success" if result.returncode == 0 else "failure"
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text=(result.completion_text or ""),
+                status=status,
+                token_usage=token_usage,
+            )
+
         # ---- local-gemma ----
         if pv == Provider.LOCAL_GEMMA:
             from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415

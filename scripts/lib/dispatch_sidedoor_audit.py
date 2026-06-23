@@ -60,6 +60,7 @@ KNOWN_DELIVERY_CALLERS = frozenset({
     "scripts/commands/dispatch-agent.sh",     # caught by the scan (not in the docstring's "4")
     "scripts/commands/dispatch.sh",           # caught by the scan (not in the docstring's "4")
     "scripts/lib/plan_gate_panel.py",         # interim side door PR-7 removes
+    "vnx_cli/commands/dispatch_agent.py",     # packaged CLI; now routes through deliver_via_door (flip-PR F3)
 })
 
 
@@ -93,7 +94,7 @@ def scan_delivery_callers(root: Path | None = None) -> Set[str]:
     """Return repo-relative paths of files that invoke a lane script as a delivery path."""
     root = root or _repo_root()
     callers: Set[str] = set()
-    for base in ("scripts", "bin"):
+    for base in ("scripts", "bin", "vnx_cli"):  # vnx_cli: the packaged CLI ships dispatch entrypoints too (codex flip-PR F3)
         for path in (root / base).rglob("*"):
             if not path.is_file() or path.suffix not in (".py", ".sh"):
                 continue
