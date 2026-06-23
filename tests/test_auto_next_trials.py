@@ -156,6 +156,75 @@ def _closure_fail(**kwargs):
 
 
 # ---------------------------------------------------------------------------
+# Gate-completeness evidence (RA-3b / #871) and human-approval tokens.
+#
+# After RA-3b, reconcile() returns "gates_incomplete" unless every required gate
+# (review_stack minus claude_github_optional) has a PASS result on disk that
+# carries a matching branch + project_id + report_path + contract_hash. And
+# advance() requires a single-use human-approval token whenever the feature's
+# merge_policy is "human". The helpers below give the trial features real,
+# branch-scoped gate evidence and a real approval token so the genuine
+# reconcile/advance gating logic runs end-to-end (rather than neutering it).
+#
+# Feature -> branch mapping in trial_env:
+#   feature-a -> feature/alpha, feature-b -> feature/bravo,
+#   feature-c -> feature/charlie, fixup-* -> feature/<fixup_id>.
+# The trial FEATURE_PLAN.md templates each declare a single "## PR-0:" heading,
+# so PR-0 is the only PR id _gates_incomplete looks up.
+# ---------------------------------------------------------------------------
+
+# Branch names declared in trial_env's ROADMAP.yaml, keyed by feature id.
+_FEATURE_BRANCHES = {
+    "feature-a": "feature/alpha",
+    "feature-b": "feature/bravo",
+    "feature-c": "feature/charlie",
+}
+
+# Required gates for the trial features (review_stack minus the optional gate).
+_REQUIRED_GATES = ("gemini_review", "codex_gate")
+
+
+def _write_passing_gates(
+    state_dir: Path,
+    branch: str,
+    pr_id: str = "PR-0",
+    project_id: str = "vnx-dev",
+) -> None:
+    """Write fully-valid PASS gate-result contracts for every required gate.
+
+    Mirrors the result-file shape asserted by tests/test_roadmap_manager.py
+    after #871: each contract carries the fields _accept + the gate-completeness
+    check require (gate, pr_id, status=pass, branch, project_id, an on-disk
+    report_path, and a contract_hash).
+    """
+    results_dir = state_dir / "review_gates" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    pr_slug = pr_id.lower().replace("-", "")
+    for gate in _REQUIRED_GATES:
+        report_file = results_dir / f"{pr_slug}-{gate}-report.md"
+        report_file.write_text(f"# {gate} report for {pr_id}\n", encoding="utf-8")
+        data = {
+            "pr_id": pr_id,
+            "gate": gate,
+            "status": "pass",
+            "project_id": project_id,
+            "branch": branch,
+            "report_path": str(report_file),
+            "contract_hash": f"hash-{pr_slug}-{gate}",
+        }
+        (results_dir / f"{pr_slug}-{gate}-contract.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+
+def _certify(manager, feature_id: str, state_dir: Path, branch: str) -> None:
+    """Provide the real gate evidence + human-approval token so advance() can
+    legitimately progress past the active feature."""
+    _write_passing_gates(state_dir, branch)
+    manager.approve(feature_id, actor="test-operator", justification="trial certification")
+
+
+# ---------------------------------------------------------------------------
 # Gate criterion 1: Auto-next advances ONLY after merged-to-main + green
 #                   checks + closure verifier pass
 # ---------------------------------------------------------------------------
@@ -187,6 +256,7 @@ class TestAutoNextAdvancementGating:
         manager.load_feature("feature-a")
 
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
 
         result = manager.advance()
         state = manager.load_state()
@@ -217,9 +287,11 @@ class TestAutoNextAdvancementGating:
         manager.load_feature("feature-a")
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
 
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
         result_ab = manager.advance()
         assert result_ab["next_feature"] == "feature-b"
 
+        _certify(manager, "feature-b", trial_env["state_dir"], _FEATURE_BRANCHES["feature-b"])
         result_bc = manager.advance()
         assert result_bc["next_feature"] == "feature-c"
 
@@ -234,8 +306,11 @@ class TestAutoNextAdvancementGating:
         manager.load_feature("feature-a")
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
 
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
         manager.advance()  # A -> B
+        _certify(manager, "feature-b", trial_env["state_dir"], _FEATURE_BRANCHES["feature-b"])
         manager.advance()  # B -> C
+        _certify(manager, "feature-c", trial_env["state_dir"], _FEATURE_BRANCHES["feature-c"])
         result = manager.advance()  # C -> done
 
         assert result["advanced"] is False
@@ -321,6 +396,7 @@ class TestBlockingDriftFixup:
         manager.init_roadmap(trial_env["roadmap_file"])
         manager.load_feature("feature-a")
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
 
         (trial_env["state_dir"] / "post_feature_drift.json").write_text(
             json.dumps({"items": [
@@ -339,6 +415,7 @@ class TestBlockingDriftFixup:
         manager.init_roadmap(trial_env["roadmap_file"])
         manager.load_feature("feature-a")
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
 
         self._inject_drift(trial_env["state_dir"], [
             {"id": "oi-4", "title": "Unrecognized category", "category": "unknown_category", "blocking": True},
@@ -405,6 +482,8 @@ class TestMultiFeatureTrialPath:
         # Step 2: Clear drift and advance from fixup -> A re-loaded (not B!)
         (trial_env["state_dir"] / "post_feature_drift.json").unlink()
 
+        # Fixup feature carries branch feature/<fixup_id>; certify its gates + token.
+        _certify(manager, fixup_id, trial_env["state_dir"], f"feature/{fixup_id}")
         result_fixup = manager.advance()
         assert result_fixup["advanced"] is True
         assert result_fixup["reason"] == "loaded_next_feature"
@@ -414,12 +493,14 @@ class TestMultiFeatureTrialPath:
         assert state["current_active_feature"] == "feature-a"
 
         # Step 3: A re-verified and merges -> B loads
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
         result_a2 = manager.advance()
         assert result_a2["advanced"] is True
         assert result_a2["next_feature"] == "feature-b"
         assert "feature-a" in manager.load_state()["merged_features"]
 
         # Step 4: B merges -> C loads
+        _certify(manager, "feature-b", trial_env["state_dir"], _FEATURE_BRANCHES["feature-b"])
         result_b = manager.advance()
         assert result_b["advanced"] is True
         assert result_b["next_feature"] == "feature-c"
@@ -433,6 +514,10 @@ class TestMultiFeatureTrialPath:
 
         results = []
         for _ in range(3):
+            # Certify the currently-active feature (gate evidence + token) so its
+            # advance can legitimately progress.
+            active = manager.load_state()["current_active_feature"]
+            _certify(manager, active, trial_env["state_dir"], _FEATURE_BRANCHES[active])
             results.append(manager.advance())
 
         assert results[0]["next_feature"] == "feature-b"
@@ -457,6 +542,7 @@ class TestMultiFeatureTrialPath:
 
         # Phase 2: closure passes
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
         result_ok = manager.advance()
         assert result_ok["advanced"] is True
         assert result_ok["next_feature"] == "feature-b"
@@ -526,6 +612,7 @@ class TestAutoNextEdgeCases:
         feature_a = next(f for f in state["features"] if f["feature_id"] == "feature-a")
         assert feature_a["status"] == "active"
 
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
         manager.advance()  # A -> B
         state = manager.load_state()
         feature_a = next(f for f in state["features"] if f["feature_id"] == "feature-a")
@@ -539,6 +626,7 @@ class TestAutoNextEdgeCases:
         manager.init_roadmap(trial_env["roadmap_file"])
         manager.load_feature("feature-a")
         monkeypatch.setattr(rm, "verify_closure", _closure_pass)
+        _certify(manager, "feature-a", trial_env["state_dir"], _FEATURE_BRANCHES["feature-a"])
 
         (trial_env["state_dir"] / "post_feature_drift.json").write_text(
             "not valid json {{{",

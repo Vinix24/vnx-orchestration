@@ -333,13 +333,15 @@ class TestCert4ReportPathEnforcement:
 
     def test_cert4a_pass_without_report_path_fails(self, env):
         """Gate result with status=pass but no report_path fails validation (GE-5)."""
+        # ADR-005: branch must match the contract branch (feature/test) or the
+        # result is rejected as stale evidence before report_path enforcement runs.
         _write_gate_result(env["results_dir"], "pr0-gemini_review-contract.json", {
             "gate": "gemini_review", "pr_id": "PR-0", "status": "pass",
-            "contract_hash": "test-hash-abc123",
+            "contract_hash": "test-hash-abc123", "branch": "feature/test",
         })
         _write_gate_result(env["results_dir"], "pr0-codex_gate-contract.json", {
             "gate": "codex_gate", "pr_id": "PR-0", "status": "pass",
-            "contract_hash": "test-hash-abc123",
+            "contract_hash": "test-hash-abc123", "branch": "feature/test",
         })
 
         contract = _make_contract()
@@ -351,15 +353,17 @@ class TestCert4ReportPathEnforcement:
 
     def test_cert4b_nonexistent_report_file_fails(self, env):
         """Gate result pointing to non-existent file fails (GE-6)."""
+        # ADR-005: branch must match so the result is accepted and the
+        # report-file-missing enforcement (not branch rejection) is what fires.
         _write_gate_result(env["results_dir"], "pr0-gemini_review-contract.json", {
             "gate": "gemini_review", "pr_id": "PR-0", "status": "pass",
             "report_path": "/nonexistent/path/report.md",
-            "contract_hash": "test-hash-abc123",
+            "contract_hash": "test-hash-abc123", "branch": "feature/test",
         })
         _write_gate_result(env["results_dir"], "pr0-codex_gate-contract.json", {
             "gate": "codex_gate", "pr_id": "PR-0", "status": "pass",
             "report_path": "/nonexistent/path/report2.md",
-            "contract_hash": "test-hash-abc123",
+            "contract_hash": "test-hash-abc123", "branch": "feature/test",
         })
 
         contract = _make_contract()
@@ -421,13 +425,17 @@ class TestCert5ContractHashMismatch:
     def test_cert5a_mismatched_hash_fails(self, env):
         """Gate result with wrong contract_hash is flagged."""
         report = _write_report(env["reports_dir"], "report.md")
+        # ADR-005: branch must match so the result is accepted and the
+        # contract-hash-mismatch enforcement (not branch rejection) is what fires.
         _write_gate_result(env["results_dir"], "pr0-gemini_review-contract.json", {
             "gate": "gemini_review", "pr_id": "PR-0", "status": "pass",
             "report_path": str(report), "contract_hash": "WRONG-HASH",
+            "branch": "feature/test",
         })
         _write_gate_result(env["results_dir"], "pr0-codex_gate-contract.json", {
             "gate": "codex_gate", "pr_id": "PR-0", "status": "pass",
             "report_path": str(report), "contract_hash": "test-hash-abc123",
+            "branch": "feature/test",
         })
 
         contract = _make_contract(content_hash="test-hash-abc123")
