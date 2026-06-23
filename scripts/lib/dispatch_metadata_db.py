@@ -50,7 +50,19 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row[1] == column for row in rows)
 
 
-def _resolve_project_id(explicit: Optional[str]) -> str:
+def _resolve_project_id(explicit: Optional[str], db_path: Optional[Path] = None) -> str:
+    """Resolve the project_id to stamp on a dispatch_metadata row.
+
+    Order: explicit arg → ambient project_scope → the OWNING store (derived from
+    ``db_path``) → VNX_PROJECT_ID env → 'vnx-dev'.
+
+    The store-derived step (``resolve_init_project_id``) is the tenant-correctness
+    fix: it anchors on the DB file's ``~/.vnx-data/<pid>/state/`` path layout, so a
+    write to a non-vnx-dev store (e.g. mission-control) stamps THAT tenant instead
+    of the bare literal 'vnx-dev'. A genuine source-conflict (path vs marker vs env
+    disagree) is logged and degrades to the env default rather than crashing the
+    write — never silently mis-stamps without a trace.
+    """
     if explicit:
         return explicit
     try:
@@ -59,7 +71,16 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
         if pid:
             return pid
     except Exception:  # noqa: BLE001 — project_scope is optional in some contexts
-        logger.debug("project_scope unavailable; falling back to VNX_PROJECT_ID env/default", exc_info=True)
+        logger.debug("project_scope unavailable; trying store-derived project_id", exc_info=True)
+    if db_path is not None:
+        try:
+            from project_id_migration import resolve_init_project_id  # noqa: PLC0415
+            return resolve_init_project_id(Path(db_path))
+        except RuntimeError as exc:
+            # Conflicting tenant sources — surface it; do not crash the write.
+            logger.warning("dispatch_metadata project_id resolution conflict for %s: %s", db_path, exc)
+        except Exception:  # noqa: BLE001 — resolver optional; fall through to env default
+            logger.debug("store-derived project_id unavailable; falling back to env", exc_info=True)
     import os  # noqa: PLC0415
     return os.environ.get("VNX_PROJECT_ID", "vnx-dev")
 
@@ -108,7 +129,7 @@ def upsert_dispatch_provider_row(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     completed_at = now_iso if outcome_status else None
-    resolved_project_id = _resolve_project_id(project_id)
+    resolved_project_id = _resolve_project_id(project_id, db_path)
 
     conn = None
     try:
