@@ -8,8 +8,18 @@ reconcile_terminal_state.py). Called by SessionStart hook.
 Usage:
     python3 scripts/build_t0_state.py [--output PATH] [--format {state,brief}]
 
-Output schema: schema_version "2.1" (t0_state.json)
+Output schema: schema_version "2.2" (t0_state.json)
 With --format brief: schema 1.0 backward-compat (t0_brief.json format)
+
+Schema 2.2 changes (fabric-freshness):
+  - Additive, backward-compatible: a top-level ``track_freshness`` marker
+    {reconciled, tracks, drifted, drifted_tracks, reason, seconds, store}.
+    Before projecting, the builder runs the advisory track reconciler against
+    the central tracks SSOT and records declared-vs-derived drift here, so the
+    SessionStart snapshot carries its own freshness. A compact form
+    {reconciled, drifted, tracks, reason} is also surfaced in t0_index.json
+    (the always-loaded cold-start file). Consumers that predate 2.2 ignore the
+    new key (no removals/renames).
 
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
@@ -1675,6 +1685,111 @@ def _build_pr_queue_section(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Track freshness (fabric-freshness): reconcile derived_status before projecting
+# ---------------------------------------------------------------------------
+
+def _resolve_tracks_store(state_dir: Path, project_id: str) -> Path:
+    """Resolve the store that actually holds the tracks for ``project_id``.
+
+    The tracks/objectives SSOT is the central per-project store
+    (``~/.vnx-data/<project>/state``). The repo-local ``.vnx-data/state`` is a
+    degraded fallback that frequently has no ``tracks`` table at all. The
+    ambient ``_STATE_DIR`` only points at central when ``VNX_DATA_DIR`` is set,
+    so resolve central explicitly (env-independent) and fall back to
+    ``state_dir`` when central cannot be resolved or has no DB yet.
+    """
+    if resolve_central_data_dir is not None and project_id:
+        try:
+            central_state = resolve_central_data_dir(project_id) / "state"
+            if (central_state / "runtime_coordination.db").exists():
+                return central_state
+        except Exception as exc:
+            log.debug("central tracks-store resolution failed: %s", exc)
+    return state_dir
+
+
+def _reconcile_tracks_fresh(
+    state_dir: Path, project_id: str, *, store: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Reconcile track ``derived_status`` BEFORE projection and return a
+    freshness marker. Advisory-only and never raises.
+
+    build_t0_state runs at EVERY SessionStart. Without this, a track whose PR
+    merged (but whose declared phase was never advanced) stays silently stale
+    until a human writes a handoff. Running the advisory reconciler here
+    recomputes derived_status from dispatch/event state and surfaces any
+    declared-vs-derived drift in the projection itself — so the SessionStart
+    snapshot carries its own freshness instead of a hand-written handoff.
+
+    Targets the CENTRAL tracks SSOT (see ``_resolve_tracks_store``): the reconcile
+    therefore performs a per-track ``UPDATE tracks.derived_status`` (tenant-scoped,
+    ADR-007-safe) on the central multi-tenant DB on every SessionStart. The
+    writes use WAL + a 10s busy-timeout (``track_reconciler._get_conn``), so
+    concurrent session starts serialize safely and contention degrades to an
+    ``error:OperationalError`` marker rather than corrupting state. The pass is
+    idempotent, so a partial batch (some tracks written, then a failure) is
+    self-healing — the next SessionStart re-reconciles.
+
+    Precondition: the ``derived_status`` column (migration 0028) is applied
+    out-of-band by ``migrate_future_system.py`` — NOT by ``_init_and_check_db``
+    (no ``apply_0028.py`` runner). On a store that has not run it, the reconcile
+    degrades to a ``precondition_unmet`` marker (safe, never raises).
+    """
+    marker: Dict[str, Any] = {
+        "reconciled": False,
+        "tracks": 0,
+        "drifted": 0,
+        "drifted_tracks": [],
+        "reason": None,
+        "seconds": 0.0,
+        "store": None,
+    }
+    pid = (project_id or "").strip()
+    if not pid:
+        marker["reason"] = "no_project_id"
+        return marker
+
+    # Use the caller-resolved store when given (guarantees coherence with the
+    # canonical projection); otherwise resolve it here.
+    store = store if store is not None else _resolve_tracks_store(state_dir, pid)
+    marker["store"] = str(store)
+    t0 = time.monotonic()
+    try:
+        if str(_LIB_DIR) not in sys.path:
+            sys.path.insert(0, str(_LIB_DIR))
+        from track_reconciler import reconcile_all_tracks
+
+        results = reconcile_all_tracks(store, pid)
+    except RuntimeError as exc:
+        # derived_status column absent (migration 0028 not applied to this
+        # store). Not an error — reconcile is N/A here.
+        marker["reason"] = "precondition_unmet"
+        log.debug("track reconcile skipped (precondition): %s", exc)
+        return marker
+    except Exception as exc:  # never break the hot path
+        marker["reason"] = f"error:{type(exc).__name__}"
+        log.warning("track reconcile failed (projection continues): %s", exc)
+        return marker
+
+    drifted = [r for r in results if r.get("drifted")]
+    marker.update(
+        reconciled=True,
+        tracks=len(results),
+        drifted=len(drifted),
+        drifted_tracks=[
+            {
+                "track_id": r.get("track_id"),
+                "declared_phase": r.get("declared_phase"),
+                "derived_status": r.get("derived_status"),
+            }
+            for r in drifted
+        ],
+        seconds=round(time.monotonic() - t0, 3),
+    )
+    return marker
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -1698,10 +1813,20 @@ def build_t0_state(
     # R6.1: probe quality_intelligence.db; classify locked/malformed (not premigration)
     db_health = _probe_db_health(state_dir / "quality_intelligence.db")
 
+    # Fabric-freshness: resolve the tracks store ONCE (the central per-project
+    # SSOT, with local fallback) and use it for BOTH the reconcile AND the
+    # canonical projection, so the snapshot is internally coherent — the
+    # freshness marker and canonical_tracks never reflect different stores.
+    # (Migration 0028 / the derived_status column is applied out-of-band by
+    # migrate_future_system.py, NOT by _init_and_check_db; a store without it
+    # degrades to a precondition_unmet marker.)
+    tracks_store = _resolve_tracks_store(state_dir, project_id)
+    track_freshness = _reconcile_tracks_fresh(state_dir, project_id, store=tracks_store)
+
     terminals = _build_terminals(state_dir)
     queues = _build_queues(dispatch_dir, state_dir)
     tracks = _build_tracks(state_dir)
-    canonical_tracks = _build_tracks_from_db(state_dir, project_id)  # R3.2/ADR-007: tenant-scoped
+    canonical_tracks = _build_tracks_from_db(tracks_store, project_id)  # R3.2/ADR-007: tenant-scoped (central SSOT)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -1722,12 +1847,13 @@ def build_t0_state(
     )
 
     return {
-        "schema_version": "2.1",
+        "schema_version": "2.2",
         "generated_at": _now_iso(),
         # staleness_seconds removed (R6.4): call compute_staleness_seconds() at read time
         "terminals": terminals,
         "queues": queues,
         "tracks": tracks,
+        "track_freshness": track_freshness,
         "canonical_tracks": canonical_tracks,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
@@ -1869,7 +1995,24 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "active_dispatches": [d.get("dispatch_id", "") for d in active_work],
         "recent_receipts": (state.get("recent_receipts") or [])[-3:],
         "health": state.get("system_health") or {},
+        "track_freshness": _track_freshness_summary(state.get("track_freshness")),
         "last_rebuild_seconds": state.get("_build_seconds"),
+    }
+
+
+def _track_freshness_summary(tf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact track-freshness marker for the always-loaded index (F3).
+
+    The full marker (with per-track drift detail) lives in the state doc; the
+    index carries only the cheap orientation fields so a cold-start session sees
+    whether the projection is fresh and how many tracks drifted.
+    """
+    tf = tf or {}
+    return {
+        "reconciled": bool(tf.get("reconciled", False)),
+        "drifted": tf.get("drifted", 0),
+        "tracks": tf.get("tracks", 0),
+        "reason": tf.get("reason"),
     }
 
 
@@ -2068,20 +2211,35 @@ def _emit_build_signal(output_path: Path, elapsed: float) -> None:
 
 
 def _emit_health_beacon(
-    output_path: Path, fmt: str, elapsed: float, succeeded: bool
+    output_path: Path, fmt: str, elapsed: float, succeeded: bool,
+    track_freshness: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Emit HealthBeacon heartbeat (best-effort)."""
+    """Emit HealthBeacon heartbeat (best-effort).
+
+    Carries a compact track-freshness summary so reconcile health (e.g.
+    ``reconciled=False`` with an ``error:*`` reason) is observable on the
+    beacon, not only inside the projection. A benign skip
+    (``no_project_id``/``precondition_unmet``) is reported but does NOT flip the
+    beacon to ``fail`` — only a real build/write failure does.
+    """
+    details: Dict[str, Any] = {
+        "format": fmt,
+        "output": str(output_path),
+        "elapsed_seconds": round(elapsed, 3),
+    }
+    if track_freshness is not None:
+        details["track_freshness"] = {
+            "reconciled": bool(track_freshness.get("reconciled", False)),
+            "drifted": track_freshness.get("drifted", 0),
+            "reason": track_freshness.get("reason"),
+        }
     try:
         from health_beacon import HealthBeacon
         HealthBeacon(
             _DATA_DIR, "t0_state_builder", expected_interval_seconds=1800,
         ).heartbeat(
             status="ok" if succeeded else "fail",
-            details={
-                "format": fmt,
-                "output": str(output_path),
-                "elapsed_seconds": round(elapsed, 3),
-            },
+            details=details,
         )
     except Exception as e:
         log.debug("HealthBeacon heartbeat failed (non-critical): %s", e)
@@ -2136,7 +2294,11 @@ def main() -> int:
         _emit_build_signal(output_path, elapsed)
 
     # Error 1: beacon status reflects both build success AND write health
-    _emit_health_beacon(output_path, args.format, elapsed, _build_succeeded and not write_failed)
+    _emit_health_beacon(
+        output_path, args.format, elapsed,
+        _build_succeeded and not write_failed,
+        track_freshness=(state or {}).get("track_freshness") if state else None,
+    )
 
     if _build_succeeded and state is not None:
         sh_status = (state.get("system_health") or {}).get("status", "healthy")

@@ -64,7 +64,7 @@ Last updated: 2026-05-06T00:00:00Z
 """
 
 SAMPLE_T0_STATE: dict = {
-    "schema_version": "2.1",
+    "schema_version": "2.2",
     "generated_at": "2026-05-06T06:00:00Z",
     "terminals": {
         "T1": {
