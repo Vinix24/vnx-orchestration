@@ -2960,9 +2960,9 @@ def run(project_root: Path | None = None) -> None:
     """Apply future-system migrations through 0031.
 
     DB path resolution (mirrors dispatch_cli.py:69-74):
-    - VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set: use VNX_DATA_DIR/state/
-      (allows targeting ~/.vnx-data/<pid>/state/ for central-store migrations).
-    - Fallback: project_root/.vnx-data/state/ (local layout).
+    - VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set: use the explicit data dir's
+      state directory (allows targeting a central per-project store for migrations).
+    - Fallback: the project-local state directory under project_root (no central data dir).
     """
     _project_root_provided = project_root is not None
     if project_root is None:
