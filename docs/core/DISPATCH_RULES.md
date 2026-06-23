@@ -8,9 +8,13 @@
 > routing policy → `scripts/lib/providers/routing_policy.yaml`; pricing/registry →
 > `scripts/lib/providers/wave7_models.yaml`. The single dispatch entry is the door
 > (`vnx dispatch` / `scripts/lib/dispatch_cli.py`); it runs `compile_plan` + a permit for every lane.
-> The door is built and tested but **default-OFF** (`VNX_SINGLE_ENTRY_DISPATCH` resolves to disabled
-> via `scripts/lib/dispatch_flags.py`; `VNX_DISPATCH_LEGACY=1` is the absolute rollback) until the
-> flip lands. Until then, dispatches route through the per-lane paths in §5/§8.
+> The door is merged (PR #896) and burn-in-validated but **default-OFF** (`VNX_SINGLE_ENTRY_DISPATCH`
+> resolves to disabled via `scripts/lib/dispatch_flags.py`; `VNX_DISPATCH_LEGACY=1` is the absolute
+> rollback); activation (`_DEFAULT_ENABLED=True`) is the remaining flip step. Until activation,
+> dispatches route through the per-lane paths in §5/§8.
+>
+> End-to-end architecture (door → assembly → delivery → govern → intelligence): see
+> **`DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`**.
 
 ## 1. Decision tree (first matching rule wins)
 
