@@ -106,3 +106,21 @@ Every dispatch: `[[TARGET:A|B|C]]` … `[[DONE]]`, headers `Role/Track/Terminal/
 ## 10. Operational runbooks (not inlined — see scripts)
 
 Startup reconciliation, post-crash lease recovery, orphaned-dispatch handling, OI lifecycle, and PR-queue ops are operational recipes, not always-loaded skill content. Use: `scripts/queue_status.sh`, `scripts/deliverable_review.sh`, `.claude/skills/t0-orchestrator/scripts/dispatch_guard.sh`, `scripts/provider_capabilities.sh`, `scripts/runtime_core_cli.py`, `bin/vnx pool {status,scale,config,reap}` (Wave 6 elastic pool, ADR-018).
+
+## 11. 1.0 transition-flag sunset list
+
+The single-entry-door rollout ships behind transition flags. At the 1.0 release these are retired so the door is the one and only path (no dual-path branches left to drift). Disposition per flag:
+
+| Flag | Disposition at 1.0 |
+|---|---|
+| `VNX_SINGLE_ENTRY_DISPATCH` | REMOVE — the door becomes the only path; the flag becomes a no-op, then deleted |
+| `VNX_DISPATCH_LEGACY` | REMOVE — the legacy lane is deleted after one stable release on the door |
+| `VNX_AUTO_ROUTE` | REMOVE — legacy-only smart-route; the door's compile_plan owns routing. `dispatch-agent.sh`'s `--auto-route` path is inert under the door and is removed with it |
+| `VNX_USE_CENTRAL_DB` | REVIEW — the central store is the default; confirm no dual-write path remains before removing |
+| `VNX_STATE_DUAL_WRITE_LEGACY` | REMOVE — a one-time migration aid |
+| `VNX_OVERRIDE_CLAUDE_HEADLESS` | KEEP — a real account-safety override, not transition scaffolding |
+| `VNX_OVERRIDE_WORKER_PUSH_MAIN` | KEEP — a real governance override |
+| `VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY` | KEEP — the benchmark baseline escape for `glm-via-harness-only` |
+| `VNX_OVERRIDE_PHANTOM_GUARD` | KEEP — operator escape for a legitimate no-op delivery |
+
+KEEP = a genuine safety/operator override. REMOVE = transition scaffolding that only existed to make the flip reversible. The default-flip itself (`dispatch_flags._DEFAULT_ENABLED`) is the operator-gated cutover; the REMOVE flags are deleted only after it has run stably.
