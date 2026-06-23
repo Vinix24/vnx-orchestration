@@ -228,7 +228,10 @@ Default pricing (USD per 1M tokens) mirrors `MODEL_PRICING` in `cost_tracker.py`
 | claude-sonnet-4.6 | $3.00 | $15.00 |
 | claude-opus-4.5 (historical) | $15.00 | $75.00 |
 | claude-sonnet-4.5 (historical) | $3.00 | $15.00 |
+| gpt-5.3-codex | $2.00 | $16.00 |
 | gpt-5.2-codex | $1.75 | $14.00 |
+| gpt-5.1-codex | $1.25 | $10.00 |
+| gpt-5.1-codex-mini | $0.25 | $2.00 |
 | gemini-pro | $0.50 | $1.50 |
 | gemini-flash | $0.10 | $0.30 |
 
