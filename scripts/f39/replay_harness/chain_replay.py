@@ -21,7 +21,7 @@ from .single_replay import (
 
 log = logging.getLogger(__name__)
 
-from context_assembler import (  # noqa: E402
+from replay_context_assembler import (  # noqa: E402
     assemble_t0_context,
     _DEFAULT_FEATURE_PLAN,
     _DEFAULT_SKILL,
