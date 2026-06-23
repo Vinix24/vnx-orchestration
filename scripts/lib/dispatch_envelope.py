@@ -356,6 +356,7 @@ def _govern(
     adapter_result: _AdapterResult,
     start_time: datetime,
     end_time: datetime,
+    phantom_diff: Optional[str] = None,
 ) -> tuple:
     """Emit unified_report then dispatch receipt. Returns (report_path, receipt_path).
 
@@ -456,6 +457,7 @@ def _govern(
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
             worktree_path=None,
             base_sha=None,
+            worktree_diff=phantom_diff,  # F1: pre-captured before the worktree teardown
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
         )
     except Exception as exc:  # noqa: BLE001
@@ -925,14 +927,24 @@ def run_envelope_plan(
             error=_isolation_error,
         )
 
+    _phantom_diff: Optional[str] = None
     try:
         start = datetime.now(timezone.utc)
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path)
         end = datetime.now(timezone.utc)
+        # F1 (codex): capture the worker's diff from the LIVE worktree BEFORE the teardown below —
+        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id> branch, so
+        # the phantom-guard inside _govern could not otherwise resolve the provider lane's diff and
+        # would abstain, letting the exact kimi/glm/deepseek phantom slip through.
+        try:
+            from phantom_guard import compute_worktree_diff  # noqa: PLC0415
+            _phantom_diff = compute_worktree_diff(wt_path, base_ref="origin/main")
+        except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
+            _phantom_diff = None
     finally:
         remove_dispatch_worktree(plan.dispatch_id)
 
-    report_path, receipt_path = _govern(enriched_spec, result, start, end)
+    report_path, receipt_path = _govern(enriched_spec, result, start, end, phantom_diff=_phantom_diff)
 
     return EnvelopeResult(
         status=result.status,

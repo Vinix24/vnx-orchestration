@@ -114,9 +114,18 @@ def compute_worktree_diff(worktree_path: Path, *, base_ref: str = "origin/main")
         cwd=wt, capture_output=True, text=True, check=True,
     ).stdout.strip()
     committed = subprocess.run(
-        ["git", "diff", merge_base],  # base..working-tree (includes uncommitted)
+        ["git", "diff", merge_base],  # base..working-tree (includes tracked uncommitted)
         cwd=wt, capture_output=True, text=True, check=True,
     ).stdout
+    # F5 (codex): `git diff` IGNORES untracked files — a worker that creates a NEW file without
+    # staging it would be false-rejected as phantom. Fold the untracked list into the diff so any
+    # new file counts as real work.
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=wt, capture_output=True, text=True, check=True,
+    ).stdout
+    if untracked.strip():
+        committed += "\n[untracked files]\n" + untracked
     return committed
 
 
@@ -156,15 +165,19 @@ def guard_at_govern(
     token_usage: Optional[int] = None,
     worktree_path: Optional[Path] = None,
     base_sha: Optional[str] = None,
+    worktree_diff: Optional[str] = None,
 ) -> PhantomVerdict:
     """Inline govern-time phantom check for BOTH lanes (claude tmux via dispatch_govern.govern,
     providers via dispatch_envelope._govern — the kimi/glm/deepseek fabrication vector).
 
     Resolves the WORKER's diff in this order and NEVER raises / NEVER false-rejects:
-      1. ``worktree_path`` if it exists (the claude tmux lane carries it on GovernSpec),
-      2. else the dispatch's own branch ``dispatch/<sanitized id>`` (isolated provider dispatches),
-      3. else ABSTAIN — return ok with an abstain reason (an unresolvable/torn-down ref must never
-         be read as "empty diff" and false-reject real work).
+      0. ``worktree_diff`` if supplied — a PRE-CAPTURED diff. The provider lane MUST use this: its
+         worktree + dispatch/<id> branch are torn down BEFORE govern runs (codex F1), so the diff
+         has to be captured while the worktree still exists and passed in here.
+      1. else ``worktree_path`` if it exists (the claude tmux lane carries a LIVE worktree on
+         GovernSpec — not torn down until after govern),
+      2. else the dispatch's own branch ``dispatch/<sanitized id>`` (still-present isolated branch),
+      3. else ABSTAIN — return ok (an unresolvable/torn-down ref must never read as "empty diff").
 
     Honors ``VNX_OVERRIDE_PHANTOM_GUARD=1`` (operator escape for a legitimate no-op delivery). This
     function performs NO receipt I/O — the caller appends the corrective ``failed`` receipt on a
@@ -175,15 +188,18 @@ def guard_at_govern(
     if os.environ.get("VNX_OVERRIDE_PHANTOM_GUARD") == "1":
         return _ok("phantom-guard overridden (VNX_OVERRIDE_PHANTOM_GUARD=1)")
     base = (base_sha or "").strip() or "origin/main"
-    try:
-        if worktree_path is not None and Path(worktree_path).exists():
-            diff = compute_worktree_diff(Path(worktree_path), base_ref=base)
-        else:
-            from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
-            branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
-            diff = compute_branch_diff(branch, base_ref=base)
-    except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
-        return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
+    if worktree_diff is not None:
+        diff = worktree_diff
+    else:
+        try:
+            if worktree_path is not None and Path(worktree_path).exists():
+                diff = compute_worktree_diff(Path(worktree_path), base_ref=base)
+            else:
+                from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
+                branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+                diff = compute_branch_diff(branch, base_ref=base)
+        except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
+            return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
     return phantom_guard(status=status, worktree_diff=diff, token_usage=token_usage, role=role)
 
 
@@ -195,33 +211,45 @@ def record_phantom_if_any(
     token_usage: Optional[int] = None,
     worktree_path: Optional[Path] = None,
     base_sha: Optional[str] = None,
+    worktree_diff: Optional[str] = None,
     receipts_file: Optional[str] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
-    ``dedup_completion_receipts`` then picks the corrective receipt as authoritative (latest of the
-    done/failed tier), so the dispatch resolves as FAILED — while the worker's original ``done``
-    receipt is PRESERVED on the ledger (the contradiction is recorded, not overwritten: audit-honest,
-    the ISAE lens). Never raises: a corrective-append failure is logged, not propagated, and the
-    govern flow continues. The guard verdict is always returned for the caller to log.
+    The corrective receipt uses ``event_type="subprocess_completion"`` (one of the watchers'
+    ACTIONABLE_EVENTS — codex F3: a custom ``phantom_rejected`` event_type is invisible to the live
+    trigger path) and carries ``phantom_rejected=True``, which ``dedup_completion_receipts`` honors
+    as a Tier-0 override (codex F4: a same-second ``...Z`` timestamp tie would otherwise let the
+    worker's ``done`` win). So the dispatch resolves FAILED while the worker's original ``done``
+    receipt is PRESERVED (the contradiction is recorded, not overwritten — audit-honest, the ISAE
+    lens). Never raises: a corrective-append failure is logged, not propagated.
     """
     verdict = guard_at_govern(
-        dispatch_id=dispatch_id, role=role, status=status,
-        token_usage=token_usage, worktree_path=worktree_path, base_sha=base_sha,
+        dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
+        worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
     )
     if verdict.is_phantom and receipts_file:
         try:
+            import os  # noqa: PLC0415
+            import sys  # noqa: PLC0415
             from datetime import datetime, timezone  # noqa: PLC0415
+            # F2 (codex): append_receipt lives in scripts/, not scripts/lib — under the single-entry
+            # PYTHONPATH only scripts/lib is present, so the bare import fails and is swallowed. Put
+            # scripts/ on the path first (mirrors dispatch_govern.ensure_receipt).
+            _scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _scripts not in sys.path:
+                sys.path.insert(0, _scripts)
             from append_receipt import append_receipt_payload  # noqa: PLC0415
             append_receipt_payload(
                 {
+                    "event_type": "subprocess_completion",
                     "dispatch_id": dispatch_id,
                     "status": "failed",
-                    "event_type": "phantom_rejected",
                     "phantom_rejected": True,
                     "phantom_reason": verdict.reason,
                     "source": "phantom_guard",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "synthesized": False,
+                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
                 receipts_file=str(receipts_file),
                 cache_window_seconds=0,

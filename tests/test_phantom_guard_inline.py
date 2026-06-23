@@ -41,7 +41,32 @@ def test_record_phantom_appends_corrective_failed_receipt(monkeypatch, tmp_path)
     assert captured["payload"]["status"] == "failed"
     assert captured["payload"]["phantom_rejected"] is True
     assert captured["payload"]["dispatch_id"] == "d1"
-    assert captured["payload"]["event_type"] == "phantom_rejected"
+    # event_type must be one the watchers honor (ACTIONABLE_EVENTS) — codex F3
+    assert captured["payload"]["event_type"] == "subprocess_completion"
+    assert captured["payload"]["synthesized"] is False  # else dedup Tier-2 drops it
+    # timestamp must be the ...Z format the other receipts use — codex F4
+    assert captured["payload"]["timestamp"].endswith("Z")
+
+
+def test_precaptured_worktree_diff_bypasses_resolution():
+    # the provider lane passes a pre-captured diff (its worktree is torn down before govern). Empty
+    # pre-captured diff + delivery + done -> phantom (no abstain, the diff is authoritative here).
+    v = pg.guard_at_govern(dispatch_id="d1", role="backend-developer", status="done",
+                           token_usage=0, worktree_diff="")
+    assert v.is_phantom
+    v2 = pg.guard_at_govern(dispatch_id="d1", role="backend-developer", status="done",
+                            worktree_diff="diff --git a/x b/x\n+y\n")
+    assert not v2.is_phantom
+
+
+def test_dedup_phantom_rejected_wins_over_worker_done():
+    import dispatch_govern as dg
+    worker = {"dispatch_id": "d1", "status": "done", "timestamp": "2026-06-23T10:00:00Z"}
+    corrective = {"dispatch_id": "d1", "status": "failed", "phantom_rejected": True,
+                  "timestamp": "2026-06-23T10:00:00Z"}  # same-second tie
+    # worker appended first; without Tier-0 the tie would let 'done' win
+    assert dg.dedup_completion_receipts([worker, corrective])["status"] == "failed"
+    assert dg.dedup_completion_receipts([corrective, worker])["status"] == "failed"
 
 
 def test_record_phantom_no_append_when_not_phantom(monkeypatch, tmp_path):
