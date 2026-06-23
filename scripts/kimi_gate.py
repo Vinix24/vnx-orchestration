@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,8 +33,29 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-from codex_parser import _extract_codex_verdict  # provider-agnostic ```json``` block scan
 from plan_gate_panel import _make_default_dispatcher  # governed provider_dispatch lane
+
+_VALID_VERDICTS = {"pass", "fail", "blocked"}
+
+
+def _extract_verdict(text: str) -> dict:
+    """Extract the worker's verdict: the LAST ```json``` block whose ``verdict`` is a
+    real verdict (pass/fail/blocked).
+
+    The governed worker report echoes the instruction, so the FIRST ```json``` block is
+    our own contract example (its ``verdict`` is the literal "pass|fail|blocked", which is
+    not a valid single verdict and is skipped). Scanning from the end and requiring a real
+    verdict value selects the worker's actual answer, never the echoed template.
+    """
+    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text or "", re.DOTALL)
+    for block in reversed(blocks):
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and str(obj.get("verdict", "")).strip().lower() in _VALID_VERDICTS:
+            return obj
+    return {}
 
 DEFAULT_MODEL = "kimi-k2-7-code"
 DEFAULT_TIMEOUT = 900
@@ -127,7 +149,7 @@ def main(argv: "list[str] | None" = None) -> int:
         return 1
     duration = time.monotonic() - start
 
-    verdict = _extract_codex_verdict(report_text or "") or {}
+    verdict = _extract_verdict(report_text or "")
     status, blocking, residual = _verdict_to_status(verdict)
 
     record = {
