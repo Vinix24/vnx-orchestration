@@ -6,13 +6,13 @@ It is a local control plane for the AI coding CLIs that already sit on your mach
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
 
-I built this for my own work, across 2,000+ hours of Claude Code and 1,450+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+I built this for my own work, across 3,000+ hours of Claude Code and 15,000+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
 ## What's new in 1.0
 
-- **pip-installable.** `pip install vnx-orchestration`, then `vnx init`, `vnx migrate`, `vnx doctor`. No repo clone required to scaffold a governed project.
+- **Packaged for pip.** A `pip`-installable distribution (`vnx init`, `vnx migrate`, `vnx doctor`) so a governed project can be scaffolded without a repo clone. The package builds from this tree; publishing to PyPI is the final 1.0 ship gate and has not happened yet. Until then, install from a checkout (see [Install](#install)).
 - **Provider-agnostic skill injection.** One skill folder, one structured prompt (role, assignment, resource index), identical for claude, kimi, codex, and deepseek workers. [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md).
 - **Realistic benchmark methodology.** A field-tests harness that measures provider lanes on production-derived tasks with programmatic verification per task, an LLM-judge fallback, and cost per quality-point. It lives in the repo under `scripts/benchmark/field-tests/` (not the pip package — the task seeds are repo-specific). A generalised "bring your own tasks" version is planned for 1.1.
 - **SSRF-safe URL policy.** Two-phase validator (lexical + DNS-resolution range-check, fail-closed) with an adversarial test suite. Ships as a governed building block in `scripts/lib/url_policy.py`; wiring into worker fetch paths is 1.0.1.
@@ -49,27 +49,31 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-06-10.
+I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-06-22.
 
-**Tier 1, in production.** Append-only NDJSON receipts with hash-chain verification tooling (`audit_chain`); per-append chain enforcement lands in 1.0.1. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane (available and subscription-preserving; works today, is actively being hardened ahead of the June 15 OAuth rollout, and is set to become the production default as of June 15, 2026; its PREPARE/GOVERN/RECEIPT/CAPTURE structural work has shipped). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
+**Tier 1, in production.** Append-only NDJSON receipts with hash-chain verification tooling (`audit_chain`); per-append chain enforcement lands in 1.0.1. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane: it is the default Claude worker lane (`scripts/commands/dispatch.sh` selects it unless a dispatch opts into the headless burst lane), runs on the subscription, and its PREPARE/GOVERN/RECEIPT/CAPTURE structural work has shipped. It is still being hardened; I do not yet claim it matches the headless lane on every surface. The headless `claude -p` burst lane is opt-in and blocked by default (`claude-headless` constraint; `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
 
-**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot (FUT-1/FUT-2 shipped and the tracks layer activated for forward-state planning; the 1.0.1 future-state reconciliation wires the open-item → track bridge and the `derived_status` reconciler into the autopilot tick behind the `VNX_ROADMAP_AUTOPILOT=1` gate, and brings the `dispatches` table into ADR-007 composite-key tenancy), the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
+**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`, and `dispatch-agent --auto-route`; built, not wired into the single-entry door). The elastic worker pool (`bin/vnx pool`). The track layer and roadmap autopilot (FUT-1/FUT-2 shipped and the tracks layer activated for forward-state planning; the 1.0.1 future-state reconciliation wires the open-item → track bridge and the `derived_status` reconciler into the autopilot tick behind the `VNX_ROADMAP_AUTOPILOT=1` gate, and brings the `dispatches` table into ADR-007 composite-key tenancy). The consolidation loop (auto-dream). Governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. The self-learning loop — outcomes proposing new success-patterns/antipatterns for a human to accept — is currently dormant: the existing patterns inject into dispatch context, but the pool does not grow on its own yet. I do not claim these as done.
 
-**Tier 3, designed, not built.** Parallel multi-track execution. The wave scheduler, merge lock, and file-scope derivation are designed, not shipped. Treat it as architecture, not a feature.
+**Tier 3, designed, not built.** Parallel multi-track execution. The wave scheduler, merge lock, and file-scope derivation are designed, not shipped. The single-entry dispatch door (`scripts/lib/dispatch_cli.py`) is built and exercised under tests, but it is default-OFF: `VNX_SINGLE_ENTRY_DISPATCH` resolves to disabled until the flip lands. The branch that finishes the flip — normalizing GLM to the harness lane at the door, the single-source routing predicate, and a phantom-guard that rejects evidence-free GATE-GREEN receipts — is in progress (`feat/dispatch-flip`), not merged. Treat all of this as architecture, not a feature.
 
 Per-provider maturity differs. Worktree isolation (`VNX_ISOLATED_WORKTREE`, defaults off) is available for single-dispatch work and is not guaranteed to be race-free under parallel dispatch, which is why parallel sits in Tier 3.
 
 ## Install
 
+The package is not on PyPI yet — publishing is the final 1.0 ship gate. Install from a checkout:
+
 ```bash
-pip install vnx-orchestration
+git clone https://github.com/Vinix24/vnx-orchestration
+cd vnx-orchestration
+pip install -e .                          # editable install of the pip CLI
 vnx init                                  # scaffold a VNX project in the current dir
 vnx migrate                               # apply runtime DB migrations
 vnx doctor                                # environment and dependency checks
 vnx dispatch-agent --agent hello-world    # works via the examples/ fallback
 ```
 
-There are two binaries on purpose during the 1.0 cutover. The pip-installed `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands still live behind `./bin/vnx`, including `gate-check`, `new-worktree`, and `demo`. The `demo` path runs without API keys.
+There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check`, `new-worktree`, and `demo`. The `demo` path runs without API keys. When the package publishes, `pip install vnx-orchestration` replaces the clone step.
 
 ## Architecture
 
@@ -95,7 +99,7 @@ VNX uses a T0 orchestrator and ephemeral workers. The old fixed T1-T3 mental mod
    append-only NDJSON receipts  (one per dispatch; hash-chain verify via audit_chain)
 ```
 
-Claude has two explicit lanes. The reference worker lane is Claude via `claude -p` subprocess in headless mode. The interactive tmux lane runs Claude on subscription; it is available now, subscription-preserving, and set to become the default lane as of the June 15, 2026 billing change — it is still maturing into that role.
+Claude has two explicit lanes. The default worker lane is the interactive tmux lane: it runs Claude on the subscription and is what `dispatch.sh` selects unless a dispatch opts out. The headless `claude -p` subprocess lane is the burst alternative; after the June 15, 2026 billing change it runs on API credits, so it is opt-in and blocked by default (`VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it). The tmux lane is subscription-preserving and still maturing toward full parity with the headless lane on every surface.
 
 The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees. Worktree isolation is available via `VNX_ISOLATED_WORKTREE=1` and is off by default; isolation guarantees vary by lane.
 
@@ -103,7 +107,7 @@ The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interact
 
 Memory is the unsolved problem in agentic AI. Most systems bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
 
-The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with thousands of receipts behind it.
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with 13,000+ receipts in the audit trail behind it.
 
 The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. As of 1.0.1 the `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 
@@ -131,11 +135,11 @@ For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/m
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by `scripts/lib/providers/provider_constraints.yaml`, a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
 
-The interactive tmux lane (`scripts/lib/tmux_interactive_dispatch.py`) is set to become the default Claude worker path as of the June 15, 2026 billing change and is actively maturing into that role; the headless burst path uses subprocess `claude -p`. The receipt format and intelligence layer are uniform across all lanes today; per-lane parity on the full PREPARE/GOVERN envelope is the dispatch-unification work targeted for the 1.x release.
+The interactive tmux lane (`scripts/lib/tmux_interactive_dispatch.py`) is the default Claude worker path and is still maturing toward full parity; the headless burst path uses subprocess `claude -p` and is opt-in (it bills API credits after the June 15, 2026 billing change). The receipt format and intelligence layer are uniform across all lanes today; per-lane parity on the full PREPARE/GOVERN envelope is the dispatch-unification work targeted for the 1.x release.
 
 Kimi runs through the Kimi CLI with OAuth. VNX does not call the Moonshot SDK directly for that lane, which keeps attribution and rate-limit behavior in one place.
 
-OpenRouter is the gateway lane for GLM-5.1 from Zhipu today; arbitrary OpenAI-compatible models via the proxy lane are planned for a later release. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
+OpenRouter is the gateway lane for GLM-5.1 from Zhipu today (`provider_dispatch.py --provider litellm:zai`, satisfying `zai-via-openrouter-only`). On the in-progress flip branch, GLM moves to a claude-CLI harness lane (`glm-harness`, the local litellm proxy in front of OpenRouter) and the single-entry door normalizes the plain `litellm:zai` runner to it; that is committed on `feat/dispatch-flip`, not on the released default path. Arbitrary OpenAI-compatible models via a generic proxy lane are planned for a later release. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
 
 The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is meaningfully more effective on coding and tool tasks than a bare DeepSeek API call (internal measurement only, not a published benchmark), because the harness adds tool-use loops, context injection, and structured diff output that the raw API does not provide.
 
@@ -143,7 +147,7 @@ Skills reach every lane the same way. Rather than depend on per-CLI mechanisms (
 
 ### Billing as a consequence, not a goal
 
-VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because interactive Claude sessions stay on the subscription rather than API credits, the interactive tmux lane is subscription-preserving. It becomes the default Claude worker lane when the June 15 billing change takes effect. This describes current public policy; vendors can change their terms.
+VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because interactive Claude sessions stay on the subscription rather than API credits, the interactive tmux lane is subscription-preserving, and it is the default Claude worker lane. The headless lane stays opt-in and blocked by default for exactly this reason. This describes current public policy; vendors can change their terms.
 
 ## Compared to dmux
 
@@ -151,7 +155,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-Public 1.0 as of this README on 2026-06-10: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. The 1.0.1 future-state reconciliation batch (ADR-007 composite-key `dispatches`, the open-item → track bridge, and its autopilot wiring) has landed on `main` — see [CHANGELOG.md](CHANGELOG.md) — but `VERSION` stays `1.0.0` until that milestone is cut. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+1.0 release candidate as of this README on 2026-06-22: `VERSION` is `1.0.0`, the package builds from this tree, and the operator binary is still required for the full command surface. Publishing to PyPI is the final 1.0 ship gate (human-gated, alongside the dispatch-door flip and the Mission Control cutover) and has not happened yet. The 1.0.1 future-state reconciliation batch (ADR-007 composite-key `dispatches`, the open-item → track bridge, and its autopilot wiring) has landed on `main` — see [CHANGELOG.md](CHANGELOG.md) — but `VERSION` stays `1.0.0` until that milestone is cut. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 

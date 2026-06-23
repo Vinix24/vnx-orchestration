@@ -695,10 +695,12 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
         # mode, so it routes via=claude_harness_keyed and clears pre-flight.
         return "claude_harness_keyed"
     if provider == "glm-harness":
-        # GLM via the claude CLI but pointed at a LOCAL litellm proxy that fronts
-        # OpenRouter — inference flows through OpenRouter, so via=openrouter clears
-        # zai-via-openrouter-only (no direct z.ai/Zhipu route).
-        return "openrouter"
+        # GLM via the claude CLI pointed at the LOCAL :4141 litellm proxy that fronts
+        # OpenRouter. A DISTINCT via (not plain "openrouter"): clears zai-via-openrouter-only
+        # (via != direct) AND clears glm-via-harness-only (via not in [openrouter, litellm]),
+        # while plain litellm:zai (via=openrouter) stays blocked. Must match the door's
+        # dispatch_cli._via_for_provider for glm-harness.
+        return "claude_harness_openrouter"
     if provider in ("claude", "codex", "gemini", "kimi"):
         return "cli"
     if provider == "local-gemma":

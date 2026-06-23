@@ -12,6 +12,12 @@
 # All variables from bin/vnx (VNX_HOME, VNX_DATA_DIR, VNX_STATE_DIR,
 # VNX_DISPATCH_DIR, log, err) are available when this runs.
 
+# Single-source routing predicate (vnx_single_entry_enabled). Sourced RELATIVE to this file
+# (not VNX_HOME) so it resolves even under a test/stub VNX_HOME; the helper itself falls back
+# to its own dir for dispatch_flags.py.
+# shellcheck source=/dev/null
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/vnx_dispatch_flags.sh"
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 _d_parse_header() {
@@ -217,11 +223,15 @@ HELP
 # ── Main command ───────────────────────────────────────────────────────────
 
 cmd_dispatch() {
-  # VNX_SINGLE_ENTRY_DISPATCH=1 delegates to the new single-entry Python gate.
-  # VNX_DISPATCH_LEGACY=1 short-circuits back to the legacy path (rollback hatch).
-  # When neither flag is set: byte-identical legacy behavior below.
-  if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]] && \
-     [[ "${VNX_DISPATCH_LEGACY:-0}" != "1" ]]; then
+  # Routing truth table (flag contract — also documented in --help):
+  #   VNX_SINGLE_ENTRY_DISPATCH | VNX_DISPATCH_LEGACY | route
+  #   ------------------------- | ------------------- | -----------------
+  #   "1"                       | unset / "0"         | DOOR (single-entry)
+  #   "1"                       | "1"                 | LEGACY (rollback wins)
+  #   unset / "0"               | (any)               | LEGACY  ← current default
+  # The rollback hatch (VNX_DISPATCH_LEGACY=1) always wins. NB: pre-flip the default
+  # is LEGACY; item E flips the default to DOOR in the single-source helper.
+  if vnx_single_entry_enabled; then
     _d_single_entry_dispatch "$@"
     return $?
   fi
@@ -462,10 +472,11 @@ HELP
   fi
 
   local exit_code=0
-  if [[ "${VNX_SINGLE_ENTRY_DISPATCH:-0}" == "1" ]]; then
-    # PR-12 single-entry door (gated; OFF default = the legacy lanes below, byte-identical).
-    # The door owns lane selection (claude -> tmux-spawn subscription, providers -> provider
-    # lane). Gap (canary-blocker): --auto-route is not yet on the bridge CLI.
+  if vnx_single_entry_enabled; then
+    # PR-12 single-entry door. Uses the single-source predicate so VNX_DISPATCH_LEGACY=1 rolls
+    # THIS delivery back too (previously this checked only ==1 and ignored the rollback — the
+    # incomplete-rollback bug). The door owns lane selection (claude -> tmux-spawn subscription,
+    # providers -> provider lane). Gap (canary-blocker): --auto-route is not yet on the bridge CLI.
     printf '%s' "$instruction" | PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
     python3 "$VNX_HOME/scripts/lib/dispatch_bridge.py" \
       --dispatch-id "$dispatch_id" \

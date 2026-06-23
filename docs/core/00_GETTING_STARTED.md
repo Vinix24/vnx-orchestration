@@ -1,7 +1,7 @@
 # Getting Started (VNX)
 
 **Status**: Active
-**Last Updated**: 2026-06-10
+**Last Updated**: 2026-06-22
 **Owner**: T-MANAGER
 **Purpose**: Quick orientation and links to the current VNX "source of truth" docs.
 
@@ -11,7 +11,8 @@
 
 - Architecture: `00_VNX_ARCHITECTURE.md`
 - Dispatch workflow: `../DISPATCH_GUIDE.md`
-- Monitoring/ops: `../operations/MONITORING_GUIDE.md`
+- Dispatch rules + lanes: `DISPATCH_RULES.md`, `PROVIDER_LANES.md`
+- Monitoring/ops: `../operations/CONTROL_CENTRE.md`
 - Receipt pipeline: `../operations/RECEIPT_PIPELINE.md`
 - Runtime rollback: `../operations/RUNTIME_CORE_ROLLBACK.md`
 - Product modes: `../contracts/PRODUCTIZATION_CONTRACT.md`
@@ -23,8 +24,9 @@ For full navigation, start at `../DOCS_INDEX.md`.
 ## VNX CLI Quick Reference
 
 Plain `vnx` is the pip-installed Python CLI. It exposes the stable essentials:
-`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, and `update`.
-Operator commands run through `./bin/vnx` from the repository root.
+`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`,
+`dream`, `version`, and `update`. Operator commands run through `./bin/vnx`
+from the repository root.
 
 ```bash
 # Initialize VNX in a new project with the pip CLI
@@ -130,7 +132,7 @@ The helper walks up from CWD to find the project-local `.vnx/bin/vnx` or `.claud
 ## Appendix A: Two binaries
 
 VNX ships TWO `vnx` entry-points with different scopes:
-- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
+- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, `version`, `update`).
 - **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
 
 This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.

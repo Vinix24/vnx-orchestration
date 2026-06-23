@@ -321,6 +321,11 @@ def _sub_provider_for(provider_value: str) -> Optional[str]:
         return provider_value.split(":", 1)[1].split(":", 1)[0] or None
     if provider_value == "deepseek-harness":
         return "deepseek"
+    if provider_value == "glm-harness":
+        # sub=zai lets a future glm-specific constraint match forbidden_route.provider=zai;
+        # the distinct harness via (below) is what clears zai-via-openrouter-only AND
+        # glm-via-harness-only (mirrors the deepseek-harness sub=deepseek/keyed-via pattern).
+        return "zai"
     return None
 
 
@@ -335,6 +340,12 @@ def _via_for_provider(provider_value: str, sub_provider: Optional[str]) -> Optio
         return via_per_sub.get(sub_provider or "", "litellm")
     if provider_value == "deepseek-harness":
         return "claude_harness_keyed"
+    if provider_value == "glm-harness":
+        # Distinct harness via (NOT plain "openrouter"): the claude CLI pointed at the local
+        # :4141 litellm proxy → OpenRouter. Clears zai-via-openrouter-only (via != direct) AND
+        # glm-via-harness-only (via not in [openrouter, litellm]); plain litellm:zai (via=openrouter)
+        # stays blocked. Must match provider_dispatch._constraint_via_for_provider for glm-harness.
+        return "claude_harness_openrouter"
     if provider_value in ("claude", "codex", "gemini", "kimi"):
         return "cli"
     if provider_value == "local-gemma":

@@ -17,7 +17,7 @@ routing_by_task:
       avg_duration_seconds: 134.3
       launch_success_rate: 1.0
       n: 28
-    - model_id: claude-opus-4-7
+    - model_id: claude-opus-4-8
       runner: subscription
       composite_score: 9.35
       quality_tier: 3
@@ -115,7 +115,7 @@ routing_by_task:
       avg_duration_seconds: 384.9
       launch_success_rate: 1.0
       n: 5
-    - model_id: claude-opus-4-7
+    - model_id: claude-opus-4-8
       runner: subscription
       composite_score: 8.69
       quality_tier: 3
@@ -230,7 +230,7 @@ routing_by_task:
       avg_duration_seconds: 52.5
       launch_success_rate: 0.52
       n: 13
-    - model_id: claude-opus-4-7
+    - model_id: claude-opus-4-8
       runner: subscription
       composite_score: 9.19
       quality_tier: 3
@@ -344,7 +344,7 @@ routing_by_task:
       avg_duration_seconds: 88.4
       launch_success_rate: 0.62
       n: 10
-    - model_id: claude-opus-4-7
+    - model_id: claude-opus-4-8
       runner: subscription
       composite_score: 9.52
       quality_tier: 3
@@ -475,7 +475,7 @@ routing_by_task:
       avg_duration_seconds: 309.6
       launch_success_rate: 1.0
       n: 2
-    - model_id: claude-opus-4-7
+    - model_id: claude-opus-4-8
       runner: subscription
       composite_score: 8.78
       quality_tier: 3

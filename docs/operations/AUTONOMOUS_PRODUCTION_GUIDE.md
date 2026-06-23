@@ -9,7 +9,7 @@
 
 ---
 
-## Current State Delta (2026-04-01)
+## Current State Delta (updated 2026-06-22)
 
 This guide still contains older execution examples, but the current production reality is:
 
@@ -17,10 +17,13 @@ This guide still contains older execution examples, but the current production r
 - the operator surface is now complemented by the delivered **SEOcrawler Command Center**
 - FP29, FP30, and FP31 have now provided real proving-ground evidence for dashboard operations, paid delivery lifecycle, and production validation
 - interactive defaults remain Sonnet/Opus driven, but optional **Gemini/Codex headless review gates** are now part of the broader VNX evolution and should not be read as forbidden by older examples in this document
+- the **default Claude worker lane is the interactive tmux-spawn lane** (subscription); after the June 15, 2026 billing change the headless `claude -p` lane bills API credits and is opt-in / blocked by default (`claude-headless` constraint, `VNX_OVERRIDE_CLAUDE_HEADLESS=1`). Older examples in this doc that shell into `claude -p` predate that default
+- the **single-entry dispatch door** (`scripts/lib/dispatch_cli.py`) is built and tested but **default-OFF** (`VNX_SINGLE_ENTRY_DISPATCH` disabled; the flip is in progress on `feat/dispatch-flip`). Dispatches currently route through the per-lane paths
 
 Use this guide as the production protocol reference, but prefer:
-- `../PROJECT_STATUS.md` for current milestone truth
+- `../../CHANGELOG.md` and `../manifesto/ROADMAP.md` for current milestone truth
 - `../core/00_GETTING_STARTED.md` for current startup/worktree flow
+- `../core/DISPATCH_RULES.md` and `../core/PROVIDER_LANES.md` for current lane/door rules
 - `../manifesto/ROADMAP.md` for what is next
 
 ---

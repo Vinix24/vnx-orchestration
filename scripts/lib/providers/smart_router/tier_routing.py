@@ -5,7 +5,7 @@ Tier→provider mappings (honoring provider_constraints.yaml):
   tier-low  → DeepSeek via Claude-harness key-auth (DEEPSEEK_API_KEY required)
                OR Kimi via CLI (kimi-via-cli-only constraint)
   tier-mid  → claude-sonnet-4-6
-  tier-high → claude-opus-4-7
+  tier-high → claude-opus-4-8
 
 Constraint references (provider_constraints.yaml):
   kimi-via-cli-only: Kimi must use lane='kimi_cli', never via=api/moonshot
@@ -67,7 +67,7 @@ _ROUTE_MID = TierRoute(
 _ROUTE_HIGH = TierRoute(
     tier=TIER_HIGH,
     provider="claude",
-    model="claude-opus-4-7",
+    model="claude-opus-4-8",
     lane="tmux_interactive",
 )
 

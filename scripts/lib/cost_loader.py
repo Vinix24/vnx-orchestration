@@ -22,6 +22,7 @@ _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4-6": ("anthropic", "sonnet"),
     "claude-opus-4-6": ("anthropic", "opus"),
     "claude-opus-4-7": ("anthropic", "opus"),
+    "claude-opus-4-8": ("anthropic", "opus"),
     "claude-haiku-4-5": ("anthropic", "haiku"),
     "deepseek-v4-flash": ("deepseek", "deepseek-v4-flash"),
     "deepseek-v4-pro": ("deepseek", "deepseek-v4-pro"),

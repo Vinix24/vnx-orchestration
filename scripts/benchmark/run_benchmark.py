@@ -73,6 +73,12 @@ def run_single(model: Dict, task: Dict, dispatch_id: str, terminal_id: str = "BE
         "--instruction", task["prompt"],
     ]
     env = os.environ.copy()
+    # glm-via-harness-only backstop (production): plain litellm:zai is blocked at the door so GLM
+    # always runs via glm-harness. The benchmark INTENTIONALLY measures the plain runner as a
+    # baseline ("harness vs simple tool-call" for the same model), so it opens the documented
+    # override for its own zai-baseline dispatches only.
+    if model["provider"].split(":", 1)[1:2] == ["zai"] or model["provider"].startswith("litellm:zai"):
+        env["VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY"] = "1"
     if model.get("model_arg"):
         if model["provider"] == "claude":
             cmd.extend(["--model", model["model_arg"]])

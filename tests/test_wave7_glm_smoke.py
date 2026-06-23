@@ -46,7 +46,11 @@ class TestProviderDispatchRoutesZaiViaOpenRouter:
         )
 
         with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result) as mock_spawn:
-            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}):
+            # glm-via-harness-only now blocks plain litellm:zai in production (GLM must run via
+            # glm-harness); this test exercises the plain-runner routing, so it opens the documented
+            # benchmark/legacy override — the same one run_benchmark.py sets for its zai baselines.
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key",
+                                         "VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY": "1"}):
                 from provider_dispatch import main
                 rc = main([
                     "--provider", "litellm:zai",
@@ -189,8 +193,9 @@ class TestGlmModelAliasResolution:
         assert zai.api_key_env == "OPENROUTER_API_KEY", (
             f"unexpected api_key_env: {zai.api_key_env!r}"
         )
-        assert len(zai.models) == 1, (
-            f"expected 1 zai model, got {len(zai.models)}"
+        assert len(zai.models) == 3, (
+            # glm-5.1-default + glm-5.1 + glm-5.2 (grew from the original 1 as GLM versions landed)
+            f"expected 3 zai models, got {len(zai.models)}"
         )
 
     def test_glm51_default_model_schema(self):
