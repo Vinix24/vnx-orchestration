@@ -599,30 +599,6 @@ class HeartbeatACKMonitor:
         if os.environ.get("VNX_ACK_DIRECT_NOTIFY", "1") != "0":
             self._notify_t0_ack(receipt, signals)
 
-    def _check_intelligence_daemon_health(self) -> Dict:
-        """Check intelligence daemon health from dashboard"""
-        try:
-            if os.path.exists(self.dashboard_file):
-                with open(self.dashboard_file, 'r') as f:
-                    dashboard = json.load(f)
-
-                daemon_info = dashboard.get('intelligence_daemon', {})
-                if daemon_info:
-                    status = daemon_info.get('status', 'unknown')
-                    patterns = daemon_info.get('patterns_available', 0)
-                    last_extraction = daemon_info.get('last_extraction')
-
-                    return {
-                        'healthy': status == 'healthy',
-                        'status': status,
-                        'patterns_available': patterns,
-                        'last_extraction': last_extraction
-                    }
-        except Exception as e:
-            logger.debug(f"Could not check intelligence daemon health: {e}")
-
-        return {'healthy': False, 'status': 'unknown'}
-
     def _notify_t0_ack(self, receipt: Dict, signals: List[Dict]):
         """Send ACK notification to T0 using tmux buffer paste"""
 

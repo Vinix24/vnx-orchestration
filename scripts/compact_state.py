@@ -63,23 +63,6 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-def _atomic_write_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def _stage_bytes(directory: Path, content: bytes) -> Path:
     """Write content to a temp file in directory; return path without committing to final name.
 

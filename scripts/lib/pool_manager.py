@@ -372,18 +372,6 @@ class PoolManager:
     # Private execution helpers
     # ------------------------------------------------------------------
 
-    def _next_terminal_id(self) -> str:
-        current_size = self.repo.get_current_size(self.pool_id)
-        slot = current_size + 1
-        prefix = self.project_id.split("-")[0] if "-" in self.project_id else self.project_id
-        return f"{prefix[:3].upper()}-{slot}"
-
-    def _provider_for_slot(self, config: PoolConfig, slot_index: int) -> str:
-        mix = config.provider_mix
-        if not mix:
-            return "claude"
-        return mix[slot_index % len(mix)]
-
     def _execute_scale_up(self, decision: PoolDecision, now: float) -> ExecResult:
         result = ExecResult(decision=decision)
         config, _, members = self.load_state()
