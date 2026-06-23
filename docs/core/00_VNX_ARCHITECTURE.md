@@ -7,6 +7,8 @@
 
 **Version**: 1.0.0
 
+> **Dispatch flow:** the end-to-end dispatch lifecycle (single-entry door → assembly → delivery → phantom-guard → gates) lives in [DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md](./DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md). This doc covers terminal/process/intelligence components; where it describes dispatch routing, that doc supersedes it.
+
 ---
 
 ## Table of Contents
@@ -59,6 +61,8 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 
 ### Architecture Diagram
 
+> **Conceptual roles, not fixed panes.** The T0-T3 grid below shows the *roles* in the system, not a fixed four-pane layout. `vnx start` launches **T0 only**; T1-T3 are on-demand worker lanes spawned per dispatch (see *Terminal Architecture* below).
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    VNX ORCHESTRATION SYSTEM V1.0                │
@@ -107,16 +111,20 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 
 ## Terminal Architecture
 
-### Terminal Specifications
+### Roles, not fixed panes
 
-| Terminal | Role | Provider | Model | Permissions | Purpose |
+`vnx start` launches **T0 only** as a tmux pane (`scripts/commands/start.sh:330,346,562`); T1-T3 are **on-demand worker lanes spawned per dispatch**, not fixed panes. A worker lane is created when a dispatch needs it (subprocess adapter or leaseless tmux lane) and torn down after. Model and provider are chosen **per dispatch via lane selection**, not pinned to a terminal — the model/provider columns below describe the *typical* role assignment, not a hard pin.
+
+### Terminal Role Specifications
+
+| Terminal | Role | Typical Provider | Typical Model | Permissions | Purpose |
 |----------|------|----------|-------|-------------|---------|
-| **T0** | Orchestrator | Claude Code | Opus | Read-Only | Manager blocks, coordination, intelligence |
-| **T1** | Worker | Claude/Codex | Sonnet | Full R/W | Any task dispatched by T0 (provider configurable) |
-| **T2** | Worker | Claude Code | Sonnet | Full R/W | Any task dispatched by T0 |
-| **T3** | Worker | Claude Code | Opus | Full R/W | Any task dispatched by T0 (Opus for complex work) |
+| **T0** | Orchestrator | Claude Code | Opus | Read-Only | Manager blocks, coordination, intelligence (the one launched pane) |
+| **T1** | Worker lane | Claude/Codex | Sonnet | Full R/W | Any task dispatched by T0 (provider per-dispatch) |
+| **T2** | Worker lane | Claude Code | Sonnet | Full R/W | Any task dispatched by T0 |
+| **T3** | Worker lane | Claude Code | Opus | Full R/W | Any task dispatched by T0 (Opus for complex work) |
 
-**Multi-Provider Support**: T1 can run Codex CLI instead of Claude Code (configured via `config.env` or `vnx start --t1-provider codex`). Gemini CLI is also supported. Skills are synced to `~/.claude/skills/`, `~/.codex/skills/`, and `.gemini/skills/` during `vnx init`.
+**Multi-Provider Support**: a worker lane can run Codex CLI or Gemini CLI instead of Claude Code; the provider is resolved per dispatch by the lane selector (see [DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md](./DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md) §3). Skills are synced to `~/.claude/skills/`, `~/.codex/skills/`, and `.gemini/skills/` during `vnx init`.
 
 ### Terminal Status Detection
 
@@ -166,38 +174,9 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ## Core Components
 
-### 1. Dispatcher V8 (`dispatcher_minimal.sh`)
+### 1. Dispatch routing (the single-entry door)
 
-**Purpose**: Native skill activation and instruction routing (Dispatcher component V8.2, shipped in VNX 1.0.0)
-
-**Functionality**:
-- Maps dispatch roles to native Claude Code skills
-- Hybrid dispatch: skill via `send-keys` (triggers slash-command detection) + instruction via `paste-buffer` (~200 tokens)
-- No template compilation needed (skills load via `/skill-name args` invocation)
-- Track-based routing (A, B, C)
-- Mode control (normal, thinking, planning)
-- Multi-provider skill invocation: `/skill-name` (Claude), `$skill-name` (Codex), `@skill-name` (Gemini)
-- PR-ID included in dispatch prompt for receipt correlation
-- Rich footer with "Expected Outputs" guidelines and report metadata template
-
-**Key Features**:
-- 87% token reduction vs V7 (200 vs 1500 tokens)
-- Guaranteed skill activation via send-keys (same mechanism as `/clear` and `/model`)
-- Model switching support (opus/sonnet/haiku)
-- Context clearing control
-- Intelligence integration maintained
-- Provider-aware dispatch (detects Claude/Codex/Gemini per terminal)
-
-**Receipt Footer** (Dispatcher V8.2):
-- Task Completion Guidelines section
-- Report Metadata block (parsed by receipt processor)
-- Expected Outputs section (implementation summary, files modified, testing evidence, open items)
-- Report write path: `.vnx-data/unified_reports/`
-
-**Legacy V7** (`dispatcher_v7_compilation.sh` - Reference only):
-- Template compilation from agent library
-- Full prompt generation (1500+ tokens)
-- See `core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference
+Routing is now the **single-entry door** (`dispatch_cli.run_dispatch`): validate → snapshot → compile_plan → permit → execute, with lane selection (provider → lane is a hard rule), assembly (skill + intelligence injection), delivery, and govern all behind one entry point. It still yields the V8 properties — native-skill invocation per provider (`/skill` Claude, `$skill` Codex, `@skill` Gemini), ~87% token reduction vs template compilation, PR-ID correlation, and the report-metadata footer (`.vnx-data/unified_reports/`). The standalone `dispatcher_minimal.sh` send-keys/paste-buffer path is **legacy** (still on disk, replaced by the door). Full flow: [DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md](./DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md) §2-4.
 
 ### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`)
 
@@ -282,8 +261,6 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
 
-### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
-
 **Purpose**: Real-time system metrics visualization
 
 **Functionality**:
@@ -301,63 +278,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ### Complete Orchestration Flow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                  ORCHESTRATION LOOP (VNX 1.0.0)                 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  1. T0 Creates Dispatch                                         │
-│     └─► Writes dispatch to dispatches/pending/                  │
-│                                                                  │
-│  2. Human Promotes Dispatch                                      │
-│     ├─► Operator reviews pending dispatch                       │
-│     └─► Moves to dispatches/active/ (approval gate)             │
-│                                                                  │
-│  3. Dispatcher V8 Routes to Terminal                            │
-│     ├─► Maps role to native skill (@skill_name)               │
-│     ├─► Gathers intelligence patterns (maintained)             │
-│     ├─► Extracts instruction content                           │
-│     ├─► Sends: skill activation + instruction + receipt        │
-│     ├─► ~200 tokens total (87% reduction from V7)              │
-│     └─► Routes via tmux or subprocess adapter                   │
-│                                                                  │
-│  5. Worker Terminal Receives Task                               │
-│     ├─► Loads compiled prompt                                   │
-│     ├─► Sends ACK receipt (task_ack)                           │
-│     └─► Begins execution                                        │
-│                                                                  │
-│  6. Heartbeat ACK Monitor Processes Acknowledgment              │
-│     ├─► Detects task_ack receipt                               │
-│     ├─► Updates dispatch status                                │
-│     ├─► Starts timeout tracking                                │
-│     └─► Updates terminal state                                  │
-│                                                                  │
-│  7. Worker Executes Task                                        │
-│     ├─► Performs requested work                                │
-│     ├─► Creates markdown report                                │
-│     └─► Writes completion receipt (task_complete)              │
-│                                                                  │
-│  8. Receipt Processor V4 Handles Report                         │
-│     ├─► Detects new report in unified_reports/                 │
-│     ├─► Parses structured data via report_parser.py            │
-│     ├─► Attaches evidence to open items (does NOT close)       │
-│     ├─► Appends to t0_receipts.ndjson                          │
-│     └─► Delivers receipt to T0 via tmux paste                  │
-│                                                                  │
-│  10. Intelligence Aggregator Updates Context                    │
-│      ├─► Consolidates all system state                         │
-│      ├─► Generates progressive context layers                  │
-│      ├─► Updates t0_intelligence.ndjson                        │
-│      └─► Enables 80-95% token savings                          │
-│                                                                  │
-│  11. T0 Reviews Feedback                                        │
-│      ├─► Reads progressive intelligence                        │
-│      ├─► Assesses terminal status                              │
-│      ├─► Makes routing decisions                               │
-│      └─► Creates next manager block [Loop Continues]           │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+The end-to-end dispatch lifecycle is now an **8-stage pipeline** behind the single-entry door (validate → snapshot → compile_plan → permit → execute → deliver → govern/phantom-guard → gates), not the older 11-step ACK/heartbeat loop. The canonical, current diagram and stage-by-stage description live in **[DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md](./DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md) §2 (End-to-end flow)**. The intelligence and process components that the pipeline drives — receipt processor, intelligence aggregator, T0 brief — are described in *Core Components* and *Intelligence Systems* below.
 
 ---
 
@@ -723,6 +644,10 @@ VNX implements a three-tier verification pipeline:
 
 Gate results are stored in `.vnx-data/state/gate_results/<PR-ID>.json` with per-check GO/HOLD verdicts.
 
+### Phantom-Guard
+
+Phantom-guard runs **inline at govern for every dispatch** (`dispatch_govern.py:268`, `phantom_guard.py`): a delivery-role worker that emits a "GATE GREEN / done" completion claim while producing **no worktree/branch diff** is rejected as a phantom — `token_usage > 0` does **not** exempt it (tokens mean an LLM thought, not that a deliverable was produced). Review roles (`plan-reviewer`, `code-reviewer`, `security-reviewer`, `reviewer`) are exempt — a verdict, not a diff, is the expected output. A legitimate no-op delivery uses the operator escape `VNX_OVERRIDE_PHANTOM_GUARD=1`. The guard abstains on an unresolvable ref (never false-rejects) and is best-effort at govern (a guard failure never loses the report). Full description: [DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md](./DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md) §6.
+
 ---
 
 ## File System Layout
@@ -789,10 +714,11 @@ project-root/
 │   │   └── dashboard_status.json    # Real-time metrics
 │   │
 │   ├── dispatches/                  # Task dispatches
-│   │   ├── staging/                 # Batch proposals (no popup)
-│   │   ├── queue/                   # Approved (popup trigger)
-│   │   ├── active/                  # In progress
-│   │   └── completed/              # Finished
+│   │   ├── pending/<id>/            # Door lifecycle: per-dispatch bundle, human-gated promote
+│   │   ├── staging/                 # Legacy PR-queue: batch proposals (no popup)
+│   │   ├── queue/                   # Legacy PR-queue: approved (popup trigger)
+│   │   ├── active/                  # Legacy PR-queue: in progress
+│   │   └── completed/              # Legacy PR-queue: finished
 │   │
 │   ├── unified_reports/             # Markdown reports
 │   ├── logs/                        # System logs
@@ -829,8 +755,12 @@ project-root/
 ## Current System Status (VNX 1.0.0)
 
 ### Active Components ✅
+- Single-entry dispatch door (`dispatch_cli.run_dispatch` — merged on main PR #896; runtime **default-OFF** pending the flip, `_DEFAULT_ENABLED=False`)
+- Dispatch assembly (lane selection + skill + intelligence injection behind the door)
+- Phantom-guard (inline at govern, rejects evidence-free GATE-GREEN delivery receipts; on main)
+- GLM→harness normalization (on main)
 - Smart Tap V7 (JSON/Markdown auto-translation)
-- Dispatcher V8 Minimal (Native skills, multi-provider, 87% token reduction)
+- Dispatcher V8 Minimal (Native skills, multi-provider, 87% token reduction — superseded by the door for routing; standalone `dispatcher_minimal.sh` now legacy)
 - Receipt Processor V4 (Report → receipt → T0 delivery, adoption tracking)
 - Heartbeat ACK Monitor (ACK processing + timeout tracking)
 - Queue Popup Watcher (dispatch review UI)
@@ -1012,6 +942,8 @@ ADR-007 and `docs/MIGRATION_GUIDE.md` for the operator runbook.
 
 ## Staging Workflow
 
+> **Legacy PR-queue lifecycle.** The staging → queue → active → completed path below is the **legacy PR-queue** model (`pr_queue_manager.py`). The single-entry door's lifecycle is per-dispatch `dispatches/pending/<id>/` bundles, promoted through a **human-gated promote** — see [DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md](./DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md) §2. This section documents the PR-queue model that still ships for batch-PR feature plans.
+
 ### Purpose
 Separates proposal review (staging) from approved work (queue), preventing premature popup notifications.
 
@@ -1164,14 +1096,15 @@ DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subs
 gates the subscription variant). Full lane map: `docs/core/PROVIDER_LANES.md`;
 dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
 
-**Single-entry door (in progress, default-OFF).** Lane selection is moving behind
-one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot →
-compile_plan → permit → execute. It is built and tested but disabled by default
-(`VNX_SINGLE_ENTRY_DISPATCH` resolves off via `scripts/lib/dispatch_flags.py`;
-`VNX_DISPATCH_LEGACY=1` is the absolute rollback). The flip that turns it on, the
-GLM→harness normalization, and a phantom-guard that rejects evidence-free
-GATE-GREEN receipts are committed on `feat/dispatch-flip`, not on the released
-default path.
+**Single-entry door (merged on main, runtime default-OFF pending the flip).** Lane
+selection runs behind one entry point (`scripts/lib/dispatch_cli.py`,
+`run_dispatch`): validate → snapshot → compile_plan → permit → execute. The door,
+the GLM→harness normalization, and a phantom-guard that rejects evidence-free
+GATE-GREEN receipts are **merged to main (PR #896)**. It is **runtime default-OFF**
+pending the default-flip: `_DEFAULT_ENABLED = False` in
+`scripts/lib/dispatch_flags.py:31`, so `VNX_SINGLE_ENTRY_DISPATCH` resolves off
+unless explicitly enabled. `VNX_DISPATCH_LEGACY=1` is the absolute rollback (wins
+over everything). The flip to `True` is a separate, gated step.
 
 ### Provider Capability Matrix
 
@@ -1349,7 +1282,7 @@ Creates a complete LeadFlow SaaS project with:
 ---
 
 **Document Status**: Active (VNX 1.0.0 release candidate — Dashboard Attention Model + intelligence injection). The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
-**Last Major Update**: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction). Prior: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
+**Last Major Update**: 2026-06-23 (single-entry door **merged on main, PR #896** — runtime default-OFF pending the flip; phantom-guard inline at govern; T0-only start + on-demand worker lanes; dispatch flow SSOT cross-linked to DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md). Prior: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction); 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
 **Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs; VNX 1.0.0)
 **Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
 **Intelligence Version**: v2.0.0 (Adoption tracking, worker injection, pairwise tag matching, 3-section digest)
