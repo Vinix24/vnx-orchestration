@@ -1412,6 +1412,108 @@ class TestSharedPrepareWiringTmux(unittest.TestCase):
         self.assertNotIn(_WORKER_RULES_FOOTER_SENTINEL, result)
         self.assertNotIn(_TRAILER_SENTINEL, result)
 
+    def test_shared_prepare_0_default_contains_report_contract_directive(self):
+        """VNX_SHARED_PREPARE=0 (default): fallback still appends the report-contract directive.
+
+        Gap #3b: without the directive the worker is never told the required report
+        sections, so its report fails the body contract and the dispatch is ungoverned.
+        """
+        lane = self._make_lane()
+        fake_enriched = "## Skill Context\n\nDo the thing."
+
+        with patch.dict(
+            os.environ,
+            {"VNX_SHARED_PREPARE": "0", "VNX_REPORT_CONTRACT_DIRECTIVE": "1"},
+        ):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                return_value=fake_enriched,
+            ):
+                result = lane._assemble_context(
+                    role="backend-developer",
+                    terminal_id="T1",
+                    dispatch_id="default-directive-test",
+                    instruction="Do the thing.",
+                )
+
+        self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
+        self.assertIn("## Report Body Contract", result)
+        # The skill body must still be present (directive is appended, not replacing).
+        self.assertIn("## Skill Context", result)
+
+    def test_shared_prepare_0_directive_suppressed_by_env(self):
+        """VNX_REPORT_CONTRACT_DIRECTIVE=0: fallback path omits the directive (override honored)."""
+        lane = self._make_lane()
+        fake_enriched = "## Skill Context\n\nDo the thing."
+
+        with patch.dict(
+            os.environ,
+            {"VNX_SHARED_PREPARE": "0", "VNX_REPORT_CONTRACT_DIRECTIVE": "0"},
+        ):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                return_value=fake_enriched,
+            ):
+                result = lane._assemble_context(
+                    role="backend-developer",
+                    terminal_id="T1",
+                    dispatch_id="directive-off-test",
+                    instruction="Do the thing.",
+                )
+
+        self.assertNotIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
+
+    def test_shared_prepare_0_legacy_label_fallback_carries_directive(self):
+        """Deepest fallback (skill injection raises -> legacy label) is still governed."""
+        lane = self._make_lane()
+
+        with patch.dict(
+            os.environ,
+            {"VNX_SHARED_PREPARE": "0", "VNX_REPORT_CONTRACT_DIRECTIVE": "1"},
+        ):
+            with patch(
+                "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                side_effect=RuntimeError("skill injection blew up"),
+            ):
+                result = lane._assemble_context(
+                    role="backend-developer",
+                    terminal_id="T1",
+                    dispatch_id="legacy-label-directive-test",
+                    instruction="Do the thing.",
+                )
+
+        # Legacy role label header is present AND the directive was appended.
+        self.assertIn("operating as a **backend-developer** worker", result)
+        self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
+
+    def test_shared_prepare_1_prepare_error_fallback_carries_directive(self):
+        """VNX_SHARED_PREPARE=1 but prepare() raises: standard-enrichment fallback is governed.
+
+        Mirrors test_shared_prepare_fallback_on_prepare_error but asserts the directive
+        is present so even the error path keeps the dispatch governed.
+        """
+        lane = self._make_lane()
+        fake_enriched = "STANDARD_ENRICHMENT_BODY"
+
+        with patch.dict(
+            os.environ,
+            {"VNX_SHARED_PREPARE": "1", "VNX_REPORT_CONTRACT_DIRECTIVE": "1"},
+        ):
+            with patch("dispatch_prepare.prepare", side_effect=RuntimeError("simulated error")):
+                with patch(
+                    "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+                    return_value=fake_enriched,
+                ):
+                    result = lane._assemble_context(
+                        role="backend-developer",
+                        terminal_id="T1",
+                        dispatch_id="prepare-error-directive-test",
+                        instruction="Do the thing.",
+                    )
+
+        self.assertIn("STANDARD_ENRICHMENT_BODY", result)
+        self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
+
     def test_shared_prepare_1_smart_context_prepended(self):
         """VNX_SHARED_PREPARE=1: smart_context is prepended before the prepare() body."""
         from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL

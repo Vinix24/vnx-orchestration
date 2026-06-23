@@ -352,8 +352,10 @@ class TmuxInteractiveDispatch:
 
         When VNX_SHARED_PREPARE=1, delegates to dispatch_prepare.prepare() so both
         Claude lanes share identical enrichment (permission preamble + worker-rules
-        footer + report-contract directive + trailer sentinel). Default ("0") is
-        byte-identical to pre-T1 behavior.
+        footer + report-contract directive + trailer sentinel). The default ("0")
+        path runs skill + intelligence enrichment and still appends the
+        report-contract directive (gap #3b) so every dispatch — on either path —
+        tells the worker the required report sections and stays governed.
 
         Reuses subprocess lane enrichers (_inject_skill_context) so the tmux-spawn
         worker receives the same skill body + intelligence treatment as a headless
@@ -422,11 +424,47 @@ class TmuxInteractiveDispatch:
             if smart_context:
                 parts.append(smart_context)
             parts.append(instruction)
-            return "\n\n".join(parts)
-
-        if smart_context:
+            enriched = "\n\n".join(parts)
+        elif smart_context:
             enriched = f"{smart_context}\n\n{enriched}"
-        return enriched
+
+        # Report-contract directive on the fallback path too (gap #3b parity with
+        # dispatch_prepare.prepare()). Without VNX_SHARED_PREPARE the worker would
+        # otherwise never be told the required report sections, so its report fails
+        # the body contract -> no governed receipt -> ungoverned dispatch. Honors the
+        # same VNX_REPORT_CONTRACT_DIRECTIVE gate (default on) as prepare().
+        return self._append_report_contract_directive(
+            enriched, dispatch_id=dispatch_id, pr_id=pr_id
+        )
+
+    @staticmethod
+    def _append_report_contract_directive(
+        body: str,
+        *,
+        dispatch_id: "str | None",
+        pr_id: "str | None" = None,
+    ) -> str:
+        """Append the report-body-contract directive when enabled.
+
+        Mirrors dispatch_prepare.prepare()'s step 5: same VNX_REPORT_CONTRACT_DIRECTIVE
+        gate (default on). Ensures the tmux fallback path (no VNX_SHARED_PREPARE) still
+        enumerates the required report sections so the worker's report passes the body
+        contract and the dispatch stays governed.
+        """
+        if os.environ.get("VNX_REPORT_CONTRACT_DIRECTIVE", "1").strip().lower() in (
+            "0", "false", "no", "off"
+        ):
+            return body
+        try:
+            import report_body_contract as _rbc  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_append_report_contract_directive: report_body_contract import "
+                "failed (%s); skipping directive",
+                exc,
+            )
+            return body
+        return body + "\n\n" + _rbc.build_directive(dispatch_id or "", pr_id=pr_id)
 
     def _govern_report(
         self,
