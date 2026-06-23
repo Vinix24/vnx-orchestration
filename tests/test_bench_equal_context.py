@@ -122,7 +122,10 @@ def test_tmux_without_equal_context_invokes_existing_enricher(monkeypatch, tmp_p
             instruction=RAW_INSTRUCTION,
         )
 
-    assert result == "skill-context-added"
+    # Enricher output is used; the fallback path also appends the report-contract
+    # directive (gap #3b) so the dispatch stays governed without VNX_SHARED_PREPARE.
+    assert "skill-context-added" in result
+    assert "<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->" in result
     inject_skill.assert_called_once()
 
 
