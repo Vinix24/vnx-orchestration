@@ -758,8 +758,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.db:
         db_path = args.db.resolve()
     else:
-        project_root = resolve_project_root(__file__)
-        db_path = project_root / ".vnx-data" / "state" / DB_FILENAME
+        # Store-resolution: VNX_DATA_DIR-first (explicit guard), else the CENTRAL
+        # per-project store the daemons read — NOT the repo-local <root>/.vnx-data.
+        # backfill used to default to repo-local while seed_tracks + the daemons
+        # resolved central (~/.vnx-data/<project>), so its track-linkage landed in a
+        # different store than the future-state it was meant to reconcile (WS2 split).
+        from project_root import resolve_central_data_dir
+        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
+            data_dir = Path(os.environ["VNX_DATA_DIR"]).resolve()
+        else:
+            data_dir = resolve_central_data_dir(args.project_id)
+        db_path = data_dir / "state" / DB_FILENAME
 
     if args.roadmap:
         roadmap_path = args.roadmap.resolve()
