@@ -113,11 +113,32 @@ def test_rule_any_block_revises():
     assert d["block_count"] == 1
 
 
-def test_rule_infra_fail_cannot_pass():
-    # two pass + one panelist that never returned a verdict -> not certifiable
+def test_rule_non_scoring_lane_abstains_does_not_veto():
+    # 2 readable PASS + 1 lane that never returned a verdict (non-scoring) -> PASS.
+    # The abstaining lane must not veto a substantive 2-0 pass (liveness, 2026-06-24).
     d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "pass"), _r("c", "revise", dispatched=False)])
+    assert d["decision"] == "PASS"
+    assert "non-scoring (abstained): c" in d["rationale"]
+
+
+def test_rule_parse_error_lane_is_non_scoring():
+    # A dispatched lane whose verdict block didn't parse also abstains (the glm flake case).
+    d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "pass"), _r("c", "revise", parse_error=True)])
+    assert d["decision"] == "PASS"
+    assert "non-scoring (abstained): c" in d["rationale"]
+
+
+def test_rule_quorum_one_scoring_revises():
+    # Only one readable verdict -> below quorum -> cannot certify.
+    d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "x", dispatched=False), _r("c", "x", parse_error=True)])
     assert d["decision"] == "REVISE"
-    assert "no readable verdict" in d["rationale"]
+    assert "quorum" in d["rationale"]
+
+
+def test_rule_non_scoring_with_dissent_still_revises():
+    # 1 pass + 1 revise (scoring) + 1 non-scoring -> passes do not outnumber the dissent -> REVISE.
+    d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "revise"), _r("c", "x", parse_error=True)])
+    assert d["decision"] == "REVISE"
 
 
 # --------------------------------------------------------------------------
@@ -165,10 +186,12 @@ def test_run_panel_dispatch_exception_is_no_verdict(tmp_path):
         return _report('{"verdict": "pass"}')
 
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
-    assert out["decision"] == "REVISE"  # cannot pass with a missing voice
+    # The failed lane abstains (non-scoring); the 2 readable PASS voices meet quorum -> PASS.
+    assert out["decision"] == "PASS"
     kimi = next(p for p in out["panelists"] if p["label"] == "kimi")
     assert kimi["dispatched"] is False
     assert "kimi cli not installed" in kimi["error"]
+    assert "non-scoring (abstained): kimi" in out["summary"]["rationale"]
 
 
 # --------------------------------------------------------------------------
@@ -258,15 +281,17 @@ def test_seed_is_tenant_scoped(tmp_path):
 # codex-review hardening (2026-06-21): fail-safe + re-seed + report integrity
 # --------------------------------------------------------------------------
 
-def test_rule_parse_error_blocks_pass():
-    # two clean passes + one panelist whose verdict could not be parsed: a missing
-    # signal must not fold into PASS (codex finding 1).
-    d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "pass"), _r("c", "revise", parse_error=True)])
+def test_rule_garbled_below_quorum_cannot_certify():
+    # Phantom-pass prevention via quorum (codex finding 1, reframed for non-scoring): a 3-panel
+    # where 2 lanes garble leaves only 1 readable voice -> below quorum -> cannot certify PASS.
+    d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "x", parse_error=True), _r("c", "x", parse_error=True)])
     assert d["decision"] == "REVISE"
-    assert "no readable verdict" in d["rationale"]
+    assert "quorum" in d["rationale"]
 
 
-def test_run_panel_garbled_verdict_blocks_pass(tmp_path):
+def test_run_panel_one_garbled_lane_abstains_quorum_holds(tmp_path):
+    # One lane emits no verdict fence (the glm-flake case): it abstains (non-scoring); the two
+    # readable PASS voices meet quorum -> PASS. The garbled lane is NOT counted as a pass.
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -276,9 +301,10 @@ def test_run_panel_garbled_verdict_blocks_pass(tmp_path):
         return _report('{"verdict": "pass"}')
 
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
-    assert out["decision"] == "REVISE"
+    assert out["decision"] == "PASS"
     glm = next(p for p in out["panelists"] if p["provider"] == "glm-harness")
     assert glm["parse_error"] is True
+    assert "non-scoring (abstained): glm-5.2-harness" in out["summary"]["rationale"]
 
 
 def test_read_report_rejects_foreign_path(tmp_path):
@@ -488,10 +514,9 @@ def test_missing_report_maps_to_parse_error_revise(tmp_path):
     assert out["decision"] == "REVISE"
 
 
-def test_fenceless_report_cannot_produce_phantom_pass(tmp_path):
-    """Two passing + one fenceless: the fenceless panelist blocks PASS (no_verdict guard)."""
-    did_fenceless = "plan-gate-feat-fenceless-aaa00001"
-
+def test_fenceless_lane_abstains_not_counted_as_phantom_pass(tmp_path):
+    """A fenceless report does NOT produce a phantom pass: the fenceless lane is non-scoring
+    (parse_error, not counted as a pass); the decision comes only from the two REAL passes."""
     def _disp(provider, model_arg, instruction, dispatch_id):
         if provider == "glm-harness":
             return "# review\n\nLooks fine.\n"  # no verdict fence
@@ -501,9 +526,12 @@ def test_fenceless_report_cannot_produce_phantom_pass(tmp_path):
     doc.write_text("## Problem\n", encoding="utf-8")
 
     out = pgp.run_panel(doc, track_id="feat-fenceless", project_id="p1", dispatcher=_disp)
-    assert out["decision"] == "REVISE"
+    # PASS from the two real passes; the fenceless lane abstained (did not phantom-pass).
+    assert out["decision"] == "PASS"
     glm = next(p for p in out["panelists"] if p["provider"] == "glm-harness")
     assert glm["parse_error"] is True
+    assert glm["verdict"] != "pass", "a fenceless lane must never be counted as a pass"
+    assert "non-scoring (abstained): glm-5.2-harness" in out["summary"]["rationale"]
 
 
 # --------------------------------------------------------------------------

@@ -209,56 +209,63 @@ def _decision(decision: str, block: int, revise: int, passes: int, rationale: st
 
 
 def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
-    """The PM-SKILL pass/fail rule.
+    """The PM-SKILL pass/fail rule, with NON-SCORING lanes + a liveness quorum.
 
-    - any infra failure (a panelist returned no verdict) -> REVISE (cannot certify
-      PASS with a silent missing voice)
-    - any BLOCK -> REVISE (revise the blocking sections, re-run the delta)
-    - >= 2 REVISE -> REVISE (one revise round)
-    - <= 1 REVISE and no BLOCK -> PASS (fold the lone dissent in as a tracked note)
+    A lane with no readable verdict (undispatched, or a report whose verdict block did not
+    parse) is NON-SCORING: it ABSTAINS rather than vetoing. Rationale (2026-06-24): a
+    structurally-broken or input-degraded lane (e.g. a model that won't emit the requested
+    fence on a large doc) must not veto a substantive PASS from the readable lanes forever —
+    that is a liveness hole, not safety. The non-scoring lanes are named in the rationale so
+    the abstention is transparent, never silent.
 
-    Parse errors already map to ``revise`` (see ``parse_verdict``), so a garbled
-    verdict counts against PASS rather than being ignored.
+    Over the SCORING (readable) lanes only:
+    - quorum: require >= 2 readable verdicts to certify (a single voice can't fold to PASS).
+    - any BLOCK -> REVISE.
+    - >= 2 REVISE -> REVISE.
+    - <= 1 REVISE and no BLOCK, with passes OUTnumbering the dissent -> PASS (the lone dissent
+      folds as a tracked note); a tie is safety-first REVISE.
     """
     if not results:
         # An empty panel must never fall through to PASS (misconfigured panel=[]).
         return _decision("REVISE", 0, 0, 0, "no panelists ran — empty panel, cannot certify")
-    block = sum(1 for r in results if r.verdict == "block")
-    revise = sum(1 for r in results if r.verdict == "revise")
-    passes = sum(1 for r in results if r.verdict == "pass")
-    # No readable verdict = no signal from that panelist: either the dispatch
-    # failed (infra) or the report had no parseable verdict block. Either way it
-    # must block PASS — folding an unreadable voice into PASS is fail-open.
-    no_verdict = [r for r in results if not r.dispatched or r.parse_error]
+    # NON-SCORING: undispatched or parse_error lanes abstain (do not count toward the verdict).
+    scoring = [r for r in results if r.dispatched and not r.parse_error]
+    non_scoring = [r for r in results if not (r.dispatched and not r.parse_error)]
+    ns_note = (
+        f"; non-scoring (abstained): {', '.join(r.label for r in non_scoring)}"
+        if non_scoring else ""
+    )
+    block = sum(1 for r in scoring if r.verdict == "block")
+    revise = sum(1 for r in scoring if r.verdict == "revise")
+    passes = sum(1 for r in scoring if r.verdict == "pass")
 
-    if no_verdict:
+    # Liveness quorum: a multi-member panel must keep >= 2 readable voices to certify, so a
+    # degraded 3-panel with only one readable lane can't pass on a single voice. A DELIBERATE
+    # 1-member panel (a smoke) needs only its one voice. quorum = min(2, panel size).
+    required = min(2, len(results))
+    if len(scoring) < required:
         return _decision(
             "REVISE", block, revise, passes,
-            f"{len(no_verdict)} panelist(s) returned no readable verdict: "
-            + ", ".join(r.label for r in no_verdict),
+            f"only {len(scoring)} readable verdict(s) of {len(results)} — below quorum "
+            f"({required}); cannot certify{ns_note}",
         )
     if block >= 1:
         return _decision(
             "REVISE", block, revise, passes,
-            f"{block} BLOCK verdict(s) — revise the blocking sections, re-run the delta only",
+            f"{block} BLOCK verdict(s) — revise the blocking sections, re-run the delta only{ns_note}",
         )
     if revise >= 2:
         return _decision(
             "REVISE", block, revise, passes,
-            f"{revise} REVISE verdicts — one revise round",
+            f"{revise} REVISE verdicts — one revise round{ns_note}",
         )
-    # <=1 REVISE, no BLOCK. PASS only if the passing voices OUTNUMBER the dissent —
-    # otherwise the "lone dissent" is not lone (a degenerate 1-/2-member panel, or a
-    # 1-1 tie). This keeps the canonical 3-member result (2 pass + 1 revise -> PASS)
-    # while closing the fail-open a 1-member smoke surfaced: a single REVISE must not
-    # fold to PASS. (SKILL: "tie -> safety-first REVISE".)
     if passes > revise:
-        dissent = [r.label for r in results if r.verdict != "pass"]
-        note = f"folded dissent (tracked): {', '.join(dissent)}" if dissent else "unanimous pass"
-        return _decision("PASS", block, revise, passes, note)
+        dissent = [r.label for r in scoring if r.verdict != "pass"]
+        note = f"folded dissent (tracked): {', '.join(dissent)}" if dissent else "unanimous pass (scoring)"
+        return _decision("PASS", block, revise, passes, note + ns_note)
     return _decision(
         "REVISE", block, revise, passes,
-        "no passing majority — the dissent is not outnumbered",
+        f"no passing majority — the dissent is not outnumbered{ns_note}",
     )
 
 
