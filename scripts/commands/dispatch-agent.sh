@@ -106,10 +106,12 @@ PYEOF
 
 echo "[dispatch-agent] Created dispatch: $DISPATCH_ID"
 
-# --- execute via the single-entry door (gated; OFF default = legacy subprocess lane) ---
-# PR-12: when VNX_SINGLE_ENTRY_DISPATCH=1, route through dispatch_bridge -> run_dispatch so
-# this delivery funnels through the door. OFF = the legacy subprocess_dispatch call, unchanged.
-# Gap (canary-blocker): --auto-route is not yet on the bridge CLI.
+# --- execute via the single-entry door (gated by VNX_SINGLE_ENTRY_DISPATCH) ---
+# When ON, route through dispatch_bridge -> run_dispatch so this agent delivery funnels through
+# the door. This is a claude-AGENT dispatcher by design (no provider variable), so the bridge's
+# claude default is correct here. Post-flip behavior is INTENTIONAL (door-flip / ADR-024): claude
+# routes via the subscription tmux-spawn lane (never headless claude -p); --auto-route is moot
+# because run_dispatch owns deterministic lane selection, so _ar_flag stays on the legacy branch.
 _ar_flag=()
 [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
 
