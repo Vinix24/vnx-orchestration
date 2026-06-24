@@ -14,10 +14,12 @@ import dispatch_flags
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _FLAGS_SH = _REPO_ROOT / "scripts" / "lib" / "vnx_dispatch_flags.sh"
 
-# (env-overlay, expected_enabled). Default is OFF pre-flip (dispatch_flags._DEFAULT_ENABLED).
+# (env-overlay, expected_enabled). Default is ON post-flip (dispatch_flags._DEFAULT_ENABLED,
+# flipped 2026-06-24 / ADR-024). Explicit VNX_SINGLE_ENTRY_DISPATCH=0 or VNX_DISPATCH_LEGACY=1
+# still opt out.
 CASES = [
-    ({}, False),                                        # unset -> default OFF
-    ({"VNX_SINGLE_ENTRY_DISPATCH": ""}, False),          # empty -> default OFF
+    ({}, True),                                          # unset -> default ON (post-flip)
+    ({"VNX_SINGLE_ENTRY_DISPATCH": ""}, True),           # empty -> default ON (post-flip)
     ({"VNX_SINGLE_ENTRY_DISPATCH": "0"}, False),         # explicit 0 -> OFF
     ({"VNX_SINGLE_ENTRY_DISPATCH": "1"}, True),          # 1 -> ON
     ({"VNX_SINGLE_ENTRY_DISPATCH": "2"}, True),          # widened: any non-0 truthy -> ON
@@ -28,9 +30,12 @@ CASES = [
 ]
 
 
-def test_default_is_off_pre_flip():
-    assert dispatch_flags.default_enabled() is False
-    assert dispatch_flags.single_entry_enabled({}) is False
+def test_default_is_on_post_flip():
+    # Door-flip D2 (ADR-024, 2026-06-24): the single-entry door is the default route.
+    assert dispatch_flags.default_enabled() is True
+    assert dispatch_flags.single_entry_enabled({}) is True
+    # The absolute rollback still wins, uniformly.
+    assert dispatch_flags.single_entry_enabled({"VNX_DISPATCH_LEGACY": "1"}) is False
 
 
 def test_python_truth_table():

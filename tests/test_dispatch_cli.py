@@ -387,8 +387,9 @@ def test_reject_on_unpromoted_staging(mock_snapshot, tmp_path):
 # test_flag_off_legacy_unchanged
 # ---------------------------------------------------------------------------
 
-def test_flag_off_legacy_unchanged(tmp_path):
-    """With VNX_SINGLE_ENTRY_DISPATCH unset, cmd_dispatch uses the legacy dry-run path."""
+def test_raw_md_legacy_under_default_on(tmp_path):
+    """Post-flip (ADR-024): VNX_SINGLE_ENTRY_DISPATCH unset resolves to the door (default ON), but a
+    raw .md still falls through to the legacy dry-run path (Option X1) — NOT the single-entry gate."""
     dispatch_md = tmp_path / "test-dispatch.md"
     dispatch_md.write_text(
         "[[TARGET:T1]]\nRole: backend-developer\nGate: human-promoted\n\nTest dispatch.\n",
