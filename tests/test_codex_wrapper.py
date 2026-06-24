@@ -81,13 +81,15 @@ class TestCodexExec:
         assert result == expected_stdout
 
     def test_emit_called_with_correct_provider(self, monkeypatch):
-        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
-
+        # Post-2026-06-24: the wrapper forwards the caller's project_id verbatim;
+        # the env fallback now lives in emit_provider_cost (best-effort), not here.
         with patch("codex_wrapper.subprocess.run", return_value=_make_run_result(stdout=_CODEX_NDJSON_NO_TOKENS)), \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
              patch("provider_costs._compute_cost_from_rates", return_value=(0.001, False)):
 
-            codex_wrapper.codex_exec("test prompt", model="gpt-5.5", dispatch_id="d-003")
+            codex_wrapper.codex_exec(
+                "test prompt", model="gpt-5.5", dispatch_id="d-003", project_id="test-proj"
+            )
 
         mock_emit.assert_called_once()
         call_kwargs = mock_emit.call_args.kwargs

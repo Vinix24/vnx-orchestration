@@ -87,7 +87,6 @@ def kimi_exec(
     """
     from provider_costs import emit_provider_cost  # noqa: PLC0415
 
-    effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
     cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", prompt]
     if model and model != DEFAULT_KIMI_MODEL:
         cmd.extend(["-m", model])
@@ -131,7 +130,7 @@ def kimi_exec(
         output_tokens=output_tokens,
         cost_usd_estimate=None,
         dispatch_id=dispatch_id,
-        project_id=effective_project_id,
+        project_id=project_id,  # forward caller pid; emit resolves env fallback (best-effort)
         metadata={"billing_mode": "subscription"},
     )
 

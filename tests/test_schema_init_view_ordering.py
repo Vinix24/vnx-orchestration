@@ -424,8 +424,8 @@ class TestAlreadyCurrentDbBootstrap:
 
         conn = sqlite3.connect(str(db))
         conn.execute(
-            "INSERT INTO dispatch_metadata (dispatch_id, terminal, track) "
-            "VALUES ('idempotent-test-dispatch', 'T1', 'A')"
+            "INSERT INTO dispatch_metadata (dispatch_id, terminal, track, project_id) "
+            "VALUES ('idempotent-test-dispatch', 'T1', 'A', 'vnx-dev')"
         )
         conn.commit()
         conn.close()

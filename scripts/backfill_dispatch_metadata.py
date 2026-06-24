@@ -46,9 +46,8 @@ if str(LIB_DIR) not in sys.path:
 
 try:
     from vnx_paths import ensure_env
-    from project_scope import current_project_id
 except Exception as exc:
-    raise SystemExit(f"backfill_dispatch_metadata: failed to load vnx_paths / project_scope: {exc}")
+    raise SystemExit(f"backfill_dispatch_metadata: failed to load vnx_paths: {exc}")
 
 # ---------------------------------------------------------------------------
 # Canonical status vocabulary (#837 — keep in sync with check_active_drain,
@@ -442,7 +441,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     receipts_file = Path(args.receipts_file) if args.receipts_file else state_dir / "t0_receipts.ndjson"
     db_path = Path(args.db_path) if args.db_path else state_dir / "quality_intelligence.db"
-    project_id = args.project_id or current_project_id()
+    # Fail-closed tenant resolve: explicit --project-id, else store-derived from
+    # db_path. Refuse to backfill under a guessed 'vnx-dev' on a non-vnx-dev store.
+    try:
+        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+        project_id = resolve_stamp_project_id(explicit=args.project_id or None, db_path=db_path)
+    except TenantUnresolved as exc:
+        print(f"ERROR: tenant_stamp_skip backfill_dispatch_metadata db_path={db_path} reason={exc}", file=sys.stderr)
+        return 1
 
     if not receipts_file.exists():
         print(f"ERROR: receipts file not found: {receipts_file}", file=sys.stderr)

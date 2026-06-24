@@ -77,27 +77,27 @@ def _write_adr(tmp_path: Path, filename: str, content: str) -> Path:
 class TestAdrParser:
     def test_adr_id_extracted(self, tmp_path):
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
-        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md")
+        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md", project_id="test-proj")
         assert adr["adr_id"] == "ADR-007"
 
     def test_status_extracted(self, tmp_path):
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
-        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md")
+        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md", project_id="test-proj")
         assert adr["status"] == "Accepted"
 
     def test_title_extracted(self, tmp_path):
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
-        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md")
+        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md", project_id="test-proj")
         assert "Multi-tenant" in adr["title"]
 
     def test_decision_summary_populated(self, tmp_path):
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
-        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md")
+        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md", project_id="test-proj")
         assert "project_id" in adr["decision_summary"]
 
     def test_binding_rules_json_list(self, tmp_path):
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
-        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md")
+        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md", project_id="test-proj")
         rules = json.loads(adr["binding_rules"])
         assert isinstance(rules, list)
         assert len(rules) >= 1
@@ -105,7 +105,7 @@ class TestAdrParser:
 
     def test_source_hash_16_chars(self, tmp_path):
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
-        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md")
+        adr = _parse_adr(adr_dir / "ADR-007-multitenant.md", project_id="test-proj")
         assert len(adr["source_hash"]) == 16
 
     def test_project_id_stamped(self, tmp_path):
@@ -120,7 +120,7 @@ class TestIndexAdrs:
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
         events_file = tmp_path / "events" / "adr_index.ndjson"
 
-        result = index_adrs(db_path, adr_dir, events_file)
+        result = index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
         assert result["indexed"] == 1
         assert result["total"] == 1
 
@@ -134,8 +134,8 @@ class TestIndexAdrs:
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
         events_file = tmp_path / "events" / "adr_index.ndjson"
 
-        index_adrs(db_path, adr_dir, events_file)
-        result2 = index_adrs(db_path, adr_dir, events_file)
+        index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
+        result2 = index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
         assert result2["indexed"] == 0
         assert result2["skipped"] == 1
 
@@ -144,7 +144,7 @@ class TestIndexAdrs:
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
         events_file = tmp_path / "events" / "adr_index.ndjson"
 
-        index_adrs(db_path, adr_dir, events_file)
+        index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
         assert events_file.exists()
         lines = [l for l in events_file.read_text().splitlines() if l.strip()]
         assert len(lines) >= 1
@@ -158,7 +158,7 @@ class TestIndexAdrs:
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
         events_file = tmp_path / "events" / "adr_index.ndjson"
 
-        index_adrs(db_path, adr_dir, events_file)
+        index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
         lines = [l for l in events_file.read_text().splitlines() if l.strip()]
         event = json.loads(lines[0])
         # record_id must be a 64-char hex sha256
@@ -171,19 +171,19 @@ class TestIndexAdrs:
 
         with mock.patch("builtins.open", side_effect=OSError("disk full")):
             with pytest.raises(OSError, match="disk full"):
-                index_adrs(db_path, adr_dir, events_file)
+                index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
 
     def test_changed_content_reindexed(self, tmp_path):
         db_path = _setup_db(tmp_path)
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
         events_file = tmp_path / "events" / "adr_index.ndjson"
 
-        index_adrs(db_path, adr_dir, events_file)
+        index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
 
         # Modify the ADR
         (adr_dir / "ADR-007-multitenant.md").write_text(
             _FIXTURE_ADR + "\n\n## Additional notes\n\nUpdated content.\n",
             encoding="utf-8",
         )
-        result2 = index_adrs(db_path, adr_dir, events_file)
+        result2 = index_adrs(db_path, adr_dir, events_file, project_id="test-proj")
         assert result2["indexed"] == 1

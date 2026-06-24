@@ -103,8 +103,8 @@ class TestIntelligencePersist:
 
         conn = sqlite3.connect(str(db_path))
         conn.execute(
-            "INSERT INTO dispatch_metadata (dispatch_id, terminal, track) VALUES (?, ?, ?)",
-            ("d-003", "T1", "A"),
+            "INSERT INTO dispatch_metadata (dispatch_id, terminal, track, project_id) VALUES (?, ?, ?, ?)",
+            ("d-003", "T1", "A", "vnx-dev"),
         )
         conn.commit()
         conn.close()

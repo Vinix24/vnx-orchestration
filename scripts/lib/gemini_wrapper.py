@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -84,7 +83,6 @@ def gemini_exec(
     """
     from provider_costs import emit_provider_cost, _compute_cost_from_rates  # noqa: PLC0415
 
-    effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
     cmd = ["gemini", "--model", model, "--output-format", "stream-json"]
 
     try:
@@ -120,7 +118,7 @@ def gemini_exec(
         output_tokens=output_tokens,
         cost_usd_estimate=cost_usd,
         dispatch_id=dispatch_id,
-        project_id=effective_project_id,
+        project_id=project_id,  # forward caller pid; emit resolves env fallback (best-effort)
         metadata={"billing_mode": "subscription"} if is_flat else None,
     )
 
