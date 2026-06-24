@@ -472,10 +472,13 @@ _ddt_handle_failure() {
 }
 
 # _ddt_subprocess_delivery — route dispatch via SubprocessAdapter instead of tmux.
-# Params: terminal_id dispatch_id complete_prompt model dispatch_file [agent_role]
+# Params: terminal_id dispatch_id complete_prompt model dispatch_file [agent_role] [provider]
+# `provider` is the 7th param (after the optional agent_role, so existing positions don't shift).
+# It is forwarded to the door bridge so a non-claude terminal-pinned worker keeps its provider
+# lane post-flip instead of silently defaulting to claude (door-flip D1 / ADR-024).
 _ddt_subprocess_delivery() {
     local terminal_id="$1" dispatch_id="$2" complete_prompt="$3" model="$4" dispatch_file="$5"
-    local agent_role="${6:-}"
+    local agent_role="${6:-}" provider="${7:-}"
 
     # Derive requires_mcp from dispatch file header so MCP-aware dispatches keep
     # their ambient MCP config instead of getting force-emptied by the worker scope.
@@ -492,13 +495,15 @@ _ddt_subprocess_delivery() {
     local _mcp_flag=()
     [[ "$_requires_mcp" == "true" ]] && _mcp_flag=(--requires-mcp)
 
-    # PR-12 single-entry door (gated; VNX_SINGLE_ENTRY_DISPATCH default OFF = legacy path,
-    # byte-identical to before). When ON, route through dispatch_bridge → run_dispatch so this
-    # delivery funnels through validate→snapshot→compile_plan→permit→execute like every other.
-    # GAPS to close before the PR-11 flip (canary-blockers, see PR12-PR2-CALLER-AUDIT):
-    #   * --auto-route is not yet on the bridge CLI (this caller passes _ar_flag);
-    #   * provider defaults to claude → the door's tmux-spawn lane — a lane change from the
-    #     subprocess lane; assert the receipt's lane in the canary before flipping.
+    # PR-12 single-entry door (gated by VNX_SINGLE_ENTRY_DISPATCH). When ON, this staged daemon
+    # delivery funnels through dispatch_bridge → run_dispatch (validate→snapshot→compile_plan→
+    # permit→execute) like every other path. Post-flip behavior is INTENTIONAL (door-flip / ADR-024):
+    #   * the lane change for claude (subprocess → tmux-spawn) is the post-June-15 provider→lane
+    #     target — claude routes via the subscription tmux-spawn lane, never headless claude -p;
+    #   * --auto-route is moot here — run_dispatch owns deterministic provider-based lane selection,
+    #     so _ar_flag is only forwarded on the legacy else-branch below;
+    #   * --provider IS forwarded so a non-claude terminal-pinned worker keeps its provider lane
+    #     (get_terminal_provider's domain string canonicalizes via _PROVIDER_ALIASES, incl. claude_code).
     local _deliver_rc=0
     # shellcheck source=/dev/null
     source "$VNX_DIR/scripts/lib/vnx_dispatch_flags.sh"
@@ -508,6 +513,7 @@ _ddt_subprocess_delivery() {
             --terminal "$terminal_id" \
             --model "$model" \
             ${agent_role:+--role "$agent_role"} \
+            ${provider:+--provider "$provider"} \
             "${_mcp_flag[@]}" \
             --instruction-stdin || _deliver_rc=$?
     else
@@ -559,7 +565,8 @@ deliver_dispatch_to_terminal() {
 
     if [[ "$adapter_type" == "subprocess" ]]; then
         local model="${_CTM_REQUIRES_MODEL:-sonnet}"
-        _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file" "$agent_role"
+        # provider ($7) is forwarded so the door bridge keeps a non-claude worker on its lane.
+        _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file" "$agent_role" "$provider"
         return $?
     fi
 
