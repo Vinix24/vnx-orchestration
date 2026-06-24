@@ -104,6 +104,60 @@ _d_resolve_track() {
   esac
 }
 
+# _d_valid_dispatch_id — the ONE id-safety predicate (P0-2 traversal guard).
+# Returns 0 iff $1 is a safe dispatch/pending id: no '/', no '..', matches the id regex.
+# Centralized so _d_is_staged_form, _d_single_entry_dispatch, and the staged-bundle hint
+# never drift on the guard (ADR-025 / door-flip D1).
+_d_valid_dispatch_id() {
+  local id="${1:-}"
+  [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || return 1
+  # The regex already forbids '/'; reject any '..' segment explicitly (defense in depth).
+  case "$id" in *..*) return 1 ;; esac
+  return 0
+}
+
+# _d_is_staged_form — decide whether the args address the single-entry DOOR (staged forms)
+# vs the LEGACY raw-file path. Consulted ONLY when the door is enabled. Door (return 0):
+# --spec-file / --force-release-lock / -h/--help (door operations), no positional (door owns
+# the "requires" error), OR a first positional that resolves to an existing pending bundle.
+# Legacy (return 1): a path (contains '/' or ends '.md' without a bundle), or a bare slug with
+# no staged bundle. Bundle-existence is checked BEFORE the '.md' heuristic so a pending-id that
+# legally ends in '.md' still routes to the door. set -u-safe: every $next peek is guarded.
+_d_is_staged_form() {
+  local a
+  # 1. door-only flags anywhere → door.
+  for a in "$@"; do
+    case "$a" in
+      --spec-file|--spec-file=*|--force-release-lock|--force-release-lock=*|-h|--help)
+        return 0 ;;
+    esac
+  done
+  # 2. first non-flag token, skipping value-taking flags (the COMPLETE legacy set:
+  #    --terminal/-t, --model/-m, --adapter). '--' ends options; the next token is positional.
+  local first="" expect_val=0 seen_ddash=0
+  for a in "$@"; do
+    if [ "$seen_ddash" -eq 1 ]; then first="$a"; break; fi
+    if [ "$expect_val" -eq 1 ]; then expect_val=0; continue; fi
+    case "$a" in
+      --) seen_ddash=1; continue ;;
+      --terminal|-t|--model|-m|--adapter) expect_val=1; continue ;;
+      --terminal=*|--model=*|--adapter=*|--dry-run|-n) continue ;;
+      --*|-*) continue ;;
+      *) first="$a"; break ;;
+    esac
+  done
+  # 3. no positional (flags only / value-flag-without-value at end) → door owns the messaging.
+  [ -n "$first" ] || return 0
+  # 4. classify the token. A path is unambiguously legacy (ids never contain '/').
+  case "$first" in */*) return 1 ;; esac
+  # Bundle wins over the .md heuristic (a pending-id may legally end in .md).
+  if _d_valid_dispatch_id "$first" \
+     && [ -f "${VNX_DISPATCH_DIR}/pending/${first}/dispatch-spec.json" ]; then
+    return 0
+  fi
+  return 1
+}
+
 # ── Single-entry dispatch (VNX_SINGLE_ENTRY_DISPATCH=1) ───────────────────
 
 _d_single_entry_dispatch() {
@@ -144,10 +198,12 @@ Usage: vnx dispatch [--spec-file <abs>] [--dry-run]
        vnx dispatch <pending-id> [--dry-run]
        vnx dispatch --force-release-lock [<class>]
 
-Single-entry gate (VNX_SINGLE_ENTRY_DISPATCH=1).
+Single-entry gate (the default lane). Staged forms route through the door:
   --spec-file <abs>            Absolute path to dispatch-spec.json
   <pending-id>                 Dispatch ID resolved to dispatches/pending/<id>/dispatch-spec.json
   --dry-run                    Print plan + fingerprint; spawn nothing
+  (The raw 'vnx dispatch <file.md>' form still works on the legacy lane but is DEPRECATED —
+   removed in 1.x per ADR-025. Stage it to a pending-id.)
   --force-release-lock [CLASS] Release stale serial lock for CLASS (default: claude-tmux).
                                Prints prior holder pid+dispatch_id; removes lock file.
                                Does NOT kill the holder — use the printed pid if needed.
@@ -158,6 +214,12 @@ Headless (api_metered) lane: set allow_headless=true + headless_reason in dispat
   (cmd_dispatch path when VNX_SINGLE_ENTRY_DISPATCH is unset) and have no effect here.
 HELP
         return 0 ;;
+      --terminal|-t|--terminal=*|--model|-m|--model=*|--adapter|--adapter=*)
+        # These are legacy raw-file overrides; a staged <pending-id>/--spec-file carries
+        # terminal/model/adapter in its spec, so the combination is invalid. Give a clear,
+        # actionable error instead of the generic unknown-flag reject.
+        err "[dispatch] single-entry gate: '${1%%=*}' is a legacy raw-file override; it is not valid with a staged <pending-id> (the spec already defines terminal/model/adapter). Drop the flag, or use the raw form (vnx dispatch <file.md>)."
+        return 1 ;;
       -*)
         err "[dispatch] single-entry gate: unknown flag: $1"
         return 1 ;;
@@ -188,9 +250,10 @@ HELP
       err "[dispatch] single-entry gate: requires --spec-file <abs> or <pending-id>"
       return 1
     fi
-    # P0-2: validate pending-id format BEFORE interpolation into path (traversal guard)
-    if [[ ! "$pending_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
-      err "[dispatch] single-entry gate: invalid pending-id format (must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$): $pending_id"
+    # P0-2: validate pending-id format BEFORE interpolation into path (traversal guard).
+    # Uses the centralized _d_valid_dispatch_id predicate (shared with _d_is_staged_form + the hint).
+    if ! _d_valid_dispatch_id "$pending_id"; then
+      err "[dispatch] single-entry gate: invalid pending-id format (must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$, no '..'): $pending_id"
       return 1
     fi
     local candidate="${VNX_DISPATCH_DIR}/pending/${pending_id}/dispatch-spec.json"
@@ -223,17 +286,28 @@ HELP
 # ── Main command ───────────────────────────────────────────────────────────
 
 cmd_dispatch() {
-  # Routing truth table (flag contract — also documented in --help):
-  #   VNX_SINGLE_ENTRY_DISPATCH | VNX_DISPATCH_LEGACY | route
-  #   ------------------------- | ------------------- | -----------------
-  #   "1"                       | unset / "0"         | DOOR (single-entry)
-  #   "1"                       | "1"                 | LEGACY (rollback wins)
-  #   unset / "0"               | (any)               | LEGACY  ← current default
-  # The rollback hatch (VNX_DISPATCH_LEGACY=1) always wins. NB: pre-flip the default
-  # is LEGACY; item E flips the default to DOOR in the single-source helper.
-  if vnx_single_entry_enabled; then
+  # Routing (flag contract — also documented in --help). The door owns STAGED forms only;
+  # raw `vnx dispatch <file.md>` stays on the legacy lane (deprecated, removed in 1.x per ADR-025):
+  #   door enabled  + staged form (--spec-file / <pending-id> with a bundle / --force-release-lock)
+  #       -> DOOR (_d_single_entry_dispatch)
+  #   door enabled  + raw form (a path, *.md, or a bare slug without a bundle)
+  #       -> LEGACY lane + a one-time DEPRECATED warning (stderr)
+  #   door disabled (VNX_DISPATCH_LEGACY=1, or VNX_SINGLE_ENTRY_DISPATCH=0/unset pre-flip)
+  #       -> LEGACY lane, byte-identical, no warning
+  # The rollback hatch (VNX_DISPATCH_LEGACY=1) always wins (single-source helper).
+  # _door_on is captured ONCE here (not re-evaluated) so the warning fires iff the door is the
+  # reason we fell through to legacy (door on + raw), never under explicit legacy/rollback.
+  local _door_on=0
+  vnx_single_entry_enabled && _door_on=1
+  if [ "$_door_on" = 1 ] && _d_is_staged_form "$@"; then
     _d_single_entry_dispatch "$@"
     return $?
+  fi
+  # Past here = the legacy raw-file lane. When the door is the default yet we got a raw form,
+  # warn once (stderr, no ERROR: prefix) — seeds the ADR-025 removal. Fires BEFORE file
+  # resolution so it shows regardless of a later not-found / --dry-run outcome.
+  if [ "$_door_on" = 1 ]; then
+    printf '%s\n' "[dispatch] DEPRECATED: raw-file dispatch (vnx dispatch <file.md>) — stage to a pending-id (vnx dispatch <pending-id>) instead. The raw form is scheduled for removal per ADR-025." >&2
   fi
 
   local file=""
@@ -275,7 +349,10 @@ File search order:
   2. .vnx-data/dispatches/pending/<file>
   3. .vnx-data/dispatches/pending/<file>.md
 
-Examples:
+Canonical (single-entry door):
+  vnx dispatch <pending-id>                         # a promoted dispatch bundle
+
+Raw-file form (DEPRECATED — removed in 1.x per ADR-025; the file must come FIRST):
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
@@ -330,7 +407,10 @@ File search order:
   2. .vnx-data/dispatches/pending/<file>
   3. .vnx-data/dispatches/pending/<file>.md
 
-Examples:
+Canonical (single-entry door):
+  vnx dispatch <pending-id>                         # a promoted dispatch bundle
+
+Raw-file form (DEPRECATED — removed in 1.x per ADR-025; the file must come FIRST):
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
@@ -357,6 +437,13 @@ HELP
       else
         err "[dispatch] File not found: $file"
         err "[dispatch] Also checked: ${VNX_DISPATCH_DIR}/pending/${file}"
+        # Staged-bundle hint: if the missing arg is a safe id that resolves to a promoted
+        # bundle, the caller likely meant the door form but the door is off (rollback/legacy).
+        # _d_valid_dispatch_id guards the path-join (no '/', no '..') before the -f check.
+        if _d_valid_dispatch_id "$file" \
+           && [ -f "${VNX_DISPATCH_DIR}/pending/${file}/dispatch-spec.json" ]; then
+          err "[dispatch] note: '${file}' is a staged dispatch bundle; the single-entry door is off (VNX_DISPATCH_LEGACY=1 or VNX_SINGLE_ENTRY_DISPATCH=0). Enable the door, or dispatch the raw .md."
+        fi
         return 1
       fi
     fi
@@ -472,20 +559,14 @@ HELP
   fi
 
   local exit_code=0
-  if vnx_single_entry_enabled; then
-    # PR-12 single-entry door. Uses the single-source predicate so VNX_DISPATCH_LEGACY=1 rolls
-    # THIS delivery back too (previously this checked only ==1 and ignored the rollback — the
-    # incomplete-rollback bug). The door owns lane selection (claude -> tmux-spawn subscription,
-    # providers -> provider lane). Gap (canary-blocker): --auto-route is not yet on the bridge CLI.
-    printf '%s' "$instruction" | PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    python3 "$VNX_HOME/scripts/lib/dispatch_bridge.py" \
-      --dispatch-id "$dispatch_id" \
-      --terminal "$terminal" \
-      --model "$model_override" \
-      ${role:+--role "$role"} \
-      --instruction-stdin \
-      || exit_code=$?
-  elif [ "$adapter" = "tmux" ]; then
+  # Door-flip A / Option X1 (ADR-024): this legacy lane is reached ONLY for raw-file forms.
+  # Staged forms route through the door at cmd_dispatch's intercept and never get here, so this
+  # delivery is unconditionally the legacy tmux/subprocess lane — preserving the raw form's full
+  # lane precedence (--adapter > Adapter: > VNX_ADAPTER > VNX_AUTO_ROUTE). The old
+  # `if vnx_single_entry_enabled -> dispatch_bridge.py` branch was removed: routing raw input
+  # through the bridge would silently drop --adapter (bridge defaults claude -> tmux), the
+  # regression A2 avoids. The bridge is still the door's delivery for STAGED callers elsewhere.
+  if [ "$adapter" = "tmux" ]; then
     # DEFAULT lane: subscription-preserving ephemeral tmux-spawn.
     # Leaseless — pass the resolved terminal as the worker label for audit parity.
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \

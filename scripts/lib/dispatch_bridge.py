@@ -50,6 +50,11 @@ from dispatch_spec import _ID_RE, Provider  # noqa: E402
 _PROVIDER_ALIASES = {
     "claude": "claude",
     "claude_cli": "claude",
+    # get_terminal_provider() (dispatcher_minimal.sh) emits the tmux-domain string 'claude_code'
+    # for claude terminals (and as the default). Without this alias the door-flip provider
+    # propagation would canonicalize 'claude_code' -> Provider('claude_code') -> ValueError ->
+    # bridge REJECT on every claude subprocess-routed worker. Map it to the closed enum value.
+    "claude_code": "claude",
     "codex": "codex",
     "codex_cli": "codex",
     "kimi": "kimi",
