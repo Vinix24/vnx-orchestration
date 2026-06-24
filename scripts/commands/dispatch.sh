@@ -292,8 +292,10 @@ cmd_dispatch() {
   #       -> DOOR (_d_single_entry_dispatch)
   #   door enabled  + raw form (a path, *.md, or a bare slug without a bundle)
   #       -> LEGACY lane + a one-time DEPRECATED warning (stderr)
-  #   door disabled (VNX_DISPATCH_LEGACY=1, or VNX_SINGLE_ENTRY_DISPATCH=0/unset pre-flip)
+  #   door disabled (rollback VNX_DISPATCH_LEGACY=1, or explicit VNX_SINGLE_ENTRY_DISPATCH=0)
   #       -> LEGACY lane, byte-identical, no warning
+  # POST-FLIP (door-flip D2, ADR-024): the door is the DEFAULT — unset VNX_SINGLE_ENTRY_DISPATCH
+  # now resolves to the door. Pre-flip the default was the legacy lane.
   # The rollback hatch (VNX_DISPATCH_LEGACY=1) always wins (single-source helper).
   # _door_on is captured ONCE here (not re-evaluated) so the warning fires iff the door is the
   # reason we fell through to legacy (door on + raw), never under explicit legacy/rollback.

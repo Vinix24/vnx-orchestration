@@ -255,14 +255,29 @@ def test_door_on_raw_md_adapter_subprocess_honored(tmp_path):
     assert not e["bridge_marker"].exists()
 
 
-def test_default_off_raw_md_legacy_no_warning(tmp_path):
+def test_rollback_raw_md_legacy_no_warning(tmp_path):
+    # Door off via explicit rollback (post-flip the default is ON, so we opt out explicitly):
+    # raw .md -> legacy, and NO deprecation warning (the raw form is the sanctioned path here).
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), flag=None)  # unset -> default OFF (pre-flip)
+    r = _run_cmd(e, str(raw), flag=None, legacy="1")
     assert r.returncode == 0, r.stderr
     assert e["lane_marker"].exists()
     assert "DEPRECATED" not in r.stderr, "deprecation warning must not fire when the door is off"
     assert not e["door_marker"].exists()
+
+
+def test_default_on_raw_md_legacy_with_warning(tmp_path):
+    # Post-flip: unset VNX_SINGLE_ENTRY_DISPATCH resolves to the door (default ON). A raw .md still
+    # falls through to legacy delivery, now WITH the deprecation warning.
+    e = _make_home(tmp_path)
+    raw = _write_raw(e)
+    r = _run_cmd(e, str(raw), flag=None)  # unset -> default ON (post-flip)
+    assert r.returncode == 0, r.stderr
+    assert e["lane_marker"].exists()
+    assert not e["door_marker"].exists()
+    assert not e["bridge_marker"].exists()
+    assert "DEPRECATED" in r.stderr, "deprecation warning must fire under the door default + raw"
 
 
 def test_rollback_staged_pending_id_legacy_with_hint(tmp_path):
@@ -362,11 +377,12 @@ def test_deliver_door_on_forwards_provider_to_bridge(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
-def test_deliver_default_off_legacy_unbroken_by_7th_arg(tmp_path):
-    # Default OFF: the 7-arg call still routes to subprocess_dispatch.py (legacy), no breakage.
+def test_deliver_optout_legacy_unbroken_by_7th_arg(tmp_path):
+    # Explicit opt-out (VNX_SINGLE_ENTRY_DISPATCH=0, post-flip the default is ON): the 7-arg call
+    # still routes to subprocess_dispatch.py (legacy), proving the signature change is backward-safe.
     proc, argv = _run_deliver(
         tmp_path, "T2", "d-2", "PROMPT", "sonnet", f"{tmp_path}/dispatch.md", "test-engineer", "claude_code",
-        flag=None,
+        flag="0",
     )
     assert proc.returncode == 0, proc.stderr
     assert any("subprocess_dispatch.py" in a for a in argv), f"legacy lane broken by 7th arg: {argv}"
@@ -385,6 +401,51 @@ def test_claude_code_canonicalizes_to_claude():
     assert dispatch_bridge._canonical_provider("claude_code").value == "claude"
     assert dispatch_bridge._canonical_provider("codex_cli").value == "codex"
     assert dispatch_bridge._canonical_provider("gemini_cli").value == "gemini"
+
+
+# --------------------------------------------------------------------------- #
+# Receipt-lane: the staged spec's provider is the lane determinant
+# (dispatch_cli.py: is_claude_lane = spec.provider == Provider.CLAUDE -> tmux-spawn; else provider lane)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("emitted,canonical", [
+    ("claude_code", "claude"),   # -> claude_tmux_subscription lane
+    ("codex_cli", "codex"),      # -> provider lane (NOT claude tmux)
+    ("gemini_cli", "gemini"),    # -> provider lane
+])
+def test_staged_spec_carries_canonical_provider_lane_determinant(tmp_path, emitted, canonical):
+    import sys
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import dispatch_bridge
+    spec_file = dispatch_bridge.stage_spec_bundle(
+        instruction_text="do it",
+        dispatch_id="20260624-lane-A",
+        role="backend-developer",
+        target_slot="T1",
+        provider=emitted,
+        data_dir=tmp_path,
+    )
+    payload = json.loads(spec_file.read_text(encoding="utf-8"))
+    assert payload["provider"] == canonical, (
+        f"provider '{emitted}' must canonicalize to '{canonical}' in the spec (the lane determinant)"
+    )
+
+
+def test_deliver_via_door_routes_to_bridge_under_default_on(tmp_path, monkeypatch):
+    # Post-flip default ON: deliver_via_door routes the in-process callers (incl.
+    # vnx_cli/commands/dispatch_agent.py) through the bridge, not the legacy callable.
+    import sys
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import dispatch_bridge
+    monkeypatch.delenv("VNX_SINGLE_ENTRY_DISPATCH", raising=False)  # unset -> default ON
+    monkeypatch.delenv("VNX_DISPATCH_LEGACY", raising=False)
+    calls = {"bridge": 0, "legacy": 0}
+    monkeypatch.setattr(dispatch_bridge, "bridge_dispatch", lambda **kw: calls.__setitem__("bridge", calls["bridge"] + 1) or 0)
+    dispatch_bridge.deliver_via_door(
+        lambda: calls.__setitem__("legacy", calls["legacy"] + 1) or True,
+        instruction_text="x", dispatch_id="20260624-agent-A", target_slot="T1", role="agent",
+    )
+    assert calls["bridge"] == 1 and calls["legacy"] == 0, f"default-ON must route via the bridge: {calls}"
 
 
 if __name__ == "__main__":

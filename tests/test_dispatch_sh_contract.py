@@ -107,8 +107,9 @@ cmd_dispatch '{dispatch_md}' --dry-run
     assert "single-entry gate" not in (r.stdout + r.stderr).lower()
 
 
-def test_default_off_does_not_invoke_door(tmp_path):
-    """Pre-flip default (flag unset) → legacy; the door stub is never invoked."""
+def test_raw_md_falls_through_to_legacy(tmp_path):
+    """Post-flip (ADR-024): flag unset resolves to the door (default ON), but a raw .md falls through
+    to the legacy lane (Option X1) — the door stub is never invoked — and emits the deprecation warning."""
     stub_home = _make_stub_home(tmp_path)
     dispatch_dir = tmp_path / "dispatches"
     dispatch_dir.mkdir()
@@ -122,3 +123,4 @@ cmd_dispatch '{dispatch_md}' --dry-run
     r = _run(cmd)
     assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
     assert not marker.exists()
+    assert "DEPRECATED" in (r.stdout + r.stderr), "deprecation warning expected for raw .md under the door default"
