@@ -55,14 +55,19 @@ local adapter_var="VNX_ADAPTER_${terminal_id}"
 local adapter_type="${!adapter_var}"  # resolved by caller per terminal
 
 if [[ "$adapter_type" == "subprocess" ]]; then
-    _ddt_subprocess_delivery ...
+    # 7 positional args: terminal_id dispatch_id complete_prompt model dispatch_file [agent_role] [provider]
+    # provider (7th, after the optional agent_role) is forwarded to the door bridge so a non-claude
+    # terminal-pinned worker keeps its provider lane when the single-entry door is enabled (ADR-024).
+    _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file" "$agent_role" "$provider"
     return $?
 fi
 # default: tmux delivery path
 ```
 
 The subprocess delivery helper is `scripts/lib/subprocess_dispatch.py`, which calls
-`SubprocessAdapter.deliver()` and exits 0 on success, 1 on failure.
+`SubprocessAdapter.deliver()` and exits 0 on success, 1 on failure. When the single-entry door is
+enabled (`VNX_SINGLE_ENTRY_DISPATCH=1`), `_ddt_subprocess_delivery` routes through
+`dispatch_bridge.py` → `run_dispatch` instead, forwarding `--provider` (door-flip / ADR-024).
 
 ## Billing Safety
 
