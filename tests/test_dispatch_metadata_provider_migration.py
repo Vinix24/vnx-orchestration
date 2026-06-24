@@ -435,6 +435,9 @@ def test_log_dispatch_metadata_no_clobber_existing_provider_model():
         env = os.environ.copy()
         env["VNX_STATE_DIR"] = str(db_path.parent)
         env["VNX_DATA_DIR"] = tmpdir
+        # tmp store has no .vnx-data/<pid>/state path layout; give the fail-closed
+        # tenant resolver an explicit source so log_dispatch_metadata can stamp.
+        env["VNX_PROJECT_ID"] = "vnx-dev"
 
         # Invoke log_dispatch_metadata WITHOUT --provider / --model (defaults to empty).
         result = subprocess.run(

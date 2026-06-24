@@ -93,7 +93,7 @@ def _read_marker_from_path(db_path: Path) -> Optional[str]:
     return None
 
 
-def resolve_init_project_id(db_path: Path) -> str:
+def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
     """Resolve the owning project_id for an init-time ADD COLUMN backfill.
 
     Anchor: the resolved DB file path (not cwd).  Resolution order:
@@ -104,12 +104,17 @@ def resolve_init_project_id(db_path: Path) -> str:
     All present sources must agree — any conflict raises RuntimeError
     (fail-closed: the real contamination guard).
 
-    No sources at all → defaults to 'vnx-dev' with a logging.warning.
-    Rationale: real non-vnx-dev central stores always carry their pid in
-    the path (source 1) so they never reach this default.  Only contextless
-    callers (tests, fresh default installs) reach it, and 'vnx-dev' is the
-    correct legacy default for those.  This restores backward-compat without
-    reintroducing contamination.
+    ``strict`` (default ``False``): when no source resolves, the legacy
+    behavior returns ``'vnx-dev'`` with a warning (backward-compat for
+    init-backfill callers). When ``strict=True`` — the QI-write-tier stamp
+    path (:func:`project_scope.resolve_stamp_project_id`) — a total absence
+    raises :class:`project_scope.TenantUnresolved` instead, so the caller
+    refuses to stamp a guessed default. Source conflicts and invalid ids
+    raise ``RuntimeError`` regardless of ``strict`` (the stamp resolver casts
+    those to ``TenantUnresolved``).
+
+    Rationale (non-strict default): real non-vnx-dev central stores always
+    carry their pid in the path (source 1) so they never reach the default.
 
     ADR-007 compliance: callers may invoke this and pass the returned value
     as ``default_project_id`` to ``run_runtime_coordination_migration`` /
@@ -135,6 +140,14 @@ def resolve_init_project_id(db_path: Path) -> str:
             "All sources must agree. Resolve the conflict before running init."
         )
     if not distinct:
+        if strict:
+            # QI-write-tier stamp path: refuse to guess a default — fail-closed.
+            from project_scope import TenantUnresolved  # noqa: PLC0415 — function-local: avoids a project_scope↔project_id_migration import cycle
+            raise TenantUnresolved(
+                "resolve_init_project_id(strict=True): no project_id source for "
+                f"db_path {db_path!r} (no .vnx-data path layout, no .vnx-project-id "
+                "marker, VNX_PROJECT_ID unset). Refusing to stamp a guessed default."
+            )
         log.warning(
             "resolve_init_project_id: no project_id source found (no .vnx-data path "
             "layout, no .vnx-project-id marker walking up from '%s', VNX_PROJECT_ID "

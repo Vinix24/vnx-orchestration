@@ -27,10 +27,7 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
-_DEFAULT_PROJECT_ID = "vnx-dev"
-
-
-def _parse_adr(file_path: Path, project_id: str = _DEFAULT_PROJECT_ID) -> dict:
+def _parse_adr(file_path: Path, project_id: str) -> dict:
     stem = file_path.stem  # e.g. ADR-007-multitenant-project-id-stamping
     parts = stem.split("-")
     adr_id = f"{parts[0]}-{parts[1]}"  # ADR-007
@@ -178,7 +175,7 @@ def index_adrs(
     db_path: Path,
     adr_dir: Path,
     events_file: Path,
-    project_id: str = _DEFAULT_PROJECT_ID,
+    project_id: str,
 ) -> dict:
     """Index all ADR-*.md files from adr_dir into db_path.
 
@@ -229,7 +226,15 @@ def main() -> None:
     if not adr_dir.exists():
         raise SystemExit(f"ADR directory not found: {adr_dir}")
 
-    result = index_adrs(db_path, adr_dir, events_file)
+    # Fail-closed: stamp adrs with the store's owning tenant (derived from db_path),
+    # never a guessed 'vnx-dev' on a non-vnx-dev store.
+    from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+    try:
+        project_id = resolve_stamp_project_id(db_path=db_path)
+    except TenantUnresolved as exc:
+        raise SystemExit(f"index_adrs: tenant unresolved for {db_path} ({exc}); refusing to stamp adrs")
+
+    result = index_adrs(db_path, adr_dir, events_file, project_id=project_id)
     print(
         f"ADR indexing complete: {result['indexed']} indexed, "
         f"{result['skipped']} skipped, {result['total']} total"

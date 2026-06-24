@@ -80,13 +80,15 @@ class TestGeminiExec:
         assert result == expected
 
     def test_emit_called_with_correct_provider(self, monkeypatch):
-        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
-
+        # Post-2026-06-24: the wrapper forwards the caller's project_id verbatim;
+        # the env fallback now lives in emit_provider_cost (best-effort), not here.
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result()), \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
              patch("provider_costs._compute_cost_from_rates", return_value=(0.002, False)):
 
-            gemini_wrapper.gemini_exec("prompt", model="gemini-2.5-pro", dispatch_id="d-g003")
+            gemini_wrapper.gemini_exec(
+                "prompt", model="gemini-2.5-pro", dispatch_id="d-g003", project_id="test-proj"
+            )
 
         mock_emit.assert_called_once()
         kwargs = mock_emit.call_args.kwargs
@@ -94,6 +96,19 @@ class TestGeminiExec:
         assert kwargs["model"] == "gemini-2.5-pro"
         assert kwargs["dispatch_id"] == "d-g003"
         assert kwargs["project_id"] == "test-proj"
+
+    def test_forwards_none_project_id_when_caller_omits_it(self, monkeypatch):
+        # No project_id passed → wrapper forwards None; emit applies its own env
+        # fallback (the cost log is best-effort, never skips). The wrapper itself
+        # no longer resolves env.
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result()), \
+             patch("provider_costs.emit_provider_cost") as mock_emit, \
+             patch("provider_costs._compute_cost_from_rates", return_value=(0.002, False)):
+
+            gemini_wrapper.gemini_exec("prompt", model="gemini-2.5-pro", dispatch_id="d-g004")
+
+        assert mock_emit.call_args.kwargs["project_id"] is None
 
     def test_emit_cost_reflects_computed_value(self, monkeypatch):
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")

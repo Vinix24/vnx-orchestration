@@ -163,7 +163,16 @@ def _handle_success(
 
     # ADR-005: emit cost event BEFORE receipt write. Raises on failure — fail-loud.
     from provider_costs import emit_provider_cost  # noqa: PLC0415
-    import os as _os  # noqa: PLC0415
+    # Best-effort store-derived pid (NDJSON cost log never skips); on an
+    # unresolved tenant, fall back to emit's env default — no data-loss.
+    _cost_pid = ""
+    try:
+        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+        _cost_pid = resolve_stamp_project_id(
+            db_path=_sd._default_state_dir() / "quality_intelligence.db"
+        )
+    except TenantUnresolved:
+        pass  # emit falls back to env; cost-audit must not lose the event
     emit_provider_cost(
         provider="claude",
         model=model or "sonnet",
@@ -171,7 +180,7 @@ def _handle_success(
         output_tokens=token_usage.get("output") if token_usage else None,
         cost_usd_estimate=cost_usd,
         dispatch_id=dispatch_id,
-        project_id=_os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+        project_id=_cost_pid,
     )
 
     _sd._ensure_unified_report(dispatch_id, terminal_id, "done")

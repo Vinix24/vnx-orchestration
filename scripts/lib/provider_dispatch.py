@@ -413,7 +413,8 @@ def _record_provider_metadata(
             pr_id=getattr(args, "pr_id", None),
             outcome_status=status,
             report_path=str(report_path),
-            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+            # No project_id kwarg: upsert resolves it store-derived from db_path
+            # (fail-closed). Passing the env-literal here would short-circuit that.
         )
     except Exception as exc:  # noqa: BLE001 — metadata logging is non-fatal
         logger.warning(
@@ -504,6 +505,15 @@ def _emit_governance(
 
     # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
     from provider_costs import emit_provider_cost  # noqa: PLC0415
+    # Best-effort store-derived pid (NDJSON cost log is outside the fail-closed
+    # regime — it must never skip): resolve from the store db_path; on an
+    # unresolved tenant, log and let emit fall back to env (no data-loss).
+    _cost_pid = ""
+    try:
+        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+        _cost_pid = resolve_stamp_project_id(db_path=Path(state_dir) / "quality_intelligence.db")
+    except TenantUnresolved as _pid_exc:
+        logger.warning("cost-event project_id unresolved from store; emit falls back to env: %s", _pid_exc)
     emit_provider_cost(
         provider=provider,
         model=model_used,
@@ -511,7 +521,7 @@ def _emit_governance(
         output_tokens=token_usage.get("output") if token_usage else None,
         cost_usd_estimate=cost_usd,
         dispatch_id=args.dispatch_id,
-        project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+        project_id=_cost_pid,
     )
 
     # Provider-aware self-learning: stamp a dispatch_metadata row so EVERY governed
@@ -1793,7 +1803,7 @@ def _dispatch_local_gemma(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         deadline_seconds=300,
         dispatch_id=args.dispatch_id,
-        project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+        # project_id dropped: spawn_local_gemma does not consume it (inert kwarg).
     )
     end_time = datetime.now(timezone.utc)
 
