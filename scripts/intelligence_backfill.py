@@ -135,6 +135,22 @@ def backfill_dispatch_metadata() -> int:
     if not PROCESSED_DIR.exists() or not DB_PATH.exists():
         return 0
 
+    # Fail-closed tenant resolve (ADR-007 amendment clause 2: QI-write-tier
+    # writers MUST use resolve_stamp_project_id, never a silent 'vnx-dev'
+    # fallback). Refuse the whole backfill if the owning tenant is unresolvable
+    # rather than stamp a contaminating default. Stamped on every INSERT (the
+    # column is NOT NULL with no default) and used to project-scope the UPDATE.
+    from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+    try:
+        project_id = resolve_stamp_project_id(db_path=DB_PATH)
+    except TenantUnresolved as exc:
+        print(
+            f"ERROR: tenant_stamp_skip intelligence_backfill db_path={DB_PATH} "
+            f"reason={exc} — refusing to backfill under a guessed default",
+            file=sys.stderr,
+        )
+        return 0
+
     conn = sqlite3.connect(str(DB_PATH))
     now = datetime.now(timezone.utc).isoformat()
     inserted = 0
@@ -172,17 +188,18 @@ def backfill_dispatch_metadata() -> int:
                 if outcome:
                     conn.execute(
                         "UPDATE dispatch_metadata SET outcome_status = COALESCE(outcome_status, ?), "
-                        "completed_at = COALESCE(completed_at, ?) WHERE dispatch_id = ?",
-                        (outcome, timestamp, dispatch_id),
+                        "completed_at = COALESCE(completed_at, ?) "
+                        "WHERE dispatch_id = ? AND project_id = ?",
+                        (outcome, timestamp, dispatch_id, project_id),
                     )
                 continue
 
             conn.execute(
                 "INSERT INTO dispatch_metadata "
-                "(dispatch_id, terminal, track, gate, dispatched_at, completed_at, outcome_status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(dispatch_id, terminal, track, gate, dispatched_at, completed_at, outcome_status, project_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (dispatch_id, terminal, track, gate, timestamp,
-                 timestamp if outcome else None, outcome),
+                 timestamp if outcome else None, outcome, project_id),
             )
             inserted += 1
 

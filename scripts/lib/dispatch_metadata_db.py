@@ -51,38 +51,55 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
 
 
 def _resolve_project_id(explicit: Optional[str], db_path: Optional[Path] = None) -> str:
-    """Resolve the project_id to stamp on a dispatch_metadata row.
+    """Resolve the project_id to stamp on a ``dispatch_metadata`` row — fail-closed.
 
-    Order: explicit arg → ambient project_scope → the OWNING store (derived from
-    ``db_path``) → VNX_PROJECT_ID env → 'vnx-dev'.
+    Delegates to :func:`project_scope.resolve_stamp_project_id`, the single
+    store-derived resolver: the OWNING store (derived from ``db_path``'s
+    ``~/.vnx-data/<pid>/state/`` layout) is authoritative, so a write to a
+    non-vnx-dev store (e.g. mission-control) stamps THAT tenant — never the bare
+    ``vnx-dev`` literal.
 
-    The store-derived step (``resolve_init_project_id``) is the tenant-correctness
-    fix: it anchors on the DB file's ``~/.vnx-data/<pid>/state/`` path layout, so a
-    write to a non-vnx-dev store (e.g. mission-control) stamps THAT tenant instead
-    of the bare literal 'vnx-dev'. A genuine source-conflict (path vs marker vs env
-    disagree) is logged and degrades to the env default rather than crashing the
-    write — never silently mis-stamps without a trace.
+    Raises :class:`project_scope.TenantUnresolved` when no tenant can be
+    resolved (no source / source conflict / invalid id). This REVERSES the prior
+    #907 fail-open semantics (degrade-to-env / keep-vnx-dev) on purpose: the
+    QI-write-tier is fail-closed per the ADR-007 amendment (2026-06-24). The sole
+    caller, :func:`upsert_dispatch_provider_row`, catches it and skips the write.
     """
-    if explicit:
-        return explicit
+    from project_scope import resolve_stamp_project_id  # noqa: PLC0415
+    return resolve_stamp_project_id(explicit, db_path)
+
+
+def _log_tenant_stamp_skip(
+    db_path: Path, dispatch_id: str, terminal: str, exc: Exception
+) -> None:
+    """Record a fail-closed dispatch_metadata skip — observable, not silent.
+
+    Logs at ERROR with the diagnostic fields and bumps a counter event in
+    ``<db_dir>/skip_metrics.ndjson``. The metric path anchors on the DB file's
+    own directory (NOT ``~/.vnx-data/<pid>/state``) precisely because the pid is
+    what failed to resolve — the db dir always exists and needs no tenant.
+    """
+    logger.error(
+        "tenant_stamp_skip: refused dispatch_metadata write (fail-closed) — "
+        "db_path=%s dispatch_id=%s terminal=%s conflicting_sources=%s",
+        db_path, dispatch_id, terminal or "?", exc,
+    )
     try:
-        from project_scope import current_project_id  # noqa: PLC0415
-        pid = current_project_id()
-        if pid:
-            return pid
-    except Exception:  # noqa: BLE001 — project_scope is optional in some contexts
-        logger.debug("project_scope unavailable; trying store-derived project_id", exc_info=True)
-    if db_path is not None:
-        try:
-            from project_id_migration import resolve_init_project_id  # noqa: PLC0415
-            return resolve_init_project_id(Path(db_path))
-        except RuntimeError as exc:
-            # Conflicting tenant sources — surface it; do not crash the write.
-            logger.warning("dispatch_metadata project_id resolution conflict for %s: %s", db_path, exc)
-        except Exception:  # noqa: BLE001 — resolver optional; fall through to env default
-            logger.debug("store-derived project_id unavailable; falling back to env", exc_info=True)
-    import os  # noqa: PLC0415
-    return os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+        from state_writer import append_locked  # noqa: PLC0415
+        append_locked(
+            Path(db_path).parent / "skip_metrics.ndjson",
+            {
+                "event_type": "tenant_stamp_skip",
+                "table": "dispatch_metadata",
+                "db_path": str(db_path),
+                "dispatch_id": dispatch_id,
+                "terminal": terminal or None,
+                "reason": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception:  # noqa: BLE001 — the metric is best-effort; the ERROR log is the contract
+        logger.debug("skip_metrics append failed (non-fatal)", exc_info=True)
 
 
 def upsert_dispatch_provider_row(
@@ -129,7 +146,6 @@ def upsert_dispatch_provider_row(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     completed_at = now_iso if outcome_status else None
-    resolved_project_id = _resolve_project_id(project_id, db_path)
 
     conn = None
     try:
@@ -140,6 +156,18 @@ def upsert_dispatch_provider_row(
         has_report_path = _has_column(conn, "dispatch_metadata", "outcome_report_path")
         has_outcome = _has_column(conn, "dispatch_metadata", "outcome_status")
         has_completed = _has_column(conn, "dispatch_metadata", "completed_at")
+
+        # Tenant-stamp only when the column exists (old column-less stores are
+        # left untouched). Fail-closed: an unresolvable tenant logs + skips the
+        # write rather than stamping a contaminating 'vnx-dev' default.
+        resolved_project_id = None
+        if has_project:
+            from project_scope import TenantUnresolved  # noqa: PLC0415
+            try:
+                resolved_project_id = _resolve_project_id(project_id, db_path)
+            except TenantUnresolved as exc:
+                _log_tenant_stamp_skip(db_path, dispatch_id, terminal, exc)
+                return False
 
         # --- create-if-absent (never clobber a richer dispatcher-written row) ---
         insert_cols = ["dispatch_id", "terminal", "track", "role", "gate", "pr_id", "dispatched_at"]

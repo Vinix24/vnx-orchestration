@@ -3,8 +3,15 @@
 dispatch_metadata_db._resolve_project_id used to fall back to a bare literal
 'vnx-dev', so a dispatch write to a non-vnx-dev store (e.g. mission-control)
 re-stamped the WRONG tenant on every write (the live re-contamination source
-behind the QI tenant-stamping bug). It now derives the owning tenant from the
-store's own DB-path layout (resolve_init_project_id), fail-closed.
+behind the QI tenant-stamping bug).
+
+As of the 2026-06-24 ADR-007 amendment it delegates to
+``project_scope.resolve_stamp_project_id`` and is FAIL-CLOSED: it derives the
+owning tenant from the store's own DB-path layout and RAISES
+``TenantUnresolved`` when no tenant can be resolved (no source / source
+conflict / invalid id) — reversing the prior #907 fail-OPEN (degrade-to-env)
+semantics on purpose. The sole caller (``upsert_dispatch_provider_row``)
+catches it and skips the write rather than stamping a guessed default.
 """
 
 from __future__ import annotations
@@ -12,11 +19,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 import dispatch_metadata_db as dmd  # noqa: E402
+import project_scope  # noqa: E402 — reference TenantUnresolved via the module (survives importlib.reload in test_project_scope_filesystem)
 
 
 def _store_db(tmp_path: Path, pid: str) -> Path:
@@ -32,34 +42,30 @@ def test_explicit_wins(tmp_path):
 
 def test_store_path_resolves_owning_tenant_not_vnx_dev(tmp_path, monkeypatch):
     # The core fix: a write to mission-control's store stamps mission-control,
-    # NOT the literal 'vnx-dev'. Clear ambient sources so only the path speaks.
+    # NOT the literal 'vnx-dev'. Clear ambient env so only the path speaks.
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-    # project_scope must not short-circuit: force it unavailable.
-    monkeypatch.setitem(sys.modules, "project_scope", None)
     db = _store_db(tmp_path, "mission-control")
     assert dmd._resolve_project_id(None, db) == "mission-control"
 
 
 def test_vnx_dev_store_still_resolves_vnx_dev(tmp_path, monkeypatch):
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-    monkeypatch.setitem(sys.modules, "project_scope", None)
     db = _store_db(tmp_path, "vnx-dev")
     assert dmd._resolve_project_id(None, db) == "vnx-dev"
 
 
-def test_source_conflict_does_not_crash_and_falls_back(tmp_path, monkeypatch):
-    # Path says mission-control, env says something else → resolve_init_project_id
-    # raises (fail-closed contamination guard). The write path must NOT crash; it
-    # logs and degrades to the env default.
+def test_source_conflict_raises_tenant_unresolved(tmp_path, monkeypatch):
+    # Path says mission-control, env disagrees → fail-CLOSED: raise (the cast
+    # of resolve_init_project_id's RuntimeError to TenantUnresolved). The caller
+    # skips the write; it must NOT silently degrade to the wrong env tenant.
     monkeypatch.setenv("VNX_PROJECT_ID", "conflicting-proj")
-    monkeypatch.setitem(sys.modules, "project_scope", None)
     db = _store_db(tmp_path, "mission-control")
-    result = dmd._resolve_project_id(None, db)
-    assert result == "conflicting-proj"  # degraded to env, no exception
+    with pytest.raises(project_scope.TenantUnresolved):
+        dmd._resolve_project_id(None, db)
 
 
-def test_contextless_keeps_vnx_dev_default(tmp_path, monkeypatch):
+def test_contextless_raises_tenant_unresolved(tmp_path, monkeypatch):
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-    monkeypatch.setitem(sys.modules, "project_scope", None)
-    # No db_path, no env, no project_scope → backward-compat 'vnx-dev'.
-    assert dmd._resolve_project_id(None, None) == "vnx-dev"
+    # No db_path, no env → fail-CLOSED: raise rather than stamp a guessed 'vnx-dev'.
+    with pytest.raises(project_scope.TenantUnresolved):
+        dmd._resolve_project_id(None, None)
