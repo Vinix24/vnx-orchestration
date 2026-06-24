@@ -111,6 +111,8 @@ The quality-intelligence store (`quality_intelligence.db`, per-project under `~/
 
 Tenant isolation (ADR-007): every intelligence table is keyed by a composite over `project_id`; the store resolves its owning project fail-closed (`.vnx-project-id` marker → `VNX_PROJECT_ID` → the `~/.vnx-data/<pid>/` path), so a fresh store never silently inherits another tenant's rows.
 
+> **Deep reference:** the full engine — `IntelligenceSelector.select()` internals, confidence/evidence gates, recency suppression, payload cap, the exact rendered markdown, the `intelligence_injections` audit, and the learning-loop write path — is documented in `docs/core/technical/INTELLIGENCE_SYSTEM.md` (this section is the overview it links back to).
+
 ## 8. Where the evidence lives
 
 - Staged intents: `.vnx-data/dispatches/pending/<id>/`

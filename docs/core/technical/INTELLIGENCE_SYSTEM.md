@@ -1,391 +1,223 @@
 # VNX Intelligence System - Technical Reference
-**Last Updated**: 2026-03-28
+**Last Updated**: 2026-06-23
 **Owner**: T-MANAGER
-**Purpose**: Documentation for VNX Intelligence System - Technical Reference.
+**Purpose**: Deep technical reference for the VNX Intelligence System — the read path (per-dispatch injection) and the write path (daemon + learning loop).
 
-**Version**: 5.0.0
-**Date**: 2026-03-28
-**Status**: Active
+**Version**: 6.0.0
+**Date**: 2026-06-23
+**Status**: Active — deep technical reference
 **Maintainer**: T-MANAGER
 
+> **See first:** `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` §7 for the overview. That doc is the entry point; this one is the engine detail it links to.
+
 ## Table of Contents
-1. [Overview](#overview)
-2. [System Architecture](#system-architecture)
-3. [Agent Validation](#agent-validation)
-4. [Pattern Matching Engine](#pattern-matching-engine)
-5. [Documentation Ingestion](#documentation-ingestion)
-6. [Prevention Rules](#prevention-rules)
-7. [Tag Intelligence](#tag-intelligence)
-8. [Learning Loop](#learning-loop)
-9. [Governance Measurement](#governance-measurement)
-10. [Performance & Caching](#performance--caching)
-11. [Integration](#integration)
-12. [Operations](#operations)
-13. [Testing](#testing)
+1. [Overview](#overview) — read/write split
+2. [System Architecture](#system-architecture) — the door → assembly → selector
+3. [Selection Engine (Pattern Matching)](#selection-engine-pattern-matching) — class-based bounded selection
+4. [Prevention Rules](#prevention-rules) — antipattern evidence + operator-gated rules
+5. [Usage Signal Pipeline](#usage-signal-pipeline) — confidence write-back + reconcile
+6. [Intelligence Injection](#intelligence-injection) — in-assembly path, rendered format, audit, tenant isolation
+7. [Governance Measurement](#governance-measurement) — CQS / SPC
+8. [Integration](#integration) — where injection plugs in, provider parity, daemon
+9. [Operations](#operations) / [Testing](#testing)
+10. [Appendix](#appendix) — files reference + superseded/legacy
+
+> Superseded sections (retained as pointers only): [Agent Validation](#agent-validation-superseded), [Documentation Ingestion](#documentation-ingestion) (daemon-side/legacy), [Tag Intelligence](#tag-intelligence-superseded), [Performance & Caching](#performance--caching-superseded).
 
 ---
 
 ## Overview
 
-The VNX Intelligence System provides automated intelligence gathering and validation for the VNX orchestration system. It enriches dispatches with relevant code patterns, prevention rules, and agent validation to improve task execution quality across T1/T2/T3 terminals.
+The VNX Intelligence System enriches every dispatch with task-relevant, evidence-backed intelligence and learns from the outcomes. It is two separate flows around one per-project store (`quality_intelligence.db`):
 
-### Key Capabilities
-- **Agent Validation**: Validates agent names before dispatch (100% prevention of invalid agents)
-- **Pattern Matching**: Queries code patterns + doc sections with relevance scoring (60-80% relevance)
-- **Documentation Ingestion**: Indexes markdown documentation into FTS5 alongside code patterns
-- **Language-Aware Filtering**: Routes doc tasks to markdown sections, code tasks to Python snippets
-- **Prevention Rules**: Generates 1-4 context-aware prevention rules per task
-- **Tag Intelligence**: Extracts 50+ specific tags for precise matching
-- **Learning Loop**: Adjusts confidence scores based on real-world effectiveness
-- **Performance Caching**: Sub-100ms query response with 80%+ cache hit rate
+### Read path — injection (per dispatch, in-assembly)
+Injection happens **in Python, in-assembly** — there is no shell `UserPromptSubmit` hook. When a dispatch body is composed (`dispatch_prepare.prepare` → `_inject_skill_context` → `_build_intelligence_section`), it calls `intelligence_injection.fetch_intelligence_section`, which runs `IntelligenceSelector.select()`. The selector queries three bounded item classes from `quality_intelligence.db`, applies confidence/evidence gates, diversity, recency suppression, and a payload cap, then renders a markdown section that is spliced into the worker's instruction. Same path for all provider lanes (`claude` via tmux/subprocess, and codex/gemini/litellm/kimi via `provider_dispatch.py`).
 
-### Intelligence Database
-- **Location**: `$VNX_STATE_DIR/quality_intelligence.db`
-- **Engine**: SQLite with FTS5 full-text search
-- **Content**: Code snippets (`language="python"`) + doc sections (`language="markdown"`)
-- **Schema Version**: 3.0
-- **Configuration**: `VNX_DOCS_DIRS` env var for markdown ingestion directories
+### Write path — learning (daemon, gated)
+The `intelligence_daemon.py` runs `learning_loop.py` on a daily cycle (18:00). Tier-1 auto-tunes pattern *confidence* from receipt outcomes (boost 1.10 / decay 0.95). Tier-2 *proposes* new prevention rules into an operator-gated `pending_rules.json` — those are never auto-activated; only operator-approved rules are ingested into the live `prevention_rules` table. The system proposes, the human approves.
+
+### Intelligence store
+- **Location**: per-project central store `~/.vnx-data/<project_id>/state/quality_intelligence.db` (resolved via `vnx_paths.resolve_central_data_dir`); embedded installs use `$VNX_STATE_DIR/quality_intelligence.db`.
+- **Engine**: SQLite (FTS5 still used by the ADR table `adrs_fts` and legacy `code_snippets`).
+- **Read tables**: `success_patterns` (proven_pattern), `antipatterns` + `prevention_rules` (failure_prevention), `dispatch_metadata` (recent_comparable), `adrs` (ADR context).
+- **Audit / feedback tables**: `intelligence_injections` (coord DB), `pattern_usage`, `dispatch_pattern_offered`, `confidence_events`.
+- **Tenant isolation (ADR-007)**: every table is keyed by `project_id`; reads are project-scoped by default (`VNX_PROJECT_FILTER` ON).
+
+> **Superseded.** The previous engine (`gather_intelligence.py`, agent-name validation, FTS5 relevance scoring, `cached_intelligence.py`, the `userpromptsubmit_*_intelligence_inject.sh` hooks) is **not** the injection path. Where those daemon-side helpers still exist they are documented in the *Superseded / legacy (daemon-side)* appendix.
 
 ---
 
 ## System Architecture
 
+Injection is in-assembly. The dispatch passes through THE DOOR (`vnx dispatch`), which picks a lane; both Claude lanes and the provider lanes assemble the body through `dispatch_prepare`, which reaches the same selector seam.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    T0 Orchestrator                      │
-│  (Manager Block Dispatch Creation)                      │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
+│                   THE DOOR  (vnx dispatch)               │
+│   decides the lane (tmux / subprocess / provider)        │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│              Dispatcher V7 Compilation                  │
-│   • Receives manager blocks from smart_tap              │
-│   • Calls gather_intelligence.py for validation         │
-│   • Injects intelligence into dispatches                │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
+│   ASSEMBLY — dispatch_prepare.prepare()                  │
+│   scripts/lib/dispatch_prepare.py:51-117                 │
+│     1. repo-map → raw instruction                        │
+│     2. _inject_skill_context()  ← gathers intelligence   │
+│     3. _inject_permission_profile()                      │
+│     4. scope guard / worker-rules / report-contract      │
+└────────────────────────┬────────────────────────────────┘
+                         │  (best-effort; never blocks dispatch)
+                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│         gather_intelligence.py (Core Engine)            │
-│                                                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐ │
-│  │   Agent     │  │   Pattern    │  │  Prevention   │ │
-│  │ Validation  │  │   Matching   │  │    Rules      │ │
-│  │   (PR #1)   │  │   (PR #2)    │  │   (PR #3)     │ │
-│  └─────────────┘  └──────────────┘  └───────────────┘ │
-│                                                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐ │
-│  │    Tag      │  │   Learning   │  │    Caching    │ │
-│  │Intelligence │  │     Loop     │  │    Layer      │ │
-│  │   (PR #4)   │  │   (PR #7)    │  │   (PR #6)     │ │
-│  └─────────────┘  └──────────────┘  └───────────────┘ │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
+│   _build_intelligence_section()                          │
+│   subprocess_dispatch_internals/skill_injection.py:73-111│
+│     → intelligence_injection.fetch_intelligence_section()│
+│        • ADR context block (INT-2, role/path triggered)  │
+│        • IntelligenceSelector.select(...)                │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│            Quality Intelligence Database                │
-│  • code_snippets: Python patterns (language="python")   │
-│  • code_snippets: Doc sections (language="markdown")    │
-│  • pattern_usage: Learning loop tracking                │
-│  • FTS5 index: Full-text search (both languages)       │
+│   IntelligenceSelector.select()                          │
+│   scripts/lib/intelligence_selector.py:143-181           │
+│                                                          │
+│   standard classes (gated, diversity, recency, cap):     │
+│   ┌──────────────┐ ┌─────────────────┐ ┌──────────────┐ │
+│   │proven_pattern│ │failure_prevention│ │recent_       │ │
+│   │success_      │ │antipatterns +    │ │comparable    │ │
+│   │patterns      │ │prevention_rules  │ │dispatch_meta │ │
+│   └──────────────┘ └─────────────────┘ └──────────────┘ │
+│                                                          │
+│   W5 direct sources (no confidence gate):                │
+│   prior_round_finding · adr_relevant · code_anchor ·     │
+│   operator_memory · schema_section                       │
+└────────────────────────┬────────────────────────────────┘
+                         │  reads          ▲  records audit
+                         ▼                 │
+┌─────────────────────────────────────────────────────────┐
+│   per-project quality_intelligence.db (ADR-007 scoped)   │
+│   ~/.vnx-data/<project_id>/state/                        │
+│   reads:  success_patterns · antipatterns ·              │
+│           prevention_rules · dispatch_metadata · adrs    │
+│   writes: pattern_usage · dispatch_pattern_offered ·     │
+│           confidence_events                              │
+│   coord DB: intelligence_injections (injection audit)    │
+└────────────────────────┬────────────────────────────────┘
+                         │ rendered markdown section
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│   Enriched instruction body (worker prompt)              │
+│   ## ADR Context (auto-injected per Wave-5)              │
+│   ## Relevant Intelligence (from past dispatches)        │
+│     ### Antipatterns to avoid                            │
+│     ### Proven success patterns                          │
+│     ### Tag warnings                                     │
+│   ## PRIOR ROUND REVIEW FINDINGS  (when pr_id maps)      │
 └─────────────────────────────────────────────────────────┘
-                     ▲
-          ┌──────────┴──────────┐
-          │                     │
-┌─────────────────┐  ┌─────────────────────────────────┐
-│ code_snippet_   │  │ doc_section_extractor.py         │
-│ extractor.py    │  │ (VNX_DOCS_DIRS → markdown)      │
-│ (*.py → python) │  │ Splits on ## headings, scores,  │
-│                 │  │ categorizes, stores as FTS5      │
-└─────────────────┘  └─────────────────────────────────┘
-                     │
-                     ▼
+
+         ── WRITE PATH (separate, daily) ──
 ┌─────────────────────────────────────────────────────────┐
-│          Dispatch with Intelligence Context             │
-│  • agent_validated: true/false                          │
-│  • pattern_count: 0-5                                   │
-│  • prevention_rules: 1-4 rules                          │
-│  • tags_analyzed: true                                  │
-│  • quality_context: {...}                               │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│               Terminal Agents (T1/T2/T3)                │
-│  Receive enriched dispatches with:                      │
-│  • Relevant code patterns                               │
-│  • Prevention warnings                                  │
-│  • Validated agent configurations                       │
+│   intelligence_daemon.py  (18:00 daily cycle)            │
+│     → learning_loop.daily_learning_cycle()               │
+│        Tier-1: confidence boost 1.10 / decay 0.95        │
+│        Tier-2: propose rules → pending_rules.json (gated) │
+│        reconcile → success_patterns.confidence_score     │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Agent Validation
+## Agent Validation (superseded)
 
-### Purpose
-Prevents invalid agent dispatches that would fail at terminal execution by validating agent names against the official agent directory.
-
-### Implementation
-
-**Version**: 1.0.0 (PR #1)
-**File**: `scripts/gather_intelligence.py` (lines 139-167)
-**Validation Source**: `.claude/terminals/library/templates/agents/agent_template_directory.yaml`
-
-### Valid Agents (as of v8.0)
-- `orchestrator-t0` - T0 orchestrator
-- `analyst` - Investigation specialist
-- `debugging-specialist` - Bug resolution
-- `architect` - System design
-- `developer` - General development
-- `senior-developer` - Advanced development
-- `performance-engineer` - Optimization
-- `quality-engineer` - Testing & validation
-- `security-engineer` - Security analysis
-- `refactoring-expert` - Code quality
-- `integration-specialist` - System integration
-- `junior-developer` - Learning tasks
-
-### Validation Process
-
-```python
-def validate_agent(agent_name: str) -> Dict[str, Any]:
-    """
-    Validates agent name against directory.
-    Returns: {
-        "valid": bool,
-        "agent": str,
-        "suggestion": str (if invalid)
-    }
-    """
-    # Load agent directory
-    agents = load_agent_directory()
-
-    # Check exact match
-    if agent_name in agents:
-        return {"valid": True, "agent": agent_name}
-
-    # Find closest match (Levenshtein distance)
-    suggestion = find_closest_match(agent_name, agents)
-
-    return {
-        "valid": False,
-        "agent": agent_name,
-        "suggestion": suggestion
-    }
-```
-
-### Error Handling
-
-When validation fails:
-1. Dispatcher logs error with suggested agent
-2. Dispatch moved to `dispatches/rejected/` with error annotation
-3. T0 can see rejection in logs: `tail -f .claude/vnx-system/logs/dispatcher.log`
-4. Suggested agent provided for correction
-
-### Testing
-
-```bash
-# List valid agents
-python3 .claude/vnx-system/scripts/gather_intelligence.py list-agents
-
-# Validate specific agent
-python3 .claude/vnx-system/scripts/gather_intelligence.py validate developer
-
-# Expected output for valid agent:
-# ✅ Agent 'developer' is valid
-
-# Expected output for invalid agent:
-# ❌ Agent 'devloper' is invalid
-# 💡 Did you mean: 'developer'?
-```
+Agent-name validation was a `gather_intelligence.py` feature on the old read path. It is **not** part of the current injection path — role resolution now lives in `worker_permissions` / `terminal_assignments` (`skill_injection._resolve_effective_role`), and lane/provider routing is enforced by the dispatch door. See the *Superseded / legacy (daemon-side)* appendix; this section is retained only as a pointer.
 
 ---
 
-## Pattern Matching Engine
+## Selection Engine (Pattern Matching)
 
 ### Purpose
-Connects 1,143 existing code patterns from the quality intelligence database to dispatch creation, providing terminals with relevant code examples and solutions.
+Choose a bounded, evidence-backed set of intelligence items for the dispatch — at most 3 standard items plus the direct W5 sources — under hard confidence, diversity, recency, and payload limits. This replaces the old FTS5 relevance-scoring engine; selection is now class-based, not a single weighted score.
 
 ### Implementation
 
-**Version**: 1.1 (PR #2, enhanced 2026-01-26)
-**File**: `scripts/gather_intelligence.py` (lines 216-326)
-**Database**: `state/quality_intelligence.db` → `code_snippets` table
-**Search**: FTS5 full-text search with relevance scoring
+**File**: `scripts/lib/intelligence_selector.py` — `IntelligenceSelector.select()` (lines 143-181)
+**Per-source queries**: `scripts/lib/intelligence_sources/` (`proven_pattern.py`, `failure_prevention.py`, `recent_comparable.py`, `adr_relevant.py`, `code_anchor.py`)
+**Contract**: FP-C Intelligence Contract — `docs/core/31_FPC_INTELLIGENCE_CONTRACT.md`. Governance gates: G-R5 (max 3 items), G-R6 (confidence + evidence + scope), G-R7 (advisory-only).
 
-### Pattern Database Schema
+### The three standard item classes
 
-```sql
--- FTS5 virtual table: stores both code snippets and doc sections
-CREATE VIRTUAL TABLE IF NOT EXISTS code_snippets USING fts5(
-    title,              -- Function name or ## heading text
-    description,        -- Docstring or frontmatter summary + first sentence
-    code,               -- Code snippet or section body (full-text searchable)
-    file_path,          -- Source file location
-    line_range,         -- "start-end" line numbers
-    tags,               -- Categories: crawler, storage, documentation, etc.
-    language,           -- "python" for code, "markdown" for docs
-    framework,          -- Framework name or doc category (architecture, api, etc.)
-    dependencies,       -- Required imports or cross-referenced doc files
-    quality_score,      -- 0-100 quality assessment
-    usage_count,        -- How many times referenced
-    last_updated,       -- Timestamp of last update
-    tokenize = 'porter unicode61'
-);
+Each is queried from a distinct table and ranked, then gated independently (`intelligence_selector.py:131-141`, source modules in `intelligence_sources/`):
 
--- Metadata table for staleness tracking
-CREATE TABLE IF NOT EXISTS snippet_metadata (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    snippet_rowid INTEGER NOT NULL,
-    file_path TEXT NOT NULL,
-    line_start INTEGER,
-    line_end INTEGER,
-    quality_score REAL DEFAULT 0.0,
-    usage_count INTEGER DEFAULT 0,
-    source_commit_hash TEXT,        -- Git commit hash at extraction time
-    extracted_at DATETIME,
-    verified_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-```
+| Class | Source table | What it carries | Rendered under |
+|-------|--------------|-----------------|----------------|
+| `proven_pattern` | `success_patterns` | high-confidence success patterns (ordered by `confidence_score`) | `### Proven success patterns` |
+| `failure_prevention` | `antipatterns` + `prevention_rules` | antipattern evidence + operator-approved rules | `### Antipatterns to avoid` |
+| `recent_comparable` | `dispatch_metadata` | similar recent dispatches (last 14 days) | `### Tag warnings` |
 
-The `language` field distinguishes content type:
-- **`"python"`**: Code snippets extracted by `code_snippet_extractor.py`
-- **`"markdown"`**: Documentation sections extracted by `doc_section_extractor.py`
+Selection priority is fixed: `ITEM_CLASS_PRIORITY = ["proven_pattern", "failure_prevention", "recent_comparable"]` (`intelligence_sources/_common.py:57`).
 
-The `framework` field serves dual purpose:
-- For Python: framework name (crawl4ai, supabase, fastapi, etc.)
-- For Markdown: document category (architecture, api, operations, etc.)
+### Confidence + evidence gates (G-R6)
 
-### Relevance Scoring Algorithm
+Each class has its own minimum confidence and minimum evidence-count threshold (`intelligence_sources/_common.py:45-55`). A candidate must clear **both** to be eligible:
 
-**Enhanced scoring (2026-01-26)** - Gate-, path-, and language-aware approach targeting higher relevance:
+| Class | Min confidence | Min evidence |
+|-------|----------------|--------------|
+| `proven_pattern` | 0.6 | 2 |
+| `failure_prevention` | 0.5 | 1 |
+| `recent_comparable` | 0.4 | 1 |
 
-```python
-def score_pattern_relevance(pattern: Dict, keywords: List[str], gate: str, task_paths: List[str], preferred_tags: List[str]) -> float:
-    score = 0.0
+If no candidate in a class clears the gate, a `SuppressionRecord` is written with the reason (`confidence X below threshold Y`) and that class contributes nothing. Antipattern confidence is derived from severity (critical 0.9 / high 0.75 / medium 0.6 / low 0.5); prevention-rule confidence comes from the row's `confidence` column (`failure_prevention.py:49,151,218`).
 
-    # 1. Keyword Matching (60% weight)
-    for keyword in keywords:
-        if keyword in pattern['title'].lower():
-            score += 0.4
-        if keyword in pattern.get('description', '').lower():
-            score += 0.3
-        if keyword in pattern.get('tags', '').lower():
-            score += 0.2
-        if keyword in pattern.get('file_path', '').lower():
-            score += 0.1
+### Diversity, governance cap, and the "best per class" rule
 
-    # 2. Preferred Tag Boost (task tags) / penalty if no matches
-    if preferred_tags:
-        if has_tag_match(pattern['tags'], preferred_tags):
-            score += 0.1
-        else:
-            score *= 0.6
+Within an eligible class (`_select_standard_classes`, `intelligence_selector.py:240-308`):
+- Duplicate items (same `content_hash`) are dropped — `seen_hashes` carries across classes.
+- At most **one** governance-category item per batch (`MAX_GOVERNANCE_PER_BATCH = 1`); extra governance items are dropped.
+- The single highest-confidence remaining candidate is selected per class (`best = max(diverse, key=confidence)`). So the standard ceiling is one item per class → 3 total (`MAX_ITEMS_PER_INJECTION = 3`).
 
-    # 3. Task Path Relevance (+0.3 for matching file/dir)
-    if has_path_match(pattern['file_path'], task_paths):
-        score += 0.3
-    else:
-        score *= 0.4
+### Recency suppression + vangnet
 
-    # 4. Gate-Aware Test Weighting
-    if '/tests/' in pattern['file_path']:
-        score *= 1.2 if gate in {'testing', 'review', 'validation'} else 0.2
+Items injected in the last *N* dispatches for the same `task_class` are suppressed so workers do not see the same pattern every round (`_query_recent_injected_ids` + the recency block in `_select_standard_classes`, `intelligence_selector.py:183-308`). *N* is `VNX_INTEL_SUPPRESS_WINDOW` (default **10**, lines 183/196); set to `0` to disable.
 
-    # 5. Production/Real-World Boost (+0.1)
-    if is_production_test(pattern['file_path']):
-        score += 0.1
+**Vangnet (safety net):** if suppression would empty a class entirely (every diverse candidate was recently injected), the best candidate is let through anyway to prevent an empty injection (`intelligence_selector.py:281-290`).
 
-    # 6. Quality Score Weighting (80-100% multiplier)
-    quality_multiplier = 0.8 + (pattern['quality_score'] / 100) * 0.2
-    score *= quality_multiplier
+### Payload cap
 
-    # 7. Usage Count Penalty (0.9x for overused patterns)
-    if pattern['usage_count'] > 10:
-        score *= 0.9
+After selection, `_enforce_payload_limit` (`intelligence_selector.py:311-329`) serializes the result and, while it exceeds `MAX_PAYLOAD_CHARS = 2000`, drops whole classes in reverse-priority order (recent_comparable first), recording a suppression reason each time. Per-item content is also capped at `MAX_CONTENT_CHARS_PER_ITEM = 500` (`_common.py:31-33`).
 
-    # 8. Recency Boost (last_updated)
-    if is_recent(pattern['last_updated'], days=30):
-        score *= 1.2
+### W5 direct sources (no confidence gate)
 
-return min(score, 1.0)  # Cap at 1.0
-```
+After the standard classes, `select()` appends the Wave-5 direct item classes when their preconditions are met (`intelligence_selector.py:166-179`, `_DIRECT_SOURCES` 65-72). These are precise, source-backed, and bypass the confidence/evidence gates (they carry their own evidence):
 
-### Language-Aware Filtering
+- `prior_round_finding` — built from prior review-gate results when `pr_id` is set (see *Prior-Round Findings* in the Injection section).
+- `adr_relevant` / `schema_section` — ADR + schema context from the `adrs` table (role/path triggered).
+- `code_anchor` — file:line anchors extracted from `dispatch_paths` + instruction.
+- `operator_memory` — operator-curated notes for the skill/paths.
 
-The system uses `_get_preferred_language()` to route queries to the right content type:
+Each appended item is re-checked against the payload cap with a cumulative drop order, so a large W5 item can evict lower-priority standard classes rather than blow the budget.
 
-- **Doc tasks** (keywords: documentation, guide, markdown, content, marketing, etc. or paths: `.md`, `.txt`): Query is filtered to `language="markdown"` with lowered quality threshold (40 vs 85)
-- **Code tasks** (paths: `.py`): Query filtered to `language="python"` with standard quality threshold (85)
-- **Mixed/unspecified tasks**: No language filter applied — FTS5 searches both code and doc sections
+### A/B control arm
 
-This replaces the previous behavior of completely skipping intelligence for non-code tasks. Now doc tasks receive relevant markdown sections instead of nothing.
+`_ab_arm()` (`intelligence_selector.py:40-50`) returns `control` for ~10% of dispatches **only when** `VNX_INTEL_AB_TEST=1`; otherwise always `treatment` (no-op). On the control arm, `select_intelligence` / `build_intelligence_context` skip injection entirely but still write the `intelligence_injections` audit row (with `ab_arm="control"` and zero items), so the effect of injection can be measured against a clean baseline.
 
-### Path Whitelist Behavior
+### CLI / inspection
 
-When a task includes explicit file paths, the system **prefers patterns from those paths**. If any path matches exist, it filters out unrelated snippets.
-
-### Usage Tracking (Optional)
-
-If a report includes `used_pattern_hashes`, the receipt processor increments `usage_count` and updates `pattern_usage` for those snippets.  
-This enables a learning loop without forcing changes to existing reports.
-
-Example report line:
-```
-Patterns Used: 2f9a... , 9a1b...
-```
-
-### Pattern Query Process
+The selector has no standalone CLI; it runs in-assembly. To inspect what was selected for a dispatch, read the audit row:
 
 ```bash
-# Command-line interface
-python3 scripts/gather_intelligence.py patterns "implement browser cleanup"
-
-# Returns top 5 patterns sorted by relevance:
-# [
-#   {
-#     "title": "verify_browser_context_cleanup",
-#     "description": "Verify browser context cleanup with close_context",
-#     "code": "def verify_browser_context_cleanup()...",  # 1000 chars max
-#     "file_path": "/path/to/file.py",
-#     "line_range": "82-97",
-#     "tags": "crawler, validation, browser-pool",
-#     "quality_score": 85.0,
-#     "usage_count": 3,
-#     "relevance_score": 0.87
-#   },
-#   ...
-# ]
+sqlite3 ~/.vnx-data/$VNX_PROJECT_ID/state/runtime_coordination.db \
+  "SELECT dispatch_id, task_class, items_injected, items_suppressed, ab_arm
+   FROM intelligence_injections ORDER BY injected_at DESC LIMIT 5"
 ```
-
-### Code Snippet Length
-
-**Enhancement (2026-01-26)**: Increased from 500 to 1000 characters for better context:
-
-```python
-# gather_intelligence.py line 310
-MAX_CODE_LENGTH = 1000  # Increased from 500
-```
-
-**Impact**: Terminals now receive more complete code examples with proper context, improving pattern usability by ~233%.
-
-### Performance Metrics
-
-- **Query Speed**: <10ms for 5 patterns from 1,143
-- **Memory Usage**: Minimal (SQLite connection only)
-- **Pattern Coverage**: All 1,143 patterns searchable
-- **Relevance Accuracy**: 60-80% (improved from 20-40%)
-- **Code Completeness**: 100% (improved from ~30%)
 
 ---
 
 ## Documentation Ingestion
 
+> **Daemon-side / legacy.** This populates the legacy `code_snippets` FTS5 table, which the **current injection path does not read** (the selector reads `success_patterns` / `antipatterns` / `prevention_rules` / `dispatch_metadata` / `adrs`, not `code_snippets`). ADR context is now served from the structured `adrs` table, not from ingested markdown. This section is retained for the daemon-side extractor only; it does not affect what a worker prompt receives.
+
 ### Purpose
-Indexes project markdown documentation into the same FTS5 `code_snippets` table, making architectural decisions, API specs, deployment procedures, and business logic searchable alongside code patterns. Configured via `VNX_DOCS_DIRS` environment variable — feature is inactive when not set.
+Indexes project markdown documentation into the legacy FTS5 `code_snippets` table, making architectural decisions, API specs, deployment procedures, and business logic searchable alongside code patterns. Configured via `VNX_DOCS_DIRS` environment variable — feature is inactive when not set.
 
 ### Implementation
 
@@ -488,7 +320,6 @@ The daemon calls `doc_section_extractor.py` after `code_snippet_extractor.py` du
 ### Testing
 
 ```bash
-cd .claude/vnx-system
 python3 -m pytest tests/test_doc_section_extractor.py -v
 # 13 tests: frontmatter, splitting, scoring, categorization, tags, env config, E2E pipeline
 ```
@@ -498,375 +329,70 @@ python3 -m pytest tests/test_doc_section_extractor.py -v
 ## Prevention Rules
 
 ### Purpose
-Generates context-aware prevention rules to warn terminals about common pitfalls and best practices relevant to their specific tasks.
+Warn workers about known failure modes for their task. There is no longer a keyword-to-hardcoded-rule generator. Prevention content comes from two real, governed sources that both surface through the `failure_prevention` item class at injection time.
 
-### Implementation
+### Source 1 — antipattern evidence (live, read at injection)
 
-**Version**: 1.0 (Activated 2026-01-26)
-**File**: `scripts/gather_intelligence.py` (lines 338-446)
-**Output**: 1-4 prevention rules per task (was 0, now active)
+Antipatterns accumulate in the `antipatterns` table from the receipt/learning pipeline. The selector reads them in `query_failure_prevention` → `_query_antipatterns` (`scripts/lib/intelligence_sources/failure_prevention.py:52-167`):
 
-### Prevention Rule Categories
+- Filter: `occurrence_count >= 1` and not expired (`valid_until`), scope-matched to the dispatch tags.
+- Ordering: by severity (critical → low) then `occurrence_count`.
+- Confidence by severity: critical 0.9 / high 0.75 / medium 0.6 / low 0.5.
+- Rendered as `- **<title>**: <why_problematic> Instead: <better_alternative>` under `### Antipatterns to avoid`.
 
-The system generates prevention rules across 10 categories:
+### Source 2 — operator-approved prevention rules (gated write → read at injection)
 
-#### 1. SSE Pipeline Memory Management
-```python
-if 'sse' in task_lower or 'stream' in task_lower:
-    rules.append({
-        "category": "sse-pipeline",
-        "severity": "high",
-        "rule": "Monitor memory usage in SSE pipelines - ensure generator cleanup",
-        "confidence": 0.9
-    })
+New rules are **proposed** by the learning loop and only become live after an operator approves them. Two stages:
+
+**Propose (Tier-2, write path).** `learning_loop.generate_prevention_rules` (`scripts/learning_loop.py:355-379`) groups repeated failures (`>= 2` occurrences of the same error+terminal+agent) and `update_terminal_constraints` (lines 405-452) writes them to `pending_rules.json` with `"status": "pending"`. Per **G-L1 they are never auto-activated** — nothing is inserted into the live `prevention_rules` table at this stage. Confidence is `min(occurrences * 0.2, 0.9)`.
+
+**Approve + ingest.** An operator edits `pending_rules.json` and sets a rule's `status` to `approved`. On the next cycle `ingest_approved_rules` (`scripts/learning_loop.py:556-...`) inserts **only** `status == "approved"` rows into the `prevention_rules` table (dedup by description + tag_combination), then marks them ingested. From then on the selector reads them via `_query_prevention_rules` (`failure_prevention.py:170-227`) and renders them under `### Antipatterns to avoid`.
+
+```
+failure receipts
+  → generate_prevention_rules()           (Tier-2 proposal)
+  → pending_rules.json  {status: "pending"}   ← G-L1: never auto-active
+  → operator sets status: "approved"          ← HUMAN GATE
+  → ingest_approved_rules()                (only approved rows)
+  → prevention_rules table  (live)
+  → query_failure_prevention()             (read at next injection)
 ```
 
-#### 2. Browser Process Cleanup
-```python
-if 'browser' in task_lower or 'chromium' in task_lower:
-    rules.append({
-        "category": "browser-cleanup",
-        "severity": "critical",
-        "rule": "Always close browser contexts and kill Chromium processes",
-        "confidence": 0.95
-    })
-```
-
-#### 3. Authentication Security
-```python
-if 'auth' in task_lower or 'login' in task_lower:
-    rules.append({
-        "category": "security",
-        "severity": "critical",
-        "rule": "Never store credentials in plain text - use environment variables",
-        "confidence": 1.0
-    })
-```
-
-#### 4. Database Performance
-```python
-if 'database' in task_lower or 'query' in task_lower:
-    rules.append({
-        "category": "performance",
-        "severity": "medium",
-        "rule": "Use connection pooling and prepared statements for queries",
-        "confidence": 0.85
-    })
-```
-
-#### 5. Test Coverage Requirements
-```python
-if 'test' in task_lower or 'validation' in task_lower:
-    rules.append({
-        "category": "testing",
-        "severity": "high",
-        "rule": "Maintain ≥80% unit test coverage and ≥70% integration coverage",
-        "confidence": 0.8
-    })
-```
-
-#### 6. Production Safety
-```python
-if 'production' in task_lower or 'deploy' in task_lower:
-    rules.append({
-        "category": "production",
-        "severity": "critical",
-        "rule": "Never deploy without running tests and creating rollback plan",
-        "confidence": 1.0
-    })
-```
-
-#### 7. SME B2B Requirements
-```python
-if 'sme' in task_lower or 'b2b' in task_lower:
-    rules.append({
-        "category": "sme-requirements",
-        "severity": "high",
-        "rule": "Validate KvK/BTW numbers and use Dutch decimal formatting",
-        "confidence": 0.9
-    })
-```
-
-#### 8. Performance Optimization
-```python
-if 'optimize' in task_lower or 'performance' in task_lower:
-    rules.append({
-        "category": "optimization",
-        "severity": "medium",
-        "rule": "Measure before optimizing - use profiling data",
-        "confidence": 0.8
-    })
-```
-
-#### 9. API Design Best Practices
-```python
-if 'api' in task_lower or 'endpoint' in task_lower:
-    rules.append({
-        "category": "api-design",
-        "severity": "medium",
-        "rule": "Follow REST principles and implement proper error responses",
-        "confidence": 0.75
-    })
-```
-
-#### 10. Refactoring Safety
-```python
-if 'refactor' in task_lower or 'cleanup' in task_lower:
-    rules.append({
-        "category": "refactoring",
-        "severity": "high",
-        "rule": "Run all tests before and after refactoring",
-        "confidence": 0.9
-    })
-```
-
-### Prevention Rule Format
+### Pending-rule shape
 
 ```json
 {
-  "prevention_rules": [
-    {
-      "category": "browser-cleanup",
-      "severity": "critical",
-      "rule": "Always close browser contexts and kill Chromium processes",
-      "confidence": 0.95,
-      "generated_at": "2026-01-26T12:30:00Z"
-    }
-  ]
+  "id": "rule-ab12cd34",
+  "created_at": "2026-06-23T14:00:00",
+  "source": "learning_loop",
+  "rule_type": "failure_prevention",
+  "pattern": "Error pattern: <first 50 chars of error>",
+  "terminal_constraint": "T1",
+  "prevention": "Validate agent exists ... before dispatch",
+  "confidence": 0.6,
+  "occurrence_count": 3,
+  "status": "pending"
 }
 ```
 
-### Testing
+### Inspection
 
 ```bash
-# Test prevention rule generation
-python3 scripts/gather_intelligence.py gather \
-  "Fix browser memory leak" "T1" "performance-engineer" "testing"
+# pending vs approved counts
+jq '[.pending_rules[] | .status] | group_by(.) | map({(.[0]): length}) | add' \
+  ~/.vnx-data/$VNX_PROJECT_ID/state/pending_rules.json
 
-# Expected output includes:
-# prevention_rules: [
-#   {
-#     "category": "browser-cleanup",
-#     "severity": "critical",
-#     "rule": "Always close browser contexts and kill Chromium processes"
-#   },
-#   {
-#     "category": "performance",
-#     "severity": "medium",
-#     "rule": "Measure before optimizing - use profiling data"
-#   }
-# ]
+# live rules
+sqlite3 ~/.vnx-data/$VNX_PROJECT_ID/state/quality_intelligence.db \
+  "SELECT description, confidence, triggered_count FROM prevention_rules
+   WHERE valid_until IS NULL OR valid_until > datetime('now') ORDER BY confidence DESC LIMIT 10"
 ```
 
 ---
 
-## Tag Intelligence
+## Tag Intelligence (superseded)
 
-### Purpose
-Extracts specific, compound tags from task descriptions for precise pattern matching and prevention rule targeting. Generates prevention rules from **pairwise and triple** tag subsets (not full n-tuples) for meaningful pattern matching.
-
-### Implementation
-
-**Version**: 2.0 (PR-3, Self-Learning Pipeline)
-**Tag Extraction**: `scripts/gather_intelligence.py` (lines 448-597)
-**Tag Combinations**: `scripts/tag_intelligence.py` (943 lines)
-**Recommendation Manager**: `scripts/tag_intelligence.py` (RecommendationManager class)
-**Tag Count**: 50+ specific tags across 12 categories + 23 standardized compound tags
-
-### Tag Categories & Patterns
-
-#### 1. SSE & Streaming (6 tags)
-- `sse-pipeline`, `sse-backpressure`, `sse-memory`
-- `streaming-data`, `generator-cleanup`, `async-stream`
-
-#### 2. Browser & Crawler (8 tags)
-- `browser-pool`, `browser-memory`, `browser-cleanup`
-- `chromium-killer`, `playwright-integration`, `crawler-optimization`
-- `page-discovery`, `sitemap-parsing`
-
-#### 3. Memory Management (6 tags)
-- `memory-leak`, `memory-optimization`, `gc-tuning`
-- `resource-cleanup`, `connection-pooling`, `cache-management`
-
-#### 4. Testing (7 tags)
-- `sme-b2b-testing`, `production-validation`, `e2e-testing`
-- `unit-testing`, `integration-testing`, `performance-testing`
-- `stress-testing`
-
-#### 5. Authentication & Security (5 tags)
-- `auth-security`, `jwt-validation`, `session-management`
-- `encryption`, `vulnerability-scan`
-
-#### 6. Database & Storage (6 tags)
-- `query-optimization`, `index-design`, `connection-pooling`
-- `transaction-safety`, `data-integrity`, `supabase-integration`
-
-#### 7. API Design (5 tags)
-- `rest-api`, `graphql`, `api-versioning`
-- `error-handling`, `rate-limiting`
-
-#### 8. Performance (6 tags)
-- `performance-tuning`, `bottleneck-analysis`, `profiling`
-- `caching-strategy`, `lazy-loading`, `code-splitting`
-
-#### 9. Dutch Compliance (4 tags)
-- `dutch-compliance`, `kvk-validation`, `btw-validation`
-- `dutch-formatting`
-
-#### 10. Refactoring (4 tags)
-- `code-cleanup`, `technical-debt`, `design-patterns`
-- `solid-principles`
-
-#### 11. Production (3 tags)
-- `production-safety`, `deployment`, `rollback-plan`
-
-#### 12. Monitoring (3 tags)
-- `health-monitoring`, `metrics-tracking`, `alerting`
-
-### Tag Extraction Algorithm
-
-```python
-def extract_specific_tags(task_description: str) -> List[str]:
-    """Extract specific, compound tags from task description."""
-    tags = []
-    task_lower = task_description.lower()
-
-    # SSE & Streaming
-    if 'sse' in task_lower:
-        tags.append('sse-pipeline')
-        if 'memory' in task_lower:
-            tags.append('sse-memory')
-        if 'backpressure' in task_lower:
-            tags.append('sse-backpressure')
-
-    # Browser & Crawler
-    if 'browser' in task_lower:
-        tags.append('browser-pool')
-        if 'memory' in task_lower or 'leak' in task_lower:
-            tags.append('browser-memory')
-        if 'cleanup' in task_lower or 'close' in task_lower:
-            tags.append('browser-cleanup')
-
-    # ... [additional tag extraction logic for all 12 categories]
-
-    return list(set(tags))  # Remove duplicates
-```
-
-### Pairwise & Triple Subset Generation (PR-3)
-
-Previously, tag combinations stored full n-tuples (8-12 tags), making each combination nearly unique and preventing meaningful pattern matching. Now `tag_intelligence.py` decomposes into pairwise and triple subsets:
-
-```python
-@staticmethod
-def generate_tag_subsets(tag_tuple: Tuple[str, ...]) -> List[Tuple[str, ...]]:
-    """Decompose n-tuples into pairs & triples for pattern matching."""
-    # Single/pair: passthrough
-    # Triple+: generate pairs and triples only (not full n-tuples)
-    # Example: (a,b,c,d) → [(a,b), (a,c), (a,d), (b,c), (b,d), (c,d),
-    #                        (a,b,c), (a,b,d), (a,c,d), (b,c,d)]
-```
-
-**Hierarchical matching**: If a pair matches, check if any triple containing those tags also matches for more specific rules.
-
-### Prevention Rule Lifecycle
-
-```
-1. Tag subsets generated from dispatch tags (pairs + triples)
-2. Occurrence count incremented in tag_combinations table
-3. At 2+ occurrences: prevention rule generated
-4. Rule confidence: min(occurrence_count / 10.0, 1.0)
-5. Rules queued in pending_rules.json (G-L1: never auto-activated)
-6. Operator reviews and accepts/rejects
-```
-
-### Recommendation Manager
-
-The `RecommendationManager` class (`tag_intelligence.py`) manages structured recommendations with evidence trails:
-
-```python
-class RecommendationManager:
-    MAX_PENDING_RECOMMENDATIONS = 5  # G-L8 cap
-
-    def add_recommendation(self, rec_type: str, target: str, symptom: str,
-                         evidence_ids: List[str], confidence: float) -> Dict
-    def mark_stale_pending_edits(self) -> List[Dict]  # >7 day old edits
-    def get_pending_count(self) -> int
-    def get_pending_recommendations(self) -> List[Dict]
-```
-
-**Recommendation Schema** (G-L2: evidence trail required):
-```json
-{
-  "type": "claude_md_patch|prevention_rule|routing_hint",
-  "target": "file_path_or_component",
-  "symptom": "detected_issue",
-  "evidence_ids": ["dispatch_1", "receipt_2", "OI-042"],
-  "confidence": 0.75,
-  "created_at": "2026-03-28T14:00:00Z",
-  "id": "sha1_hash_12chars",
-  "status": "pending|superseded|accepted"
-}
-```
-
-**Governance**:
-- **G-L2**: `evidence_ids` required — `ValueError` raised if missing
-- **G-L8**: Max 5 active pending recommendations. When cap is reached, lowest-confidence pending recommendation is superseded
-- Stale edits (>7 days) are marked for operator review
-
-### Hierarchical Tagging
-
-Tags follow a hierarchical structure for better organization:
-
-```
-memory
-├── memory-leak
-│   ├── browser-memory
-│   ├── sse-memory
-│   └── connection-leak
-└── memory-optimization
-    ├── gc-tuning
-    └── cache-management
-
-testing
-├── unit-testing
-├── integration-testing
-├── e2e-testing
-└── production-validation
-    └── sme-b2b-testing
-```
-
-### Tag Boosting
-
-**Preferred tags** (derived from task description) receive direct boosts, while non-matching tags are penalized:
-
-```python
-# gather_intelligence.py - relevance scoring
-if preferred_tags:
-    if has_tag_match(pattern['tags'], preferred_tags):
-        score += 0.1  # reward tag alignment
-    else:
-        score *= 0.6  # penalize mismatched tags
-```
-
-### Testing
-
-```bash
-# Test tag extraction
-python3 scripts/gather_intelligence.py gather \
-  "Implement SSE pipeline optimization for SME B2B testing with production validation" \
-  "T1" "performance-engineer" "testing"
-
-# Expected tags:
-# [
-#   "sse-pipeline",
-#   "sse-memory",
-#   "sme-b2b-testing",
-#   "production-validation",
-#   "performance-tuning",
-#   "memory-optimization",
-#   "production-safety"
-# ]
-```
+The compound-tag extractor and the pairwise/triple subset generator (`tag_intelligence.py`, `RecommendationManager`) were part of the old `gather_intelligence.py` read path. They are **not** in the current injection path. Scope matching is now done by the selector's lightweight `scope_tags` mechanism: `select()` builds an effective scope from `skill_name`, `Track-<n>`, `gate`, and the resolved `task_class` (`intelligence_selector.py:155-159`), and each source filters candidates with `_scope_matches` (`intelligence_sources/_common.py`). Operator-gated recommendations now live in `pending_rules.json` (see *Prevention Rules*). Retained here only as a pointer; details are in the *Superseded / legacy (daemon-side)* appendix.
 
 ---
 
@@ -877,44 +403,28 @@ Tracks when injected intelligence patterns are offered to terminals and whether 
 
 ### Implementation
 
-**Version**: 2.0 (PR-0, Self-Learning Pipeline)
-**Files**: `scripts/gather_intelligence.py` (offer/adoption tracking), `scripts/learning_loop.py` (confidence updates)
-**Audit Log**: `$VNX_STATE_DIR/intelligence_usage.ndjson` (append-only, G-L7)
+The injection side and the outcome side write to different places:
 
-### Offer → Adoption → Confidence Cycle
+- **Injection-time recording** (read path, in-assembly): `record_injection` → `record_injection_audit` writes the `intelligence_injections` audit row (coord DB), `record_pattern_usage` updates `pattern_usage` + `dispatch_pattern_offered`, and `stamp_source_dispatch_ids` records which source dispatches each injected pattern came from (`scripts/lib/intelligence_sources/_recording.py`).
+- **Outcome write-back** (on receipt arrival): `intelligence_persist.update_confidence_from_outcome` (`scripts/lib/intelligence_persist.py:268-...`) matches patterns back to the dispatch via `success_patterns.source_dispatch_ids` and recomputes confidence.
+- **Daily Tier-1 tuning**: `learning_loop.py` adjusts `pattern_usage.confidence` (boost 1.10 / decay 0.95), then `confidence_reconcile.reconcile_pattern_confidence` syncs those stats back into `success_patterns.confidence_score`.
 
-```
-1. Pattern Offered      gather_intelligence.py → record_pattern_offer()
-   (logged to NDJSON)   → intelligence_usage.ndjson {event_type: "offer"}
+### Per-dispatch write-back — Beta posterior (not fixed deltas)
 
-2. Dispatch Executes    Terminal works on task with injected patterns
+`update_confidence_from_outcome(db_path, dispatch_id, terminal, status)` does **not** apply a fixed `+x%`. It increments `success_count` / `failure_count` on the matching `pattern_usage` row and writes back a `Beta(success+1, failure+1)` Laplace-smoothed posterior to `success_patterns.confidence_score`, so the score reflects total usage volume rather than a run of consecutive boosts (`intelligence_persist.py:276-285`). A `confidence_events` row is written for audit. Linkage is `success_patterns.source_dispatch_ids LIKE '%<dispatch_id>%'`, project-scoped (ADR-007). Matching `pattern_usage` rows use the stable `intel_sp_<id>` id so the per-dispatch update and the daily reconcile read/write the same row.
 
-3. Receipt Arrives      receipt_processor.sh → record_adoption_from_receipt()
-   (correlation)        Compares receipt file changes with offered patterns
+### Daily Tier-1 confidence tuning (learning_loop.py)
 
-4. Adoption Recorded    Matching file changes → record_pattern_adoption()
-   (logged to NDJSON)   → intelligence_usage.ndjson {event_type: "adoption"}
-
-5. Confidence Updated   learning_loop.py → adjust_confidence()
-   (logged to NDJSON)   → intelligence_usage.ndjson {event_type: "confidence_change"}
-```
-
-### Key Functions
+The fixed-rate boost/decay still exists, but as the **daily** Tier-1 tuning, not the per-dispatch path. From `PatternUsageMetric` (`scripts/learning_loop.py:40-53`):
 
 ```python
-def record_pattern_offer(self, pattern_id: str, terminal: str, dispatch_id: str,
-                          file_path: str = "") -> None:
-    """Log a pattern offer event to intelligence_usage.ndjson (G-L7 audit trail)."""
-
-def record_pattern_adoption(self, pattern_id: str, terminal: str, dispatch_id: str) -> None:
-    """Record that an agent adopted a pattern (increments pattern_usage.used_count)."""
-
-def record_adoption_from_receipt(self, dispatch_id: str, terminal: str,
-                                 report_path: str) -> Dict[str, Any]:
-    """Correlate completed receipt's file changes with patterns offered for dispatch."""
+decay_rate = 0.95   # 5% daily decay for unused patterns
+boost_rate = 1.10   # 10% boost for used patterns
 ```
 
-### Database Schema
+`daily_learning_cycle` (`learning_loop.py:799-...`) runs: analyze receipts → update confidence scores → learn from failures (propose rules) → archive stale → persist to intelligence DB + `ingest_approved_rules` → **reconcile** (`confidence_reconcile.reconcile_pattern_confidence`, syncs `pattern_usage` stats into `success_patterns.confidence_score`). A 300-second TTL guard (`RECONCILE_CACHE_TTL_SECONDS`) lets the selector call `maybe_reconcile` at injection time as a safety net without re-running the full reconcile every dispatch (`confidence_reconcile.py:162-...`).
+
+### pattern_usage schema
 
 ```sql
 CREATE TABLE pattern_usage (
@@ -933,48 +443,10 @@ CREATE TABLE pattern_usage (
 );
 ```
 
-### Confidence Adjustment Formula
-
-```python
-def adjust_confidence(pattern_id: str, outcome: str) -> float:
-    current = get_confidence(pattern_id)
-
-    if outcome == "used":
-        new_confidence = min(current * 1.10, 2.0)   # +10%, cap 2.0
-    elif outcome == "ignored":
-        new_confidence = max(current * 0.95, 0.1)   # -5%, floor 0.1
-    elif outcome == "success":
-        new_confidence = min(current * 1.15, 2.0)   # +15%
-    elif outcome == "failure":
-        new_confidence = max(current * 0.90, 0.1)   # -10%
-
-    # All changes logged to intelligence_usage.ndjson (G-L7)
-    return new_confidence
-```
-
 ### Governance Enforcement
 
-- **G-L1**: `update_terminal_constraints()` writes to `pending_rules.json`, never directly to active rules
-- **G-L4**: `archive_unused_patterns()` queues to `pending_archival.json` for operator confirmation, never auto-archives
-- **G-L7**: Every offer, adoption, and confidence change is logged with timestamp, source, and old/new value
-
-### Audit Log Format (intelligence_usage.ndjson)
-
-```json
-{"timestamp": "2026-03-28T14:30:00Z", "event_type": "offer", "pattern_id": "abc123", "terminal": "T1", "dispatch_id": "20260328-impl-A"}
-{"timestamp": "2026-03-28T15:00:00Z", "event_type": "adoption", "pattern_id": "abc123", "terminal": "T1", "dispatch_id": "20260328-impl-A"}
-{"timestamp": "2026-03-28T15:01:00Z", "event_type": "confidence_change", "pattern_id": "abc123", "old_value": 1.0, "new_value": 1.1, "source": "adoption_boost"}
-```
-
-### Configuration
-
-```python
-BOOST_RATE = 1.10       # 10% per adoption
-DECAY_RATE = 0.95       # 5% daily for unused
-ARCHIVE_THRESHOLD = 30  # days (queued, not auto-archived per G-L4)
-CONFIDENCE_CAP = 2.0
-CONFIDENCE_FLOOR = 0.1
-```
+- **G-L1**: `update_terminal_constraints()` writes to `pending_rules.json`, never directly to the live `prevention_rules` table.
+- **G-L4**: stale-pattern archival queues to an operator-confirmation list, never auto-archives.
 
 ### Operations
 
@@ -983,14 +455,12 @@ CONFIDENCE_FLOOR = 0.1
 python3 scripts/learning_loop.py run
 
 # Check usage stats
-sqlite3 $VNX_STATE_DIR/quality_intelligence.db \
-  "SELECT pattern_id, used_count, ignored_count, confidence FROM pattern_usage WHERE used_count > 0 ORDER BY confidence DESC LIMIT 10"
-
-# View pending archival queue (G-L4)
-cat $VNX_STATE_DIR/pending_archival.json | jq '.patterns | length'
+sqlite3 ~/.vnx-data/$VNX_PROJECT_ID/state/quality_intelligence.db \
+  "SELECT pattern_id, used_count, success_count, failure_count, confidence
+   FROM pattern_usage WHERE used_count > 0 ORDER BY confidence DESC LIMIT 10"
 
 # View pending rules queue (G-L1)
-cat $VNX_STATE_DIR/pending_rules.json | jq '.rules | length'
+jq '.pending_rules | length' ~/.vnx-data/$VNX_PROJECT_ID/state/pending_rules.json
 ```
 
 ---
@@ -998,67 +468,109 @@ cat $VNX_STATE_DIR/pending_rules.json | jq '.rules | length'
 ## Intelligence Injection
 
 ### Purpose
-Delivers task-relevant intelligence to all terminals (T0-T3), replacing the previous system that only injected terminal status noise into T0.
+Splice task-relevant intelligence into the worker's instruction body. Injection is **in-assembly, in Python** — there is no `UserPromptSubmit` shell hook and no `additionalContext` JSON. The same path serves every provider lane.
 
-### Implementation
+### The in-assembly path (read path)
 
-**Version**: 2.0 (PR-2, Self-Learning Pipeline)
-**T0 Hook**: `scripts/userpromptsubmit_intelligence_inject.sh` (recommendations + quality hotspots)
-**Worker Hook**: `scripts/userpromptsubmit_worker_intelligence_inject.sh` (dispatch-specific patterns)
-**Registration**: Hooks registered via `vnx regen-settings --merge` (A-9)
-
-### T0 vs Worker Injection
-
-| Aspect | T0 Injection | T1-T3 Worker Injection |
-|--------|-------------|------------------------|
-| Content | Recommendations, quality hotspots | Dispatch-relevant patterns, prevention rules |
-| Max Patterns | N/A | 3 |
-| Max Rules | N/A | 2 |
-| Token Budget | <400 tokens | <400 tokens |
-| Dedup | Hash-based | Hash-based |
-
-### Worker Injection Flow
-
-```bash
-# 1. Determine current dispatch from terminal_state.json
-DISPATCH_ID=$(jq -r ".terminals.${TERMINAL_ID}.claimed_by" "$TERMINAL_STATE")
-
-# 2. Query gather_intelligence.py for dispatch-specific patterns
-INTELLIGENCE_JSON=$(python3 "$GATHER_SCRIPT" gather \
-  "$TASK" "$TERMINAL_ID" "${AGENT:-}" "${GATE:-}" "${DISPATCH_ID}")
-
-# 3. Hash-based change detection (skip if unchanged)
-INTEL_HASH=$(echo "$INTELLIGENCE_JSON" | sha256sum | cut -d' ' -f1)
-
-# 4. Inject into Claude Code prompt via additionalContext
-{
-  "decision": "allow",
-  "additionalContext": "=== VNX [T1] Dispatch: ABC-123 | Gate: implementation ===\n..."
-}
+```
+vnx dispatch (THE DOOR)
+  → dispatch_prepare.prepare()                 scripts/lib/dispatch_prepare.py:51-117
+    → _inject_skill_context()                  subprocess_dispatch_internals/skill_injection.py:114-...
+      → _build_intelligence_section()          skill_injection.py:73-111
+        → intelligence_injection.fetch_intelligence_section()   scripts/lib/intelligence_injection.py:292-369
+          → fetch_adr_context_section()        (ADR block, INT-2)
+          → IntelligenceSelector.select()      scripts/lib/intelligence_selector.py:143-181
 ```
 
-### Injection Audit (G-L7)
+`_build_intelligence_section` looks up the per-project state dir, then delegates to `fetch_intelligence_section`, which (a) builds the ADR context block when role/path triggers match, (b) runs the selector, (c) emits the coordination event, records the `intelligence_injections` audit row, and stamps `source_dispatch_ids`, then (d) returns the combined markdown. `build_intelligence_section` (the wrapper) prepends the `## Relevant Intelligence (from past dispatches)` header and splices it above the original instruction (`intelligence_injection.py:284-289`). Provider lanes (codex/gemini/litellm/kimi) reach the identical `fetch_intelligence_section` via `provider_dispatch.py`.
 
-Every injection event is logged to `intelligence_usage.ndjson`:
+### Exact rendered markdown
 
-```json
-{
-  "timestamp": "2026-03-28T14:30:00Z",
-  "event_type": "injection",
-  "terminal": "T1",
-  "dispatch_id": "ABC-123",
-  "gate": "implementation",
-  "pattern_ids": ["hash1", "hash2"],
-  "token_estimate": 320
-}
-```
+`format_intelligence_items` groups selected items by class and renders fixed section names (`intelligence_injection.py:372-393`):
 
-### Safe Degradation (A-5)
+```markdown
+## Relevant Intelligence (from past dispatches)
 
-Missing dispatch metadata, empty intelligence results, or unavailable database all degrade gracefully to no-op injection — the terminal prompt proceeds without intelligence context. Intelligence never blocks dispatch execution.
+### Antipatterns to avoid
+- **<title>**: <content>
+
+### Proven success patterns
+- **<title>**: <content>
+
+### Tag warnings
+- **<title>**: <content>
 
 ---
 
+<original instruction follows>
+```
+
+The class → heading mapping is hard-coded: `failure_prevention` → "Antipatterns to avoid", `proven_pattern` → "Proven success patterns", `recent_comparable` → "Tag warnings". When the selected set has no items in a class, that subheading is omitted. When the selector returns nothing, the original instruction is returned unchanged (best-effort).
+
+### ADR context block (INT-2, Wave-5)
+
+When the dispatch role is in `ADR_TRIGGER_ROLES` (`database-engineer`, `architect`, `intelligence-engineer`, `security-engineer`) or `dispatch_paths` hit `schemas/…` / `coordination_db.py` / `quality_db.py`, `fetch_adr_context_section` queries the `adrs` table (status `Accepted`, project-scoped, FTS-matched on path terms, max 3) and prepends a binding block (`intelligence_injection.py:29-247`):
+
+```markdown
+## ADR Context (auto-injected per Wave-5)
+
+The following Architectural Decision Records apply to your dispatch scope:
+
+### ADR-007 — <title>
+**Decision summary:** <≤200 chars>
+**Binding rules:**
+- <rule>
+
+These are BINDING — your implementation MUST comply.
+```
+
+Per ADR-005 the ADR injection writes an NDJSON audit event **first** and re-raises `OSError` on write failure (it must not be swallowed); other exceptions degrade to no ADR block. When both ADR and intelligence sections exist, ADR comes first (most binding).
+
+### Prior-round findings (Wave-5, highest signal)
+
+When the dispatch carries a `pr_id` that maps to existing review-gate results, `prior_round_injector.py` injects the previous round's findings so a re-dispatch sees what the last round flagged (the fix for round-cascades like PR #432's 9-round chain). It reads `state/review_gates/results/pr-<id>-{codex_gate,gemini_review}.json`, prefers blocking over advisory and newest round first, scope-filters by overlap with `dispatch_paths`, and trims to `MAX_INJECTION_CHARS = 2000` (`prior_round_injector.py:26,89-176`). Findings carry a `contract_hash` so the re-dispatch can tell which contract version produced them. The rendered block (`format_findings_section`, lines 179-210) includes an **anti-anchoring** notice telling the worker to re-read current code before relying on the findings:
+
+```markdown
+## PRIOR ROUND REVIEW FINDINGS
+
+> **Anti-anchoring notice:** Re-read current code at touched lines before
+> relying on these findings — they may have been addressed in subsequent rounds.
+
+### Blocking
+- **[codex_gate]** <message>
+
+### Advisory
+- **[gemini_review]** <message>
+```
+
+This surfaces through the selector as the `prior_round_finding` direct item class (`build_prior_round_item`).
+
+### Injection audit (`intelligence_injections`)
+
+Every injection — including A/B control arms that inject nothing — writes one row to the `intelligence_injections` table in the coord DB (`intelligence_selector.py:331-365` → `_recording.record_injection_audit`):
+
+| Column | Meaning |
+|--------|---------|
+| `injection_id`, `dispatch_id` | identity + attribution (dispatch_id is required; empty raises) |
+| `injection_point` | `dispatch_create` or `dispatch_resume` |
+| `task_class` | resolved task class used for selection + recency window |
+| `items_injected`, `items_suppressed` | counts |
+| `payload_chars` | serialized payload size |
+| `items_json`, `suppressed_json` | full selected items + suppression reasons |
+| `project_id` | ADR-007 tenant key (when the column exists) |
+| `ab_arm` | `treatment` or `control` (when the column exists) |
+
+The recency-suppression query (`_query_recent_injected_ids`) reads `items_json` from the last *N* rows of this same table for the task class, which is how an item injected last round gets suppressed this round.
+
+### Tenant isolation (ADR-007)
+
+Injection is per-project. The store is resolved from `current_project_id()` (`scripts/lib/project_scope.py:56-67`), which reads `VNX_PROJECT_ID` (default `vnx-dev`) and rejects ids that violate `^[a-z][a-z0-9-]{1,31}$` — bad ids fail loudly rather than bleeding cross-tenant. The central QI store path is `~/.vnx-data/<project_id>/state/quality_intelligence.db` (`intelligence_selector._get_central_qi_conn` 114-129). Reads are project-scoped by default (`VNX_PROJECT_FILTER` ON), and every source applies a `project_id = ?` clause when the table has the column. At init time, the owning `project_id` for a backfill is resolved **fail-closed** by `project_id_migration.resolve_init_project_id` (`scripts/lib/project_id_migration.py:96-151`): it derives the id from the DB path layout, the `.vnx-project-id` marker, and `VNX_PROJECT_ID`, and raises `RuntimeError` if those sources disagree — that conflict guard is what prevents a fresh non-`vnx-dev` store from silently inheriting another tenant's rows.
+
+### Safe degradation
+
+Missing dispatch metadata, an absent database, empty selection, or any selector exception all degrade to a no-op (original instruction returned). Injection never blocks dispatch execution. The one non-swallowed case is ADR-005 `OSError` on the ADR audit-event write, which must propagate.
+
+---
 ## Governance Measurement
 
 ### Purpose
@@ -1170,446 +682,213 @@ spc_alerts (alert_type, metric, scope, observed, limit, severity)
 
 ---
 
-## Performance & Caching
+## Performance & Caching (superseded)
 
-### Purpose
-Optimize intelligence query performance through multi-layer caching and intelligent query optimization.
-
-### Implementation
-
-**Version**: 1.0 (PR #6)
-**File**: `scripts/cached_intelligence.py` (276 lines)
-**Integration**: Transparent caching layer for `gather_intelligence.py`
-
-### Cache Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│         gather_intelligence.py               │
-│         (Main Intelligence Engine)           │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│       cached_intelligence.py                 │
-│       (Transparent Caching Layer)            │
-│                                              │
-│  ┌──────────┐  ┌──────────┐  ┌───────────┐ │
-│  │ Pattern  │  │  Report  │  │  Keyword  │ │
-│  │  Cache   │  │  Cache   │  │   Cache   │ │
-│  │ 100/15m  │  │  50/30m  │  │  200/60m  │ │
-│  └──────────┘  └──────────┘  └───────────┘ │
-│                                              │
-│  ┌──────────┐                                │
-│  │Prevention│                                │
-│  │  Cache   │                                │
-│  │  75/20m  │                                │
-│  └──────────┘                                │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│    quality_intelligence.db (SQLite)          │
-│    • code_snippets (1,143 patterns)          │
-│    • pattern_usage (learning data)           │
-│    • FTS5 indexes                            │
-└─────────────────────────────────────────────┘
-```
-
-### Cache Layers
-
-#### 1. Pattern Cache
-- **Size**: 100 items
-- **TTL**: 15 minutes
-- **Purpose**: Cache frequent pattern queries
-- **Hit Rate Target**: 80%+
-
-#### 2. Report Cache
-- **Size**: 50 items
-- **TTL**: 30 minutes
-- **Purpose**: Cache report mining results
-- **Hit Rate Target**: 70%+
-
-#### 3. Keyword Cache
-- **Size**: 200 items
-- **TTL**: 60 minutes
-- **Purpose**: Cache keyword extraction
-- **Hit Rate Target**: 90%+
-
-#### 4. Prevention Cache
-- **Size**: 75 items
-- **TTL**: 20 minutes
-- **Purpose**: Cache prevention rule generation
-- **Hit Rate Target**: 75%+
-
-### Performance Metrics
-
-```bash
-# Benchmark cache performance
-python3 cached_intelligence.py benchmark
-
-# Expected output:
-# Pattern Query (cached): 12ms
-# Pattern Query (uncached): 156ms
-# Cache Hit Rate: 87%
-# Memory Usage: 8.4 MB
-
-# View cache statistics
-python3 cached_intelligence.py stats
-
-# Expected output:
-# Pattern Cache: 87 items, 82% hit rate
-# Report Cache: 34 items, 71% hit rate
-# Keyword Cache: 156 items, 93% hit rate
-# Prevention Cache: 52 items, 78% hit rate
-```
-
-### Cache Optimization Strategies
-
-#### 1. TTL-Based Expiration
-- Short TTL (15-20m) for frequently changing data
-- Long TTL (60m) for stable data (keywords)
-
-#### 2. LRU Eviction
-- Least Recently Used patterns evicted first
-- Maintains hot patterns in cache
-
-#### 3. Confidence Boosting
-- Cached patterns receive small confidence boost
-- Encourages reuse of successful patterns
-
-#### 4. Query Result Preloading
-- Common queries preloaded during daemon startup
-- Reduces cold start latency
+The `cached_intelligence.py` multi-layer cache (pattern/report/keyword/prevention caches) wrapped the old `gather_intelligence.py` engine and is **not** in the current selector path. The current engine keeps latency bounded structurally instead of with a cache: selection reads a handful of `LIMIT`-bounded queries per class, caps output at `MAX_PAYLOAD_CHARS = 2000`, and uses a 300-second TTL guard around confidence reconcile (`confidence_reconcile.maybe_reconcile`) so the selector never re-runs the full reconcile per dispatch. Prior-round findings use a 1-minute-bucketed `lru_cache` (`prior_round_injector._fetch_cached`). The cache layer is documented in the *Superseded / legacy (daemon-side)* appendix only.
 
 ---
 
 ## Integration
 
-### Dispatcher Integration (V7.4)
+### Where injection plugs in (the door → assembly)
 
-The dispatcher calls `gather_intelligence.py` for **every dispatch**:
-
-```bash
-# dispatcher_v7_compilation.sh (line 485-512)
-
-# Gather intelligence for dispatch
-INTEL_JSON=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather \
-  "$TASK_DESCRIPTION" "$TRACK" "$AGENT_ROLE" 2>/dev/null)
-
-# Parse intelligence components
-AGENT_VALID=$(echo "$INTEL_JSON" | jq -r '.agent_validated')
-PATTERN_COUNT=$(echo "$INTEL_JSON" | jq -r '.pattern_count')
-PREVENTION_COUNT=$(echo "$INTEL_JSON" | jq -r '.prevention_rules | length')
-
-# Reject dispatch if agent invalid
-if [[ "$AGENT_VALID" == "false" ]]; then
-  SUGGESTED_AGENT=$(echo "$INTEL_JSON" | jq -r '.suggested_agent')
-  echo "❌ Agent '$AGENT_ROLE' invalid. Suggested: $SUGGESTED_AGENT"
-  mv "$DISPATCH_FILE" "$REJECTED_DIR/"
-  exit 1
-fi
-
-# Inject quality_context into dispatch
-echo "$INTEL_JSON" | jq '.quality_context' > "$DISPATCH_DIR/quality_context.json"
-```
-
-### Quality Context Structure
-
-```json
-{
-  "intelligence_version": "3.0.0",
-  "agent_validated": true,
-  "suggested_agent": null,
-  "patterns_available": true,
-  "pattern_count": 5,
-  "offered_pattern_hashes": ["a1b2c3...", "d4e5f6...", "g7h8i9...", "j0k1l2...", "m3n4o5..."],
-  "patterns": [
-    {
-      "title": "verify_browser_context_cleanup",
-      "description": "Verify browser context cleanup with close_context",
-      "code": "def verify_browser_context_cleanup()...",
-      "file_path": "/path/to/file.py",
-      "line_range": "82-97",
-      "tags": "crawler, validation, browser-pool",
-      "quality_score": 85.0,
-      "usage_count": 3,
-      "relevance_score": 0.87
-    }
-  ],
-  "prevention_rules": [
-    {
-      "category": "browser-cleanup",
-      "severity": "critical",
-      "rule": "Always close browser contexts and kill Chromium processes",
-      "confidence": 0.95
-    }
-  ],
-  "tags_analyzed": true,
-  "extracted_tags": ["browser-pool", "browser-memory", "memory-leak"],
-  "reports_mined": false,
-  "generated_at": "2026-01-26T12:30:00Z"
-}
-```
-
-### Terminal Access
-
-Terminals can query intelligence directly:
-
-```bash
-# From T1/T2/T3 terminal
-python3 ../.claude/vnx-system/scripts/gather_intelligence.py patterns \
-  "implement SSE cleanup"
-
-# Returns pattern JSON
-```
-
-### Intelligence Daemon Integration
-
-The intelligence daemon runs the learning loop daily:
+Intelligence is not called by a dispatcher script. It runs **inside assembly**, behind the single dispatch door. Both Claude lanes (tmux-spawn, subprocess) and the provider lanes assemble through `dispatch_prepare.prepare()`, which calls `_inject_skill_context` → `_build_intelligence_section` (see *Intelligence Injection*). No lane calls the selector directly; the seam is shared so every provider gets the same intelligence.
 
 ```python
-# intelligence_daemon.py integration
-def run_learning_cycle():
-    """Run daily learning cycle at 18:00."""
-    learning_loop = LearningLoop()
-    report = learning_loop.run()
-
-    # Update dashboard with learning metrics
-    update_dashboard({
-        "learning_cycle_last_run": datetime.now(),
-        "patterns_adjusted": report['adjustments_made'],
-        "patterns_archived": report['patterns_archived']
-    })
+# scripts/lib/dispatch_prepare.py:80-91  (assembly seam)
+body = _inject_skill_context(
+    terminal_id or "",
+    raw,                         # instruction (+ repo-map)
+    role,
+    {
+        "dispatch_id": dispatch_id,
+        "model": model,
+        "dispatch_paths": dispatch_paths or [],
+        "pr_id": pr_id,
+        "pr": pr_id,
+    },
+)
 ```
+
+`dispatch_paths`, `instruction_text`, and `pr_id` are forwarded all the way to `IntelligenceSelector.select()` so the W5 direct classes (adr_relevant, code_anchor, operator_memory, schema_section, prior_round_finding) can fire on real dispatches.
+
+### Provider-lane parity
+
+`provider_dispatch.py` (codex/gemini/litellm/kimi) reaches the same `intelligence_injection.fetch_intelligence_section`, so a kimi or glm worker receives the identical `## Relevant Intelligence` / `## ADR Context` blocks a Claude worker would. This is deliberate: raw vs gate-routed dispatch must not produce a different audit trail.
+
+### Intelligence daemon integration (write path)
+
+The daemon owns the write path and the daily cycle:
+
+```python
+# scripts/intelligence_daemon.py  (IntelligenceDaemon)
+self.learning_loop = LearningLoop()
+self.daily_hygiene_hour = 18          # 18:00
+
+# run loop:
+if self.should_run_daily_hygiene():   # once/day at 18:00
+    self.daily_hygiene()              # extractor + hygiene refresh
+self.run_learning_cycle()             # learning_loop.daily_learning_cycle()
+```
+
+`run_learning_cycle` calls `learning_loop.daily_learning_cycle()` (Tier-1 confidence tuning, Tier-2 rule proposals, reconcile). The daemon does not touch the read path.
 
 ---
-
 ## Operations
 
-### Monitoring
+All state lives in the per-project central store. `$VNX_PROJECT_ID` defaults to `vnx-dev`.
 
-#### Check Intelligence Health
+### Inspect what was injected
+
 ```bash
-# View dashboard status
-cat .claude/vnx-system/state/dashboard_status.json | jq '.intelligence'
+# Recent injection decisions (coord DB) — counts, suppression, A/B arm
+sqlite3 ~/.vnx-data/$VNX_PROJECT_ID/state/runtime_coordination.db \
+  "SELECT dispatch_id, task_class, items_injected, items_suppressed, ab_arm
+   FROM intelligence_injections ORDER BY injected_at DESC LIMIT 10"
 
-# Expected output:
-# {
-#   "pattern_count": 1143,
-#   "agent_validation": "active",
-#   "learning_loop_last_run": "2026-01-26T18:00:00Z",
-#   "cache_hit_rate": 0.87,
-#   "query_latency_ms": 12
-# }
+# Full selected items + suppression reasons for one dispatch
+sqlite3 ~/.vnx-data/$VNX_PROJECT_ID/state/runtime_coordination.db \
+  "SELECT items_json, suppressed_json FROM intelligence_injections
+   WHERE dispatch_id = '<id>'"
 ```
 
-#### Monitor Dispatcher Integration
-```bash
-# Check dispatcher logs for intelligence calls
-tail -f .claude/vnx-system/logs/dispatcher.log | grep "Intelligence"
+### Inspect the read tables
 
-# Expected output:
-# [2026-01-26 12:30:00] Intelligence: Gathered 5 patterns for task
-# [2026-01-26 12:30:00] Intelligence: Generated 3 prevention rules
-# [2026-01-26 12:30:00] Intelligence: Agent validated successfully
+```bash
+QI=~/.vnx-data/$VNX_PROJECT_ID/state/quality_intelligence.db
+
+# Proven patterns by confidence
+sqlite3 "$QI" "SELECT title, confidence_score, usage_count FROM success_patterns
+  ORDER BY confidence_score DESC LIMIT 10"
+
+# Antipatterns + live prevention rules
+sqlite3 "$QI" "SELECT title, severity, occurrence_count FROM antipatterns
+  ORDER BY occurrence_count DESC LIMIT 10"
+sqlite3 "$QI" "SELECT description, confidence, triggered_count FROM prevention_rules
+  WHERE valid_until IS NULL OR valid_until > datetime('now') ORDER BY confidence DESC LIMIT 10"
 ```
 
-#### Check Pattern Usage
+### Write path
+
 ```bash
-# View pattern usage statistics
-sqlite3 .claude/vnx-system/state/quality_intelligence.db \
-  "SELECT pattern_id, used_count, confidence
-   FROM pattern_usage
-   ORDER BY used_count DESC LIMIT 10"
+# Manual daily learning cycle (Tier-1 tune + Tier-2 propose + reconcile)
+python3 scripts/learning_loop.py run
+
+# Pending rule proposals awaiting operator approval (G-L1)
+jq '.pending_rules | length' ~/.vnx-data/$VNX_PROJECT_ID/state/pending_rules.json
 ```
 
 ### Troubleshooting
 
-#### Problem: No patterns returned
-
-**Symptoms**:
-```bash
-python3 scripts/gather_intelligence.py patterns "test task"
-# Returns: {"patterns": []}
-```
-
-**Diagnosis**:
-```bash
-# Check database connectivity
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('.claude/vnx-system/state/quality_intelligence.db')
-cursor = conn.cursor()
-cursor.execute('SELECT COUNT(*) FROM code_snippets')
-print(f'Patterns in DB: {cursor.fetchone()[0]}')
-"
-```
-
-**Solutions**:
-1. Verify database exists and has 1,143 patterns
-2. Check FTS5 index: `PRAGMA index_list(code_snippets_fts)`
-3. Test with broader keywords
-
-#### Problem: Agent validation failing
-
-**Symptoms**:
-```bash
-# Dispatcher rejecting all agents
-ls .claude/vnx-system/dispatches/rejected/
-```
-
-**Diagnosis**:
-```bash
-# List valid agents
-python3 scripts/gather_intelligence.py list-agents
-
-# Validate specific agent
-python3 scripts/gather_intelligence.py validate "problem-agent"
-```
-
-**Solutions**:
-1. Verify agent directory exists: `.claude/terminals/library/templates/agents/agent_template_directory.yaml`
-2. Check agent name spelling (case-sensitive)
-3. Use suggested agent from validation output
-
-#### Problem: Low cache hit rate
-
-**Symptoms**:
-```bash
-python3 cached_intelligence.py stats
-# Cache Hit Rate: 23% (target: 80%+)
-```
-
-**Diagnosis**:
-```bash
-# Check cache configuration
-python3 -c "
-from cached_intelligence import CachedIntelligence
-cache = CachedIntelligence()
-print(f'Pattern Cache: {cache.pattern_cache.maxsize} items')
-print(f'TTL: {cache.pattern_cache_ttl} seconds')
-"
-```
-
-**Solutions**:
-1. Increase cache size: `PATTERN_CACHE_SIZE = 200`
-2. Increase TTL: `PATTERN_CACHE_TTL = 1800` (30 min)
-3. Check if queries are too unique (cache can't help)
+| Symptom | Likely cause | Check |
+|---------|--------------|-------|
+| No `## Relevant Intelligence` block in worker prompt | selector returned 0 items (all below threshold), or A/B control arm | `intelligence_injections.items_injected` + `ab_arm` for the dispatch |
+| Same item every round | recency suppression disabled | `echo $VNX_INTEL_SUPPRESS_WINDOW` (default 10; `0` disables) |
+| Intelligence missing for a non-`vnx-dev` project | wrong project store / `VNX_PROJECT_FILTER` | confirm `VNX_PROJECT_ID`, that `~/.vnx-data/<pid>/state/quality_intelligence.db` exists |
+| New rule never appears | it is still `status: pending` (G-L1 gate) | set `status: "approved"` in `pending_rules.json`, re-run learning cycle |
+| Confidence stuck at initial value | reconcile not run | `python3 scripts/learning_loop.py run`, or rely on injection-time `maybe_reconcile` (300s TTL) |
 
 ---
 
 ## Testing
 
-### Test Suite Structure
-
-```
-.claude/vnx-system/tests/
-├── test_pattern_matching.py          # Pattern engine tests
-├── test_agent_validation.py          # Agent validation tests
-├── test_doc_section_extractor.py     # Doc ingestion tests (13 tests)
-├── test_cli_json_output.py           # CLI JSON contract stability
-├── test_validate_template_tokens.py  # Template validation
-├── test_receipt_ci_guard.py          # Receipt format compliance
-└── test_pr_recommendation_integration.py  # PR queue integration
-```
-
-### Running Tests
+### Read-path tests
 
 ```bash
-# Run all intelligence tests
-cd .claude/vnx-system
-python3 -m pytest tests/test_*intelligence*.py -v
-
-# Run specific test suite
-python3 tests/test_pattern_matching.py
-
-# Run with coverage
-python3 -m pytest tests/ --cov=scripts --cov-report=html
+python3 -m pytest \
+  tests/test_intelligence_selector.py \
+  tests/test_intelligence_sources/ \
+  tests/test_intelligence_injection.py \
+  tests/test_intelligence_recency_suppression.py \
+  tests/test_intelligence_per_provider.py \
+  tests/test_provider_dispatch_intelligence.py \
+  tests/test_subprocess_intelligence_injection.py \
+  tests/test_skill_injection_wave5.py \
+  tests/test_prior_round_injector.py \
+  tests/test_adr_injection.py \
+  tests/test_intelligence_ab_framework.py -v
 ```
 
-### Test Coverage
-
-**Target Coverage**: ≥85%
-
-Current coverage:
-- `gather_intelligence.py`: 92%
-- `learning_loop.py`: 88%
-- `cached_intelligence.py`: 85%
-- `intelligence_daemon.py`: 79%
-
-### Integration Testing
+### Write-path + tenant tests
 
 ```bash
-# End-to-end intelligence flow test
-python3 tests/test_intelligence_integration.py
-
-# Expected output:
-# ✅ Agent validation working
-# ✅ Pattern matching returning 5 patterns
-# ✅ Prevention rules generated (3 rules)
-# ✅ Tags extracted (7 tags)
-# ✅ Quality context populated
-# ✅ Cache working (hit rate: 87%)
-# ✅ Learning loop adjusting confidence
-#
-# All integration tests passed!
+python3 -m pytest \
+  tests/test_learning_loop_certification.py \
+  tests/test_confidence_reconcile.py \
+  tests/test_project_scope_filesystem.py \
+  tests/test_project_id_migration.py \
+  tests/test_intelligence_pipeline_e2e.py -v
 ```
+
+### What each suite proves
+
+- `test_intelligence_selector.py` / `test_intelligence_sources/` — thresholds, diversity, payload cap, the three classes.
+- `test_intelligence_recency_suppression.py` — suppression window + vangnet.
+- `test_intelligence_per_provider.py` / `test_provider_dispatch_intelligence.py` — provider-lane parity (same section for codex/gemini/litellm/kimi).
+- `test_prior_round_injector.py` — prior-round scope filter, char cap, anti-anchoring notice.
+- `test_project_id_migration.py` — ADR-007 fail-closed conflict guard.
+- `test_intelligence_pipeline_e2e.py` — inject → receipt → confidence write-back end to end.
 
 ---
-
 ## Appendix
 
-### Files Reference
+### Files Reference (current engine)
 
-#### Core Scripts
-- `.claude/vnx-system/scripts/gather_intelligence.py` - Main intelligence engine with language-aware filtering
-- `.claude/vnx-system/scripts/code_snippet_extractor.py` - Python code pattern extraction
-- `.claude/vnx-system/scripts/doc_section_extractor.py` - Markdown documentation section extraction
-- `.claude/vnx-system/scripts/learning_loop.py` - Learning & confidence adjustment
-- `.claude/vnx-system/scripts/cached_intelligence.py` - Performance caching layer
-- `.claude/vnx-system/scripts/intelligence_daemon.py` - Daemon integration (orchestrates all extractors)
+**Read path (injection)**
+- `scripts/lib/dispatch_prepare.py` — shared assembly seam (`prepare()`), where injection plugs in.
+- `scripts/lib/subprocess_dispatch_internals/skill_injection.py` — `_inject_skill_context`, `_build_intelligence_section` (`:73-111`).
+- `scripts/lib/intelligence_injection.py` — `fetch_intelligence_section`, `format_intelligence_items`, ADR context block.
+- `scripts/lib/intelligence_selector.py` — `IntelligenceSelector.select()` (`:143-181`), gates, recency, payload cap, audit.
+- `scripts/lib/intelligence_sources/` — per-class queries + constants: `_common.py` (thresholds/limits), `proven_pattern.py`, `failure_prevention.py`, `recent_comparable.py`, `adr_relevant.py`, `code_anchor.py`, `_recording.py`, `_models.py`.
+- `scripts/lib/prior_round_injector.py` — Wave-5 prior-round findings (`MAX_INJECTION_CHARS = 2000`).
+- `scripts/lib/confidence_reconcile.py` — `maybe_reconcile` / `reconcile_pattern_confidence` (300s TTL guard).
+- `scripts/lib/intelligence_persist.py` — `update_confidence_from_outcome` (Beta posterior write-back).
 
-#### Database
-- `$VNX_STATE_DIR/quality_intelligence.db` - SQLite database
-  - `code_snippets` FTS5 table — Python snippets (`language="python"`) + doc sections (`language="markdown"`)
-  - `snippet_metadata` table — commit hash tracking, staleness verification
-  - `pattern_usage` table — learning data
-  - FTS5 full-text search indexes
+**Write path (daemon / learning)** — note: these two live at top-level `scripts/`, not `scripts/lib/`:
+- `scripts/intelligence_daemon.py` — daily cycle orchestration (18:00), runs the learning loop.
+- `scripts/learning_loop.py` — Tier-1 confidence tune (boost 1.10 / decay 0.95), Tier-2 rule proposals → `pending_rules.json`, `ingest_approved_rules`, reconcile.
 
-#### Configuration
-- `.claude/terminals/library/templates/agents/agent_template_directory.yaml` - Valid agents
-- `.claude/vnx-system/state/dashboard_status.json` - System health metrics
+**Tenant isolation (ADR-007)**
+- `scripts/lib/project_scope.py` — `current_project_id` (`:56-67`), `project_filter_enabled`.
+- `scripts/lib/project_id_migration.py` — `resolve_init_project_id` fail-closed (`:96-151`).
 
-#### Logs & Reports
-- `.claude/vnx-system/logs/dispatcher.log` - Dispatcher intelligence calls
-- `.claude/vnx-system/state/learning_report_*.json` - Daily learning reports
-- `.claude/vnx-system/state/archive/patterns/` - Archived patterns
+**Stores (per-project, ADR-007)** — `~/.vnx-data/<project_id>/state/`:
+- `quality_intelligence.db` — `success_patterns`, `antipatterns`, `prevention_rules`, `dispatch_metadata`, `adrs`/`adrs_fts`, `pattern_usage`, `dispatch_pattern_offered`, `confidence_events`.
+- `runtime_coordination.db` — `intelligence_injections` (injection audit).
+- `pending_rules.json` — operator-gated Tier-2 rule proposals (G-L1).
 
-### Performance Benchmarks
+**Contract / spec**
+- `docs/core/31_FPC_INTELLIGENCE_CONTRACT.md` — FP-C contract (G-R5/R6/R7, limits).
+- `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md` — tenant stamping.
 
-| Metric | Target | Current | Status |
-|--------|--------|---------|--------|
-| Pattern Query (cached) | <100ms | 12ms | ✅ |
-| Pattern Query (uncached) | <200ms | 156ms | ✅ |
-| Agent Validation | <10ms | 3ms | ✅ |
-| Prevention Rule Generation | <50ms | 28ms | ✅ |
-| Tag Extraction | <20ms | 8ms | ✅ |
-| Cache Hit Rate | >80% | 87% | ✅ |
-| Memory Usage | <50MB | 8.4MB | ✅ |
-| Learning Cycle Duration | <60s | 42s | ✅ |
+### Superseded / legacy (daemon-side)
+
+The following are **not** part of the injection read path. Some files still exist for daemon-side hygiene/extraction or are fully retired; none are consulted when assembling a worker prompt:
+
+- `gather_intelligence.py` — the old `gather/patterns/validate/list-agents` engine (agent-name validation, FTS5 relevance scoring, keyword→hardcoded prevention rules, compound-tag extraction). Superseded by `IntelligenceSelector`.
+- `cached_intelligence.py` — the pattern/report/keyword/prevention cache layer that wrapped `gather_intelligence.py`. Not in the selector path.
+- `tag_intelligence.py` — compound-tag extraction + pairwise/triple subsets + `RecommendationManager`. Scope matching is now `scope_tags` + `_scope_matches`.
+- `code_snippet_extractor.py` / `doc_section_extractor.py` — populate the legacy `code_snippets` FTS5 table; used (if at all) by daemon hygiene, not by injection.
+- `scripts/userpromptsubmit_intelligence_inject.sh` / `scripts/userpromptsubmit_worker_intelligence_inject.sh` — the old shell-hook + `additionalContext` injection model. The files still exist on disk but are **not** the injection path; current injection is in-assembly Python and does not register or call these hooks. (verify: confirm they are not wired in any active `settings.json` before relying on this.)
 
 ### Version History
 
-- **v5.0.0** (2026-03-28) - Self-Learning Pipeline: usage signal tracking (PR-0), session analytics fix (PR-1), task-relevant injection for all terminals (PR-2), pairwise/triple tag subsets + recommendation manager (PR-3), 3-section quality digest + consolidated 11-phase nightly pipeline (PR-4)
-- **v3.0.0** (2026-03-02) - Documentation ingestion (`doc_section_extractor.py`), language-aware filtering, `VNX_DOCS_DIRS` config
-- **v2.0.0** (2026-01-26) - Enhanced relevance scoring, prevention rules, tag intelligence
-- **v1.1.0** (2026-01-19) - Pattern matching engine (PR #2), dispatcher integration (PR #8)
-- **v1.0.0** (2026-01-18) - Agent validation (PR #1)
+- **v6.0.0** (2026-06-23) — Rebased onto the current engine: in-assembly Python injection (`dispatch_prepare` → `_build_intelligence_section` → `fetch_intelligence_section` → `IntelligenceSelector.select()`), class-based bounded selection (FP-C G-R5/R6/R7), W5 direct sources, recency suppression + vangnet, A/B control arm, ADR context, prior-round findings, Beta-posterior confidence write-back, ADR-007 tenant isolation. The `gather_intelligence.py` engine, FTS5 relevance scoring, agent validation, tag intelligence, and the UserPromptSubmit shell hooks are marked superseded.
+- **v5.0.0** (2026-03-28) — Self-Learning Pipeline (last version describing the `gather_intelligence.py` engine).
+- **v3.0.0** (2026-03-02) — Documentation ingestion, language-aware filtering, `VNX_DOCS_DIRS`.
+- **v2.0.0** (2026-01-26) — Enhanced relevance scoring, prevention rules, tag intelligence.
+- **v1.1.0** (2026-01-19) — Pattern matching engine, dispatcher integration.
+- **v1.0.0** (2026-01-18) — Agent validation.
+
+### Cross-references
+
+- Overview / entry point: `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` §7 (this doc is the deep reference it links to).
+- FP-C contract: `docs/core/31_FPC_INTELLIGENCE_CONTRACT.md`.
+- Tenant isolation: `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md`.
 
 ---
 
-**Document Version**: 5.0.0
-**Last Updated**: 2026-03-28
+**Document Version**: 6.0.0
+**Last Updated**: 2026-06-23
 **Maintained by**: T-MANAGER
-**Status**: Production Active
+**Status**: Active — deep technical reference
