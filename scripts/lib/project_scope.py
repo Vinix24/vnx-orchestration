@@ -67,6 +67,73 @@ def current_project_id() -> str:
     return _validate(raw)
 
 
+class TenantUnresolved(RuntimeError):
+    """No authoritative project_id could be resolved for a write that MUST be
+    tenant-stamped.
+
+    Fail-closed contract (ADR-007 amendment 2026-06-24, QI-write-tier): callers
+    in the DB-table write regime (``dispatch_metadata``, ``adrs``) catch this,
+    log at ERROR + skip the write — they never stamp a contaminating ``vnx-dev``
+    default onto a non-vnx-dev store. Unlike :func:`current_project_id`, which
+    degrades to ``'vnx-dev'`` on an unset env, this path refuses to guess.
+    """
+
+
+def resolve_stamp_project_id(
+    explicit: str | None = None, db_path: "str | Path | None" = None
+) -> str:
+    """Resolve the project_id to STAMP on a tenant-scoped DB-table write, fail-closed.
+
+    NEVER silently defaults to ``vnx-dev``: an unresolvable tenant raises
+    :class:`TenantUnresolved` so the caller can refuse the contaminating write.
+
+    Precedence:
+      (a) ``explicit`` (non-empty, valid) → use it.
+      (b) ``db_path`` given → :func:`project_id_migration.resolve_init_project_id`
+          with ``strict=True`` is TERMINAL. That resolver weighs
+          {db-path layout, ``.vnx-project-id`` marker, ``VNX_PROJECT_ID`` env}
+          as co-sources that must AGREE — a lone env source IS the value (not a
+          conflict); a source mismatch or (under strict) a total absence raises.
+          A ``RuntimeError`` (source conflict / invalid id) is CAST to
+          ``TenantUnresolved``. No separate env step runs after ``db_path``.
+      (c) no ``db_path`` → ``VNX_PROJECT_ID`` env (non-empty, valid) → use it.
+      (d) otherwise → ``raise TenantUnresolved``.
+
+    ``Path.resolve()`` inside the resolver may raise ``OSError`` on a
+    non-existent parent; that is caught and converted to ``TenantUnresolved``
+    so an IO error never leaks to the fail-closed caller.
+    """
+    if explicit:
+        try:
+            return _validate(explicit)
+        except ValueError as exc:
+            raise TenantUnresolved(f"explicit project_id invalid: {exc}") from exc
+
+    if db_path is not None:
+        try:
+            from project_id_migration import resolve_init_project_id  # noqa: PLC0415
+            return resolve_init_project_id(Path(db_path), strict=True)
+        except TenantUnresolved:
+            raise  # already the fail-closed type — do not double-wrap
+        except (RuntimeError, OSError) as exc:
+            # RuntimeError: source conflict or invalid resolved id.
+            # OSError: Path.resolve() on a non-existent parent.
+            raise TenantUnresolved(
+                f"tenant unresolved for db_path {db_path!r}: {exc}"
+            ) from exc
+
+    raw = os.environ.get(ENV_VAR)
+    if raw:
+        try:
+            return _validate(raw)
+        except ValueError as exc:
+            raise TenantUnresolved(f"VNX_PROJECT_ID invalid: {exc}") from exc
+
+    raise TenantUnresolved(
+        "no project_id source: no explicit arg, no db_path, and VNX_PROJECT_ID unset"
+    )
+
+
 def project_filter_enabled() -> bool:
     """Return True when per-project filtering should be applied to reads.
 

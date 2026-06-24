@@ -16,7 +16,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
     from vnx_paths import ensure_env
-    from project_scope import current_project_id
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
@@ -76,7 +75,25 @@ def main():
     # INSERT OR IGNORE: only inserts when the row is new so existing provider/model
     # values are never deleted by a REPLACE. dispatched_at is set on first insert only.
     # A follow-up UPDATE keeps all other dispatch fields current on re-calls.
-    project_id_val = current_project_id()
+    #
+    # Tenant-stamp fail-closed (this tmux-lane is the live MC contamination source):
+    # resolve the owning tenant store-derived from DB_PATH; if unresolvable, log +
+    # skip rather than stamp a contaminating 'vnx-dev' default. Only the
+    # project_id-column path needs it (old column-less stores skip stamping).
+    has_project = _has_column(conn, "dispatch_metadata", "project_id")
+    project_id_val = None
+    if has_project:
+        try:
+            from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+            project_id_val = resolve_stamp_project_id(db_path=DB_PATH)
+        except TenantUnresolved as exc:
+            print(
+                "ERROR: tenant_stamp_skip log_dispatch_metadata "
+                f"db_path={DB_PATH} dispatch_id={args.dispatch_id} "
+                f"terminal={args.terminal} reason={exc}",
+                file=sys.stderr,
+            )
+            return 1
     now_iso = datetime.utcnow().isoformat()
     _dispatch_vals = (
         args.role or None,
@@ -93,7 +110,7 @@ def main():
         args.target_open_items,
     )
 
-    if _has_column(conn, "dispatch_metadata", "project_id"):
+    if has_project:
         cur.execute("""
             INSERT OR IGNORE INTO dispatch_metadata (
                 dispatch_id, terminal, track, role, skill_name, gate,
@@ -144,7 +161,7 @@ def main():
     # land via migration v21/v23 (GAP 2); older DBs simply skip them. COALESCE keeps
     # any real value already stamped by provider_dispatch; only fills NULL.
     # ADR-007: scope by project_id when present to prevent cross-tenant overwrite.
-    has_project = _has_column(conn, "dispatch_metadata", "project_id")
+    # (has_project already resolved above for the fail-closed tenant stamp.)
     if args.provider and _has_column(conn, "dispatch_metadata", "provider"):
         if has_project:
             cur.execute(

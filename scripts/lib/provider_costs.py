@@ -157,7 +157,7 @@ def emit_provider_cost(
     output_tokens: int | None,
     cost_usd_estimate: float | None,
     dispatch_id: str | None = None,
-    project_id: str = "vnx-dev",
+    project_id: str = "",
     metadata: dict | None = None,
 ) -> None:
     """Append a provider cost NDJSON event to .vnx-data/events/provider_costs.ndjson.
@@ -166,6 +166,14 @@ def emit_provider_cost(
     ADR-007: project_id stamped on every event.
 
     Raises OSError/IOError on write failure — no silent except.
+
+    Tenant resolution (best-effort, NOT fail-closed): the cost log is an
+    append-only NDJSON receipt, not a central-DB table, so the ADR-007
+    DEFAULT-ban does not bind it and it must NEVER skip an event (cost-audit =
+    no data-loss). Callers that hold a store ``db_path`` (provider_dispatch,
+    recovery) pass a store-derived pid explicitly; absent that, this falls back
+    to the env (then ``vnx-dev``). The ``if not project_id`` trigger treats
+    ``None`` and ``""`` identically.
     """
     effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

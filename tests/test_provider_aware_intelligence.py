@@ -38,7 +38,9 @@ from dispatch_metadata_db import upsert_dispatch_provider_row  # noqa: E402
 
 
 def _bootstrap_db(tmp_path: Path) -> Path:
-    db = tmp_path / "state" / "quality_intelligence.db"
+    # Canonical ~/.vnx-data/<pid>/state/ layout so the fail-closed tenant resolver
+    # derives the owning project_id from the path (no env/marker needed).
+    db = tmp_path / ".vnx-data" / "vnx-dev" / "state" / "quality_intelligence.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     assert quality_db_init.bootstrap_qi_db(db, _REPO / "schemas" / "quality_intelligence.sql")
     return db
@@ -177,8 +179,8 @@ def test_upsert_does_not_clobber_existing_richer_row(tmp_path):
     db = _bootstrap_db(tmp_path)
     conn = sqlite3.connect(str(db))
     conn.execute(
-        "INSERT INTO dispatch_metadata (dispatch_id, terminal, track, role, gate) "
-        "VALUES ('d-2', 'T1', 'A', 'frontend-architect', 'codex_gate')"
+        "INSERT INTO dispatch_metadata (dispatch_id, terminal, track, role, gate, project_id) "
+        "VALUES ('d-2', 'T1', 'A', 'frontend-architect', 'codex_gate', 'vnx-dev')"
     )
     conn.commit(); conn.close()
     # Upsert with provider; role/gate already set must be preserved (COALESCE)

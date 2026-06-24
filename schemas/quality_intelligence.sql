@@ -517,7 +517,7 @@ VALUES ('8.0.5-session-model', 'Add session_model column to session_analytics fo
 CREATE TABLE IF NOT EXISTS dispatch_metadata (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dispatch_id TEXT NOT NULL,
-    project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+    project_id TEXT NOT NULL,  -- ADR-007 amendment 2026-06-24: NO default; writers fail-closed via resolve_stamp_project_id
     terminal TEXT NOT NULL,
     track TEXT NOT NULL,
     provider TEXT,
@@ -681,7 +681,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '0');
 
 CREATE TABLE IF NOT EXISTS adrs (
     adr_id              TEXT    NOT NULL,
-    project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+    project_id          TEXT    NOT NULL,  -- ADR-007 amendment 2026-06-24: NO default; index_adrs fail-closed
     status              TEXT    NOT NULL,
     title               TEXT    NOT NULL,
     decision_summary    TEXT    NOT NULL,

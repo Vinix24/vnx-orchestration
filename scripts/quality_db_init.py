@@ -514,7 +514,7 @@ def _migrate_v19(conn: sqlite3.Connection) -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS adrs (
                 adr_id              TEXT    NOT NULL,
-                project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+                project_id          TEXT    NOT NULL,  -- ADR-007 amendment 2026-06-24: NO default (CREATE, not ALTER); index_adrs fail-closed always stamps project_id
                 status              TEXT    NOT NULL,
                 title               TEXT    NOT NULL,
                 decision_summary    TEXT    NOT NULL,

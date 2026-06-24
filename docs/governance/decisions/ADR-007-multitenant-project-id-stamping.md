@@ -111,6 +111,53 @@ applying the in-place rebuild against a live DB (quiesce, verified backup,
 preflight + dry-run, postflight `integrity_check`, restore-on-failure) is in
 `docs/MIGRATION_GUIDE.md` (PRD §7.2, human-gated).
 
+## Amendment 2026-06-24 — QI-write-tier fail-closed (operator-signed)
+
+The original **Decision** (§Decision), **Column rule** (Decision rule 1), and
+**Rejected sentinel** consequence stated that every tenant-scoped table
+*declares* `project_id TEXT NOT NULL DEFAULT 'vnx-dev'` and that new code
+*SHOULD NOT* rely on the default. Field experience (the `mission-control`
+re-stamp contamination, [[mc-autonomous-release-and-store-tenant-contamination]])
+showed *SHOULD NOT* is too weak for the live QI write path: a writer that
+silently degrades to `vnx-dev` on an unresolved tenant re-contaminates a
+non-vnx-dev store on every write. This amendment **supersedes** those clauses
+for the **QI-write-tier** (`dispatch_metadata`, `adrs`):
+
+1. **Fresh schema carries NO default.** `schemas/quality_intelligence.sql`
+   declares `project_id TEXT NOT NULL` (no `DEFAULT 'vnx-dev'`) for
+   `dispatch_metadata` and `adrs`. A conformance test asserts absence via
+   `PRAGMA table_info` on a store built through the production init entrypoint.
+
+2. **Writers MUST resolve fail-closed.** Every QI-write-tier writer resolves the
+   tenant via `project_scope.resolve_stamp_project_id` (store-derived from the
+   DB path; env only when no db_path). An unresolvable tenant (no source /
+   source conflict / invalid id) raises `TenantUnresolved`; the writer logs at
+   ERROR (`tenant_stamp_skip` + `skip_metrics.ndjson`) and **skips** the write
+   rather than stamping a guessed default. This reverses the prior #907 fail-open
+   resolver semantics on purpose — completing the arc #859 began on the runtime
+   tier ("never a silent `vnx-dev` default").
+
+3. **Legacy column-add migrations may keep an inert transient default.** A
+   `ALTER TABLE … ADD COLUMN project_id … NOT NULL` requires a literal default
+   under SQLite (`quality_db_init.py:783`); that default is inert because (a) it
+   only runs on legacy stores via the column-absent guard, and (b) the bootstrap
+   self-heal (`run_qi_three_phase_migration`, Phase 3, dynamic
+   `enumerate_project_id_tables`) re-stamps and drops the default for any
+   non-vnx-dev store.
+
+4. **NDJSON cost log stays best-effort.** `provider_costs.emit_provider_cost` is
+   an append-only receipt log, not a central-DB table, so the DEFAULT-ban does
+   not bind it; it must never skip an event (cost-audit = no data-loss) and
+   stamps a store-derived pid best-effort.
+
+5. **Acknowledged temporary exceptions:** the self-learning/intelligence-tier
+   writers (`success_patterns`, `intelligence_injections`; PR-2,
+   `pre10-tenant-intel-tier`) and the runtime-coordination tier keep the legacy
+   default until their own follow-up migrations.
+
+Composite-key rule (Decision rule 2) is unchanged and verified present:
+`dispatch_metadata UNIQUE(project_id, dispatch_id)`, `adrs PK(adr_id, project_id)`.
+
 ## Cross-references
 
 - ADR-009 — Schema-first migrations via PRAGMA introspection (the implementation discipline that keeps this ADR enforceable across future migrations)
