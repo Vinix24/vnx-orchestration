@@ -3,12 +3,16 @@
 
 Pattern A — silent exception:
   `except Exception:` or bare `except:` immediately followed by `pass`
-  with no log or re-raise. Whitelist: `# noqa: vnx-silent-except`.
+  with no log or re-raise. Whitelist: a PLAIN marker comment on the `except`
+  line containing `vnx-silent-except` (e.g. `# vnx-silent-except: <reason>`).
+  Do NOT use the `# noqa:` prefix — Ruff rejects `# noqa: vnx-silent-except`
+  as an invalid directive; this gate only substring-matches the token.
 
 Pattern B — non-atomic state write:
   `open(path, "w"|"wb")` where path matches state file patterns,
   without os.replace / tempfile / state_writer in the following 10 lines.
-  Whitelist: `# noqa: vnx-atomic-write`.
+  Whitelist: a plain marker comment containing `vnx-atomic-write`
+  (e.g. `# vnx-atomic-write: <reason>`) — not the Ruff-rejected `# noqa:` form.
 
 Exit codes:
   0 = clean (no findings)
@@ -139,7 +143,17 @@ def collect_files_from_dirs(root: Path) -> list[str]:
         if not target.is_dir():
             continue
         for dirpath, dirs, files in os.walk(target):
-            dirs[:] = [d for d in dirs if d not in ("__pycache__", ".venv", "node_modules")]
+            parts = Path(dirpath).parts
+            # Skip vendored/cache dirs, and the benchmark task SEEDS under
+            # field-tests/ — those are PLANTED fixtures (deliberate anti-patterns
+            # reviewer-models must find); a suppression marker there would tip the
+            # answer. Path-component match (not substring) so `field-tests-old/seed`
+            # is NOT skipped. Real harness `runners/` + `verify.py` stay linted.
+            dirs[:] = [
+                d for d in dirs
+                if d not in ("__pycache__", ".venv", "node_modules")
+                and not (d == "seed" and "field-tests" in parts)
+            ]
             for f in files:
                 if f.endswith(".py"):
                     result.append(os.path.join(dirpath, f))
@@ -166,9 +180,9 @@ def _print_findings(findings: list[Finding]) -> None:
     print("  A = silent exception (except + pass, no log/re-raise)")
     print("  B = non-atomic state write (open(path,'w') without os.replace)")
     print()
-    print("To suppress a specific line add the appropriate noqa comment:")
-    print("  # noqa: vnx-silent-except")
-    print("  # noqa: vnx-atomic-write")
+    print("To suppress a line, add a PLAIN marker comment on it (NOT a # noqa: directive — Ruff rejects that):")
+    print("  # vnx-silent-except: <reason>")
+    print("  # vnx-atomic-write: <reason>")
 
 
 def main(argv: list[str] | None = None) -> int:

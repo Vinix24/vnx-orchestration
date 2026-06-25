@@ -757,7 +757,7 @@ def run_phase1_ddl(
         except Exception:
             try:
                 conn.execute("ROLLBACK")
-            except Exception:
+            except Exception:  # vnx-silent-except: rollback best-effort
                 pass
             raise
     finally:
@@ -868,7 +868,7 @@ def run_phase2_restamp(
         except Exception:
             try:
                 conn.execute("ROLLBACK")
-            except Exception:
+            except Exception:  # vnx-silent-except: rollback best-effort
                 pass
             raise
     finally:
@@ -1110,7 +1110,7 @@ def run_phase3_enforce(
         except Exception:
             try:
                 conn.execute("ROLLBACK")
-            except Exception:
+            except Exception:  # vnx-silent-except: rollback best-effort
                 pass
             raise
     finally:
