@@ -25,9 +25,12 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import logging
 import statistics
 from collections import defaultdict
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import yaml
 
@@ -115,8 +118,8 @@ def aggregate():
                             cells[key]["costs"].append(c)
                     except ValueError:
                         pass
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("skipping %s during routing-matrix aggregation: %s", f, exc)
     return cells
 
 
