@@ -3021,7 +3021,7 @@ def run(project_root: Path | None = None) -> None:
         if conn is not None:
             try:
                 conn.rollback()
-            except Exception:
+            except Exception:  # vnx-silent-except: rollback best-effort
                 pass
         raise
     finally:
