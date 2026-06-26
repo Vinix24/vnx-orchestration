@@ -11,7 +11,7 @@ This document defines what a headless run is in VNX terms, which state it must e
 All subsequent implementation PRs (PR-1 through PR-4) share this contract as their single source of truth.
 
 For headless review-gate specific evidence requirements, also see:
-- [45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md)
+- [45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md](../core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md)
 
 ---
 

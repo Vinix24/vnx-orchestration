@@ -56,10 +56,10 @@ except ValueError as e:
 
 Reference: PR #479 (gate reviewer fail-loud).
 
-To suppress CI on a specific line where silent handling is genuinely correct:
+To suppress the lint on a specific line where silent handling is genuinely correct, use the bare marker comment (Ruff rejects the `# noqa:` prefix form, so the lint scanner uses its own marker):
 
 ```python
-except Exception:  # noqa: vnx-silent-except
+except Exception:  # vnx-silent-except: <one-line reason>
     pass
 ```
 
@@ -94,12 +94,9 @@ Before requesting review:
 
 ## CI gates
 
-Every PR runs two automated review gates in addition to the test suite:
+Your PR triggers the GitHub Actions in `.github/workflows/` — the pytest profiles, the ADR-003 "no Anthropic SDK" block, the lint-patterns (silent-except / atomic-write) gate, the dispatch-ID slug-match and trace-token gates, and a secret scan. Make those green.
 
-- **codex_gate** — static analysis, may post blocking findings as PR comments
-- **gemini_review** — adversarial review, may post blocking findings as PR comments
-
-Respond to blocking findings by amending the PR. The gates re-run on each push.
+Separately, maintainer review uses adversarial LLM review gates (a codex/kimi diff-gate and, when run, a Gemini pass) as part of the local dispatch flow before merge. Those are **not** GitHub Actions that run on your PR — they are a maintainer-side step. Expect review feedback derived from them; respond by amending the PR.
 
 **First-time contributors:** CI requires maintainer approval before running on external PRs. This is a GitHub security policy for public repos, not a manual delay.
 

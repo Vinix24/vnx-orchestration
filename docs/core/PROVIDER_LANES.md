@@ -182,20 +182,19 @@ today. Per-lane parity on the full PREPARE/GOVERN envelope, and the synthesized-
 report parity for analysis-only dispatches, is the dispatch-unification work
 targeted for the 1.x release.
 
-## Single-entry door and the in-progress flip
+## Single-entry door (default lane)
 
-Lane selection is moving behind one entry point, the dispatch door
+Lane selection runs behind one entry point, the dispatch door
 (`scripts/lib/dispatch_cli.py`): a spec is validated, a plan is compiled, a
-permit is issued, and only then does a lane execute. The door is built and
-exercised under tests, but it is **default-OFF**. The single-source routing
-predicate (`scripts/lib/dispatch_flags.py`) resolves `VNX_SINGLE_ENTRY_DISPATCH`
-to disabled until the flip lands; `VNX_DISPATCH_LEGACY=1` is the absolute
-rollback. Today, dispatches go through the existing per-lane paths described
-above.
+permit is issued, and only then does a lane execute. The door is **default-ON**
+since 2026-06-24 (ADR-024). The single-source routing predicate
+(`scripts/lib/dispatch_flags.py`) resolves `VNX_SINGLE_ENTRY_DISPATCH` on
+(`_DEFAULT_ENABLED = True`); `VNX_DISPATCH_LEGACY=1` is the absolute per-terminal
+rollback to the legacy per-lane paths described above. Every dispatch now goes
+through the door.
 
-On the in-progress flip branch (`feat/dispatch-flip`), the door normalizes GLM
-to a claude-CLI harness lane (`glm-harness`, the local litellm proxy in front of
-OpenRouter) — the plain `litellm:zai` runner is normalized to `glm-harness` at
-the bridge, backed by the `glm-via-harness-only` constraint. A phantom-guard
-rejects evidence-free GATE-GREEN receipts. These are committed on the branch, not
-on the released default path.
+At the door, GLM is normalized to a claude-CLI harness lane (`glm-harness`, the
+local litellm proxy in front of OpenRouter) — the plain `litellm:zai` runner is
+normalized to `glm-harness` at the bridge, backed by the `glm-via-harness-only`
+constraint. A phantom-guard rejects evidence-free GATE-GREEN receipts. All of
+this is on `main`.
