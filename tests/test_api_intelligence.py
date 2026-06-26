@@ -37,14 +37,16 @@ def _make_db(tmp_path: Path) -> Path:
             confidence_score REAL,
             category TEXT,
             usage_count INTEGER,
-            last_used TEXT
+            last_used TEXT,
+            project_id TEXT DEFAULT 'vnx-dev'
         );
         CREATE TABLE antipatterns (
             id INTEGER PRIMARY KEY,
             title TEXT,
             severity TEXT,
             occurrence_count INTEGER,
-            last_seen TEXT
+            last_seen TEXT,
+            project_id TEXT DEFAULT 'vnx-dev'
         );
         CREATE TABLE coordination_events (
             id INTEGER PRIMARY KEY,
@@ -95,7 +97,9 @@ class TestPatternsEndpoint:
         db_path = _make_db(tmp_path)
         con = sqlite3.connect(str(db_path))
         con.execute(
-            "INSERT INTO success_patterns VALUES (1, 'Test Pattern', 0.85, 'crawler', 3, '2026-01-01')"
+            "INSERT INTO success_patterns "
+            "(id, title, confidence_score, category, usage_count, last_used) "
+            "VALUES (1, 'Test Pattern', 0.85, 'crawler', 3, '2026-01-01')"
         )
         con.commit()
         con.close()
@@ -114,7 +118,9 @@ class TestPatternsEndpoint:
         db_path = _make_db(tmp_path)
         con = sqlite3.connect(str(db_path))
         con.execute(
-            "INSERT INTO antipatterns VALUES (1, 'Bad Pattern', 'medium', 5, '2026-01-01')"
+            "INSERT INTO antipatterns "
+            "(id, title, severity, occurrence_count, last_seen) "
+            "VALUES (1, 'Bad Pattern', 'medium', 5, '2026-01-01')"
         )
         con.commit()
         con.close()
@@ -141,7 +147,9 @@ class TestPatternsEndpoint:
         con = sqlite3.connect(str(db_path))
         for i in range(10):
             con.execute(
-                "INSERT INTO success_patterns VALUES (?, ?, 0.5, 'cat', 1, NULL)",
+                "INSERT INTO success_patterns "
+                "(id, title, confidence_score, category, usage_count, last_used) "
+                "VALUES (?, ?, 0.5, 'cat', 1, NULL)",
                 (i + 1, f"Pattern {i}"),
             )
         con.commit()

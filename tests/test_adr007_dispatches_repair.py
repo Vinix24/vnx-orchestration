@@ -722,7 +722,8 @@ def test_run_repairs_then_walks_to_head(tmp_path: Path, monkeypatch: pytest.Monk
     assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
     assert mfs._has_solo_dispatch_id_unique(conn, _dispatch_cols(conn)) is False
     assert "ux_solo_did" not in _unique_index_names(conn)
-    assert schema_migration_user_version(conn) == 30
+    # Head moved 30 -> 31 when migration 0031 (runtime tenant FK repair) landed.
+    assert schema_migration_user_version(conn) == 31
     conn.close()
 
 

@@ -129,7 +129,10 @@ class TestSmokeSuccess(_SmokeTestCase):
         result = classify_exit(exit_code=0)
         self.assertEqual(result.failure_class, SUCCESS)
         self.assertFalse(result.retryable)
-        self.assertEqual(result.operator_hint, "")
+        self.assertEqual(
+            result.operator_hint,
+            "Run completed successfully. Check output artifact for results.",
+        )
 
     def test_success_inspection(self):
         """Operator can inspect a succeeded run."""
@@ -144,7 +147,7 @@ class TestSmokeSuccess(_SmokeTestCase):
 
         run = self.registry.get(run.run_id)
         line = format_run_line(run)
-        self.assertIn("[+]", line)
+        self.assertIn("[✓]", line)
         self.assertIn("succeeded", line)
 
         detail = format_run_detail(run)
@@ -196,12 +199,12 @@ class TestSmokeTimeout(_SmokeTestCase):
 
         run = self.registry.get(run.run_id)
         line = format_run_line(run)
-        self.assertIn("[X]", line)
+        self.assertIn("[✗]", line)
         self.assertIn("TIMEOUT", line)
 
         detail = format_run_detail(run)
         self.assertIn("TIMEOUT", detail)
-        self.assertIn("Timed out", detail)
+        self.assertIn("Failure Class : TIMEOUT", detail)
 
 
 class TestSmokeNoOutputHang(_SmokeTestCase):
@@ -266,7 +269,7 @@ class TestSmokeNoOutputHang(_SmokeTestCase):
         run = self.registry.get(run.run_id)
         detail = format_run_detail(run)
         self.assertIn("NO_OUTPUT", detail)
-        self.assertIn("No output (hang)", detail)
+        self.assertIn("Failure Class : NO_OUTPUT", detail)
 
 
 class TestSmokeInterrupted(_SmokeTestCase):
@@ -321,7 +324,7 @@ class TestSmokeInterrupted(_SmokeTestCase):
         run = self.registry.get(run.run_id)
         detail = format_run_detail(run)
         self.assertIn("INTERRUPTED", detail)
-        self.assertIn("Interrupted (signal)", detail)
+        self.assertIn("Failure Class : INTERRUPTED", detail)
 
 
 class TestSmokeOperatorSummary(_SmokeTestCase):
@@ -355,18 +358,17 @@ class TestSmokeOperatorSummary(_SmokeTestCase):
         self.assertEqual(summary.active_count, 1)
         self.assertEqual(summary.succeeded_count, 1)
         self.assertEqual(summary.failed_count, 1)
-        self.assertEqual(summary.status_label, "ACTIVE")
         self.assertEqual(summary.failure_class_counts.get("TIMEOUT"), 1)
 
         text = format_health_summary(summary)
-        self.assertIn("ACTIVE", text)
+        self.assertIn("Active      : 1", text)
         self.assertIn("TIMEOUT", text)
 
     def test_summary_idle(self):
         """Health summary shows IDLE when no runs exist."""
         summary = build_health_summary(self.registry)
-        self.assertEqual(summary.status_label, "IDLE")
         self.assertEqual(summary.total_runs, 0)
+        self.assertEqual(summary.active_count, 0)
 
     def test_list_runs_active_filter(self):
         """list_runs with show_active returns only running runs."""
@@ -389,7 +391,7 @@ class TestSmokeOperatorSummary(_SmokeTestCase):
 
         lines = list_runs(self.registry, show_failed=True)
         self.assertEqual(len(lines), 1)
-        self.assertIn("[X]", lines[0])
+        self.assertIn("[✗]", lines[0])
         self.assertIn("TOOL_FAIL", lines[0])
 
 

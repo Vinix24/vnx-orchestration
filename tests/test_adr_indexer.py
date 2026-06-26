@@ -83,16 +83,23 @@ def _write_adr(adr_dir: Path, num: str, title: str, context_files: str,
 class TestAdrIndexLoad(unittest.TestCase):
 
     def test_load_index_from_adr_dir(self):
-        """Loads all 14 ADRs from the real docs/governance/decisions/ directory."""
+        """Loads every ADR from the real docs/governance/decisions/ directory.
+
+        Counts the live ADR-*.md files rather than hardcoding a number, so adding
+        a new ADR does not break this test.
+        """
         if not _REAL_ADR_DIR.is_dir():
             self.skipTest("real ADR dir not available")
 
+        expected = len(list(_REAL_ADR_DIR.glob("ADR-*.md")))
+        self.assertGreater(expected, 0, "no ADR files found in the real ADR dir")
+
         index, mtimes = _scan_adrs(_REAL_ADR_DIR)
 
-        self.assertEqual(len(index.entries), 14, (
-            f"Expected 14 ADRs, got {len(index.entries)}: {sorted(index.entries.keys())}"
+        self.assertEqual(len(index.entries), expected, (
+            f"Expected {expected} ADRs, got {len(index.entries)}: {sorted(index.entries.keys())}"
         ))
-        self.assertEqual(len(mtimes), 14)
+        self.assertEqual(len(mtimes), expected)
 
     def test_load_index_empty_dir(self):
         """Loading from an empty directory yields no entries."""
