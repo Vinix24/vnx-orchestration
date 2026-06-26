@@ -290,6 +290,20 @@ def test_done_when_pr_ref_merged_zero_dispatches(tmp_path):
     assert _get_derived(state_dir, "T-ev-done") == "done"
 
 
+def test_done_when_pr_ref_merged_with_terminal_dispatches(tmp_path):
+    """all-terminal-dispatch path also derives 'done' from a merged pr_ref,
+    including a multi-PR list where only one PR is merged (D-RECON)."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-ev-term", pr_ref="#908,#909")
+    _seed_dispatch(state_dir, "d-term-1", "T-ev-term", state="completed")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-ev-term", PROJECT_ID,
+        _merged_pr_numbers=frozenset({909}),  # only the 2nd PR of the list merged
+    )
+    assert result["derived_status"] == "done"
+
+
 def test_done_when_declared_done_without_evidence(tmp_path):
     """A done track with no dispatch or merged-PR evidence stays done."""
     state_dir = _build_db(tmp_path)
@@ -494,3 +508,55 @@ def test_phase_never_modified_by_prref_path(tmp_path):
     conn.close()
     assert row["phase"] == before_phase
     assert row["derived_status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# D-RECON (2026-06-26): git-grounded merged-PR source + multi-PR pr_ref
+# ---------------------------------------------------------------------------
+
+def test_parse_pr_numbers_handles_comma_list():
+    # A track that landed across multiple PRs: '#908,#909' -> {908, 909}.
+    assert track_reconciler._parse_pr_numbers("#908,#909") == frozenset({908, 909})
+    assert track_reconciler._parse_pr_numbers("908 909") == frozenset({908, 909})
+    assert track_reconciler._parse_pr_numbers("#911") == frozenset({911})
+    assert track_reconciler._parse_pr_numbers(None) == frozenset()
+    assert track_reconciler._parse_pr_numbers("not-a-pr") == frozenset()
+
+
+def test_gh_source_off_by_default(tmp_path, monkeypatch):
+    # Without VNX_RECONCILE_GIT, source 4 must not run (no gh, deterministic).
+    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
+    called = {"gh": False}
+    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh",
+                        lambda *a, **k: called.__setitem__("gh", True) or frozenset())
+    state = tmp_path / "state"; state.mkdir()
+    _load_merged_pr_numbers(state)
+    assert called["gh"] is False
+
+
+def test_gh_source_used_when_flag_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "1")
+    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset({911, 912}))
+    state = tmp_path / "state"; state.mkdir()
+    assert {911, 912} <= set(_load_merged_pr_numbers(state))
+
+
+def test_gh_cache_first_no_network_on_fresh_cache(tmp_path, monkeypatch):
+    # A fresh cache file is honoured without shelling out to gh.
+    import time as _t
+    state = tmp_path / "state"; state.mkdir()
+    (state / "pr_merged_cache.json").write_text(
+        json.dumps({"ts": _t.time(), "numbers": [911, 912]}), encoding="utf-8")
+
+    def _boom(*a, **k):
+        raise AssertionError("gh must NOT be called when the cache is fresh")
+    monkeypatch.setattr(track_reconciler.subprocess, "run", _boom)
+    assert track_reconciler._load_merged_prs_from_gh(state) == frozenset({911, 912})
+
+
+def test_gh_silent_on_failure(tmp_path, monkeypatch):
+    # gh absent/failing -> empty set, never raises (offline-safe contract).
+    state = tmp_path / "state"; state.mkdir()
+    monkeypatch.setattr(track_reconciler.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("gh")))
+    assert track_reconciler._load_merged_prs_from_gh(state) == frozenset()
