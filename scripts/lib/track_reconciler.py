@@ -24,7 +24,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import sqlite3
+import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional
 
@@ -48,17 +52,66 @@ def _parse_pr_number(pr_ref: Optional[str]) -> Optional[int]:
         return None
 
 
+def _parse_pr_numbers(pr_ref: Optional[str]) -> FrozenSet[int]:
+    """Parse a single ref OR a comma/space-separated list ('#908,#909') into a
+    set of ints. A track that landed across multiple PRs ('#908,#909') is done
+    when ANY of them is merged. Empty set when nothing parses."""
+    if not pr_ref:
+        return frozenset()
+    nums: set = set()
+    for tok in re.split(r"[,\s]+", str(pr_ref).strip()):
+        n = _parse_pr_number(tok)
+        if n is not None:
+            nums.add(n)
+    return frozenset(nums)
+
+
+def _load_merged_prs_from_gh(state_path: Path, ttl_seconds: int = 600) -> FrozenSet[int]:
+    """Opt-in git-grounded merged-PR source. Cache-first (``pr_merged_cache.json``,
+    TTL ~10 min) so the SessionStart hot path rarely shells out; network call is
+    silent-on-failure so the caller's never-raises / offline-safe contract holds.
+    Only consulted when ``VNX_RECONCILE_GIT`` is set."""
+    cache = state_path / "pr_merged_cache.json"
+    now = time.time()
+    try:
+        cached = json.loads(cache.read_text(encoding="utf-8"))
+        if isinstance(cached, dict) and (now - float(cached.get("ts", 0))) < ttl_seconds:
+            return frozenset(int(n) for n in cached.get("numbers", []))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass  # stale/missing/corrupt cache → fall through to a fresh fetch
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "merged", "--limit", "500", "--json", "number"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode != 0:
+            return frozenset()
+        nums = {int(p["number"]) for p in json.loads(result.stdout or "[]") if "number" in p}
+    except Exception:  # noqa: BLE001 — gh absent/offline/slow must never break reconcile
+        return frozenset()
+    try:
+        cache.write_text(json.dumps({"ts": now, "numbers": sorted(nums)}), encoding="utf-8")
+    except OSError:
+        pass  # cache write is best-effort
+    return frozenset(nums)
+
+
 def _load_merged_pr_numbers(state_dir: str | Path) -> FrozenSet[int]:
-    """Load confirmed-merged PR numbers from local sources only (no network).
+    """Load confirmed-merged PR numbers.
 
     Sources (all optional; errors silently ignored):
       1. {state_dir}/../events/pr_merged.ndjson  — ADR-005 event ledger
       2. {state_dir}/t0_receipts.ndjson           — receipt log
       3. {state_dir}/../../ROADMAP.yaml           — authoritative feature list
          pr_queue[*].status=merged entries cover recent PRs not yet in NDJSON files
+      4. git/GitHub via ``gh`` (OPT-IN, ``VNX_RECONCILE_GIT`` set) — cache-first
+         (10-min TTL), silent-on-failure. Closes the gap where a PR merged via raw
+         ``gh pr merge`` emits no local ``pr_merged`` receipt, so a merged track
+         would otherwise stay ``queued`` forever (the git-reality drift).
 
-    Returns frozenset[int] of confirmed-merged PR numbers.
-    Deterministic for a given file state; never calls gh or any network.
+    Returns frozenset[int]. Offline-safe and never raises: sources 1-3 are local
+    and deterministic; source 4 is opt-in and degrades to today's behaviour when
+    ``gh`` is absent/offline.
     """
     merged: set = set()
     state_path = Path(state_dir)
@@ -105,6 +158,12 @@ def _load_merged_pr_numbers(state_dir: str | Path) -> FrozenSet[int]:
         pass
     except Exception:
         log.debug("_load_merged_pr_numbers: ROADMAP.yaml parse error (non-fatal)", exc_info=True)
+
+    # Source 4 (opt-in, network): git/GitHub merge state via gh, cache-first.
+    # Gated behind VNX_RECONCILE_GIT so the default offline hot path is unchanged.
+    _git_flag = os.environ.get("VNX_RECONCILE_GIT", "").strip().lower()
+    if _git_flag not in ("", "0", "false", "no", "off"):
+        merged |= _load_merged_prs_from_gh(state_path)
 
     return frozenset(merged)
 
@@ -204,10 +263,10 @@ def _compute_derived_status(
         # pr_ref evidence path: covers tracks with no matching dispatches.
         # Historical dispatches stored 'A'/'B'/'C' in the track column instead of
         # feature track_ids, so the join above is empty for all pre-1.0 tracks.
-        # If the track's own pr_ref is confirmed merged via local evidence (NDJSON
-        # ledger or ROADMAP.yaml), derive 'done' without a dispatch match.
-        pr_num = _parse_pr_number(track_pr_ref)
-        if pr_num is not None and pr_num in merged_pr_numbers:
+        # If the track's own pr_ref (single or a '#911,#912' multi-PR list) is
+        # confirmed merged via any evidence source, derive 'done' without a
+        # dispatch match.
+        if _parse_pr_numbers(track_pr_ref) & merged_pr_numbers:
             return "done"
         # Absence of evidence is not evidence of queued. Historical dispatches may
         # be archived, so defer to declared phase (2026-06-15 migration panel).
@@ -241,6 +300,11 @@ def _compute_derived_status(
             dispatch_ids,
         ).fetchone()
         if merged_event:
+            return "done"
+
+        # Also accept the track's own pr_ref being confirmed merged via any
+        # evidence source (NDJSON / ROADMAP / git) — same as the no-dispatch path.
+        if _parse_pr_numbers(track_pr_ref) & merged_pr_numbers:
             return "done"
 
         # All dispatches terminal but PR not confirmed merged yet.
