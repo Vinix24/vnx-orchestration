@@ -1598,19 +1598,19 @@ class TestAdrRelevantIntegration(unittest.TestCase):
         conn.close()
         self._db_path = db_path
 
-        # Reset _INDEX singleton so each test starts from a clean load
+        # Reset ADR cache so each test starts from a clean scan
         try:
             import adr_indexer
-            adr_indexer._INDEX.loaded_at = 0.0
+            adr_indexer._ADR_CACHE.invalidate()
         except Exception:
             pass
 
     def tearDown(self):
         self._tmp.cleanup()
-        # Reset singleton after test to not pollute other suites
+        # Reset cache after test to not pollute other suites
         try:
             import adr_indexer
-            adr_indexer._INDEX.loaded_at = 0.0
+            adr_indexer._ADR_CACHE.invalidate()
         except Exception:
             pass
 
@@ -2043,13 +2043,9 @@ class TestOperatorMemoryInjection(unittest.TestCase):
         original_memory = self._patch_memory_dir(self._memory_dir)
         operator_memory_indexer._CACHES.clear()
 
-        # Snapshot full INDEX state before mutation
-        original_adr_loaded_dir = adr_indexer._INDEX._loaded_dir
-        original_adr_entries = dict(adr_indexer._INDEX.entries)
-        original_adr_fta = dict(adr_indexer._INDEX.file_to_adrs)
-        original_adr_mtimes = dict(adr_indexer._INDEX._file_mtimes)
-        original_loaded_at = adr_indexer._INDEX.loaded_at
-        adr_indexer._INDEX.loaded_at = 0.0  # force reload
+        # Force a fresh ADR scan; invalidate() rebuilds on next get() so no
+        # save/restore of cache internals is needed (the cache is keyed by dir).
+        adr_indexer._ADR_CACHE.invalidate()
 
         try:
             selector = IntelligenceSelector(
@@ -2068,12 +2064,7 @@ class TestOperatorMemoryInjection(unittest.TestCase):
         finally:
             prior_round_injector._resolve_state_dir = original_prior_resolve
             self._restore_memory_dir(original_memory)
-            # Fully restore INDEX singleton so we don't pollute other tests
-            adr_indexer._INDEX.loaded_at = original_loaded_at
-            adr_indexer._INDEX.entries = original_adr_entries
-            adr_indexer._INDEX.file_to_adrs = original_adr_fta
-            adr_indexer._INDEX._file_mtimes = original_adr_mtimes
-            adr_indexer._INDEX._loaded_dir = original_adr_loaded_dir
+            adr_indexer._ADR_CACHE.invalidate()
 
         payload_size = len(json.dumps(result.to_payload_dict()))
         self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2,
@@ -2354,12 +2345,8 @@ class TestSchemaSectionInjection(unittest.TestCase):
         operator_memory_indexer._project_memory_dir = lambda cwd=None: memory_dir
         operator_memory_indexer._CACHES.clear()
 
-        original_adr_loaded_dir = adr_indexer._INDEX._loaded_dir
-        original_adr_entries = dict(adr_indexer._INDEX.entries)
-        original_adr_fta = dict(adr_indexer._INDEX.file_to_adrs)
-        original_adr_mtimes = dict(adr_indexer._INDEX._file_mtimes)
-        original_adr_loaded_at = adr_indexer._INDEX.loaded_at
-        adr_indexer._INDEX.loaded_at = 0.0
+        # Force a fresh ADR scan; invalidate() rebuilds on next get().
+        adr_indexer._ADR_CACHE.invalidate()
 
         original_schemas_resolve = self._patch_schemas_dir(self._schemas)
 
@@ -2382,11 +2369,7 @@ class TestSchemaSectionInjection(unittest.TestCase):
         finally:
             prior_round_injector._resolve_state_dir = original_prior_resolve
             operator_memory_indexer._project_memory_dir = original_memory
-            adr_indexer._INDEX.loaded_at = original_adr_loaded_at
-            adr_indexer._INDEX.entries = original_adr_entries
-            adr_indexer._INDEX.file_to_adrs = original_adr_fta
-            adr_indexer._INDEX._file_mtimes = original_adr_mtimes
-            adr_indexer._INDEX._loaded_dir = original_adr_loaded_dir
+            adr_indexer._ADR_CACHE.invalidate()
             self._restore_schemas_dir(original_schemas_resolve)
 
         payload_size = len(json.dumps(result.to_payload_dict()))

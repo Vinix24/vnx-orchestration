@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Set
 
 from intelligence_sources import (  # noqa: F401  (re-exported for backward compat)
+    _DIRECT_INJECTION_CLASSES,
     CONFIDENCE_THRESHOLDS, EVIDENCE_THRESHOLDS, ITEM_CLASS_PRIORITY,
     MAX_CODE_ANCHOR_CHARS, MAX_CONTENT_CHARS_PER_ITEM, MAX_GOVERNANCE_PER_BATCH,
     MAX_ITEMS_PER_INJECTION, MAX_PAYLOAD_CHARS, PATTERN_CATEGORY_GOVERNANCE,
