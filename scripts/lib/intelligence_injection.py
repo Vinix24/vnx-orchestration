@@ -390,4 +390,16 @@ def format_intelligence_items(items: list) -> str:
         for item in by_class["recent_comparable"]:
             parts.append(f"- **{item.title}**: {item.content}")
         parts.append("")
+    # Direct-injection classes carry a fully-formatted markdown section in
+    # item.content (code anchors as file:line pointers, ADRs, schema sections,
+    # operator memories, prior-round findings). They are selected + budgeted by
+    # IntelligenceSelector but were previously never rendered here — emit their
+    # content verbatim so the worker actually receives them.
+    for cls in ("prior_round_finding", "adr_relevant", "schema_section",
+                "code_anchor", "operator_memory"):
+        for item in by_class.get(cls, []):
+            content = (getattr(item, "content", "") or "").rstrip()
+            if content:
+                parts.append(content)
+                parts.append("")
     return "\n".join(parts)
