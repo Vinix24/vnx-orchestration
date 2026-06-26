@@ -28,6 +28,18 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 
+# Failure statuses sampled from the governed receipt stream when mining for
+# recurring failure patterns. Keep in sync with check_active_drain.FAILURE_STATUSES,
+# weekly_digest._FAILURE_STATUSES, receipt_classifier._FAILURE_STATUSES, and
+# payload.FAILURE_STATUSES (gate-F2). "timeout" is included here (unlike the
+# confidence-scoring set in payload.py): a recurring task_timeout is a legitimate
+# failure to learn a prevention rule from — generate_prevention_suggestion has a
+# dedicated 'timeout' branch.
+_FAILURE_STATUSES = frozenset(
+    {"failed", "failure", "error", "blocked", "timeout", "contract_invalid"}
+)
+
+
 def _to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
     """Normalize a datetime to timezone-aware UTC, handling naive datetimes gracefully."""
     if dt is None:
@@ -35,6 +47,27 @@ def _to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _parse_receipt_timestamp(value) -> Optional[datetime]:
+    """Parse a receipt timestamp string to tz-aware UTC, or None if unparseable.
+
+    Handles both ISO forms seen in t0_receipts.ndjson:
+      "2026-05-07T08:31:55.295343+00:00" and "2026-06-26T12:51:47Z".
+    """
+    if not value or not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        return _to_aware_utc(datetime.fromisoformat(raw))
+    except ValueError:
+        # Fall back to a date-only prefix (day-granularity window).
+        try:
+            return _to_aware_utc(datetime.fromisoformat(raw[:10]))
+        except ValueError:
+            return None
 
 
 @dataclass
@@ -62,7 +95,11 @@ class LearningLoop:
         self.vnx_path = Path(paths["VNX_HOME"])
         state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
         self.db_path = state_dir / "quality_intelligence.db"
-        self.receipts_path = self.vnx_path / "terminals" / "file_bus" / "receipts"
+        # Mine failures from the governed receipt stream (the single NDJSON the
+        # receipt processor writes), not the long-gone terminals/file_bus/receipts
+        # directory — that path never existed under the central store, which is why
+        # the proposal tier never produced a single pending_rules.json.
+        self.receipts_path = state_dir / "t0_receipts.ndjson"
         self.archive_path = state_dir / "archive" / "patterns"
 
         # Create archive directory if it doesn't exist
@@ -290,44 +327,97 @@ class LearningLoop:
             log.debug("Failed to commit ignored_count updates: %s", e)
 
     def extract_failure_patterns(self, start_time: datetime = None) -> List[Dict]:
-        """Extract new failure patterns from recent terminal errors"""
+        """Extract recurring failure patterns from the governed receipt stream.
+
+        Reads the single ``t0_receipts.ndjson`` line by line, keeps receipts whose
+        ``status`` is a failure status (``_FAILURE_STATUSES``) inside the time
+        window, and projects each onto the failure dict consumed downstream by
+        ``generate_prevention_rules`` / ``persist_to_intelligence_db``
+        (keys: task / terminal / agent / error / timestamp).
+        """
         if not start_time:
             start_time = datetime.now(timezone.utc) - timedelta(hours=24)
         else:
             start_time = _to_aware_utc(start_time)
 
-        failure_patterns = []
+        failure_patterns: List[Dict] = []
 
-        # Scan receipts for failures and extract patterns
-        for receipt_file in self.receipts_path.glob("*.ndjson"):
-            if receipt_file.stat().st_mtime < start_time.timestamp():
-                continue
+        if not self.receipts_path.exists():
+            return failure_patterns
 
-            try:
-                with open(receipt_file, 'r') as f:
-                    for line in f:
-                        try:
-                            receipt = json.loads(line.strip())
+        try:
+            with open(self.receipts_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        receipt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                            # Check for error indicators
-                            if receipt.get('outcome') == 'error' or 'error' in str(receipt.get('terminal_response', '')).lower():
-                                # Extract failure context
-                                failure_pattern = {
-                                    'task': receipt.get('task_description', ''),
-                                    'terminal': receipt.get('terminal', ''),
-                                    'agent': receipt.get('agent', ''),
-                                    'error': self.extract_error_message(receipt.get('terminal_response', '')),
-                                    'timestamp': receipt.get('timestamp', datetime.now().isoformat())
-                                }
-                                failure_patterns.append(failure_pattern)
+                    status = str(receipt.get("status", "")).lower()
+                    if status not in _FAILURE_STATUSES:
+                        continue
 
-                        except json.JSONDecodeError:
-                            continue
+                    # Window filter on the receipt timestamp. Drop records we
+                    # cannot place in time so a full historical stream does not
+                    # over-produce against the >=2 recurrence threshold.
+                    ts_raw = receipt.get("timestamp")
+                    ts_dt = _parse_receipt_timestamp(ts_raw)
+                    if ts_dt is None or ts_dt < start_time:
+                        continue
 
-            except Exception as e:
-                print(f"⚠️ Error extracting failure patterns: {e}")
+                    failure_patterns.append({
+                        "task": str(receipt.get("task_id") or receipt.get("task_description") or ""),
+                        "terminal": str(receipt.get("terminal") or receipt.get("terminal_id") or ""),
+                        "agent": str(receipt.get("provider") or receipt.get("model") or ""),
+                        "error": self._failure_error_message(receipt),
+                        "timestamp": ts_raw or datetime.now(timezone.utc).isoformat(),
+                    })
+
+        except OSError as e:
+            print(f"⚠️ Error reading receipt stream {self.receipts_path}: {e}")
 
         return failure_patterns
+
+    def _failure_error_message(self, receipt: Dict) -> str:
+        """Derive a stable error string from a failure receipt.
+
+        Prefers the structured ``failure_reason`` (e.g. "Exhausted 3 retries"),
+        then summarizes ``contract_violations`` for contract-invalid receipts,
+        and finally falls back to scanning any free-text error field.
+        """
+        reason = receipt.get("failure_reason")
+        if reason:
+            return str(reason)[:200]
+
+        status = str(receipt.get("status", "")).lower()
+        if status == "contract_invalid":
+            violations = receipt.get("contract_violations")
+            summary = self._summarize_contract_violations(violations)
+            if summary:
+                return summary[:200]
+
+        for field in ("error", "message", "detail", "terminal_response"):
+            text = receipt.get(field)
+            if isinstance(text, str) and text.strip():
+                return self.extract_error_message(text)
+
+        return "Unknown error"
+
+    @staticmethod
+    def _summarize_contract_violations(violations) -> str:
+        """Render contract_violations (a list of missing headings) into a key."""
+        if isinstance(violations, list) and violations:
+            items = [str(v) for v in violations if str(v).strip()]
+            if items:
+                return "Contract violations: " + ", ".join(items)
+        elif isinstance(violations, dict) and violations:
+            return "Contract violations: " + ", ".join(sorted(str(k) for k in violations))
+        elif isinstance(violations, str) and violations.strip():
+            return "Contract violations: " + violations.strip()
+        return ""
 
     def extract_error_message(self, response: str) -> str:
         """Extract error message from terminal response"""
