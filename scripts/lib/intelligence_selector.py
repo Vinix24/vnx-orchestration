@@ -33,7 +33,7 @@ from intelligence_sources import (  # noqa: F401  (re-exported for backward comp
     query_proven_patterns, query_failure_prevention, query_recent_comparable,
     build_adr_item, build_schema_section_item,
     build_code_anchor_item, build_operator_memory_item, build_prior_round_item,
-    build_doc_relevant_item,
+    build_doc_relevant_item, build_scout_sketch_item,
     record_injection_audit, record_pattern_usage,
 )
 from intelligence_sources import stamp_source_dispatch_ids as _stamp
@@ -79,6 +79,10 @@ _DIRECT_SOURCES = [
     ("doc_relevant",        ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant"]),
     ("operator_memory",     ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant", "operator_memory"]),
     ("schema_section",      ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant", "operator_memory", "schema_section"]),
+    # scout_sketch is the curated recon over the deterministic anchors — added
+    # last so its eviction order is the longest (it survives a budget squeeze
+    # over the other direct classes) while still being droppable as a last resort.
+    ("scout_sketch",        ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant", "operator_memory", "schema_section", "scout_sketch"]),
 ]
 
 # Build-step 1: rank-then-budget (opt-in via VNX_INTEL_RANK_THEN_BUDGET=1).
@@ -89,6 +93,7 @@ _DIRECT_SOURCES = [
 # Score = confidence * (1 + tag_overlap) * recency_decay * class_weight.
 _CLASS_WEIGHT: Dict[str, float] = {
     "failure_prevention": 1.5,
+    "scout_sketch": 1.45,
     "prior_round_finding": 1.4,
     "proven_pattern": 1.2,
     "adr_relevant": 1.1,
@@ -239,6 +244,7 @@ class IntelligenceSelector:
             "doc_relevant": build_doc_relevant_item(self._get_quality_db(), dispatch_id, paths, instruction_text or "", now_ts) if (paths or instruction_text) else None,
             "operator_memory": build_operator_memory_item(dispatch_id, skill_name, paths, instruction_text or "", now_ts) if (skill_name or paths or instruction_text) else None,
             "schema_section": build_schema_section_item(dispatch_id, paths, instruction_text or "", now_ts) if (paths or instruction_text) else None,
+            "scout_sketch": build_scout_sketch_item(self._coord_state_dir, dispatch_id, now_ts),
         }
 
         if _rank_then_budget_enabled():
