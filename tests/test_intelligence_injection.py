@@ -96,6 +96,41 @@ class TestFormatIntelligenceItems:
         section = intelligence_injection.format_intelligence_items([])
         assert section == ""
 
+    def test_direct_injection_classes_render_their_content(self):
+        """Regression: direct-injection classes (code_anchor, adr_relevant,
+        schema_section, operator_memory, prior_round_finding) were selected and
+        budgeted but never rendered — their content must now reach the worker."""
+        items = [
+            _make_item("code_anchor", "Code anchors",
+                       "## CODE ANCHORS\n- `scripts/x.py:10-20` (matched: foo)"),
+            _make_item("adr_relevant", "ADRs",
+                       "## ADRS\n- ADR-007: tenant project_id"),
+            _make_item("prior_round_finding", "Prior",
+                       "## PRIOR FINDINGS\n- missing UNIQUE on dispatch_metadata"),
+            _make_item("operator_memory", "Memory",
+                       "## OPERATOR MEMORY\n- release stale leases first"),
+            _make_item("schema_section", "Schema",
+                       "## SCHEMA\nCREATE TABLE dispatches (...)"),
+        ]
+        section = intelligence_injection.format_intelligence_items(items)
+        assert "scripts/x.py:10-20" in section, "code_anchor pointer not rendered"
+        assert "ADR-007" in section
+        assert "missing UNIQUE on dispatch_metadata" in section
+        assert "release stale leases first" in section
+        assert "CREATE TABLE dispatches" in section
+
+    def test_direct_and_standard_classes_both_render(self):
+        """A mix of standard + direct classes must render both."""
+        items = [
+            _make_item("proven_pattern", "PP", "do this"),
+            _make_item("code_anchor", "Code anchors",
+                       "## CODE ANCHORS\n- `scripts/y.py:1-5`"),
+        ]
+        section = intelligence_injection.format_intelligence_items(items)
+        assert "Proven success patterns" in section
+        assert "do this" in section
+        assert "scripts/y.py:1-5" in section
+
 
 # ---------------------------------------------------------------------------
 # fetch_intelligence_section
