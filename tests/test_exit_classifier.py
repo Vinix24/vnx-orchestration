@@ -22,7 +22,6 @@ if SCRIPTS_LIB not in sys.path:
 
 from exit_classifier import (
     classify_exit,
-    ClassificationResult,
     FC_SUCCESS as SUCCESS,
     FC_TIMEOUT as TIMEOUT,
     FC_NO_OUTPUT as NO_OUTPUT,
@@ -146,9 +145,12 @@ class TestToolFailClassification(unittest.TestCase):
         result = classify_exit(exit_code=1, stderr="Error 429: Too Many Requests")
         self.assertEqual(result.failure_class, TOOL_FAIL)
 
-    def test_context_limit(self):
-        result = classify_exit(exit_code=1, stderr="context length exceeded")
+    def test_auth_error_not_retryable(self):
+        """Auth (401/403) is a tool/API error but must NOT be retried blindly
+        (credential rotation needed) — a retry just burns tokens."""
+        result = classify_exit(exit_code=1, stderr="401 Unauthorized")
         self.assertEqual(result.failure_class, TOOL_FAIL)
+        self.assertFalse(result.retryable)
 
     def test_connection_refused(self):
         result = classify_exit(exit_code=1, stderr="connection refused")
@@ -158,15 +160,25 @@ class TestToolFailClassification(unittest.TestCase):
         result = classify_exit(exit_code=1, stderr="503 Service Unavailable")
         self.assertEqual(result.failure_class, TOOL_FAIL)
 
-    def test_auth_error(self):
-        result = classify_exit(exit_code=1, stderr="401 Unauthorized")
+    def test_timeout_keyword_in_stderr_retryable(self):
+        """A timeout keyword in stderr (without the timed_out flag) stays a
+        retryable TOOL_FAIL — preserves auto-recovery coverage."""
+        result = classify_exit(exit_code=1, stderr="upstream request timeout")
         self.assertEqual(result.failure_class, TOOL_FAIL)
+        self.assertTrue(result.retryable)
 
 
 class TestPromptErrClassification(unittest.TestCase):
 
     def test_invalid_prompt(self):
         result = classify_exit(exit_code=1, stderr="Error: invalid prompt format")
+        self.assertEqual(result.failure_class, PROMPT_ERR)
+        self.assertFalse(result.retryable)
+
+    def test_context_limit_is_prompt_err_not_retryable(self):
+        """Context/token-limit is an input-size problem, not a transient tool
+        error: re-running the same oversized prompt fails again."""
+        result = classify_exit(exit_code=1, stderr="context length exceeded")
         self.assertEqual(result.failure_class, PROMPT_ERR)
         self.assertFalse(result.retryable)
 
