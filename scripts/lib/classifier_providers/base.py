@@ -138,4 +138,7 @@ def get_provider(name: Optional[str] = None) -> ClassifierProvider:
     if key == "codex":
         from .codex_provider import CodexProvider
         return CodexProvider()
+    if key == "deepseek":
+        from .deepseek_provider import DeepSeekProvider
+        return DeepSeekProvider()
     raise ValueError(f"unknown classifier provider: {key}")
