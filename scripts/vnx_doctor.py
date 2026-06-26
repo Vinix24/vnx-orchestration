@@ -119,7 +119,12 @@ def check_path_resolution(paths: Dict[str, str]) -> List[CheckResult]:
     results = []
     project_root = Path(paths["PROJECT_ROOT"])
     canonical_root = Path(paths.get("VNX_CANONICAL_ROOT", paths["VNX_HOME"]))
-    intelligence_dir = Path(paths["VNX_INTELLIGENCE_DIR"])
+    # Tolerate a partial paths dict (e.g. vnx_doctor run on a bare project before
+    # full init): fall back to the canonical derivation rather than KeyError-ing.
+    # Mirrors vnx_paths.py: VNX_INTELLIGENCE_DIR = canonical_root / ".vnx-intelligence".
+    intelligence_dir = Path(
+        paths.get("VNX_INTELLIGENCE_DIR") or (canonical_root / ".vnx-intelligence")
+    )
 
     if project_root.is_dir():
         results.append(CheckResult("path", PASS, f"Runtime root: {project_root}"))

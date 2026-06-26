@@ -264,8 +264,21 @@ class TestWriteAccess:
 class TestPathResolution:
     def test_project_root_valid(self, vnx_env):
         results = check_path_resolution(vnx_env)
-        root_check = [r for r in results if "Project root" in r.message]
+        root_check = [r for r in results if "Runtime root" in r.message]
         assert root_check[0].status == PASS
+
+    def test_missing_intelligence_dir_falls_back_without_crash(self, tmp_path):
+        """A paths dict without VNX_INTELLIGENCE_DIR must not KeyError; it falls
+        back to the canonical <canonical_root>/.vnx-intelligence derivation."""
+        partial = {
+            "PROJECT_ROOT": str(tmp_path),
+            "VNX_HOME": str(tmp_path / "vnx"),
+            # VNX_INTELLIGENCE_DIR intentionally omitted
+        }
+        results = check_path_resolution(partial)  # must not raise
+        intel = [r for r in results if "Intelligence dir" in r.message]
+        assert intel, "Intelligence dir check missing"
+        assert ".vnx-intelligence" in intel[0].message
 
 
 # ---------------------------------------------------------------------------
