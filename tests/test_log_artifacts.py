@@ -56,6 +56,8 @@ class TestLogArtifactCreation(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="Hello world",
             stderr="",
+            exit_code=0,
+            duration_seconds=5.2,
         )
         self.assertTrue(path.exists())
         self.assertEqual(path.name, "run-001.log")
@@ -70,6 +72,8 @@ class TestLogArtifactCreation(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="output",
             stderr="",
+            exit_code=0,
+            duration_seconds=5.2,
         )
         self.assertTrue(nested_dir.exists())
 
@@ -86,12 +90,14 @@ class TestLogArtifactHeader(_TmpDirTestCase):
             started_at="2026-03-30T12:00:00.000Z",
             stdout="",
             stderr="",
+            exit_code=0,
+            duration_seconds=5.2,
         )
         content = path.read_text(encoding="utf-8")
-        self.assertIn("run_id:       run-hdr-1", content)
-        self.assertIn("dispatch_id:  d-hdr-1", content)
-        self.assertIn("target_type:  headless_codex_cli", content)
-        self.assertIn("started_at:   2026-03-30T12:00:00.000Z", content)
+        self.assertIn("Run ID       : run-hdr-1", content)
+        self.assertIn("Dispatch ID  : d-hdr-1", content)
+        self.assertIn("Target Type  : headless_codex_cli", content)
+        self.assertIn("Started At   : 2026-03-30T12:00:00.000Z", content)
         self.assertIn("VNX HEADLESS RUN LOG", content)
 
 
@@ -106,6 +112,8 @@ class TestLogArtifactStdoutStderr(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="Analysis complete: module uses layered architecture",
             stderr="",
+            exit_code=0,
+            duration_seconds=5.2,
         )
         content = path.read_text(encoding="utf-8")
         self.assertIn("STDOUT", content)
@@ -120,6 +128,8 @@ class TestLogArtifactStdoutStderr(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="",
             stderr="Error: context limit exceeded",
+            exit_code=1,
+            duration_seconds=5.2,
         )
         content = path.read_text(encoding="utf-8")
         self.assertIn("STDERR", content)
@@ -134,9 +144,11 @@ class TestLogArtifactStdoutStderr(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="",
             stderr="",
+            exit_code=0,
+            duration_seconds=5.2,
         )
         content = path.read_text(encoding="utf-8")
-        self.assertIn("(no stdout)", content)
+        self.assertIn("(no output)", content)
         self.assertIn("(no stderr)", content)
 
     def test_both_stdout_and_stderr_delimited(self):
@@ -149,6 +161,8 @@ class TestLogArtifactStdoutStderr(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="good output",
             stderr="warning output",
+            exit_code=0,
+            duration_seconds=5.2,
         )
         content = path.read_text(encoding="utf-8")
         stdout_pos = content.index("STDOUT")
@@ -171,14 +185,13 @@ class TestLogArtifactFooter(_TmpDirTestCase):
             stderr="",
             exit_code=0,
             duration_seconds=42.5,
-            completed_at="2026-03-30T10:00:42.500Z",
         )
         content = path.read_text(encoding="utf-8")
         self.assertIn("RUN OUTCOME", content)
-        self.assertIn("exit_code:        0", content)
-        self.assertIn("failure_class:    N/A", content)
-        self.assertIn("duration_seconds: 42.5", content)
-        self.assertIn("completed_at:     2026-03-30T10:00:42.500Z", content)
+        self.assertIn("Exit Code    : 0", content)
+        self.assertIn("Failure Class: SUCCESS", content)
+        self.assertIn("Duration     : 42.5s", content)
+        self.assertIn("Status       : SUCCEEDED", content)
 
     def test_footer_with_failure(self):
         path = write_log_artifact(
@@ -194,11 +207,11 @@ class TestLogArtifactFooter(_TmpDirTestCase):
             duration_seconds=5.2,
         )
         content = path.read_text(encoding="utf-8")
-        self.assertIn("exit_code:        1", content)
-        self.assertIn("failure_class:    TOOL_FAIL", content)
-        self.assertIn("duration_seconds: 5.2", content)
+        self.assertIn("Exit Code    : 1", content)
+        self.assertIn("Failure Class: TOOL_FAIL", content)
+        self.assertIn("Duration     : 5.2s", content)
 
-    def test_footer_defaults_na_for_missing(self):
+    def test_footer_placeholders_for_unknown_outcome(self):
         path = write_log_artifact(
             artifact_dir=self.artifact_dir,
             run_id="run-foot-3",
@@ -207,11 +220,13 @@ class TestLogArtifactFooter(_TmpDirTestCase):
             started_at="2026-03-30T10:00:00.000Z",
             stdout="",
             stderr="",
+            exit_code=None,
+            duration_seconds=0.0,
         )
         content = path.read_text(encoding="utf-8")
-        self.assertIn("exit_code:        N/A", content)
-        self.assertIn("failure_class:    N/A", content)
-        self.assertIn("duration_seconds: N/A", content)
+        self.assertIn("Exit Code    : —", content)
+        self.assertIn("Failure Class: UNKNOWN", content)
+        self.assertIn("Duration     : 0.0s", content)
 
 
 # ============================================================================
@@ -252,7 +267,7 @@ class TestOutputArtifact(_TmpDirTestCase):
             run_id="run-oa-4",
             stdout="content",
         )
-        self.assertEqual(path.name, "run-oa-4.output.txt")
+        self.assertEqual(path.name, "run-oa-4.out")
 
 
 # ============================================================================
