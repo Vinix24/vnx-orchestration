@@ -83,10 +83,16 @@ def build_code_anchor_item(
     """
     if not dispatch_paths or not instruction_text or _code_anchor_finder is None:
         return None
+    # Inject compact file:line pointers, not full code bodies. A pointer is ~70
+    # chars, so many ranges across files fit within budget and the item stays
+    # small enough to survive the direct-injection payload limit (a full-body
+    # anchor + the growing suppression list exceeded MAX_PAYLOAD_CHARS and was
+    # evicted whole). Workers — or a scout pre-pass — read the referenced ranges.
     anchors = _code_anchor_finder.fetch_code_anchors(
         dispatch_paths,
         instruction_text,
         max_chars=max_chars,
+        refs_only=True,
     )
     if not anchors:
         return None
@@ -94,7 +100,7 @@ def build_code_anchor_item(
         item_id=f"intel_ca_{dispatch_id}",
         item_class="code_anchor",
         title=f"Code anchors for {len(dispatch_paths)} touched files",
-        content=_code_anchor_finder.format_code_anchors_section(anchors),
+        content=_code_anchor_finder.format_code_anchors_refs(anchors),
         confidence=1.0,
         evidence_count=len(anchors),
         last_seen=now_ts,
