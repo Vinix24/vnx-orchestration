@@ -65,6 +65,12 @@ except ImportError:
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
     from project_scope import current_project_id, project_filter_enabled
 
+try:
+    from vnx_tag_vocabulary import derive_tags as _derive_tags
+except ImportError:
+    def _derive_tags(text, paths=None):  # type: ignore[misc]
+        return []
+
 # Direct injection source table: (item_class, cumulative_drop_order)
 _DIRECT_SOURCES = [
     ("prior_round_finding", ["prior_round_finding"]),
@@ -117,9 +123,18 @@ def _recency_decay(last_seen) -> float:
 
 
 def _relevance_score(item, query_scope) -> float:
-    """Composite relevance score for rank-then-budget."""
+    """Composite relevance score for rank-then-budget.
+
+    tag_overlap counts the item's tags (its own scope_tags plus deterministically
+    derived VNX domain/intent/component tags from its title+content) against the
+    query scope, so matching is by intent + subsystem, not just file-path overlap.
+    """
     conf = float(getattr(item, "confidence", 0.0) or 0.0)
-    overlap = len(set(getattr(item, "scope_tags", None) or []) & set(query_scope or []))
+    item_tags = set(getattr(item, "scope_tags", None) or [])
+    item_tags |= set(_derive_tags(
+        f"{getattr(item, 'title', '')} {getattr(item, 'content', '')}"
+    ))
+    overlap = len(item_tags & set(query_scope or []))
     recency = _recency_decay(getattr(item, "last_seen", ""))
     weight = _CLASS_WEIGHT.get(getattr(item, "item_class", ""), 1.0)
     return conf * (1.0 + overlap) * recency * weight
@@ -227,11 +242,19 @@ class IntelligenceSelector:
         }
 
         if _rank_then_budget_enabled():
-            # Unified rank-then-budget over standard + direct candidates.
+            # Unified rank-then-budget over standard + direct candidates. The query
+            # scope is enriched with deterministic VNX domain/intent/component tags
+            # so tag_overlap matches on intent + subsystem (not just file paths).
+            # Kept local to this opt-in branch so the legacy DB-query scope is
+            # unchanged.
+            query_tags = list(effective_scope)
+            for tag in _derive_tags(instruction_text, paths):
+                if tag not in query_tags:
+                    query_tags.append(tag)
             pool = list(selected) + [
                 direct[c] for c, _ in _DIRECT_SOURCES if direct.get(c) is not None
             ]
-            selected = self._rank_then_budget(pool, suppressed, effective_scope)
+            selected = self._rank_then_budget(pool, suppressed, query_tags)
         else:
             # Legacy default: class-priority eviction, direct items appended last.
             selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)))
