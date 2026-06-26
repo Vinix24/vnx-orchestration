@@ -145,6 +145,7 @@ def fetch_code_anchors(
     *,
     max_chars: int = MAX_CODE_ANCHOR_CHARS,
     repo_root: Optional[Path] = None,
+    refs_only: bool = False,
 ) -> list[CodeAnchor]:
     """Fetch file:line anchors for files in dispatch_paths matching instruction terms.
 
@@ -219,18 +220,26 @@ def fetch_code_anchors(
             anchor = _slice_anchor(lines, match_line, dp, term)
             all_anchors.append(anchor)
 
-    # Trim to fit max_chars budget
-    return _trim_to_budget(all_anchors, max_chars)
+    # Trim to fit max_chars budget. In refs_only mode the budget is measured
+    # against the compact pointer format, so many more ranges (across files) fit.
+    formatter = format_code_anchors_refs if refs_only else format_code_anchors_section
+    return _trim_to_budget(all_anchors, max_chars, formatter)
 
 
-def _trim_to_budget(anchors: list[CodeAnchor], max_chars: int) -> list[CodeAnchor]:
-    """Keep as many anchors as fit within max_chars when formatted."""
+def _trim_to_budget(
+    anchors: list[CodeAnchor],
+    max_chars: int,
+    formatter=None,
+) -> list[CodeAnchor]:
+    """Keep as many anchors as fit within max_chars when formatted by ``formatter``."""
     if not anchors:
         return []
+    if formatter is None:
+        formatter = format_code_anchors_section
     trimmed: list[CodeAnchor] = []
     for anchor in anchors:
         candidate = trimmed + [anchor]
-        if len(format_code_anchors_section(candidate)) <= max_chars:
+        if len(formatter(candidate)) <= max_chars:
             trimmed.append(anchor)
         else:
             break
@@ -263,4 +272,31 @@ def format_code_anchors_section(anchors: list[CodeAnchor]) -> str:
         lines.append("```")
         lines.append("")
 
+    return "\n".join(lines)
+
+
+def format_code_anchors_refs(anchors: list[CodeAnchor]) -> str:
+    """Compact pointer-only format: file:line ranges, no code body.
+
+    Workers (or a scout pre-pass) open the referenced ranges to read the live
+    source. Because each pointer is tiny (~70 chars vs a multi-line body), many
+    ranges across several files fit within the same budget, and the injected
+    code_anchor item stays small enough to survive the direct-injection payload
+    budget instead of being evicted whole.
+    """
+    if not anchors:
+        return ""
+
+    lines = [
+        "## CODE ANCHORS (current-state pointers — read these ranges before editing)",
+        "",
+        "> Pointers to the live code, not copies. Open each range to read the "
+        "current source; re-read the file if a range looks stale.",
+        "",
+    ]
+    for anchor in anchors:
+        lines.append(
+            f"- `{anchor.file_path}:{anchor.line_start}-{anchor.line_end}` "
+            f"(matched: `{anchor.matched_term}`)"
+        )
     return "\n".join(lines)
