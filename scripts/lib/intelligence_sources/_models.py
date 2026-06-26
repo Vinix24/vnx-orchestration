@@ -34,6 +34,16 @@ def _format_items_markdown(items: List[IntelligenceItem]) -> str:
         for item in by_class["recent_comparable"]:
             parts.append(f"- **{item.title}**: {item.content}")
         parts.append("")
+    # Direct-injection classes carry a fully-formatted markdown section in
+    # item.content; emit it verbatim so they reach the worker (they were
+    # selected + budgeted but previously dropped at render).
+    for cls in ("prior_round_finding", "adr_relevant", "schema_section",
+                "code_anchor", "operator_memory"):
+        for item in by_class.get(cls, []):
+            content = (item.content or "").rstrip()
+            if content:
+                parts.append(content)
+                parts.append("")
     return "\n".join(parts)
 
 
