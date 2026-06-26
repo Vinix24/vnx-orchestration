@@ -391,11 +391,12 @@ def format_intelligence_items(items: list) -> str:
             parts.append(f"- **{item.title}**: {item.content}")
         parts.append("")
     # Direct-injection classes carry a fully-formatted markdown section in
-    # item.content (code anchors as file:line pointers, ADRs, schema sections,
-    # operator memories, prior-round findings). They are selected + budgeted by
-    # IntelligenceSelector but were previously never rendered here — emit their
-    # content verbatim so the worker actually receives them.
-    for cls in ("prior_round_finding", "adr_relevant", "schema_section",
+    # item.content (the scout pre-pass sketch, code anchors as file:line pointers,
+    # ADRs, schema sections, operator memories, prior-round findings). They are
+    # selected + budgeted by IntelligenceSelector but were previously never
+    # rendered here — emit their content verbatim so the worker actually receives
+    # them. scout_sketch leads: it is the curated "start here" recon over the rest.
+    for cls in ("scout_sketch", "prior_round_finding", "adr_relevant", "schema_section",
                 "code_anchor", "doc_relevant", "operator_memory"):
         for item in by_class.get(cls, []):
             content = (getattr(item, "content", "") or "").rstrip()

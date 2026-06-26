@@ -41,6 +41,7 @@ _DIRECT_INJECTION_CLASSES = frozenset({
     "operator_memory",
     "schema_section",
     "doc_relevant",
+    "scout_sketch",
 })
 
 CONFIDENCE_THRESHOLDS = {
