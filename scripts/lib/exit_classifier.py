@@ -10,7 +10,8 @@ Failure classes:
   TOOL_FAIL    — transient tool/network error (retryable)
   INFRA_FAIL   — infrastructure problem: binary missing, OOM, etc.
   NO_OUTPUT    — subprocess produced no output (hung or crashed silently)
-  INTERRUPTED  — terminated by a signal (SIGTERM, SIGKILL, etc.)
+  INTERRUPTED  — terminated by a graceful/user signal (SIGINT, SIGTERM, SIGHUP).
+                 SIGKILL(-9) is NOT interrupted — it falls through (usually OOM/infra).
   PROMPT_ERR   — prompt rejected by the CLI (not retryable)
   UNKNOWN      — unrecognised exit condition
 
@@ -20,7 +21,7 @@ BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -49,40 +50,92 @@ _OPERATOR_HINTS = {
     FC_UNKNOWN: "Unknown failure. Check exit code and stderr for clues.",
 }
 
-# Retryable by default per failure class
+# Retryable by default per failure class (HEADLESS_RUN_CONTRACT.md §4.1).
+# INTERRUPTED is retryable (a SIGINT/SIGTERM is a transient/manual stop); UNKNOWN
+# is NOT retryable (do not blindly re-run an unclassified failure).
 _RETRYABLE = {
     FC_SUCCESS: False,
     FC_TIMEOUT: True,
     FC_TOOL_FAIL: True,
     FC_INFRA_FAIL: True,
     FC_NO_OUTPUT: True,
-    FC_INTERRUPTED: False,
+    FC_INTERRUPTED: True,
     FC_PROMPT_ERR: False,
-    FC_UNKNOWN: True,
+    FC_UNKNOWN: False,
 }
 
 # Stderr patterns → (failure_class, reason, retryable)
 # Checked in order; first match wins.
+# Signal numbers classified as INTERRUPTED — graceful/user terminations only.
+# SIGKILL (9) and other signals are NOT here: they fall through to stderr/UNKNOWN
+# (a SIGKILL is usually an OOM-killer or hard infra kill, not a user interrupt).
+# Contract: HEADLESS_RUN_CONTRACT.md §4.1.
+_INTERRUPT_SIGNALS: frozenset[int] = frozenset({1, 2, 15})  # SIGHUP, SIGINT, SIGTERM
+
+# stderr → failure-class patterns, evaluated first-match-wins. ORDER MATTERS:
+# INFRA before TOOL before PROMPT, so a line matching both ("Permission denied,
+# API error" → INFRA) resolves to the more-fundamental class (§4.2).
 _STDERR_PATTERNS: list[tuple[re.Pattern, str, str, bool]] = [
+    # --- INFRA_FAIL: host / binary / resource (infra beats tool) ---
     (
-        re.compile(r"rate.limit|429|too many requests", re.IGNORECASE),
-        FC_TOOL_FAIL, "API rate limit or HTTP 429 detected in stderr", True,
+        re.compile(r"command not found", re.IGNORECASE),
+        FC_INFRA_FAIL, "CLI binary missing / command not found", True,
+    ),
+    (
+        re.compile(r"permission denied|EACCES", re.IGNORECASE),
+        FC_INFRA_FAIL, "Permission denied", True,
+    ),
+    (
+        re.compile(r"no space left|disk full|ENOSPC", re.IGNORECASE),
+        FC_INFRA_FAIL, "Disk full / no space left on device", True,
+    ),
+    (
+        re.compile(r"out.of.memory|\bOOM\b|cannot.allocate|\bkilled\b", re.IGNORECASE),
+        FC_INFRA_FAIL, "Out-of-memory or resource exhaustion", True,
+    ),
+    # --- TOOL_FAIL: transient API / network ---
+    (
+        re.compile(r"rate.limit|\b429\b|too many requests", re.IGNORECASE),
+        FC_TOOL_FAIL, "API rate limit or HTTP 429", True,
+    ),
+    (
+        re.compile(r"api error|model overloaded|\b50[0-9]\b|service unavailable", re.IGNORECASE),
+        FC_TOOL_FAIL, "API/service error (5xx / overloaded)", True,
+    ),
+    (
+        # Auth is a tool/API error but NON-retryable: a blind retry won't fix a
+        # 401/403 without credential rotation and just burns tokens/API calls.
+        re.compile(r"\b401\b|\b403\b|unauthorized|forbidden", re.IGNORECASE),
+        FC_TOOL_FAIL, "Auth error (401/403) — rotate credentials (non-retryable)", False,
     ),
     (
         re.compile(r"connection.refused|connection.reset|connection.error|network.error|ECONNREFUSED", re.IGNORECASE),
-        FC_TOOL_FAIL, "Network/connection error detected in stderr", True,
+        FC_TOOL_FAIL, "Network/connection error", True,
     ),
     (
-        re.compile(r"timeout|timed.out", re.IGNORECASE),
-        FC_TOOL_FAIL, "Timeout keyword in stderr", True,
+        # A timeout keyword in stderr WITHOUT the timed_out flag (the flag is
+        # caught earlier as TIMEOUT); keep it retryable to preserve auto-recovery.
+        re.compile(r"\btimeout\b|timed.out|deadline exceeded", re.IGNORECASE),
+        FC_TOOL_FAIL, "Timeout/deadline keyword in stderr", True,
+    ),
+    # --- PROMPT_ERR: non-retryable input problem ---
+    (
+        # Context/token-limit is an input-size problem, not a transient tool error:
+        # re-running the same oversized prompt fails again → PROMPT_ERR (fix the prompt).
+        re.compile(r"context.length|context.window|token.limit", re.IGNORECASE),
+        FC_PROMPT_ERR, "Context/token limit exceeded — reduce prompt size", False,
     ),
     (
-        re.compile(r"invalid.prompt|bad.prompt|prompt.error|malformed.prompt", re.IGNORECASE),
-        FC_PROMPT_ERR, "Invalid or malformed prompt rejected by CLI", False,
+        re.compile(r"invalid.prompt|bad.prompt|prompt.error|malformed.prompt|prompt too long", re.IGNORECASE),
+        FC_PROMPT_ERR, "Invalid / malformed / oversized prompt rejected by CLI", False,
     ),
     (
-        re.compile(r"out.of.memory|OOM|killed|cannot.allocate", re.IGNORECASE),
-        FC_INFRA_FAIL, "Out-of-memory or resource exhaustion detected in stderr", True,
+        re.compile(r"malformed json|invalid json", re.IGNORECASE),
+        FC_PROMPT_ERR, "Malformed JSON input", False,
+    ),
+    (
+        re.compile(r"schema validation|schema error", re.IGNORECASE),
+        FC_PROMPT_ERR, "Schema validation error on input", False,
     ),
 ]
 
@@ -117,25 +170,38 @@ def classify_exit(
 ) -> ClassificationResult:
     """Classify a headless subprocess exit into a named failure class.
 
-    Priority order (first match wins):
-      1. binary_not_found → INFRA_FAIL
-      2. no_output_detected → NO_OUTPUT
-      3. timed_out → TIMEOUT
-      4. exit_code < 0 → INTERRUPTED (signal termination)
-      5. exit_code == 0 → SUCCESS
-      6. stderr pattern match → class from pattern table
+    Priority order (first match wins) — HEADLESS_RUN_CONTRACT.md §4.2:
+      1. exit_code == 0 → SUCCESS (a clean exit wins over any flag/stderr)
+      2. timed_out → TIMEOUT (beats signals, binary_not_found and stderr)
+      3. no_output_detected → NO_OUTPUT
+      4. exit_code < 0 with signal in _INTERRUPT_SIGNALS → INTERRUPTED
+         (SIGKILL/-9 and other signals fall through — usually OOM/infra, not a user interrupt)
+      5. binary_not_found → INFRA_FAIL
+      6. stderr pattern match → class from pattern table (INFRA > TOOL > PROMPT)
       7. fallback → UNKNOWN
     """
     stderr_tail = (stderr or "")[-500:].strip()
+    sig = abs(exit_code) if (exit_code is not None and exit_code < 0) else None
 
-    if binary_not_found:
+    if exit_code == 0:
         return ClassificationResult(
-            failure_class=FC_INFRA_FAIL,
-            retryable=_RETRYABLE[FC_INFRA_FAIL],
+            failure_class=FC_SUCCESS,
+            retryable=_RETRYABLE[FC_SUCCESS],
+            exit_code=0,
+            stderr_tail=stderr_tail,
+            classification_reason="Subprocess exited with code 0",
+            operator_hint=_OPERATOR_HINTS[FC_SUCCESS],
+        )
+
+    if timed_out:
+        return ClassificationResult(
+            failure_class=FC_TIMEOUT,
+            retryable=_RETRYABLE[FC_TIMEOUT],
+            signal=sig,
             exit_code=exit_code,
             stderr_tail=stderr_tail,
-            classification_reason="CLI binary not found in PATH",
-            operator_hint=_OPERATOR_HINTS[FC_INFRA_FAIL],
+            classification_reason="Subprocess exceeded its configured timeout",
+            operator_hint=_OPERATOR_HINTS[FC_TIMEOUT],
         )
 
     if no_output_detected:
@@ -148,18 +214,7 @@ def classify_exit(
             operator_hint=_OPERATOR_HINTS[FC_NO_OUTPUT],
         )
 
-    if timed_out:
-        return ClassificationResult(
-            failure_class=FC_TIMEOUT,
-            retryable=_RETRYABLE[FC_TIMEOUT],
-            exit_code=exit_code,
-            stderr_tail=stderr_tail,
-            classification_reason="Subprocess exceeded its configured timeout",
-            operator_hint=_OPERATOR_HINTS[FC_TIMEOUT],
-        )
-
-    if exit_code is not None and exit_code < 0:
-        sig = abs(exit_code)
+    if sig is not None and sig in _INTERRUPT_SIGNALS:
         return ClassificationResult(
             failure_class=FC_INTERRUPTED,
             retryable=_RETRYABLE[FC_INTERRUPTED],
@@ -170,23 +225,24 @@ def classify_exit(
             operator_hint=_OPERATOR_HINTS[FC_INTERRUPTED],
         )
 
-    if exit_code == 0:
+    if binary_not_found:
         return ClassificationResult(
-            failure_class=FC_SUCCESS,
-            retryable=_RETRYABLE[FC_SUCCESS],
-            exit_code=0,
+            failure_class=FC_INFRA_FAIL,
+            retryable=_RETRYABLE[FC_INFRA_FAIL],
+            exit_code=exit_code,
             stderr_tail=stderr_tail,
-            classification_reason="Subprocess exited with code 0",
-            operator_hint=_OPERATOR_HINTS[FC_SUCCESS],
+            classification_reason="CLI binary not found in PATH",
+            operator_hint=_OPERATOR_HINTS[FC_INFRA_FAIL],
         )
 
-    # Stderr pattern matching
+    # Stderr pattern matching (INFRA > TOOL > PROMPT, first-match-wins).
     if stderr:
         for pattern, fc, reason, retryable in _STDERR_PATTERNS:
             if pattern.search(stderr):
                 return ClassificationResult(
                     failure_class=fc,
                     retryable=retryable,
+                    signal=sig,
                     exit_code=exit_code,
                     stderr_tail=stderr_tail,
                     classification_reason=reason,
@@ -196,6 +252,7 @@ def classify_exit(
     return ClassificationResult(
         failure_class=FC_UNKNOWN,
         retryable=_RETRYABLE[FC_UNKNOWN],
+        signal=sig,
         exit_code=exit_code,
         stderr_tail=stderr_tail,
         classification_reason=f"Unrecognised failure: exit_code={exit_code}",
