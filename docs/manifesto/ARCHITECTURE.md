@@ -3,7 +3,7 @@
 **Author**: Vincent van de Th
 **Date**: February 2026
 **Status**: Reference Architecture — pip-installable production release (1.0.0)
-**Usage**: 6 months daily use on local system · 1466 dispatches processed · 4 concurrent terminals
+**Usage**: 6+ months daily use on a local system · 13,000+ governed receipts in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
 
 ---
 
