@@ -10,11 +10,16 @@ VNX_ROOT = TESTS_DIR.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
 
 
-def test_dispatch_ack_watcher_invokes_ack_monitor_directly():
-    content = (SCRIPTS_DIR / "dispatch_ack_watcher.sh").read_text(encoding="utf-8")
-    assert "heartbeat_ack_monitor_wrapper.py" not in content
-    assert "heartbeat_ack_monitor.py" in content
-    assert "--stdin" in content
+def test_heartbeat_ack_monitor_wrapper_removed():
+    """AS-09 removed the wrapper indirection. The dispatch_ack_watcher.sh shim was
+    itself later deleted (cb174793), so the durable invariant is simply that the
+    wrapper module no longer exists and the monitor it wrapped still does."""
+    assert not (SCRIPTS_DIR / "heartbeat_ack_monitor_wrapper.py").exists(), (
+        "heartbeat_ack_monitor_wrapper.py should be gone (AS-09 wrapper removal)"
+    )
+    assert (SCRIPTS_DIR / "heartbeat_ack_monitor.py").exists(), (
+        "heartbeat_ack_monitor.py (the direct target) should exist"
+    )
 
 
 def test_pr_queue_completion_attempt_inlines_event_logging():

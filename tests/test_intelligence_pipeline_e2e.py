@@ -29,6 +29,7 @@ def _create_test_db(db_path: Path) -> sqlite3.Connection:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS success_patterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
             pattern_type TEXT NOT NULL,
             category TEXT NOT NULL,
             title TEXT NOT NULL,
@@ -44,11 +45,14 @@ def _create_test_db(db_path: Path) -> sqlite3.Connection:
             source_dispatch_ids TEXT,
             source_receipts TEXT,
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_used DATETIME
+            last_used DATETIME,
+            valid_from DATETIME DEFAULT CURRENT_TIMESTAMP,
+            valid_until DATETIME
         );
 
         CREATE TABLE IF NOT EXISTS antipatterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
             pattern_type TEXT NOT NULL,
             category TEXT NOT NULL,
             title TEXT NOT NULL,
@@ -62,11 +66,14 @@ def _create_test_db(db_path: Path) -> sqlite3.Connection:
             severity TEXT DEFAULT 'medium',
             source_dispatch_ids TEXT,
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_seen DATETIME
+            last_seen DATETIME,
+            valid_from DATETIME DEFAULT CURRENT_TIMESTAMP,
+            valid_until DATETIME
         );
 
         CREATE TABLE IF NOT EXISTS prevention_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
             tag_combination TEXT NOT NULL,
             rule_type TEXT NOT NULL,
             description TEXT NOT NULL,
@@ -74,7 +81,10 @@ def _create_test_db(db_path: Path) -> sqlite3.Connection:
             confidence REAL DEFAULT 0.0,
             created_at TEXT NOT NULL,
             triggered_count INTEGER DEFAULT 0,
-            last_triggered TEXT
+            last_triggered TEXT,
+            source_dispatch_id TEXT,
+            valid_from DATETIME DEFAULT CURRENT_TIMESTAMP,
+            valid_until DATETIME
         );
 
         CREATE TABLE IF NOT EXISTS pattern_usage (
