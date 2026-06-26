@@ -23,8 +23,8 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
    │  reads the bundle → compile_plan → picks the lane:               │
    │     provider=claude              → claude tmux-spawn lane         │
    │     provider=kimi|glm|deepseek   → provider envelope lane         │
-   │  Flag: VNX_SINGLE_ENTRY_DISPATCH (default OFF = byte-identical    │
-   │  legacy routing); VNX_DISPATCH_LEGACY=1 = hard rollback.          │
+   │  Flag: VNX_SINGLE_ENTRY_DISPATCH (default ON, ADR-024 2026-06-24);│
+   │  VNX_DISPATCH_LEGACY=1 = hard rollback to legacy routing.         │
    └───────────────────────────┬─────────────────────────────────────┘
                                 ▼
    ┌─ ASSEMBLY — dispatch_prepare.prepare / _assemble_context ────────┐

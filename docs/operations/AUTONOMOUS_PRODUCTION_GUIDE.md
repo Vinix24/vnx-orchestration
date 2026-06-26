@@ -18,7 +18,7 @@ This guide still contains older execution examples, but the current production r
 - FP29, FP30, and FP31 have now provided real proving-ground evidence for dashboard operations, paid delivery lifecycle, and production validation
 - interactive defaults remain Sonnet/Opus driven, but optional **Gemini/Codex headless review gates** are now part of the broader VNX evolution and should not be read as forbidden by older examples in this document
 - the **default Claude worker lane is the interactive tmux-spawn lane** (subscription); after the June 15, 2026 billing change the headless `claude -p` lane bills API credits and is opt-in / blocked by default (`claude-headless` constraint, `VNX_OVERRIDE_CLAUDE_HEADLESS=1`). Older examples in this doc that shell into `claude -p` predate that default
-- the **single-entry dispatch door** (`scripts/lib/dispatch_cli.py`) is built and tested but **default-OFF** (`VNX_SINGLE_ENTRY_DISPATCH` disabled; the flip is in progress on `feat/dispatch-flip`). Dispatches currently route through the per-lane paths
+- the **single-entry dispatch door** (`scripts/lib/dispatch_cli.py`) is **default-ON** since 2026-06-24 (ADR-024; `VNX_SINGLE_ENTRY_DISPATCH` enabled via `_DEFAULT_ENABLED = True`). Every dispatch routes through the door, which selects the per-lane path; `VNX_DISPATCH_LEGACY=1` is the per-terminal rollback
 
 Use this guide as the production protocol reference, but prefer:
 - `../../CHANGELOG.md` and `../manifesto/ROADMAP.md` for current milestone truth

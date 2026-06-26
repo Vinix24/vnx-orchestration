@@ -8,6 +8,19 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 Future-state reconciliation batch (`adr007-composite-keys-batch` / future-state milestone). It makes the track ↔ dispatch ↔ open-item future state reflect reality *automatically* and brings the `dispatches` table into ADR-007 composite-key tenancy. `VERSION` is still `1.0.0`: these changes are on `main` but not yet cut as a tagged release. Driven by `claudedocs/PRD-future-state-reconciliation-v1.1.md` (database-engineer skill under T0 governance). The 1.0 launch does not depend on this batch. Cite ADR-007.
 
+### Pre-ship hardening sprint (2026-06-26)
+
+A pre-PyPI-ship pass: five real production bugs and the future-state drift, then a stale-test and docs sweep. None change the 1.0 feature surface; they make it tip-top before publish.
+
+- **exit_classifier audit-trail restore (#913)** — a dead-code purge had gutted `_STDERR_PATTERNS`, broken the decision-tree order, and inverted `_RETRYABLE` for INTERRUPTED/UNKNOWN, corrupting the governed coordination-events trail + retry behavior. Restored to HEADLESS_RUN_CONTRACT §4 (+ context-limit → non-retryable, auth 401/403 → non-retryable to save tokens).
+- **future-state git-grounded reconcile (#914)** — the track reconciler never advanced a track to `done` from a merged PR (it read three dead-for-central-store sources). Added a 4th source (`gh pr list --state merged`, opt-in `VNX_RECONCILE_GIT`, cache-first, silent-on-failure) + multi-PR `pr_ref` parsing.
+- **self-learning proposal tier revived (#915)** — `learning_loop.extract_failure_patterns` scanned a directory that never existed under the central store; pointed it at the real `t0_receipts.ndjson` so the operator-gated proposal tier (`pending_rules.json`) finally runs.
+- **schema SSOT for `dispatches.output_ref`/`output_kind` (#916)** — columns referenced by code but declared in no `.sql`; declared in the canonical table (closes the schema-drift guard).
+- **`report_findings` self-heal (#917)** — `ALTER ADD COLUMN` for missing columns before the `CREATE INDEX (extracted_at DESC)` so a drifted table self-heals instead of crashing.
+- **`vnx_doctor` partial-setup tolerance (#918)** — `.get()` fallback for `VNX_INTELLIGENCE_DIR` so the doctor reports failures instead of `KeyError`-ing on a bare project.
+- **code-anchor injection as pointers (#919)** — code anchors were silently evicted whole (item + suppression list exceeded the payload budget); now inject compact `file:line` pointers, not full bodies — cheaper, richer, and the item survives the budget. `MAX_PAYLOAD_CHARS` unchanged.
+- **stale-test clusters (#920)** — test-only: aligned fixtures/expectations to current production (project_id-scoped fixtures, F54 temporal columns, the cb174793 CLI rename, dynamic ADR count).
+
 ### Added
 
 - **ADR-007 composite-key `dispatches` rebuild (PR-A1, #859)** — schema-preserving in-place repair of the `dispatches` table to `UNIQUE(dispatch_id, project_id)`, removing every uniqueness keyed solely on `dispatch_id` (inline column, table-level, standalone index, partial index, and `lower(dispatch_id)` expression index). Canonical 12-step crash-safe rebuild: capture/restore `PRAGMA foreign_keys`, `BEGIN IMMEDIATE` with bounded retry on `SQLITE_BUSY/LOCKED`, drop+recreate dependent views/triggers verbatim, preserve the `sqlite_sequence` high-water mark, and run `foreign_key_check` + `integrity_check` before commit (abort/rollback on any violation). Tenant `project_id` is resolved **fail-closed** from a precedence chain (resolved DB path → `.vnx-project-id` marker → `VNX_PROJECT_ID`); conflicting or unknown sources abort, and existing NULL/empty/conflicting `project_id` values abort before any mutation. Never a silent `vnx-dev` default. (`scripts/migrate_future_system.py`)

@@ -15,7 +15,7 @@ from the `vnx-manager` skill for non-dispatcher daemons.
 
 ```bash
 # 1. Pull latest main (must include SUP-PR1..PR4)
-cd /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt
+cd /path/to/your/project   # your VNX checkout
 git fetch origin && git merge --ff-only origin/main
 
 # 2. Set the flag

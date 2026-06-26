@@ -1164,14 +1164,14 @@ DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subs
 gates the subscription variant). Full lane map: `docs/core/PROVIDER_LANES.md`;
 dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
 
-**Single-entry door (in progress, default-OFF).** Lane selection is moving behind
+**Single-entry door (merged, default-ON).** Lane selection runs behind
 one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot →
-compile_plan → permit → execute. It is built and tested but disabled by default
-(`VNX_SINGLE_ENTRY_DISPATCH` resolves off via `scripts/lib/dispatch_flags.py`;
-`VNX_DISPATCH_LEGACY=1` is the absolute rollback). The flip that turns it on, the
-GLM→harness normalization, and a phantom-guard that rejects evidence-free
-GATE-GREEN receipts are committed on `feat/dispatch-flip`, not on the released
-default path.
+compile_plan → permit → execute. It is the default lane as of 2026-06-24
+(ADR-024; `VNX_SINGLE_ENTRY_DISPATCH` resolves on via
+`scripts/lib/dispatch_flags.py` `_DEFAULT_ENABLED = True`; `VNX_DISPATCH_LEGACY=1`
+is the absolute per-terminal rollback). The door normalizes GLM to the harness
+lane, applies the single-source routing predicate, and runs a phantom-guard that
+rejects evidence-free GATE-GREEN receipts — all on `main`.
 
 ### Provider Capability Matrix
 
