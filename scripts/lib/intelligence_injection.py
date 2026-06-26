@@ -396,7 +396,7 @@ def format_intelligence_items(items: list) -> str:
     # IntelligenceSelector but were previously never rendered here — emit their
     # content verbatim so the worker actually receives them.
     for cls in ("prior_round_finding", "adr_relevant", "schema_section",
-                "code_anchor", "operator_memory"):
+                "code_anchor", "doc_relevant", "operator_memory"):
         for item in by_class.get(cls, []):
             content = (getattr(item, "content", "") or "").rstrip()
             if content:

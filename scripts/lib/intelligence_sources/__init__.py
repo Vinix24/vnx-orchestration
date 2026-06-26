@@ -49,6 +49,7 @@ from .failure_prevention import query_failure_prevention
 from .recent_comparable import query_recent_comparable
 from .adr_relevant import build_adr_item, build_schema_section_item
 from .code_anchor import build_code_anchor_item, build_operator_memory_item, build_prior_round_item
+from .doc_relevant import build_doc_relevant_item
 
 __all__ = [
     "CONFIDENCE_THRESHOLDS", "EVIDENCE_THRESHOLDS", "GOVERNANCE_CONFIDENCE_PENALTY",
@@ -69,4 +70,5 @@ __all__ = [
     "query_proven_patterns", "query_failure_prevention", "query_recent_comparable",
     "build_adr_item", "build_schema_section_item",
     "build_code_anchor_item", "build_operator_memory_item", "build_prior_round_item",
+    "build_doc_relevant_item",
 ]
