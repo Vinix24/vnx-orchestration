@@ -1,12 +1,12 @@
 """scout_prepass — sidecar contract for the cheap-model scout pre-pass.
 
-Build-step 5 (consumption side). The scout pre-pass is a cheap-model recon that
-ranks the deterministic code-anchor candidates for a dispatch into
-INCLUDE/MAYBE/EXCLUDE verdicts plus a short plan sketch, written to a per-dispatch
-``scout_context.json`` sidecar BEFORE the permit is issued. The producer (the
-door call + provider invocation) lands in a follow-up; this module owns the
-sidecar location, the read path, and the rendering of the injected sketch so the
-intelligence layer can consume a sidecar the moment one exists.
+The scout pre-pass is a cheap-model recon that ranks the deterministic
+code-anchor candidates for a dispatch into INCLUDE/MAYBE/EXCLUDE verdicts plus a
+short plan sketch, written to a per-dispatch ``scout_context.json`` sidecar
+BEFORE the permit is issued. This module owns both ends: the producer
+(``maybe_run_scout`` — the door pre-pass + key-auth provider invocation, 5b) and
+the consumer (sidecar location, fail-open read, and the rendering of the injected
+sketch, 5a) so the intelligence layer consumes a sidecar the moment one exists.
 
 Design contract:
   - The sidecar is a SEPARATE file keyed by dispatch_id — it never mutates the
@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -236,3 +238,214 @@ def _ref_line(item: Dict[str, str]) -> str:
     ref = item.get("ref", "")
     why = item.get("why", "")
     return f"- `{ref}` — {why}" if why else f"- `{ref}`"
+
+
+# ---------------------------------------------------------------------------
+# Producer — the door pre-pass (build-step 5b)
+# ---------------------------------------------------------------------------
+#
+# Runs AFTER compile_plan / BEFORE issue_permit in dispatch_cli.run_dispatch.
+# A cheap, key-auth model (DeepSeek-Flash via the classifier harness — NEVER a
+# claude/subscription lane) ranks the deterministic code-anchor candidates into
+# INCLUDE/MAYBE/EXCLUDE + a plan sketch, written to the sidecar. Opt-in, gated,
+# fail-open (any miss → no sidecar → the deterministic code_anchor injection
+# stands). It never reads or rewrites the instruction file, so the permit /
+# instruction_sha256 TOCTOU is untouched.
+
+_DEFAULT_MIN_PATHS = 2
+_MIN_INSTRUCTION_CHARS = 40
+# task_classes where a code-anchor recon adds little (no source to rank).
+_SKIP_TASK_CLASSES = frozenset({"docs_synthesis", "channel_response", "ops_watchdog"})
+# Dispatch lanes the scout skips — claude_headless is the rare API-metered opt-in
+# path; do not spend a scout call there.
+_SKIP_LANES = frozenset({"claude_headless"})
+# Allowlist of cheap key-auth classifier lanes the scout may use. Default-deny so
+# a subscription lane (e.g. 'haiku') can NEVER run the scout, per the hard
+# constraint "never a claude/subscription lane for the scout".
+_ALLOWED_SCOUT_PROVIDERS = frozenset({"deepseek", "ollama", "gemini", "codex"})
+
+
+def scout_prepass_enabled() -> bool:
+    """Opt-in flag for the scout producer (default OFF)."""
+    return os.environ.get("VNX_SCOUT_PREPASS", "0") == "1"
+
+
+def _scout_provider_name() -> str:
+    name = (os.environ.get("VNX_SCOUT_PROVIDER") or "deepseek").strip().lower()
+    if name not in _ALLOWED_SCOUT_PROVIDERS:
+        # Default-deny: anything not a sanctioned key-auth lane (incl. the
+        # subscription 'haiku') falls back to the key-auth default.
+        logger.debug("scout: provider %r is not an allowed key-auth lane — using deepseek", name)
+        return "deepseek"
+    return name
+
+
+def _scout_gate_ok(
+    dispatch_paths: "List[str] | None",
+    instruction_text: str,
+    task_class: "str | None",
+    lane: "str | None",
+) -> bool:
+    """Scope/lane/task_class gate — skip trivial, non-code, or headless dispatches."""
+    try:
+        min_paths = int(os.environ.get("VNX_SCOUT_MIN_PATHS", _DEFAULT_MIN_PATHS))
+    except (TypeError, ValueError):
+        min_paths = _DEFAULT_MIN_PATHS
+    if not dispatch_paths or len(dispatch_paths) < max(1, min_paths):
+        return False
+    if not instruction_text or len(instruction_text.strip()) < _MIN_INSTRUCTION_CHARS:
+        return False
+    if task_class and str(task_class).strip().lower() in _SKIP_TASK_CLASSES:
+        return False
+    if lane and str(lane).strip().lower() in _SKIP_LANES:
+        return False
+    return True
+
+
+def _candidate_refs(dispatch_paths: List[str], instruction_text: str) -> List[str]:
+    """Deterministic code-anchor candidate refs (file:line ranges), pointer-only."""
+    try:
+        import code_anchor_finder as _caf
+    except ImportError:
+        return []
+    anchors = _caf.fetch_code_anchors(dispatch_paths, instruction_text, refs_only=True)
+    return [f"{a.file_path}:{a.line_start}-{a.line_end}" for a in anchors]
+
+
+def _build_scout_prompt(instruction_text: str, candidate_refs: List[str]) -> str:
+    """Bounded recon prompt — rank the candidates, JSON-only output."""
+    refs_block = "\n".join(f"- {r}" for r in candidate_refs)
+    instr = instruction_text.strip()
+    if len(instr) > 2000:
+        instr = instr[:2000] + " […]"
+    return (
+        "You are a fast code-recon scout. Rank the candidate code ranges below by "
+        "how relevant each is to the task. Do NOT write code or summarize file "
+        "contents — only rank the given pointers and name relevant tests/docs.\n\n"
+        f"TASK:\n{instr}\n\n"
+        f"CANDIDATE RANGES (use these exact refs, do not invent files):\n{refs_block}\n\n"
+        "Respond with ONLY a JSON object of this shape:\n"
+        '{"include":[{"ref":"<one of the candidates>","why":"<=12 words"}],'
+        '"maybe":[{"ref":"...","why":"..."}],'
+        '"exclude":[{"ref":"..."}],'
+        '"tests":["tests/..."],"docs":["docs/..."],'
+        '"plan_sketch":"<=2 sentence approach"}\n'
+        "Only use refs from the candidate list. Keep it short."
+    )
+
+
+def _invoke_scout_model(prompt: str, provider_name: str) -> "tuple[Optional[Dict[str, Any]], str]":
+    """Call the cheap key-auth classifier. Returns (parsed JSON | None, model)."""
+    try:
+        from classifier_providers import get_provider
+    except ImportError:
+        return None, ""
+    try:
+        provider = get_provider(provider_name)
+    except ValueError:
+        logger.debug("scout: unknown provider %r", provider_name)
+        return None, ""
+    if not provider.is_available():
+        logger.debug("scout: provider %r unavailable (no key / CLI)", provider_name)
+        return None, ""
+    result = provider.classify(prompt)
+    model = str((result.extra or {}).get("model") or "")
+    if result.error or not result.parsed_json:
+        logger.debug("scout: provider %r returned no usable JSON (%s)", provider_name, result.error)
+        return None, model
+    return result.parsed_json, model
+
+
+def _snap_refs(bucket: Any, allowed: "set[str]") -> List[Dict[str, str]]:
+    """Keep only model verdicts whose ref is a real candidate (anti-hallucination).
+
+    Producer-side caps (bucket length, why length) mirror normalize_sidecar so the
+    on-disk sidecar is bounded even before the consumer re-normalizes it.
+    """
+    out: List[Dict[str, str]] = []
+    if not isinstance(bucket, list):
+        return out
+    for entry in bucket:
+        if len(out) >= _MAX_REFS_PER_BUCKET:
+            break
+        if isinstance(entry, dict):
+            ref = str(entry.get("ref") or "").strip()
+            why = str(entry.get("why") or "").strip()
+        elif isinstance(entry, str):
+            ref, why = entry.strip(), ""
+        else:
+            continue
+        if ref in allowed:
+            out.append({"ref": ref, "why": why[:_MAX_WHY_CHARS]})
+    return out
+
+
+def _assemble_sidecar(
+    dispatch_id: str,
+    parsed: Dict[str, Any],
+    candidate_refs: List[str],
+    provider_name: str,
+    model: str,
+) -> Dict[str, Any]:
+    """Build the sidecar from the model verdicts, snapped to real candidates."""
+    allowed = set(candidate_refs)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "dispatch_id": dispatch_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "provider": provider_name,
+        "model": model,
+        "include": _snap_refs(parsed.get("include"), allowed),
+        "maybe": _snap_refs(parsed.get("maybe"), allowed),
+        "exclude": _snap_refs(parsed.get("exclude"), allowed),
+        "tests": [str(t).strip() for t in (parsed.get("tests") or []) if str(t).strip()][:_MAX_AUX_ITEMS],
+        "docs": [str(d).strip() for d in (parsed.get("docs") or []) if str(d).strip()][:_MAX_AUX_ITEMS],
+        "plan_sketch": str(parsed.get("plan_sketch") or "").strip()[:_MAX_PLAN_CHARS],
+    }
+
+
+def write_scout_sidecar(state_dir: "Path | str", dispatch_id: str, sidecar: Dict[str, Any]) -> Path:
+    """Atomically write the sidecar (tmp + os.replace). Raises ValueError on unsafe id."""
+    path = scout_sidecar_path(state_dir, dispatch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(sidecar, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def maybe_run_scout(
+    *,
+    dispatch_id: str,
+    instruction_text: str,
+    dispatch_paths: "List[str] | None",
+    state_dir: "Path | str",
+    task_class: "str | None" = None,
+    lane: "str | None" = None,
+) -> "Optional[Path]":
+    """Run the scout pre-pass and write a sidecar. Best-effort — NEVER raises.
+
+    Returns the sidecar path on success, else None (fail-open → the deterministic
+    code_anchor injection stands). Opt-in (``VNX_SCOUT_PREPASS=1``) and gated on
+    scope/lane/task_class. Uses a cheap key-auth lane only (never the subscription).
+    """
+    if not scout_prepass_enabled():
+        return None
+    try:
+        if not _scout_gate_ok(dispatch_paths, instruction_text, task_class, lane):
+            return None
+        candidate_refs = _candidate_refs(list(dispatch_paths or []), instruction_text)
+        if not candidate_refs:
+            return None
+        provider_name = _scout_provider_name()
+        prompt = _build_scout_prompt(instruction_text, candidate_refs)
+        parsed, model = _invoke_scout_model(prompt, provider_name)
+        if not parsed:
+            return None
+        sidecar = _assemble_sidecar(dispatch_id, parsed, candidate_refs, provider_name, model)
+        if not (sidecar["include"] or sidecar["maybe"] or sidecar["plan_sketch"]):
+            return None  # nothing useful — don't write an empty sidecar
+        return write_scout_sidecar(state_dir, dispatch_id, sidecar)
+    except Exception as exc:  # fail-open: a scout failure must never block the door
+        logger.debug("maybe_run_scout: fail-open for %s (%s)", dispatch_id, exc)
+        return None
