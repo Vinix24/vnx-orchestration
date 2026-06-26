@@ -697,6 +697,101 @@ class TestPayloadBounds(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: rank-then-budget (build-step 1, opt-in)
+# ---------------------------------------------------------------------------
+
+class TestRankThenBudget(unittest.TestCase):
+    def _item(self, cls, item_id, confidence=0.9, content="x", scope_tags=None,
+              last_seen="2026-06-26T00:00:00Z"):
+        return IntelligenceItem(
+            item_id=item_id, item_class=cls, title=f"{cls} {item_id}",
+            content=content, confidence=confidence, evidence_count=2,
+            last_seen=last_seen, scope_tags=scope_tags or [],
+        )
+
+    def test_flag_default_off(self):
+        import intelligence_selector as mod
+        os.environ.pop("VNX_INTEL_RANK_THEN_BUDGET", None)
+        self.assertFalse(mod._rank_then_budget_enabled())
+
+    def test_recency_decay_fresh_vs_old(self):
+        from datetime import datetime, timedelta, timezone
+        from intelligence_selector import _recency_decay
+        # Dynamically recent (1h ago) so the assertion never becomes a time-bomb.
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        self.assertGreater(_recency_decay(recent), 0.9)
+        # Far past (well beyond the 30-day half-life) → floored at 0.3.
+        old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        self.assertEqual(_recency_decay(old), 0.3)
+        self.assertEqual(_recency_decay(""), 1.0)  # unknown → neutral
+
+    def test_score_orders_failure_prevention_above_code_anchor(self):
+        from intelligence_selector import _relevance_score
+        fp = self._item("failure_prevention", "fp", confidence=0.9, scope_tags=["coding_sql"])
+        ca = self._item("code_anchor", "ca", confidence=1.0, scope_tags=[])
+        self.assertGreater(_relevance_score(fp, ["coding_sql"]), _relevance_score(ca, []))
+
+    def test_all_fit_keeps_all(self):
+        selector = IntelligenceSelector()
+        items = [self._item("code_anchor", "a", content="short"),
+                 self._item("proven_pattern", "b", content="short")]
+        suppressed = []
+        out = selector._rank_then_budget(items, suppressed, [])
+        selector.close()
+        self.assertEqual(len(out), 2)
+        self.assertEqual(suppressed, [])
+
+    def test_over_budget_keeps_highest_score(self):
+        selector = IntelligenceSelector()
+        big = "x" * MAX_CONTENT_CHARS_PER_ITEM
+        # Two big items that can't both fit; the higher-scored one survives.
+        hi = self._item("proven_pattern", "hi", confidence=1.0, content=big, scope_tags=["coding_sql"])
+        lo = self._item("recent_comparable", "lo", confidence=0.4, content=big)
+        suppressed = []
+        out = selector._rank_then_budget([lo, hi], suppressed, ["coding_sql"])
+        payload = json.dumps({"injection_point": "x", "injected_at": "x",
+                              "items": [i.to_dict() for i in out],
+                              "suppressed": [s.to_dict() for s in suppressed]})
+        selector.close()
+        self.assertLessEqual(len(payload), MAX_PAYLOAD_CHARS)
+        kept = {i.item_id for i in out}
+        self.assertIn("hi", kept)
+
+    def test_full_payload_with_suppressed_stays_under_budget(self):
+        """Regression: suppression records grow the payload too — the FINAL payload
+        (items + suppressed) must stay <= MAX_PAYLOAD_CHARS even when many items are
+        rejected (the reconciliation pass)."""
+        selector = IntelligenceSelector()
+        big = "x" * MAX_CONTENT_CHARS_PER_ITEM
+        # Many big items: most will be rejected, growing the suppressed list.
+        items = [self._item("recent_comparable", f"r{n}", confidence=0.5, content=big)
+                 for n in range(12)]
+        suppressed = []
+        out = selector._rank_then_budget(items, suppressed, [])
+        payload = json.dumps({"injection_point": "dispatch_create",
+                              "injected_at": "2026-06-26T00:00:00.000000Z",
+                              "items": [i.to_dict() for i in out],
+                              "suppressed": [s.to_dict() for s in suppressed]})
+        selector.close()
+        self.assertLessEqual(len(payload), MAX_PAYLOAD_CHARS,
+                             f"full payload {len(payload)} exceeds MAX_PAYLOAD_CHARS")
+        self.assertGreater(len(suppressed), 0)
+
+    def test_failure_prevention_reserved_over_cheap_anchors(self):
+        """A failure_prevention rule survives even when code anchors would fill the budget."""
+        selector = IntelligenceSelector()
+        big = "x" * MAX_CONTENT_CHARS_PER_ITEM
+        fp = self._item("failure_prevention", "fp", confidence=0.6, content=big)
+        anchors = [self._item("code_anchor", f"ca{n}", confidence=1.0, content=big)
+                   for n in range(5)]
+        suppressed = []
+        out = selector._rank_then_budget(anchors + [fp], suppressed, [])
+        selector.close()
+        self.assertIn("fp", {i.item_id for i in out},
+                      "reserved failure_prevention must survive the budget")
+
+
+# ---------------------------------------------------------------------------
 # Tests: convenience function
 # ---------------------------------------------------------------------------
 
