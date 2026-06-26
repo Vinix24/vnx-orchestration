@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Set
 
@@ -71,6 +72,54 @@ _DIRECT_SOURCES = [
     ("operator_memory",     ["prior_round_finding", "adr_relevant", "code_anchor", "operator_memory"]),
     ("schema_section",      ["prior_round_finding", "adr_relevant", "code_anchor", "operator_memory", "schema_section"]),
 ]
+
+# Build-step 1: rank-then-budget (opt-in via VNX_INTEL_RANK_THEN_BUDGET=1).
+# Replaces class-priority eviction with a composite-score knapsack so the most
+# relevant items survive the budget, while reserved classes get first claim so
+# cheap anchors can't evict a critical failure-prevention rule. Default OFF —
+# the legacy class-priority path stays the default until operator-enabled.
+# Score = confidence * (1 + tag_overlap) * recency_decay * class_weight.
+_CLASS_WEIGHT: Dict[str, float] = {
+    "failure_prevention": 1.5,
+    "prior_round_finding": 1.4,
+    "proven_pattern": 1.2,
+    "adr_relevant": 1.1,
+    "schema_section": 1.1,
+    "code_anchor": 1.0,
+    "operator_memory": 1.0,
+    "recent_comparable": 0.8,
+}
+_RESERVED_CLASSES = frozenset({"failure_prevention"})
+
+
+def _rank_then_budget_enabled() -> bool:
+    return os.environ.get("VNX_INTEL_RANK_THEN_BUDGET", "0") == "1"
+
+
+def _recency_decay(last_seen) -> float:
+    """30-day half-life decay on an ISO last_seen, floored at 0.3. 1.0 if unknown."""
+    if not last_seen or not isinstance(last_seen, str):
+        return 1.0
+    raw = last_seen.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return 1.0
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0)
+    return max(0.3, 0.5 ** (age_days / 30.0))
+
+
+def _relevance_score(item, query_scope) -> float:
+    """Composite relevance score for rank-then-budget."""
+    conf = float(getattr(item, "confidence", 0.0) or 0.0)
+    overlap = len(set(getattr(item, "scope_tags", None) or []) & set(query_scope or []))
+    recency = _recency_decay(getattr(item, "last_seen", ""))
+    weight = _CLASS_WEIGHT.get(getattr(item, "item_class", ""), 1.0)
+    return conf * (1.0 + overlap) * recency * weight
 
 
 class IntelligenceSelector:
@@ -162,7 +211,6 @@ class IntelligenceSelector:
         candidates = apply_candidate_diversity(self._query_candidates(resolved_class, effective_scope), resolved_class)
         recent_ids = self._query_recent_injected_ids(resolved_class)
         selected, suppressed = self._select_standard_classes(candidates, recent_ids=recent_ids)
-        selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)))
 
         now_ts = _now_utc()
         paths = dispatch_paths or []
@@ -173,11 +221,21 @@ class IntelligenceSelector:
             "operator_memory": build_operator_memory_item(dispatch_id, skill_name, paths, instruction_text or "", now_ts) if (skill_name or paths or instruction_text) else None,
             "schema_section": build_schema_section_item(dispatch_id, paths, instruction_text or "", now_ts) if (paths or instruction_text) else None,
         }
-        for class_name, extra_drop in _DIRECT_SOURCES:
-            item = direct.get(class_name)
-            if item is not None:
-                selected.append(item)
-                selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)) + extra_drop)
+
+        if _rank_then_budget_enabled():
+            # Unified rank-then-budget over standard + direct candidates.
+            pool = list(selected) + [
+                direct[c] for c, _ in _DIRECT_SOURCES if direct.get(c) is not None
+            ]
+            selected = self._rank_then_budget(pool, suppressed, effective_scope)
+        else:
+            # Legacy default: class-priority eviction, direct items appended last.
+            selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)))
+            for class_name, extra_drop in _DIRECT_SOURCES:
+                item = direct.get(class_name)
+                if item is not None:
+                    selected.append(item)
+                    selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)) + extra_drop)
 
         return InjectionResult(injection_point=injection_point, injected_at=now_ts, items=selected, suppressed=suppressed, task_class=resolved_class, dispatch_id=dispatch_id)
 
@@ -308,6 +366,54 @@ class IntelligenceSelector:
                 governance_used += 1
         return selected, suppressed
 
+
+    def _rank_then_budget(self, candidates, suppressed, query_scope) -> List[IntelligenceItem]:
+        """Score every candidate, then greedily pack into MAX_PAYLOAD_CHARS by score.
+
+        Reserved high-value classes (failure_prevention) get first claim on the
+        budget so cheap, plentiful anchors can't evict the one rule that matters.
+        Items that don't fit are recorded as suppressed.
+        """
+        if not candidates:
+            return []
+        ranked = sorted(
+            candidates, key=lambda it: _relevance_score(it, query_scope), reverse=True
+        )
+        reserved = [it for it in ranked if it.item_class in _RESERVED_CLASSES]
+        others = [it for it in ranked if it.item_class not in _RESERVED_CLASSES]
+
+        def _size(items):
+            # Mirror InjectionResult.to_payload_dict(): the payload counts both
+            # items AND the suppressed list (which grows as items are rejected).
+            return len(json.dumps({
+                "injection_point": "x", "injected_at": "x",
+                "items": [i.to_dict() for i in items],
+                "suppressed": [s.to_dict() for s in suppressed],
+            }))
+
+        selected: List[IntelligenceItem] = []
+        for item in reserved + others:
+            if _size(selected + [item]) <= MAX_PAYLOAD_CHARS:
+                selected.append(item)
+            else:
+                suppressed.append(SuppressionRecord(
+                    item_class=item.item_class,
+                    reason=f"rank-then-budget: {item.item_class} did not fit MAX_PAYLOAD_CHARS",
+                ))
+        # Reconcile: every suppression record added above also grows the payload,
+        # so an item that fit earlier can be over budget once the suppressed list
+        # has grown. Drop the lowest-scored selected item (non-reserved first)
+        # until the FULL payload (items + suppressed) fits. Each drop nets a
+        # reduction (item content >> one suppression record), so this converges.
+        while selected and _size(selected) > MAX_PAYLOAD_CHARS:
+            droppable = [it for it in selected if it.item_class not in _RESERVED_CLASSES] or selected
+            victim = min(droppable, key=lambda it: _relevance_score(it, query_scope))
+            selected.remove(victim)
+            suppressed.append(SuppressionRecord(
+                item_class=victim.item_class,
+                reason="rank-then-budget: dropped in budget reconciliation",
+            ))
+        return selected
 
     def _enforce_payload_limit(self, selected, suppressed, drop_order=None) -> List[IntelligenceItem]:
         """Drop lowest-priority classes until payload fits within MAX_PAYLOAD_CHARS."""
