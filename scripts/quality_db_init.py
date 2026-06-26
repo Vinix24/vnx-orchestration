@@ -25,7 +25,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 23
+HIGHEST_QI_VERSION = 24
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -949,6 +949,27 @@ def _migrate_v23(conn: sqlite3.Connection) -> None:
         log('INFO', 'Migrated dispatch_metadata: added model column (GAP 2, v23)')
 
 
+def _migrate_v24(conn: sqlite3.Connection) -> None:
+    """V24: grounding_source column on confidence_events (outcome-grounding v2).
+
+    Records HOW a per-dispatch confidence event was grounded — ``'junction'``
+    (the ``dispatch_pattern_offered`` precise per-dispatch linkage) or
+    ``'source_dispatch_ids'`` (the legacy substring join) — so the self-learning
+    auto-tier and audit queries can tell precisely-grounded outcomes apart from
+    the legacy-grounded ones. Additive nullable column; existing rows read NULL.
+    ALTER TABLE only (no rebuild). confidence_events is created by _migrate_v11,
+    which runs first; the existence guard is cheap insurance for partial DBs.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='confidence_events'"
+    ).fetchone():
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(confidence_events)").fetchall()}
+    if "grounding_source" not in cols:
+        conn.execute("ALTER TABLE confidence_events ADD COLUMN grounding_source TEXT")
+        log('INFO', 'Migrated confidence_events: added grounding_source column (outcome-grounding v2, v24)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -974,6 +995,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     21: _migrate_v21,
     22: _migrate_v22,
     23: _migrate_v23,
+    24: _migrate_v24,
 }
 
 
