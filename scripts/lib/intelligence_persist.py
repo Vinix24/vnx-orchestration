@@ -15,10 +15,11 @@ Tables written:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from project_scope import current_project_id
@@ -38,6 +39,104 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
         if name == column:
             return True
     return False
+
+
+def _has_table(conn: sqlite3.Connection, table: str) -> bool:
+    try:
+        return conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _outcome_grounding_v2_enabled() -> bool:
+    """Opt-in flag for junction-grounded confidence updates (default OFF).
+
+    When unset, ``update_confidence_from_outcome`` keeps its legacy
+    ``source_dispatch_ids`` substring join byte-for-byte. When ``=1`` and the
+    ``dispatch_pattern_offered`` junction exists, the precise per-dispatch
+    offered↔pattern linkage grounds confidence instead. Governance-critical
+    path (runs on every completion receipt) — gated for a deliberate rollout.
+    """
+    return os.environ.get("VNX_OUTCOME_GROUNDING_V2", "0") == "1"
+
+
+def _legacy_source_id_rows(
+    conn: sqlite3.Connection,
+    dispatch_id: str,
+    project_id: str,
+    sp_has_project: bool,
+) -> list:
+    """Legacy join: success_patterns whose source_dispatch_ids contains dispatch_id."""
+    if sp_has_project:
+        return conn.execute(
+            "SELECT id, confidence_score, usage_count, title FROM success_patterns "
+            "WHERE source_dispatch_ids LIKE ? AND project_id = ?",
+            (f"%{dispatch_id}%", project_id),
+        ).fetchall()
+    return conn.execute(
+        "SELECT id, confidence_score, usage_count, title FROM success_patterns "
+        "WHERE source_dispatch_ids LIKE ?",
+        (f"%{dispatch_id}%",),
+    ).fetchall()
+
+
+def _junction_grounded_rows(
+    conn: sqlite3.Connection,
+    dispatch_id: str,
+    project_id: str,
+    sp_has_project: bool,
+) -> list:
+    """Precise join: success_patterns OFFERED for this dispatch via the junction.
+
+    ``dispatch_pattern_offered`` is the per-dispatch offering junction (PK
+    ``(dispatch_id, pattern_id)``), written atomically alongside
+    ``source_dispatch_ids`` at injection time. Joining on the stable
+    ``intel_sp_<id>`` pattern-id convention gives an exact offered↔pattern
+    linkage — no substring false positives, no source_dispatch_ids 20-entry cap.
+    Tenant-scoped on BOTH sides when the project_id column is present so a
+    cross-tenant pattern_id/id collision cannot leak a confidence update.
+    """
+    from confidence_reconcile import SUCCESS_PATTERN_PREFIX
+
+    params: list = [SUCCESS_PATTERN_PREFIX]  # binds the JOIN's (? || sp.id)
+    where_parts = ["dpo.dispatch_id = ?"]
+    params.append(dispatch_id)
+    if sp_has_project:
+        where_parts.append("sp.project_id = ?")
+        params.append(project_id)
+    if _has_column(conn, "dispatch_pattern_offered", "project_id"):
+        where_parts.append("dpo.project_id = ?")
+        params.append(project_id)
+    sql = (
+        "SELECT DISTINCT sp.id, sp.confidence_score, sp.usage_count, sp.title "
+        "FROM success_patterns sp "
+        "JOIN dispatch_pattern_offered dpo ON dpo.pattern_id = (? || sp.id) "
+        "WHERE " + " AND ".join(where_parts)
+    )
+    return conn.execute(sql, params).fetchall()
+
+
+def _resolve_grounded_patterns(
+    conn: sqlite3.Connection,
+    dispatch_id: str,
+    project_id: str,
+    sp_has_project: bool,
+) -> Tuple[list, str]:
+    """Return (success_pattern rows offered for this dispatch, grounding_source).
+
+    With ``VNX_OUTCOME_GROUNDING_V2`` and the junction present, the junction is
+    authoritative ('junction'); otherwise the legacy substring join is used
+    ('source_dispatch_ids'). The junction and source_dispatch_ids are co-written
+    in one transaction at injection, so "junction present" implies it is the
+    complete, precise set — the legacy join only remains for pre-junction DBs
+    and the flag-off default.
+    """
+    if _outcome_grounding_v2_enabled() and _has_table(conn, "dispatch_pattern_offered"):
+        return _junction_grounded_rows(conn, dispatch_id, project_id, sp_has_project), "junction"
+    return _legacy_source_id_rows(conn, dispatch_id, project_id, sp_has_project), "source_dispatch_ids"
 
 
 def persist_signals_to_db(
@@ -279,12 +378,17 @@ def update_confidence_from_outcome(
     success_count or failure_count on the matching pattern_usage row, then
     the new Beta posterior is written back to success_patterns.confidence_score.
 
-    Linkage is via success_patterns.source_dispatch_ids (JSON array).
-    pattern_usage rows are matched / created using the stable
-    "intel_sp_<id>" id convention so the daily reconcile and the
-    per-dispatch update read and write the same row.
+    Linkage from a dispatch to the patterns it grounds is resolved by
+    ``_resolve_grounded_patterns``: with ``VNX_OUTCOME_GROUNDING_V2=1`` the
+    ``dispatch_pattern_offered`` junction (precise per-dispatch offered↔pattern
+    linkage) is authoritative; otherwise the legacy ``source_dispatch_ids``
+    substring join is used (default, byte-identical to the prior behaviour).
+    pattern_usage rows are matched / created using the stable "intel_sp_<id>"
+    id convention so the daily reconcile and the per-dispatch update read and
+    write the same row.
 
-    A confidence_events row is written for audit/learning-summary queries.
+    A confidence_events row is written for audit/learning-summary queries; its
+    ``grounding_source`` records which linkage produced the event.
 
     Args:
         db_path:     Path to quality_intelligence.db.
@@ -313,18 +417,9 @@ def update_confidence_from_outcome(
     ce_has_project = _has_column(conn, "confidence_events", "project_id")
 
     try:
-        if sp_has_project:
-            rows = conn.execute(
-                "SELECT id, confidence_score, usage_count, title FROM success_patterns "
-                "WHERE source_dispatch_ids LIKE ? AND project_id = ?",
-                (f"%{dispatch_id}%", project_id),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, confidence_score, usage_count, title FROM success_patterns "
-                "WHERE source_dispatch_ids LIKE ?",
-                (f"%{dispatch_id}%",),
-            ).fetchall()
+        rows, grounding_source = _resolve_grounded_patterns(
+            conn, dispatch_id, project_id, sp_has_project
+        )
 
         is_success = status == "success"
 
@@ -396,26 +491,26 @@ def update_confidence_from_outcome(
                 )
                 decayed += 1
 
-        # Record a confidence_events audit row (best-effort — table may not exist yet)
+        # Record a confidence_events audit row (best-effort — table/columns may
+        # not exist yet on older DBs). Columns are appended only when present so
+        # the same insert works across every migration level.
         try:
+            ce_cols = ["dispatch_id", "terminal", "outcome", "patterns_boosted",
+                       "patterns_decayed", "confidence_change", "occurred_at"]
+            ce_vals: list = [dispatch_id, terminal, status, boosted, decayed,
+                             round(net_change, 4), now]
             if ce_has_project:
-                conn.execute(
-                    "INSERT INTO confidence_events "
-                    "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
-                    " confidence_change, occurred_at, project_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (dispatch_id, terminal, status, boosted, decayed,
-                     round(net_change, 4), now, project_id),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO confidence_events "
-                    "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
-                    " confidence_change, occurred_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (dispatch_id, terminal, status, boosted, decayed,
-                     round(net_change, 4), now),
-                )
+                ce_cols.append("project_id")
+                ce_vals.append(project_id)
+            if _has_column(conn, "confidence_events", "grounding_source"):
+                ce_cols.append("grounding_source")
+                ce_vals.append(grounding_source)
+            placeholders = ", ".join("?" for _ in ce_vals)
+            conn.execute(
+                f"INSERT INTO confidence_events ({', '.join(ce_cols)}) "
+                f"VALUES ({placeholders})",
+                ce_vals,
+            )
         except sqlite3.OperationalError:
             pass  # Table not yet migrated in older DBs
 
