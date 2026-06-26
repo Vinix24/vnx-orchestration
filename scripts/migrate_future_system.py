@@ -1341,6 +1341,80 @@ def _apply_0022_skip_dispatches_rebuild(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _create_v22_dispatches_table(conn: sqlite3.Connection) -> None:
+    """Create the v22-shape dispatches table (composite UNIQUE(dispatch_id, project_id))."""
+    conn.execute("""
+        CREATE TABLE dispatches (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id     TEXT    NOT NULL,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+            state           TEXT    NOT NULL DEFAULT 'proposed'
+                                    CHECK (state IN (
+                                        'proposed', 'ready', 'active', 'completed', 'failed',
+                                        'queued', 'claimed', 'delivering', 'accepted', 'running',
+                                        'timed_out', 'failed_delivery', 'expired', 'recovered',
+                                        'dead_letter'
+                                    )),
+            terminal_id     TEXT,
+            track           TEXT,
+            priority        TEXT    DEFAULT 'P2',
+            pr_ref          TEXT,
+            gate            TEXT,
+            attempt_count   INTEGER NOT NULL DEFAULT 0,
+            bundle_path     TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            expires_after   TEXT,
+            metadata_json   TEXT    DEFAULT '{}',
+            operator_approved_at TEXT,
+            UNIQUE(dispatch_id, project_id)
+        )
+    """)
+
+
+def _copy_into_v22_dispatches(
+    conn: sqlite3.Connection,
+    col_info: list,
+    col_list: str,
+) -> None:
+    """Re-add extra columns, copy rows, preserve the sequence high-water mark, drop the old table.
+
+    Extracted from _apply_0022_dynamic_rebuild; the caller wraps this in the
+    foreign_keys=OFF + SAVEPOINT transaction.
+    """
+    # Add any extra columns (beyond the 0022 schema) back via ALTER TABLE.
+    v22_cols = {
+        'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
+        'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
+        'expires_after', 'metadata_json', 'operator_approved_at',
+    }
+    extra_cols = [c for c, gen in col_info if not gen and c not in v22_cols]
+    for extra_col in extra_cols:
+        conn.execute(f"ALTER TABLE dispatches ADD COLUMN \"{extra_col}\" TEXT")
+
+    conn.execute(
+        f"INSERT INTO dispatches ({col_list}) "
+        f"SELECT {col_list} FROM dispatches_pre_v22"
+    )
+
+    # Sequence preservation (mirrors 0022 SQL DELETE+INSERT pattern, PR #685).
+    conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dispatches'")
+    conn.execute("""
+        INSERT INTO sqlite_sequence(name, seq)
+        SELECT 'dispatches',
+               COALESCE(
+                   (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v22'),
+                   (SELECT MAX(id) FROM dispatches),
+                   0
+               )
+    """)
+
+    # DROP succeeds because foreign_keys=OFF (set by the caller, outside the savepoint).
+    # Ghost FKs on child tables referencing dispatches_pre_v22 are tolerated here;
+    # the adaptive 0031-branch rebuilds those child tables with correct composite FKs.
+    conn.execute("DROP TABLE dispatches_pre_v22")
+
+
 def _apply_0022_dynamic_rebuild(conn: sqlite3.Connection) -> None:
     """Apply the full 0022 migration using a dynamic column copy.
 
@@ -1381,65 +1455,8 @@ def _apply_0022_dynamic_rebuild(conn: sqlite3.Connection) -> None:
 
             # Dispatches rebuild: rename → create v22 shape → dynamic copy → seq fix → drop.
             conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_v22")
-            conn.execute("""
-                CREATE TABLE dispatches (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    dispatch_id     TEXT    NOT NULL,
-                    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
-                    state           TEXT    NOT NULL DEFAULT 'proposed'
-                                            CHECK (state IN (
-                                                'proposed', 'ready', 'active', 'completed', 'failed',
-                                                'queued', 'claimed', 'delivering', 'accepted', 'running',
-                                                'timed_out', 'failed_delivery', 'expired', 'recovered',
-                                                'dead_letter'
-                                            )),
-                    terminal_id     TEXT,
-                    track           TEXT,
-                    priority        TEXT    DEFAULT 'P2',
-                    pr_ref          TEXT,
-                    gate            TEXT,
-                    attempt_count   INTEGER NOT NULL DEFAULT 0,
-                    bundle_path     TEXT,
-                    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    expires_after   TEXT,
-                    metadata_json   TEXT    DEFAULT '{}',
-                    operator_approved_at TEXT,
-                    UNIQUE(dispatch_id, project_id)
-                )
-            """)
-
-            # Add any extra columns (beyond the 0022 schema) back via ALTER TABLE.
-            v22_cols = {
-                'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
-                'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
-                'expires_after', 'metadata_json', 'operator_approved_at',
-            }
-            extra_cols = [c for c, gen in col_info if not gen and c not in v22_cols]
-            for extra_col in extra_cols:
-                conn.execute(f"ALTER TABLE dispatches ADD COLUMN \"{extra_col}\" TEXT")
-
-            conn.execute(
-                f"INSERT INTO dispatches ({col_list}) "
-                f"SELECT {col_list} FROM dispatches_pre_v22"
-            )
-
-            # Sequence preservation (mirrors 0022 SQL DELETE+INSERT pattern, PR #685).
-            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dispatches'")
-            conn.execute("""
-                INSERT INTO sqlite_sequence(name, seq)
-                SELECT 'dispatches',
-                       COALESCE(
-                           (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v22'),
-                           (SELECT MAX(id) FROM dispatches),
-                           0
-                       )
-            """)
-
-            # DROP succeeds because foreign_keys=OFF (set above, outside the savepoint).
-            # Ghost FKs on child tables referencing dispatches_pre_v22 are tolerated here;
-            # the adaptive 0031-branch rebuilds those child tables with correct composite FKs.
-            conn.execute("DROP TABLE dispatches_pre_v22")
+            _create_v22_dispatches_table(conn)
+            _copy_into_v22_dispatches(conn, col_info, col_list)
 
             # Indexes — applied AFTER dispatches rebuild so operator_approved_at exists.
             for stmt in schema_migration._split_sql_statements(_0022_INDEXES_DDL):
@@ -2373,10 +2390,8 @@ def _adaptive_foreign_tenant_preflight(
 def _adaptive_orphan_preflight(conn: sqlite3.Connection) -> None:
     """D1 + orphan policy (CONSERVATIVE): count headless_runs rows whose
     dispatch_id or attempt_id have no matching parent row. If ANY orphans exist
-    → ABORT with a clear report. We NEVER silently exclude governance data.
-
-    Also checks if any other tables reference headless_runs (deepseek finding)
-    so the operator is informed of the full FK graph.
+    → ABORT with a clear report (incl. tables referencing headless_runs). We
+    NEVER silently exclude governance data.
     """
     if not _table_has_column(conn, "headless_runs", "dispatch_id"):
         # headless_runs has no dispatch_id column at all — cannot have orphans
@@ -2475,6 +2490,64 @@ def _validate_col_references(sql: str, valid_cols: set[str], object_name: str) -
         )
 
 
+def _prepare_v31_dependents(
+    conn: sqlite3.Connection,
+    table: str,
+    base_copy_cols: list,
+) -> tuple:
+    """Capture views/triggers on `table`, validate their column refs against the
+    v31 shape, and drop views before the rebuild. Returns (views, triggers) for
+    verbatim recreation after the rename.
+
+    Secondary indexes are intentionally NOT captured here: the rebuild replaces
+    them with authoritative v31 DDL from _V31_TABLE_INDEXES.
+    """
+    views = tenant_stamping._get_views_referencing(conn, table)
+    triggers = tenant_stamping._get_triggers_for_table(conn, table)
+    v31_cols_for_table = set(base_copy_cols) | {"project_id"}
+    for view_name, view_sql in views:
+        _validate_col_references(view_sql, v31_cols_for_table, f"view:{view_name}")
+        conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+    for trig_name, trig_sql in triggers:
+        _validate_col_references(trig_sql, v31_cols_for_table, f"trigger:{trig_name}")
+    return views, triggers
+
+
+def _copy_rows_into_v31_staging(
+    conn: sqlite3.Connection,
+    table: str,
+    staging: str,
+    base_copy_cols: list,
+    resolved_pid: str,
+    has_pid: bool,
+) -> None:
+    """Copy rows from `table` into the v31 staging table, filling (has_pid) or
+    adding (not has_pid) project_id = resolved_pid. Fail-loud on a composite-key
+    collision — never silent data loss.
+    """
+    src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
+    if has_pid:
+        # project_id column exists: copy it, filling NULL/'' with resolved_pid.
+        dst_col_list = ", ".join(f'"{c}"' for c in base_copy_cols + ["project_id"])
+        pid_expr = (
+            "CASE WHEN \"project_id\" IS NULL OR \"project_id\" = '' "
+            f"THEN '{resolved_pid}' ELSE \"project_id\" END"
+        )
+        select_sql = f'SELECT {src_col_list}, {pid_expr} FROM "{table}"'
+    else:
+        # project_id column absent: add it set to resolved_pid for all rows.
+        dst_col_list = src_col_list + ', "project_id"'
+        select_sql = f"SELECT {src_col_list}, '{resolved_pid}' FROM \"{table}\""
+    try:
+        conn.execute(f'INSERT INTO "{staging}" ({dst_col_list}) {select_sql}')
+    except sqlite3.IntegrityError as exc:
+        raise RuntimeError(
+            f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
+            "Two or more rows resolve to the same (key, project_id) after NULL/'' fill. "
+            "Investigate duplicates before retrying. ROLLBACK."
+        ) from exc
+
+
 def _adaptive_rebuild_table(
     conn: sqlite3.Connection,
     table: str,
@@ -2483,21 +2556,12 @@ def _adaptive_rebuild_table(
 ) -> None:
     """D2: Rebuild one runtime table to its exact v31 manifest shape.
 
-    Per-table project_id handling:
-    - If project_id column PRESENT: preserve existing non-NULL/non-'' values;
-      fill NULL/'' cells with resolved_pid (cannot hold NULL in a composite key).
-    - If project_id column ABSENT (e.g. headless_runs in mixed state): add it
-      set to resolved_pid for all rows.
-
-    Dependent objects (views, triggers, secondary indexes) are captured before
-    DROP and recreated verbatim after rename. Index/trigger SQL is validated
-    against the new column set and a warning is emitted on any dangling reference
-    (not a hard abort — the operator verifies).
-
-    Row-copy uses an exact count-assert (rows_copied == source_rowcount). Any
-    composite-key collision fails loud — no silent data loss.
-
-    FK-off must already be active on the connection (set by _run_runtime_v31_transaction).
+    project_id: if present, preserve non-NULL/'' values and fill NULL/'' with
+    resolved_pid; if absent, add it set to resolved_pid. Dependent views/triggers
+    are captured + validated + recreated verbatim. Row-copy uses an exact
+    count-assert (rows_copied == source_rowcount) and fails loud on a
+    composite-key collision — no silent data loss. FK-off must already be active
+    on the connection (set by _run_runtime_v31_transaction).
     """
     ddl_template = _V31_TABLE_DDL[table]
     base_copy_cols = _V31_COPY_COLS[table]
@@ -2505,25 +2569,10 @@ def _adaptive_rebuild_table(
 
     has_pid = _table_has_column(conn, table, "project_id")
 
-    # --- Capture dependent objects BEFORE drop ---
-    views = tenant_stamping._get_views_referencing(conn, table)
-    triggers = tenant_stamping._get_triggers_for_table(conn, table)
-    secondary_indexes = tenant_stamping._get_secondary_indexes(conn, table)
-
-    # Build the set of valid column names for the rebuilt table (v31 shape).
-    # Validate views/triggers against this — a view/trigger referencing a column
-    # that no longer exists after the rebuild would error at recreation time.
-    # Secondary indexes are NOT validated here: we replace them with authoritative
-    # v31 DDL from _V31_TABLE_INDEXES, so the old captured SQL is only kept as
-    # a fallback and is never re-executed for the 4 core tables.
-    v31_cols_for_table = set(base_copy_cols) | {"project_id"}
-
-    for view_name, view_sql in views:
-        _validate_col_references(view_sql, v31_cols_for_table, f"view:{view_name}")
-        conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
-
-    for trig_name, trig_sql in triggers:
-        _validate_col_references(trig_sql, v31_cols_for_table, f"trigger:{trig_name}")
+    # Capture dependent views/triggers, validate their column refs against the
+    # v31 shape, and drop views before the rebuild (see helper). Returned for
+    # verbatim recreation after the rename.
+    views, triggers = _prepare_v31_dependents(conn, table, base_copy_cols)
 
     # Count source rows for the count-assert
     source_rowcount = conn.execute(
@@ -2534,40 +2583,7 @@ def _adaptive_rebuild_table(
     conn.execute(f'DROP TABLE IF EXISTS "{staging}"')
     conn.execute(ddl_template.format(staging=f'"{staging}"'))
 
-    if has_pid:
-        # project_id column exists: copy it, filling NULL/'' with resolved_pid
-        copy_cols_with_pid = base_copy_cols + ["project_id"]
-        src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
-        dst_col_list = ", ".join(f'"{c}"' for c in copy_cols_with_pid)
-        pid_expr = (
-            "CASE WHEN \"project_id\" IS NULL OR \"project_id\" = '' "
-            f"THEN '{resolved_pid}' ELSE \"project_id\" END"
-        )
-        try:
-            conn.execute(
-                f'INSERT INTO "{staging}" ({dst_col_list}) '
-                f'SELECT {src_col_list}, {pid_expr} FROM "{table}"'
-            )
-        except sqlite3.IntegrityError as exc:
-            raise RuntimeError(
-                f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
-                "Two or more rows resolve to the same (key, project_id) after NULL/'' fill. "
-                "Investigate duplicates before retrying. ROLLBACK."
-            ) from exc
-    else:
-        # project_id column absent: add it set to resolved_pid for all rows
-        src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
-        dst_col_list = ", ".join(f'"{c}"' for c in base_copy_cols) + ', "project_id"'
-        try:
-            conn.execute(
-                f'INSERT INTO "{staging}" ({dst_col_list}) '
-                f"SELECT {src_col_list}, '{resolved_pid}' FROM \"{table}\""
-            )
-        except sqlite3.IntegrityError as exc:
-            raise RuntimeError(
-                f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
-                "Investigate duplicates before retrying. ROLLBACK."
-            ) from exc
+    _copy_rows_into_v31_staging(conn, table, staging, base_copy_cols, resolved_pid, has_pid)
 
     # Count-assert: every source row must be copied (no composite-key collision allowed).
     # This fires when the INSERT succeeded but produced fewer rows than the source
@@ -2616,6 +2632,30 @@ def _wpm_has_composite_fk_to_terminal_leases(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _create_wpm_v31_staging(conn: sqlite3.Connection, staging: str) -> None:
+    """Create the v31 worker_pool_membership staging table (composite FKs to
+    terminal_leases and pool_config)."""
+    conn.execute(f"""
+CREATE TABLE "{staging}" (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    terminal_id         TEXT    NOT NULL,
+    project_id          TEXT    NOT NULL,
+    pool_id             TEXT    NOT NULL DEFAULT 'default',
+    provider            TEXT    NOT NULL
+                            CHECK (provider IN ('claude', 'codex', 'gemini', 'litellm')),
+    role                TEXT    NOT NULL,
+    joined_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    released_at         TEXT,
+    release_reason      TEXT,
+    spawn_generation    INTEGER NOT NULL DEFAULT 1,
+    metadata_json       TEXT    DEFAULT '{{}}',
+    FOREIGN KEY (terminal_id, project_id)
+        REFERENCES terminal_leases(terminal_id, project_id),
+    FOREIGN KEY (project_id, pool_id)
+        REFERENCES pool_config(project_id, pool_id)
+)""")
+
+
 def _adaptive_rebuild_worker_pool_membership(
     conn: sqlite3.Connection,
     staging_suffix: str = "_v31_new",
@@ -2640,25 +2680,7 @@ def _adaptive_rebuild_worker_pool_membership(
     ).fetchone()[0]
 
     conn.execute(f'DROP TABLE IF EXISTS "{staging}"')
-    conn.execute(f"""
-CREATE TABLE "{staging}" (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    terminal_id         TEXT    NOT NULL,
-    project_id          TEXT    NOT NULL,
-    pool_id             TEXT    NOT NULL DEFAULT 'default',
-    provider            TEXT    NOT NULL
-                            CHECK (provider IN ('claude', 'codex', 'gemini', 'litellm')),
-    role                TEXT    NOT NULL,
-    joined_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    released_at         TEXT,
-    release_reason      TEXT,
-    spawn_generation    INTEGER NOT NULL DEFAULT 1,
-    metadata_json       TEXT    DEFAULT '{{}}',
-    FOREIGN KEY (terminal_id, project_id)
-        REFERENCES terminal_leases(terminal_id, project_id),
-    FOREIGN KEY (project_id, pool_id)
-        REFERENCES pool_config(project_id, pool_id)
-)""")
+    _create_wpm_v31_staging(conn, staging)
 
     conn.execute(
         f'INSERT INTO "{staging}" '
@@ -3008,14 +3030,13 @@ def run(project_root: Path | None = None) -> None:
         # a downgrade+re-walk that did not converge aborts here rather than looping.
         _assert_manifest_converged(conn)
 
-        # (E) W1 tenant-stamping (1.0-blocker) — close conn before the 3-phase
-        # runner opens new connections (avoids WAL reader/writer conflicts).
-        # B1 fix: call the COUPLED two-DB orchestrator so BOTH RC and QI are
-        # migrated. The QI sibling path is resolved inside _run_w1_coupled_migration.
+        # (E) W1 tenant-stamping (1.0-blocker): close conn first (the 3-phase
+        # runner opens its own — avoids WAL conflicts), then run the COUPLED
+        # two-DB orchestrator so BOTH RC and QI migrate (QI path resolved inside).
         conn.close()
         conn = None
         _run_w1_coupled_migration(db_path)
-        print(f"\n  Migration complete. Schema at user_version (RC verified by manifest converge).\n")
+        print("\n  Migration complete. Schema at user_version (RC verified by manifest converge).\n")
 
     except Exception:
         if conn is not None:
