@@ -6,7 +6,8 @@ Purpose: Extract high-quality documentation sections from markdown files
          and populate FTS5 search database alongside code snippets.
 
 Configurable via VNX_DOCS_DIRS environment variable (comma-separated paths,
-relative to PROJECT_ROOT or absolute). Feature is inactive when not configured.
+relative to PROJECT_ROOT or absolute). When unset, defaults to the project's
+own docs/ directory; set VNX_DOCS_DIRS="" to disable doc indexing.
 """
 
 import hashlib
@@ -98,10 +99,19 @@ def log(level: str, message: str):
 
 
 def _resolve_docs_dirs() -> List[Path]:
-    """Resolve documentation directories from VNX_DOCS_DIRS env var."""
-    raw = os.environ.get("VNX_DOCS_DIRS", "")
-    if not raw:
-        return []
+    """Resolve documentation directories from VNX_DOCS_DIRS env var.
+
+    When VNX_DOCS_DIRS is UNSET, defaults to the project's own ``docs/`` directory
+    so the project's functional/technical docs are indexed for the doc_relevant
+    intelligence source without operator config. An EXPLICIT empty value
+    (VNX_DOCS_DIRS="") disables doc indexing.
+    """
+    raw = os.environ.get("VNX_DOCS_DIRS")
+    if raw is None:
+        default_docs = PROJECT_ROOT / "docs"
+        return [default_docs] if default_docs.is_dir() else []
+    if not raw.strip():
+        return []  # explicit empty → doc indexing disabled
     dirs = []
     for entry in raw.split(","):
         p = Path(entry.strip())

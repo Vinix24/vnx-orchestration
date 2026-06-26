@@ -38,7 +38,7 @@ def _format_items_markdown(items: List[IntelligenceItem]) -> str:
     # item.content; emit it verbatim so they reach the worker (they were
     # selected + budgeted but previously dropped at render).
     for cls in ("prior_round_finding", "adr_relevant", "schema_section",
-                "code_anchor", "operator_memory"):
+                "code_anchor", "doc_relevant", "operator_memory"):
         for item in by_class.get(cls, []):
             content = (item.content or "").rstrip()
             if content:
