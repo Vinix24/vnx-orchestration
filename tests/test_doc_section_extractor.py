@@ -234,10 +234,18 @@ def test_docs_dirs_from_env(tmp_path, monkeypatch):
     assert dirs[0] == docs_dir
 
 
-def test_docs_dirs_empty_when_unset(monkeypatch):
+def test_docs_dirs_defaults_to_project_docs_when_unset(monkeypatch):
+    """Unset VNX_DOCS_DIRS now defaults to the project's docs/ (so the project's
+    own docs are indexed for the doc_relevant source without operator config)."""
     monkeypatch.delenv("VNX_DOCS_DIRS", raising=False)
     dirs = _resolve_docs_dirs()
-    assert dirs == []
+    assert any(p.name == "docs" for p in dirs), dirs
+
+
+def test_docs_dirs_empty_when_explicitly_blank(monkeypatch):
+    """An explicit empty value disables doc indexing."""
+    monkeypatch.setenv("VNX_DOCS_DIRS", "")
+    assert _resolve_docs_dirs() == []
 
 
 # ── Full Pipeline E2E Test ────────────────────────────────────────
