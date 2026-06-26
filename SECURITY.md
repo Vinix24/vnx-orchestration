@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately to the maintainers.
+Please report security issues privately to the maintainer at **vincentvd@gmail.com** (or via GitHub's private security-advisory flow on the repository). Do not open a public issue for a security report.
 
 Include:
 
