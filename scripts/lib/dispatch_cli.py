@@ -566,6 +566,26 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             _emit_reject(plan)
             return 1
 
+        # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth
+        # model ranks the deterministic anchors into a sidecar BEFORE the permit
+        # is issued. It reads vspec.instruction_text in-memory and writes a
+        # SEPARATE sidecar file — it never touches the instruction, so the
+        # permit / instruction_sha256 TOCTOU below is untouched. Never blocks the
+        # door (best-effort, never raises).
+        if not dry_run:
+            try:
+                from scout_prepass import maybe_run_scout
+                maybe_run_scout(
+                    dispatch_id=plan.dispatch_id,
+                    instruction_text=vspec.instruction_text,
+                    dispatch_paths=[dp.path for dp in vspec.spec.dispatch_paths],
+                    state_dir=state_dir,
+                    task_class=getattr(vspec.spec, "task_class", None),
+                    lane=plan.lane,
+                )
+            except Exception as exc:
+                logger.debug("[dispatch_cli] scout pre-pass skipped: %s", exc)
+
         permit = issue_permit(plan)
         require_permit(plan, permit)  # P1-#6: door backstop for BOTH lanes
         fp = fingerprint(permit)
