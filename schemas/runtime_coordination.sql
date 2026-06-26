@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS dispatches (
     track           TEXT,
     priority        TEXT    DEFAULT 'P2',
     pr_ref          TEXT,
+    -- Pluggable output identity (NO-NODE deliverable model). A deliverable is
+    -- the GROUP BY over dispatches sharing one output_ref; migration 0027's
+    -- deliverables VIEW reads these. Declared here so the schema is the SSOT;
+    -- the idempotent preflight (_ensure_dispatches_output_columns) still adds
+    -- them to legacy DBs created before they existed.
+    output_ref      TEXT,
+    output_kind     TEXT,
     gate            TEXT,
     attempt_count   INTEGER NOT NULL DEFAULT 0,
     bundle_path     TEXT,
