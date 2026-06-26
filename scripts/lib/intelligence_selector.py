@@ -33,6 +33,7 @@ from intelligence_sources import (  # noqa: F401  (re-exported for backward comp
     query_proven_patterns, query_failure_prevention, query_recent_comparable,
     build_adr_item, build_schema_section_item,
     build_code_anchor_item, build_operator_memory_item, build_prior_round_item,
+    build_doc_relevant_item,
     record_injection_audit, record_pattern_usage,
 )
 from intelligence_sources import stamp_source_dispatch_ids as _stamp
@@ -69,8 +70,9 @@ _DIRECT_SOURCES = [
     ("prior_round_finding", ["prior_round_finding"]),
     ("adr_relevant",        ["prior_round_finding", "adr_relevant"]),
     ("code_anchor",         ["prior_round_finding", "adr_relevant", "code_anchor"]),
-    ("operator_memory",     ["prior_round_finding", "adr_relevant", "code_anchor", "operator_memory"]),
-    ("schema_section",      ["prior_round_finding", "adr_relevant", "code_anchor", "operator_memory", "schema_section"]),
+    ("doc_relevant",        ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant"]),
+    ("operator_memory",     ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant", "operator_memory"]),
+    ("schema_section",      ["prior_round_finding", "adr_relevant", "code_anchor", "doc_relevant", "operator_memory", "schema_section"]),
 ]
 
 # Build-step 1: rank-then-budget (opt-in via VNX_INTEL_RANK_THEN_BUDGET=1).
@@ -85,6 +87,7 @@ _CLASS_WEIGHT: Dict[str, float] = {
     "proven_pattern": 1.2,
     "adr_relevant": 1.1,
     "schema_section": 1.1,
+    "doc_relevant": 1.0,
     "code_anchor": 1.0,
     "operator_memory": 1.0,
     "recent_comparable": 0.8,
@@ -218,6 +221,7 @@ class IntelligenceSelector:
             "prior_round_finding": build_prior_round_item(pr_id or "", paths, now_ts) if pr_id else None,
             "adr_relevant": build_adr_item(dispatch_id, paths, now_ts) if paths else None,
             "code_anchor": build_code_anchor_item(dispatch_id, paths, instruction_text or "", now_ts) if (paths and instruction_text) else None,
+            "doc_relevant": build_doc_relevant_item(self._get_quality_db(), dispatch_id, paths, instruction_text or "", now_ts) if (paths or instruction_text) else None,
             "operator_memory": build_operator_memory_item(dispatch_id, skill_name, paths, instruction_text or "", now_ts) if (skill_name or paths or instruction_text) else None,
             "schema_section": build_schema_section_item(dispatch_id, paths, instruction_text or "", now_ts) if (paths or instruction_text) else None,
         }
