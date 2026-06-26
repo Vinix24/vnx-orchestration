@@ -9,11 +9,13 @@
 --         claudedocs/PLANNING-OBJECT-MODEL-SYNTHESIS-2026-06-01.md
 --
 -- Pre-migration state (v24-v26): tracks has no `horizon`; dispatches may or
---          may not carry output_ref/output_kind (added by structural-doctor on
---          live DBs, absent on fresh DBs that only have the 0024 schema).
---          A preflight hook in migrate_future_system.py idempotently adds
---          output_ref + output_kind (+ backfill from pr_ref) before this SQL
---          runs, so the deliverables VIEW always sees those columns.
+--          may not carry output_ref/output_kind. Fresh DBs now declare both in
+--          the base runtime_coordination.sql CREATE TABLE (the schema SSOT, so
+--          the schema-drift guard passes); legacy DBs got them from the
+--          structural-doctor. Either way, a preflight hook in
+--          migrate_future_system.py idempotently adds output_ref + output_kind
+--          (+ backfill from pr_ref) before this SQL runs when they are still
+--          absent, so the deliverables VIEW always sees those columns.
 -- Post-migration state (v27): tracks.horizon TEXT CHECK(now|next|later);
 --          deliverables VIEW (GROUP BY project_id, output_ref).
 --
