@@ -36,14 +36,16 @@ def _make_db(tmp_path: Path) -> Path:
             confidence_score REAL,
             category TEXT,
             usage_count INTEGER,
-            last_used TEXT
+            last_used TEXT,
+            project_id TEXT DEFAULT 'vnx-dev'
         );
         CREATE TABLE antipatterns (
             id INTEGER PRIMARY KEY,
             title TEXT,
             severity TEXT,
             occurrence_count INTEGER,
-            last_seen TEXT
+            last_seen TEXT,
+            project_id TEXT DEFAULT 'vnx-dev'
         );
         """
     )
@@ -274,9 +276,9 @@ class TestConfidenceTrends:
     def test_success_patterns_aggregated_by_date(self, tmp_path):
         db_path = _make_db(tmp_path)
         con = sqlite3.connect(str(db_path))
-        con.execute("INSERT INTO success_patterns VALUES (1, 'P1', 0.8, 'cat', 1, '2026-04-10')")
-        con.execute("INSERT INTO success_patterns VALUES (2, 'P2', 0.6, 'cat', 1, '2026-04-10')")
-        con.execute("INSERT INTO success_patterns VALUES (3, 'P3', 0.9, 'cat', 1, '2026-04-11')")
+        con.execute("INSERT INTO success_patterns (id, title, confidence_score, category, usage_count, last_used) VALUES (1, 'P1', 0.8, 'cat', 1, '2026-04-10')")
+        con.execute("INSERT INTO success_patterns (id, title, confidence_score, category, usage_count, last_used) VALUES (2, 'P2', 0.6, 'cat', 1, '2026-04-10')")
+        con.execute("INSERT INTO success_patterns (id, title, confidence_score, category, usage_count, last_used) VALUES (3, 'P3', 0.9, 'cat', 1, '2026-04-11')")
         con.commit()
         con.close()
 
@@ -295,7 +297,7 @@ class TestConfidenceTrends:
     def test_antipatterns_included_in_trends(self, tmp_path):
         db_path = _make_db(tmp_path)
         con = sqlite3.connect(str(db_path))
-        con.execute("INSERT INTO antipatterns VALUES (1, 'AP1', 'high', 3, '2026-04-12')")
+        con.execute("INSERT INTO antipatterns (id, title, severity, occurrence_count, last_seen) VALUES (1, 'AP1', 'high', 3, '2026-04-12')")
         con.commit()
         con.close()
 
@@ -312,7 +314,7 @@ class TestConfidenceTrends:
     def test_trend_entry_has_required_fields(self, tmp_path):
         db_path = _make_db(tmp_path)
         con = sqlite3.connect(str(db_path))
-        con.execute("INSERT INTO success_patterns VALUES (1, 'P1', 0.7, 'cat', 1, '2026-04-13')")
+        con.execute("INSERT INTO success_patterns (id, title, confidence_score, category, usage_count, last_used) VALUES (1, 'P1', 0.7, 'cat', 1, '2026-04-13')")
         con.commit()
         con.close()
 
