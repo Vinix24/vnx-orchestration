@@ -320,6 +320,27 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 
 ---
 
+## Phase 12: The Road to 1.0 (Waves 5–8 → 1.0.0, May–June 2026)
+
+**Problem**
+- v0.10.0 was a single-operator, single-project system. Running it for more than one project meant the central state could cross-contaminate (`project_id` was not enforced end-to-end).
+- Dispatch routing had grown several side doors (per-lane scripts called directly), so the audit trail of *how* a dispatch was routed was inconsistent.
+- Install was checkout-only with no packaged surface.
+
+**What changed**
+- **Multi-provider control centre (Waves 5–7)** — the elastic worker pool (`bin/vnx pool`, ADR-018), five provider lanes (Claude subscription tmux + subprocess burst, Codex CLI, Gemini CLI, Kimi CLI OAuth, LiteLLM bridge for DeepSeek/GLM), universal cost tracking, and the provider/routing registries (`scripts/lib/providers/`).
+- **Multitenancy (ADR-007)** — composite `UNIQUE(dispatch_id, project_id)` and fail-closed `project_id` resolution across the central store, so one machine can govern many projects without bleed. The `dispatches` table rebuild + the future-state reconciliation batch (track ↔ dispatch ↔ open-item) followed.
+- **The single-entry door (ADR-024)** — every dispatch funnels through one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot → compile_plan → permit → execute. Flipped default-ON 2026-06-24, with a phantom-guard that rejects evidence-free GATE-GREEN receipts and GLM normalized to the harness lane at the door. Rollback via `VNX_DISPATCH_LEGACY=1`.
+- **Packaging** — the wheel builds from the tree (`pip install -e .`, `vnx` console script); the PyPI publish is the final human-gated 1.0 ship step.
+- **Mission Control central-store cutover (2026-06-23)** and the receipt PULL-model groundwork.
+- **Pre-ship hardening sprint (2026-06-26)** — five real production bugs (exit-classifier audit-trail, schema-SSOT, report-findings self-heal, doctor partial-setup, code-anchor payload eviction), the future-state git-grounded reconcile, the self-learning proposal-tier revival, and a stale-test + docs sweep. See `CHANGELOG.md`.
+
+**Outcome**
+- `VERSION` is `1.0.0` (release candidate); the only remaining ship gate is the PyPI publish.
+- The audit trail now records routing through one door; multitenancy is enforced fail-closed; the self-learning proposal tier produces operator-gated proposals from the real receipt stream.
+
+---
+
 ## The Operator's Journey: From 4 tmux Panes to Headless Orchestrator
 
 This section traces how the *experience of running VNX* changed for the human operator — independent of the technical phases above, which describe what was built. These phases describe what it felt like.
@@ -402,7 +423,10 @@ The operator can answer questions that previously required guesswork: "Did this 
 - Supervisor pack: daemons auto-respawn, state auto-rotates nightly
 - Cryptographic audit trail: instruction_sha256, token tracking, canonical gate schema
 - Headless audit parity at ~90% (was 40% at v0.9.0)
-- Intelligence loop closed: selector-learner reconciled, T0 decision log active
+- Intelligence loop closed: selector-learner reconciled, T0 decision log active; the self-learning proposal tier produces operator-gated proposals from the receipt stream
+- Multitenancy enforced fail-closed (ADR-007 composite `project_id` keys) — one machine governs many projects without bleed
+- Single-entry dispatch door default-ON (ADR-024): every dispatch funnels through one validated, permitted, phantom-guarded entry point
+- Elastic worker pool (`bin/vnx pool`, ADR-018) with queue- and cost-aware scaling and per-worker worktree isolation
 - Public packaging and CI hygiene suitable for external evaluation
 
 ---

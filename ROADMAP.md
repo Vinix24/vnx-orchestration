@@ -2,9 +2,9 @@
 
 > Public roadmap. Detailed designs live in `docs/manifesto/ROADMAP.md`.
 
-## Current: 1.0.0 (2026-05-29)
+## Current: 1.0.0 (release candidate)
 
-1.0.0 is pip-installable and production-validated. ~120 PRs merged since the first Wave 5 delivery in mid-May. Capability summary below.
+`VERSION` is `1.0.0` and the wheel builds from this tree. **It is not on PyPI yet — install from a checkout; the PyPI publish is the one remaining 1.0 ship gate (human-gated).** Production-validated on the author's own work (a multi-month receipt trail). Built across many waves since the first Wave 5 delivery in mid-May. Capability summary below.
 
 ### Always-on (default active)
 
@@ -13,7 +13,7 @@
 - **Intelligence injection**: context bundles, ADR injection, repo-map enrichment for all providers (#712), kimi intelligence wiring (#701)
 - **GOV-1 PreToolUse hook**: blocks raw worker spawns, enforces subprocess_dispatch path (#656)
 - **Elastic worker pool**: `vnx pool` CLI, queue-aware + cost-aware scaling, per-worker worktree isolation
-- **Central install**: `pip install vnx-orchestration`, `vnx init`, `vnx doctor --strict`
+- **Central install**: from a checkout (`pip install -e .` or `./bin/vnx`), `vnx init`, `vnx doctor --strict`. PyPI publish (`pip install vnx-orchestration`) is the final 1.0 ship gate, not done yet.
 - **Track layer**: schema + DAL + CLI + ADR-007 composite PK (FUT-1 + FUT-2, both done)
 - **ADR intelligence**: FTS5 ADR index + injection in dispatch context (INT-1, INT-2)
 - **Cost tracking**: universal cost tracking across all 5 providers (#684)

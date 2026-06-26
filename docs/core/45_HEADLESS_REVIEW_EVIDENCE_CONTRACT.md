@@ -8,7 +8,7 @@ This contract applies to headless review providers used for governance evidence,
 - `codex_gate`
 - `claude_github_optional`
 
-It does not replace the generic headless execution contract in [HEADLESS_RUN_CONTRACT.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/HEADLESS_RUN_CONTRACT.md). It narrows that contract for review-gate runs that T0 depends on for closure decisions.
+It does not replace the generic headless execution contract in [HEADLESS_RUN_CONTRACT.md](../contracts/HEADLESS_RUN_CONTRACT.md). It narrows that contract for review-gate runs that T0 depends on for closure decisions.
 
 ## 1. Why This Exists
 
