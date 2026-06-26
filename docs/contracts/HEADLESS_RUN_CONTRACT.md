@@ -249,6 +249,17 @@ Classification is applied in order (first match wins):
 7. **Stderr contains prompt/input error patterns** -> `prompt_error`
 8. **Exit code != 0 with no matching pattern** -> `unknown`
 
+**Retryability refinements (2026-06-26).** Two stderr cases override their class
+default because a blind auto-retry cannot fix them and only wastes API
+calls/tokens:
+
+- **Context / token-limit exceeded** -> `prompt_error` (NOT `tool_failure`). It
+  is an input-size problem; re-running the same oversized prompt fails again.
+  Operator action: reduce the prompt.
+- **Auth errors (401 / 403)** -> `tool_failure` class (it is an API error) but
+  **non-retryable**. Operator action: rotate credentials, then retry. The
+  per-pattern `retryable=False` flag overrides the `tool_failure` class default.
+
 ### 4.3 Classification Evidence
 
 Each failure classification MUST record:
