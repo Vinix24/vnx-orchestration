@@ -190,3 +190,69 @@ def test_pre_existing_full_schema_table_survives():
     result = ensure_report_findings_table(conn)
     assert result is False
     assert _table_exists(conn)
+
+
+# ── drifted pre-existing table self-heals (D-A3) ────────────────────────────────
+
+def _drifted_table_missing_extracted_at(conn: sqlite3.Connection) -> None:
+    """Create a report_findings table that predates the extracted_at column."""
+    conn.executescript(
+        """
+        CREATE TABLE report_findings (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_path  TEXT NOT NULL,
+            terminal     TEXT,
+            summary      TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO report_findings (report_path, terminal, summary) "
+        "VALUES ('r/old.md', 'T1', 'pre-drift row')"
+    )
+    conn.commit()
+
+
+def test_drifted_table_missing_extracted_at_does_not_crash():
+    """A populated table missing extracted_at must self-heal, not crash on CREATE INDEX."""
+    conn = _fresh_conn()
+    _drifted_table_missing_extracted_at(conn)
+
+    # Pre-condition: the index column is genuinely absent.
+    cols_before = {r[1] for r in conn.execute("PRAGMA table_info(report_findings)")}
+    assert "extracted_at" not in cols_before
+
+    # Must not raise OperationalError: no such column: extracted_at.
+    result = ensure_report_findings_table(conn)
+    assert result is False  # table already existed
+
+    cols_after = {r[1] for r in conn.execute("PRAGMA table_info(report_findings)")}
+    # Self-healed: the missing canonical columns were added.
+    for expected in (
+        "extracted_at", "dispatch_id", "report_date", "task_type",
+        "patterns_found", "antipatterns_found", "prevention_rules_found",
+        "tags_found", "age_category",
+    ):
+        assert expected in cols_after, f"{expected} not self-healed onto drifted table"
+
+    # The extracted_at index now exists (it was the crash site).
+    assert "idx_report_findings_extracted" in _indexes(conn)
+
+    # Pre-drift data is preserved (additive ALTER, no rebuild).
+    row = conn.execute(
+        "SELECT report_path, terminal, summary, extracted_at FROM report_findings"
+    ).fetchone()
+    assert row[0] == "r/old.md"
+    assert row[1] == "T1"
+    assert row[3] is None  # nullable backfill — no CURRENT_TIMESTAMP default on ALTER
+
+
+def test_drifted_table_self_heal_is_idempotent():
+    """Running the self-heal twice on a drifted table is a no-op the second time."""
+    conn = _fresh_conn()
+    _drifted_table_missing_extracted_at(conn)
+    ensure_report_findings_table(conn)
+    # Second call: table now complete; must not raise duplicate-column.
+    result = ensure_report_findings_table(conn)
+    assert result is False
+    assert "idx_report_findings_extracted" in _indexes(conn)
