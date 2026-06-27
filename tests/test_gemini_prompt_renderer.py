@@ -473,6 +473,7 @@ class TestRecordResultAdvisoryBlockingIntegration:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_REPORTS_DIR", str(data_dir / "unified_reports"))
+        monkeypatch.setenv("VNX_HEADLESS_REPORTS_DIR", str(data_dir / "unified_reports" / "headless"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
 
@@ -480,6 +481,9 @@ class TestRecordResultAdvisoryBlockingIntegration:
 
     def test_record_result_emits_advisory_and_blocking_fields(self, manager):
         report_path = str((manager.reports_dir / "manual-pr2-gemini.md").resolve())
+        # record_result now requires the report file to exist on disk.
+        manager.reports_dir.mkdir(parents=True, exist_ok=True)
+        Path(report_path).write_text("# gemini report\n", encoding="utf-8")
         result = manager.record_result(
             gate="gemini_review",
             pr_number=2,
@@ -501,6 +505,9 @@ class TestRecordResultAdvisoryBlockingIntegration:
 
     def test_record_result_persists_with_advisory_blocking_fields(self, manager, tmp_path):
         report_path = str((manager.reports_dir / "manual-pr3-gemini.md").resolve())
+        # record_result now requires the report file to exist on disk.
+        manager.reports_dir.mkdir(parents=True, exist_ok=True)
+        Path(report_path).write_text("# gemini report\n", encoding="utf-8")
         manager.record_result(
             gate="gemini_review",
             pr_number=3,
@@ -528,7 +535,9 @@ class TestRecordResultAdvisoryBlockingIntegration:
         contract = _make_minimal_contract()
         payload = manager.request_gemini_with_contract(contract=contract, mode="per_pr")
 
-        assert payload["status"] == "queued"
+        # Gemini-available requests now emit 'requested' (was 'queued'); the
+        # per-gate vocabulary is 'requested' if available else 'not_executable'.
+        assert payload["status"] == "requested"
         assert "prompt" in payload
         assert len(payload["prompt"]) > 100
         # The prompt file should be persisted to disk
@@ -537,7 +546,8 @@ class TestRecordResultAdvisoryBlockingIntegration:
         saved = json.loads(request_files[0].read_text(encoding="utf-8"))
         assert "prompt" in saved
         assert "PR-2" in saved["pr_id"]
-        assert saved["report_path"].startswith(str(manager.reports_dir.resolve()))
+        # Headless gates write under the dedicated headless reports dir.
+        assert saved["report_path"].startswith(str(manager.headless_reports_dir.resolve()))
 
     def test_request_gemini_with_contract_blocked_when_gemini_unavailable(self, manager, monkeypatch):
         import review_gate_manager as rgm
@@ -546,8 +556,10 @@ class TestRecordResultAdvisoryBlockingIntegration:
 
         contract = _make_minimal_contract()
         payload = manager.request_gemini_with_contract(contract=contract)
-        assert payload["status"] == "blocked"
-        assert payload["reason"] == "gemini_not_available"
+        # Unavailable gemini now emits 'not_executable' (was 'blocked'); with the
+        # review flag disabled the reason is 'provider_disabled'.
+        assert payload["status"] == "not_executable"
+        assert payload["reason"] == "provider_disabled"
 
     def test_request_gemini_with_contract_raises_on_missing_field(self, manager):
         bad_contract = _make_minimal_contract(pr_id="")

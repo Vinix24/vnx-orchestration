@@ -481,20 +481,25 @@ class TestOfferedDoesNotIncrementUsedCount:
 class TestSourceLevelGuards:
     """Cheap source-level checks that protect against regressions."""
 
-    def test_subprocess_dispatch_calls_record_injection(self):
-        src = (SCRIPTS_LIB / "subprocess_dispatch.py").read_text(encoding="utf-8")
+    def test_broker_calls_record_injection(self):
+        # The injection/audit wiring moved out of subprocess_dispatch.py (now a
+        # thin facade) into dispatch_broker.py, the dispatch-creation owner.
+        src = (SCRIPTS_LIB / "dispatch_broker.py").read_text(encoding="utf-8")
         assert "record_injection(" in src, (
-            "Finding 1: subprocess_dispatch.py must call record_injection()"
+            "Finding 1: dispatch_broker.py must call record_injection()"
         )
         assert "emit_event(" in src, (
-            "Finding 1: subprocess_dispatch.py must call emit_event()"
+            "Finding 1: dispatch_broker.py must call emit_event()"
         )
 
-    def test_intelligence_selector_uses_stable_item_id(self):
-        src = (SCRIPTS_LIB / "intelligence_selector.py").read_text(encoding="utf-8")
+    def test_source_builders_use_stable_item_id(self):
+        # Deterministic, content-derived ids are generated in the per-source
+        # builders via intelligence_sources._common._stable_item_id (was inlined
+        # in intelligence_selector.py before the per-source split).
+        src = (SCRIPTS_LIB / "intelligence_sources" / "_common.py").read_text(encoding="utf-8")
         assert "_stable_item_id(" in src, (
-            "Finding 2: intelligence_selector.py must use _stable_item_id() "
-            "for content-derived ids"
+            "Finding 2: intelligence_sources._common must define/use "
+            "_stable_item_id() for content-derived ids"
         )
         # The old random helper must no longer be used as the item_id source.
         assert "item_id=_item_id()" not in src, (

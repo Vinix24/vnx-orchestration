@@ -179,7 +179,7 @@ def test_task_complete_survives_100_state_mutations(tmp_path: Path) -> None:
         }))
     receipts_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    result = bts._build_recent_receipts(state_dir, n=3)
+    result = bts._build_recent_receipts(state_dir, limit=3)
     types = [r.get("event_type") for r in result]
     assert "task_complete" in types, f"task_complete disappeared after 100 state_mutations: {result}"
     assert "state_mutation" not in types, f"state_mutation leaked into recency summary: {result}"
