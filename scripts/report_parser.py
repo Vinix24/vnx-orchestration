@@ -86,6 +86,19 @@ class ReportParser:
             'used_pattern_hashes': self.extract_used_pattern_hashes(content)
         }
 
+        # Governance (audit #10): validate the worker report body. A success-claim with an invalid
+        # body must NOT enter the audit trail as a clean task_complete. Fail-soft: any import/validate
+        # error leaves the receipt's behaviour unchanged (treated as valid).
+        extracted['_body_contract_valid'] = True
+        try:
+            _lib = str(Path(__file__).resolve().parent / "lib")
+            if _lib not in sys.path:
+                sys.path.insert(0, _lib)
+            from report_body_contract import validate_body as _validate_body
+            extracted['_body_contract_valid'] = bool(_validate_body(content).valid)
+        except Exception:
+            extracted['_body_contract_valid'] = True
+
         # PR #8 Fix: If no intelligence in report, try to cross-reference from dispatch
         if not extracted['intelligence'].get('quality_context'):
             # Extract dispatch_id from metadata
@@ -648,16 +661,31 @@ class ReportParser:
         """Build enhanced receipt structure from extracted data"""
         metadata = extracted.get('metadata', {})
 
+        # Governance (audit #10): a receipt that CLAIMS success must satisfy the report body contract.
+        # A success-claim with an invalid body is recorded as report_contract_invalid (status
+        # contract_invalid) so it cannot enter the audit trail as a verified task_complete. Reports
+        # that do not claim success (gate verdicts, partial, unknown) keep their event_type.
+        _contract_valid = extracted.get('_body_contract_valid', True)
+        _status = str(metadata.get('status', 'unknown')).lower()
+        _claims_success = _status in ('success', 'done', 'complete', 'completed', 'pass', 'passed')
+        if _claims_success and not _contract_valid:
+            _event_type = 'report_contract_invalid'
+            _receipt_status = 'contract_invalid'
+        else:
+            _event_type = 'task_complete'
+            _receipt_status = metadata.get('status', 'unknown')
+
         # Start with comprehensive structure including all new fields
         receipt = {
-            'event_type': 'task_complete',  # Primary field for structured processing
-            'event': 'task_complete',  # Legacy compatibility field
+            'event_type': _event_type,  # Primary field for structured processing
+            'event': _event_type,  # Legacy compatibility field
             'timestamp': datetime.utcnow().isoformat(),  # FIX: Use UTC, not local time
             'terminal': metadata.get('terminal', 'unknown'),
             'track': metadata.get('track'),  # Include track field for terminal routing
             'type': metadata.get('type', 'UNKNOWN'),
             'gate': metadata.get('gate', 'unknown'),
-            'status': metadata.get('status', 'unknown'),
+            'status': _receipt_status,
+            'contract_valid': _contract_valid,  # governance visibility (audit #10)
             'confidence': metadata.get('confidence', 0.50),
             'task_id': metadata.get('task_id', 'unknown'),
             'dispatch_id': metadata.get('dispatch_id', 'unknown'),
