@@ -18,7 +18,7 @@ Since then the substrate changed materially:
 | Atomic project_id-scoped dispatch claiming | Shipped | `claim_next_queued_dispatch` (BEGIN IMMEDIATE) |
 | N-worker lanes | Shipped | Elastic pool (ADR-018), subprocess adapter, tmux |
 | Track DAL + CLI + state machine | Shipped | `scripts/lib/tracks.py`, FUT-1/FUT-2 |
-| Autopilot-tick (dark) | Shipped | `autopilot_tick.py`, RA-6, gated by `VNX_AUTOPILOT=1` |
+| Autopilot-tick (dark) | Shipped | `autopilot_tick.py`, RA-6, gated by `VNX_ROADMAP_AUTOPILOT=1` |
 | Human-gate primitive | Shipped | RA-4 |
 
 The planning unit is now the **track**, not the chain. Tracks are independent, project-scoped (`(track_id, project_id)` composite key per ADR-007), individually dispatchable, and structurally isolated per worktree. The substrate is ready for concurrent activation under three safety conditions.

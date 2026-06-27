@@ -122,7 +122,7 @@ These invariants replace the four chain-contract invariants (C-1..C-4) from `MUL
 - Worktree isolation (`scripts/lib/dispatch_worktree_isolation.py`, `VNX_ISOLATED_WORKTREE=1`)
 - Atomic dispatch claim (`claim_next_queued_dispatch`)
 - N-worker lanes (elastic pool ADR-018, subprocess adapter, tmux)
-- Autopilot-tick (`RA-6`, ships dark, gated by `VNX_AUTOPILOT=1`)
+- Autopilot-tick (`RA-6`, ships dark, gated by `VNX_ROADMAP_AUTOPILOT=1`)
 - Human-gate primitive (RA-4)
 
 ### Needs Building for True Parallel Activation

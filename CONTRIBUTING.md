@@ -89,7 +89,7 @@ Before requesting review:
 - [ ] Tests added or updated: `python3 -m pytest tests/<related>`
 - [ ] `gh pr checks` shows VNX CI workflow conclusion = success
 - [ ] No new TODO/FIXME in committed files
-- [ ] No new `except Exception: pass` (or justified with `# noqa: vnx-silent-except`)
+- [ ] No new `except Exception: pass` (or justified with a plain `# vnx-silent-except: <reason>` marker — NOT the `# noqa:` form, which the scanner rejects)
 - [ ] No new direct `open(..., "w")` for state files without tmp-then-rename
 
 ## CI gates
