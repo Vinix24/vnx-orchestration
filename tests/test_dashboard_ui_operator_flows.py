@@ -38,6 +38,7 @@ from dashboard_read_model import (
     register_project,
     FRESH_THRESHOLD,
     AGING_THRESHOLD,
+    REGISTRY_AGING_THRESHOLD,
 )
 from dashboard_actions import (
     ActionOutcome,
@@ -471,17 +472,23 @@ class TestAggregateOpenItemsView(unittest.TestCase):
 class TestDegradedStateRendering(unittest.TestCase):
 
     def test_stale_open_items_triggers_degraded(self):
-        """open_items.json older than AGING_THRESHOLD marks envelope as degraded."""
+        """open_items.json older than its registry threshold marks degraded.
+
+        open_items.json is a slowly-changing registry file, so OpenItemsView
+        applies REGISTRY_AGING_THRESHOLD (24h), not the default AGING_THRESHOLD —
+        consistently with the pr_queue / projects registry sources. Backdate
+        beyond the registry threshold to trigger the degraded path.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             oi_path = Path(tmp) / "open_items.json"
             _make_open_items_file(oi_path, [])
-            # Backdate file mtime to beyond AGING_THRESHOLD
-            old_ts = (datetime.now(timezone.utc) - timedelta(seconds=AGING_THRESHOLD + 60)).timestamp()
+            # Backdate file mtime to beyond the registry aging threshold.
+            old_ts = (datetime.now(timezone.utc) - timedelta(seconds=REGISTRY_AGING_THRESHOLD + 60)).timestamp()
             os.utime(oi_path, (old_ts, old_ts))
 
             view = OpenItemsView(tmp)
             env = view.get_items()
-            self.assertTrue(env.degraded, "File older than AGING_THRESHOLD must produce degraded=True")
+            self.assertTrue(env.degraded, "File older than REGISTRY_AGING_THRESHOLD must produce degraded=True")
             self.assertTrue(any("stale" in r for r in env.degraded_reasons), "Degraded reason must mention 'stale'")
 
     def test_freshness_envelope_fields_always_present(self):
