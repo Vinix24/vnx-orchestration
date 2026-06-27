@@ -209,14 +209,25 @@ function DispatchCard({ card }: { card: KanbanCard }) {
         )}
       </div>
 
-      {/* Bottom row: duration + receipt status */}
+      {/* Bottom row: duration (+ scout badge) + receipt status */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span
-          data-testid="card-duration"
-          style={{ fontSize: 10, color: 'rgba(244,244,249,0.45)' }}
-        >
-          {card.duration_label || '—'}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span
+            data-testid="card-duration"
+            style={{ fontSize: 10, color: 'rgba(244,244,249,0.45)' }}
+          >
+            {card.duration_label || '—'}
+          </span>
+          {card.scout_enriched && (
+            <span
+              data-testid="card-scout"
+              title="Scout-verrijkt: deze dispatch heeft een scout pre-pass sidecar"
+              style={{ fontSize: 10, fontWeight: 600, color: 'var(--color-info, #6ca8ff)' }}
+            >
+              🔍 scout
+            </span>
+          )}
+        </div>
         {card.has_receipt && card.receipt_status && (
           <span
             style={{
