@@ -1258,3 +1258,314 @@ features:
       observability), #869 (operator runbook automation), #864 (broader
       ADR-007 batch). Depends on the reconciler (deterministic derived_status)
       and the local-lane evaluation (gemma-4-12b-integration) being in place.
+
+  # ============================================================================
+  # ---- Post-1.0 repo-audit remediation (multi-provider swarm, 2026-06-27) ----
+  # Source: claudedocs/2026-06-27-repo-audit-findings.md (1 critical, 16 high,
+  # 41 medium, 39 low after dedup; 12 dimensions x 6 providers, adversarial
+  # verify). plan = notes; execution gates = review_stack. Operator directive:
+  # fill roadmap with plan + gates, then execute autonomously (human gate only
+  # for the PyPI ship). Ship-blockers = milestone 1.0; cleanup = 1.0.1.
+  # ============================================================================
+
+  - feature_id: audit-sec-dashboard-auth
+    title: "Dashboard: default loopback bind + token/CSRF auth on mutating POSTs (audit critical #1)"
+    branch_name: feat/audit-dashboard-auth
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - codex_gate
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      CRITICAL. serve_dashboard.py binds ("::",port) with IPV6_V6ONLY=0 (all
+      interfaces) while the banner says localhost; no auth; ACAO:* on every
+      mutation. POST /api/restart-process pkills+respawns the daemon fleet and
+      /api/operator/* (incl. config/set, gate/toggle) flips governance. Fix:
+      default-bind 127.0.0.1 (VNX_DASHBOARD_BIND opt-in for remote), fix the
+      banner, drop blanket ACAO:*, add a shared-secret token + Origin/CSRF
+      guard on every mutating POST, refuse mutation on a non-loopback bind
+      without a token. File: dashboard/serve_dashboard.py:685,205,654-668.
+
+  - feature_id: audit-dep-pyyaml
+    title: "Add missing pyyaml runtime dependency (audit high #5)"
+    branch_name: feat/audit-dep-pyyaml
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      constraint_enforcer.py:44 does an unguarded import yaml; pyproject omits
+      pyyaml, so the headline hello-world dispatch dies with No module named
+      yaml on a clean install. Fix: add "pyyaml>=6.0" to project.dependencies
+      (pyproject.toml:13).
+
+  - feature_id: audit-docs-pip-install
+    title: "Fix pip-install-not-on-PyPI doc contradiction (audit high #4)"
+    branch_name: feat/audit-docs-pip-install
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      QUICKSTART.md:9-12 + ONBOARDING Step 1 lead with `pip install
+      vnx-orchestration` (not on PyPI; README:66 contradicts). Fix: make Step 1
+      match README (clone + pip install -e .) with a "not on PyPI yet" caveat,
+      until the publish.
+
+  - feature_id: audit-demo-modernize
+    title: "Demo: retire the redundant 4-tmux T1-T3 model (audit high #9)"
+    branch_name: feat/audit-demo-modernize
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      README markets `demo` as the no-key entry point but the assets are
+      missing/untracked and `./bin/vnx demo` errors. Operator note: the demo is
+      the old 4-tmux-window T1-T3 model, now redundant (door + leaseless lane).
+      Fix: remove the demo command + its 3 README refs, OR ship a minimal
+      current door-model dry-run replay. Do NOT restore the stale 4-window
+      assets. File: scripts/lib/vnx_demo.py:172-176,42-53.
+
+  - feature_id: audit-dx-doctor-worker-cli
+    title: "vnx doctor: probe worker CLIs it dispatches to (audit high #7)"
+    branch_name: feat/audit-doctor-worker-cli
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      doctor.py:32-47 probes only python3/git/jq/shellcheck — no claude/codex/
+      gemini/kimi. Fix: add a WARN-level worker-CLI probe (claude, optionally
+      others) with an actionable install message. Highest-leverage first-run fix.
+
+  - feature_id: audit-dx-dispatch-preflight
+    title: "dispatch-agent: preflight claude binary + surface the failure reason (audit high #6)"
+    branch_name: feat/audit-dispatch-preflight
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      dispatch_agent.py:93 Popen(["claude",...]) with no shutil.which precheck;
+      a missing/unauthenticated CLI prints only status: failed. Fix: add a
+      which('claude') precheck + on a False door result read the failure_class
+      and print the exit_classifier reason + a `vnx doctor` hint.
+
+  - feature_id: audit-dx-prerequisites-docs
+    title: "Add a Prerequisites section to the pip happy-path (audit high #8)"
+    branch_name: feat/audit-prereq-docs
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      No prerequisites section anywhere; the onboarding starter path presents
+      dispatch-agent as the first task with no mention of the worker CLI it
+      needs. Fix: add a Prerequisites block to README install + onboarding
+      (VNX drives existing coding CLIs; default lane needs an installed+
+      authenticated claude CLI + incurs usage; point zero-key users at the demo
+      replacement).
+
+  - feature_id: audit-gov-report-parser-contract
+    title: "report_parser: enforce body-contract + phantom-guard before task_complete (audit high #10)"
+    branch_name: feat/audit-report-parser-contract
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - codex_gate
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      report_parser.py:165-172,652-668 (the canonical receipt-processor daemon)
+      converts any unified_reports/*.md to a clean task_complete with NO body
+      contract and NO phantom-guard — a GATE-GREEN/success report with no code
+      change is admitted as status=success. The primary audit-trail producer
+      accepting unverified completions. Fix: run report_body_contract.
+      validate_body() + on failure/filename-only dispatch_id emit
+      report_contract_invalid/status=contract_invalid; treat status='unknown'
+      on a completion event as a violation.
+
+  - feature_id: audit-gov-sidedoor-ci
+    title: "Enforce the dispatch side-door audit in CI (audit high #2)"
+    branch_name: feat/audit-sidedoor-ci
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      dispatch_sidedoor_audit.py main() returns 1 on a new side-door but nothing
+      in CI runs it; the pytest allowlist omits test_dispatch_sidedoor_audit.py
+      + test_runtime_adapter_certification.py; no pre-commit. Fix: add a CI step
+      running the audit (fail on exit 1) + add the two test files to a pytest
+      step. (.github/workflows/vnx-ci.yml:72-214)
+
+  - feature_id: audit-correctness-receipt-idempotency
+    title: "Receipt idempotency: write-ahead the dedup marker (audit high #3)"
+    branch_name: feat/audit-receipt-idempotency
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - codex_gate
+      - kimi_review
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    notes: >
+      append_receipt_internals/idempotency.py:196-203 appends the receipt before
+      recording the idempotency key via _write_cache; a cache-write failure
+      after the receipt write means a retry re-appends the same audit receipt.
+      Fix: record the dedup marker BEFORE writing the receipt (worst case a
+      missing receipt, never a duplicate), or downgrade a post-write _write_cache
+      failure to a best-effort log.
+
+  - feature_id: audit-tests-build-project-status
+    title: "Fix brittle source-grep test (audit high #11)"
+    branch_name: feat/audit-test-build-project-status
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      test_build_project_status.py:263-268 asserts 'write_project_status(_STATE_DIR)'
+      but prod renamed to state_dir. Bare FAIL, no regression. Fix: behavioral
+      test (mock write_project_status, assert called with the right Path) or
+      match the new call string.
+
+  - feature_id: audit-tests-build-t0-brief
+    title: "Fix build_t0_brief rc=1-on-empty-state_dir tests (audit high #12)"
+    branch_name: feat/audit-test-build-t0-brief
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      test_build_t0_brief_output.py:94,116,126,146 assert rc==0 on an empty
+      state_dir but _build_system_health returns degraded so main() exits 1.
+      Fix: test the pure fns (build_t0_state + _state_to_brief/_resolve_output_path)
+      or seed minimal state + mock the health-beacon.
+
+  - feature_id: audit-tests-fsr-b-tenant-guard
+    title: "Fix tenant-guard test escaping tmp isolation (audit high #13)"
+    branch_name: feat/audit-test-fsr-b-tenant-guard
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      test_fsr_b_tenant_guard.py:225-244 — _resolve_tracks_store calls
+      resolve_central_data_dir('vnx-dev') and reads the real production store,
+      bypassing the monkeypatched VNX_DATA_DIR. Fix: monkeypatch
+      resolve_central_data_dir->None (and/or VNX_USE_CENTRAL_DB='') before
+      build_t0_state() in the canary; add a builder-layer resolver test.
+
+  - feature_id: audit-tests-fsr-isolation-guard
+    title: "Fix isolation-guard fixture missing project-id marker (audit high #14)"
+    branch_name: feat/audit-test-fsr-isolation-guard
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      test_fsr_isolation_guard.py:149,192,208,255 — _make_v21_project never
+      writes .vnx-project-id, so the fail-closed _resolve_validated_project_id
+      (D-A1 #913, ADR-007 R3.1) raises before assertions. Fix: write
+      (project_dir/'.vnx-project-id').write_text('vnx-dev\n') in the fixture.
+
+  - feature_id: audit-tests-feedback-loop
+    title: "Fix feedback-loop silent column-swallow (audit high #15)"
+    branch_name: feat/audit-test-feedback-loop
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      api_intelligence.py:847-848 swallows OperationalError (no such column:
+      project_id) -> [] -> 200 with all-zero metrics; test_feedback_loop.py:350
+      asserts boosts==1. Fix: discriminating except (re-raise unless 'no such
+      table'); add project_id to the test schema + INSERTs.
+
+  - feature_id: audit-docs-autopilot-flag
+    title: "Fix non-existent VNX_AUTOPILOT flag in docs (audit high #16)"
+    branch_name: feat/audit-docs-autopilot-flag
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      ROADMAP.md:98, MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md:125, ADR-020:21
+      gate RA-6 on VNX_AUTOPILOT=1 (zero hits in scripts/); the real flag is
+      VNX_ROADMAP_AUTOPILOT. Fix: replace the flag name in all three docs.
+
+  - feature_id: audit-sweep-medium
+    title: "Repo-audit medium-severity sweep (41 findings)"
+    branch_name: feat/audit-sweep-medium
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      The 41 medium findings from claudedocs/2026-06-27-repo-audit-findings.md
+      across security/correctness/architecture/hardening/tests/docs/ai-slop/
+      perf/governance/oss-readiness. Worked in batched gated PRs by cluster.
+
+  - feature_id: audit-sweep-low
+    title: "Repo-audit low-severity / AI-slop sweep (39 findings)"
+    branch_name: feat/audit-sweep-low
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: >
+      The 39 low findings (dead code, defensive bloat, comment-noise, nits) from
+      the audit doc. Worked as a final cleanup sweep in batched gated PRs.

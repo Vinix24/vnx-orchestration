@@ -1,12 +1,28 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-16T13:04:04.569288+00:00
+**Last updated**: 2026-06-27T19:58:42.195083+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #953 — feat(config): runtime honours UI-set config — gate/dispatch flags (P0 PR 6b) (#953) (2026-06-27)
+- #952 — feat(config): runtime honours UI-set config — intelligence read-sites (P0 PR 6a) (#952) (2026-06-27)
+- #951 — feat(config): config control-plane page — toggles + approval modal + audit drawer (P0 PR 5) (#951) (2026-06-27)
+- #950 — feat(config): config control-plane API — GET inventory/audit + POST set (P0 PR 4) (#950) (2026-06-27)
+- #949 — feat(config): config control-plane DAO — set_config + DB-resolver (P0 PR 3) (#949) (2026-06-27)
+- #948 — feat(config): config_store_db — config control-plane persistence (P0, PR 2) (#948) (2026-06-27)
+- #947 — feat(config): config_registry SSOT — operator config control-plane foundation (P0) (#947) (2026-06-27)
+- #946 — feat(dashboard): surface the planning (future-state) layer as an operator page (#946) (2026-06-27)
+- #945 — feat(dashboard): surface system health as an operator page (#945) (2026-06-27)
+- #944 — feat(dashboard): add future-ready (Queued) lane to the kanban (#944) (2026-06-27)
+- #943 — feat(dashboard): show scout-enrichment per dispatch in the kanban (#943) (2026-06-27)
+- #942 — fix(status): resolve data dir via ensure_env, not install-relative (#225) (#942) (2026-06-27)
+- #941 — fix(doctor): make consumer-setup checks layout-aware (standalone-dev WARN) (#941) (2026-06-27)
+- #940 — feat(cli): add `vnx skills sync` — propagation refresh for project skills (#940) (2026-06-27)
+- #939 — docs(t0): reconcile T0 CLAUDE.md to the current skill + arc (#939) (2026-06-27)
+- #938 — feat(intelligence): wire the LLM tagger at persist-time (deepseek default) (#938) (2026-06-27)
 - #879 — fix(migration): 0031 ADR-007 runtime tenant + FK repair (#879) (2026-06-15)
 - #878 — chore(audit): backfill utility for recent worktree-only receipts (dry-run-first) (#878) (2026-06-15)
 - #876 — fix(reconciler): defer to declared phase when no dispatch/PR evidence (prevents done→queued downgrade) (#876) (2026-06-15)
@@ -20,63 +36,6 @@ _Last 14 days — sourced from git merge commits._
 - #861 — feat(fsr-a2): version reconciliation via declarative invariant manifest (#861) (2026-06-14)
 - #859 — feat(fsr-a1): ADR-007 dispatches in-place rebuild — composite UNIQUE, 12-step, fail-closed tenant (#859) (2026-06-14)
 - #860 — chore(kimi): raise default per-chunk stall threshold 300s→600s (#860) (2026-06-14)
-- #858 — PR-E (future-state): kanban honesty — degraded signal, no silent drops, staleness truth (#858) (2026-06-13)
-- #857 — PR-0 (future-state): enforced test-isolation guard (no test mutates the live DB) (#857) (2026-06-13)
-- #853 — docs(provenance): hash-chain ADR-023 + receipt/pipeline truth-pass (events_path, .vnx-data paths) (#853) (2026-06-13)
-- #856 — test(hygiene): prevent production events-dir contamination + reconcile 3 silent test failures (#595 mock, #811 staging-guard) (#856) (2026-06-13)
-- #855 — fix(t0-skill): correct dead dispatch path + intelligence.sh paths + §12 prefixes + CLAUDE.md stale blocks (#855) (2026-06-13)
-- #854 — docs: CHANGELOG #840-#851 wave + ROADMAP shipped-item reclass + README date/tmux-default truth (#854) (2026-06-13)
-- #851 — chore(roadmap): PM-reconcile overnight wave (#842-#850) — status sync to bb8f6159 (#851) (2026-06-11)
-- #850 — fix(selflearn): injection-history-aware suppression breaks duplicate dominance (93% dup root-cause) (#850) (2026-06-11)
-- #849 — feat(tracks): oi-lifecycle-closure — track done, oi-close, dispatch linkage backfill, status --tracks (#849) (2026-06-11)
-- #848 — fix(dispatch): broker atomicity (orphan window, claim TOCTOU) + adapter pipe hygiene (H1/H6) (#848) (2026-06-11)
-- #847 — feat(outcome): dispatch_metadata backfill tool + contract_invalid vocab sync (gate-F2) (#847) (2026-06-11)
-- #846 — docs: truth-pass for 1.0 launch — version labels, ADR amendments, surface sync, provenance (#846) (2026-06-11)
-- #845 — fix(tmux-lane): truthful completion receipts + extra-flags quoting (H3/H5) (#845) (2026-06-11)
-- #844 — fix(routing): resolve kimi lane/constraint conflict + generalize raw-spawn guard to provider CLIs (#844) (2026-06-11)
-- #843 — fix(observability): unify state/events path resolution + events_path receipt pointer (H2) (#843) (2026-06-11)
-- #842 — fix(schema-init): view-ordering on legacy DBs unblocks v22/v23 (nightly phase-0 failure mode 2) (#842) (2026-06-11)
-- #841 — chore(roadmap): PM-close — sweep-fix closure (LB-4..7 done, blockers resolved, evidence in pr_queue) (#841) (2026-06-10)
-- #833 — feat(dashboard): lane-aware agent stream (replace fixed T0-T3) (#833) (2026-06-10)
-- #840 — fix(audit-chain): distinguish unchained from broken ledger in verify (LB-5) (#840) (2026-06-10)
-- #837 — fix(digest): event-type filter + canonical outcome vocabulary (#837) (2026-06-10)
-- #838 — fix(nightly): Python 3.9 compat — lazy annotations in quality_db_init + version guard in pipeline (#838) (2026-06-10)
-- #835 — fix(init): wire governance hooks block into scaffolded settings.json (LB-6) (#835) (2026-06-10)
-- #839 — docs(changelog): add [1.0.0] release entry (LB-7) (#839) (2026-06-10)
-- #836 — fix(scrub): remove client project data from wheel + docs index path (LB-4) (#836) (2026-06-10)
-- #834 — chore(roadmap): PM-reconcile — sweep-blockers LB-4..7, 13 new features, status/freshness fixes (#834) (2026-06-10)
-- #832 — fix(packaging): exclude benchmark dev-tooling from wheel (LB-3 artifact grep) (#832) (2026-06-09)
-- #831 — feat(bench): codex lane + 6/6 skill-injection E2E + seed-decontaminatie + 1.0 docs (#831) (2026-06-07)
-- #830 — feat(benchmark): field-tests T2 medium + T3 complex task-definitions (#830) (2026-06-04)
-- #829 — feat(roadmap): park sales-copilot VNX upgrade (1.0.1, post-launch) (#829) (2026-06-04)
-- #828 — feat(benchmark): field-tests realistic-bench suite — infrastructure + T1 task-defs (#828) (2026-06-04)
-- #827 — chore(roadmap): privacy trim — slim public notes, move details to private state (#827) (2026-06-04)
-- #825 — docs(bootstrap): tmux-spawn lane in CLAUDE bootstrap snippet + ops doc (#825) (2026-06-04)
-- #824 — docs(t0-skill): tmux-spawn dispatch as default; subprocess-dispatch for terminal-pinned work (#824) (2026-06-04)
-- #823 — fix(provider-dispatch): _dispatch_gemini respects args.model (OI-155) (#823) (2026-06-03)
-- #822 — feat(smart-router): quality_tier discriminator + per-task min/max gates (PR-SR-FIX-3) (#822) (2026-06-03)
-- #821 — fix(claude-spawn): capture completion_text from stream-json assistant events (#821) (2026-06-03)
-- #820 — feat(roadmap): add bench-v2 smart-lanes benchmark to 1.1 milestone (#820) (2026-06-03)
-- #819 — fix(provider-dispatch): uniform central-path resolution (OI-126) (#819) (2026-06-03)
-- #818 — fix(smart-router): null-cost sort + strategy-tag (cost-collapse bug) (#818) (2026-06-03)
-- #817 — feat(digest): D2 — progress_table + minimal digest skeleton (Phase-1) (#817) (2026-06-03)
-- #816 — feat(infra): atomic_io.py + ADR-021 — digest D1 per architecture V2 (#816) (2026-06-03)
-- #815 — docs(digest): architecture v2 — redesign per B3.1 trigger on PR #814 (#815) (2026-06-03)
-- #811 — feat(governance): enforce /pending dispatch path (close T0 direct-call bypass) (#811) (2026-06-03)
-- #812 — feat(oi): bulk pattern subcommands + 1.0 closing sprint (96→48 open) (#812) (2026-06-03)
-- #813 — feat(smart-lanes): PR-2 Smart Router cost-tier classifier (flag-gated, default-off) (#813) (2026-06-03)
-- #810 — chore(roadmap): refresh launch_state.note for 2026-06-03 scope-pull (9-juni launch) (#810) (2026-06-03)
-- #808 — fix(receipts): dedup recent_receipts per dispatch_id (keep best status) (#808) (2026-06-03)
-- #795 — feat(dispatch): PR-2 envelope claude-subprocess adapter (flag-gated, dual-receipt-safe) (#795) (2026-06-03)
-- #806 — fix(dispatcher): survive scans that skip/reject all dispatches (set -e leak) + observable rejection (#806) (2026-06-03)
-- #805 — fix(selflearn): control-for-difficulty model inference + decision-grade digest (no harmful routing, no truncation/dups) (#805) (2026-06-03)
-- #804 — feat(governance): activate profile-gate resolver in request_reviews() (#804) (2026-06-03)
-- #803 — feat(tracks): track_type + next_action_owner discriminator (additive, SQLite, 1.0.1) (#803) (2026-06-03)
-- #802 — fix(reconciler): derive done from track.pr_ref + merged-state (decouple from legacy A/B/C dispatch.track join) (#802) (2026-06-02)
-- #801 — feat(planning): dispatch->track linkage backfill (dry-run default, backup-on-apply) (#801) (2026-06-02)
-- #800 — feat(planning): turn-on — vnx objective sync (auto-seed, human-gated) + advisory drift-gate (#800) (2026-06-02)
-- #799 — feat(governance): worker-permission relay — auto-accept window + catastrophic hard-list + escalation (no silent hangs) (#799) (2026-06-02)
-- #798 — fix(tmux): hook-driven version-agnostic lane signals + wire subagent-block (#798) (2026-06-02)
 
 ## Active features
 
@@ -255,5 +214,59 @@ Status: done
 Status: in-progress
 
 ### pm-gate-agent-automation — PM-gate agent automation — event-driven per-receipt roadmap maintenance
+Status: planned
+
+### audit-sec-dashboard-auth — Dashboard: default loopback bind + token/CSRF auth on mutating POSTs (audit critical #1)
+Status: planned
+
+### audit-dep-pyyaml — Add missing pyyaml runtime dependency (audit high #5)
+Status: planned
+
+### audit-docs-pip-install — Fix pip-install-not-on-PyPI doc contradiction (audit high #4)
+Status: planned
+
+### audit-demo-modernize — Demo: retire the redundant 4-tmux T1-T3 model (audit high #9)
+Status: planned
+
+### audit-dx-doctor-worker-cli — vnx doctor: probe worker CLIs it dispatches to (audit high #7)
+Status: planned
+
+### audit-dx-dispatch-preflight — dispatch-agent: preflight claude binary + surface the failure reason (audit high #6)
+Status: planned
+
+### audit-dx-prerequisites-docs — Add a Prerequisites section to the pip happy-path (audit high #8)
+Status: planned
+
+### audit-gov-report-parser-contract — report_parser: enforce body-contract + phantom-guard before task_complete (audit high #10)
+Status: planned
+
+### audit-gov-sidedoor-ci — Enforce the dispatch side-door audit in CI (audit high #2)
+Status: planned
+
+### audit-correctness-receipt-idempotency — Receipt idempotency: write-ahead the dedup marker (audit high #3)
+Status: planned
+
+### audit-tests-build-project-status — Fix brittle source-grep test (audit high #11)
+Status: planned
+
+### audit-tests-build-t0-brief — Fix build_t0_brief rc=1-on-empty-state_dir tests (audit high #12)
+Status: planned
+
+### audit-tests-fsr-b-tenant-guard — Fix tenant-guard test escaping tmp isolation (audit high #13)
+Status: planned
+
+### audit-tests-fsr-isolation-guard — Fix isolation-guard fixture missing project-id marker (audit high #14)
+Status: planned
+
+### audit-tests-feedback-loop — Fix feedback-loop silent column-swallow (audit high #15)
+Status: planned
+
+### audit-docs-autopilot-flag — Fix non-existent VNX_AUTOPILOT flag in docs (audit high #16)
+Status: planned
+
+### audit-sweep-medium — Repo-audit medium-severity sweep (41 findings)
+Status: planned
+
+### audit-sweep-low — Repo-audit low-severity / AI-slop sweep (39 findings)
 Status: planned
 
