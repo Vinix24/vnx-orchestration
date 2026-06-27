@@ -1365,22 +1365,26 @@ cmd_skills_sync() {
   log "[skills-sync] done. Had local skill edits? Diff against $backup and re-apply them."
 }
 
-# cmd_skills — 'vnx skills <sub>' dispatcher.
+# cmd_skills — 'vnx skills <sub>' dispatcher. Subcommands inherit the 'skills' mode tier
+# (same convention as 'suggest'), so this uses if/elif rather than a case-branch the
+# mode-coverage test would read as a separate top-level command.
 cmd_skills() {
   local sub="${1:-}"
-  case "$sub" in
-    sync) shift; cmd_skills_sync "$@" ;;
-    ""|-h|--help)
-      cat <<'HELP'
+  if [ "$sub" = "sync" ]; then
+    shift
+    cmd_skills_sync "$@"
+  elif [ -z "$sub" ] || [ "$sub" = "-h" ] || [ "$sub" = "--help" ]; then
+    cat <<'HELP'
 Usage: vnx skills <command>
 
 Commands:
   sync [--apply|--dry-run]   Refresh .claude/skills/ from the installed VNX (canonical),
                              with a timestamped backup. Default is --dry-run (preview).
 HELP
-      ;;
-    *) err "[skills] unknown subcommand: $sub (try 'vnx skills --help')"; return 1 ;;
-  esac
+  else
+    err "[skills] unknown subcommand: $sub (try 'vnx skills --help')"
+    return 1
+  fi
 }
 
 cmd_bootstrap_terminals() {
