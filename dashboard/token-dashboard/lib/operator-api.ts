@@ -12,6 +12,7 @@ import type {
   GateToggleResponse,
   GovernanceDigestEnvelope,
   SystemHealthEnvelope,
+  PlanningEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
   PatternsResponse,
@@ -128,6 +129,10 @@ export function fetchGovernanceDigest(): Promise<GovernanceDigestEnvelope> {
 
 export function fetchSystemHealth(): Promise<SystemHealthEnvelope> {
   return get(`${BASE}/system-health`);
+}
+
+export function fetchPlanning(): Promise<PlanningEnvelope> {
+  return get(`${BASE}/planning`);
 }
 
 export function fetchReports(params?: {

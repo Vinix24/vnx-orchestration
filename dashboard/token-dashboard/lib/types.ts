@@ -276,6 +276,62 @@ export interface SystemHealthEnvelope {
   health_score: number;
 }
 
+// ---- Planning / future-state ----
+export interface PlanningDeliverable {
+  deliverable_ref: string;
+  output_kind: string;
+  derived_status: string;
+  dispatch_count: number;
+}
+
+export interface PlanningOpenItem {
+  oi_id: string;
+  link_type: string;
+  title: string;
+  severity: string | null;
+  status: string | null;
+}
+
+export interface PlanningDependency {
+  to_track_id: string;
+  to_project_id: string | null;
+  kind: string;
+  confidence: number | null;
+}
+
+export interface PlanningCard {
+  track_id: string;
+  title: string;
+  phase: string;
+  horizon: string;
+  priority: string | null;
+  next_up: boolean;
+  pr_ref: string | null;
+  dispatch_count: number;
+  depends_on: PlanningDependency[];
+  deliverables: PlanningDeliverable[];
+  open_items: PlanningOpenItem[];
+}
+
+export type PlanningHorizon = 'now' | 'next' | 'later';
+
+export interface PlanningDrift {
+  generated_at: string | null;
+  divergent_count: number;
+  total_tracks: number;
+  divergent: unknown[];
+}
+
+export interface PlanningEnvelope {
+  queried_at: string;
+  project_id: string;
+  horizons: Record<PlanningHorizon, PlanningCard[]>;
+  total_tracks: number;
+  drift?: PlanningDrift;
+  degraded?: boolean;
+  degraded_reasons?: string[];
+}
+
 export type KanbanStageName = 'queued' | 'staging' | 'pending' | 'active' | 'review' | 'done';
 
 export interface KanbanEnvelope {
