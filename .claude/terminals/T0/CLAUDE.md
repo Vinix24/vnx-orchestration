@@ -56,13 +56,14 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 
 **Worker dispatch policy:**
 
-- Claude workers run via tmux-spawn (`scripts/lib/tmux_interactive_dispatch.py`): interactive, subscription-preserving. NEVER `claude -p`.
+- All dispatches go through the single-entry door `vnx dispatch <pending-id>`, which decides the lane. Calling a lane script directly is a side door (rollback only: `VNX_DISPATCH_LEGACY=1`).
+- Provider→lane (hard): `claude`/Opus/Sonnet route via the tmux-spawn lane (`scripts/lib/tmux_interactive_dispatch.py`, interactive, subscription-preserving) — NEVER `provider_dispatch`, NEVER `claude -p`. `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
 - Default model: sonnet. For complex reasoning: `--model opus` with `VNX_OVERRIDE_WORKERS_SONNET_PINNED=1`.
-- All work flows through governed lanes (tmux-spawn / provider_dispatch). No Claude Code subagents (Task tool).
+- No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
 ## Crash Recovery (on-demand only)
 
-Follow the full procedure in `@t0-orchestrator` §6.2 Post-Crash Startup.
+Follow the full procedure in `@t0-orchestrator` §7 (Startup / recovery / runbooks), which points to `docs/core/DISPATCH_RULES.md` §10.
 Quick reference: validate schema → repair stale leases → reconcile queue → check orphaned dispatches → check incidents.
 
 ## Runtime Policy
@@ -83,7 +84,7 @@ Quick reference: validate schema → repair stale leases → reconcile queue →
 - DENIED: `Write`/`Edit` for scripts/, dashboard/, docs/manifesto/ — those go through dispatch+PR
 - DENIED: direct commits to main branch
 - DENIED: production state in `.vnx-data/state/` — use `dispatch_register`, `append_receipt`, or `open_items_manager` APIs
-- OUTPUT: dispatch via `subprocess_dispatch.py` (primary) or promote staged dispatch (when template exists)
+- OUTPUT: dispatch via the single-entry door `vnx dispatch` or promote a staged dispatch (when a template exists)
 - Manager blocks to terminal are ONLY for accidental dispatches or operator-requested manual delivery
 
 ## Core Responsibilities
@@ -92,7 +93,7 @@ Quick reference: validate schema → repair stale leases → reconcile queue →
 2. Evaluate quality advisory before deciding next action.
 3. Check open items and close only evidence-backed items.
 4. Complete PRs when all gates passed and no blockers remain.
-5. Prefer staged dispatch templates when they exist; use `subprocess_dispatch.py` for ad-hoc dispatches.
+5. Prefer staged dispatch templates when they exist; use `vnx dispatch` (the single-entry door) for ad-hoc dispatches.
 6. Open new open items when new out-of-scope risks/issues are discovered.
 7. Dispatch one block at a time and keep queue state consistent.
 8. Request required headless review gates and verify their report + receipt evidence before closure.
@@ -162,9 +163,7 @@ python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch
 ## Headless T1 Dispatch
 
 T1 is a headless backend-developer. This is the **dominant dispatch path** — not a special case.
-Dispatch via:
-- Set VNX_ADAPTER_T1=subprocess in the dispatcher environment (default since F32)
-- Or call directly: `python3 scripts/lib/subprocess_dispatch.py --terminal-id T1 --dispatch-id <id> --model sonnet --instruction "<task>"`
+Dispatch via the single-entry door (`vnx dispatch`), which routes T1 onto the subprocess lane when `VNX_ADAPTER_T1=subprocess` (default since F32). The underlying lane script is `scripts/lib/subprocess_dispatch.py` (`--terminal-id T1 --dispatch-id <id> --model sonnet`); call it directly only to debug the lane, not as the normal path.
 
 T1 dispatches do NOT go through tmux send-keys.
 T1 receipts arrive in t0_receipts.ndjson with source="subprocess".
@@ -183,7 +182,22 @@ For parallel dispatches or high-throughput scenarios, use the elastic pool inste
 | Burn-in / batch hardening | Single interactive dispatch |
 | Role-scoped work (backend-developer, etc.) | Operator wants tmux visibility |
 
-Pool is additive — existing T1/T2/T3 subprocess routing continues unchanged. See `@t0-orchestrator` §9.3 and `docs/governance/decisions/ADR-018-elastic-worker-pool.md`.
+Pool is additive — existing T1/T2/T3 subprocess routing continues unchanged. See `docs/governance/decisions/ADR-018-elastic-worker-pool.md`.
+
+## Store & Intelligence (current arc)
+
+**Per-project store (ADR-026).** State is per-project under `~/.vnx-data/<project_id>/`
+(dev repo = `vnx-dev`), resolved via `resolve_central_data_dir`. The repo-relative
+`.vnx-data/state/` paths in this doc are illustrative — the resolved central dir is the SSOT.
+The old shared `~/.vnx-data/state` store is frozen/orphaned; do not write to it. See
+`docs/governance/decisions/ADR-026-per-project-store-with-governance-federation.md`.
+
+**Intelligence pipeline (build-steps 0–5).** Runs automatically in the daemon/selector;
+T0 does not invoke it per dispatch but should know the opt-in flags:
+- `VNX_INTEL_RANK_THEN_BUDGET` — rank candidates by tag-overlap, then budget.
+- `VNX_TAGGER_ENABLED` / `VNX_TAGGER_PROVIDER` (default `deepseek`) — persist-time LLM
+  tagging over the closed VNX vocabulary (build-step 3b, wired).
+- `VNX_SCOUT_PREPASS` — cheap-model recon pre-pass in the door, fail-open.
 
 ## Quick Commands
 
