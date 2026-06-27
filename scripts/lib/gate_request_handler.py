@@ -52,7 +52,8 @@ class GateRequestHandlerMixin:
         return os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0") == "1" and shutil.which("gh") is not None
 
     def _ci_gate_available(self) -> bool:
-        return os.environ.get("VNX_CI_GATE_REQUIRED", "0") == "1" and shutil.which("gh") is not None
+        import config_runtime
+        return config_runtime.get_bool("VNX_CI_GATE_REQUIRED") and shutil.which("gh") is not None
 
     def _dispatch_one_review(
         self,

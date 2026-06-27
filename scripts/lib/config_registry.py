@@ -80,7 +80,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Require the wiring gate.", approval=True),
     "VNX_USE_CENTRAL_DB": _e(
         "VNX_USE_CENTRAL_DB", "enum", "", "dispatch",
-        "Central-DB read mode (''=per-project | '1'=central | 'shadow').", approval=True),
+        "Central-DB read mode (''=per-project | '1'=central | 'shadow'). Process-start routing — "
+        "env-only, surfaced read-only: live-toggling would split reads across DBs mid-process.",
+        writable=False),
     "VNX_USE_FEDERATION": _e(
         "VNX_USE_FEDERATION", "bool", "0", "intelligence",
         "Cross-project intelligence federation (NOT yet implemented).",

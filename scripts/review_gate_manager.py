@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import secrets
 import shutil
@@ -34,7 +33,8 @@ from gate_report_generator import GateReportGeneratorMixin
 
 def _build_default_review_stack() -> List[str]:
     stack = ["gemini_review", "codex_gate", "claude_github_optional"]
-    if os.environ.get("VNX_CI_GATE_REQUIRED", "0") == "1":
+    import config_runtime
+    if config_runtime.get_bool("VNX_CI_GATE_REQUIRED"):
         stack.append("ci_gate")
     return stack
 

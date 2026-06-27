@@ -211,7 +211,8 @@ def _haiku_enabled() -> bool:
 
 
 def _autopilot_enabled() -> bool:
-    return os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("0", "", "false", "False")
+    import config_runtime
+    return config_runtime.get("VNX_ROADMAP_AUTOPILOT") not in ("0", "", "false", "False")
 
 
 def _maybe_autopilot_tick(state_dir: Path, dry_run: bool) -> None:
