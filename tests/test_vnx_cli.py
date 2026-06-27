@@ -88,22 +88,32 @@ def test_init_writes_governance_profiles(tmp_path):
 
 
 def test_init_creates_vnx_data_subdirs(tmp_path):
-    """vnx init creates dispatches/pending, receipts, unified_reports, logs."""
+    """vnx init creates the project-local .vnx-data scaffold subdirs.
+
+    receipts/ and logs/ now live under the resolved (external) state root, not
+    project-local; the local scaffold is VNX_DATA_INIT_SUBDIRS.
+    """
     vnx_init(_init_args(tmp_path))
 
     vnx_data = tmp_path / ".vnx-data"
-    for subdir in ("dispatches/pending", "dispatches/active", "receipts", "unified_reports", "logs"):
+    for subdir in ("state", "dispatches/pending", "dispatches/active",
+                   "dispatches/completed", "events", "unified_reports"):
         assert (vnx_data / subdir).is_dir(), f"missing {subdir}"
 
 
-def test_init_idempotent(tmp_path):
-    """Running vnx init twice does not raise or overwrite existing files."""
+def test_init_refuses_reinit_without_force(tmp_path):
+    """A second vnx init refuses (rc=1) without --force and never clobbers files.
+
+    init is no longer silently idempotent: once .vnx-version exists it requires
+    --force to reinitialise, protecting an existing project from accidental
+    overwrite. The existing governance profile must be left untouched.
+    """
     vnx_init(_init_args(tmp_path))
     profiles_before = (tmp_path / ".vnx" / "governance_profiles.yaml").read_text()
 
     rc = vnx_init(_init_args(tmp_path))
 
-    assert rc == 0
+    assert rc == 1
     profiles_after = (tmp_path / ".vnx" / "governance_profiles.yaml").read_text()
     assert profiles_before == profiles_after
 

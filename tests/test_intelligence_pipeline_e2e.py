@@ -121,8 +121,12 @@ def _create_test_db(db_path: Path) -> sqlite3.Connection:
 
 
 @pytest.fixture
-def test_env(tmp_path):
+def test_env(tmp_path, monkeypatch):
     """Set up test environment with temp dirs and DB."""
+    # The test DB is project-scoped (project_id DEFAULT 'vnx-dev'); pin the
+    # project so the persist/query path is not affected by a VNX_PROJECT_ID
+    # leaked from an earlier test in the same process (order-independence).
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = state_dir / "quality_intelligence.db"

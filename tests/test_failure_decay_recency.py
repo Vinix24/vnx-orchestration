@@ -46,7 +46,29 @@ def _live_db_path() -> Path | None:
     except RuntimeError:
         return None
     candidate = root / ".vnx-data" / "state" / "quality_intelligence.db"
-    return candidate if candidate.exists() else None
+    if not candidate.exists():
+        return None
+    # A live DB can predate the confidence_events migration; the canary needs
+    # that table, so treat a too-old (un-migrated) DB as "not available" rather
+    # than letting the query raise an OperationalError.
+    if not _has_table(candidate, "confidence_events"):
+        return None
+    return candidate
+
+
+def _has_table(db_path: Path, table: str) -> bool:
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
 
 
 class FailureDecayRecencyCanary(unittest.TestCase):
