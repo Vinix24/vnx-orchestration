@@ -264,6 +264,8 @@ Commands:
   init               Create .vnx-data runtime layout and .vnx/config.yml
   init-db            Initialize quality intelligence database from schema
   bootstrap-skills   Create/link ./\.claude/skills from shipped dist skills
+  skills sync        Refresh ./\.claude/skills from the installed VNX (canonical),
+                     with a timestamped backup. Default --dry-run; --apply to update.
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
   bootstrap-hooks    Deploy SessionStart hooks to .claude/hooks/ + settings.json
   regen-settings     Patch-manage settings.json (--merge|--full|--validate)
@@ -1289,6 +1291,102 @@ cmd_bootstrap_skills() {
   fi
 }
 
+# cmd_skills_sync — idempotent refresh of an EXISTING project's skills from the
+# installed VNX (canonical), closing the bootstrap-skills copy-once gap (ADR-026).
+# bootstrap-skills returns early when .claude/skills/ already exists; this refreshes it.
+# Safe by design: timestamped backup before any overwrite (= the preservation path; we
+# never auto-merge customization), project-only skills preserved (rsync has no --delete),
+# and a dry-run preview is the DEFAULT — --apply is required to write.
+cmd_skills_sync() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
+  local apply=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)   apply=1; shift ;;
+      --dry-run) apply=0; shift ;;
+      -h|--help) echo "Usage: vnx skills sync [--apply|--dry-run]"; return 0 ;;
+      *) err "[skills-sync] unknown argument: $1"; return 1 ;;
+    esac
+  done
+
+  local shipped_skills_dir="$VNX_HOME/skills"
+  local project_skills_dir="$PROJECT_ROOT/.claude/skills"
+
+  if [ ! -d "$shipped_skills_dir" ]; then
+    err "[skills-sync] missing shipped skills dir: $shipped_skills_dir"; return 1
+  fi
+  if [ ! -d "$project_skills_dir" ]; then
+    err "[skills-sync] no project skills dir — run 'vnx bootstrap-skills' first: $project_skills_dir"
+    return 1
+  fi
+  if ! command -v rsync >/dev/null 2>&1; then
+    err "[skills-sync] rsync required for sync (and its dry-run preview)"; return 1
+  fi
+
+  # Itemized dry-run: lines NOT starting with '.' are real changes (transfers/creates).
+  local changes
+  changes="$(rsync -ai --dry-run "$shipped_skills_dir/" "$project_skills_dir/" 2>/dev/null \
+    | grep -vE '^(\.| *$|sending|sent |total )' || true)"
+
+  if [ -z "$changes" ]; then
+    log "[skills-sync] project skills already current with $VNX_HOME (no changes)"
+    return 0
+  fi
+
+  log "[skills-sync] shipped skills differ from project — these would update:"
+  printf '%s\n' "$changes"
+
+  if [ "$apply" -eq 0 ]; then
+    log "[skills-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
+    return 0
+  fi
+
+  local ts backup
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup="$PROJECT_ROOT/.claude/skills.bak.$ts"
+  if ! cp -R "$project_skills_dir" "$backup"; then
+    err "[skills-sync] backup failed; aborting (no changes made)"; return 1
+  fi
+  log "[skills-sync] backed up current skills -> $backup"
+
+  rsync -a "$shipped_skills_dir/" "$project_skills_dir/"
+  log "[skills-sync] refreshed .claude/skills/ from $VNX_HOME (project-only skills preserved)"
+
+  # Mirror to the provider skill paths if those tools + dirs are present (matches bootstrap-skills).
+  if command -v codex >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.agents/skills" ]; then
+    rsync -a "$shipped_skills_dir/" "$PROJECT_ROOT/.agents/skills/"
+    log "[skills-sync] mirrored to Codex (.agents/skills/)"
+  fi
+  if command -v gemini >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.gemini/skills" ]; then
+    rsync -a "$shipped_skills_dir/" "$PROJECT_ROOT/.gemini/skills/"
+    log "[skills-sync] mirrored to Gemini (.gemini/skills/)"
+  fi
+
+  log "[skills-sync] done. Had local skill edits? Diff against $backup and re-apply them."
+}
+
+# cmd_skills — 'vnx skills <sub>' dispatcher. Subcommands inherit the 'skills' mode tier
+# (same convention as 'suggest'), so this uses if/elif rather than a case-branch the
+# mode-coverage test would read as a separate top-level command.
+cmd_skills() {
+  local sub="${1:-}"
+  if [ "$sub" = "sync" ]; then
+    shift
+    cmd_skills_sync "$@"
+  elif [ -z "$sub" ] || [ "$sub" = "-h" ] || [ "$sub" = "--help" ]; then
+    cat <<'HELP'
+Usage: vnx skills <command>
+
+Commands:
+  sync [--apply|--dry-run]   Refresh .claude/skills/ from the installed VNX (canonical),
+                             with a timestamped backup. Default is --dry-run (preview).
+HELP
+  else
+    err "[skills] unknown subcommand: $sub (try 'vnx skills --help')"
+    return 1
+  fi
+}
+
 cmd_bootstrap_terminals() {
   _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local terminals_dir="$PROJECT_ROOT/.claude/terminals"
@@ -1953,6 +2051,9 @@ main() {
       ;;
     bootstrap-skills)
       cmd_bootstrap_skills
+      ;;
+    skills)
+      cmd_skills "$@"
       ;;
     bootstrap-terminals)
       cmd_bootstrap_terminals "$@"
