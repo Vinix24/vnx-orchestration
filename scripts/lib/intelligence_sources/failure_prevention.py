@@ -21,6 +21,7 @@ from ._common import (
     _now_utc,
     _project_scope_clause,
     _scope_matches,
+    _merge_stored_tags,
     _stable_item_id,
     _table_has_column,
 )
@@ -109,12 +110,13 @@ def _query_antipatterns(
     ap_scope_clause, ap_scope_params = _project_scope_clause(
         has_column_fn("antipatterns", "project_id")
     )
+    tags_col = ", tags" if has_column_fn("antipatterns", "tags") else ""
     try:
         rows = db.execute(
             f"""
             SELECT id, title, description, category, severity,
                    why_problematic, better_alternative,
-                   occurrence_count, first_seen, last_seen
+                   occurrence_count, first_seen, last_seen{tags_col}
             FROM antipatterns
             WHERE occurrence_count >= 1
               AND (valid_until IS NULL OR valid_until > datetime('now'))
@@ -138,9 +140,11 @@ def _query_antipatterns(
     for row in rows:
         row_d = dict(row)
         category = row_d.get("category", "")
-        pattern_scope = [category] if category else []
-        if not _scope_matches(pattern_scope, scope_tags):
+        # Inclusion filter is category-only (consistent with proven_pattern);
+        # the merged tags are used for the item's scope_tags (ranking) only.
+        if not _scope_matches([category] if category else [], scope_tags):
             continue
+        pattern_scope = _merge_stored_tags(category, row_d.get("tags"))
         content_parts = []
         if row_d.get("why_problematic"):
             content_parts.append(row_d["why_problematic"])

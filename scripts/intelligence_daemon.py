@@ -233,6 +233,19 @@ class GovernanceDigestRunner:
             except Exception as exc:
                 logger.warning("GovernanceDigestRunner: signal persistence failed (non-fatal): %s", exc)
 
+            # LLM-tagger enrichment (opt-in VNX_TAGGER_ENABLED): tag any newly
+            # persisted / still-untagged patterns so the rank-then-budget selector
+            # can match them on stored tags. No-op + non-fatal when disabled.
+            try:
+                from vnx_tagger import enrich_pattern_tags, is_enabled as _tagger_enabled
+                tagger_db = self.state_dir / "quality_intelligence.db"
+                if _tagger_enabled() and tagger_db.exists():
+                    tag_result = enrich_pattern_tags(tagger_db, limit=100)
+                    if any(v for k, v in tag_result.items() if not k.startswith("_")):
+                        logger.info("GovernanceDigestRunner: tagger enriched patterns: %s", tag_result)
+            except Exception as exc:
+                logger.warning("GovernanceDigestRunner: tagger enrichment failed (non-fatal): %s", exc)
+
             digest = build_digest(signals)
 
             self.last_run = datetime.now()

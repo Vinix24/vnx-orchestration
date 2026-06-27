@@ -22,6 +22,7 @@ from ._common import (
     _stable_item_id,
     _table_has_column,
     classify_pattern_category,
+    _merge_stored_tags,
 )
 try:
     from project_scope import current_project_id, project_filter_enabled
@@ -138,6 +139,7 @@ def _query_per_project(
     has_pattern_cat = has_column_fn("success_patterns", "pattern_category")
     has_content_hash_col = has_column_fn("success_patterns", "content_hash")
     has_project_id_col = has_column_fn("success_patterns", "project_id")
+    has_tags_col = has_column_fn("success_patterns", "tags")
     select_cols = (
         "id, title, description, category, confidence_score, "
         "usage_count, source_dispatch_ids, first_seen, last_used"
@@ -148,6 +150,8 @@ def _query_per_project(
         select_cols += ", content_hash"
     if has_project_id_col:
         select_cols += ", project_id"
+    if has_tags_col:
+        select_cols += ", tags"
     scope_clause, scope_params = _project_scope_clause(has_project_id_col)
     active_project_id = current_project_id() if has_project_id_col else None
     try:
@@ -212,6 +216,7 @@ def _per_project_row_to_item(
     last_seen = canonical_row_d.get("last_used") or canonical_row_d.get("first_seen") or _now_utc()
     stored_cat = canonical_row_d.get("pattern_category")
     pattern_category = stored_cat or classify_pattern_category(canonical_title, canonical_content)
+    item_tags = _merge_stored_tags(canonical_category, canonical_row_d.get("tags"))
     return IntelligenceItem(
         item_id=_stable_item_id("sp", canonical_key),
         item_class="proven_pattern",
@@ -220,7 +225,7 @@ def _per_project_row_to_item(
         confidence=float(canonical_row_d.get("confidence_score", 0.0)),
         evidence_count=int(canonical_row_d.get("usage_count", 0)),
         last_seen=last_seen,
-        scope_tags=[canonical_category] if canonical_category else [],
+        scope_tags=item_tags,
         source_refs=source_refs[:5],
         task_class_filter=[],
         pattern_category=pattern_category,
