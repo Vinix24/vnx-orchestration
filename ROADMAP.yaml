@@ -31,25 +31,23 @@ title: VNX Multi-Feature Roadmap
 
 launch_state:
   version: "1.0.0"
-  date: "2026-06-10"             # last update to this launch_state block
-  status: "pre-launch"            # all blockers resolved; awaiting operator publish-go
-  target_date: "2026-06-09"       # slipped 1 day by the pre-publish sweep; publish-ready since 2026-06-10
-  last_verified: "2026-06-10"
-  verified_against: "origin/main@bb8f6159"
+  date: "2026-06-27"             # last update to this launch_state block
+  status: "pre-launch"            # gate-clear; awaiting operator PyPI publish-go (LB-3)
+  target_date: "2026-06-09"       # original target; publish-ready since 2026-06-10, still operator-gated
+  last_verified: "2026-06-27"
+  verified_against: "origin/main@9e5a9302"
   note: >
-    2026-06-10 (night): the 2026-06-09/10 pre-publish sweep found 4
-    ship-blockers (LB-4..LB-7); all four were fixed, kimi-gated, and merged
-    the same night (#834-#840 + dashboard-ops on #833). LB-3 was RE-RUN GREEN
-    on main@bfe37501: wheel 2.42MB/861 files, extended artifact grep (secrets
-    AND client-data patterns) zero-hit on the blocker class, LB-5 proven on
-    the artifact (audit_chain verify -> status unchained, exit 0), LB-6 proven
-    (fresh scaffold wires Stop + PreToolUse hooks with valid site-packages
-    paths), fresh-venv init/migrate/doctor 14/2/0. Artifacts staged in
-    /tmp/vnx-lb3-final/dist/. Crontab PATH line applied 2026-06-10 (nightly
-    runs Homebrew Python again; migrations v22/v23 self-heal at next 04:00
-    run). Remaining: the operator-only publish set in LB-3. Sweep history:
-    claudedocs/2026-06-09-RUNDOWN-1.0-PREPYPI-SWEEP.md + this block's git
-    history (40b2d3cd).
+    Still gate-clear; the only thing between 1.0.0 and release is the
+    operator-only PyPI publish (LB-3). Since 2026-06-10 the codebase kept
+    moving while staying gate-clear: a 4-day hardening sprint (#913-#920), an
+    HN-readiness docs sweep + cleanup (#921/#922), a migration refactor (#924),
+    the full intelligence build-program steps 0-5 (#923 render-gap, #925
+    rank-then-budget, #926 doc_relevant, #927/#928 tagging, #929 outcome-
+    grounding, #930/#931 scout pre-pass), and a codex-triaged test-suite-green
+    sweep (#932-#934) establishing the no-bare-FAIL standard. Every PR was
+    kimi-diff-gated + CI-green. The 2026-06-09/10 pre-publish sweep history
+    (LB-3..LB-7, #833-#840) is in claudedocs/2026-06-09-RUNDOWN-1.0-PREPYPI-
+    SWEEP.md and this block's git history.
   launch_blockers:
     - "LB-3 (operator): PyPI publish go (artifacts verified + staged) -> pip install from PyPI check -> git tag v1.0.0 + GitHub release. Optional: central-install refresh + TestPyPI dry-run first. LB-4..LB-7 resolved 2026-06-10 (#833/#835/#836/#839/#840, see launch-sweep-blockers)."
 
