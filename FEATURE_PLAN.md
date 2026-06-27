@@ -1,12 +1,22 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-27T19:58:42.195083+00:00
+**Last updated**: 2026-06-27T21:40:41.439897+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #963 — fix(audit): clear medium bugs — falsified old_value, json-list crash, truthy flag, doctor jq, requirements (C2,C5,D7,F6,F9) (#963) (2026-06-27)
+- #962 — docs(audit): fix VNX_AUTOPILOT flag + SECURITY email + CONTRIBUTING marker + PyPI metadata (audit #16/D1,O1,O2,O5) (#962) (2026-06-27)
+- #961 — fix(governance): enforce report contract + idempotency ordering + side-door CI (audit high #2,#3,#10) (#961) (2026-06-27)
+- #960 — test(audit): fix the bare-FAIL test cluster (audit high #11-#15) (#960) (2026-06-27)
+- #959 — fix(test): teach docs-command validation about the pip-only CLI surface (#959) (2026-06-27)
+- #958 — fix(dx): worker-CLI doctor probe + dispatch preflight + prerequisites docs (audit high #6,#7,#8) (#958) (2026-06-27)
+- #957 — refactor(demo): retire the demo command + demo mode (audit high #9) (#957) (2026-06-27)
+- #956 — fix(install): add missing pyyaml dep + align pip-install docs with README (audit high #4,#5) (#956) (2026-06-27)
+- #955 — fix(dashboard): default loopback bind + CSRF/token guard on mutating POSTs (audit critical #1) (#955) (2026-06-27)
+- #954 — chore(roadmap): seed the multi-provider repo-audit remediation backlog (#954) (2026-06-27)
 - #953 — feat(config): runtime honours UI-set config — gate/dispatch flags (P0 PR 6b) (#953) (2026-06-27)
 - #952 — feat(config): runtime honours UI-set config — intelligence read-sites (P0 PR 6a) (#952) (2026-06-27)
 - #951 — feat(config): config control-plane page — toggles + approval modal + audit drawer (P0 PR 5) (#951) (2026-06-27)
@@ -43,8 +53,8 @@ _No active features._
 
 ## Completed
 
-### F2
-All PRs merged. (#847)
+### F6
+All PRs merged. (#963)
 
 ## Planned (from ROADMAP.yaml)
 
@@ -217,55 +227,55 @@ Status: in-progress
 Status: planned
 
 ### audit-sec-dashboard-auth — Dashboard: default loopback bind + token/CSRF auth on mutating POSTs (audit critical #1)
-Status: planned
+Status: done
 
 ### audit-dep-pyyaml — Add missing pyyaml runtime dependency (audit high #5)
-Status: planned
+Status: done
 
 ### audit-docs-pip-install — Fix pip-install-not-on-PyPI doc contradiction (audit high #4)
-Status: planned
+Status: done
 
 ### audit-demo-modernize — Demo: retire the redundant 4-tmux T1-T3 model (audit high #9)
-Status: planned
+Status: done
 
 ### audit-dx-doctor-worker-cli — vnx doctor: probe worker CLIs it dispatches to (audit high #7)
-Status: planned
+Status: done
 
 ### audit-dx-dispatch-preflight — dispatch-agent: preflight claude binary + surface the failure reason (audit high #6)
-Status: planned
+Status: done
 
 ### audit-dx-prerequisites-docs — Add a Prerequisites section to the pip happy-path (audit high #8)
-Status: planned
+Status: done
 
 ### audit-gov-report-parser-contract — report_parser: enforce body-contract + phantom-guard before task_complete (audit high #10)
-Status: planned
+Status: done
 
 ### audit-gov-sidedoor-ci — Enforce the dispatch side-door audit in CI (audit high #2)
-Status: planned
+Status: done
 
 ### audit-correctness-receipt-idempotency — Receipt idempotency: write-ahead the dedup marker (audit high #3)
-Status: planned
+Status: done
 
 ### audit-tests-build-project-status — Fix brittle source-grep test (audit high #11)
-Status: planned
+Status: done
 
 ### audit-tests-build-t0-brief — Fix build_t0_brief rc=1-on-empty-state_dir tests (audit high #12)
-Status: planned
+Status: done
 
 ### audit-tests-fsr-b-tenant-guard — Fix tenant-guard test escaping tmp isolation (audit high #13)
-Status: planned
+Status: done
 
 ### audit-tests-fsr-isolation-guard — Fix isolation-guard fixture missing project-id marker (audit high #14)
-Status: planned
+Status: done
 
 ### audit-tests-feedback-loop — Fix feedback-loop silent column-swallow (audit high #15)
-Status: planned
+Status: done
 
 ### audit-docs-autopilot-flag — Fix non-existent VNX_AUTOPILOT flag in docs (audit high #16)
-Status: planned
+Status: done
 
 ### audit-sweep-medium — Repo-audit medium-severity sweep (41 findings)
-Status: planned
+Status: in-progress
 
 ### audit-sweep-low — Repo-audit low-severity / AI-slop sweep (39 findings)
 Status: planned
