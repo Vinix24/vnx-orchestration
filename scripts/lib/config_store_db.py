@@ -126,7 +126,7 @@ def _emit_config_event_best_effort(
         # is handed back clean to the caller. The audited write already committed above.
         try:
             conn.rollback()
-        except Exception:
+        except Exception:  # vnx-silent-except: rollback of a failed best-effort emit; audited write already committed
             pass
 
 
