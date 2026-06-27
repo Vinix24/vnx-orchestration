@@ -21,6 +21,7 @@ import json
 import os
 import socket
 import subprocess
+import hmac
 import sys
 from functools import partial
 from http import HTTPStatus
@@ -202,9 +203,46 @@ def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj:
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(payload)))
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    # No blanket Access-Control-Allow-Origin: the dashboard serves its own UI same-origin. A wildcard
+    # ACAO let any web page read these responses; an explicit allowlist can be added via env if needed.
     handler.end_headers()
     handler.wfile.write(payload)
+
+
+# --- Mutation auth (audit critical #1) ---------------------------------------
+# The dashboard exposes process-control + governance-mutation POSTs. Default-bind is loopback
+# (main()), and every mutating POST is guarded below: cross-origin requests are rejected (CSRF), and
+# a shared-secret token is required when one is configured or when bound to a non-loopback address.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_LOOPBACK_BIND = True  # set in main() from the resolved bind address
+_DASHBOARD_TOKEN = os.environ.get("VNX_DASHBOARD_TOKEN", "")
+
+
+def _bind_is_loopback(bind: str) -> bool:
+    return bind in _LOOPBACK_HOSTS
+
+
+def _origin_same_site(handler: "DashboardHandler") -> bool:
+    """True when the request has no Origin (curl/native client) or its host matches the request Host
+    (same-origin). Blocks a cross-origin page from POSTing to the dashboard (CSRF)."""
+    origin = handler.headers.get("Origin")
+    if not origin:
+        return True
+    host = handler.headers.get("Host", "")
+    return bool(host) and urlsplit(origin).netloc == host
+
+
+def _mutation_forbidden(handler: "DashboardHandler") -> "str | None":
+    """Return an error string if a mutating request must be refused, else None. Guards every POST."""
+    if not _origin_same_site(handler):
+        return "cross-origin request rejected"
+    if not _LOOPBACK_BIND and not _DASHBOARD_TOKEN:
+        return "mutation endpoints are disabled on a non-loopback bind without VNX_DASHBOARD_TOKEN"
+    if _DASHBOARD_TOKEN:
+        provided = handler.headers.get("X-VNX-Dashboard-Token", "")
+        if not hmac.compare_digest(provided, _DASHBOARD_TOKEN):
+            return "missing or invalid dashboard token"
+    return None
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -504,6 +542,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed_path = unquote(urlsplit(self.path).path)
 
+        # Audit critical #1: guard every mutating POST (CSRF + token). Loopback default bind makes
+        # the token optional locally; a non-loopback bind requires it.
+        _auth_err = _mutation_forbidden(self)
+        if _auth_err is not None:
+            _json_response(self, HTTPStatus.FORBIDDEN, {"error": "forbidden", "reason": _auth_err})
+            return
+
         # /api/jump/{terminal} — switch tmux focus to terminal
         if parsed_path.startswith("/api/jump/"):
             terminal_id = parsed_path[len("/api/jump/"):]
@@ -676,17 +721,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    global _LOOPBACK_BIND, _DASHBOARD_TOKEN
     port = int(os.environ.get("PORT", "4173"))
+    # Audit critical #1: default to loopback. The old all-interfaces bind exposed process-control +
+    # governance mutations to the LAN. Opt into remote with VNX_DASHBOARD_BIND (and a token).
+    bind = os.environ.get("VNX_DASHBOARD_BIND", "127.0.0.1")
+    _LOOPBACK_BIND = _bind_is_loopback(bind)
+    _DASHBOARD_TOKEN = os.environ.get("VNX_DASHBOARD_TOKEN", "")
 
     # Serve from `.claude/vnx-system` regardless of where the script is launched from.
     service_dir = Path(__file__).resolve().parents[1]
     handler = partial(DashboardHandler, directory=str(service_dir))
 
-    server = DualStackHTTPServer(("::", port), handler)
+    # IPv6 bind forms (``::``, ``::1``) use the dual-stack server; IPv4 forms use the plain server.
+    if ":" in bind:
+        server: ThreadingHTTPServer = DualStackHTTPServer((bind, port), handler)
+    else:
+        server = ThreadingHTTPServer((bind, port), handler)
+
     print(
-        f"Serving dashboard from {service_dir} on http://localhost:{port} (dashboard at /dashboard/index.html)",
+        f"Serving dashboard from {service_dir} on http://{bind}:{port}/dashboard/index.html",
         flush=True,
     )
+    if not _LOOPBACK_BIND:
+        if _DASHBOARD_TOKEN:
+            print(f"[security] non-loopback bind {bind}: mutations require X-VNX-Dashboard-Token header", flush=True)
+        else:
+            print(f"[security] WARNING: non-loopback bind {bind} without VNX_DASHBOARD_TOKEN — mutation endpoints are DISABLED", flush=True)
     try:
         server.serve_forever()
     finally:
