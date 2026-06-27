@@ -25,7 +25,11 @@ ADR-007 (tenant stamping): both tables carry ``project_id`` and a composite key 
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
+import uuid
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+import config_registry
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS project_config (
@@ -85,3 +89,127 @@ def read_config(conn: sqlite3.Connection, project_id: str, key: str) -> Optional
     except sqlite3.Error:
         return None
     return row[0] if row else None
+
+
+def _coerce(type_: str, value: Any) -> str:
+    """Validate + normalise a value to its stored string form. Raises ValueError on a bad value."""
+    if type_ == "bool":
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        s = str(value).strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return "1"
+        if s in ("0", "false", "no", "off", ""):
+            return "0"
+        raise ValueError(f"invalid bool value: {value!r}")
+    return str(value)
+
+
+def _emit_config_event_best_effort(
+    conn: sqlite3.Connection, project_id: str, key: str, old: Optional[str], new: str,
+    actor: str, event_id: str,
+) -> None:
+    """Append a `config_changed` coordination event with the audit's event_id. Best-effort: the
+    project_config_audit row (written atomically by set_config) is the hard governance record; the
+    broader event stream must never block or roll back a config write."""
+    try:
+        import coordination_db
+        coordination_db._append_event(  # noqa: SLF001 — canonical event helper
+            conn, event_type="config_changed", entity_type="project_config", entity_id=key,
+            from_state=old, to_state=new, actor=actor,
+            reason="operator config change", metadata={"event_id": event_id},
+            project_id=project_id,
+        )
+        conn.commit()
+    except Exception:
+        # A partial _append_event may leave an open implicit txn — roll it back so the connection
+        # is handed back clean to the caller. The audited write already committed above.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def set_config(
+    conn: sqlite3.Connection, project_id: str, key: str, value: Any, *,
+    actor: str, approval_id: Optional[str] = None,
+) -> dict:
+    """Persist an operator config change, atomically writing the value + a mandatory audit row.
+
+    Validates against the registry (unknown / not-writable / approval-required all raise), coerces
+    the value, then writes `project_config` (upsert) + `project_config_audit` in ONE transaction —
+    there is no write without an audit row. A `config_changed` coordination event is emitted
+    best-effort afterwards. Returns {key, old_value, new_value, event_id}.
+    """
+    entry = config_registry.CONFIG_REGISTRY.get(key)
+    if entry is None:
+        raise ValueError(f"unknown config key: {key}")
+    if not entry.writable_from_ui:
+        raise PermissionError(f"{key} is not writable from the UI")
+    if entry.requires_approval and not approval_id:
+        raise PermissionError(f"{key} requires an approval_id")
+
+    coerced = _coerce(entry.type, value)
+    ensure_config_tables(conn)  # DDL, idempotent — commits any pending txn, so BEGIN below is clean
+    event_id = str(uuid.uuid4())
+
+    # BEGIN IMMEDIATE takes the write lock up front so the old-value read and the value+audit write
+    # share ONE snapshot: no concurrent writer can slip between them and stale the audit's old_value.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        old = read_config(conn, project_id, key)
+        conn.execute(
+            """
+            INSERT INTO project_config (project_id, config_key, config_value, config_type, updated_by, approval_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, config_key) DO UPDATE SET
+                config_value = excluded.config_value,
+                config_type  = excluded.config_type,
+                updated_by   = excluded.updated_by,
+                updated_at   = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                approval_id  = excluded.approval_id
+            """,
+            (project_id, key, coerced, entry.type, actor, approval_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_config_audit
+                (project_id, config_key, old_value, new_value, changed_by, approval_id, event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, key, old, coerced, actor, approval_id, event_id),
+        )
+        conn.commit()  # the value + its audit row commit together, or neither does
+    except BaseException:
+        conn.rollback()
+        raise
+
+    _emit_config_event_best_effort(conn, project_id, key, old, coerced, actor, event_id)
+    return {"key": key, "old_value": old, "new_value": coerced, "event_id": event_id}
+
+
+def make_db_resolver(
+    state_dir_for_project: Callable[[str], "Optional[Path | str]"],
+) -> config_registry.DbResolver:
+    """Build a config_registry DB-resolver (step 2 of the precedence chain) backed by read_config.
+
+    ``state_dir_for_project(project_id)`` returns the project's state dir (or None). The resolver
+    opens the per-project runtime_coordination.db READ-ONLY; any miss / error → None (fail-open)."""
+    def _resolver(project_id: Optional[str], key: str) -> Optional[str]:
+        if not project_id:
+            return None
+        sdir = state_dir_for_project(project_id)
+        if not sdir:
+            return None
+        db = Path(sdir) / "runtime_coordination.db"
+        if not db.exists():
+            return None
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return None
+        try:
+            return read_config(conn, project_id, key)
+        finally:
+            conn.close()
+    return _resolver
