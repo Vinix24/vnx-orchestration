@@ -265,7 +265,7 @@ class TestBuildT0StateHook:
         build_t0_state_path = _REPO_ROOT / "scripts" / "build_t0_state.py"
         content = build_t0_state_path.read_text(encoding="utf-8")
         assert "from build_project_status import write_project_status" in content
-        assert "write_project_status(_STATE_DIR)" in content
+        assert "write_project_status(state_dir)" in content
 
     def test_write_project_status_called_with_state_dir(self, tmp_path):
         """Smoke-test that write_project_status can be called with a tmp state_dir."""
