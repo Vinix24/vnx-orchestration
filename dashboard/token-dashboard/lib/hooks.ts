@@ -9,6 +9,7 @@ import {
   fetchKanban,
   fetchGateConfig,
   fetchGovernanceDigest,
+  fetchSystemHealth,
   fetchReports,
   fetchReportContent,
   fetchAgents,
@@ -28,7 +29,7 @@ import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse, TranscriptResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
-  GateConfigResponse, GovernanceDigestEnvelope,
+  GateConfigResponse, GovernanceDigestEnvelope, SystemHealthEnvelope,
   ReportsEnvelope, AgentsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
   ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
@@ -165,6 +166,14 @@ export function useGovernanceDigest() {
     'operator-governance-digest',
     fetchGovernanceDigest,
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 15000 }
+  );
+}
+
+export function useSystemHealth() {
+  return useSWR<SystemHealthEnvelope>(
+    'operator-system-health',
+    fetchSystemHealth,
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
   );
 }
 

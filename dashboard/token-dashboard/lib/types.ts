@@ -263,6 +263,19 @@ export interface KanbanCard {
   promoted?: boolean;
 }
 
+// ---- System health ----
+export interface SystemHealthComponent {
+  status: string; // healthy | degraded | dead
+  details: Record<string, unknown>;
+}
+
+export interface SystemHealthEnvelope {
+  status: string; // overall: healthy | degraded | dead
+  queried_at: string;
+  components: Record<string, SystemHealthComponent>;
+  health_score: number;
+}
+
 export type KanbanStageName = 'queued' | 'staging' | 'pending' | 'active' | 'review' | 'done';
 
 export interface KanbanEnvelope {
