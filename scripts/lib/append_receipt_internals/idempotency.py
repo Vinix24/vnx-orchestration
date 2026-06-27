@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from .common import (
     EXIT_LOCK_ERROR,
     facade,
 )
+
+_log = logging.getLogger(__name__)
 
 IDEMPOTENCY_FIELDS = (
     "dispatch_id",
@@ -200,7 +203,17 @@ def _write_receipt_under_lock(
                 raise AppendReceiptError("receipt_write_failed", EXIT_IO_ERROR, f"Failed to append receipt: {exc}") from exc
 
             cache_entries.append({"ts": time.time(), "key": idempotency_key})
-            _write_cache(cache_path, cache_entries)
+            try:
+                _write_cache(cache_path, cache_entries)
+            except Exception as exc:
+                # Audit #3: the receipt is already durable (written above). A failed dedup-cache write
+                # must NOT raise — raising would propagate as an error, the caller would retry, and
+                # the retry would re-append the same receipt (a duplicate audit record). Log and
+                # continue: worst case a rare future duplicate, never a lost receipt (the safe direction).
+                _log.warning(
+                    "idempotency cache write failed after receipt append (key=%s): %s",
+                    idempotency_key, exc,
+                )
 
             return AppendResult(
                 status="appended",
