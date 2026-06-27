@@ -238,11 +238,22 @@ class TestDirectCouplingFreeze:
                     continue
                 if "subprocess" in line and "tmux" in line:
                     violations.append(f"{py_file.name}:{i}: {line.strip()}")
-        # Known pre-existing violations (predating Feature 16):
+        # Baseline of files that reference tmux directly. Refreshed 2026-06-27
+        # (operator-approved): the leaseless tmux-spawn lane is now first-class,
+        # so the door/spawn/governance modules below legitimately couple to tmux.
+        # The set guards against NEW, unexpected coupling outside this lane.
         known_preexisting = {
+            "cleanup_worker_exit.py",
             "dashboard_actions.py",
-            "terminal_snapshot.py",
-            "terminal_state_reconciler.py",
+            "dispatch_govern.py",
+            "dispatch_prepare.py",
+            "dispatch_sidedoor_audit.py",
+            "governance_emit.py",
+            "plan_gate_panel.py",
+            "provider_dispatch.py",
+            "staging_validator.py",
+            "tmux_interactive_dispatch.py",
+            "worker_permission_relay.py",
         }
         new_violations = [
             v for v in violations
@@ -254,11 +265,21 @@ class TestDirectCouplingFreeze:
         )
 
     def test_count_preexisting_violations_stable(self) -> None:
-        """Pre-existing violations count must not increase."""
+        """Direct-tmux-coupling file set must not grow beyond the approved baseline."""
+        # Refreshed 2026-06-27 (operator-approved) — see the note in
+        # test_no_direct_tmux_subprocess_in_protected_modules. Kept in sync with it.
         known_files = {
+            "cleanup_worker_exit.py",
             "dashboard_actions.py",
-            "terminal_snapshot.py",
-            "terminal_state_reconciler.py",
+            "dispatch_govern.py",
+            "dispatch_prepare.py",
+            "dispatch_sidedoor_audit.py",
+            "governance_emit.py",
+            "plan_gate_panel.py",
+            "provider_dispatch.py",
+            "staging_validator.py",
+            "tmux_interactive_dispatch.py",
+            "worker_permission_relay.py",
         }
         found: set[str] = set()
         for py_file in sorted(LIB_DIR.glob("*.py")):
