@@ -253,6 +253,8 @@ export interface KanbanCard {
   duration_label: string;
   has_receipt: boolean;
   receipt_status: string | null;
+  /** True when a scout pre-pass sidecar exists for this dispatch (door scout producer). */
+  scout_enriched?: boolean;
 }
 
 export type KanbanStageName = 'staging' | 'pending' | 'active' | 'review' | 'done';
