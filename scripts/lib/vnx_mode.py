@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """VNX Mode — detection, storage, and command gating.
 
-Manages the three VNX execution modes (starter, operator, demo) as defined
+Manages the two VNX execution modes (starter, operator) as defined
 in the productization contract (PR-0). Mode is persisted in
 ``.vnx-data/mode.json`` and checked at command dispatch time.
+(Demo mode was retired 2026-06-27, audit #9 — the `vnx demo` command was removed.)
 
 Contracts:
   G-R2: Receipts and runtime state in all modes.
-  A-R1: Starter, operator, and demo share the same canonical runtime model.
+  A-R1: Starter and operator share the same canonical runtime model.
   Productization §2.4: mode.json is source of truth for current mode.
   Productization §7.5: No silent degradation — unavailable commands fail explicitly.
 """
@@ -30,7 +31,6 @@ from typing import Any, Dict, FrozenSet, Optional
 class VNXMode(str, Enum):
     STARTER = "starter"
     OPERATOR = "operator"
-    DEMO = "demo"
 
     def __str__(self) -> str:
         return self.value
@@ -67,15 +67,10 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "pool", "permission",
 })
 
-TIER_DEMO_ONLY: FrozenSet[str] = frozenset({
-    "demo",
-})
-
 # Mode -> allowed command sets
 MODE_COMMANDS: Dict[VNXMode, FrozenSet[str]] = {
     VNXMode.STARTER: TIER_UNIVERSAL | TIER_STARTER_OPERATOR,
     VNXMode.OPERATOR: TIER_UNIVERSAL | TIER_STARTER_OPERATOR | TIER_OPERATOR_ONLY,
-    VNXMode.DEMO: TIER_UNIVERSAL | TIER_DEMO_ONLY,
 }
 
 
@@ -170,8 +165,6 @@ class ModeGateError(Exception):
         self.current_mode = current_mode
         if current_mode == VNXMode.STARTER:
             upgrade = "Run 'vnx init --operator' to upgrade."
-        elif current_mode == VNXMode.DEMO:
-            upgrade = "Run 'vnx init' to set up a real project."
         else:
             upgrade = ""
         super().__init__(
@@ -203,7 +196,7 @@ def get_available_commands(mode: Optional[VNXMode] = None,
         mode = read_mode(data_dir)
     if mode is None:
         # Pre-init: all commands
-        return TIER_UNIVERSAL | TIER_STARTER_OPERATOR | TIER_OPERATOR_ONLY | TIER_DEMO_ONLY
+        return TIER_UNIVERSAL | TIER_STARTER_OPERATOR | TIER_OPERATOR_ONLY
     return MODE_COMMANDS.get(mode, frozenset())
 
 
@@ -212,7 +205,6 @@ def get_mode_description(mode: VNXMode) -> str:
     descriptions = {
         VNXMode.STARTER: "Single terminal, one AI provider, sequential dispatch. No tmux required.",
         VNXMode.OPERATOR: "Full multi-agent orchestration with tmux grid, multiple providers, and all governance controls.",
-        VNXMode.DEMO: "Showcase VNX capabilities with dry-run dispatches and sample state. No API keys required.",
     }
     return descriptions.get(mode, "Unknown mode")
 
@@ -223,7 +215,6 @@ def get_mode_description(mode: VNXMode) -> str:
 
 FEATURE_FLAGS = {
     "VNX_STARTER_MODE_ENABLED": ("1", "Enable starter mode (set '0' to disable)"),
-    "VNX_DEMO_MODE_ENABLED": ("1", "Enable demo mode (set '0' to disable)"),
     "VNX_MODE_GATING_ENABLED": ("1", "Enable command gating by mode (set '0' for backward compat)"),
 }
 
@@ -238,7 +229,6 @@ def check_mode_feature_enabled(mode: VNXMode) -> bool:
     """Check if the given mode is enabled via feature flags."""
     flag_map = {
         VNXMode.STARTER: "VNX_STARTER_MODE_ENABLED",
-        VNXMode.DEMO: "VNX_DEMO_MODE_ENABLED",
     }
     flag = flag_map.get(mode)
     if flag is None:

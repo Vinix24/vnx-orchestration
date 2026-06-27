@@ -264,9 +264,6 @@ The core insight: **your feedback isn't annotations on a plan — it's separate 
 git clone https://github.com/Vinix24/vnx-orchestration.git
 cd vnx-orchestration
 ./install.sh /path/to/your/project
-
-# Try the dry-run demo (no LLM needed)
-vnx demo --replay governance-pipeline
 ```
 
 The replay walks through a complete governance lifecycle with real evidence data — dispatch promotion, parallel execution, quality gates, and blocker resolution.

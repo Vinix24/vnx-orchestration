@@ -81,6 +81,12 @@ VNX supports three user modes. All modes share the same canonical runtime model 
 
 ### 2.3 Demo Mode
 
+> **RETIRED 2026-06-27 (audit #9).** The `vnx demo` command, its `vnx_demo.py` wrapper, and the
+> `demo/` replay assets have been removed. The dry-run replay assets were never shipped (the command
+> errored on a fresh clone), and the old 4-tmux T1-T3 model it reflected is superseded by the
+> single-entry door. This section is kept for the decision trail; the capabilities below are no
+> longer available.
+
 **Purpose**: Showcase VNX capabilities without requiring a real project or persistent state. For marketing, talks, and evaluation.
 
 | Property | Value |
@@ -174,7 +180,7 @@ All 47 commands are available in operator mode. The public command surface must 
 | `vnx package-check` | Package integrity check |
 | `vnx init-db` | Initialize database |
 
-#### Tier 4: Demo Only
+#### Tier 4: Demo Only (RETIRED 2026-06-27, audit #9 — `vnx demo` removed)
 | Command | Description |
 |---------|-------------|
 | `vnx demo` | Launch demo mode |

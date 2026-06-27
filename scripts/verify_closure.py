@@ -238,7 +238,6 @@ def check_test_files_exist() -> List[ClosureCheck]:
         "test_vnx_init.py",
         "test_vnx_setup.py",
         "test_vnx_install.py",
-        "test_vnx_demo.py",
         "test_vnx_doctor.py",
         "test_vnx_worktree.py",
         "test_path_resolution_regression.py",

@@ -61,10 +61,6 @@ vnx update --dry-run
 - `Ctrl+B D` — Detach (keeps running)
 - Mouse — Click to switch panes
 
-### Demo Setup
-Use `./bin/vnx demo` from a cloned `vnx-orchestration` repo root for the current
-demo workflow.
-
 ---
 
 ## Feature Development Workflow
