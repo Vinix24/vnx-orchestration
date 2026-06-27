@@ -41,8 +41,13 @@ def test_shell_resolver_keeps_runtime_local_and_intelligence_canonical(tmp_path)
         capture_output=True,
     )
 
+    # Isolate HOME to an empty tmp dir so the resolver's central-store probe
+    # ($HOME/.vnx-data/<project_id>) cannot find the operator's live store and
+    # wrongly resolve VNX_DATA_DIR there instead of the worktree-local path.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
     env = {
-        "HOME": os.environ["HOME"],
+        "HOME": str(fake_home),
         "PATH": os.environ["PATH"],
         "TERM": os.environ.get("TERM", "xterm-256color"),
     }
@@ -66,5 +71,13 @@ printf 'VNX_INTELLIGENCE_DIR=%s\n' "$VNX_INTELLIGENCE_DIR"
     lines = dict(line.split("=", 1) for line in result.stdout.strip().splitlines())
     assert Path(lines["PROJECT_ROOT"]).resolve() == worktree_root.resolve()
     assert Path(lines["VNX_CANONICAL_ROOT"]).resolve() == canonical_root.resolve()
-    assert Path(lines["VNX_DATA_DIR"]).resolve() == (worktree_root / ".vnx-data").resolve()
+    # With a resolvable project_id but no local/central store, runtime resolves
+    # to the per-project data home (XDG: $HOME/.local/share/vnx/<pid>) — the
+    # central-store model shares project state across worktrees rather than
+    # keeping a separate per-worktree .vnx-data. HOME is isolated above so this
+    # never touches the operator's real profile or live store.
+    assert Path(lines["VNX_DATA_DIR"]).resolve() == (
+        fake_home / ".local" / "share" / "vnx" / "vnx-dev"
+    ).resolve()
+    # Intelligence stays anchored to the canonical root regardless.
     assert Path(lines["VNX_INTELLIGENCE_DIR"]).resolve() == (canonical_root / ".vnx-intelligence").resolve()
