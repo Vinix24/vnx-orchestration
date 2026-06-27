@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-from project_root import resolve_data_dir  # noqa: E402
+from vnx_paths import ensure_env  # noqa: E402
 
 
 # ── Color helpers ──────────────────────────────────────────────────────
@@ -203,7 +203,11 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
     args, _extra = parser.parse_known_args(argv)
 
     if data_dir is None:
-        data_dir = resolve_data_dir(__file__)
+        # Resolve VNX_DATA_DIR the same way `vnx doctor` does (vnx_paths.ensure_env →
+        # the per-project central store ~/.vnx-data/<project_id>), not via
+        # resolve_data_dir(__file__) which, under a central install, resolves relative to
+        # the install dir and misses the project's store entirely (issue #225).
+        data_dir = Path(ensure_env()["VNX_DATA_DIR"])
 
     strategy_dir = data_dir / "strategy"
     state_dir = data_dir / "state"
