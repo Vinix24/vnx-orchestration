@@ -535,6 +535,10 @@ def _append_to_json_list(existing_json: Optional[str], new_item: str) -> str:
     if existing_json:
         try:
             items = json.loads(existing_json)
+            if not isinstance(items, list):
+                # Audit C5: a valid-but-non-list JSON value (e.g. {} or "x") would otherwise crash
+                # items.append() and abort the whole persist batch. Treat it as empty.
+                items = []
         except (json.JSONDecodeError, TypeError):
             items = []
     if new_item and new_item not in items:
