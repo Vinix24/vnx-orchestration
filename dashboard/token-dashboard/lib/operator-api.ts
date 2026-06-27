@@ -13,6 +13,10 @@ import type {
   GovernanceDigestEnvelope,
   SystemHealthEnvelope,
   PlanningEnvelope,
+  ConfigEnvelope,
+  ConfigSetRequest,
+  ConfigSetResponse,
+  ConfigAuditEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
   PatternsResponse,
@@ -133,6 +137,21 @@ export function fetchSystemHealth(): Promise<SystemHealthEnvelope> {
 
 export function fetchPlanning(): Promise<PlanningEnvelope> {
   return get(`${BASE}/planning`);
+}
+
+export function fetchConfig(): Promise<ConfigEnvelope> {
+  return get(`${BASE}/config`);
+}
+
+export function postConfigSet(req: ConfigSetRequest): Promise<ConfigSetResponse> {
+  return post(`${BASE}/config/set`, req as unknown as Record<string, unknown>);
+}
+
+export function fetchConfigAudit(params?: { limit?: number; key?: string }): Promise<ConfigAuditEnvelope> {
+  const p: Record<string, string> = {};
+  if (params?.limit != null) p.limit = String(params.limit);
+  if (params?.key) p.key = params.key;
+  return get(`${BASE}/config/audit`, Object.keys(p).length ? p : undefined);
 }
 
 export function fetchReports(params?: {

@@ -235,6 +235,67 @@ export interface GateToggleResponse {
   timestamp: string;
 }
 
+// ===== Config Control-Plane Types =====
+// Mirrors config_registry.all_effective() rows + the config DAO/API contract.
+
+export interface ConfigEntryRow {
+  key: string;
+  type: 'bool' | 'string' | 'enum';
+  category: string; // 'intelligence' | 'dispatch' | 'gate'
+  description: string;
+  default: string;
+  value: string | null;
+  is_default: boolean;
+  writable_from_ui: boolean;
+  requires_approval: boolean;
+  planned: boolean;
+}
+
+export interface ConfigEnvelope {
+  project_id: string;
+  config: ConfigEntryRow[];
+  queried_at: string;
+  error?: string;
+}
+
+export interface ConfigSetRequest {
+  key: string;
+  value: string;
+  actor?: string;
+  approval_id?: string;
+}
+
+export interface ConfigSetResponse {
+  status: 'success' | 'failed';
+  action?: string;
+  project_id?: string;
+  key?: string;
+  old_value?: string | null;
+  new_value?: string;
+  event_id?: string;
+  actor?: string;
+  approval_id?: string | null;
+  message?: string;
+  timestamp: string;
+}
+
+export interface ConfigAuditRow {
+  config_key: string;
+  old_value: string | null;
+  new_value: string;
+  changed_by: string;
+  changed_at: string;
+  approval_id: string | null;
+  event_id: string;
+}
+
+export interface ConfigAuditEnvelope {
+  project_id: string;
+  audit: ConfigAuditRow[];
+  queried_at: string;
+  degraded?: boolean;
+}
+
 // ===== Kanban Board Types =====
 
 export interface KanbanCard {

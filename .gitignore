@@ -86,8 +86,9 @@ CHANGELOG_QUALITY_ADVISORY.md
 /.pr_state.json
 /PR_QUEUE.md
 
-# Old config directory (merged into configs/)
-config/
+# Old config directory (merged into configs/) — root-anchored so it does not match
+# nested app routes like dashboard/token-dashboard/app/operator/config/
+/config/
 
 # Old testing directory (merged into tests/)
 testing/
