@@ -11,6 +11,7 @@ import type {
   GateToggleRequest,
   GateToggleResponse,
   GovernanceDigestEnvelope,
+  SystemHealthEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
   PatternsResponse,
@@ -123,6 +124,10 @@ export function postGateToggle(req: GateToggleRequest): Promise<GateToggleRespon
 
 export function fetchGovernanceDigest(): Promise<GovernanceDigestEnvelope> {
   return get(`${BASE}/governance-digest`);
+}
+
+export function fetchSystemHealth(): Promise<SystemHealthEnvelope> {
+  return get(`${BASE}/system-health`);
 }
 
 export function fetchReports(params?: {
