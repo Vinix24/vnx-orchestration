@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """vnx dispatch-agent — dispatch a task to a named agent."""
 
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -85,6 +86,17 @@ def vnx_dispatch_agent(args) -> int:
         )
         return 1
 
+    # Preflight (audit high #6): the default lane drives an installed, authenticated `claude` CLI as
+    # a subprocess. A missing binary otherwise surfaces only as a bare "status: failed".
+    if shutil.which("claude") is None:
+        print(
+            "Warning: 'claude' CLI not found on PATH. The default dispatch lane drives an installed, "
+            "authenticated `claude` CLI as a subprocess.\n"
+            "Install + authenticate it (or select a different lane via the model/provider), then "
+            "re-run. Run `vnx doctor` to check worker CLIs.",
+            file=sys.stderr,
+        )
+
     print(f"Dispatching to agent '{agent}' (dispatch_id={dispatch_id}) ...")
 
     # Route through the single-entry door (gated by VNX_SINGLE_ENTRY_DISPATCH / VNX_DISPATCH_LEGACY);
@@ -108,5 +120,13 @@ def vnx_dispatch_agent(args) -> int:
     status = "done" if success else "failed"
     print(f"dispatch_id : {dispatch_id}")
     print(f"status      : {status}")
+
+    if not success:
+        print(
+            "\nDispatch failed. A common cause is a missing or unauthenticated worker CLI. "
+            "Run `vnx doctor` to check worker CLIs,\nand see the dispatch log under "
+            ".vnx-data/ for the classified failure reason.",
+            file=sys.stderr,
+        )
 
     return 0 if success else 1

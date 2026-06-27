@@ -44,6 +44,19 @@ def _check_tools() -> list[Check]:
         status=PASS if shellcheck else WARN,
         detail=shellcheck or "shellcheck not found in PATH; shell lint checks will emit tool_unavailable warnings",
     ))
+    # Worker CLIs the dispatch lanes drive as subprocesses (audit high #7). WARN, not FAIL: an
+    # operator may use a non-Claude lane, but `vnx dispatch-agent` fails at spawn if NONE is present.
+    worker_clis = ("claude", "codex", "gemini", "kimi")
+    found_workers = [c for c in worker_clis if shutil.which(c)]
+    results.append(Check(
+        name="tool:worker-cli",
+        status=PASS if found_workers else WARN,
+        detail=(
+            f"found: {', '.join(found_workers)}" if found_workers
+            else "no worker CLI (claude/codex/gemini/kimi) on PATH; `vnx dispatch-agent` will fail at "
+                 "spawn. Install + authenticate the lane you use (default: claude)."
+        ),
+    ))
     return results
 
 
