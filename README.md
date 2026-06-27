@@ -72,8 +72,17 @@ pip install -e .                          # editable install of the pip CLI
 vnx init                                  # scaffold a VNX project in the current dir
 vnx migrate                               # apply runtime DB migrations
 vnx doctor                                # environment and dependency checks
-vnx dispatch-agent --agent hello-world    # works via the examples/ fallback
+vnx dispatch-agent --agent hello-world    # needs a worker CLI (see Prerequisites)
 ```
+
+### Prerequisites
+
+VNX does not run models itself — it drives existing coding CLIs as subprocesses and governs the
+result. The default dispatch lane needs an **installed + authenticated `claude` CLI** on your PATH
+(other lanes: `codex`, `gemini`, `kimi`), and using it incurs that provider's subscription/credit
+usage. `vnx dispatch-agent` fails at spawn if no worker CLI is present — `vnx doctor` flags this with
+a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not currently shipped;
+the old replay demo was retired.)
 
 There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check` and `new-worktree`. When the package publishes, `pip install vnx-orchestration` replaces the clone step.
 
