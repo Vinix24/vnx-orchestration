@@ -96,6 +96,8 @@ class TestFormatBriefOutputPath:
         state_dir = tmp_path / "state"
         dispatch_dir = tmp_path / "dispatches"
         state_dir.mkdir(parents=True)
+        # Seed a receipts file so _build_system_health is not 'degraded' (which makes main() exit 1).
+        (state_dir / "t0_receipts.ndjson").write_text("")
         (dispatch_dir / "pending").mkdir(parents=True)
         (dispatch_dir / "active").mkdir(parents=True)
         (dispatch_dir / "conflicts").mkdir(parents=True)
@@ -127,6 +129,8 @@ class TestFormatBriefOutputPath:
         state_dir = tmp_path / "state"
         dispatch_dir = tmp_path / "dispatches"
         state_dir.mkdir(parents=True)
+        # Seed a receipts file so _build_system_health is not 'degraded' (which makes main() exit 1).
+        (state_dir / "t0_receipts.ndjson").write_text("")
         (dispatch_dir / "pending").mkdir(parents=True)
         (dispatch_dir / "active").mkdir(parents=True)
         (dispatch_dir / "conflicts").mkdir(parents=True)
@@ -147,6 +151,8 @@ class TestFormatBriefOutputPath:
         state_dir = tmp_path / "state"
         dispatch_dir = tmp_path / "dispatches"
         state_dir.mkdir(parents=True)
+        # Seed a receipts file so _build_system_health is not 'degraded' (which makes main() exit 1).
+        (state_dir / "t0_receipts.ndjson").write_text("")
         (dispatch_dir / "pending").mkdir(parents=True)
         (dispatch_dir / "active").mkdir(parents=True)
         (dispatch_dir / "conflicts").mkdir(parents=True)
