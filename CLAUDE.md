@@ -65,7 +65,7 @@ Two lanes ship on main; T0 picks per task. Full decision rule, provider strings,
 
 **Provider→lane rule (hard).** `claude`/Opus/Sonnet panelists and workers route via the **tmux-spawn lane** (subscription, June-15 escape) — NEVER `provider_dispatch` (it refuses claude: claude is not a provider-lane provider) and NEVER headless `claude -p` (API credits post-cutover). `kimi`/`glm`(litellm:zai)/`deepseek` route via `provider_dispatch.py`. Everything dispatches through the **single-entry door** (`vnx dispatch`), which decides the lane; calling a lane script directly is a side door (PR-12 consolidates the remaining ones, incl. the plan-gate panel). The plan-first gate (`plan_gate_panel.py`) honors this split.
 
-For full documentation: `.vnx/docs/`
+For full documentation: `docs/`
 <!-- VNX:END BOOTSTRAP -->
 
 <important if="working on schemas/migrations">
