@@ -187,6 +187,28 @@ def _resolve_venv_path(paths: Dict[str, str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Layout detection
+# ---------------------------------------------------------------------------
+
+def _is_central_install(vnx_home: Path) -> bool:
+    """True when VNX_HOME is a central install (carries .vnx-install-mode=central)."""
+    marker = vnx_home / ".vnx-install-mode"
+    try:
+        return marker.is_file() and marker.read_text(encoding="utf-8").strip() == "central"
+    except OSError:
+        return False
+
+
+def _is_standalone_dev(project_root: Path, vnx_home: Path) -> bool:
+    """True for the vnx-orchestration source checkout: PROJECT_ROOT == VNX_HOME and no
+    central-install marker. Here the consumer bootstrap (config.yml, sessionstart hook,
+    .claude/skills/skills.yaml) is legitimately absent — the repo is the SOURCE, not a
+    `vnx init`-ed consumer — so those checks must not read as failures. A central install
+    with PROJECT_ROOT == VNX_HOME is instead a real mis-detection (run from a project dir)."""
+    return project_root == vnx_home and not _is_central_install(vnx_home)
+
+
+# ---------------------------------------------------------------------------
 # Directory checks
 # ---------------------------------------------------------------------------
 
@@ -212,7 +234,10 @@ def check_directories(paths: Dict[str, str]) -> List[CheckResult]:
 
     # Central-install mis-detection hint: if PROJECT_ROOT == VNX_HOME, all dirs will fail
     # because no project has been initialized there. Give a single actionable message.
-    central_misdetect = (project_root == vnx_home)
+    # But the vnx-orchestration source checkout also has PROJECT_ROOT == VNX_HOME (no
+    # central marker) — there it is the expected layout, not a mis-detection.
+    standalone_dev = _is_standalone_dev(project_root, vnx_home)
+    central_misdetect = (project_root == vnx_home) and not standalone_dev
 
     for label, dir_path in required_dirs:
         if dir_path.is_dir():
@@ -232,16 +257,20 @@ def check_directories(paths: Dict[str, str]) -> List[CheckResult]:
     config_file = project_root / ".vnx" / "config.yml"
     if config_file.exists():
         results.append(CheckResult("file", PASS, f"Config: {config_file}"))
+    elif standalone_dev:
+        results.append(CheckResult("file", WARN,
+            "Config not present (standalone-dev checkout)",
+            "VNX_HOME == PROJECT_ROOT and no central marker — the source repo is not a "
+            "`vnx init`-ed consumer, so .vnx/config.yml is not expected here."))
+    elif central_misdetect:
+        results.append(CheckResult("file", FAIL,
+            f"Missing config at PROJECT_ROOT={project_root}",
+            f"PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+            f"Expected: {config_file}"))
     else:
-        if central_misdetect:
-            results.append(CheckResult("file", FAIL,
-                f"Missing config at PROJECT_ROOT={project_root}",
-                f"PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
-                f"Expected: {config_file}"))
-        else:
-            results.append(CheckResult("file", FAIL,
-                f"Missing config: {config_file}",
-                f"Run: cd {project_root} && vnx init"))
+        results.append(CheckResult("file", FAIL,
+            f"Missing config: {config_file}",
+            f"Run: cd {project_root} && vnx init"))
 
     return results
 
@@ -265,6 +294,11 @@ def check_templates(paths: Dict[str, str]) -> List[CheckResult]:
     skills_yaml = Path(paths.get("VNX_SKILLS_DIR", vnx_home / "skills")) / "skills.yaml"
     if skills_yaml.exists():
         results.append(CheckResult("template", PASS, "Skills registry present"))
+    elif _is_standalone_dev(Path(paths["PROJECT_ROOT"]), vnx_home):
+        results.append(CheckResult("template", WARN,
+            "Skills registry not present (standalone-dev checkout)",
+            "The source repo ships skills under skills/; the per-project .claude/skills/ "
+            "registry is created by `vnx bootstrap-skills` in a consumer project."))
     else:
         results.append(CheckResult("template", FAIL, f"Missing: {skills_yaml}",
                                    "Run: vnx bootstrap-skills"))
@@ -345,6 +379,11 @@ def check_hooks(paths: Dict[str, str]) -> List[CheckResult]:
     hook_file = project_root / ".claude" / "hooks" / "sessionstart.sh"
     if hook_file.exists():
         return [CheckResult("hooks", PASS, f"SessionStart hook: {hook_file}")]
+    if _is_standalone_dev(project_root, vnx_home):
+        return [CheckResult("hooks", WARN,
+                            "SessionStart hook not present (standalone-dev checkout)",
+                            "The source repo is not a `vnx init`-ed consumer; the hook is "
+                            "deployed by `vnx bootstrap-hooks` in a consumer project.")]
     if project_root == vnx_home:
         return [CheckResult("hooks", FAIL,
                             f"Missing hook: {hook_file}",
