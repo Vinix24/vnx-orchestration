@@ -1313,6 +1313,7 @@ def _build_recent_receipts(
         view: Dict[str, Any] = {
             "timestamp": r.get("timestamp"),
             "dispatch_id": r.get("dispatch_id"),
+            "event_type": r.get("event_type") or r.get("event"),
             "status": r.get("status"),
             "terminal": r.get("terminal"),
             "commit_hash": r.get("commit_hash") or r.get("commit"),
