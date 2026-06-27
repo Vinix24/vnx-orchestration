@@ -73,8 +73,19 @@ jobs:
             "$VNX_HOME/tests/test_cli_json_output.py" \
             "$VNX_HOME/tests/test_validate_template_tokens.py" \
             "$VNX_HOME/tests/test_receipt_ci_guard.py" \
+            "$VNX_HOME/tests/test_dispatch_sidedoor_audit.py" \
+            "$VNX_HOME/tests/test_runtime_adapter_certification.py" \
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
+
+      - name: Side-door exhaustiveness audit
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          # Audit #2: the dispatch-lane exhaustiveness invariant — fail CI if a new direct delivery
+          # caller bypasses the single-entry door without being audited.
+          python3 "$VNX_HOME/scripts/lib/dispatch_sidedoor_audit.py"
 
   trace-token-check:
     name: Trace Token Validation
