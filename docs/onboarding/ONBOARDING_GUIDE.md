@@ -24,6 +24,12 @@ pip install -e .
 vnx version
 ```
 
+**Prerequisites.** VNX drives existing coding CLIs as subprocesses — it does not run models itself.
+The default dispatch lane needs an **installed + authenticated `claude` CLI** on your PATH (other
+lanes: `codex`, `gemini`, `kimi`), and using it incurs that provider's subscription/credit usage.
+`vnx dispatch-agent` (Step 4) fails at spawn without one; `vnx doctor` flags this as a
+`tool:worker-cli` warning.
+
 ### Step 2: Initialize a Project
 
 ```bash

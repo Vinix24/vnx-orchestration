@@ -90,7 +90,7 @@ def _log(check: CheckResult) -> None:
 # ---------------------------------------------------------------------------
 
 REQUIRED_TOOLS = ["bash", "python3"]
-RECOMMENDED_TOOLS = ["rg", "jq", "tmux", "codex", "gemini", "sqlite3"]
+RECOMMENDED_TOOLS = ["rg", "jq", "tmux", "claude", "codex", "gemini", "kimi", "sqlite3"]
 
 
 def check_tools() -> List[CheckResult]:
