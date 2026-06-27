@@ -266,8 +266,10 @@ _ALLOWED_SCOUT_PROVIDERS = frozenset({"deepseek", "ollama", "gemini", "codex"})
 
 
 def scout_prepass_enabled() -> bool:
-    """Opt-in flag for the scout producer (default OFF)."""
-    return os.environ.get("VNX_SCOUT_PREPASS", "0") == "1"
+    """Opt-in flag for the scout producer (default OFF). Resolved through config_runtime so an
+    operator's dashboard toggle is honoured; absent a UI value this is exactly the env/default."""
+    import config_runtime
+    return config_runtime.get_bool("VNX_SCOUT_PREPASS")
 
 
 def _scout_provider_name() -> str:
