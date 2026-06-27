@@ -255,9 +255,15 @@ export interface KanbanCard {
   receipt_status: string | null;
   /** True when a scout pre-pass sidecar exists for this dispatch (door scout producer). */
   scout_enriched?: boolean;
+  /** Future-ready lane only: the deliverable output kind (pr|post|deal|doc). */
+  output_kind?: string;
+  /** Future-ready lane only: coordination-DB state (proposed|ready|queued). */
+  state?: string;
+  /** Future-ready lane only: true when human-gated promoted (operator_approved_at set). */
+  promoted?: boolean;
 }
 
-export type KanbanStageName = 'staging' | 'pending' | 'active' | 'review' | 'done';
+export type KanbanStageName = 'queued' | 'staging' | 'pending' | 'active' | 'review' | 'done';
 
 export interface KanbanEnvelope {
   stages: Partial<Record<KanbanStageName, KanbanCard[]>>;

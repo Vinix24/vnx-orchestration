@@ -30,6 +30,7 @@ const TRACK_COLORS: Record<string, { bg: string; border: string; text: string }>
 
 // ---- Column definitions ----
 const COLUMNS: { key: KanbanStageName; label: string; accentColor: string }[] = [
+  { key: 'queued',   label: 'Queued',   accentColor: 'rgba(108, 168, 255, 0.55)' },
   { key: 'staging',  label: 'Staging',  accentColor: 'rgba(107, 138, 230, 0.6)' },
   { key: 'pending',  label: 'Pending',  accentColor: 'rgba(249, 115, 22, 0.6)'  },
   { key: 'active',   label: 'Active',   accentColor: 'rgba(249, 115, 22, 1)'    },
@@ -228,6 +229,20 @@ function DispatchCard({ card }: { card: KanbanCard }) {
             </span>
           )}
         </div>
+        {card.stage === 'queued' && card.state && (
+          <span
+            data-testid="card-queued-state"
+            title={card.promoted ? 'Promoted — ready to dispatch' : 'Awaiting promotion'}
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: card.promoted ? 'var(--color-success)' : 'rgba(244,244,249,0.55)',
+            }}
+          >
+            {card.output_kind && card.output_kind !== '—' ? `${card.output_kind} · ` : ''}
+            {card.state}
+          </span>
+        )}
         {card.has_receipt && card.receipt_status && (
           <span
             style={{
@@ -489,12 +504,12 @@ function KanbanContent() {
         })}
       </div>
 
-      {/* 5-column grid */}
+      {/* 6-column grid */}
       <div
         data-testid="kanban-grid"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)',
+          gridTemplateColumns: 'repeat(6, 1fr)',
           gap: 16,
           alignItems: 'start',
         }}
