@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -115,14 +116,20 @@ def _seed_pattern(
     usage_count: int = 3,
 ) -> int:
     conn = sqlite3.connect(str(db_path))
+    # Relative timestamps: hardcoded dates were a time bomb — once last_used aged
+    # past the recency-decay window the seeded confidence dropped below the
+    # proven-pattern threshold, leaving zero eligible items and failing the test.
+    now = datetime.now(timezone.utc)
+    first_seen = (now - timedelta(days=2)).isoformat()
+    last_used = now.isoformat()
     cur = conn.execute(
         """
         INSERT INTO success_patterns
             (title, description, category, confidence_score, usage_count,
              pattern_data, first_seen, last_used)
-        VALUES (?, ?, ?, ?, ?, '{}', '2026-04-01T00:00:00Z', '2026-04-29T00:00:00Z')
+        VALUES (?, ?, ?, ?, ?, '{}', ?, ?)
         """,
-        (title, description, category, confidence, usage_count),
+        (title, description, category, confidence, usage_count, first_seen, last_used),
     )
     conn.commit()
     pid = cur.lastrowid
