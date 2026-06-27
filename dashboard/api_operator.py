@@ -76,6 +76,73 @@ def _is_scout_enriched(dispatch_id: str) -> bool:
     except (ValueError, OSError):
         return False
 
+
+# Coordination-DB states that mean "planned, not yet executing" — the future-ready lane.
+# 'ready' = promoted (human-gated, dispatchable); 'proposed' = awaiting promotion.
+_QUEUED_STATES = ("proposed", "ready", "queued")
+
+
+def _scan_queued_dispatches(exclude_ids: "set[str]") -> list:
+    """Future-ready deliverables: rows in runtime_coordination.db whose state is planned
+    (proposed/ready/queued) and which are NOT yet a file in the kanban dirs. These are the
+    dispatches 'staged to run in the future' — the planning layer's promoted-but-undispatched
+    work. Fail-open: a missing DB / missing column / any error → [], never breaks the kanban."""
+    import sqlite3
+    db_path = CANONICAL_STATE_DIR / "runtime_coordination.db"
+    if not db_path.exists():
+        return []
+    entries: list = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatches)").fetchall()}
+        if "state" not in cols or "dispatch_id" not in cols:
+            return []
+        placeholders = ",".join("?" * len(_QUEUED_STATES))
+        rows = conn.execute(
+            f"SELECT dispatch_id, state, track, terminal_id, priority, gate, "
+            f"output_kind, operator_approved_at "
+            f"FROM dispatches WHERE state IN ({placeholders}) ORDER BY created_at DESC",
+            _QUEUED_STATES,
+        ).fetchall()
+        for r in rows:
+            d = dict(r)
+            did = d.get("dispatch_id")
+            if not did or did in exclude_ids:
+                continue
+            entries.append({
+                "id": did,
+                "file": "—",
+                "pr_id": "—",
+                "track": d.get("track") or "—",
+                "terminal": d.get("terminal_id") or "—",
+                "role": "—",
+                "gate": d.get("gate") or "—",
+                "priority": d.get("priority") or "—",
+                "status": d.get("state"),
+                "reason": "—",
+                "domain": "coding",
+                "dir": "queued",
+                "stage": "queued",
+                "output_kind": d.get("output_kind") or "—",
+                "state": d.get("state"),
+                "promoted": d.get("operator_approved_at") is not None,
+                "duration_secs": 0,
+                "duration_label": "—",
+                "has_receipt": False,
+                "receipt_status": None,
+                "scout_enriched": _is_scout_enriched(did),
+            })
+    except sqlite3.Error as exc:
+        print(f"[kanban] queued scan failed: {exc}", file=sys.stderr)
+        return []
+    finally:
+        conn.close()
+    return entries
+
 _SYSTEM_HEALTH_COUNT_SQL_TEMPLATE = "SELECT COUNT(*) AS cnt FROM {table}"
 _SYSTEM_HEALTH_COUNT_CENTRAL_SQL_TEMPLATE = "SELECT COUNT(*) AS cnt FROM {table} WHERE project_id = ?"
 
@@ -209,10 +276,12 @@ def _scan_dispatches() -> dict:
     Ties broken by most-recent mtime.
     """
     receipts = _scan_receipts()
-    stages: dict[str, list] = {s: [] for s in ["staging", "pending", "active", "review", "done", "rejected"]}
+    stages: dict[str, list] = {s: [] for s in ["queued", "staging", "pending", "active", "review", "done", "rejected"]}
 
     if not DISPATCHES_DIR.exists():
-        return {"stages": stages, "total": 0}
+        # No file-based dispatches, but the future-ready lane is DB-backed and independent.
+        stages["queued"] = _scan_queued_dispatches(set())
+        return {"stages": stages, "total": len(stages["queued"])}
 
     now = datetime.now(timezone.utc).timestamp()
 
@@ -270,6 +339,10 @@ def _scan_dispatches() -> dict:
             key=lambda e: (_STAGE_PRIORITY.get(e[0], 99), -e[1]),
         )
         stages[winner_stage].append(winner_entry)
+
+    # Future-ready lane: planned (proposed/ready/queued) coordination-DB rows that are NOT
+    # already a file in the stages above. Deduped against the file-based dispatch ids.
+    stages["queued"] = _scan_queued_dispatches(set(candidates.keys()))
 
     # Restore mtime-descending order within each stage (most recent first)
     for stage_name in stages:

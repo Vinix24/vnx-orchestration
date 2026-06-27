@@ -2,7 +2,7 @@
  * Tests for app/operator/kanban/page.tsx
  *
  * Quality gate: gate_pr2_kanban_frontend
- * - Kanban page renders 5 columns under test
+ * - Kanban page renders 6 columns under test
  * - Dispatch cards show PR-id, track, terminal, gate, duration under test
  * - Empty, loading, and error states render correctly under test
  * - SWR hook polls /api/operator/kanban endpoint
@@ -173,10 +173,11 @@ beforeEach(() => {
   setSearchParams('');
 });
 
-describe('KanbanPage — 5 columns', () => {
-  test('renders all 5 column headers', () => {
+describe('KanbanPage — 6 columns', () => {
+  test('renders all 6 column headers (incl. future-ready Queued)', () => {
     renderWithData(makeEnvelope());
 
+    expect(screen.getByTestId('column-queued')).toBeInTheDocument();
     expect(screen.getByTestId('column-staging')).toBeInTheDocument();
     expect(screen.getByTestId('column-pending')).toBeInTheDocument();
     expect(screen.getByTestId('column-active')).toBeInTheDocument();
@@ -187,6 +188,7 @@ describe('KanbanPage — 5 columns', () => {
   test('renders column labels', () => {
     renderWithData(makeEnvelope());
 
+    expect(screen.getByText('Queued')).toBeInTheDocument();
     expect(screen.getByText('Staging')).toBeInTheDocument();
     expect(screen.getByText('Pending')).toBeInTheDocument();
     expect(screen.getByText('Active')).toBeInTheDocument();
@@ -250,6 +252,25 @@ describe('KanbanPage — dispatch cards', () => {
     expect(screen.queryByTestId('card-scout')).toBeNull();
   });
 
+  test('renders future-ready queued card with output_kind + state badge', () => {
+    const queuedCard: KanbanCard = {
+      ...CARD_A,
+      id: 'deliverable-1',
+      stage: 'queued',
+      state: 'ready',
+      output_kind: 'pr',
+      promoted: true,
+    };
+    renderWithData(makeEnvelope({
+      stages: { queued: [queuedCard] },
+      total: 1,
+    }));
+
+    const badge = screen.getByTestId('card-queued-state');
+    expect(badge).toHaveTextContent('pr');
+    expect(badge).toHaveTextContent('ready');
+  });
+
   test('renders duration label', () => {
     renderWithData(makeEnvelope({
       stages: { active: [CARD_A] },
@@ -301,12 +322,13 @@ describe('KanbanPage — empty state', () => {
     renderWithData(makeEnvelope());
 
     const emptyPlaceholders = screen.getAllByText('No dispatches');
-    expect(emptyPlaceholders).toHaveLength(5);
+    expect(emptyPlaceholders).toHaveLength(6);
   });
 
   test('each empty column has its own testid', () => {
     renderWithData(makeEnvelope());
 
+    expect(screen.getByTestId('empty-queued')).toBeInTheDocument();
     expect(screen.getByTestId('empty-staging')).toBeInTheDocument();
     expect(screen.getByTestId('empty-pending')).toBeInTheDocument();
     expect(screen.getByTestId('empty-active')).toBeInTheDocument();
