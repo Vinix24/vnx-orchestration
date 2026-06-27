@@ -22,7 +22,6 @@ from vnx_mode import (
     TIER_UNIVERSAL,
     TIER_STARTER_OPERATOR,
     TIER_OPERATOR_ONLY,
-    TIER_DEMO_ONLY,
     MODE_COMMANDS,
     VNXMode,
 )
@@ -42,7 +41,7 @@ def _extract_readme_commands(readme_path: Path) -> set:
     commands = set()
     for m in matches:
         cmd = m.split()[0].strip("`").strip()
-        if cmd and cmd not in ("demo", "init", "doctor", "status", "help"):
+        if cmd and cmd not in ("init", "doctor", "status", "help"):
             commands.add(cmd)
         elif cmd:
             commands.add(cmd)
@@ -64,7 +63,6 @@ def _all_mode_commands() -> set:
     all_cmds |= TIER_UNIVERSAL
     all_cmds |= TIER_STARTER_OPERATOR
     all_cmds |= TIER_OPERATOR_ONLY
-    all_cmds |= TIER_DEMO_ONLY
     return all_cmds
 
 
@@ -79,10 +77,7 @@ class TestModeTierConsistency:
         pairs = [
             (TIER_UNIVERSAL, TIER_STARTER_OPERATOR),
             (TIER_UNIVERSAL, TIER_OPERATOR_ONLY),
-            (TIER_UNIVERSAL, TIER_DEMO_ONLY),
             (TIER_STARTER_OPERATOR, TIER_OPERATOR_ONLY),
-            (TIER_STARTER_OPERATOR, TIER_DEMO_ONLY),
-            (TIER_OPERATOR_ONLY, TIER_DEMO_ONLY),
         ]
         for a, b in pairs:
             overlap = a & b
@@ -96,11 +91,6 @@ class TestModeTierConsistency:
         operator_cmds = MODE_COMMANDS[VNXMode.OPERATOR]
         expected = TIER_UNIVERSAL | TIER_STARTER_OPERATOR | TIER_OPERATOR_ONLY
         assert expected == operator_cmds
-
-    def test_demo_includes_universal_and_demo_only(self):
-        demo_cmds = MODE_COMMANDS[VNXMode.DEMO]
-        expected = TIER_UNIVERSAL | TIER_DEMO_ONLY
-        assert expected == demo_cmds
 
     def test_every_command_in_at_least_one_mode(self):
         all_cmds = _all_mode_commands()

@@ -16,9 +16,8 @@ pip install -e .
 vnx version
 ```
 
-For repo-local operator commands such as gates, worktrees, tmux sessions, and
-demos, clone the repository and run `./bin/vnx` from the repo root. See
-Appendix A.
+For repo-local operator commands such as gates, worktrees, and tmux sessions,
+clone the repository and run `./bin/vnx` from the repo root. See Appendix A.
 
 ## Step 2: Initialize
 
@@ -81,6 +80,6 @@ Operator commands run via the bash entrypoint `bin/vnx`. See Appendix A.
 
 VNX ships TWO `vnx` entry-points with different scopes:
 - **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, `version`, `update`).
-- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
+- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `start`, `recover`, `cost-report`). Run from the repo root.
 
 This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.

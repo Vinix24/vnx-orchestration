@@ -385,11 +385,6 @@ Shell helper:
   install-check      Check prerequisites without installing
   install-validate   Validate an existing VNX installation
 
-  demo               Showcase VNX without API keys or project setup
-                     Sub-commands: replay [scenario], dashboard, setup, list
-  demo --replay <scenario>  Replay a recorded governance flow
-  demo --dashboard          Launch dashboard with sample data
-
   help               Show this help text
 USAGE
   }
@@ -823,9 +818,9 @@ _check_mode_gate() {
     return 0
   fi
 
-  # Skip gating for init, setup, help, demo (always allowed)
+  # Skip gating for init, setup, help (always allowed)
   case "$cmd" in
-    init|setup|install-check|install-validate|help|-h|--help|demo) return 0 ;;
+    init|setup|install-check|install-validate|help|-h|--help) return 0 ;;
   esac
 
   # Skip if mode.json doesn't exist (pre-init state)
@@ -845,11 +840,6 @@ except ModeGateError as e:
     return $?
   fi
   return 0
-}
-
-# ── Demo command ─────────────────────────────────────────────────────────
-cmd_demo() {
-  PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/lib/vnx_demo.py" "$@"
 }
 
 cmd_init_db() {
@@ -2224,9 +2214,6 @@ main() {
       ;;
     install-validate)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --validate "$@"
-      ;;
-    demo)
-      cmd_demo "$@"
       ;;
     migrate)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main migrate "$@"
