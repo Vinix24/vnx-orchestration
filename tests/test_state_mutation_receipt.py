@@ -191,7 +191,7 @@ def test_state_mutation_excluded_from_recency_summary(tmp_path: Path) -> None:
     ]
     receipts_path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
 
-    result = bts._build_recent_receipts(state_dir, n=3)
+    result = bts._build_recent_receipts(state_dir, limit=3)
 
     returned_types = [r.get("event_type") for r in result]
     assert "state_mutation" not in returned_types, f"state_mutation leaked into recency summary: {result}"
