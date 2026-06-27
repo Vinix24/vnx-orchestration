@@ -14,8 +14,13 @@ through `./bin/vnx` from a cloned `vnx-orchestration` repository.
 
 ### Step 1: Install
 
+The package is not on PyPI yet — publishing is the final 1.0 ship gate. Until
+then, install from a checkout:
+
 ```bash
-python3 -m pip install vnx-orchestration
+git clone https://github.com/Vinix24/vnx-orchestration
+cd vnx-orchestration
+pip install -e .
 vnx version
 ```
 
