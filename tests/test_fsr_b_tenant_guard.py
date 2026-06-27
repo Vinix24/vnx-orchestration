@@ -55,6 +55,9 @@ def _pin_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    # Block the central-store fallback so the builder resolves the tmp store, not the live
+    # ~/.vnx-data/<project>/state (audit #13 — the canary otherwise reads production tracks).
+    monkeypatch.setattr(bts, "resolve_central_data_dir", None, raising=False)
     return state_dir
 
 

@@ -844,8 +844,11 @@ def _fetch_confidence_events(
     try:
         for row in con.execute(sql, params).fetchall():
             rows.append(dict(row))
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as exc:
+        # Surface schema drift (e.g. a missing project_id column) instead of the prior bare swallow,
+        # which turned a broken query into healthy-looking all-zero metrics (audit #15). Fail-open
+        # (return what we have) so the dashboard degrades rather than 500s, but never silently.
+        _logger.warning("confidence_events query failed (schema drift?): %s", exc)
     return rows
 
 

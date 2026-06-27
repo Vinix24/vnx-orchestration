@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS confidence_events (
     patterns_boosted INTEGER DEFAULT 0,
     patterns_decayed INTEGER DEFAULT 0,
     confidence_change REAL NOT NULL,
-    occurred_at TEXT NOT NULL
+    occurred_at TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'vnx-dev'
 );
 """
 
