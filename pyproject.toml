@@ -7,6 +7,19 @@ name = "vnx-orchestration"
 dynamic = ["version"]
 description = "Governance-first runtime for AI agents (NDJSON receipts, SPC-grade quality gates)"
 readme = "README.md"
+keywords = ["ai-agents", "orchestration", "governance", "llm", "multi-agent", "audit-trail", "ndjson", "claude"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Build Tools",
+]
 requires-python = ">=3.11,<3.14"
 license = {text = "MIT"}
 authors = [{name = "Vincent van Deth", email = "advies@vincentvandeth.nl"}]

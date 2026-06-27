@@ -95,7 +95,7 @@ Key deliverables: `smart_router.py`, `hard_constraints.py`, `route_decisions_wat
 ~40 PRs completing the 1.0 capability surface. Major additions:
 
 **Roadmap Autopilot (RA-1..6 + RA-3b)**
-Gate-enforced autopilot primitives for the roadmap advance flow. RA-1 stamps `project_id` on `roadmap_state.json` and receipts (ADR-007 compliance). RA-2 provisions branch + worktree on `load_feature`. RA-3 enforces review-gate evidence in reconcile/advance. RA-3b closes 4 advance-gate bypass holes. RA-4 adds a human-approval gate primitive. RA-5 adds a `step` subcommand driving the active feature PR queue. RA-6 wires `autopilot_tick` + scheduler — ships dark (default off), gated by `VNX_AUTOPILOT=1`.
+Gate-enforced autopilot primitives for the roadmap advance flow. RA-1 stamps `project_id` on `roadmap_state.json` and receipts (ADR-007 compliance). RA-2 provisions branch + worktree on `load_feature`. RA-3 enforces review-gate evidence in reconcile/advance. RA-3b closes 4 advance-gate bypass holes. RA-4 adds a human-approval gate primitive. RA-5 adds a `step` subcommand driving the active feature PR queue. RA-6 wires `autopilot_tick` + scheduler — ships dark (default off), gated by `VNX_ROADMAP_AUTOPILOT=1`.
 
 **N-Scaling Foundation (N-1/2/3)**
 N-1: atomic `claim_next_queued_dispatch` + migration 0026 for race-free queue consumption. N-2: `pool_worker_runner` single-claim entrypoint. N-3: `VNX_POOL_TASK_CONSUMER` wiring from pool worker spawn. Full pool-task-consumer path is opt-in; single-worker default unchanged.
