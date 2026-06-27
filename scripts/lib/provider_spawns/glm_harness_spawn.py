@@ -163,15 +163,49 @@ def spawn_glm_harness(
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
         **kwargs,
     )
+    # Harden the flaky OpenRouter→GLM lane: a returncode-0 spawn that produced no
+    # assistant text is an empty/garbled response (the recurrent glm-harness flake),
+    # not a success. Surface it as a RETRYABLE, loud failure so the adapter retries
+    # and we never silently emit an empty report. Timeouts keep their own signal.
+    rc, err = _coerce_empty_completion_to_retryable(
+        claude_result.returncode, claude_result.timed_out,
+        claude_result.completion, claude_result.error, "glm-harness",
+    )
     return GLMHarnessSpawnResult(
-        returncode=claude_result.returncode,
+        returncode=rc,
         completion=claude_result.completion,
         events_written=claude_result.events_written,
         session_id=claude_result.session_id,
         timed_out=claude_result.timed_out,
         model=resolved_model,
         stopped_early=claude_result.stopped_early,
-        error=claude_result.error,
+        error=err,
         token_usage=claude_result.token_usage,
         _adapter=getattr(claude_result, "_adapter", None),
     )
+
+
+def _coerce_empty_completion_to_retryable(
+    returncode: int,
+    timed_out: bool,
+    completion: Any,
+    error: Optional[str],
+    lane: str,
+) -> "tuple[int, Optional[str]]":
+    """Turn an rc=0 spawn with an empty completion into a retryable, loud failure.
+
+    The harness lanes (claude CLI → litellm/OpenRouter) occasionally return a
+    successful exit with no assistant text. Left as-is that becomes a silent
+    empty report with no retry. Returning (1, error) makes the flake visible and
+    lets the dispatch adapter's retry budget re-attempt. Timeouts are left alone
+    (they already carry their own returncode/timed_out signal).
+    """
+    if returncode != 0 or timed_out:
+        return returncode, error
+    text = ""
+    if isinstance(completion, dict):
+        text = completion.get("text", "") or ""
+    if text.strip():
+        return returncode, error
+    logger.error("%s: empty completion on a returncode-0 spawn — marking retryable", lane)
+    return 1, error or f"{lane} returned an empty completion (retryable; provider flake)"
