@@ -99,6 +99,19 @@ def set_db_resolver(resolver: Optional[DbResolver]) -> None:
     _db_resolver = resolver
 
 
+# The project a single-tenant runtime process resolves against when a caller does not pass an
+# explicit project_id. Wired by config_runtime.autowire() at runtime startup; None until then, so
+# read-sites that omit project_id behave exactly as the env-only world (the resolver gets None →
+# no DB lookup). The dashboard passes project_id explicitly and never relies on this.
+_default_project_id: Optional[str] = None
+
+
+def set_default_project_id(project_id: Optional[str]) -> None:
+    """Set the implicit project_id used by get()/get_bool() when the caller omits one."""
+    global _default_project_id
+    _default_project_id = project_id
+
+
 def _bare(key: str) -> str:
     return key[len("VNX_"):] if key.startswith("VNX_") else key
 
@@ -111,10 +124,11 @@ def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
     if override is not None:
         return override
-    # 2. per-project DB value (wired later)
+    # 2. per-project DB value. Resolve the project: explicit arg wins, else the process default.
     if _db_resolver is not None:
+        pid = project_id if project_id is not None else _default_project_id
         try:
-            db_val = _db_resolver(project_id, key)
+            db_val = _db_resolver(pid, key)
         except Exception:
             db_val = None
         if db_val is not None:

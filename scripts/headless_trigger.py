@@ -30,6 +30,10 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+# scripts/lib on path so the operator-config façade (config_runtime) is importable module-wide.
+_LIB_DIR = str(_REPO_ROOT / "scripts" / "lib")
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
 _LOG = logging.getLogger("headless_trigger")
 
 _DEBOUNCE_SECONDS = 30          # Layer 1: min seconds between T0 triggers
@@ -200,7 +204,10 @@ def trigger_headless_t0(
 # ---------------------------------------------------------------------------
 
 def _haiku_enabled() -> bool:
-    return os.environ.get("VNX_HAIKU_CLASSIFY", "0") not in ("0", "", "false", "False")
+    import config_runtime
+    # Preserve the permissive truthiness (anything but the explicit off-values), now via the registry
+    # so a dashboard toggle / override applies. get() returns the env/default for a known key, never None.
+    return config_runtime.get("VNX_HAIKU_CLASSIFY") not in ("0", "", "false", "False")
 
 
 def _autopilot_enabled() -> bool:

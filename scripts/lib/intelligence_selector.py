@@ -107,7 +107,8 @@ _RESERVED_CLASSES = frozenset({"failure_prevention"})
 
 
 def _rank_then_budget_enabled() -> bool:
-    return os.environ.get("VNX_INTEL_RANK_THEN_BUDGET", "0") == "1"
+    import config_runtime
+    return config_runtime.get_bool("VNX_INTEL_RANK_THEN_BUDGET")
 
 
 def _recency_decay(last_seen) -> float:
