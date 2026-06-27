@@ -267,7 +267,8 @@ def check_pr_wiring(pr_number: int, *, state_dir: Optional[Path] = None) -> Wiri
     must catch this and mark the gate outcome as FAILED, never PASS with 0 checks.
     """
     skip_list = _load_skip_list(state_dir)
-    required = os.environ.get("VNX_WIRING_GATE_REQUIRED", "0") == "1"
+    import config_runtime
+    required = config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED")
 
     diff_text = _get_pr_diff(pr_number)
     if not diff_text:

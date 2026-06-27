@@ -60,6 +60,12 @@ def test_federation_is_planned_and_not_writable():
     assert fed.writable_from_ui is False
 
 
+def test_central_db_is_env_only_routing():
+    # VNX_USE_CENTRAL_DB is a process-start routing decision, surfaced read-only — never UI-writable
+    # (live-toggling would split reads across DBs mid-process).
+    assert cr.CONFIG_REGISTRY["VNX_USE_CENTRAL_DB"].writable_from_ui is False
+
+
 # ---------------------------------------------------------------------------
 # Resolution precedence
 # ---------------------------------------------------------------------------
