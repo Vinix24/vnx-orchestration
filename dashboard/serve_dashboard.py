@@ -165,6 +165,12 @@ from api_planning import (  # noqa: E402
     _operator_get_planning,
 )
 
+from api_config import (  # noqa: E402
+    operator_get_config,
+    operator_post_config_set,
+    operator_get_config_audit,
+)
+
 from api_intelligence import (  # noqa: E402
     _intelligence_get_patterns,
     _intelligence_get_injections,
@@ -356,6 +362,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, get_operator_recommendations())
             return
 
+        if path == "/api/operator/config/audit":
+            result, status_int = operator_get_config_audit(params)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if path == "/api/operator/config":
+            result, status_int = operator_get_config(params)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
         if path == "/api/operator/planning":
             _json_response(self, HTTPStatus.OK, _operator_get_planning())
             return
@@ -545,6 +561,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return
             result, status_int = _operator_post_gate_toggle(body_data)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path == "/api/operator/config/set":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body_bytes = self.rfile.read(length) if length else b"{}"
+            try:
+                body_data = json.loads(body_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            result, status_int = operator_post_config_set(body_data)
             _json_response(self, HTTPStatus(status_int), result)
             return
 
