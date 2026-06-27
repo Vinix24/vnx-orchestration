@@ -31,13 +31,21 @@ class Check(NamedTuple):
 
 def _check_tools() -> list[Check]:
     results = []
-    for tool in ("python3", "git", "jq"):
+    for tool in ("python3", "git"):
         found = shutil.which(tool)
         results.append(Check(
             name=f"tool:{tool}",
             status=PASS if found else FAIL,
             detail=found or f"{tool} not found in PATH",
         ))
+    # Audit F9: jq is used only by the bash operator surface; the pip CLI is pure Python, so a
+    # missing jq must not hard-FAIL `vnx doctor`. WARN instead.
+    jq = shutil.which("jq")
+    results.append(Check(
+        name="tool:jq",
+        status=PASS if jq else WARN,
+        detail=jq or "jq not found in PATH; only the bash operator surface (./bin/vnx) needs it",
+    ))
     shellcheck = shutil.which("shellcheck")
     results.append(Check(
         name="tool:shellcheck",

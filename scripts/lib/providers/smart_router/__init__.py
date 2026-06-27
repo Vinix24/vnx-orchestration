@@ -54,7 +54,9 @@ def route_dispatch(
     TierRoute via resolve_tier_route().
     """
     _env = env if env is not None else dict(_os.environ)
-    if not _env.get("VNX_AUTO_ROUTE"):
+    # Audit D7: a bare truthiness check treated VNX_AUTO_ROUTE=0/false as ENABLING (any non-empty
+    # string is truthy). Honour only the canonical truthy values, matching the docstring.
+    if _env.get("VNX_AUTO_ROUTE", "").strip().lower() not in ("1", "true", "yes", "on"):
         return None
     tier = classify_dispatch(task_spec, file_paths or [], loc_estimate)
     return resolve_tier_route(tier, _env)

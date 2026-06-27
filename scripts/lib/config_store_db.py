@@ -157,7 +157,14 @@ def set_config(
     # share ONE snapshot: no concurrent writer can slip between them and stale the audit's old_value.
     conn.execute("BEGIN IMMEDIATE")
     try:
-        old = read_config(conn, project_id, key)
+        # Audit C2: read old_value DIRECTLY (not via the fail-open read_config). read_config swallows
+        # sqlite errors -> None, which would write a FALSIFIED audit old_value=NULL on a real read
+        # failure. Here a read error must propagate and roll the txn back (the write fails loudly).
+        _old_row = conn.execute(
+            "SELECT config_value FROM project_config WHERE project_id = ? AND config_key = ?",
+            (project_id, key),
+        ).fetchone()
+        old = _old_row[0] if _old_row else None
         conn.execute(
             """
             INSERT INTO project_config (project_id, config_key, config_value, config_type, updated_by, approval_id)
