@@ -25,7 +25,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 24
+HIGHEST_QI_VERSION = 25
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -970,6 +970,27 @@ def _migrate_v24(conn: sqlite3.Connection) -> None:
         log('INFO', 'Migrated confidence_events: added grounding_source column (outcome-grounding v2, v24)')
 
 
+def _migrate_v25(conn: sqlite3.Connection) -> None:
+    """V25: tags column on success_patterns + antipatterns (LLM-tagger persist).
+
+    Stores the model-agnostic VNX tags (deterministic floor + optional LLM
+    enrichment via vnx_tagger) as a JSON array string, so a pattern with no
+    deterministic tags can still be matched by the rank-then-budget tag_overlap.
+    Additive nullable column; existing rows read NULL until the enrichment pass
+    backfills them. ALTER TABLE only (no rebuild). Both tables exist from the
+    base schema; the existence guard is cheap insurance for partial DBs.
+    """
+    for tbl in ("success_patterns", "antipatterns"):
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+        ).fetchone():
+            continue
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()}
+        if "tags" not in cols:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN tags TEXT")
+            log('INFO', f'Migrated {tbl}: added tags column (LLM-tagger persist, v25)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -996,6 +1017,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     22: _migrate_v22,
     23: _migrate_v23,
     24: _migrate_v24,
+    25: _migrate_v25,
 }
 
 

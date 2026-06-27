@@ -45,6 +45,7 @@ ENV_ENABLED = "VNX_TAGGER_ENABLED"
 ENV_PROVIDER = "VNX_TAGGER_PROVIDER"
 _DEFAULT_PROVIDER = "deepseek"
 _MAX_TAGS = 6
+_TAGGABLE_TABLES = frozenset({"success_patterns", "antipatterns"})
 
 
 def is_enabled() -> bool:
@@ -114,3 +115,73 @@ def enrich_tags(text: str, paths: Optional[List[str]] = None) -> List[str]:
         if t not in tags:
             tags.append(t)
     return tags
+
+
+def enrich_pattern_tags(
+    db_path: "object",
+    *,
+    limit: int = 200,
+    only_untagged: bool = True,
+    tables: "Optional[List[str]]" = None,
+) -> dict:
+    """Persist enriched tags onto success_patterns/antipatterns (`tags` JSON column).
+
+    Serves both the one-time BACKFILL and ongoing enrichment: for each pattern
+    (by default only those with no stored tags) it computes ``enrich_tags`` and
+    writes the result as a JSON array. NO-OP when the tagger is disabled — storing
+    the deterministic floor alone adds nothing the selector doesn't already derive
+    on the fly, so the stored column is only worth populating when the LLM enriches.
+    Best-effort + never raises; missing ``tags`` column → skipped.
+
+    Returns a per-table count dict, e.g. ``{"success_patterns": 12, "antipatterns": 7}``.
+    """
+    if not is_enabled():
+        return {"_skipped": "tagger_disabled"}
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    # Whitelist: only these identifiers are ever interpolated into SQL, so the
+    # public ``tables`` arg can never reach an arbitrary table name (no injection).
+    requested = tables or ["success_patterns", "antipatterns"]
+    tbls = [t for t in requested if t in _TAGGABLE_TABLES]
+    # Clamp into [1, 1_000_000]: the upper bound keeps the value SQLite-bindable
+    # (a too-large int raises on bind) while staying far above any real table size.
+    try:
+        safe_limit = max(1, min(int(limit), 1_000_000))
+    except (TypeError, ValueError, OverflowError):
+        safe_limit = 200
+    out: dict = {}
+    try:
+        conn = _sqlite3.connect(str(db_path))
+    except _sqlite3.Error:
+        return {"_skipped": "db_open_failed"}
+    try:
+        for tbl in tbls:
+            try:
+                cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            except _sqlite3.Error:
+                continue
+            if "tags" not in cols or "title" not in cols:
+                continue
+            where = "WHERE tags IS NULL OR tags = '' OR tags = '[]'" if only_untagged else ""
+            desc_col = "COALESCE(description,'')" if "description" in cols else "''"
+            try:
+                rows = conn.execute(
+                    f"SELECT id, title, {desc_col} FROM {tbl} {where} ORDER BY id DESC LIMIT ?",
+                    (safe_limit,),
+                ).fetchall()
+            except _sqlite3.Error:
+                continue
+            n = 0
+            for pid, title, desc in rows:
+                tags = enrich_tags(f"{title or ''} {desc or ''}".strip())
+                try:
+                    conn.execute(f"UPDATE {tbl} SET tags = ? WHERE id = ?", (_json.dumps(tags), pid))
+                    n += 1
+                except _sqlite3.Error:
+                    continue
+            conn.commit()
+            out[tbl] = n
+    finally:
+        conn.close()
+    return out

@@ -184,6 +184,31 @@ def _normalize_for_hash(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
+def _merge_stored_tags(category: str, raw_tags: Any) -> List[str]:
+    """Build an item's scope_tags from its category + the persisted ``tags`` column.
+
+    The stored tags (deterministic floor + optional LLM enrichment from vnx_tagger,
+    a JSON array string) feed the rank-then-budget tag_overlap so a pattern with no
+    derivable tags is still matchable. Category leads; stored tags are appended,
+    deduped. Malformed/empty tags degrade to category-only.
+    """
+    out: List[str] = [category] if category else []
+    if not raw_tags:
+        return out
+    parsed: Any = raw_tags
+    if isinstance(raw_tags, str):
+        try:
+            parsed = json.loads(raw_tags)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return out
+    if isinstance(parsed, list):
+        for t in parsed:
+            ts = str(t).strip()
+            if ts and ts not in out:
+                out.append(ts)
+    return out
+
+
 def _content_hash(*parts: str) -> str:
     joined = "\n".join(_normalize_for_hash(p) for p in parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
