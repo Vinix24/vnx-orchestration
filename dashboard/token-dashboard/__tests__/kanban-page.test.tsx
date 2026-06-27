@@ -232,6 +232,24 @@ describe('KanbanPage — dispatch cards', () => {
     expect(screen.getByTestId('card-gate')).toHaveTextContent('gate_pr1_lifecycle');
   });
 
+  test('renders scout badge when dispatch is scout-enriched', () => {
+    renderWithData(makeEnvelope({
+      stages: { active: [{ ...CARD_A, scout_enriched: true }] },
+      total: 1,
+    }));
+
+    expect(screen.getByTestId('card-scout')).toHaveTextContent('scout');
+  });
+
+  test('omits scout badge when not scout-enriched', () => {
+    renderWithData(makeEnvelope({
+      stages: { active: [CARD_A] },
+      total: 1,
+    }));
+
+    expect(screen.queryByTestId('card-scout')).toBeNull();
+  });
+
   test('renders duration label', () => {
     renderWithData(makeEnvelope({
       stages: { active: [CARD_A] },

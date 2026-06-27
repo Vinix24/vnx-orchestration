@@ -56,11 +56,25 @@ try:
     import shadow_logger as _op_shadow_logger       # type: ignore[import]
     from vnx_paths import resolve_central_data_dir as _op_resolve_central  # type: ignore[import]
     from vnx_paths import project_id_from_state_dir as _op_project_id_from_state_dir  # type: ignore[import]
+    from scout_prepass import scout_sidecar_path as _op_scout_sidecar_path  # type: ignore[import]
 except Exception:
     _op_shadow_verifier = None   # type: ignore[assignment]
     _op_shadow_logger = None     # type: ignore[assignment]
     _op_resolve_central = None   # type: ignore[assignment]
     _op_project_id_from_state_dir = None  # type: ignore[assignment]
+    _op_scout_sidecar_path = None  # type: ignore[assignment]
+
+
+def _is_scout_enriched(dispatch_id: str) -> bool:
+    """True when a scout pre-pass sidecar exists for this dispatch
+    (``<state_dir>/scout/<dispatch_id>.json``). Fail-open: any error → False, so a
+    missing scout layer never breaks the kanban. Mirrors the door's scout producer."""
+    if _op_scout_sidecar_path is None:
+        return False
+    try:
+        return _op_scout_sidecar_path(CANONICAL_STATE_DIR, dispatch_id).exists()
+    except (ValueError, OSError):
+        return False
 
 _SYSTEM_HEALTH_COUNT_SQL_TEMPLATE = "SELECT COUNT(*) AS cnt FROM {table}"
 _SYSTEM_HEALTH_COUNT_CENTRAL_SQL_TEMPLATE = "SELECT COUNT(*) AS cnt FROM {table} WHERE project_id = ?"
@@ -239,6 +253,7 @@ def _scan_dispatches() -> dict:
                     "duration_label": _format_duration(duration_secs),
                     "has_receipt": receipt is not None,
                     "receipt_status": receipt.get("status") if receipt else None,
+                    "scout_enriched": _is_scout_enriched(dispatch_id),
                 }
                 candidates[dispatch_id].append((stage, mtime, entry))
             except Exception as exc:
