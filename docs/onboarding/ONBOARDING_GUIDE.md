@@ -5,8 +5,8 @@
 
 This guide separates the two supported command surfaces. Plain `vnx` is the
 pip-installed Python CLI for user-facing essentials. Repo-local automation,
-tmux orchestration, worktrees, gates, recovery, demos, and cost reports run
-through `./bin/vnx` from a cloned `vnx-orchestration` repository.
+tmux orchestration, worktrees, gates, recovery, and cost reports run through
+`./bin/vnx` from a cloned `vnx-orchestration` repository.
 
 ---
 
@@ -85,7 +85,7 @@ The pip CLI command set is intentionally small: `init`, `doctor`, `status`,
 ## Part 2: Operator Path (Repo-Local Bash CLI)
 
 Use this path when you need the full VNX operator surface: tmux sessions,
-queue promotion, gate checks, worktrees, recovery, demos, and cost reports.
+queue promotion, gate checks, worktrees, recovery, and cost reports.
 
 ### Step 1: Clone and Install Operator Prerequisites
 
@@ -143,12 +143,9 @@ main session.
 ./bin/vnx stop
 ```
 
-### Step 7: Demos and Session Intelligence
+### Step 7: Session Intelligence
 
 ```bash
-./bin/vnx demo
-./bin/vnx demo --replay governance-pipeline
-./bin/vnx demo --dashboard
 ./bin/vnx analyze-sessions
 ./bin/vnx suggest review
 ./bin/vnx suggest accept 1,3,5
@@ -203,6 +200,6 @@ Doctor output is actionable. Common fixes:
 
 VNX ships TWO `vnx` entry-points with different scopes:
 - **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
-- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
+- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `start`, `recover`, `cost-report`). Run from the repo root.
 
 This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.

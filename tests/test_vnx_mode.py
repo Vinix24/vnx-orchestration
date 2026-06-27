@@ -21,7 +21,6 @@ from vnx_mode import (
     TIER_UNIVERSAL,
     TIER_STARTER_OPERATOR,
     TIER_OPERATOR_ONLY,
-    TIER_DEMO_ONLY,
     MODE_COMMANDS,
     read_mode,
     write_mode,
@@ -67,10 +66,6 @@ class TestModeReadWrite:
     def test_write_and_read_operator(self, data_dir):
         write_mode(VNXMode.OPERATOR, str(data_dir))
         assert read_mode(str(data_dir)) == VNXMode.OPERATOR
-
-    def test_write_and_read_demo(self, data_dir):
-        write_mode(VNXMode.DEMO, str(data_dir))
-        assert read_mode(str(data_dir)) == VNXMode.DEMO
 
     def test_mode_file_is_valid_json(self, data_dir):
         write_mode(VNXMode.STARTER, str(data_dir))
@@ -132,23 +127,10 @@ class TestCommandGating:
         for cmd in all_cmds:
             check_command_allowed(cmd, VNXMode.OPERATOR)
 
-    def test_demo_blocks_non_universal(self, data_dir):
-        for cmd in TIER_OPERATOR_ONLY:
-            with pytest.raises(ModeGateError):
-                check_command_allowed(cmd, VNXMode.DEMO)
-
-    def test_demo_allows_demo_command(self, data_dir):
-        check_command_allowed("demo", VNXMode.DEMO)
-
-    def test_demo_error_suggests_init(self, data_dir):
-        with pytest.raises(ModeGateError) as exc:
-            check_command_allowed("start", VNXMode.DEMO)
-        assert "vnx init" in str(exc.value)
-
     def test_pre_init_allows_everything(self, data_dir):
         """No mode.json = pre-init state, all commands allowed."""
         check_command_allowed("start")  # Should not raise
-        check_command_allowed("demo")
+        check_command_allowed("dispatch")
 
     def test_gating_reads_from_file(self, data_dir):
         write_mode(VNXMode.STARTER, str(data_dir))
@@ -190,10 +172,6 @@ class TestFeatureFlags:
         assert check_mode_feature_enabled(VNXMode.STARTER) is False
         os.environ.pop("VNX_STARTER_MODE_ENABLED")
 
-    def test_demo_enabled_by_default(self):
-        os.environ.pop("VNX_DEMO_MODE_ENABLED", None)
-        assert check_mode_feature_enabled(VNXMode.DEMO) is True
-
     def test_operator_always_enabled(self):
         assert check_mode_feature_enabled(VNXMode.OPERATOR) is True
 
@@ -218,7 +196,6 @@ class TestModeDescriptions:
     def test_vnx_mode_str(self):
         assert str(VNXMode.STARTER) == "starter"
         assert str(VNXMode.OPERATOR) == "operator"
-        assert str(VNXMode.DEMO) == "demo"
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +204,8 @@ class TestModeDescriptions:
 
 class TestTierCompleteness:
     def test_no_overlap_between_exclusive_tiers(self):
-        assert TIER_OPERATOR_ONLY & TIER_DEMO_ONLY == frozenset()
         assert TIER_UNIVERSAL & TIER_OPERATOR_ONLY == frozenset()
-        assert TIER_UNIVERSAL & TIER_DEMO_ONLY == frozenset()
+        assert TIER_STARTER_OPERATOR & TIER_OPERATOR_ONLY == frozenset()
 
     def test_operator_mode_includes_universal_and_starter(self):
         op = MODE_COMMANDS[VNXMode.OPERATOR]

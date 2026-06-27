@@ -278,10 +278,6 @@ class TestMigrateInModeTiers:
         from vnx_mode import MODE_COMMANDS, VNXMode
         assert "migrate" in MODE_COMMANDS[VNXMode.OPERATOR]
 
-    def test_migrate_in_demo_mode(self):
-        from vnx_mode import MODE_COMMANDS, VNXMode
-        assert "migrate" in MODE_COMMANDS[VNXMode.DEMO]
-
 
 # ---------------------------------------------------------------------------
 # Pool status error message points to a real command

@@ -75,7 +75,7 @@ vnx doctor                                # environment and dependency checks
 vnx dispatch-agent --agent hello-world    # works via the examples/ fallback
 ```
 
-There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check`, `new-worktree`, and `demo`. The `demo` path runs without API keys. When the package publishes, `pip install vnx-orchestration` replaces the clone step.
+There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check` and `new-worktree`. When the package publishes, `pip install vnx-orchestration` replaces the clone step.
 
 ## Architecture
 
