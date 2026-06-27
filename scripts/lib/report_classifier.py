@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 import sys as _sys
@@ -241,7 +240,8 @@ def classify_report(extraction: ExtractionResult) -> HaikuClassification:
     Returns:
         HaikuClassification with classified_by="haiku" or "rule_based".
     """
-    if os.environ.get("VNX_HAIKU_CLASSIFY") != "1":
+    import config_runtime
+    if not config_runtime.get_bool("VNX_HAIKU_CLASSIFY"):
         logger.debug("classify_report: VNX_HAIKU_CLASSIFY not set; using rule_based")
         return HaikuClassification.rule_based(extraction)
 

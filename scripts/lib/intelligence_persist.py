@@ -15,7 +15,6 @@ Tables written:
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +59,8 @@ def _outcome_grounding_v2_enabled() -> bool:
     offered↔pattern linkage grounds confidence instead. Governance-critical
     path (runs on every completion receipt) — gated for a deliberate rollout.
     """
-    return os.environ.get("VNX_OUTCOME_GROUNDING_V2", "0") == "1"
+    import config_runtime
+    return config_runtime.get_bool("VNX_OUTCOME_GROUNDING_V2")
 
 
 def _legacy_source_id_rows(

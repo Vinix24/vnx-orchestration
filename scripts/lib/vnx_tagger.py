@@ -18,7 +18,6 @@ later matches.
 from __future__ import annotations
 
 import json
-import os
 from typing import List, Optional
 
 try:
@@ -49,11 +48,13 @@ _TAGGABLE_TABLES = frozenset({"success_patterns", "antipatterns"})
 
 
 def is_enabled() -> bool:
-    return os.environ.get(ENV_ENABLED, "0") == "1"
+    import config_runtime
+    return config_runtime.get_bool(ENV_ENABLED)
 
 
 def get_tagger_provider_name() -> str:
-    return (os.environ.get(ENV_PROVIDER) or _DEFAULT_PROVIDER).strip().lower()
+    import config_runtime
+    return (config_runtime.get(ENV_PROVIDER) or _DEFAULT_PROVIDER).strip().lower()
 
 
 def _build_prompt(text: str, paths: Optional[List[str]]) -> str:
