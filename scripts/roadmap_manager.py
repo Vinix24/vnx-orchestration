@@ -687,7 +687,8 @@ Implement the minimum blocking fix required before the roadmap may advance.
         ADR-007: project_id-scoped via existing primitives — no extra scoping needed.
         ADR-018 Rule 2: single-claim, no loop. Caller (silence_watchdog) schedules repetition.
         """
-        if os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("1", "true", "True"):
+        import config_runtime
+        if config_runtime.get("VNX_ROADMAP_AUTOPILOT") not in ("1", "true", "True"):
             return {"status": "disabled", "reason": "VNX_ROADMAP_AUTOPILOT not set"}
 
         state = self.load_state()
@@ -808,7 +809,8 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         Returns {"status": "disabled"} when VNX_ROADMAP_AUTOPILOT is unset/off.
         """
-        if os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("1", "true", "True"):
+        import config_runtime
+        if config_runtime.get("VNX_ROADMAP_AUTOPILOT") not in ("1", "true", "True"):
             return {"status": "disabled", "reason": "VNX_ROADMAP_AUTOPILOT not set"}
 
         from track_reconciler import reconcile_all_tracks  # noqa: PLC0415
