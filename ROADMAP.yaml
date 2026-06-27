@@ -1278,7 +1278,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#955"
     notes: >
       CRITICAL. serve_dashboard.py binds ("::",port) with IPV6_V6ONLY=0 (all
       interfaces) while the banner says localhost; no auth; ACAO:* on every
@@ -1298,7 +1299,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#956"
     notes: >
       constraint_enforcer.py:44 does an unguarded import yaml; pyproject omits
       pyyaml, so the headline hello-world dispatch dies with No module named
@@ -1314,7 +1316,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#956"
     notes: >
       QUICKSTART.md:9-12 + ONBOARDING Step 1 lead with `pip install
       vnx-orchestration` (not on PyPI; README:66 contradicts). Fix: make Step 1
@@ -1330,7 +1333,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#957"
     notes: >
       README markets `demo` as the no-key entry point but the assets are
       missing/untracked and `./bin/vnx demo` errors. Operator note: the demo is
@@ -1348,7 +1352,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#958"
     notes: >
       doctor.py:32-47 probes only python3/git/jq/shellcheck — no claude/codex/
       gemini/kimi. Fix: add a WARN-level worker-CLI probe (claude, optionally
@@ -1363,7 +1368,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#958"
     notes: >
       dispatch_agent.py:93 Popen(["claude",...]) with no shutil.which precheck;
       a missing/unauthenticated CLI prints only status: failed. Fix: add a
@@ -1379,7 +1385,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#958"
     notes: >
       No prerequisites section anywhere; the onboarding starter path presents
       dispatch-agent as the first task with no mention of the worker CLI it
@@ -1398,7 +1405,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#961"
     notes: >
       report_parser.py:165-172,652-668 (the canonical receipt-processor daemon)
       converts any unified_reports/*.md to a clean task_complete with NO body
@@ -1418,7 +1426,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#961"
     notes: >
       dispatch_sidedoor_audit.py main() returns 1 on a new side-door but nothing
       in CI runs it; the pytest allowlist omits test_dispatch_sidedoor_audit.py
@@ -1436,7 +1445,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0"
-    status: planned
+    status: done
+    pr_ref: "#961"
     notes: >
       append_receipt_internals/idempotency.py:196-203 appends the receipt before
       recording the idempotency key via _write_cache; a cache-write failure
@@ -1454,7 +1464,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_ref: "#960"
     notes: >
       test_build_project_status.py:263-268 asserts 'write_project_status(_STATE_DIR)'
       but prod renamed to state_dir. Bare FAIL, no regression. Fix: behavioral
@@ -1470,7 +1481,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_ref: "#960"
     notes: >
       test_build_t0_brief_output.py:94,116,126,146 assert rc==0 on an empty
       state_dir but _build_system_health returns degraded so main() exits 1.
@@ -1486,7 +1498,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_ref: "#960"
     notes: >
       test_fsr_b_tenant_guard.py:225-244 — _resolve_tracks_store calls
       resolve_central_data_dir('vnx-dev') and reads the real production store,
@@ -1503,7 +1516,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_ref: "#960"
     notes: >
       test_fsr_isolation_guard.py:149,192,208,255 — _make_v21_project never
       writes .vnx-project-id, so the fail-closed _resolve_validated_project_id
@@ -1519,7 +1533,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_ref: "#960"
     notes: >
       api_intelligence.py:847-848 swallows OperationalError (no such column:
       project_id) -> [] -> 200 with all-zero metrics; test_feedback_loop.py:350
@@ -1535,7 +1550,8 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: done
+    pr_ref: "#962"
     notes: >
       ROADMAP.md:98, MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md:125, ADR-020:21
       gate RA-6 on VNX_AUTOPILOT=1 (zero hits in scripts/); the real flag is
@@ -1550,7 +1566,7 @@ features:
       - kimi_review
     depends_on: []
     milestone: "1.0.1"
-    status: planned
+    status: in-progress
     notes: >
       The 41 medium findings from claudedocs/2026-06-27-repo-audit-findings.md
       across security/correctness/architecture/hardening/tests/docs/ai-slop/
