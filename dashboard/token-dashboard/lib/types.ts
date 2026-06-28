@@ -343,6 +343,12 @@ export interface ObservabilityEnvelope {
   self_learning: { events: ConfidenceEvent[]; proposals: number; degraded?: boolean };
   tagging: { events: TaggingEvent[]; degraded?: boolean };
   provenance: { by_status: Record<string, number>; recent: ProvenanceRow[]; degraded?: boolean };
+  rework: {
+    by_role: ReworkRoleStat[];
+    by_origin_role: ReworkOriginRole[];
+    recent: ReworkEdge[];
+    degraded?: boolean;
+  };
   runtime: {
     cron: CronJob[];
     daemons: DaemonProc[];
@@ -350,6 +356,26 @@ export interface ObservabilityEnvelope {
     cron_degraded?: boolean;
     daemons_degraded?: boolean;
   };
+}
+
+export interface ReworkRoleStat {
+  role: string;
+  total_dispatches: number;
+  successes: number;
+  success_rate: number;
+}
+
+export interface ReworkOriginRole {
+  origin_role: string;
+  reworked: number;
+}
+
+export interface ReworkEdge {
+  rework_dispatch: string;
+  rework_role: string | null;
+  origin_dispatch: string;
+  origin_role: string | null;
+  dispatched_at: string | null;
 }
 
 // ===== Kanban Board Types =====
