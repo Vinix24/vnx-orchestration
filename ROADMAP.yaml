@@ -1585,3 +1585,24 @@ features:
     notes: >
       The 39 low findings (dead code, defensive bloat, comment-noise, nits) from
       the audit doc. Worked as a final cleanup sweep in batched gated PRs.
+
+  - feature_id: rework-skill-refinement-loop
+    title: "Skill-refinement proposal tier from rework attribution"
+    branch_name: feat/rework-skill-refinement-loop
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - kimi_review
+    depends_on: []
+    milestone: "1.1"
+    status: planned
+    notes: >
+      Slice 2 of the rework->skill loop (slice 1 shipped: attribution engine #970 +
+      observability panel #971). Reactivate the dormant proposal tier as a skill-refinement
+      path: cluster the rework attribution (dispatch_metadata.parent_dispatch +
+      rework_by_origin_role) and gate findings (review_gates/results) by the role/skill that
+      governed the reworked dispatch, then write operator-gated pending_skill_refinements.json
+      proposals carrying an evidence trail (the receipts/edges that triggered each). Never
+      auto-apply -- human gate (last set stays human). Audit-first: only propose once the panel
+      shows a stable rework-by-role pattern. Design: self-improve-loop-v2 PLAN D3
+      (claudedocs/2026-06-24-self-improve-loop-v2-PLAN.md).
