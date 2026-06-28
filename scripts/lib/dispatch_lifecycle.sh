@@ -498,6 +498,11 @@ _fdd_log_dispatch_metadata() {
     local agent_role="$5" gate="$6" pr_id="$7" instruction_content="$8"
     local intelligence_data="$9"
 
+    # Parity with subprocess/provider/headless lanes: if the role was not threaded through to the
+    # governed tmux delivery path, recover it from the dispatch file's "Role:" header so per-role
+    # rework attribution is not blind to governed feature work. Honest: empty stays empty if no header.
+    agent_role=$(vnx_dispatch_resolve_agent_role "$agent_role" "$dispatch_file" 2>/dev/null || echo "$agent_role")
+
     local _dm_cognition _dm_priority _dm_pattern_count _dm_rule_count _dm_instr_chars
     _dm_cognition=$(vnx_dispatch_extract_cognition "$dispatch_file" 2>/dev/null || echo "normal")
     _dm_priority=$(vnx_dispatch_extract_priority "$dispatch_file" 2>/dev/null || echo "P1")
