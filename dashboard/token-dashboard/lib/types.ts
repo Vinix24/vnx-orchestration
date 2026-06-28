@@ -296,6 +296,62 @@ export interface ConfigAuditEnvelope {
   degraded?: boolean;
 }
 
+// ===== Observability (governance / audit-trail) Types =====
+
+export interface ConfidenceEvent {
+  dispatch_id: string;
+  outcome: string;
+  confidence_change: number;
+  patterns_boosted: number;
+  patterns_decayed: number;
+  occurred_at: string;
+}
+
+export interface TaggingEvent {
+  table_name: string;
+  pattern_id: number;
+  pattern_title: string | null;
+  tags: string[];
+  provider: string | null;
+  tagged_at: string;
+}
+
+export interface ProvenanceRow {
+  dispatch_id: string;
+  receipt_id: string | null;
+  commit_sha: string | null;
+  pr_number: number | null;
+  chain_status: string;
+  gaps: unknown[];
+  registered_at: string;
+}
+
+export interface CronJob {
+  schedule: string;
+  command: string;
+  last_run: string | null;
+}
+
+export interface DaemonProc {
+  pid: string;
+  name: string;
+}
+
+export interface ObservabilityEnvelope {
+  project_id: string;
+  queried_at: string;
+  self_learning: { events: ConfidenceEvent[]; proposals: number; degraded?: boolean };
+  tagging: { events: TaggingEvent[]; degraded?: boolean };
+  provenance: { by_status: Record<string, number>; recent: ProvenanceRow[]; degraded?: boolean };
+  runtime: {
+    cron: CronJob[];
+    daemons: DaemonProc[];
+    daemons_running: number;
+    cron_degraded?: boolean;
+    daemons_degraded?: boolean;
+  };
+}
+
 // ===== Kanban Board Types =====
 
 export interface KanbanCard {
