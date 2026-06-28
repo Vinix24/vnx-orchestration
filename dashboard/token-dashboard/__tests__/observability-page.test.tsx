@@ -31,9 +31,10 @@ function envelope(over: Partial<ObservabilityEnvelope> = {}): ObservabilityEnvel
       recent: [{ dispatch_id: 'D-2', receipt_id: 'r2', commit_sha: 'abc12345def', pr_number: 99, chain_status: 'complete', gaps: [], registered_at: '2026-06-28T08:00:00Z' }],
     },
     rework: {
-      by_role: [{ role: 'security-engineer', total_dispatches: 187, successes: 50, success_rate: 0.267 }],
+      by_role: [{ role: 'reviewer', total_dispatches: 6, successes: 5, success_rate: 0.833 }],
       by_origin_role: [{ origin_role: 'backend-developer', reworked: 3 }],
       recent: [{ rework_dispatch: 'D-rw', rework_role: 'debugger', origin_dispatch: 'D-or', origin_role: 'backend-developer', dispatched_at: '2026-06-28T07:00:00Z' }],
+      benchmark_excluded: 1644,
     },
     runtime: {
       cron: [{ schedule: '0 4 * * *', command: 'nightly_intelligence_pipeline.sh', last_run: '2026-06-28T04:00:00Z' }],
@@ -61,8 +62,9 @@ describe('ObservabilityPage', () => {
     expect(screen.getByTestId('obs-tagging-row')).toHaveTextContent('security');
     expect(screen.getByTestId('obs-chain-complete')).toHaveTextContent('complete: 4');
     expect(screen.getByTestId('obs-provenance-row')).toHaveTextContent('D-2');
-    expect(screen.getByTestId('obs-rework-role-row')).toHaveTextContent('security-engineer');
-    expect(screen.getByTestId('obs-rework-role-row')).toHaveTextContent('27%');
+    expect(screen.getByTestId('obs-rework-role-row')).toHaveTextContent('reviewer');
+    expect(screen.getByTestId('obs-rework-role-row')).toHaveTextContent('83%');
+    expect(screen.getByTestId('obs-rework-benchmark-note')).toHaveTextContent('1644 benchmark rows excluded');
     expect(screen.getByTestId('obs-rework-origin')).toHaveTextContent('backend-developer: 3');
     expect(screen.getByTestId('obs-rework-edge')).toHaveTextContent('debugger');
     expect(screen.getByTestId('obs-daemons')).toHaveTextContent('1 daemon');
@@ -74,7 +76,7 @@ describe('ObservabilityPage', () => {
       tagging: { events: [], degraded: true },
       provenance: { by_status: {}, recent: [], degraded: true },
       self_learning: { events: [], proposals: 0 },
-      rework: { by_role: [], by_origin_role: [], recent: [], degraded: true },
+      rework: { by_role: [], by_origin_role: [], recent: [], benchmark_excluded: 0, degraded: true },
       runtime: { cron: [], daemons: [], daemons_running: 0 },
     }));
     expect(screen.getByTestId('obs-degraded-tagging-agent')).toBeInTheDocument();

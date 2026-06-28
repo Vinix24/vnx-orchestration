@@ -181,12 +181,29 @@ def compute_rework_edges(
     return {"scanned": scanned, "edges": edges, "persisted": persisted}
 
 
+# The model-benchmark (field-test) and headless review-gates run on the `headless` track/terminal and
+# carry ~99% of the role-stamped rows. They are NOT governed feature work, so per-role first-pass
+# success must exclude them or the numbers measure benchmark difficulty, not production rework.
+_GOVERNED_PREDICATE = (
+    "(track IS NULL OR track != 'headless') AND (terminal IS NULL OR terminal != 'headless')"
+)
+_BENCHMARK_PREDICATE = "(track = 'headless' OR terminal = 'headless')"
+
+
 def success_by_role(qi_conn: sqlite3.Connection) -> List[dict]:
-    """Per-role first-pass success from the existing dispatch_success_by_role view (already populated)."""
+    """Per-role first-pass success for GOVERNED dispatches only (benchmark/headless excluded).
+
+    Computed directly off dispatch_metadata (not the unfiltered dispatch_success_by_role view) so the
+    benchmark runs don't dominate the rate.
+    """
     try:
         rows = qi_conn.execute(
-            "SELECT role, total_dispatches, successes, success_rate "
-            "FROM dispatch_success_by_role WHERE role IS NOT NULL"
+            "SELECT role, COUNT(*) AS total, "
+            "       SUM(CASE WHEN outcome_status='success' THEN 1 ELSE 0 END) AS successes, "
+            "       ROUND(AVG(CASE WHEN outcome_status='success' THEN 1.0 ELSE 0.0 END), 3) AS success_rate "
+            "FROM dispatch_metadata "
+            "WHERE outcome_status IS NOT NULL AND role IS NOT NULL AND " + _GOVERNED_PREDICATE + " "
+            "GROUP BY role ORDER BY total DESC"
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -194,6 +211,18 @@ def success_by_role(qi_conn: sqlite3.Connection) -> List[dict]:
         {"role": r[0], "total": r[1], "successes": r[2], "success_rate": r[3]}
         for r in rows
     ]
+
+
+def benchmark_excluded_count(qi_conn: sqlite3.Connection) -> int:
+    """How many role-stamped, outcome-bearing rows are benchmark/headless (excluded from success_by_role)."""
+    try:
+        row = qi_conn.execute(
+            "SELECT COUNT(*) FROM dispatch_metadata "
+            "WHERE outcome_status IS NOT NULL AND role IS NOT NULL AND " + _BENCHMARK_PREDICATE
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row and row[0] is not None else 0
 
 
 def rework_by_origin_role(qi_conn: sqlite3.Connection, project_id: str) -> List[dict]:

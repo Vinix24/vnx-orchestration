@@ -113,9 +113,16 @@ function Body({ data }: { data: ObservabilityEnvelope }) {
 
         {/* Rework / skill attribution */}
         <Section title="Rework / skill" count={rw.by_role.length} degraded={rw.degraded}>
-          <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>First-pass success by role (low = rework-prone)</div>
+          <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>
+            First-pass success by role — governed only
+            {rw.benchmark_excluded > 0 && (
+              <span data-testid="obs-rework-benchmark-note" style={{ color: 'rgba(244,244,249,0.4)' }}>
+                {' '}· {rw.benchmark_excluded} benchmark rows excluded
+              </span>
+            )}
+          </div>
           {rw.by_role.length === 0 ? (
-            <div style={_muted}>No role outcomes recorded.</div>
+            <div style={_muted}>No governed role-stamped dispatches yet (governed lanes barely stamp role).</div>
           ) : rw.by_role.slice(0, 8).map((r, i) => (
             <div key={i} data-testid="obs-rework-role-row" style={_row}>
               <span style={{ fontWeight: 700, minWidth: 120 }}>{r.role}</span>
