@@ -411,12 +411,12 @@ class TestNullCostSortKey:
         c_expensive = self._make(score=9.5, cost=0.050)
         assert _cost_aware_sort_key(c_cheap) < _cost_aware_sort_key(c_expensive)
 
-    def test_equal_score_null_cost_treated_as_zero_beats_positive_cost(self):
-        """Null cost is treated as 0, so a null-cost candidate ties on score but
-        sorts before a positive-cost candidate of the same score."""
+    def test_equal_score_null_cost_ranks_after_measured_cost(self):
+        """Hybrid policy: a null/unknown cost ranks LAST within the capable band (never assumed
+        free), so a same-score MEASURED-cost candidate sorts before the null-cost one."""
         c_null = self._make(score=9.5, cost=None)
         c_with_cost = self._make(score=9.5, cost=0.001)
-        assert _cost_aware_sort_key(c_null) < _cost_aware_sort_key(c_with_cost)
+        assert _cost_aware_sort_key(c_with_cost) < _cost_aware_sort_key(c_null)
 
     def test_incapable_candidates_always_trail_capable(self):
         """Incapable candidates (score <= 1.0) must sort after all capable candidates
@@ -426,11 +426,10 @@ class TestNullCostSortKey:
         assert _cost_aware_sort_key(capable_low_score) < _cost_aware_sort_key(incapable_high_implied)
 
     def test_real_yaml_02_code_review_not_collapsed_to_deepseek(self, recommendations_yaml):
-        """Regression: decide() for code_review must return claude-opus-4-6, not deepseek-v4-flash.
-
-        The recommendations_yaml fixture has 02_code_review with claude-opus-4-6 at
-        composite_score=10.0 and claude-sonnet-4-6 at 9.5 — both null-cost. Before the
-        null-cost fix, any model with a measured cost would collapse the null-cost majority.
+        """Hybrid policy: code_review must NOT collapse to deepseek-v4-flash (5.5, below the 7.0
+        capability bar). Both opus (10.0, ~$0.225) and sonnet (9.5, ~$0.045) clear the bar; among
+        the band the CHEAPEST wins, so sonnet is chosen — a strong model at a fraction of opus's cost.
+        deepseek never wins (it is below the bar), which is the regression this guards.
         """
         decision = decide(
             "Code review: audit security",
@@ -439,5 +438,6 @@ class TestNullCostSortKey:
         )
         assert decision.task_class == "02_code_review"
         assert decision.primary is not None
-        assert decision.primary.model_id == "claude-opus-4-6"
-        assert decision.primary.composite_score == 10.0
+        assert decision.primary.model_id == "claude-sonnet-4-6"
+        assert decision.primary.composite_score == 9.5
+        assert decision.primary.model_id != "deepseek-v4-flash"

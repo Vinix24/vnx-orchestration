@@ -186,7 +186,9 @@ class TestCostAwareSortKey:
 class TestRecommendCostAware:
 
     def test_cheapest_capable_model_ranks_first(self, tmp_path):
-        """With cost data populated, cheapest capable model wins."""
+        """Hybrid policy: among models that clear the capability threshold (>=7.0), the cheapest wins.
+        deepseek-flash (5.5) is BELOW the bar so it cannot beat the band despite being cheapest;
+        sonnet (8.0, ~$0.045) beats opus (9.0, ~$0.225) within the band."""
         entries = {
             "01_code_generation": [
                 {"model_id": "claude-opus-4-6", "composite_score": 9.0,
@@ -200,15 +202,15 @@ class TestRecommendCostAware:
         rec_path = _yaml_with_costs(tmp_path, entries)
         candidates = recommend("01_code_generation", recommendations_path=rec_path)
 
-        # After cost enrichment: deepseek-v4-flash should be cheapest capable
-        # deepseek-flash ≈ $0.0014/call << sonnet $0.045 << opus $0.225
+        # After cost enrichment: deepseek-flash ≈ $0.0014, sonnet ≈ $0.045, opus ≈ $0.225.
+        # deepseek (5.5) is below the 7.0 capability bar, so sonnet (cheapest in the band) wins.
         assert len(candidates) >= 3
-        assert candidates[0].model_id == "deepseek-v4-flash"
+        assert candidates[0].model_id == "claude-sonnet-4-6"
         assert candidates[0].cost_usd_per_call is not None
-        # Verify price ordering within capable models
-        capable = [c for c in candidates if c.composite_score > _INCAPABLE_SCORE_FLOOR]
-        costs = [c.cost_usd_per_call or float("inf") for c in capable]
-        assert costs == sorted(costs), "Capable candidates must be sorted by cost ascending"
+        # Within the capable band (score >= 7.0), cost ascending.
+        band = [c for c in candidates if c.composite_score >= 7.0]
+        costs = [c.cost_usd_per_call or float("inf") for c in band]
+        assert costs == sorted(costs), "Band candidates must be sorted by cost ascending"
 
     def test_incapable_models_trail_despite_low_cost(self, tmp_path):
         """Models at score=1.0 rank after all capable ones even with zero cost."""
