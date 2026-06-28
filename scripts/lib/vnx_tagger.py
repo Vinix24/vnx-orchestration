@@ -46,6 +46,24 @@ _DEFAULT_PROVIDER = "deepseek"
 _MAX_TAGS = 6
 _TAGGABLE_TABLES = frozenset({"success_patterns", "antipatterns"})
 
+# Per-action tagging audit trail (observability). One row per pattern the tagger actually tags, so
+# the dashboard can show "what did the tagging agent do, and with which model". ADR-007: composite
+# UNIQUE over project_id. Lives in the same quality_intelligence.db the tagger already writes.
+_TAGGING_EVENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tagging_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id    TEXT NOT NULL DEFAULT 'vnx-dev',
+    table_name    TEXT NOT NULL,
+    pattern_id    INTEGER NOT NULL,
+    pattern_title TEXT,
+    tags_json     TEXT NOT NULL,
+    provider      TEXT,
+    tagged_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (project_id, table_name, pattern_id, tagged_at)
+);
+CREATE INDEX IF NOT EXISTS idx_tagging_events_recent ON tagging_events(project_id, tagged_at DESC);
+"""
+
 
 def is_enabled() -> bool:
     import config_runtime
@@ -156,6 +174,14 @@ def enrich_pattern_tags(
         conn = _sqlite3.connect(str(db_path))
     except _sqlite3.Error:
         return {"_skipped": "db_open_failed"}
+    # Best-effort tagging audit log (never blocks tagging). project_id + provider captured per run.
+    import os as _os
+    try:
+        conn.executescript(_TAGGING_EVENTS_SCHEMA)
+    except _sqlite3.Error:
+        pass
+    _project_id = _os.environ.get("VNX_PROJECT_ID") or "vnx-dev"
+    _provider = get_tagger_provider_name()
     try:
         for tbl in tbls:
             try:
@@ -178,6 +204,14 @@ def enrich_pattern_tags(
                 tags = enrich_tags(f"{title or ''} {desc or ''}".strip())
                 try:
                     conn.execute(f"UPDATE {tbl} SET tags = ? WHERE id = ?", (_json.dumps(tags), pid))
+                    if tags:
+                        # Audit event for the dashboard — only meaningful taggings (non-empty).
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tagging_events "
+                            "(project_id, table_name, pattern_id, pattern_title, tags_json, provider) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (_project_id, tbl, pid, title, _json.dumps(tags), _provider),
+                        )
                     n += 1
                 except _sqlite3.Error:
                     continue
