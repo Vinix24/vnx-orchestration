@@ -172,6 +172,12 @@ def classify_task(
 # Composite score at or below which a model is considered incapable for the task class.
 _INCAPABLE_SCORE_FLOOR = 1.0
 
+# Operator-chosen capability threshold (2026-06-28): a model scoring at/above this clears the
+# "capable enough" bar and competes on COST; models below it are ranked by capability instead, so a
+# cheap-but-weak model can never beat a much stronger one. On the 0-10 composite scale, 7.0 = solidly
+# capable. Tunable; kept absolute so the per-candidate sort key stays composable.
+_CAPABILITY_THRESHOLD = 7.0
+
 
 def _compute_quality_tier(composite_score: float, cost_tier: Optional[int]) -> int:
     """Derive quality tier (1-3) from composite_score and cost_tier.
@@ -189,17 +195,21 @@ def _compute_quality_tier(composite_score: float, cost_tier: Optional[int]) -> i
 
 
 def _cost_aware_sort_key(c: "RouteCandidate") -> tuple:
-    """Sort key for cost-aware candidate ranking.
+    """Sort key for cost-aware candidate ranking — capability-threshold, then cheapest.
 
-    Capable models (score > _INCAPABLE_SCORE_FLOOR) are ranked first by composite_score
-    DESC, with cost ASC as a secondary tiebreaker. Null cost is treated as 0 (sort-neutral)
-    so models without measured cost never collapse behind the single cheapest entry.
-    Incapable models trail, sorted by score descending.
+    Operator-chosen policy (2026-06-28, the hybrid):
+      1. Models at/above _CAPABILITY_THRESHOLD clear the capability bar (band 0). Among them the
+         CHEAPEST wins (cost ASC), with composite_score DESC as the tiebreaker on equal cost. A
+         null/unknown cost ranks LAST within the band (+inf) — an unmeasured model is never assumed
+         free. This is why a cheap-and-strong model beats an expensive-and-stronger one, but a
+         cheap-and-WEAK model (below the bar) cannot beat a strong one.
+      2. Models below the threshold (band 1) are ranked by capability DESC (best available), cost ASC
+         as a tiebreaker — so the strongest sub-bar model still wins when nothing clears the bar.
     """
-    if c.composite_score > _INCAPABLE_SCORE_FLOOR:
-        cost = c.cost_usd_per_call if c.cost_usd_per_call is not None else 0.0
-        return (0, -c.composite_score, cost)
-    return (1, -c.composite_score, float("inf"))
+    cost = c.cost_usd_per_call if c.cost_usd_per_call is not None else float("inf")
+    if c.composite_score >= _CAPABILITY_THRESHOLD:
+        return (0, cost, -c.composite_score)
+    return (1, -c.composite_score, cost)
 
 
 def _filter_by_constraints(
@@ -248,10 +258,12 @@ def _load_recommendations(
 ) -> Dict[str, List[RouteCandidate]]:
     """Load routing_recommendations.yaml and return parsed candidates per task class.
 
-    Candidates are enriched with cost_usd_per_call from wave7_models.yaml (via
-    cost_loader) and sorted cost-first within the capable tier (score > 1.0).
-    When wave7_models.yaml is absent, costs remain None and the sort falls back
-    to score-descending — identical to pre-cost-aware behavior.
+    Candidates are enriched with cost_usd_per_call from wave7_models.yaml (via cost_loader) and
+    sorted by the operator-chosen hybrid (see _cost_aware_sort_key): models at/above the
+    _CAPABILITY_THRESHOLD (7.0) compete on cost (cheapest first, null/unknown cost last), while
+    models below the threshold are ranked by capability descending. When costs are all None (no
+    wave7 data), every above-bar candidate ties on cost and the order collapses to score-descending
+    — identical to the pre-cost-aware behaviour.
     """
     from cost_loader import enrich_candidates as _enrich  # noqa: PLC0415
 
