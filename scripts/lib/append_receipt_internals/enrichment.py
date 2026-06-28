@@ -61,7 +61,7 @@ def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
         }
 
 
-def _enrich_provenance_linkage(enriched: Dict[str, Any]) -> None:
+def _enrich_provenance_linkage(enriched: Dict[str, Any], state_dir: Path) -> None:
     try:
         facade.enrich_receipt_provenance(enriched)
         prov_validation = facade.validate_receipt_provenance(enriched)
@@ -76,8 +76,46 @@ def _enrich_provenance_linkage(enriched: Dict[str, Any]) -> None:
                     _emit("WARN", "provenance_gap_detected",
                            gap_type=gap.gap_type, entity_id=gap.entity_id,
                            description=gap.description)
+        # Light up the provenance chain: write the registry row so dispatch -> receipt -> commit -> PR
+        # is queryable (and its gaps visible). At append time only dispatch_id + receipt_id + trace_token
+        # are known (the commit happens later), so chain_status stays 'incomplete' until merge fills
+        # commit_sha. Best-effort; never blocks the append.
+        _register_provenance_link(enriched, state_dir)
     except Exception as exc:
         _emit("WARN", "provenance_enrichment_failed", error=str(exc))
+
+
+def _register_provenance_link(enriched: Dict[str, Any], state_dir: Path) -> None:
+    dispatch_id = enriched.get("dispatch_id")
+    if not dispatch_id or str(dispatch_id) in ("", "unknown", "none", "null"):
+        return
+    db_path = state_dir / "runtime_coordination.db"
+    if not db_path.exists():
+        return
+    try:
+        import sqlite3 as _sqlite3
+        from receipt_provenance import register_provenance_link  # noqa: PLC0415
+        receipt_id = str(enriched.get("run_id") or enriched.get("task_id") or "") or None
+        pr_number = enriched.get("pr_number")
+        try:
+            pr_number = int(pr_number) if pr_number is not None else None
+        except (TypeError, ValueError):
+            pr_number = None
+        conn = _sqlite3.connect(str(db_path))
+        try:
+            register_provenance_link(
+                conn,
+                dispatch_id=str(dispatch_id),
+                receipt_id=receipt_id,
+                trace_token=enriched.get("trace_token"),
+                pr_number=pr_number,
+                feature_plan_pr=enriched.get("feature_plan_pr"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        _emit("WARN", "provenance_register_failed", error=str(exc))
 
 
 def _enrich_terminal_snapshot(enriched: Dict[str, Any], state_dir: Path) -> None:
@@ -257,7 +295,7 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
 
     _enrich_project_id_and_git(enriched, paths, repo_root)
     _enrich_session_metadata(enriched, state_dir)
-    _enrich_provenance_linkage(enriched)
+    _enrich_provenance_linkage(enriched, state_dir)
     _enrich_terminal_snapshot(enriched, state_dir)
 
     if _is_subprocess_intermediate_completion(receipt):
