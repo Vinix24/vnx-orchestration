@@ -516,6 +516,66 @@ routing_by_task:
       launch_success_rate: 0.33
       n: 2
     min_quality_tier: 3
+  04_documentation:
+    # No dedicated field-test benchmark coverage yet (n: 0) — default routing to capable
+    # general-purpose models above the capability bar. Replaced when export_routing_matrix.py
+    # gains documentation-task runs.
+    candidates:
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 8.0
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 300.0
+      launch_success_rate: 1.0
+      n: 0
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 7.8
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 250.0
+      launch_success_rate: 1.0
+      n: 0
+    - model_id: kimi-k2-7-code
+      runner: kimi-cli
+      composite_score: 7.5
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 200.0
+      launch_success_rate: 1.0
+      n: 0
+    min_quality_tier: 3
+  07_translation:
+    # No dedicated field-test benchmark coverage yet (n: 0) — default routing to capable
+    # general-purpose models above the capability bar. Replaced when export_routing_matrix.py
+    # gains translation-task runs.
+    candidates:
+    - model_id: claude-sonnet-4-6
+      runner: subscription
+      composite_score: 8.0
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 300.0
+      launch_success_rate: 1.0
+      n: 0
+    - model_id: deepseek-v4-pro
+      runner: claude-harness
+      composite_score: 7.8
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 250.0
+      launch_success_rate: 1.0
+      n: 0
+    - model_id: glm-5-2
+      runner: claude-harness
+      composite_score: 7.5
+      quality_tier: 3
+      cost_usd_per_call: null
+      avg_duration_seconds: 220.0
+      launch_success_rate: 1.0
+      n: 0
+    min_quality_tier: 3
 _meta:
   source: field-tests t1-t6 benchmark (export_routing_matrix.py)
   scale: composite_score 0-10 (benchmark 0-5 x2)
