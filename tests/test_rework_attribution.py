@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 from rework_attribution import (  # noqa: E402
+    benchmark_excluded_count,
     compute_rework_edges,
     rework_by_origin_role,
     success_by_role,
@@ -215,6 +216,30 @@ def test_bad_repo_is_fail_open(tmp_path):
         assert result["edges"] == []  # git fails -> no edges, no raise
     finally:
         rc.close()
+        qi.close()
+
+
+def test_success_by_role_excludes_benchmark(tmp_path):
+    qi = sqlite3.connect(tmp_path / "qi.db")
+    qi.executescript(_QI_SCHEMA)
+    qi.executemany(
+        "INSERT INTO dispatch_metadata (dispatch_id, project_id, terminal, track, role, outcome_status) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("g1", "vnx-dev", "T1", "A", "backend-developer", "success"),
+            ("g2", "vnx-dev", "T2", "B", "backend-developer", "failure"),
+            # benchmark run on the headless track — must not pollute governed FPY
+            ("b1", "vnx-dev", "headless", "headless", "security-engineer", "failure"),
+        ],
+    )
+    qi.commit()
+    try:
+        roles = {r["role"]: r for r in success_by_role(qi)}
+        assert "security-engineer" not in roles  # benchmark excluded
+        assert roles["backend-developer"]["total"] == 2
+        assert roles["backend-developer"]["successes"] == 1
+        assert benchmark_excluded_count(qi) == 1
+    finally:
         qi.close()
 
 

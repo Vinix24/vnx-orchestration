@@ -183,18 +183,30 @@ def _runtime() -> dict:
 def _rework(limit: int, project_id: str) -> dict:
     """Rework→skill attribution (slice 1): per-role first-pass success, rework-by-origin-role
     (self-join over parent_dispatch), and recent rework edges. Read-only, fail-open."""
-    out: dict = {"by_role": [], "by_origin_role": [], "recent": []}
+    out: dict = {"by_role": [], "by_origin_role": [], "recent": [], "benchmark_excluded": 0}
     conn = _ro_conn(_qi_db())
     if conn is None:
         out["degraded"] = True
         return out
     try:
+        # GOVERNED only: the model-benchmark + headless review-gates run on the `headless` track/terminal
+        # and carry ~99% of role-stamped rows; including them would measure benchmark difficulty, not rework.
         roles = conn.execute(
-            "SELECT role, total_dispatches, successes, success_rate "
-            "FROM dispatch_success_by_role WHERE role IS NOT NULL ORDER BY total_dispatches DESC LIMIT ?",
+            "SELECT role, COUNT(*) AS total_dispatches, "
+            "       SUM(CASE WHEN outcome_status='success' THEN 1 ELSE 0 END) AS successes, "
+            "       ROUND(AVG(CASE WHEN outcome_status='success' THEN 1.0 ELSE 0.0 END), 3) AS success_rate "
+            "FROM dispatch_metadata "
+            "WHERE outcome_status IS NOT NULL AND role IS NOT NULL "
+            "  AND (track IS NULL OR track != 'headless') AND (terminal IS NULL OR terminal != 'headless') "
+            "GROUP BY role ORDER BY total_dispatches DESC LIMIT ?",
             (limit,),
         ).fetchall()
         out["by_role"] = [dict(r) for r in roles]
+        bench = conn.execute(
+            "SELECT COUNT(*) FROM dispatch_metadata WHERE outcome_status IS NOT NULL AND role IS NOT NULL "
+            "  AND (track = 'headless' OR terminal = 'headless')"
+        ).fetchone()
+        out["benchmark_excluded"] = int(bench[0]) if bench and bench[0] is not None else 0
     except sqlite3.Error:
         out["degraded"] = True
     try:
