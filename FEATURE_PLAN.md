@@ -1,12 +1,20 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-06-27T21:40:41.439897+00:00
+**Last updated**: 2026-06-28T09:00:12.894341+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #971 — feat(dashboard): rework/skill-attribution observability panel (slice 1b) (#971) (2026-06-28)
+- #970 — feat(intelligence): rework-attribution engine (slice 1a) (#970) (2026-06-28)
+- #969 — feat(provenance): close dispatch→commit half of the chain (#969) (2026-06-28)
+- #968 — feat(observability): governance/audit-trail dashboard page (self-learning + tagging + provenance + runtime) (#968) (2026-06-28)
+- #967 — feat(observability): light up the provenance chain — populate the registry at append (+ fix latent upsert bug) (#967) (2026-06-28)
+- #966 — feat(observability): tagging audit event — per-action tagger trail (dashboard panel 2) (#966) (2026-06-28)
+- #965 — feat(smart-router): hybrid routing policy — capability-threshold, then cheapest (+ 2 missing classes) (#965) (2026-06-28)
+- #964 — chore(roadmap): close the resolved audit-remediation tracks (16 done + PR refs) (#964) (2026-06-27)
 - #963 — fix(audit): clear medium bugs — falsified old_value, json-list crash, truthy flag, doctor jq, requirements (C2,C5,D7,F6,F9) (#963) (2026-06-27)
 - #962 — docs(audit): fix VNX_AUTOPILOT flag + SECURITY email + CONTRIBUTING marker + PyPI metadata (audit #16/D1,O1,O2,O5) (#962) (2026-06-27)
 - #961 — fix(governance): enforce report contract + idempotency ordering + side-door CI (audit high #2,#3,#10) (#961) (2026-06-27)
@@ -45,7 +53,6 @@ _Last 14 days — sourced from git merge commits._
 - #863 — feat(fsr-b): tenant-scoped canonical tracks in build_t0_state (#863) (2026-06-14)
 - #861 — feat(fsr-a2): version reconciliation via declarative invariant manifest (#861) (2026-06-14)
 - #859 — feat(fsr-a1): ADR-007 dispatches in-place rebuild — composite UNIQUE, 12-step, fail-closed tenant (#859) (2026-06-14)
-- #860 — chore(kimi): raise default per-chunk stall threshold 300s→600s (#860) (2026-06-14)
 
 ## Active features
 
@@ -278,5 +285,8 @@ Status: done
 Status: in-progress
 
 ### audit-sweep-low — Repo-audit low-severity / AI-slop sweep (39 findings)
+Status: planned
+
+### rework-skill-refinement-loop — Skill-refinement proposal tier from rework attribution
 Status: planned
 
