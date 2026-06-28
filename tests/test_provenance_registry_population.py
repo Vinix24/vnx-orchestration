@@ -10,6 +10,7 @@ are known (the commit happens later), so chain_status stays 'incomplete' until m
 """
 
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 from append_receipt_internals import enrichment  # noqa: E402
+from receipt_provenance import reconcile_commit_provenance  # noqa: E402
 
 _REGISTRY_SCHEMA = """
 CREATE TABLE provenance_registry (
@@ -108,11 +110,6 @@ def test_missing_db_is_fail_open(tmp_path):
     sd = tmp_path / "empty"
     sd.mkdir()
     enrichment._register_provenance_link({"dispatch_id": "D-y", "run_id": "r"}, sd)  # must not raise
-
-
-import subprocess  # noqa: E402
-
-from receipt_provenance import reconcile_commit_provenance  # noqa: E402
 
 
 def _git_repo_with_commit(tmp_path, body: str) -> Path:
