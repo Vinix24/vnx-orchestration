@@ -13,6 +13,7 @@ import {
   fetchPlanning,
   fetchConfig,
   fetchConfigAudit,
+  fetchObservability,
   fetchReports,
   fetchReportContent,
   fetchAgents,
@@ -33,7 +34,7 @@ import type {
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope, SystemHealthEnvelope, PlanningEnvelope,
-  ConfigEnvelope, ConfigAuditEnvelope,
+  ConfigEnvelope, ConfigAuditEnvelope, ObservabilityEnvelope,
   ReportsEnvelope, AgentsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
   ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
@@ -194,6 +195,14 @@ export function useConfig() {
     'operator-config',
     fetchConfig,
     { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useObservability() {
+  return useSWR<ObservabilityEnvelope>(
+    'operator-observability',
+    fetchObservability,
+    { refreshInterval: 20000, revalidateOnFocus: true, dedupingInterval: 8000 }
   );
 }
 

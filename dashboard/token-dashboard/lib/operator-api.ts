@@ -17,6 +17,7 @@ import type {
   ConfigSetRequest,
   ConfigSetResponse,
   ConfigAuditEnvelope,
+  ObservabilityEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
   PatternsResponse,
@@ -141,6 +142,10 @@ export function fetchPlanning(): Promise<PlanningEnvelope> {
 
 export function fetchConfig(): Promise<ConfigEnvelope> {
   return get(`${BASE}/config`);
+}
+
+export function fetchObservability(): Promise<ObservabilityEnvelope> {
+  return get(`${BASE}/observability`);
 }
 
 export function postConfigSet(req: ConfigSetRequest): Promise<ConfigSetResponse> {
