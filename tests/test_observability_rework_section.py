@@ -22,6 +22,8 @@ CREATE TABLE dispatch_metadata (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dispatch_id TEXT NOT NULL,
     project_id  TEXT NOT NULL,
+    terminal TEXT,
+    track TEXT,
     role TEXT,
     parent_dispatch TEXT,
     pattern_count INTEGER DEFAULT 0,
@@ -47,11 +49,14 @@ def _qi(tmp_path) -> Path:
     conn.executescript(_QI_SCHEMA)
     conn.executemany(
         "INSERT INTO dispatch_metadata "
-        "(dispatch_id, project_id, role, parent_dispatch, dispatched_at, outcome_status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(dispatch_id, project_id, terminal, track, role, parent_dispatch, dispatched_at, outcome_status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("D-origin", "vnx-dev", "backend-developer", None, "2026-06-28T07:00:00Z", "success"),
-            ("D-rework", "vnx-dev", "debugger", "D-origin", "2026-06-28T08:00:00Z", "success"),
+            # governed feature dispatches (track A / terminal T1) — counted
+            ("D-origin", "vnx-dev", "T1", "A", "backend-developer", None, "2026-06-28T07:00:00Z", "success"),
+            ("D-rework", "vnx-dev", "T2", "B", "debugger", "D-origin", "2026-06-28T08:00:00Z", "success"),
+            # benchmark run (headless track) — must be EXCLUDED from by_role, counted in benchmark_excluded
+            ("D-bench", "vnx-dev", "headless", "headless", "security-engineer", None, "2026-06-28T06:00:00Z", "failure"),
         ],
     )
     conn.commit()
@@ -67,6 +72,9 @@ def test_rework_section_surfaces_roles_origin_and_edges(tmp_path, monkeypatch):
     assert not out.get("degraded")
     roles = {r["role"]: r for r in out["by_role"]}
     assert roles["backend-developer"]["success_rate"] == 1.0
+    # benchmark (headless) role is excluded from governed by_role but counted separately
+    assert "security-engineer" not in roles
+    assert out["benchmark_excluded"] == 1
     assert {"origin_role": "backend-developer", "reworked": 1} in out["by_origin_role"]
     assert len(out["recent"]) == 1
     edge = out["recent"][0]

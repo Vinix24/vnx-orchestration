@@ -35,6 +35,7 @@ from project_root import (  # noqa: E402
     resolve_project_root,
 )
 from rework_attribution import (  # noqa: E402
+    benchmark_excluded_count,
     compute_rework_edges,
     rework_by_origin_role,
     success_by_role,
@@ -86,6 +87,7 @@ def main(argv: "list[str] | None" = None) -> int:
             qi_conn.commit()
         roles = success_by_role(qi_conn)
         rework_roles = rework_by_origin_role(qi_conn, project_id)
+        benchmark_excluded = benchmark_excluded_count(qi_conn)
     finally:
         qi_conn.close()
         if rc_conn is not None:
@@ -96,7 +98,8 @@ def main(argv: "list[str] | None" = None) -> int:
         "scanned": result["scanned"],
         "edges": result["edges"],
         "persisted": result["persisted"],
-        "success_by_role": roles,
+        "success_by_role_governed": roles,
+        "benchmark_excluded": benchmark_excluded,
         "rework_by_origin_role": rework_roles,
     }
     if args.json:
@@ -112,7 +115,9 @@ def main(argv: "list[str] | None" = None) -> int:
         print("rework by origin role:")
         for r in rework_roles:
             print(f"  {r['origin_role']}: {r['reworked']} reworked")
-    print("first-pass success by role (top 8):")
+    print(f"first-pass success by role — GOVERNED only ({benchmark_excluded} benchmark rows excluded):")
+    if not roles:
+        print("  (no governed role-stamped dispatches yet — governed lanes barely stamp role; see fix 2/3)")
     for r in roles[:8]:
         print(f"  {r['role']}: {r['successes']}/{r['total']} ({r['success_rate']})")
     return EXIT_OK

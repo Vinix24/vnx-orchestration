@@ -347,6 +347,8 @@ export interface ObservabilityEnvelope {
     by_role: ReworkRoleStat[];
     by_origin_role: ReworkOriginRole[];
     recent: ReworkEdge[];
+    /** Count of benchmark/headless rows excluded from by_role (governed-only scope). */
+    benchmark_excluded: number;
     degraded?: boolean;
   };
   runtime: {
