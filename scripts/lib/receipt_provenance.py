@@ -348,14 +348,17 @@ def register_provenance_link(
     now = _now_utc()
     gaps_json = json.dumps(gaps or [])
 
-    existing = conn.execute(
+    _cur = conn.execute(
         "SELECT * FROM provenance_registry WHERE dispatch_id = ?",
         (dispatch_id,),
-    ).fetchone()
+    )
+    existing = _cur.fetchone()
 
     if existing:
-        # Merge: only overwrite fields that are currently NULL
-        merged = dict(existing)
+        # Merge: only overwrite fields that are currently NULL. ``existing`` is a plain tuple (the
+        # caller's connection has no Row factory), so build the dict from the cursor's column names —
+        # dict(tuple) would raise "dictionary update sequence element ... length N".
+        merged = dict(zip([d[0] for d in _cur.description], existing))
         if receipt_id and not merged.get("receipt_id"):
             merged["receipt_id"] = receipt_id
         if commit_sha and not merged.get("commit_sha"):
