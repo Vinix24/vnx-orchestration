@@ -110,5 +110,70 @@ def test_missing_db_is_fail_open(tmp_path):
     enrichment._register_provenance_link({"dispatch_id": "D-y", "run_id": "r"}, sd)  # must not raise
 
 
+import subprocess  # noqa: E402
+
+from receipt_provenance import reconcile_commit_provenance  # noqa: E402
+
+
+def _git_repo_with_commit(tmp_path, body: str) -> Path:
+    """Init a throwaway git repo and create one commit with the given message body. Returns repo path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+        "HOME": str(tmp_path),
+    }
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    (repo / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", body], cwd=repo, env=env, check=True)
+    return repo
+
+
+def test_reconcile_links_commit_sha_from_trace_token(tmp_path):
+    sd = _state_dir(tmp_path)
+    # Receipt half is already written (dispatch_id known, commit not yet).
+    enrichment._register_provenance_link({"dispatch_id": "20260628-120000-feat", "run_id": "r-1"}, sd)
+    repo = _git_repo_with_commit(tmp_path, "feat: a thing\n\nDispatch-ID: 20260628-120000-feat\n")
+    expected_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True,
+    ).stdout.strip()
+
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    result = reconcile_commit_provenance(repo, conn, max_commits=50)
+    conn.commit()
+    row = conn.execute(
+        "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+        ("20260628-120000-feat",),
+    ).fetchone()
+    conn.close()
+
+    assert result["linked"] == 1
+    assert result["scanned"] >= 1
+    assert row is not None and row[0] == expected_sha
+
+
+def test_reconcile_ignores_tokenless_commits(tmp_path):
+    sd = _state_dir(tmp_path)
+    repo = _git_repo_with_commit(tmp_path, "chore: no token here\n")
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    result = reconcile_commit_provenance(repo, conn, max_commits=50)
+    n = conn.execute("SELECT COUNT(*) FROM provenance_registry").fetchone()[0]
+    conn.close()
+    assert result["linked"] == 0
+    assert n == 0  # no token -> no registry write
+
+
+def test_reconcile_bad_repo_is_fail_open(tmp_path):
+    # Not a git repo -> git log fails -> {scanned:0, linked:0}, never raises.
+    sd = _state_dir(tmp_path)
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    result = reconcile_commit_provenance(tmp_path / "not-a-repo", conn, max_commits=50)
+    conn.close()
+    assert result == {"scanned": 0, "linked": 0}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

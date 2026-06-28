@@ -456,6 +456,57 @@ def register_provenance_link(
     )
 
 
+def reconcile_commit_provenance(
+    repo_root: "str | Path",
+    conn: sqlite3.Connection,
+    *,
+    max_commits: int = 300,
+) -> Dict[str, int]:
+    """Close the dispatch->commit link: scan recent git commits for a ``Dispatch-ID:`` trace token
+    and register each commit's SHA against its dispatch_id in the provenance_registry.
+
+    This is the merge-side half of the chain (B1 wrote dispatch_id+receipt_id at append; this writes
+    commit_sha so chain_status can reach 'complete'). Read-git + upsert-registry; best-effort — git
+    errors yield ``{scanned: 0, linked: 0}``. Idempotent: register_provenance_link upserts per dispatch_id.
+    """
+    try:
+        from trace_token_validator import extract_trace_tokens  # noqa: PLC0415
+    except Exception:
+        return {"scanned": 0, "linked": 0}
+    try:
+        # Null-record-separated SHA + full body, so multi-line commit bodies stay intact.
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "log", f"-{int(max_commits)}", "--no-merges",
+             "--format=%H%x1f%B%x1e"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return {"scanned": 0, "linked": 0}
+    if result.returncode != 0:
+        return {"scanned": 0, "linked": 0}
+
+    scanned = linked = 0
+    for entry in result.stdout.split("\x1e"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        sha, _sep, body = entry.partition("\x1f")
+        sha = sha.strip()
+        if not sha:
+            continue
+        scanned += 1
+        tokens = extract_trace_tokens(body)
+        dispatch_id = tokens.preferred or tokens.legacy_dispatch
+        if not dispatch_id:
+            continue
+        try:
+            register_provenance_link(conn, dispatch_id=dispatch_id, commit_sha=sha)
+            linked += 1
+        except sqlite3.Error:
+            continue
+    return {"scanned": scanned, "linked": linked}
+
+
 def get_provenance_link(
     conn: sqlite3.Connection,
     dispatch_id: str,

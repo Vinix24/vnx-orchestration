@@ -679,21 +679,21 @@ class TmuxInteractiveDispatch:
         )
 
     # -- tmux primitives ---------------------------------------------------
-    def _spawn_session(self, session: str, cwd: Path) -> "tuple[str, str] | None":
-        """Create a detached session; return (pane_id, window_id) or None."""
-        res = self._runner.run(
-            [
-                "new-session",
-                "-d",
-                "-s",
-                session,
-                "-c",
-                str(cwd),
-                "-P",
-                "-F",
-                "#{pane_id}",
-            ]
-        )
+    def _spawn_session(
+        self, session: str, cwd: Path, dispatch_id: str = ""
+    ) -> "tuple[str, str] | None":
+        """Create a detached session; return (pane_id, window_id) or None.
+
+        When ``dispatch_id`` is provided it is exported into the pane environment as
+        ``VNX_CURRENT_DISPATCH_ID`` so the worker's ``git commit`` carries a provenance
+        trace token (read by the prepare-commit-msg hook / trace_token_validator), closing
+        the dispatch->commit link in the provenance_registry.
+        """
+        args = ["new-session", "-d", "-s", session, "-c", str(cwd)]
+        if dispatch_id:
+            args += ["-e", f"VNX_CURRENT_DISPATCH_ID={dispatch_id}"]
+        args += ["-P", "-F", "#{pane_id}"]
+        res = self._runner.run(args)
         if res.returncode != 0:
             logger.warning(
                 "interactive: new-session %s failed: %s", session, res.stderr.strip()
@@ -1632,7 +1632,7 @@ class TmuxInteractiveDispatch:
         window_id: "str | None" = None
         try:
             # 1. Spawn detached session
-            spawned = self._spawn_session(session, cwd)
+            spawned = self._spawn_session(session, cwd, dispatch_id)
             if spawned is None:
                 self._emit_event(
                     "interactive_spawn_failed",
