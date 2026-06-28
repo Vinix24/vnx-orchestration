@@ -39,6 +39,19 @@ vnx_dispatch_extract_agent_role() {
     echo "$role"
 }
 
+# vnx_dispatch_resolve_agent_role — prefer an explicitly threaded role; else recover it from the
+# dispatch file's "Role:" header. Parity with the subprocess/provider/headless lanes (OI-1107) so the
+# governed tmux delivery path stamps a role into dispatch_metadata for per-role rework attribution.
+# No invented fallback: empty stays empty when the file carries no Role: header (honest over guessed).
+vnx_dispatch_resolve_agent_role() {
+    local explicit_role="$1" file="$2"
+    if [ -n "$explicit_role" ]; then
+        echo "$explicit_role"
+        return 0
+    fi
+    [ -n "$file" ] && [ -f "$file" ] && vnx_dispatch_extract_agent_role "$file"
+}
+
 vnx_dispatch_normalize_role() {
     local role="$1"
     echo "$role" | tr -d '[:space:][:punct:]' | tr '[:upper:]' '[:lower:]'
