@@ -1,10 +1,11 @@
 """Observability dashboard API — the governance/audit-trail panel.
 
-GET /api/operator/observability returns four read-only, fail-open sections:
+GET /api/operator/observability returns five read-only, fail-open sections:
   - self_learning : recent confidence_events (what the self-learning loop adjusted) + proposal count
   - tagging       : recent tagging_events (what the tagging agent tagged + with which model)
   - runtime       : cron jobs (schedule + last-run) + VNX daemon liveness
   - provenance    : provenance_registry chain_status counts + recent rows with their gaps
+  - rework        : per-role first-pass success + rework-by-origin-role + recent rework edges
 
 Single-tenant: reads this dashboard's project (CANONICAL_STATE_DIR). Every section is best-effort —
 a missing table / db / command yields an empty section + a `degraded` flag, never an error.
@@ -179,8 +180,53 @@ def _runtime() -> dict:
     return out
 
 
+def _rework(limit: int, project_id: str) -> dict:
+    """Rework→skill attribution (slice 1): per-role first-pass success, rework-by-origin-role
+    (self-join over parent_dispatch), and recent rework edges. Read-only, fail-open."""
+    out: dict = {"by_role": [], "by_origin_role": [], "recent": []}
+    conn = _ro_conn(_qi_db())
+    if conn is None:
+        out["degraded"] = True
+        return out
+    try:
+        roles = conn.execute(
+            "SELECT role, total_dispatches, successes, success_rate "
+            "FROM dispatch_success_by_role WHERE role IS NOT NULL ORDER BY total_dispatches DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out["by_role"] = [dict(r) for r in roles]
+    except sqlite3.Error:
+        out["degraded"] = True
+    try:
+        origin = conn.execute(
+            "SELECT p.role AS origin_role, COUNT(*) AS reworked "
+            "FROM dispatch_metadata d JOIN dispatch_metadata p "
+            "  ON d.parent_dispatch = p.dispatch_id AND d.project_id = p.project_id "
+            "WHERE d.project_id = ? AND d.parent_dispatch IS NOT NULL AND d.parent_dispatch != '' "
+            "GROUP BY p.role ORDER BY reworked DESC",
+            (project_id,),
+        ).fetchall()
+        out["by_origin_role"] = [dict(r) for r in origin]
+        edges = conn.execute(
+            "SELECT d.dispatch_id AS rework_dispatch, d.role AS rework_role, "
+            "       p.dispatch_id AS origin_dispatch, p.role AS origin_role, d.dispatched_at "
+            "FROM dispatch_metadata d JOIN dispatch_metadata p "
+            "  ON d.parent_dispatch = p.dispatch_id AND d.project_id = p.project_id "
+            "WHERE d.project_id = ? AND d.parent_dispatch IS NOT NULL AND d.parent_dispatch != '' "
+            "ORDER BY d.dispatched_at DESC LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+        out["recent"] = [dict(r) for r in edges]
+    except sqlite3.Error:
+        # parent_dispatch self-join unavailable on older schema → empty, not an error
+        out["degraded"] = True
+    finally:
+        conn.close()
+    return out
+
+
 def operator_get_observability(params: dict, *, project_id: "str | None" = None) -> "tuple[dict, int]":
-    """GET /api/operator/observability — the four governance/audit sections. Always 200 (fail-open;
+    """GET /api/operator/observability — the five governance/audit sections. Always 200 (fail-open;
     each section self-reports `degraded`)."""
     pid = project_id or _op_dashboard_project_id() or "vnx-dev"
     try:
@@ -193,6 +239,7 @@ def operator_get_observability(params: dict, *, project_id: "str | None" = None)
         "self_learning": _self_learning(limit, pid),
         "tagging": _tagging(limit, pid),
         "provenance": _provenance(limit),
+        "rework": _rework(limit, pid),
         "runtime": _runtime(),
     }
     return body, 200
