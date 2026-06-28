@@ -39,10 +39,17 @@ function chainColor(status: string): string {
   }
 }
 
+function fpyColor(rate: number): string {
+  if (rate >= 0.8) return 'var(--color-success, #50fa7b)';
+  if (rate >= 0.5) return 'var(--color-warning, #facc15)';
+  return 'var(--color-danger, #ff5555)';  // low first-pass success = rework-prone role
+}
+
 function Body({ data }: { data: ObservabilityEnvelope }) {
   const sl = data.self_learning;
   const tg = data.tagging;
   const pv = data.provenance;
+  const rw = data.rework;
   const rt = data.runtime;
   return (
     <div data-testid="observability-page" style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -100,6 +107,40 @@ function Body({ data }: { data: ObservabilityEnvelope }) {
                 {r.commit_sha ? `commit ${r.commit_sha.slice(0, 8)}` : 'no commit'}{r.pr_number ? ` · PR#${r.pr_number}` : ''}
                 {r.gaps.length ? ` · gaps: ${r.gaps.length}` : ''}
               </span>
+            </div>
+          ))}
+        </Section>
+
+        {/* Rework / skill attribution */}
+        <Section title="Rework / skill" count={rw.by_role.length} degraded={rw.degraded}>
+          <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>First-pass success by role (low = rework-prone)</div>
+          {rw.by_role.length === 0 ? (
+            <div style={_muted}>No role outcomes recorded.</div>
+          ) : rw.by_role.slice(0, 8).map((r, i) => (
+            <div key={i} data-testid="obs-rework-role-row" style={_row}>
+              <span style={{ fontWeight: 700, minWidth: 120 }}>{r.role}</span>
+              <span style={{ color: fpyColor(r.success_rate), fontWeight: 700 }}>{Math.round(r.success_rate * 100)}%</span>
+              <span style={{ color: 'var(--color-muted)' }}>{r.successes}/{r.total_dispatches}</span>
+            </div>
+          ))}
+          {rw.by_origin_role.length > 0 && (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--color-muted)', marginTop: 6 }}>Reworked by origin role</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {rw.by_origin_role.map((r, i) => (
+                  <span key={i} data-testid="obs-rework-origin" style={{ fontSize: 10, fontWeight: 700, color: 'var(--color-accent, #f97316)', border: '1px solid var(--color-accent, #f97316)', borderRadius: 5, padding: '1px 7px' }}>
+                    {r.origin_role}: {r.reworked}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+          {rw.recent.slice(0, 6).map((e, i) => (
+            <div key={`edge-${i}`} data-testid="obs-rework-edge" style={_row}>
+              <code style={{ fontWeight: 700 }}>{e.rework_role ?? '?'}</code>
+              <span style={{ color: 'var(--color-muted)' }}>reworked</span>
+              <span style={{ color: 'var(--color-accent, #f97316)' }}>{e.origin_role ?? '?'}</span>
+              <span style={{ color: 'var(--color-muted)' }}>{e.rework_dispatch} ← {e.origin_dispatch}</span>
             </div>
           ))}
         </Section>
