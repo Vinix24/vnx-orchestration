@@ -334,10 +334,14 @@ class SubprocessAdapter:
         }
         if cwd is not None:
             popen_kwargs["cwd"] = str(cwd)
-        if extra_env or scrub_env_keys:
+        # Always export the dispatch id so worker commits carry a provenance trace token
+        # (prepare-commit-msg hook -> trace_token_validator), closing the dispatch->commit link.
+        if extra_env or scrub_env_keys or dispatch_id:
             merged_env = os.environ.copy()
             if extra_env:
                 merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            if dispatch_id:
+                merged_env["VNX_CURRENT_DISPATCH_ID"] = dispatch_id
             for _scrub_key in (scrub_env_keys or ()):
                 merged_env.pop(_scrub_key, None)
             popen_kwargs["env"] = merged_env
