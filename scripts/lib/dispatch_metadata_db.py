@@ -116,6 +116,7 @@ def upsert_dispatch_provider_row(
     outcome_status: Optional[str] = None,
     report_path: Optional[str] = None,
     project_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> bool:
     """Create-if-absent and provider/model-stamp a ``dispatch_metadata`` row.
 
@@ -127,6 +128,8 @@ def upsert_dispatch_provider_row(
                "kimi"). Stamped when the ``model`` column exists (migration
                v23 / GAP-2). Optional — callers that don't know the model
                may omit it.
+        session_id: Pre-assigned worker session UUID (F1.1). Stamped when the
+               ``session_id`` column exists. Optional — ignored when absent/None.
 
     Raises:
         ValueError: ``dispatch_id``, ``terminal``, or ``provider`` is empty —
@@ -156,6 +159,7 @@ def upsert_dispatch_provider_row(
         has_report_path = _has_column(conn, "dispatch_metadata", "outcome_report_path")
         has_outcome = _has_column(conn, "dispatch_metadata", "outcome_status")
         has_completed = _has_column(conn, "dispatch_metadata", "completed_at")
+        has_session_id = _has_column(conn, "dispatch_metadata", "session_id")
 
         # Tenant-stamp only when the column exists (old column-less stores are
         # left untouched). Fail-closed: an unresolvable tenant logs + skips the
@@ -178,6 +182,9 @@ def upsert_dispatch_provider_row(
         if has_model and model:
             insert_cols.append("model")
             insert_vals.append(model)
+        if has_session_id and session_id:
+            insert_cols.append("session_id")
+            insert_vals.append(session_id)
         if has_project:
             insert_cols.append("project_id")
             insert_vals.append(resolved_project_id)
@@ -197,6 +204,9 @@ def upsert_dispatch_provider_row(
         if has_model and model:
             set_clauses.append("model = COALESCE(model, ?)")
             params.append(model)
+        if has_session_id and session_id:
+            set_clauses.append("session_id = COALESCE(session_id, ?)")
+            params.append(session_id)
         set_clauses.append("role = COALESCE(role, ?)")
         params.append(role or None)
         set_clauses.append("gate = COALESCE(gate, ?)")
