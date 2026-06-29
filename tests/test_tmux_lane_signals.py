@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from tmux_interactive_dispatch import TmuxInteractiveDispatch, TmuxResult  # noqa: E402
+from runtime_coordination import get_connection, get_events, init_schema  # noqa: E402
 
 HOOKS_DIR = SCRIPT_DIR / "hooks"
 SESSION_READY_HOOK = HOOKS_DIR / "tmux_signal_session_ready.sh"
@@ -187,12 +189,18 @@ class TestHookGuards(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
 
-    def _run_hook(self, script: Path, env: dict, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    def _run_hook(
+        self,
+        script: Path,
+        env: dict,
+        cwd: Path | None = None,
+        input_text: str = "{}",
+    ) -> subprocess.CompletedProcess:
         full_env = {"PATH": os.environ.get("PATH", "")}
         full_env.update(env)
         return subprocess.run(
             ["bash", str(script)],
-            input="{}",
+            input=input_text,
             capture_output=True,
             text=True,
             env=full_env,
@@ -241,6 +249,168 @@ class TestHookGuards(unittest.TestCase):
     def test_prompt_received_noop_when_env_unset(self) -> None:
         proc = self._run_hook(PROMPT_RECEIVED_HOOK, env={})
         self.assertEqual(proc.returncode, 0)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_session_ready_captures_session_id_from_stdin(self) -> None:
+        sig = self.root / "sig-sid"
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+        proc = self._run_hook(
+            SESSION_READY_HOOK,
+            env={
+                "VNX_TMUX_SIGNAL_DIR": str(sig),
+                "VNX_DISPATCH_ID": "disp-sid",
+            },
+            input_text=json.dumps({"session_id": session_id, "transcript_path": "/tmp/t.json"}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue((sig / "session_ready").is_file())
+        self.assertEqual((sig / "session_ready").read_text(encoding="utf-8").strip(), "disp-sid")
+        self.assertTrue((sig / "session_id").is_file())
+        self.assertEqual((sig / "session_id").read_text(encoding="utf-8").strip(), session_id)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_session_ready_empty_stdin_still_writes_sentinel(self) -> None:
+        sig = self.root / "sig-empty"
+        proc = self._run_hook(
+            SESSION_READY_HOOK,
+            env={
+                "VNX_TMUX_SIGNAL_DIR": str(sig),
+                "VNX_DISPATCH_ID": "disp-empty",
+            },
+            input_text="",
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue((sig / "session_ready").is_file())
+        self.assertFalse((sig / "session_id").exists())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_session_ready_garbage_stdin_still_writes_sentinel(self) -> None:
+        sig = self.root / "sig-garbage"
+        proc = self._run_hook(
+            SESSION_READY_HOOK,
+            env={
+                "VNX_TMUX_SIGNAL_DIR": str(sig),
+                "VNX_DISPATCH_ID": "disp-garbage",
+            },
+            input_text="not json {",
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue((sig / "session_ready").is_file())
+
+    def test_session_ready_no_jq_still_writes_sentinel(self) -> None:
+        sig = self.root / "sig-nojq"
+        session_id = "123e4567-e89b-12d3-a456-426614174000"
+        # Place a fake jq earlier in PATH so command -v jq succeeds but it fails
+        # to parse, simulating a broken/missing jq installation.
+        fake_bin = self.root / "fakebin"
+        fake_bin.mkdir()
+        (fake_bin / "jq").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (fake_bin / "jq").chmod(0o755)
+        proc = self._run_hook(
+            SESSION_READY_HOOK,
+            env={
+                "VNX_TMUX_SIGNAL_DIR": str(sig),
+                "VNX_DISPATCH_ID": "disp-nojq",
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            },
+            input_text=json.dumps({"session_id": session_id}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue((sig / "session_ready").is_file())
+        # With a failing jq we cannot extract the id, but the pipe must be
+        # drained and the primary sentinel still written.
+        self.assertFalse((sig / "session_id").exists())
+
+
+# ---------------------------------------------------------------------------
+# F1.1 session_id verifier: lane-side comparison
+# ---------------------------------------------------------------------------
+class TestSessionIdVerifier(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        init_schema(self.root)
+        self.lane = _make_lane(_CaptureRunner(), self.root)
+
+    def _events(self, dispatch_id: str, event_type: str) -> list[dict]:
+        with get_connection(self.root) as conn:
+            return get_events(conn, entity_id=dispatch_id, event_type=event_type)
+
+    def test_matching_session_id_emits_no_event(self) -> None:
+        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        sig = self.root / "sig-match"
+        sig.mkdir()
+        (sig / "session_id").write_text(session_uuid + "\n", encoding="utf-8")
+
+        self.lane._verify_session_id(
+            sig, session_uuid, dispatch_id="disp-match", label="T1"
+        )
+        self.assertEqual(
+            len(self._events("disp-match", "session_id_mismatch")), 0
+        )
+
+    def test_different_session_id_emits_mismatch_event(self) -> None:
+        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        sig = self.root / "sig-mismatch"
+        sig.mkdir()
+        (sig / "session_id").write_text("00000000-0000-0000-0000-000000000000\n", encoding="utf-8")
+
+        self.lane._verify_session_id(
+            sig, session_uuid, dispatch_id="disp-mismatch", label="T1"
+        )
+        events = self._events("disp-mismatch", "session_id_mismatch")
+        self.assertEqual(len(events), 1)
+        meta = json.loads(events[0]["metadata_json"])
+        self.assertEqual(meta["pre_assigned_session_id"], session_uuid)
+        self.assertEqual(meta["hook_session_id"], "00000000-0000-0000-0000-000000000000")
+
+    def test_missing_session_id_file_emits_no_event(self) -> None:
+        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        sig = self.root / "sig-missing"
+        sig.mkdir()
+
+        self.lane._verify_session_id(
+            sig, session_uuid, dispatch_id="disp-missing", label="T1"
+        )
+        self.assertEqual(
+            len(self._events("disp-missing", "session_id_mismatch")), 0
+        )
+
+    def test_empty_session_id_file_emits_no_event(self) -> None:
+        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        sig = self.root / "sig-empty"
+        sig.mkdir()
+        (sig / "session_id").write_text("\n", encoding="utf-8")
+
+        self.lane._verify_session_id(
+            sig, session_uuid, dispatch_id="disp-empty", label="T1"
+        )
+        self.assertEqual(
+            len(self._events("disp-empty", "session_id_mismatch")), 0
+        )
+
+    def test_none_session_uuid_skips_verification(self) -> None:
+        sig = self.root / "sig-none"
+        sig.mkdir()
+        (sig / "session_id").write_text("unexpected-value\n", encoding="utf-8")
+
+        self.lane._verify_session_id(
+            sig, None, dispatch_id="disp-none", label="T1"
+        )
+        self.assertEqual(
+            len(self._events("disp-none", "session_id_mismatch")), 0
+        )
+
+    def test_none_signal_dir_skips_verification(self) -> None:
+        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
+
+        self.lane._verify_session_id(
+            None, session_uuid, dispatch_id="disp-no-sig", label="T1"
+        )
+        self.assertEqual(
+            len(self._events("disp-no-sig", "session_id_mismatch")), 0
+        )
 
 
 # ---------------------------------------------------------------------------
