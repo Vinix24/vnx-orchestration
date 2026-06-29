@@ -820,6 +820,51 @@ class TmuxInteractiveDispatch:
         # Enter ALWAYS as a separate keystroke.
         return self._runner.run(["send-keys", "-t", pane_id, "Enter"]).returncode == 0
 
+    def _verify_session_id(
+        self,
+        signal_dir: "Path | None",
+        session_uuid: "str | None",
+        *,
+        dispatch_id: str,
+        label: str,
+    ) -> None:
+        """Compare the hook-reported session id to the pre-assigned uuid (F1.1).
+
+        Fires only when ``session_uuid`` is set (``VNX_TMUX_SESSION_ID`` flag ON).
+        A missing or empty ``session_id`` sentinel is fail-open: older CLIs may not
+        report the id. Only a non-empty DIFFERENT value emits a ``session_id_mismatch``
+        audit event. Never raises and never blocks the dispatch.
+        """
+        if not session_uuid:
+            return
+        if signal_dir is None:
+            return
+        sid_path = signal_dir / "session_id"
+        try:
+            if not sid_path.exists():
+                return
+            hook_session_id = sid_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.debug(
+                "interactive: failed to read hook session_id for %s: %s",
+                dispatch_id,
+                exc,
+            )
+            return
+        if not hook_session_id:
+            return
+        if hook_session_id != session_uuid:
+            self._emit_event(
+                "session_id_mismatch",
+                dispatch_id=dispatch_id,
+                label=label,
+                reason="Claude CLI session_id differs from pre-assigned VNX session_uuid",
+                metadata={
+                    "pre_assigned_session_id": session_uuid,
+                    "hook_session_id": hook_session_id,
+                },
+            )
+
     def _wait_ready(
         self,
         pane_id: str,
@@ -1872,6 +1917,14 @@ class TmuxInteractiveDispatch:
                 warmup_timeout=warmup_timeout,
                 poll_interval=warmup_poll_interval,
                 signal_dir=signal_dir,
+            )
+            # F1.1: verify the pre-assigned session id actually took (hook-reported id
+            # must match). Fail-open: only emit an audit event, never block dispatch.
+            self._verify_session_id(
+                signal_dir,
+                session_uuid,
+                dispatch_id=dispatch_id,
+                label=label,
             )
             _strict = os.environ.get("VNX_TMUX_READY_STRICT", "1").strip().lower() not in (
                 "0", "false", "no", "off"
