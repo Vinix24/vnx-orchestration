@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -204,6 +205,7 @@ def _default_launch_command(
     role: "str | None" = None,
     requires_mcp: bool = False,
     working_tree_only: bool = False,
+    session_uuid: "str | None" = None,
 ) -> str:
     """Build the interactive ``claude`` launch line (NOT ``claude -p``).
 
@@ -218,6 +220,10 @@ def _default_launch_command(
 
     ``requires_mcp``: when True, ``--strict-mcp-config --mcp-config {}`` is omitted
     so the worker keeps its normal ambient MCP config.
+
+    ``session_uuid``: when provided, ``--session-id <uuid>`` is injected after
+    ``--model`` so the worker's transcript is deterministically joinable. The uuid
+    is shlex-quoted; a None/empty value appends nothing (fail-open).
     """
     if not _SAFE_MODEL_RE.match(model):
         raise ValueError(
@@ -263,7 +269,10 @@ def _default_launch_command(
             flags = " --dangerously-skip-permissions"
     if extra_flags:
         flags = f"{flags} {extra_flags}".rstrip()
-    return f"source ~/.zshrc 2>/dev/null; claude --model {model}{flags}"
+    session_arg = ""
+    if session_uuid:
+        session_arg = f" --session-id {shlex.quote(session_uuid)}"
+    return f"source ~/.zshrc 2>/dev/null; claude --model {model}{session_arg}{flags}"
 
 
 def _sanitize_session_name(raw: str) -> str:
@@ -484,6 +493,7 @@ class TmuxInteractiveDispatch:
         pr_id: "str | None" = None,
         outcome_status: "str | None" = None,
         report_path: "str | Path | None" = None,
+        session_id: "str | None" = None,
     ) -> None:
         """Best-effort dispatch_metadata row for the leaseless tmux lane.
 
@@ -491,6 +501,9 @@ class TmuxInteractiveDispatch:
         default OFF preserves the lane's legacy behaviour (no row written).
         Uses the shared writer's COALESCE/INSERT-OR-IGNORE pattern so re-calls
         are idempotent and never clobber a richer provider-lane row.
+
+        ``session_id``: the pre-assigned worker session UUID (F1.1), stamped only
+        when the column exists and a non-empty value is provided.
 
         Fail-open: any error is logged at DEBUG and swallowed; the write must
         never block, delay, or fail the dispatch.
@@ -522,6 +535,7 @@ class TmuxInteractiveDispatch:
                 pr_id=pr_id,
                 outcome_status=outcome_status,
                 report_path=str(report_path) if report_path else None,
+                session_id=session_id,
             )
         except Exception as exc:  # noqa: BLE001 — metadata stamp is best-effort; must never block dispatch
             logger.debug(
@@ -545,6 +559,7 @@ class TmuxInteractiveDispatch:
         failure_reason: str = "tmux_receipt_deadline_exceeded",
         token_usage: "dict | None" = None,
         role: "str | None" = None,
+        session_id: "str | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -557,6 +572,9 @@ class TmuxInteractiveDispatch:
 
         ``role`` is forwarded to GovernSpec so govern() can apply role-specific
         validation logic (e.g. plan-reviewer bodies skip standard heading validation).
+
+        ``session_id``: pre-assigned worker session UUID (F1.1), threaded through to
+        the dispatch_metadata stamp.
         """
         try:
             from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
@@ -594,6 +612,7 @@ class TmuxInteractiveDispatch:
             pr_id=pr_id,
             outcome_status=outcome.contract_status,
             report_path=outcome.report_path,
+            session_id=session_id,
         )
         if outcome.report_path:
             logger.info(
@@ -756,7 +775,11 @@ class TmuxInteractiveDispatch:
 
     # -- tmux primitives ---------------------------------------------------
     def _spawn_session(
-        self, session: str, cwd: Path, dispatch_id: str = ""
+        self,
+        session: str,
+        cwd: Path,
+        dispatch_id: str = "",
+        session_uuid: "str | None" = None,
     ) -> "tuple[str, str] | None":
         """Create a detached session; return (pane_id, window_id) or None.
 
@@ -764,10 +787,15 @@ class TmuxInteractiveDispatch:
         ``VNX_CURRENT_DISPATCH_ID`` so the worker's ``git commit`` carries a provenance
         trace token (read by the prepare-commit-msg hook / trace_token_validator), closing
         the dispatch->commit link in the provenance_registry.
+
+        When ``session_uuid`` is provided it is exported as ``VNX_CLAUDE_SESSION_ID``
+        so the SessionStart hook can verify the pre-assigned id took (F1.1).
         """
         args = ["new-session", "-d", "-s", session, "-c", str(cwd)]
         if dispatch_id:
             args += ["-e", f"VNX_CURRENT_DISPATCH_ID={dispatch_id}"]
+        if session_uuid:
+            args += ["-e", f"VNX_CLAUDE_SESSION_ID={session_uuid}"]
         args += ["-P", "-F", "#{pane_id}"]
         res = self._runner.run(args)
         if res.returncode != 0:
@@ -1557,6 +1585,13 @@ class TmuxInteractiveDispatch:
                 f"'claude-opus-4-8'); whitespace and shell metacharacters are not allowed"
             )
 
+        # F1.1: pre-assign the worker's Claude session id when the session-linkage
+        # flag is on. uuid4 is always valid; a None value keeps the launch line and
+        # pane env byte-for-byte unchanged when the flag is off.
+        session_uuid: "str | None" = None
+        if os.environ.get("VNX_TMUX_SESSION_ID", "").strip().lower() in ("1", "true"):
+            session_uuid = str(uuid.uuid4())
+
         # Worktree isolation: allocate before session creation so a failed add
         # never spawns a tmux session with an uncontrolled cwd.
         worktree_handle: "WorktreeHandle | None" = None
@@ -1708,7 +1743,7 @@ class TmuxInteractiveDispatch:
         window_id: "str | None" = None
         try:
             # 1. Spawn detached session
-            spawned = self._spawn_session(session, cwd, dispatch_id)
+            spawned = self._spawn_session(session, cwd, dispatch_id, session_uuid=session_uuid)
             if spawned is None:
                 self._emit_event(
                     "interactive_spawn_failed",
@@ -1772,6 +1807,7 @@ class TmuxInteractiveDispatch:
                 role=role,
                 requires_mcp=requires_mcp,
                 working_tree_only=working_tree_only,
+                session_uuid=session_uuid,
             )
 
             # FIX 1: Final-command guard — bites regardless of how the command
@@ -1859,6 +1895,7 @@ class TmuxInteractiveDispatch:
                     model=model,
                     failure_reason="interactive_ready_timeout",
                     role=role,
+                    session_id=session_uuid,
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -1968,6 +2005,7 @@ class TmuxInteractiveDispatch:
                     model=model,
                     failure_reason="submit_failed",
                     role=role,
+                    session_id=session_uuid,
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -2025,6 +2063,7 @@ class TmuxInteractiveDispatch:
                     model=model,
                     failure_reason="interactive_no_progress",
                     role=role,
+                    session_id=session_uuid,
                 )
                 _teardown("no_progress")
                 return InteractiveDispatchResult(
@@ -2066,6 +2105,7 @@ class TmuxInteractiveDispatch:
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
                     role=role,
+                    session_id=session_uuid,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -2107,6 +2147,7 @@ class TmuxInteractiveDispatch:
                 model=model,
                 token_usage=_pane_tokens,
                 role=role,
+                session_id=session_uuid,
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.

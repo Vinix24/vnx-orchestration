@@ -544,6 +544,94 @@ class TestNoDashP(_LaneTestCase):
         self.assertIn("--verbose", safe)
         self.assertNotIn("-p", safe.split())
 
+    def test_session_uuid_injected_when_set(self):
+        """F1.1 slice B: --session-id <uuid> is injected after --model and passes the headless guard."""
+        session_uuid = "11111111-2222-3333-4444-555555555555"
+        cmd = _default_launch_command("sonnet", session_uuid=session_uuid)
+
+        self.assertIn("claude --model sonnet", cmd)
+        # Exactly one --session-id occurrence, immediately followed by the quoted uuid.
+        self.assertEqual(cmd.count("--session-id"), 1)
+        self.assertIn(f"--session-id {session_uuid}", cmd)
+        # Must still be an interactive launch (no -p/--print).
+        _assert_no_headless_flags(cmd)
+        # The uuid is shlex-quoted; uuid4 chars are safe, but quote must not add unwanted wrappers here.
+        self.assertNotIn("'", cmd.split("--session-id")[1].split()[0])
+
+    def test_session_uuid_none_unchanged_launch(self):
+        """F1.1 slice B: when session_uuid is None the launch line is byte-for-byte unchanged."""
+        cmd_without = _default_launch_command("sonnet")
+        cmd_with_none = _default_launch_command("sonnet", session_uuid=None)
+        self.assertEqual(cmd_with_none, cmd_without)
+        self.assertNotIn("--session-id", cmd_with_none)
+
+
+class TestSessionLinkageDispatch(_LaneTestCase):
+    """F1.1 slice B: end-to-end session linkage through a dispatch() call."""
+
+    def test_session_id_flag_on_injects_uuid(self):
+        """VNX_TMUX_SESSION_ID=1: launch command has --session-id and new-session exports VNX_CLAUDE_SESSION_ID."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        with patch.dict(os.environ, {"VNX_TMUX_SESSION_ID": "1"}):
+            result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+
+        # Extract the literal launch command sent to the pane.
+        literal_cmds = [c for c in fake.commands if c and c[0] == "send-keys" and "-l" in c]
+        self.assertTrue(literal_cmds, "literal send-keys for launch command not found")
+        launch_cmd = literal_cmds[0][-1]
+
+        # Exactly one --session-id <uuid4>.
+        self.assertEqual(launch_cmd.count("--session-id"), 1)
+        parts = launch_cmd.split()
+        idx = parts.index("--session-id")
+        session_arg = parts[idx + 1]
+        self.assertRegex(
+            session_arg,
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
+
+        # new-session exports both VNX_CURRENT_DISPATCH_ID and VNX_CLAUDE_SESSION_ID.
+        new_session_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertTrue(new_session_cmds)
+        ns_cmd = new_session_cmds[0]
+        self.assertIn("-e", ns_cmd)
+        dispatch_env = f"VNX_CURRENT_DISPATCH_ID={self.DISPATCH_ID}"
+        session_env = f"VNX_CLAUDE_SESSION_ID={session_arg}"
+        self.assertIn(dispatch_env, ns_cmd)
+        self.assertIn(session_env, ns_cmd)
+
+        # _assert_no_headless_flags must accept the assembled command (interactive only).
+        _assert_no_headless_flags(launch_cmd)
+
+    def test_session_id_flag_off_unchanged(self):
+        """VNX_TMUX_SESSION_ID unset: no --session-id in launch, no VNX_CLAUDE_SESSION_ID env."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        with patch.dict(os.environ, {"VNX_TMUX_SESSION_ID": "0"}):
+            result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+
+        literal_cmds = [c for c in fake.commands if c and c[0] == "send-keys" and "-l" in c]
+        launch_cmd = literal_cmds[0][-1]
+        self.assertNotIn("--session-id", launch_cmd)
+
+        new_session_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        ns_cmd = new_session_cmds[0]
+        self.assertNotIn("VNX_CLAUDE_SESSION_ID", " ".join(ns_cmd))
+        self.assertIn("VNX_CURRENT_DISPATCH_ID", " ".join(ns_cmd))
+
 
 class TestStaleReceiptGuard(_LaneTestCase):
     def test_stale_receipt_does_not_complete(self):

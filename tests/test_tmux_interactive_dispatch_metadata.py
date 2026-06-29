@@ -88,6 +88,7 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
     monkeypatch.setenv("VNX_TMUX_SESSION_ID", "1")
     state_dir = _bootstrap_state(tmp_path)
     lane = _make_lane(state_dir)
+    session_id = "11111111-2222-3333-4444-555555555555"
 
     report_path = lane._govern_report(
         dispatch_id="20260628-tmux-meta-1",
@@ -98,6 +99,7 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
         model="sonnet",
         role="backend-developer",
         pr_id="42",
+        session_id=session_id,
     )
 
     assert report_path == fake_govern.report_path
@@ -114,7 +116,7 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
     assert row["outcome_status"] == "authored"
     assert row["outcome_report_path"] == str(fake_govern.report_path)
     assert row["project_id"] == "vnx-dev"
-    assert row["session_id"] is None
+    assert row["session_id"] == session_id
 
 
 def test_metadata_row_not_written_when_flag_unset(tmp_path, monkeypatch, fake_govern):
@@ -191,6 +193,42 @@ def test_metadata_track_defaults_to_headless_for_non_terminal_label(
     assert row is not None
     assert row["terminal"] == "ephemeral"
     assert row["track"] == "headless"
+
+
+def test_metadata_session_id_coalesce_preserved_on_second_call(
+    tmp_path, monkeypatch, fake_govern
+):
+    """A pre-assigned session_id must never be clobbered by a later call with None."""
+    monkeypatch.setenv("VNX_TMUX_SESSION_ID", "1")
+    state_dir = _bootstrap_state(tmp_path)
+    lane = _make_lane(state_dir)
+    session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    lane._govern_report(
+        dispatch_id="20260628-tmux-meta-coalesce",
+        terminal_id="T1",
+        instruction="do the thing",
+        receipt={"status": "done"},
+        duration_seconds=1.0,
+        model="sonnet",
+        role="backend-developer",
+        session_id=session_id,
+    )
+    lane._govern_report(
+        dispatch_id="20260628-tmux-meta-coalesce",
+        terminal_id="T1",
+        instruction="do the thing",
+        receipt={"status": "done"},
+        duration_seconds=1.0,
+        model="sonnet",
+        role="backend-developer",
+        session_id=None,
+    )
+
+    db = state_dir / "quality_intelligence.db"
+    row = _read_row(db, "20260628-tmux-meta-coalesce")
+    assert row is not None
+    assert row["session_id"] == session_id
 
 
 if __name__ == "__main__":
