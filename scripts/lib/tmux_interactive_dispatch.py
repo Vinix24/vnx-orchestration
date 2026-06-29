@@ -91,8 +91,19 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
     def _dedup_receipts(receipts):  # type: ignore[misc]
         return receipts[-1] if receipts else None
 
+# Shared dispatch_metadata writer — keeps the leaseless tmux lane provider-aware.
+# Imported defensively; if unavailable the lane degrades to its prior behaviour.
+try:
+    from dispatch_metadata_db import upsert_dispatch_provider_row as _upsert_dispatch_metadata  # noqa: E402
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    _upsert_dispatch_metadata = None  # type: ignore[misc]
+
 # Only simple identifiers are valid model names (no whitespace or shell metacharacters).
 _SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+# Terminal → track mapping shared with headless provider lanes. The leaseless
+# tmux lane borrows it so T1/T2/T3 dispatches land in tracks A/B/C.
+_TERMINAL_TRACK = {"T1": "A", "T2": "B", "T3": "C"}
 
 # Allowlist for extra_flags tokens: long flags (--foo, --foo=bar, --foo=bar.baz-qux),
 # short flags (-f), and short flags with values (-f val treated as two tokens).
@@ -463,6 +474,62 @@ class TmuxInteractiveDispatch:
         import report_body_contract as _rbc  # noqa: PLC0415
         return body + "\n\n" + _rbc.build_directive(dispatch_id or "", pr_id=pr_id)
 
+    def _stamp_dispatch_metadata(
+        self,
+        dispatch_id: str,
+        terminal_id: str,
+        *,
+        model: "str | None" = None,
+        role: "str | None" = None,
+        pr_id: "str | None" = None,
+        outcome_status: "str | None" = None,
+        report_path: "str | Path | None" = None,
+    ) -> None:
+        """Best-effort dispatch_metadata row for the leaseless tmux lane.
+
+        Flag-gated by ``VNX_TMUX_SESSION_ID`` (truthy values: "1"/"true");
+        default OFF preserves the lane's legacy behaviour (no row written).
+        Uses the shared writer's COALESCE/INSERT-OR-IGNORE pattern so re-calls
+        are idempotent and never clobber a richer provider-lane row.
+
+        Fail-open: any error is logged at DEBUG and swallowed; the write must
+        never block, delay, or fail the dispatch.
+        """
+        if os.environ.get("VNX_TMUX_SESSION_ID", "").strip().lower() not in ("1", "true"):
+            return
+
+        if _upsert_dispatch_metadata is None:
+            logger.debug(
+                "interactive: dispatch_metadata writer unavailable for dispatch=%s",
+                dispatch_id,
+            )
+            return
+
+        try:
+            # All setup inside the guard: the metadata stamp must be fully fail-open,
+            # including db_path/track computation (gate finding) — never propagate to dispatch.
+            db_path = self._state_dir / "quality_intelligence.db"
+            track = _TERMINAL_TRACK.get(terminal_id, "headless")
+            _upsert_dispatch_metadata(
+                db_path,
+                dispatch_id=dispatch_id,
+                terminal=terminal_id,
+                provider="claude",
+                model=model,
+                track=track,
+                role=role,
+                gate=None,
+                pr_id=pr_id,
+                outcome_status=outcome_status,
+                report_path=str(report_path) if report_path else None,
+            )
+        except Exception as exc:  # noqa: BLE001 — metadata stamp is best-effort; must never block dispatch
+            logger.debug(
+                "interactive: dispatch_metadata stamp failed for dispatch=%s (non-fatal): %s",
+                dispatch_id,
+                exc,
+            )
+
     def _govern_report(
         self,
         dispatch_id: str,
@@ -519,6 +586,15 @@ class TmuxInteractiveDispatch:
             token_usage=token_usage,
         )
         outcome = govern(spec, raw, lane="tmux_interactive")
+        self._stamp_dispatch_metadata(
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            model=model,
+            role=role,
+            pr_id=pr_id,
+            outcome_status=outcome.contract_status,
+            report_path=outcome.report_path,
+        )
         if outcome.report_path:
             logger.info(
                 "interactive: govern() emitted report dispatch=%s "
