@@ -24,7 +24,9 @@ if _LIB not in sys.path:
 
 import config_registry  # noqa: E402  (after the scripts/lib path guard above)
 
-_wired = False
+# Keyed by (state_dir_str, project_id) so a second project in the same process gets its own store.
+# Value is True when that (state_dir, project_id) pair is wired; False / absent otherwise.
+_wired_for: "dict[tuple[str, str], bool]" = {}
 
 
 def _resolve_state_dir(state_dir: "str | Path | None") -> Optional[Path]:
@@ -50,12 +52,10 @@ def _resolve_project_id(state_dir: Path, project_id: Optional[str]) -> Optional[
 def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = None) -> bool:
     """Wire config_registry's DB resolver + default project for this runtime process.
 
-    Returns True once wired. Idempotent (subsequent calls are O(1)); fail-soft — any missing state
-    dir / project_id / DB leaves the registry env-only and returns False (it may succeed on a later
-    call once the runtime state exists)."""
-    global _wired
-    if _wired:
-        return True
+    Keyed by (state_dir, project_id): if the same pair is requested again it is a fast no-op
+    (idempotent); a DIFFERENT project_id re-wires to that project's store. Fail-soft — any missing
+    state dir / project_id / DB leaves the registry env-only and returns False."""
+    global _wired_for
     try:
         sd = _resolve_state_dir(state_dir)
         if sd is None:
@@ -63,14 +63,19 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
         pid = _resolve_project_id(sd, project_id)
         if not pid:
             return False
-        db = sd / "runtime_coordination.db"
-        if not db.exists():
-            return False
+        wire_key = (str(sd), pid)
+        if not _wired_for.get(wire_key):
+            # First time for this pair: confirm the DB exists before wiring.
+            if not (sd / "runtime_coordination.db").exists():
+                return False
+        # Always (re)apply the global registry state for the requested pair, so a switch
+        # back to a previously-wired project restores ITS resolver + default — a bare cache
+        # hit would otherwise leave the registry pointed at the last-wired project.
         import config_store_db
         resolved = sd
         config_registry.set_db_resolver(config_store_db.make_db_resolver(lambda _pid: resolved))
         config_registry.set_default_project_id(pid)
-        _wired = True
+        _wired_for[wire_key] = True
         return True
     except Exception:
         return False
@@ -83,6 +88,6 @@ def get(key: str) -> Optional[str]:
 
 
 def get_bool(key: str) -> bool:
-    """Bool view of get() — true only for the canonical "1" (matches the read-sites)."""
+    """Bool view of get() — true for any truthy spelling (1/true/yes/on), via config_registry.get_bool."""
     autowire()
     return config_registry.get_bool(key)
