@@ -4,6 +4,8 @@
 **Scope**: The shift from interactive tmux-based execution to headless subprocess workers  
 **Status**: Retrospective — written after the transition completed
 
+> **Update (post-June-15 2026):** Anthropic's June-15 billing change moved headless `claude -p` onto paid API credits while interactive Claude Code stayed on the subscription. That reversed the end-state for the **Claude** worker: the default Claude lane is now the interactive **tmux-spawn** lane (subscription-preserving), and headless `claude -p` is opt-in and blocked by default. "Headless" below still describes the non-Claude provider lanes (`provider_dispatch`: kimi/glm/deepseek/codex) and the opt-in burst lane — not the default for the Claude worker. Read this doc as the evolution story, with that correction applied.
+
 ---
 
 ## The "Before" Picture

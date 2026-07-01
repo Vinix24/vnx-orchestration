@@ -50,9 +50,11 @@ Filed and tracked in `ROADMAP.yaml`; not part of this batch:
 - **#869** — operator-runbook automation (automating the §7.2 runtime-migration runbook).
 - Additional follow-ups **#865**, **#870**, **#874** are filed against the 1.x line.
 
-## [1.0.0] — 2026-06-10
+## [1.0.0] — Unreleased (release candidate)
 
-First public release. Everything below is the rc9 → 1.0.0 delta; the rc-series
+The 1.0.0 release candidate. The code is at 1.0.0 and pip-installable from a
+checkout; the PyPI publish is the one remaining ship gate (this date is set when
+the tag is cut). Everything below is the rc9 → 1.0.0 delta; the rc-series
 entries that follow document the road there.
 
 ### Added

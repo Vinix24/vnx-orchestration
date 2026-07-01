@@ -1,10 +1,12 @@
 # Known Limitations & Scope
 
+> **Note on the model below (2026-07):** the fixed T0 + Track A/B/C + T-MANAGER terminal layout described in this "Tested" section is the **opt-in subprocess lane** (`VNX_ADAPTER_T{n}=subprocess`). The **default** since the door-flip is the single-entry dispatch door with **ephemeral per-dispatch workers** (spawned per task, leaving receipts + worktree state behind), not fixed terminals. See the README and `docs/core/DISPATCH_RULES.md` for the current lanes; live per-feature status lives in `ROADMAP.yaml`.
+
 ## Tested
 - 5 terminals: T0 (orchestrator) + Track A / Track B / Track C (workers) + T-MANAGER (system maintenance)
 - Claude Code + Codex CLI + Gemini CLI + Kimi CLI (provider auto-detection via session_resolver)
 - Single-repository workflows (one VNX instance per project)
-- Deployed across 3 independent projects (SaaS SEO tool, marketing website, VNX itself) via `vnx update`
+- Deployed across 4 independent projects (SaaS SEO tool, marketing website, Mission Control, VNX itself)
 - Receipt-based cost observability (V4 — receipt_processor with git provenance per receipt)
 - Graceful crash recovery via ledger replay
 - T0 orchestrator: Claude Opus via Claude Code
