@@ -29,6 +29,12 @@ from typing import Set
 
 _LANES = ("subprocess_dispatch", "provider_dispatch", "tmux_interactive_dispatch")
 
+# NOTE ON REACH: these patterns catch literal lane-script filename references in spawn/exec
+# contexts and direct delivery-function calls. A FULLY dynamic construction (e.g. a lane name
+# assembled from fragments, or an `importlib.import_module` / `__import__` caller) is out of
+# static-regex reach by design. The runtime pretooluse spawn-guard hooks are the enforcing
+# backstop for those; this static scan is the audit-surface ledger for the reachable shapes.
+#
 # Real DELIVERY invocations (not a docstring mention): the lane script named in a spawn/exec
 # context, or a delivery-function CALL. Comment/docstring lines are skipped before matching.
 _DELIVERY_PATTERNS = [
