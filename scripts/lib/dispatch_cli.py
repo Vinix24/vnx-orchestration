@@ -51,6 +51,12 @@ from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # n
 from dispatch_serialization import force_release, serialize_lane  # noqa: E402
 
 
+class _InvariantViolation(Exception):
+    """A door closed-set or permit invariant was breached — a should-never-happen,
+    security-relevant event, categorically distinct from a transient runtime error.
+    Surfaced with its own reject code so the audit signal is not masked (audit finding A7)."""
+
+
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
@@ -587,7 +593,10 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                 logger.debug("[dispatch_cli] scout pre-pass skipped: %s", exc)
 
         permit = issue_permit(plan)
-        require_permit(plan, permit)  # P1-#6: door backstop for BOTH lanes
+        try:
+            require_permit(plan, permit)  # P1-#6: door backstop for BOTH lanes
+        except PermissionError as exc:
+            raise _InvariantViolation(f"permit invariant breached: {exc}") from exc
         fp = fingerprint(permit)
         logger.info("[dispatch_cli] permit fingerprint: %s", fp)
 
@@ -616,10 +625,17 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                     role=vspec.spec.role,
                 )
             else:
-                raise ValueError(
-                    f"[dispatch_cli] closed set violated — unknown lane: {plan.lane!r}"
+                raise _InvariantViolation(
+                    f"closed set violated — unknown lane: {plan.lane!r}"
                 )
 
+    except _InvariantViolation as exc:
+        logger.error(
+            "[dispatch_cli] INVARIANT VIOLATION dispatch=%s: %s",
+            getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
+        )
+        print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
