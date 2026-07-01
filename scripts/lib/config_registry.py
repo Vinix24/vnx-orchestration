@@ -143,9 +143,19 @@ def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
     return entry.default if entry is not None else None
 
 
+_TRUTHY = frozenset(("1", "true", "yes", "on"))
+
+
 def get_bool(key: str, project_id: Optional[str] = None) -> bool:
-    """Bool view of get(): true only for the canonical truthy "1" (matches the read-sites)."""
-    return get(key, project_id) == "1"
+    """Bool view of get(): true for canonical truthy values (1/true/yes/on, case-insensitive).
+
+    Applies to every source the precedence chain returns (VNX_OVERRIDE_* env vars, regular env
+    vars, and per-project DB values): any truthy spelling resolves True, not just the literal "1".
+    """
+    val = get(key, project_id)
+    if val is None:
+        return False
+    return val.strip().lower() in _TRUTHY
 
 
 def all_effective(project_id: Optional[str] = None) -> List[dict]:
