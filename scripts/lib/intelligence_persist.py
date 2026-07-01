@@ -15,10 +15,13 @@ Tables written:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+_LOG = logging.getLogger(__name__)
 
 try:
     from project_scope import current_project_id
@@ -155,8 +158,10 @@ def persist_signals_to_db(
     if not signals or not db_path.exists():
         return {"patterns_upserted": 0, "antipatterns_upserted": 0, "metadata_updated": 0}
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 10000")
     now = datetime.now(timezone.utc).isoformat()
 
     patterns_upserted = 0
@@ -405,8 +410,10 @@ def update_confidence_from_outcome(
     # Local import to keep the module standalone-importable.
     from confidence_reconcile import beta_score, SUCCESS_PATTERN_PREFIX
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 10000")
     now = datetime.now(timezone.utc).isoformat()
     boosted = 0
     decayed = 0
@@ -491,9 +498,13 @@ def update_confidence_from_outcome(
                 )
                 decayed += 1
 
-        # Record a confidence_events audit row (best-effort — table/columns may
-        # not exist yet on older DBs). Columns are appended only when present so
-        # the same insert works across every migration level.
+        # Record a confidence_events audit row in the SAME transaction as the
+        # confidence UPDATE above so they commit atomically (or roll back together).
+        # Columns are appended only when present so the insert works across every
+        # migration level.  Schema-absent errors (table/column not yet migrated)
+        # are silently skipped; resource errors (locked, disk-full) are logged at
+        # WARNING so the lost-audit case is never silent.
+        _SCHEMA_ABSENT_MSGS = ("no such table", "no such column", "has no column")
         try:
             ce_cols = ["dispatch_id", "terminal", "outcome", "patterns_boosted",
                        "patterns_decayed", "confidence_change", "occurred_at"]
@@ -511,8 +522,21 @@ def update_confidence_from_outcome(
                 f"VALUES ({placeholders})",
                 ce_vals,
             )
-        except sqlite3.OperationalError:
-            pass  # Table not yet migrated in older DBs
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if any(token in msg for token in _SCHEMA_ABSENT_MSGS):
+                pass  # vnx-silent-except: table/column not yet migrated in older DBs
+            else:
+                # Resource error (locked/disk-full): roll back the confidence UPDATE too so it
+                # never commits without its audit row (atomic). Fail-open + visible: the caller
+                # gets an audit-consistent no-op, not an exception, and the loss is logged.
+                _LOG.warning(
+                    "intelligence_persist: confidence_events audit insert failed — rolling back "
+                    "the confidence update to stay atomic (dispatch=%s): %s",
+                    dispatch_id, exc,
+                )
+                conn.rollback()
+                return {"boosted": 0, "decayed": 0}
 
         conn.commit()
     except Exception:

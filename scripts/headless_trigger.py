@@ -310,31 +310,34 @@ def silence_watchdog(
     if trigger_state.shutdown_event.is_set():
         return
 
-    dispatches_base = state_dir.parent / "dispatches"
-    anomalies = (
-        check_stale_leases(state_dir)
-        + _scan_old_files(dispatches_base / "active", _ORPHANED_DISPATCH_SECONDS)
-        + _scan_old_files(dispatches_base / "pending", _STUCK_PENDING_SECONDS)
-    )
+    try:
+        dispatches_base = state_dir.parent / "dispatches"
+        anomalies = (
+            check_stale_leases(state_dir)
+            + _scan_old_files(dispatches_base / "active", _ORPHANED_DISPATCH_SECONDS)
+            + _scan_old_files(dispatches_base / "pending", _STUCK_PENDING_SECONDS)
+        )
 
-    if anomalies:
-        _LOG.info("Layer 2 anomalies (%d): %s", len(anomalies), anomalies[:3])
-        if _haiku_enabled():
-            classification = llm_triage(anomalies)
-            _LOG.info("Haiku classification: %s", classification)
-            if classification == "stuck":
+        if anomalies:
+            _LOG.info("Layer 2 anomalies (%d): %s", len(anomalies), anomalies[:3])
+            if _haiku_enabled():
+                classification = llm_triage(anomalies)
+                _LOG.info("Haiku classification: %s", classification)
+                if classification == "stuck":
+                    trigger_headless_t0("silence_anomaly", anomalies, state_dir, dry_run, trigger_state)
+            else:
                 trigger_headless_t0("silence_anomaly", anomalies, state_dir, dry_run, trigger_state)
         else:
-            trigger_headless_t0("silence_anomaly", anomalies, state_dir, dry_run, trigger_state)
-    else:
-        _LOG.debug("Layer 2: no anomalies detected")
+            _LOG.debug("Layer 2: no anomalies detected")
 
-    _maybe_autopilot_tick(state_dir, dry_run)
-
-    if not trigger_state.shutdown_event.is_set():
-        t = threading.Timer(interval, silence_watchdog, [state_dir, interval, trigger_state, dry_run])
-        t.daemon = True
-        t.start()
+        _maybe_autopilot_tick(state_dir, dry_run)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("Layer 2: transient error in watchdog body (will reschedule): %s", exc)
+    finally:
+        if not trigger_state.shutdown_event.is_set():
+            t = threading.Timer(interval, silence_watchdog, [state_dir, interval, trigger_state, dry_run])
+            t.daemon = True
+            t.start()
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +410,14 @@ class ReceiptWatcher:
             return
 
         current_size = self.receipts_path.stat().st_size
-        if current_size <= self._file_pos:
+        if current_size < self._file_pos:
+            # File was truncated or rotated — re-seed to start of new content.
+            _LOG.info(
+                "Layer 0: receipt file truncated (pos=%d, size=%d) — re-seeding",
+                self._file_pos, current_size,
+            )
+            self._file_pos = 0
+        if current_size == self._file_pos:
             return
 
         try:
