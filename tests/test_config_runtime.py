@@ -31,11 +31,11 @@ def _clean(monkeypatch):
         monkeypatch.delenv(f"VNX_OVERRIDE_{cr._bare(k)}", raising=False)
     monkeypatch.delenv("VNX_STATE_DIR", raising=False)
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-    crt._wired = False
+    crt._wired_for.clear()
     cr.set_db_resolver(None)
     cr.set_default_project_id(None)
     yield
-    crt._wired = False
+    crt._wired_for.clear()
     cr.set_db_resolver(None)
     cr.set_default_project_id(None)
 
@@ -95,8 +95,8 @@ def test_autowire_failsoft_without_db(tmp_path):
 def test_autowire_is_idempotent(tmp_path):
     sd = _state_dir_with(tmp_path, "VNX_SCOUT_PREPASS", "1")
     assert crt.autowire(state_dir=sd, project_id=PID) is True
-    # a second call (even with a bogus dir) keeps the first wiring and returns True
-    assert crt.autowire(state_dir=tmp_path / "bogus", project_id="other") is True
+    # A second call with the same (state_dir, project_id) is a fast no-op and still returns True.
+    assert crt.autowire(state_dir=sd, project_id=PID) is True
     assert crt.get_bool("VNX_SCOUT_PREPASS") is True
 
 

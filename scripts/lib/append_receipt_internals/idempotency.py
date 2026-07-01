@@ -105,7 +105,17 @@ def _compute_idempotency_key(receipt: Dict[str, Any], event_name: str) -> str:
         and "task_id" not in digest_fields
         and "report_path" not in digest_fields
     ):
-        digest_fields["timestamp"] = receipt.get("timestamp")
+        ts = receipt.get("timestamp")
+        if ts and str(ts).strip():
+            digest_fields["timestamp"] = ts
+        else:
+            # No stable identifying field and no timestamp: use a content hash of the full receipt
+            # so that two genuinely distinct receipts still get distinct idempotency keys instead
+            # of collapsing to the same null/empty hash and silently dropping the second one.
+            content_hash = hashlib.sha256(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            digest_fields["_content_hash"] = content_hash
 
     if not digest_fields:
         digest_fields = receipt
@@ -178,7 +188,9 @@ def _write_receipt_under_lock(
             recent_keys = {entry["key"] for entry in cache_entries}
 
             if idempotency_key in recent_keys:
-                _write_cache(cache_path, cache_entries)
+                # Do NOT rewrite the cache on a duplicate hit: rewriting would trim it to
+                # max_entries=2048 and could evict in-window keys we still need for dedup.
+                # The cache is already correct and fresh — just skip the append.
                 return AppendResult(
                     status="duplicate",
                     receipts_file=receipt_path,
