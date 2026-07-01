@@ -362,7 +362,12 @@ def append_receipt_payload(
     if result.status == "appended":
         # Phase 6 P3 dual-write: drain persisted mirror debt before attempting
         # the current central write so transient mirror failures are repaired.
-        _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
+        # Best-effort only — the durable local write already succeeded; a mirror
+        # failure (including pending-queue I/O) must never fail the append.
+        try:
+            _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("payload: central mirror drain failed (best-effort, ignoring): %s", exc)
         if not skip_enrichment:
             _run_post_append_hooks(receipt)
 
