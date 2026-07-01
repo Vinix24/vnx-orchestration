@@ -224,7 +224,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 **Representative implementations**
 - `hooks/stop_hook.py`
 - `scripts/lib/report_assembler.py`
-- `scripts/lib/haiku_classifier.py`
+- `scripts/lib/classifier_providers/haiku_provider.py`
 - `scripts/lib/t0_state_builder.py`
 
 **Outcome**
@@ -261,11 +261,11 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 - Benchmark scores: Level-1 100%, Level-2 73–87%, Level-3 67–78%.
 - Fixture-mode tagging separates benchmark runs from production execution.
 
-**Representative implementations**
-- `scripts/lib/t0_decision_framework.py`
-- `scripts/lib/t0_gate_locks.py`
-- `scripts/lib/t0_context_assembler.py`
-- `scripts/benchmark/t0_replay_harness.py`
+**Representative components**
+- T0 decision pre-filter + taxonomy (the deterministic pre-LLM filter)
+- Gate locks: `.vnx-data/state/gate_locks/<gate-id>.lock`, enforced by the closure/gate machinery (`scripts/closure_verifier.py`)
+- Context assembler: `scripts/lib/context_assembler.py`
+- F39 replay harness: `scripts/f39/replay_harness/`
 
 **Outcome**
 - T0 can make correct decisions autonomously in the majority of cases.
