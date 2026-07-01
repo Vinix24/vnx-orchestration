@@ -154,22 +154,49 @@ _psr_update_dispatch_outcome() {
     local dispatch_id="$1" event_type="$2" status="$3" report_path="$4" timestamp="$5"
     [ -n "$dispatch_id" ] || return 0
     case "$event_type" in task_complete|task_failed|task_timeout) ;; *) return 0 ;; esac
-    python3 -c "
-import sqlite3, sys
+    # Report-derived values (dispatch_id/status/report_path/timestamp) are passed as argv, NOT
+    # interpolated into the Python source (a crafted report status must not be able to inject Python
+    # at the shell→heredoc boundary — codex G2-boundary). The quoted <<'PY' delimiter disables all
+    # shell expansion inside the body.
+    python3 - "$SCRIPTS_DIR" "$dispatch_id" "$status" "${report_path:-}" "$timestamp" <<'PY' 2>/dev/null || log "WARN" "Failed to update dispatch_metadata outcome (non-fatal)"
+import json, sqlite3, sys
 from pathlib import Path
-sys.path.insert(0, str(Path('$SCRIPTS_DIR') / 'lib'))
+scripts_dir, dispatch_id, status, report_path, timestamp = sys.argv[1:6]
+sys.path.insert(0, str(Path(scripts_dir) / 'lib'))
 from vnx_paths import ensure_env
 p = ensure_env()
+# G2: if a phantom-guard corrective receipt already rejected this dispatch,
+# downgrade the persisted outcome_status to failed. Fail-open: any read error
+# leaves the original status untouched.
+ledger = Path(p['VNX_STATE_DIR']) / 't0_receipts.ndjson'
+try:
+    if ledger.exists():
+        with ledger.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                if r.get('dispatch_id') == dispatch_id and r.get('phantom_rejected') is True:
+                    status = 'failed'
+                    break
+except Exception:
+    pass
 db = Path(p['VNX_STATE_DIR']) / 'quality_intelligence.db'
 if not db.exists(): sys.exit(0)
 conn = sqlite3.connect(str(db))
 conn.execute(
     'UPDATE dispatch_metadata SET outcome_status=?, outcome_report_path=?, completed_at=? WHERE dispatch_id=? AND outcome_status IS NULL',
-    ('$3', '${4:-}', '$5', '$1')
+    (status, report_path, timestamp, dispatch_id)
 )
 conn.commit()
 conn.close()
-" 2>/dev/null || log "WARN" "Failed to update dispatch_metadata outcome (non-fatal)"
+PY
     python3 "$SCRIPTS_DIR/update_dispatch_cqs.py" --dispatch-id "$dispatch_id" 2>/dev/null \
         || log "WARN" "Failed to update dispatch CQS (non-fatal)"
 }

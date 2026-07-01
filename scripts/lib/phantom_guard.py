@@ -260,6 +260,46 @@ def record_phantom_if_any(
     return verdict
 
 
+def record_guard_error(
+    *,
+    dispatch_id: str,
+    receipts_file: Optional[str],
+    error: object,
+) -> None:
+    """Best-effort audit signal that the phantom-guard itself errored (fail-open backstop, G4).
+
+    The guard is the single completion chokepoint; if it raises, detection fails open. This
+    appends a non-actionable ``phantom_guard_error`` receipt so the failure is recoverable from
+    the ledger, not just a scrolled log line. Never raises.
+    """
+    _LOG.error("phantom_guard: GUARD ERROR dispatch=%s — %s", dispatch_id, error)
+    if not receipts_file:
+        return
+    try:
+        import os  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+        _scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+        from append_receipt import append_receipt_payload  # noqa: PLC0415
+        append_receipt_payload(
+            {
+                "event_type": "phantom_guard_error",
+                "dispatch_id": dispatch_id,
+                "status": "guard_error",
+                "guard_error": str(error),
+                "source": "phantom_guard",
+                "synthesized": False,
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            receipts_file=str(receipts_file),
+            cache_window_seconds=0,
+        )
+    except Exception as exc:  # noqa: BLE001 — never break the caller on an audit-append failure
+        _LOG.error("phantom_guard: guard-error signal append failed dispatch=%s: %s", dispatch_id, exc)
+
+
 def _extract_token_usage(receipt: Mapping[str, Any]) -> Optional[int]:
     """Best-effort total token count from a receipt; None when unmeasured (e.g. kimi-cli)."""
     tu = receipt.get("token_usage")
