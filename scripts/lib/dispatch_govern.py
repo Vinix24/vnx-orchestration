@@ -282,7 +282,16 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)
+        logger.error("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)
+        try:
+            from phantom_guard import record_guard_error  # noqa: PLC0415
+            record_guard_error(
+                dispatch_id=dispatch_id,
+                receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+                error=exc,
+            )
+        except Exception:  # noqa: BLE001 — the guard-error audit signal must never make govern fatal
+            logger.error("govern: guard-error audit signal itself failed dispatch=%s", dispatch_id)
     return outcome
 
 
