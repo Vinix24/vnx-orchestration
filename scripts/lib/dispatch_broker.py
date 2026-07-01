@@ -122,7 +122,7 @@ def _write_atomic(path: Path, content: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         tmp.write_text(content, encoding="utf-8")
-        tmp.rename(path)
+        os.replace(tmp, path)  # atomic; overwrites an existing target (unlike Path.rename on some platforms)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)

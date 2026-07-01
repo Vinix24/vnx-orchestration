@@ -13,8 +13,14 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+try:
+    from fastapi import FastAPI
+    from fastapi.responses import HTMLResponse
+except ImportError as _exc:  # opt-in dashboard extra
+    raise SystemExit(
+        "The aggregator dashboard needs the optional dashboard deps. "
+        "Install them with:  pip install 'vnx-orchestration[dashboard]'"
+    ) from _exc
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from scripts.aggregator import DEFAULT_AGGREGATOR_DB, DEFAULT_AGGREGATOR_DIR
