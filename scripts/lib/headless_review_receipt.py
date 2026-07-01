@@ -191,8 +191,8 @@ def validate_gate_result(d: Dict[str, Any]) -> List[ValidationError]:
     if not contract_hash and status == "pass":
         errors.append(ValidationError(
             field="contract_hash",
-            severity="warning",
-            message="contract_hash is empty for a passing gate",
+            severity="error",
+            message="contract_hash is required for a passing gate",
         ))
 
     # Contradictory: pass + blocking findings
