@@ -1,9 +1,9 @@
 # Glass Box Governance: An Append-Only Audit Architecture for Multi-Agent AI Workflows
 
-**Author**: Vincent van de Th
+**Author**: Vincent van Deth
 **Date**: February 2026
-**Status**: Reference Architecture — pip-installable production release (1.0.0)
-**Usage**: 6+ months daily use on a local system · 13,000+ governed receipts in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
+**Status**: Reference Architecture — 1.0.0 release candidate, pip-installable from a checkout (PyPI publish pending)
+**Usage**: 6+ months daily use on a local system · 14,000+ governed receipts in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
 
 ---
 
@@ -91,7 +91,7 @@ VNX uses a **dual-input bridge**:
 - **Push (Optional Hooks)**: If a provider supports hooks, they can emit receipts directly.
 - **Pull (External Watcher)**: For providers without hooks (Codex, Gemini, future models), VNX watches the filesystem for agent output reports and generates receipts from them.
 
-This **External Watcher Pattern** means that even if an agent process crashes, the orchestration layer remains alive and aware. It also means you can swap models per-task — use Claude for architecture, Codex for implementation, Gemini for review — without changing any orchestration logic. The next planned experiment is adding Kimi 2.5 as a worker terminal to further validate the watcher pattern across provider ecosystems.
+This **External Watcher Pattern** means that even if an agent process crashes, the orchestration layer remains alive and aware. It also means you can swap models per-task — use Claude for architecture, Codex for implementation, Gemini for review — without changing any orchestration logic. Kimi runs as a first-class production worker lane via its CLI OAuth path (the `kimi-via-cli-only` constraint), one of several providers the watcher pattern already validates across ecosystems.
 
 Intelligence and usage signals are derived from receipts and watchers, not from provider hooks. Hooks can optionally enrich metadata, but they are never dependencies.
 
