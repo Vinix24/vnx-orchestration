@@ -30,12 +30,18 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.20",
     "jinja2>=3.0",
     "pyyaml>=6.0",
+    "jsonschema>=4.20",   # governed report schema validation (governance_emit → unified_report_schema)
+    "psutil>=5.9",        # runtime supervision + intelligence daemon monitoring
 ]
 
 # Full quality advisory/local-CI audit tools.
 # Install via `pip install vnx-orchestration[quality]`.
 [project.optional-dependencies]
 quality = ["vulture>=2.10", "ruff>=0.6"]
+
+# Opt-in aggregator dashboard (scripts/aggregator/aggregator_dashboard.py).
+# Install via `pip install vnx-orchestration[dashboard]`.
+dashboard = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 # Smart Lanes — modular provider submodules for local/cost-zero inference.
 # Install individual lanes: pip install vnx-orchestration[local-gemma]
