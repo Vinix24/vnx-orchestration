@@ -113,7 +113,7 @@ Startup reconciliation, post-crash lease recovery, orphaned-dispatch handling, O
 
 ## 11. 1.0 transition-flag sunset list
 
-The single-entry-door rollout ships behind transition flags. At the 1.0 release these are retired so the door is the one and only path (no dual-path branches left to drift). Disposition per flag:
+The single-entry-door rollout ships behind transition flags. They are retired in a post-1.0 release (target 1.0.1), after the door has run stably as the default, so it becomes the one and only path (no dual-path branches left to drift). At 1.0.0 the flags below are still live — the `REMOVE` disposition is the plan, not a done deal. Disposition per flag:
 
 | Flag | Disposition at 1.0 |
 |---|---|

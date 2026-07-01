@@ -49,7 +49,7 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-06-22.
+I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of the 1.0 launch (July 2026).
 
 **Tier 1, in production.** Append-only NDJSON receipts with hash-chain verification tooling (`audit_chain`); per-append chain enforcement lands in 1.0.1. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (lane-specific; `VNX_ISOLATED_WORKTREE` defaults off). The interactive tmux worker lane: it is the default Claude worker lane (`scripts/commands/dispatch.sh` selects it unless a dispatch opts into the headless burst lane), runs on the subscription, and its PREPARE/GOVERN/RECEIPT/CAPTURE structural work has shipped. It is still being hardened; I do not yet claim it matches the headless lane on every surface. The headless `claude -p` burst lane is opt-in and blocked by default (`claude-headless` constraint; `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it). The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
 
@@ -120,7 +120,7 @@ The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interact
 
 Memory is the unsolved problem in agentic AI. Most systems bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
 
-The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with 13,000+ receipts in the audit trail behind it.
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement lands in 1.0.1. It is forensic, not lossy. This is in production now, with 14,000+ receipts in the audit trail behind it.
 
 The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. As of 1.0.1 the `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 
@@ -132,7 +132,7 @@ The point is not that the AI remembers. The point is that what it remembers is g
 
 ## Architecture decisions
 
-The decisions behind VNX are written down, not implied. There are 25 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+The decisions behind VNX are written down, not implied. There are 26 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
@@ -168,7 +168,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-1.0 release candidate as of this README on 2026-06-26: `VERSION` is `1.0.0`, the package builds from this tree, and the operator binary is still required for the full command surface. **Publishing to PyPI is the one remaining 1.0 ship gate** — human-gated, and not done yet. The two other gates it once sat alongside have both landed: the single-entry dispatch door is merged and default-ON (ADR-024, 2026-06-24), and the Mission Control central-store cutover completed (2026-06-23). The 1.0.1 future-state reconciliation batch (ADR-007 composite-key `dispatches`, the open-item → track bridge, and its autopilot wiring) has also landed on `main` — see [CHANGELOG.md](CHANGELOG.md) — but `VERSION` stays `1.0.0` until that milestone is cut. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+1.0 release candidate as of the 1.0 launch (July 2026): `VERSION` is `1.0.0`, the package builds from this tree, and the operator binary is still required for the full command surface. **Publishing to PyPI is the one remaining 1.0 ship gate** — human-gated, and not done yet. The two other gates it once sat alongside have both landed: the single-entry dispatch door is merged and default-ON (ADR-024, 2026-06-24), and the Mission Control central-store cutover completed (2026-06-23). The 1.0.1 future-state reconciliation batch (ADR-007 composite-key `dispatches`, the open-item → track bridge, and its autopilot wiring) has also landed on `main` — see [CHANGELOG.md](CHANGELOG.md) — but `VERSION` stays `1.0.0` until that milestone is cut. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 

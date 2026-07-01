@@ -1,5 +1,7 @@
 # VNX Roadmap
 
+> **This file is the architecture-principles + wave-history roadmap. Live, per-feature status is the SSOT in [`ROADMAP.yaml`](../../ROADMAP.yaml)** — some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust `ROADMAP.yaml` and the README for what is actually shipped.
+
 **Status**: Public roadmap  
 **Planning Horizon**: 2026 (rolling)  
 **Principle**: Governance-first, model-agnostic, local-first
@@ -128,7 +130,7 @@ Key deliverables: `autopilot_tick.py`, `pool_worker_runner.py`, `auto_dream` pac
 ## Milestones
 
 ### 1.0.0 Public Release
-**Status**: `Completed` — 2026-05-29
+**Status**: `Release candidate` — pip-installable from a checkout; the PyPI publish is the one remaining ship gate (human-gated, not yet done).
 
 pip-installable, 5-provider production, governance receipts, elastic pool, smart routing (opt-in), roadmap-autopilot gate hardening (RA-1..5 active, RA-6 dark), auto-dream self-learning loop runnable. See [1.0 Sprint section](#10-sprint--roadmap-autopilot-n-scaling-foundation-auto-dream) for full capability list.
 
