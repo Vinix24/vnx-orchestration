@@ -130,7 +130,7 @@ Key deliverables: `autopilot_tick.py`, `pool_worker_runner.py`, `auto_dream` pac
 ## Milestones
 
 ### 1.0.0 Public Release
-**Status**: `Release candidate` — pip-installable from a checkout; the PyPI publish is the one remaining ship gate (human-gated, not yet done).
+**Status**: `Released` — 2026-07-02. Published to PyPI (`pip install vnx-orchestration`); source tagged `v1.0.0`.
 
 pip-installable, 5-provider production, governance receipts, elastic pool, smart routing (opt-in), roadmap-autopilot gate hardening (RA-1..5 active, RA-6 dark), auto-dream self-learning loop runnable. See [1.0 Sprint section](#10-sprint--roadmap-autopilot-n-scaling-foundation-auto-dream) for full capability list.
 
