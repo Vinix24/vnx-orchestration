@@ -47,11 +47,21 @@ TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
 # headless `claude -p`: post-cutover that bills API credits.
 _CLAUDE_PROVIDERS = {"claude"}
 
-# Default diverse-family panel: (label, provider string, model_arg).
+# Full diverse-family assurance panel: (label, provider string, model_arg).
+# One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI) so a
+# plan is reviewed from five independent vantage points before any code is written.
+# NOTE: with the current fail-safe rule, a panelist that emits no verdict (a down proxy or an
+# uninstalled CLI) forces an unconditional REVISE. Keep every provider here runnable, and see
+# the `panel-quorum-fix` track for the retry/quorum/abstain rule that makes a large panel
+# robust to a single flake. glm-harness requires the local litellm proxy on :4141.
 DEFAULT_PANEL: List[Dict[str, str]] = [
     {"label": "opus", "provider": "claude", "model_arg": "opus"},
     {"label": "kimi", "provider": "kimi", "model_arg": "kimi-k2-7-code"},
     {"label": "glm-5.2-harness", "provider": "glm-harness", "model_arg": "glm-5.2"},
+    {"label": "deepseek", "provider": "deepseek-harness", "model_arg": "deepseek-v4-pro"},
+    {"label": "codex", "provider": "codex", "model_arg": "gpt-5.5"},
+    # gemini is intentionally omitted until the `gemini` CLI is installed: an unrunnable
+    # panelist emits no verdict, which the fail-safe rule turns into an unconditional REVISE.
 ]
 
 VERDICT_FENCE = "vnx-plan-verdict"
