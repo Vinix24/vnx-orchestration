@@ -174,8 +174,4 @@ I built this for my own work. Use at your own discretion.
 
 ## Credits
 
-Dimitri Geelen's Claude Code RFC on deterministic agent governance shaped the external governance framing: [RFC #45427](https://github.com/anthropics/claude-code/issues/45427).
-
-My subagent observability work is currently represented by the [delivery substep observability contract](docs/core/150_DELIVERY_SUBSTEP_OBSERVABILITY_CONTRACT.md); I will link the public RFC when it is split out.
-
 Anthropic Claude Code is the foundation. I add receipts, provider routing, tmux dispatch, and worktree isolation around it.

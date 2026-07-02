@@ -1,0 +1,40 @@
+# ============================================================================
+# ROADMAP.yaml is the SINGLE SOURCE OF TRUTH for the feature roadmap.
+#
+# It is the only hand-edited planning surface. Two views are GENERATED from it
+# and must never be hand-edited:
+#   - FEATURE_PLAN.md  <- scripts/build_feature_plan.py
+#   - PR_QUEUE.md      <- scripts/build_pr_queue.py
+#
+# After editing this file, regenerate both views and commit them together:
+#   python3 scripts/build_feature_plan.py
+#   python3 scripts/build_pr_queue.py
+# CI guards this: tests/test_roadmap_consistency.py runs the generators with
+# --check and fails the build if either view drifts from this file.
+#
+# This shipped file is an ILLUSTRATIVE EXAMPLE of the roadmap format. Replace the
+# example features below with your own; the generators and CI guard work the same.
+#
+# ADR-007: every new central-DB table needs a composite UNIQUE/PK over
+# project_id. Cite it explicitly in review-gate prompts for schema work.
+# ============================================================================
+
+roadmap_id: vnx-roadmap
+title: VNX Roadmap (example)
+
+launch_state:
+  version: "1.0.0"
+  status: "example"
+  last_verified: "2026-01-01"
+  verified_against: "example"
+  launch_blockers: []
+
+features:
+  - feature_id: example-feature
+    title: "Example feature — replace with your own roadmap entries"
+    risk_class: medium
+    merge_policy: human
+    depends_on: []
+    milestone: "1.0"
+    status: planned
+    pr_queue: []
