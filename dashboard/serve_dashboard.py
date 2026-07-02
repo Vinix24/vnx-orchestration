@@ -256,11 +256,31 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed_path = unquote(urlsplit(path).path)
         if parsed_path.startswith("/state/"):
             rel = parsed_path[len("/state/") :]
-            rel_parts = [part for part in Path(rel).parts if part not in ("", ".", "..")]
-            canonical_path = CANONICAL_STATE_DIR.joinpath(*rel_parts)
-            if canonical_path.exists():
-                return str(canonical_path)
-            return str(LEGACY_STATE_DIR.joinpath(*rel_parts))
+            rel_path = Path(rel)
+            parts = rel_path.parts
+            # Strip a leading absolute anchor ("/", the POSIX "//" form, or a drive root) so
+            # joinpath() cannot reset to an absolute path and escape the state dir. Path
+            # ("/etc/passwd").parts is ("/", "etc", "passwd"); an un-dropped anchor -> arbitrary
+            # file read via GET /state//etc/passwd (or the %2F-encoded form).
+            if rel_path.anchor and parts and parts[0] == rel_path.anchor:
+                parts = parts[1:]
+            rel_parts = [part for part in parts if part not in ("", ".", "..")]
+            for base in (CANONICAL_STATE_DIR, LEGACY_STATE_DIR):
+                candidate = base.joinpath(*rel_parts)
+                # Defense in depth: refuse anything that resolves outside the state dir
+                # (guards absolute anchors, .. combinations, and symlink escapes).
+                try:
+                    resolved = candidate.resolve()
+                    base_resolved = base.resolve()
+                except OSError:
+                    continue
+                if resolved != base_resolved and base_resolved not in resolved.parents:
+                    continue
+                if candidate.exists():
+                    return str(candidate)
+            # Nothing valid inside the state dirs -> a canonical path that does not exist,
+            # so the handler returns 404 (same outcome as a genuine miss).
+            return str(CANONICAL_STATE_DIR.joinpath(*rel_parts))
         return super().translate_path(path)
 
     def do_GET(self) -> None:
