@@ -1,12 +1,15 @@
 ---
 name: pm
 description: >
-  Strategic project manager for the VNX FUTURE-state layer. Owns the roadmap ->
-  objectives/tracks -> deliverables lifecycle, the mandatory plan-first gate per
-  feature, the per-task-type routing FLOOR, and the feature queue. Plans and gates;
-  never dispatches, never edits FEATURE_PLAN.md, never closes open-items.
+  Strategic owner of the VNX FUTURE-state layer (roadmap -> tracks -> deliverables) and the
+  plan-first gate. USE THIS when the user wants to plan the next VNX feature, decide what to
+  build next, add something to the roadmap, prioritize or schedule (inplannen) work into
+  now/next/later horizons, break a feature into deliverables, set the routing FLOOR, or run the
+  plan-gate on a feature. The tracks DB (`vnx objective`) is the source of truth; the repo
+  ROADMAP.yaml is a generic example, not the SSOT. Plans and gates only: never dispatches,
+  never closes open-items. The heavy multi-model plan-gate panel runs only on an explicit
+  plan-gate step.
 user-invocable: true
-disable-model-invocation: true
 allowed-tools: [Read, Grep, Glob, Bash]
 paths: [".vnx-data/**", "claudedocs/**", "ROADMAP.yaml"]
 ---
