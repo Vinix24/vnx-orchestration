@@ -1,15 +1,21 @@
-<!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_pr_queue.py -->
-
-# PR Queue — VNX 1.0 launch (DERIVED VIEW)
-
-> Authoritative source: `ROADMAP.yaml` (`launch_state` + `features[].pr_queue`).
-> Live PR state: `gh pr list`. Do not hand-edit this file.
+# PR Queue - Feature: Dependency Chain Test
 
 ## Progress Overview
-Launch status: **example** (version 1.0.0)
-Last verified: 2026-01-01 against example
-Merged launch PRs: 0 | Queued: 0
+Total: 3 PRs | Complete: 2 | Active: 0 | Queued: 1 | Blocked: 0
+Progress: ██████░░░░ 66%
 
 ## Status
 
-_No PRs in queue._
+### ✅ Completed PRs
+- PR-1: Base
+- PR-2: Middle
+
+### ⏳ Queued PRs
+- PR-3: Top (dependencies: PR-2) [risk=unknown, merge=human, review=none]
+
+## Dependency Flow
+```
+PR-1 (no dependencies)
+PR-1 → PR-2
+PR-2 → PR-3
+```

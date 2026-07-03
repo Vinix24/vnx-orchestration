@@ -11,7 +11,7 @@ All DB restores use atomic pattern (temp file + verify + mv) to prevent corrupti
 - A new migration introduced a UNIQUE or NOT NULL constraint that breaks rc2-era writes.
 - A central DB migration was applied out of order (schema_version mismatch detected by `scripts/lib/schema_versioning.py`).
 - Data corruption is detected after `apply_migration_0010 / 0015 / 0016` ran against a central DB.
-- Operator decision: wave rollback to previous release candidate.
+- Operator decision: wave rollback to the previous release.
 
 Do not roll back `0010_add_project_id` unless you are also rolling back all migrations that build on it (0011 through 0021 in reverse order). The rollback chain must be applied in reverse numeric order.
 

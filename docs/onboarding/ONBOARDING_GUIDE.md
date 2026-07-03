@@ -14,15 +14,13 @@ tmux orchestration, worktrees, gates, recovery, and cost reports run through
 
 ### Step 1: Install
 
-The package is not on PyPI yet — publishing is the final 1.0 ship gate. Until
-then, install from a checkout:
-
 ```bash
-git clone https://github.com/Vinix24/vnx-orchestration
-cd vnx-orchestration
-pip install -e .
+pip install vnx-orchestration
 vnx version
 ```
+
+For the repo-local operator surface (Part 2), clone the repository and run
+`pip install -e .` from the checkout instead.
 
 **Prerequisites.** VNX drives existing coding CLIs as subprocesses — it does not run models itself.
 The default dispatch lane needs an **installed + authenticated `claude` CLI** on your PATH (other

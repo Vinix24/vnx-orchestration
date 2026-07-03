@@ -2,7 +2,7 @@
 
 **Author**: Vincent van Deth
 **Date**: February 2026
-**Status**: Reference Architecture — 1.0.0 release candidate, pip-installable from a checkout (PyPI publish pending)
+**Status**: Reference Architecture — 1.0.0, released to PyPI 2026-07-02 (`pip install vnx-orchestration`)
 **Usage**: 6+ months daily use on a local system · 14,000+ governed receipts in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
 
 ---

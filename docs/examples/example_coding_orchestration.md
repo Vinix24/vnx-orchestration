@@ -4,6 +4,12 @@
 
 This walkthrough shows VNX coordinating three AI agents on a real coding task: implementing JWT authentication with login endpoints, test coverage, and a security review — all running simultaneously.
 
+> **Note:** this example uses the opt-in terminal-grid mode (`vnx start`, a fixed T0–T3
+> layout on the subprocess lane). The default dispatch model since 1.0 is ephemeral
+> per-dispatch workers through the single-entry door (`vnx dispatch`); see the
+> [README architecture section](../../README.md#architecture). The grid remains supported
+> for operators who want four visible, terminal-pinned agents.
+
 ---
 
 ## Prerequisites

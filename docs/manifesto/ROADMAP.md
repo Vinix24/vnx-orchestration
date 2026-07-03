@@ -1,6 +1,6 @@
 # VNX Roadmap
 
-> **This file is the architecture-principles + wave-history roadmap. Live, per-feature status is the SSOT in [`ROADMAP.yaml`](../../ROADMAP.yaml)** — some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust `ROADMAP.yaml` and the README for what is actually shipped.
+> **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in the maintainer's tracks database (the `vnx objective` CLI); the repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan. Some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust [`ROADMAP.md`](../../ROADMAP.md) and the README for what is actually shipped.
 
 **Status**: Public roadmap  
 **Planning Horizon**: 2026 (rolling)  
@@ -468,9 +468,9 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 ---
 
-## Living Roadmap (ROADMAP.yaml)
+## Living Roadmap (tracks database)
 
-`ROADMAP.yaml` in the repository root is the single source of truth for the active feature roadmap. The document you are reading captures the architecture principles and wave history; per-feature planning, milestone assignments, and PR queues live in `ROADMAP.yaml`. Two generated views are derived from it: `FEATURE_PLAN.md` and `PR_QUEUE.md`.
+The active feature roadmap is the tracks database, operated through the `vnx objective` CLI (tracks, horizons, plan gates, deliverables). The repo-root `ROADMAP.yaml` is a generic example of the machine-readable roadmap format; `FEATURE_PLAN.md` and `PR_QUEUE.md` are views generated from it by `scripts/build_feature_plan.py` / `scripts/build_pr_queue.py`. The document you are reading captures the architecture principles and wave history; the public per-release summary is [`ROADMAP.md`](../../ROADMAP.md).
 
 **1.0.1 focus:** operational hardening and provider reliability. Key items include Kimi content-block regression suite, log-rotation bounds for the event-stream ring buffer, tmux submit reliability hardening, and completion of the unified dispatch envelope for the Claude subprocess lane. (Per-append hash-chain enforcement shipped in #840; self-learning loop reactivation shipped in #850.)
 

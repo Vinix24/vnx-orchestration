@@ -39,13 +39,12 @@ You never write FEATURE_PLAN.md, never run `vnx dispatch`, never `transition_pha
 Per feature, in order. Every call carries `--project-id <pid>` explicitly (ADR-007; never
 trust the silent `vnx-dev` default in a multi-project context).
 
-1. **Objective** — author the feature in `ROADMAP.yaml`, then `planning_cli.py objective
-   sync` (default CHECK), and `... objective sync --apply` only with operator consent. The
-   seeder is the single writer of tracks; you call the CLI. A feature = one track,
-   `horizon` in {now, next, later}; the queue *is* the horizon ordering. (If you need an
-   ad-hoc track without a ROADMAP edit, use `planning_cli.py objective add` — the thin
-   wrapper over the single-writer; do NOT touch the DB directly.)
-2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the 3-model panel,
+1. **Objective** — add the feature with `planning_cli.py objective add` (the thin wrapper
+   over the single-writer; do NOT touch the DB directly). The tracks DB is the SSOT and is
+   DECOUPLED from the repo ROADMAP.yaml (a generic example since the 1.0 launch) — do NOT
+   `objective sync` against it; sync would seed example data into the live store. A feature
+   = one track, `horizon` in {now, next, later}; the queue *is* the horizon ordering.
+2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the 5-family panel,
    revise until pass. No deliverable promotes until this passes.
 3. **Deliverables** — `planning_cli.py deliverable add --objective <track> --output-kind
    {pr,doc,...} --title "..."` per planned output. Each lands `proposed`. The human gate
@@ -66,10 +65,11 @@ a diverse-family panel BEFORE any implementation.
 - **Plan doc** (linked from the track, output_kind `doc`): `## Problem`, `## Approach`,
   `## Deliverables` (each tagged task_class + complexity), `## Risks`, `## Model-routing plan`
   (the FLOOR per deliverable, not a hand-picked lane), `## Open questions`.
-- **Panel = Opus + Kimi + GLM-5.2-via-harness** (three families -> real disagreement).
-  DeepSeek-via-harness-with-own-key is an equally legal third (constraint blocks DeepSeek only
-  on the prod subscription, not own-key). **Codex is reserved** for security/schema/governance
-  plans, never a default panelist.
+- **Panel = the full 5-family DEFAULT_PANEL: opus + kimi + glm-harness + deepseek-harness +
+  codex** (`scripts/lib/plan_gate_panel.py`, #991; gemini omitted until a CLI exists — five
+  families -> real disagreement). A flaked/undispatched lane ABSTAINS (non-scoring, #910);
+  liveness-quorum = min(2, panel size), so one flake never forces REVISE. Operational
+  preconditions: the glm litellm proxy on :4141, `DEEPSEEK_API_KEY`, kimi + codex CLIs.
 - **Run it**: `planning_cli.py plan-gate run <track> --doc <plan.md> --project-id <pid>`. The
   panel runs on the **governed worker path**, and each panelist routes by its lane (the
   single-entry dispatch door decides this; until PR-12 wires/flips that door, the engine calls

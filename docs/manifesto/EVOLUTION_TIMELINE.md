@@ -331,12 +331,12 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 - **Multi-provider control centre (Waves 5–7)** — the elastic worker pool (`bin/vnx pool`, ADR-018), five provider lanes (Claude subscription tmux + subprocess burst, Codex CLI, Gemini CLI, Kimi CLI OAuth, LiteLLM bridge for DeepSeek/GLM), universal cost tracking, and the provider/routing registries (`scripts/lib/providers/`).
 - **Multitenancy (ADR-007)** — composite `UNIQUE(dispatch_id, project_id)` and fail-closed `project_id` resolution across the central store, so one machine can govern many projects without bleed. The `dispatches` table rebuild + the future-state reconciliation batch (track ↔ dispatch ↔ open-item) followed.
 - **The single-entry door (ADR-024)** — every dispatch funnels through one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot → compile_plan → permit → execute. Flipped default-ON 2026-06-24, with a phantom-guard that rejects evidence-free GATE-GREEN receipts and GLM normalized to the harness lane at the door. Rollback via `VNX_DISPATCH_LEGACY=1`.
-- **Packaging** — the wheel builds from the tree (`pip install -e .`, `vnx` console script); the PyPI publish is the final human-gated 1.0 ship step.
+- **Packaging** — the wheel builds from the tree (`pip install -e .`, `vnx` console script); the human-gated PyPI publish followed on 2026-07-02.
 - **Mission Control central-store cutover (2026-06-23)** and the receipt PULL-model groundwork.
 - **Pre-ship hardening sprint (2026-06-26)** — five real production bugs (exit-classifier audit-trail, schema-SSOT, report-findings self-heal, doctor partial-setup, code-anchor payload eviction), the future-state git-grounded reconcile, the self-learning proposal-tier revival, and a stale-test + docs sweep. See `CHANGELOG.md`.
 
 **Outcome**
-- `VERSION` is `1.0.0` (release candidate); the only remaining ship gate is the PyPI publish.
+- `VERSION` is `1.0.0`, published to PyPI on 2026-07-02 (`pip install vnx-orchestration`), tagged `v1.0.0` with a GitHub release.
 - The audit trail now records routing through one door; multitenancy is enforced fail-closed; the self-learning proposal tier produces operator-gated proposals from the real receipt stream.
 
 ---
