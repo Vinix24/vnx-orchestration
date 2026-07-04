@@ -386,6 +386,42 @@ def _register_dream_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_attest_subparser(subparsers: argparse.Action) -> None:
+    attest_parser = subparsers.add_parser(
+        "attest",
+        help="write and verify in-repo attestation records (governance D2)",
+    )
+    attest_subs = attest_parser.add_subparsers(dest="attest_subcommand", metavar="SUBCOMMAND")
+
+    aw = attest_subs.add_parser("write", help="write attest record for the current branch")
+    aw.add_argument("--dispatch-id", required=True, dest="dispatch_id", metavar="DISPATCH_ID",
+                    help="Dispatch-ID of the governed build")
+    aw.add_argument("--deliverable", required=True, metavar="DELIVERABLE",
+                    help="deliverable being attested (e.g. D2)")
+    aw.add_argument("--track", required=True, metavar="TRACK_ID",
+                    help="track/objective ID")
+    aw.add_argument("--gate-ref", dest="gate_ref", default="no-gate-ref", metavar="REF",
+                    help="plan-gate pass reference")
+    aw.add_argument("--signer", default="vnx@local", metavar="IDENTITY",
+                    help="signer identity (must match an allowed_signers entry)")
+    aw.add_argument("--key", default=None, metavar="KEY_PATH",
+                    help="SSH private key for detached signature (optional; unsigned if omitted)")
+    aw.add_argument("--base-ref", dest="base_ref", default="origin/main", metavar="REF",
+                    help="base branch for merge-base (default: origin/main)")
+    aw.add_argument("--no-commit", dest="no_commit", action="store_true",
+                    help="write the record file only; skip git add + commit")
+    aw.add_argument("--project-dir", default=".", metavar="DIR",
+                    help="repository root (default: current directory)")
+
+    av = attest_subs.add_parser("verify", help="verify a branch attest record")
+    av.add_argument("--allowed-signers", dest="allowed_signers", default=None, metavar="PATH",
+                    help="path to SSH allowed_signers file (auto-detected if omitted)")
+    av.add_argument("--base-ref", dest="base_ref", default="origin/main", metavar="REF",
+                    help="base branch for merge-base (default: origin/main)")
+    av.add_argument("--project-dir", default=".", metavar="DIR",
+                    help="repository root (default: current directory)")
+
+
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
         from vnx_cli.commands.init_cmd import vnx_init
@@ -431,6 +467,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.migrate import vnx_migrate
         sys.exit(vnx_migrate(args))
 
+    elif args.command == "attest":
+        from vnx_cli.commands.attest import vnx_attest
+        sys.exit(vnx_attest(args))
+
     else:
         parser.print_help()
         sys.exit(0)
@@ -458,6 +498,7 @@ def main() -> None:
     _register_learning_subparser(subparsers)
     _register_dream_subparser(subparsers)
     _register_migrate_subparser(subparsers)
+    _register_attest_subparser(subparsers)
 
     args = parser.parse_args()
     _dispatch_command(args, parser)
