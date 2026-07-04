@@ -603,6 +603,7 @@ process_dispatches() {
     _unified_supervisor_lease_sweep_tick
     _maybe_auto_seed_tracks
     _maybe_objective_reconcile
+    _maybe_learning_cycle
 
     for dispatch in "$PENDING_DIR"/*.md; do
         [ -f "$dispatch" ] || continue

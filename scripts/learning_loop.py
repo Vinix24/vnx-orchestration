@@ -8,6 +8,7 @@ Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import time
 import sys
@@ -334,6 +335,11 @@ class LearningLoop:
         window, and projects each onto the failure dict consumed downstream by
         ``generate_prevention_rules`` / ``persist_to_intelligence_db``
         (keys: task / terminal / agent / error / timestamp).
+
+        Filter: receipts with a missing/empty provider AND a failure status are
+        skipped — these are the 9,052+ unknown:unknown receipts that carry no
+        usable provenance and would poison pattern proposals (D3 data-quality
+        guard). The post-filter corpus size is logged.
         """
         if not start_time:
             start_time = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -344,6 +350,9 @@ class LearningLoop:
 
         if not self.receipts_path.exists():
             return failure_patterns
+
+        total_scanned = 0
+        no_provider_skipped = 0
 
         try:
             with open(self.receipts_path, "r", encoding="utf-8", errors="replace") as f:
@@ -356,8 +365,22 @@ class LearningLoop:
                     except json.JSONDecodeError:
                         continue
 
+                    total_scanned += 1
                     status = str(receipt.get("status", "")).lower()
                     if status not in _FAILURE_STATUSES:
+                        continue
+
+                    # D3 data-quality filter: skip no-provider failure receipts.
+                    # Targets receipts where 'provider' is explicitly set to a
+                    # none-sentinel ("none", "unknown", "null", ""), e.g. the 9,052+
+                    # unknown:unknown receipts. Receipts where the field is absent
+                    # entirely (e.g. contract_invalid from the receipt processor)
+                    # pass through — they carry usable governance provenance.
+                    raw_provider = receipt.get("provider")
+                    if raw_provider is not None and str(raw_provider).strip().lower() in (
+                        "", "none", "null", "unknown"
+                    ):
+                        no_provider_skipped += 1
                         continue
 
                     # Window filter on the receipt timestamp. Drop records we
@@ -379,6 +402,12 @@ class LearningLoop:
         except OSError as e:
             print(f"⚠️ Error reading receipt stream {self.receipts_path}: {e}")
 
+        post_filter = total_scanned - no_provider_skipped
+        print(
+            f"  Receipt corpus: {total_scanned} scanned, "
+            f"{no_provider_skipped} no-provider filtered → {post_filter} effective; "
+            f"{len(failure_patterns)} failures in window"
+        )
         return failure_patterns
 
     def _failure_error_message(self, receipt: Dict) -> str:
@@ -852,43 +881,122 @@ class LearningLoop:
         return hashlib.sha1(pattern_id.encode("utf-8")).hexdigest()
 
     def _supersede_stale_patterns(self) -> int:
-        """Set valid_until on low-confidence patterns older than 30 days (F54).
+        """Queue low-confidence stale patterns for operator-gated suppression (D3 G-L4 gate).
+
+        Candidates are written to pending_archival.json with action="supersede" and
+        status="pending". valid_until is NOT set automatically — operator approval is
+        required before any pattern is suppressed. This closes the G-L4 ungated bypass.
 
         Applies to:
-          - success_patterns (confidence_score < 0.3)
-          - prevention_rules  (confidence < 0.3)
+          - success_patterns (confidence_score < 0.3, older than 30 days)
+          - prevention_rules  (confidence < 0.3, older than 30 days)
         Antipatterns have no numeric confidence column and are skipped.
+
+        Off-switch: set VNX_LEARN_SUPERSEDE=0 to skip this step entirely.
         """
-        now = datetime.now().isoformat()
+        if os.environ.get("VNX_LEARN_SUPERSEDE", "1") == "0":
+            print("  VNX_LEARN_SUPERSEDE=0 — supersede step skipped")
+            return 0
+
         total = 0
         try:
-            cur = self.conn.execute(
-                "UPDATE success_patterns SET valid_until = ? "
-                "WHERE confidence_score < 0.3 "
-                "AND valid_from < datetime('now', '-30 days') "
-                "AND valid_until IS NULL",
-                (now,),
-            )
-            total += cur.rowcount
+            paths = ensure_env()
+            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
+            pending_path = state_dir / "pending_archival.json"
 
-            cur = self.conn.execute(
-                "UPDATE prevention_rules SET valid_until = ? "
-                "WHERE confidence < 0.3 "
-                "AND valid_from < datetime('now', '-30 days') "
-                "AND valid_until IS NULL",
-                (now,),
-            )
-            total += cur.rowcount
+            existing: List[Dict] = []
+            if pending_path.exists():
+                try:
+                    data = json.loads(pending_path.read_text(encoding="utf-8"))
+                    existing = data.get("pending_archival", [])
+                except (json.JSONDecodeError, OSError):
+                    existing = []
 
-            self.conn.commit()
-            print(f"  Superseded {total} low-confidence patterns older than 30 days")
+            existing_keys = {
+                (str(e.get("pattern_id", "")), e.get("source_table", ""))
+                for e in existing
+            }
+            now = datetime.now().isoformat()
+            added = 0
+
+            # success_patterns candidates
+            try:
+                rows = self.conn.execute(
+                    "SELECT id, title, confidence_score FROM success_patterns "
+                    "WHERE confidence_score < 0.3 "
+                    "AND valid_from < datetime('now', '-30 days') "
+                    "AND valid_until IS NULL"
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["id"]), "success_patterns")
+                    if key in existing_keys:
+                        continue
+                    existing.append({
+                        "pattern_id": str(row["id"]),
+                        "title": (row["title"] or "")[:120],
+                        "confidence": round(float(row["confidence_score"]), 4),
+                        "source_table": "success_patterns",
+                        "action": "supersede",
+                        "reason": "confidence_score < 0.3, older than 30 days",
+                        "queued_at": now,
+                        "status": "pending",
+                    })
+                    added += 1
+            except Exception as e:
+                log.debug("success_patterns supersede query failed: %s", e)
+
+            # prevention_rules candidates
+            try:
+                rows = self.conn.execute(
+                    "SELECT id, description AS title, confidence FROM prevention_rules "
+                    "WHERE confidence < 0.3 "
+                    "AND valid_from < datetime('now', '-30 days') "
+                    "AND valid_until IS NULL"
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["id"]), "prevention_rules")
+                    if key in existing_keys:
+                        continue
+                    existing.append({
+                        "pattern_id": str(row["id"]),
+                        "title": (row["title"] or "")[:120],
+                        "confidence": round(float(row["confidence"]), 4),
+                        "source_table": "prevention_rules",
+                        "action": "supersede",
+                        "reason": "confidence < 0.3, older than 30 days",
+                        "queued_at": now,
+                        "status": "pending",
+                    })
+                    added += 1
+            except Exception as e:
+                log.debug("prevention_rules supersede query failed: %s", e)
+
+            total = added
+            if added:
+                pending_path.write_text(
+                    json.dumps({"pending_archival": existing}, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                print(
+                    f"  Queued {added} stale-pattern supersede candidates for operator review"
+                    f" → {pending_path}"
+                )
+            else:
+                print("  No stale patterns qualified for supersede")
         except Exception as e:
-            print(f"❌ Error superseding stale patterns: {e}")
+            print(f"❌ Error queuing stale patterns for supersede: {e}")
         return total
 
-    def daily_learning_cycle(self):
-        """Run the complete daily learning cycle"""
-        print(f"\n🔄 Starting Daily Learning Cycle at {datetime.now().isoformat()}")
+    def daily_learning_cycle(self, from_history: bool = False):
+        """Run the complete daily learning cycle.
+
+        Args:
+            from_history: When True, mine the full receipt history (all-time window)
+                instead of the default 24-hour window. Use for the first run against
+                a historical trail (``vnx learning run --from-history``).
+        """
+        mode = "FULL HISTORY" if from_history else "DAILY (24h)"
+        print(f"\n🔄 Starting Learning Cycle [{mode}] at {datetime.now().isoformat()}")
         print("=" * 60)
 
         start_time = time.time()
@@ -910,7 +1018,11 @@ class LearningLoop:
 
         # 3. Extract and learn from failures
         print("\n🔍 Step 3: Learning from failures...")
-        failure_patterns = self.extract_failure_patterns()
+        failure_window = (
+            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
+            else datetime.now(timezone.utc) - timedelta(hours=24)
+        )
+        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
         new_rules = self.generate_prevention_rules(failure_patterns)
 
         if new_rules:
@@ -926,15 +1038,20 @@ class LearningLoop:
         self.save_pattern_metrics()
 
         # 5.5 Persist high-confidence patterns and failures to intelligence DB
+        # Off-switch: VNX_LEARN_PERSIST=0 skips the auto-persist of observations.
         print("\n🔗 Step 5.5: Bridging patterns to intelligence DB...")
-        self.persist_to_intelligence_db()
+        if os.environ.get("VNX_LEARN_PERSIST", "1") != "0":
+            self.persist_to_intelligence_db()
+        else:
+            print("  VNX_LEARN_PERSIST=0 — pattern persist skipped")
         self.ingest_approved_rules()
 
-        # 5.6 Supersede low-confidence stale patterns (F54 temporal lifecycle)
-        print("\n🗑️ Step 5.6: Superseding expired low-confidence patterns...")
+        # 5.6 Queue stale low-confidence patterns for operator-gated supersede (D3 G-L4).
+        # valid_until is NOT set here — operator must approve via pending_archival.json.
+        print("\n📋 Step 5.6: Queuing stale patterns for operator-gated supersede...")
         superseded = self._supersede_stale_patterns()
         if superseded:
-            print(f"  ✓ Superseded {superseded} stale patterns")
+            print(f"  ✓ {superseded} patterns queued for operator review")
 
         # 5.7 Close the feedback loop: sync pattern_usage stats back to
         # success_patterns.confidence_score so intelligence_selector reads
@@ -951,11 +1068,14 @@ class LearningLoop:
         print("\n📈 Step 6: Generating learning report...")
         report = self.generate_learning_report()
 
+        proposal_count = len(new_rules)
+        self.learning_stats["proposal_count"] = proposal_count
+
         elapsed = time.time() - start_time
         print(f"\n✅ Learning cycle completed in {elapsed:.2f} seconds")
         print(f"  • Patterns tracked: {len(self.pattern_metrics)}")
         print(f"  • Confidence adjustments: {self.learning_stats['confidence_adjustments']}")
-        print(f"  • New prevention rules: {len(new_rules)}")
+        print(f"  • Proposals (pending rules): {proposal_count}")
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
@@ -987,20 +1107,23 @@ def main():
     """Run learning loop manually or check status"""
     import sys
 
+    from_history = "--from-history" in sys.argv
+    argv = [a for a in sys.argv[1:] if a != "--from-history"]
+
     loop = LearningLoop()
 
-    if len(sys.argv) > 1:
-        command = sys.argv[1]
+    if argv:
+        command = argv[0]
 
         if command == "run":
-            # Run full learning cycle
-            report = loop.daily_learning_cycle()
+            report = loop.daily_learning_cycle(from_history=from_history)
+            proposal_count = report.get("statistics", {}).get("proposal_count", 0)
+            print(f"\n📊 Proposals (pending rules): {proposal_count}")
             print("\n📊 Learning Summary:")
             print(json.dumps(report['statistics'], indent=2))
 
         elif command == "status":
-            # Show current status
-            print(f"📊 Pattern Metrics Status:")
+            print("📊 Pattern Metrics Status:")
             print(f"  Total patterns tracked: {len(loop.pattern_metrics)}")
 
             if loop.pattern_metrics:
@@ -1014,7 +1137,6 @@ def main():
                 print(f"  Recently used (7 days): {recently_used}")
 
         elif command == "test":
-            # Test pattern extraction
             print("Testing pattern extraction...")
             used = loop.extract_used_patterns(datetime.now(timezone.utc) - timedelta(hours=1))
             ignored = loop.extract_ignored_patterns(datetime.now(timezone.utc) - timedelta(hours=1))
@@ -1023,10 +1145,11 @@ def main():
 
         else:
             print(f"Unknown command: {command}")
-            print("Usage: learning_loop.py [run|status|test]")
+            print("Usage: learning_loop.py [run|status|test] [--from-history]")
     else:
         print("VNX Learning Loop v1.0")
         print("Commands: run, status, test")
+        print("Flags:    --from-history (mine full history instead of 24h window)")
 
 
 if __name__ == "__main__":

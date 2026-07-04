@@ -15,6 +15,8 @@
 #   VNX_SUPERVISOR_MODE            — "unified" enables ticks; default is "legacy" (no-op)
 #   VNX_RUNTIME_SUPERVISE_INTERVAL — seconds between supervise_all() calls; default 60
 #   VNX_LEASE_SWEEP_INTERVAL_SEC   — seconds between lease_sweep calls; default 30
+#   VNX_LEARNING_ENABLED           — "1" enables the daily learning cycle tick; default 0 (off)
+#   VNX_LEARNING_CYCLE_INTERVAL    — seconds between learning cycle runs; default 86400 (daily)
 
 # _maybe_runtime_supervise — throttled RuntimeSupervisor.supervise_all() tick (SUP-PR3).
 # Invokes scripts/lib/runtime_supervise.py at most once per
@@ -85,6 +87,32 @@ _maybe_objective_reconcile() {
         cmd+=(--apply)
     fi
     "${cmd[@]}" >> "$log_file" 2>&1 || true
+    echo "$now" > "$state_file"
+}
+
+# _maybe_learning_cycle — throttled daily learning cycle tick (D3).
+# Invokes scripts/learning_loop.py run at most once per VNX_LEARNING_CYCLE_INTERVAL
+# seconds when VNX_SUPERVISOR_MODE=unified AND VNX_LEARNING_ENABLED=1.
+# Default (unset) = no behaviour change (off by default, operator opt-in).
+# Logs to VNX_LOGS_DIR/learning_cycle.log.
+_maybe_learning_cycle() {
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+    [[ "${VNX_LEARNING_ENABLED:-0}" == "1" ]] || return 0
+    local interval="${VNX_LEARNING_CYCLE_INTERVAL:-86400}"
+    local state_file="$STATE_DIR/.last_learning_cycle_ts"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last < interval )); then
+        return 0
+    fi
+    local log_file="$VNX_LOGS_DIR/learning_cycle.log"
+    mkdir -p "$(dirname "$log_file")"
+    python3 "$VNX_DIR/scripts/learning_loop.py" run >> "$log_file" 2>&1 || true
     echo "$now" > "$state_file"
 }
 
