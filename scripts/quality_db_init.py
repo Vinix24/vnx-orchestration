@@ -25,7 +25,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 25
+HIGHEST_QI_VERSION = 26
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -991,6 +991,59 @@ def _migrate_v25(conn: sqlite3.Connection) -> None:
             log('INFO', f'Migrated {tbl}: added tags column (LLM-tagger persist, v25)')
 
 
+def _migrate_v26(conn: sqlite3.Connection) -> None:
+    """V26: drop dead success_rate column from success_patterns (per-project store).
+
+    success_rate has always been 0.0 — no production path ever writes a non-zero
+    value. The effective sort is confidence_score DESC; success_rate was a dead
+    tiebreaker that added no ordering signal.
+
+    Uses ALTER TABLE DROP COLUMN (SQLite 3.35+). The idx_patterns_category index
+    referenced success_rate and must be dropped first, then recreated without it.
+
+    Reversible via _migrate_v26_down: re-adds the column with DEFAULT 0.0.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='success_patterns'"
+    ).fetchone():
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(success_patterns)").fetchall()}
+    if "success_rate" not in cols:
+        return  # already dropped — idempotent
+    conn.execute("DROP INDEX IF EXISTS idx_patterns_category")
+    conn.execute("ALTER TABLE success_patterns DROP COLUMN success_rate")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patterns_category "
+        "ON success_patterns (category)"
+    )
+    log('INFO', 'Migrated success_patterns: dropped dead success_rate column (v26)')
+
+
+def _migrate_v26_down(conn: sqlite3.Connection) -> None:
+    """Down migration for V26: re-add success_rate REAL DEFAULT 0.0.
+
+    Restores the column so the schema is compatible with pre-v26 code.
+    Existing rows read 0.0 (the default). Also restores idx_patterns_category
+    with the original (category, success_rate DESC) definition.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='success_patterns'"
+    ).fetchone():
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(success_patterns)").fetchall()}
+    if "success_rate" in cols:
+        return  # already present — idempotent
+    conn.execute(
+        "ALTER TABLE success_patterns ADD COLUMN success_rate REAL DEFAULT 0.0"
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_patterns_category")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patterns_category "
+        "ON success_patterns (category, success_rate DESC)"
+    )
+    log('INFO', 'Reversed V26: re-added success_rate column to success_patterns')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1018,6 +1071,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     23: _migrate_v23,
     24: _migrate_v24,
     25: _migrate_v25,
+    26: _migrate_v26,
 }
 
 

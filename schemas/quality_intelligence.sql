@@ -170,7 +170,6 @@ CREATE TABLE IF NOT EXISTS success_patterns (
     outcomes TEXT, -- JSON array of expected outcomes
 
     -- Metrics
-    success_rate REAL DEFAULT 0.0, -- 0-1.0
     usage_count INTEGER DEFAULT 0,
     avg_completion_time INTEGER, -- seconds
     confidence_score REAL DEFAULT 0.0, -- 0-1.0
@@ -183,7 +182,7 @@ CREATE TABLE IF NOT EXISTS success_patterns (
 );
 
 -- Indexes for success_patterns table
-CREATE INDEX IF NOT EXISTS idx_patterns_category ON success_patterns (category, success_rate DESC);
+CREATE INDEX IF NOT EXISTS idx_patterns_category ON success_patterns (category);
 CREATE INDEX IF NOT EXISTS idx_patterns_usage ON success_patterns (usage_count DESC);
 
 -- Anti-patterns to avoid

@@ -1010,18 +1010,18 @@ def _collect_recent_dispatches(
 
 _INTELLIGENCE_BRIEF_SQL = (
     "SELECT id, pattern_type, category, title, description, "
-    "success_rate, confidence_score "
+    "confidence_score "
     "FROM success_patterns "
-    "ORDER BY confidence_score DESC, success_rate DESC "
+    "ORDER BY confidence_score DESC "
     "LIMIT 10"
 )
 
 _INTELLIGENCE_BRIEF_CENTRAL_SQL = (
     "SELECT id, pattern_type, category, title, description, "
-    "success_rate, confidence_score "
+    "confidence_score "
     "FROM success_patterns "
     "WHERE project_id = ? "
-    "ORDER BY confidence_score DESC, success_rate DESC "
+    "ORDER BY confidence_score DESC "
     "LIMIT 10"
 )
 
