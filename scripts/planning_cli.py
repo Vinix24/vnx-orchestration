@@ -425,13 +425,13 @@ def _close_evidence(state_dir: Path, track_id: str, project_id: str) -> dict[str
             conn.close()
     except Exception as exc:
         logger.debug("close evidence query failed: %s", exc)
-    # Match the reconciler's OTHER merge source: pr_ref against the local
-    # merged-PR set (not only coordination_events), so the signal does not
-    # falsely read 'no merge' when the reconciler in fact saw one.
+    # Match the reconciler's ALL-merged subset semantics: ALL parsed PRs must be
+    # merged (subset check), mirroring _compute_derived_status so a multi-PR
+    # track ('#908,#909', both merged) is not falsely reported as unmerged.
     try:
         if ev["pr_ref"]:
-            num = track_reconciler._parse_pr_number(ev["pr_ref"])
-            if num is not None and num in track_reconciler._load_merged_pr_numbers(state_dir):
+            nums = track_reconciler._parse_pr_numbers(ev["pr_ref"])
+            if nums and nums <= track_reconciler._load_merged_pr_numbers(state_dir):
                 ev["pr_merged"] = True
     except Exception as exc:
         logger.debug("close evidence merged-PR check failed: %s", exc)

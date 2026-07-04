@@ -271,3 +271,38 @@ def test_phase_path_unreachable_returns_none():
     assert planning_cli._phase_path_to("done", "active") is None
     assert planning_cli._phase_path_to("active", "active") == []
     assert planning_cli._phase_path_to("queued", "done") == ["active", "done"]
+
+
+def _write_pr_merged_ndjson(state_dir: Path, pr_numbers: list) -> None:
+    """Seed pr_merged.ndjson so _load_merged_pr_numbers sees the given PR numbers."""
+    import json as _json
+    events_dir = state_dir.parent / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    lines = [_json.dumps({"event_type": "pr_merged", "pr_number": n}) for n in pr_numbers]
+    (events_dir / "pr_merged.ndjson").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_evidence_multi_pr_both_merged_signals_success(tmp_path):
+    # Multi-PR pr_ref '#908,#909' with BOTH in the merged set → pr_merged=True,
+    # has_success_signal=True (mirrors _compute_derived_status subset semantics).
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T-multi", PROJECT_ID, title="x", goal_state="y",
+                            phase="active", pr_ref="#908,#909")
+    _write_pr_merged_ndjson(sd, [908, 909])
+
+    ev = planning_cli._close_evidence(sd, "T-multi", PROJECT_ID)
+    assert ev["pr_merged"] is True
+    assert ev["has_success_signal"] is True
+
+
+def test_evidence_multi_pr_partial_merge_no_success_signal(tmp_path):
+    # Multi-PR pr_ref '#908,#909' with only ONE merged → pr_merged stays False;
+    # the subset check requires ALL PRs to be merged (not just any).
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T-partial", PROJECT_ID, title="x", goal_state="y",
+                            phase="active", pr_ref="#908,#909")
+    _write_pr_merged_ndjson(sd, [908])  # 909 not merged
+
+    ev = planning_cli._close_evidence(sd, "T-partial", PROJECT_ID)
+    assert ev["pr_merged"] is False
+    assert ev["has_success_signal"] is False

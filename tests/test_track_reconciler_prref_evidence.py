@@ -291,17 +291,24 @@ def test_done_when_pr_ref_merged_zero_dispatches(tmp_path):
 
 
 def test_done_when_pr_ref_merged_with_terminal_dispatches(tmp_path):
-    """all-terminal-dispatch path also derives 'done' from a merged pr_ref,
-    including a multi-PR list where only one PR is merged (D-RECON)."""
+    """all-terminal-dispatch path derives 'done' only when ALL PRs in pr_ref are merged."""
     state_dir = _build_db(tmp_path)
     _seed_track(state_dir, "T-ev-term", pr_ref="#908,#909")
     _seed_dispatch(state_dir, "d-term-1", "T-ev-term", state="completed")
 
+    # Both PRs merged → done.
     result = track_reconciler.reconcile_track(
+        state_dir, "T-ev-term", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908, 909}),
+    )
+    assert result["derived_status"] == "done"
+
+    # Only one PR merged → in_progress (ALL-merged rule; was 'done' before this change).
+    result_partial = track_reconciler.reconcile_track(
         state_dir, "T-ev-term", PROJECT_ID,
         _merged_pr_numbers=frozenset({909}),  # only the 2nd PR of the list merged
     )
-    assert result["derived_status"] == "done"
+    assert result_partial["derived_status"] == "in_progress"
 
 
 def test_done_when_declared_done_without_evidence(tmp_path):
@@ -560,3 +567,138 @@ def test_gh_silent_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(track_reconciler.subprocess, "run",
                         lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("gh")))
     assert track_reconciler._load_merged_prs_from_gh(state) == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# D1: ALL-merged multi-PR derivation + declared-done stability
+# ---------------------------------------------------------------------------
+
+def test_single_pr_merged_done_no_dispatch(tmp_path):
+    """Single PR in pr_ref — merged → done (unchanged single-PR behaviour, no dispatch)."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-single-nd", pr_ref="#800")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-single-nd", PROJECT_ID,
+        _merged_pr_numbers=frozenset({800}),
+    )
+    assert result["derived_status"] == "done"
+
+
+def test_single_pr_merged_done_terminal_dispatch(tmp_path):
+    """Single PR in pr_ref — merged → done (unchanged single-PR behaviour, terminal dispatch)."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-single-td", pr_ref="#800")
+    _seed_dispatch(state_dir, "D-single-td-1", "T-single-td", state="completed")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-single-td", PROJECT_ID,
+        _merged_pr_numbers=frozenset({800}),
+    )
+    assert result["derived_status"] == "done"
+
+
+def test_multi_pr_partial_merge_no_dispatch_not_done(tmp_path):
+    """Multi-PR '#908,#909', only #908 merged, no dispatches → NOT done (ALL-merged rule)."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-multi-nd", pr_ref="#908,#909")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-multi-nd", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908}),  # only first PR merged
+    )
+    assert result["derived_status"] != "done"
+
+
+def test_multi_pr_partial_merge_terminal_dispatch_not_done(tmp_path):
+    """Multi-PR '#908,#909', only #908 merged, terminal dispatch, no event → NOT done."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-multi-td", pr_ref="#908,#909")
+    _seed_dispatch(state_dir, "D-multi-td-1", "T-multi-td", state="completed")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-multi-td", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908}),  # only first PR merged
+    )
+    # Was 'done' before this change (ANY-merged); now 'in_progress' (ALL-merged rule).
+    assert result["derived_status"] == "in_progress"
+
+
+def test_multi_pr_all_merged_done_no_dispatch(tmp_path):
+    """Multi-PR '#908,#909', both merged, no dispatch → done."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-multi-all-nd", pr_ref="#908,#909")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-multi-all-nd", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908, 909}),
+    )
+    assert result["derived_status"] == "done"
+
+
+def test_multi_pr_all_merged_done_terminal_dispatch(tmp_path):
+    """Multi-PR '#908,#909', both merged, terminal dispatch → done."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-multi-all-td", pr_ref="#908,#909")
+    _seed_dispatch(state_dir, "D-multi-all-td-1", "T-multi-all-td", state="completed")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-multi-all-td", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908, 909}),
+    )
+    assert result["derived_status"] == "done"
+
+
+def test_declared_done_terminal_partial_merge_no_event_done(tmp_path):
+    """Declared-done + terminal dispatch + partial multi-PR merge + no pr_merged event → done.
+
+    This is the phantom-drift regression introduced by the ALL-merged change: without the
+    declared-done short-circuit in the all-terminal branch, this would return 'in_progress'.
+    """
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-decl-stab", phase="done", pr_ref="#908,#909")
+    _seed_dispatch(state_dir, "D-decl-stab-1", "T-decl-stab", state="completed")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-decl-stab", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908}),  # partial merge, no pr_merged event
+    )
+    assert result["derived_status"] == "done"
+
+
+def test_declared_done_no_dispatch_partial_merge_done(tmp_path):
+    """Declared-done, no dispatches, partial multi-PR merge → done (existing fallback)."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-decl-nd", phase="done", pr_ref="#908,#909")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-decl-nd", PROJECT_ID,
+        _merged_pr_numbers=frozenset({908}),  # partial merge
+    )
+    assert result["derived_status"] == "done"
+
+
+def test_unparseable_pr_ref_not_done_no_dispatch(tmp_path):
+    """Unparseable pr_ref produces an empty set → does not derive done via the pr_ref path."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-unparse-nd", phase="active", pr_ref="PR-FUT-99")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-unparse-nd", PROJECT_ID,
+        _merged_pr_numbers=frozenset({1, 2, 3}),
+    )
+    # Empty parse result cannot derive done via pr_ref path.
+    assert result["derived_status"] != "done"
+
+
+def test_unparseable_pr_ref_not_done_terminal_dispatch(tmp_path):
+    """Unparseable pr_ref + terminal dispatch → in_progress (no pr_ref evidence path)."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-unparse-td", phase="active", pr_ref="PR-FUT-99")
+    _seed_dispatch(state_dir, "D-unparse-td-1", "T-unparse-td", state="completed")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-unparse-td", PROJECT_ID,
+        _merged_pr_numbers=frozenset({1, 2, 3}),
+    )
+    assert result["derived_status"] == "in_progress"
