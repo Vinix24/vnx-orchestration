@@ -568,3 +568,193 @@ def _append_to_json_list(existing_json: Optional[str], new_item: str) -> str:
     if new_item and new_item not in items:
         items.append(new_item)
     return json.dumps(items[-20:])  # keep last 20
+
+
+# ---------------------------------------------------------------------------
+# Shadow / divergence comparison (D5)
+# ---------------------------------------------------------------------------
+
+def _projected_conf(
+    found: bool,
+    current_conf: float,
+    cur_succ: int,
+    cur_fail: int,
+    is_success: bool,
+) -> float:
+    """Shadow helper: projected confidence after one outcome — no DB write.
+
+    When ``found`` is False the pattern is not matched by this path, so the
+    confidence is left unchanged.  When True, the beta-posterior is recomputed
+    with the incremented counter.
+    """
+    if not found:
+        return current_conf
+    from confidence_reconcile import beta_score
+    new_s = cur_succ + (1 if is_success else 0)
+    new_f = cur_fail + (0 if is_success else 1)
+    return round(beta_score(new_s, new_f), 6)
+
+
+def shadow_grounding_compare(
+    db_path: Path,
+    dispatches: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Read-only V1 vs V2 confidence divergence report.
+
+    For each entry in ``dispatches`` (list of
+    ``{'dispatch_id': str, 'status': 'success'|'failure'}``), resolves which
+    patterns V1 (``source_dispatch_ids LIKE``) and V2
+    (``dispatch_pattern_offered`` junction) would update, then computes the
+    projected beta-score each path would produce — WITHOUT writing anything.
+
+    ``VNX_OUTCOME_GROUNDING_V2`` is intentionally ignored: shadow mode always
+    evaluates both paths in parallel so the report is flag-independent.
+
+    Returns::
+
+        {
+          'dispatches': [
+            {
+              'dispatch_id': str,
+              'status': str,
+              'v1_pattern_ids': [int, ...],
+              'v2_pattern_ids': [int, ...],
+              'v1_only':   [int, ...],   # matched by V1, not V2
+              'v2_only':   [int, ...],   # matched by V2, not V1
+              'agreement': [int, ...],   # matched by both
+              'pattern_details': {
+                  sp_id: {
+                      'title': str,
+                      'current_conf': float,
+                      'v1_new_conf': float,  # current_conf when not matched
+                      'v2_new_conf': float,
+                      'in_v1': bool,
+                      'in_v2': bool,
+                  }
+              },
+              'has_divergence': bool,
+            },
+            ...
+          ],
+          'summary': {
+              'total_dispatches': int,
+              'diverged_dispatches': int,
+              'v2_only_grounded': int,
+              'v1_only_grounded': int,
+              'junction_available': bool,
+          },
+        }
+    """
+    if not db_path.exists():
+        return {
+            "dispatches": [],
+            "summary": {
+                "total_dispatches": 0,
+                "diverged_dispatches": 0,
+                "v2_only_grounded": 0,
+                "v1_only_grounded": 0,
+                "junction_available": False,
+            },
+        }
+
+    from confidence_reconcile import SUCCESS_PATTERN_PREFIX
+
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        project_id = current_project_id()
+        sp_has_project = _has_column(conn, "success_patterns", "project_id")
+        junction_available = _has_table(conn, "dispatch_pattern_offered")
+        pu_table_exists = _has_table(conn, "pattern_usage")
+
+        dispatch_results: List[Dict[str, Any]] = []
+        total_v2_only = 0
+        total_v1_only = 0
+        diverged = 0
+
+        for entry in dispatches:
+            dispatch_id = (entry.get("dispatch_id") or "").strip()
+            status = (entry.get("status") or "").lower()
+            is_success = status == "success"
+
+            v1_rows = _legacy_source_id_rows(conn, dispatch_id, project_id, sp_has_project)
+            v1_by_id = {int(row["id"]): row for row in v1_rows}
+            v1_ids = set(v1_by_id)
+
+            if junction_available:
+                v2_rows = _junction_grounded_rows(conn, dispatch_id, project_id, sp_has_project)
+            else:
+                v2_rows = []
+            v2_by_id = {int(row["id"]): row for row in v2_rows}
+            v2_ids = set(v2_by_id)
+
+            all_ids = v1_ids | v2_ids
+            v1_only = sorted(v1_ids - v2_ids)
+            v2_only = sorted(v2_ids - v1_ids)
+            agreement = sorted(v1_ids & v2_ids)
+            has_divergence = bool(v1_only or v2_only)
+
+            if has_divergence:
+                diverged += 1
+            total_v2_only += len(v2_only)
+            total_v1_only += len(v1_only)
+
+            pattern_details: Dict[int, Dict[str, Any]] = {}
+            for sp_id in all_ids:
+                source_row = v1_by_id.get(sp_id) or v2_by_id.get(sp_id)
+                current_conf = float(source_row["confidence_score"] or 0.0) if source_row else 0.0
+                title = str(source_row["title"] or f"pattern_{sp_id}")[:120] if source_row else f"pattern_{sp_id}"
+
+                cur_succ = 0
+                cur_fail = 0
+                if pu_table_exists:
+                    pid = f"{SUCCESS_PATTERN_PREFIX}{sp_id}"
+                    try:
+                        pu_row = conn.execute(
+                            "SELECT success_count, failure_count FROM pattern_usage "
+                            "WHERE pattern_id = ?",
+                            (pid,),
+                        ).fetchone()
+                        if pu_row:
+                            cur_succ = int(pu_row["success_count"] or 0)
+                            cur_fail = int(pu_row["failure_count"] or 0)
+                    except sqlite3.OperationalError:
+                        pass
+
+                pattern_details[sp_id] = {
+                    "title": title,
+                    "current_conf": current_conf,
+                    "v1_new_conf": _projected_conf(
+                        sp_id in v1_ids, current_conf, cur_succ, cur_fail, is_success
+                    ),
+                    "v2_new_conf": _projected_conf(
+                        sp_id in v2_ids, current_conf, cur_succ, cur_fail, is_success
+                    ),
+                    "in_v1": sp_id in v1_ids,
+                    "in_v2": sp_id in v2_ids,
+                }
+
+            dispatch_results.append({
+                "dispatch_id": dispatch_id,
+                "status": status,
+                "v1_pattern_ids": sorted(v1_ids),
+                "v2_pattern_ids": sorted(v2_ids),
+                "v1_only": v1_only,
+                "v2_only": v2_only,
+                "agreement": agreement,
+                "pattern_details": pattern_details,
+                "has_divergence": has_divergence,
+            })
+
+        return {
+            "dispatches": dispatch_results,
+            "summary": {
+                "total_dispatches": len(dispatches),
+                "diverged_dispatches": diverged,
+                "v2_only_grounded": total_v2_only,
+                "v1_only_grounded": total_v1_only,
+                "junction_available": junction_available,
+            },
+        }
+    finally:
+        conn.close()

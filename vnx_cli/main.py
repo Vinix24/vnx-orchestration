@@ -332,6 +332,19 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         help="which proposals to show: rules, archival, or all (default: all)",
     )
 
+    lr_gs = learning_subs.add_parser(
+        "grounding-shadow",
+        help="compare V1 (substring-join) vs V2 (junction) confidence grounding — read-only",
+    )
+    lr_gs.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_gs.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        metavar="N",
+        help="max recent dispatches to analyse (default: 50)",
+    )
+
 
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_parser = subparsers.add_parser(
