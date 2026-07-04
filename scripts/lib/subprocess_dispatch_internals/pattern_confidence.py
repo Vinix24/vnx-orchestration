@@ -125,6 +125,15 @@ def _update_pattern_confidence(
 
     Linkage is by title: pattern_usage.pattern_title → success_patterns.title.
     Returns count of pattern_usage rows updated.  Never raises.
+
+    KEEP THIS PATH (D1, 2026-07-04): for dispatches routed via the subprocess
+    lane that complete without emitting a task_complete/task_failed receipt,
+    intelligence_persist.update_confidence_from_outcome() never fires (it
+    listens exclusively for task_complete/task_failed events).  This fixed-delta
+    path (+0.05 success / -0.10 failure, capped at 1.0/floored at 0.0) is the
+    ONLY confidence update those dispatches receive.  Do not retire it until a
+    receipt-level grounding path exists for subprocess_completion events.
+    See claudedocs/2026-07-04-intelligence-dataflow-MAP.md §2.
     """
     if not db_path.exists():
         return 0
@@ -178,7 +187,13 @@ def _query_offered_patterns(conn, dispatch_id: str) -> list:
 def _apply_pattern_outcome(
     conn, pattern_id, title: str, is_success: bool, now: str,
 ) -> None:
-    """Apply success-boost or failure-decay to a single offered pattern."""
+    """Apply success-boost or failure-decay to a single offered pattern.
+
+    Fixed-delta path: +0.05 (cap 1.0) on success, -0.10 (floor 0.0) on
+    failure.  Does NOT touch pattern_usage.success_count/failure_count —
+    those are reserved for the Beta-Laplace grounding path in
+    intelligence_persist.update_confidence_from_outcome().
+    """
     if is_success:
         conn.execute(
             """
