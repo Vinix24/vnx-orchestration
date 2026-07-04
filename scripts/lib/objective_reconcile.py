@@ -44,10 +44,201 @@ _PR_STATE_CACHE_FILE = "pr_state_cache.json"
 _SUMMARY_FILE = "reconcile_summary.json"
 _HISTORY_FILE = "reconcile_history.ndjson"
 _SKIP_PHASES: FrozenSet[str] = frozenset({"done", "parked"})
+_VALID_VERDICTS: FrozenSet[str] = frozenset({"ok", "false-candidate"})
 
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Operator review recording
+# ---------------------------------------------------------------------------
+
+def record_review(
+    state_dir: Path,
+    run_id: str,
+    reviewer: str,
+    verdict: str,
+    note: Optional[str],
+    ts: Optional[str] = None,
+) -> None:
+    """Append an operator review record to reconcile_history.ndjson.
+
+    Raises ValueError when run_id does not appear as a reconcile-run record in
+    the history file (callers translate this to CLI exit 2). Raises ValueError
+    for an invalid verdict. Raises OSError on I/O failure.
+    """
+    if verdict not in _VALID_VERDICTS:
+        raise ValueError(
+            f"invalid verdict {verdict!r}: must be one of {sorted(_VALID_VERDICTS)}"
+        )
+
+    history_path = state_dir / _HISTORY_FILE
+
+    run_found = False
+    try:
+        with open(history_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                # Review records themselves carry record="review"; skip them.
+                if rec.get("record") == "review":
+                    continue
+                if rec.get("run_id") == run_id:
+                    run_found = True
+                    break
+    except FileNotFoundError:
+        pass
+
+    if not run_found:
+        raise ValueError(f"run_id {run_id!r} not found in reconcile history")
+
+    review_record: Dict[str, Any] = {
+        "record": "review",
+        "run_id": run_id,
+        "reviewer": reviewer,
+        "verdict": verdict,
+        "note": note or "",
+        "ts": ts or _now_utc(),
+    }
+
+    try:
+        with open(history_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(review_record) + "\n")
+    except OSError as exc:
+        raise OSError(f"cannot append review to {history_path}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Streak computation (flip criterion)
+# ---------------------------------------------------------------------------
+
+def compute_streak(
+    state_dir: Path,
+    project_id: str,
+) -> Dict[str, Any]:
+    """Compute the consecutive clean-run streak from reconcile_history.ndjson.
+
+    A run enters the streak when:
+      (a) evidence_source_health.gh == "ok" AND counts.unverified == 0
+      (b) it has zero "false-candidate" reviews
+
+    A degraded run (gh != "ok", unverified > 0, or any false-candidate review)
+    breaks the streak.
+
+    The VNX_AUTO_CLOSE flip criterion is met when the streak has ≥1 run with
+    ≥1 confirmed candidate that received an "ok" review.
+
+    Returns:
+      {
+        "streak_length": int,
+        "has_reviewed_confirmed": bool,
+        "flip_criterion_met": bool,
+        "runs": [...],     # run entries in streak (newest first)
+        "project_id": str,
+      }
+    """
+    history_path = state_dir / _HISTORY_FILE
+
+    summaries: List[Dict[str, Any]] = []
+    reviews_by_run: Dict[str, List[Dict[str, Any]]] = {}
+
+    try:
+        with open(history_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if rec.get("record") == "review":
+                    rid = rec.get("run_id", "")
+                    reviews_by_run.setdefault(rid, []).append(rec)
+                elif "run_id" in rec and "counts" in rec:
+                    if rec.get("project_id") == project_id:
+                        summaries.append(rec)
+    except FileNotFoundError:
+        pass
+
+    # Walk from newest run to oldest
+    summaries_newest_first = list(reversed(summaries))
+
+    streak_runs: List[Dict[str, Any]] = []
+    has_reviewed_confirmed = False
+
+    for run in summaries_newest_first:
+        run_id = run.get("run_id", "")
+        gh_ok = run.get("evidence_source_health", {}).get("gh") == "ok"
+        counts = run.get("counts") or {}
+        unverified = counts.get("unverified", 0)
+        confirmed = counts.get("confirmed", 0)
+        is_clean = gh_ok and unverified == 0
+
+        run_reviews = reviews_by_run.get(run_id, [])
+        has_false_candidate = any(r.get("verdict") == "false-candidate" for r in run_reviews)
+        has_ok_review = any(r.get("verdict") == "ok" for r in run_reviews)
+
+        if not is_clean or has_false_candidate:
+            break
+
+        streak_runs.append({
+            "run_id": run_id,
+            "started_at": run.get("started_at"),
+            "gh": run.get("evidence_source_health", {}).get("gh"),
+            "confirmed": confirmed,
+            "unverified": unverified,
+            "reviews": run_reviews,
+        })
+
+        if confirmed > 0 and has_ok_review:
+            has_reviewed_confirmed = True
+
+    streak_length = len(streak_runs)
+    flip_criterion_met = streak_length >= 1 and has_reviewed_confirmed
+
+    return {
+        "streak_length": streak_length,
+        "has_reviewed_confirmed": has_reviewed_confirmed,
+        "flip_criterion_met": flip_criterion_met,
+        "runs": streak_runs,
+        "project_id": project_id,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tick command builder (testable helper)
+# ---------------------------------------------------------------------------
+
+def build_tick_command(
+    vnx_dir: str,
+    project_id: str,
+    state_dir: str,
+    *,
+    auto_close: bool = False,
+) -> List[str]:
+    """Return the argv list the supervisor tick executes for `objective reconcile`.
+
+    CHECK mode by default; --apply appended only when auto_close=True
+    (i.e. VNX_AUTO_CLOSE=1 in the environment).
+    """
+    cmd = [
+        "python3",
+        str(Path(vnx_dir) / "scripts" / "planning_cli.py"),
+        "objective", "reconcile",
+        "--project-id", project_id,
+        "--state-dir", state_dir,
+    ]
+    if auto_close:
+        cmd.append("--apply")
+    return cmd
 
 
 def _make_run_id() -> str:

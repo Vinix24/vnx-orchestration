@@ -197,6 +197,58 @@ poll. Inspect `pending/` and move or delete the offending file.
 
 ---
 
+## Objective reconcile tick (D4 — advisory-first)
+
+When `VNX_SUPERVISOR_MODE=unified`, the dispatcher prelude fires `_maybe_objective_reconcile`
+as the last tick helper. This periodically runs `objective reconcile` against the live
+project state so tracks whose PRs merge between manual reconcile calls close automatically.
+
+### Interval
+
+```
+VNX_OBJECTIVE_RECONCILE_INTERVAL=900   # seconds between reconcile runs; default 900 (15 min)
+```
+
+State file: `.vnx-data/state/.last_objective_reconcile_ts`.
+Log: `.vnx-data/logs/objective_reconcile.log`.
+
+### Default mode: CHECK (advisory)
+
+By default the tick runs in CHECK mode — it verifies PR states and reports candidates but does
+**not** advance declared phases. This is the safe default: an operator can review the output
+in `objective_reconcile.log` or via `vnx objective reconcile --json` before enabling writes.
+
+### Enabling auto-close: VNX_AUTO_CLOSE
+
+To enable automatic phase advancement, set `VNX_AUTO_CLOSE=1` in `bin/vnx`. The tick then
+appends `--apply` to the reconcile command and closes CONFIRMED tracks on each run.
+
+**Before setting VNX_AUTO_CLOSE=1**, verify the flip criterion is met:
+
+```bash
+vnx objective reconcile-streak --project-id <pid>
+```
+
+The flip criterion requires:
+- A consecutive streak of clean runs (gh=ok, zero unverified, no false-candidate reviews).
+- At least one run in the streak has a confirmed candidate with an `ok` operator review.
+
+Record operator reviews with:
+
+```bash
+vnx objective reconcile-review <run_id> --reviewer <name> --verdict ok
+vnx objective reconcile-review <run_id> --reviewer <name> --verdict false-candidate --note "..."
+```
+
+`run_id` comes from the `run_id` field in `reconcile_history.ndjson` or `reconcile_summary.json`.
+
+### Rollback
+
+Unset `VNX_AUTO_CLOSE` (or remove it from `bin/vnx`) to revert to CHECK mode without
+restarting the supervisor. The next tick will omit `--apply`.
+
+---
+
 ## Architecture summary
 
 ```
@@ -205,8 +257,9 @@ bin/vnx
 
 scripts/dispatcher_supervisor.sh           ← wrapper (backoff + respawn)
   └── scripts/dispatcher_minimal.sh     ← inner loop
-        ├── _maybe_expire_stale_leases()   ← every 30s → scripts/lib/lease_sweep.py
-        └── _maybe_runtime_supervise()     ← every 60s → scripts/lib/runtime_supervise.py
+        ├── _maybe_expire_stale_leases()      ← every 30s → scripts/lib/lease_sweep.py
+        ├── _maybe_runtime_supervise()        ← every 60s → scripts/lib/runtime_supervise.py
+        └── _maybe_objective_reconcile()      ← every 900s → planning_cli.py objective reconcile
 
 scripts/receipt_processor_supervisor.sh    ← wrapper (backoff + respawn)
   └── scripts/receipt_processor.sh     ← inner poll loop
@@ -218,10 +271,12 @@ scripts/lib/cleanup_worker_exit.py         ← called by both adapters on worker
 ```
 
 State files: `.vnx-data/state/.last_lease_sweep_ts`,
-`.vnx-data/state/.last_runtime_supervise_ts`.
+`.vnx-data/state/.last_runtime_supervise_ts`,
+`.vnx-data/state/.last_objective_reconcile_ts`.
 
 Logs: `.vnx-data/logs/dispatcher_supervisor.log`,
 `.vnx-data/logs/receipt_processor_supervisor.log`,
-`.vnx-data/logs/lease_sweep.log`.
+`.vnx-data/logs/lease_sweep.log`,
+`.vnx-data/logs/objective_reconcile.log`.
 
 Full design rationale: `claudedocs/2026-04-29-unified-supervisor-research.md`.

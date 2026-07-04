@@ -922,3 +922,259 @@ def test_stamp_roundtrip_prref_with_double_quote_unchanged_guarded(tmp_path, mon
     assert summary["counts"].get("reopened_guard", 0) == 1
     assert summary["counts"].get("closed", 0) == 0
     assert _phase(sd, "T-rt6") == "active"
+
+
+# ---------------------------------------------------------------------------
+# D4 tests: review recording, streak computation, tick command builder
+# ---------------------------------------------------------------------------
+
+def _run_reconcile_and_get_run_id(sd: Path, tmp_path: Path, monkeypatch, pr_num: int, track_id: str) -> str:
+    """Helper: run reconcile in check mode and return the run_id."""
+    _seed_track(sd, track_id, phase="active", pr_ref=f"#{pr_num}")
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({pr_num: _merged_pr(pr_num)}),
+    )
+    summary, _ = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=False,
+    )
+    return summary["run_id"]
+
+
+class TestRecordReview:
+    """objective_reconcile.record_review — happy path and unknown-run_id refusal."""
+
+    def test_happy_path_appends_review_record(self, tmp_path, monkeypatch):
+        """record_review appends the review JSON line to reconcile_history.ndjson."""
+        sd = _build_db(tmp_path)
+        run_id = _run_reconcile_and_get_run_id(sd, tmp_path, monkeypatch, 5001, "T-rev1")
+
+        objective_reconcile.record_review(
+            sd, run_id, reviewer="alice", verdict="ok", note="looks good"
+        )
+
+        history_path = sd / "reconcile_history.ndjson"
+        lines = [l for l in history_path.read_text().splitlines() if l.strip()]
+        review_lines = [json.loads(l) for l in lines if json.loads(l).get("record") == "review"]
+        assert len(review_lines) == 1
+        r = review_lines[0]
+        assert r["run_id"] == run_id
+        assert r["reviewer"] == "alice"
+        assert r["verdict"] == "ok"
+        assert r["note"] == "looks good"
+        assert "ts" in r
+
+    def test_unknown_run_id_raises_value_error(self, tmp_path, monkeypatch):
+        """record_review raises ValueError when run_id is not in history."""
+        sd = _build_db(tmp_path)
+        # No reconcile run has been performed; history file does not exist.
+        with pytest.raises(ValueError, match="not found in reconcile history"):
+            objective_reconcile.record_review(
+                sd, "nonexistent-run-id", reviewer="bob", verdict="ok", note=""
+            )
+
+    def test_unknown_run_id_after_existing_runs(self, tmp_path, monkeypatch):
+        """Raises ValueError when run_id is absent even when history has other runs."""
+        sd = _build_db(tmp_path)
+        _run_reconcile_and_get_run_id(sd, tmp_path, monkeypatch, 5002, "T-rev2")
+
+        with pytest.raises(ValueError, match="not found in reconcile history"):
+            objective_reconcile.record_review(
+                sd, "wrong-run-id-xyz", reviewer="bob", verdict="false-candidate", note=""
+            )
+
+    def test_invalid_verdict_raises_value_error(self, tmp_path, monkeypatch):
+        """record_review raises ValueError for an invalid verdict value."""
+        sd = _build_db(tmp_path)
+        run_id = _run_reconcile_and_get_run_id(sd, tmp_path, monkeypatch, 5003, "T-rev3")
+
+        with pytest.raises(ValueError, match="invalid verdict"):
+            objective_reconcile.record_review(
+                sd, run_id, reviewer="carol", verdict="maybe", note=""
+            )
+
+    def test_review_record_does_not_count_as_run_id_source(self, tmp_path, monkeypatch):
+        """A review record's run_id does not satisfy the run_id existence check."""
+        sd = _build_db(tmp_path)
+        run_id = _run_reconcile_and_get_run_id(sd, tmp_path, monkeypatch, 5004, "T-rev4")
+
+        # Record a review so a "review" record with run_id exists in history.
+        objective_reconcile.record_review(sd, run_id, reviewer="dave", verdict="ok", note="")
+
+        # A made-up run_id must still fail even though history has review records.
+        with pytest.raises(ValueError, match="not found in reconcile history"):
+            objective_reconcile.record_review(
+                sd, "invented-id", reviewer="dave", verdict="ok", note=""
+            )
+
+
+class TestComputeStreak:
+    """objective_reconcile.compute_streak — streak logic and flip criterion."""
+
+    def _write_summary(self, sd: Path, run_id: str, *, gh: str = "ok", confirmed: int = 0, unverified: int = 0) -> None:
+        """Directly append a synthetic summary to reconcile_history.ndjson."""
+        history_path = sd / "reconcile_history.ndjson"
+        rec = {
+            "run_id": run_id,
+            "project_id": PROJECT_ID,
+            "mode": "check",
+            "started_at": "2026-07-04T10:00:00Z",
+            "finished_at": "2026-07-04T10:00:01Z",
+            "evidence_source_health": {"gh": gh},
+            "counts": {
+                "tracks": 1, "nominated": 1,
+                "confirmed": confirmed, "closed": 0,
+                "closed_sibling": 0, "open_pr": 0,
+                "unverified": unverified, "deferred": 0, "stale": 0,
+            },
+            "per_track": [],
+        }
+        with open(history_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def _write_review(self, sd: Path, run_id: str, verdict: str) -> None:
+        history_path = sd / "reconcile_history.ndjson"
+        rec = {"record": "review", "run_id": run_id, "reviewer": "test", "verdict": verdict, "note": "", "ts": "2026-07-04T10:01:00Z"}
+        with open(history_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def test_empty_history_returns_zero_streak(self, tmp_path):
+        sd = _build_db(tmp_path)
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 0
+        assert result["flip_criterion_met"] is False
+        assert result["runs"] == []
+
+    def test_single_clean_run_counts_in_streak(self, tmp_path):
+        sd = _build_db(tmp_path)
+        self._write_summary(sd, "run-A", gh="ok", unverified=0)
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 1
+
+    def test_degraded_run_resets_streak_to_zero(self, tmp_path):
+        """A degraded run (gh != ok) anywhere in the sequence resets the streak."""
+        sd = _build_db(tmp_path)
+        # Oldest to newest: clean, degraded, clean, clean
+        self._write_summary(sd, "run-old", gh="ok", unverified=0)
+        self._write_summary(sd, "run-deg", gh="absent", unverified=0)
+        self._write_summary(sd, "run-c1", gh="ok", unverified=0)
+        self._write_summary(sd, "run-c2", gh="ok", unverified=0)
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        # Only the two clean runs after the degraded run count; oldest degraded breaks it.
+        assert result["streak_length"] == 2
+        assert result["runs"][0]["run_id"] == "run-c2"
+        assert result["runs"][1]["run_id"] == "run-c1"
+
+    def test_unverified_run_resets_streak(self, tmp_path):
+        """A run with unverified > 0 resets the streak."""
+        sd = _build_db(tmp_path)
+        self._write_summary(sd, "run-unv", gh="ok", unverified=1)
+        self._write_summary(sd, "run-ok", gh="ok", unverified=0)
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 1
+        assert result["runs"][0]["run_id"] == "run-ok"
+
+    def test_false_candidate_review_breaks_streak(self, tmp_path):
+        """A false-candidate review on a run breaks the streak even if the run was clean."""
+        sd = _build_db(tmp_path)
+        self._write_summary(sd, "run-1", gh="ok", unverified=0)
+        self._write_review(sd, "run-1", verdict="false-candidate")
+        self._write_summary(sd, "run-2", gh="ok", unverified=0)
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        # run-2 is clean and unreviewd; run-1 has a false-candidate → breaks streak.
+        assert result["streak_length"] == 1
+        assert result["runs"][0]["run_id"] == "run-2"
+
+    def test_ok_review_without_confirmed_does_not_meet_flip_criterion(self, tmp_path):
+        """Even with an ok review, flip criterion requires confirmed > 0."""
+        sd = _build_db(tmp_path)
+        self._write_summary(sd, "run-X", gh="ok", unverified=0, confirmed=0)
+        self._write_review(sd, "run-X", verdict="ok")
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 1
+        assert result["has_reviewed_confirmed"] is False
+        assert result["flip_criterion_met"] is False
+
+    def test_flip_criterion_met_when_ok_reviewed_confirmed(self, tmp_path):
+        """Flip criterion met: streak has ≥1 confirmed candidate with ok review."""
+        sd = _build_db(tmp_path)
+        self._write_summary(sd, "run-Y", gh="ok", unverified=0, confirmed=1)
+        self._write_review(sd, "run-Y", verdict="ok")
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 1
+        assert result["has_reviewed_confirmed"] is True
+        assert result["flip_criterion_met"] is True
+
+    def test_flip_criterion_requires_reviewed_run_in_current_streak(self, tmp_path):
+        """Reviewed confirmed run before the degraded gap does not count for current streak."""
+        sd = _build_db(tmp_path)
+        # Oldest: clean + confirmed + ok review; then degraded; then clean (no review)
+        self._write_summary(sd, "run-before", gh="ok", unverified=0, confirmed=1)
+        self._write_review(sd, "run-before", verdict="ok")
+        self._write_summary(sd, "run-deg", gh="absent", unverified=0)
+        self._write_summary(sd, "run-after", gh="ok", unverified=0, confirmed=0)
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 1
+        assert result["runs"][0]["run_id"] == "run-after"
+        assert result["has_reviewed_confirmed"] is False
+        assert result["flip_criterion_met"] is False
+
+    def test_project_id_scoping(self, tmp_path):
+        """compute_streak only counts runs for the requested project_id."""
+        sd = _build_db(tmp_path)
+        # Write a run for a different project.
+        history_path = sd / "reconcile_history.ndjson"
+        other_run = {
+            "run_id": "run-other-proj",
+            "project_id": "other-project",
+            "mode": "check",
+            "started_at": "2026-07-04T10:00:00Z",
+            "finished_at": "2026-07-04T10:00:01Z",
+            "evidence_source_health": {"gh": "ok"},
+            "counts": {"tracks": 1, "nominated": 1, "confirmed": 1, "closed": 0,
+                       "closed_sibling": 0, "open_pr": 0, "unverified": 0, "deferred": 0, "stale": 0},
+            "per_track": [],
+        }
+        with open(history_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(other_run) + "\n")
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 0, "other-project run must not count"
+
+
+class TestBuildTickCommand:
+    """objective_reconcile.build_tick_command — command construction without VNX_AUTO_CLOSE."""
+
+    def test_check_mode_no_apply_when_auto_close_absent(self, tmp_path):
+        """VNX_AUTO_CLOSE absent (auto_close=False) → --apply not in command."""
+        cmd = objective_reconcile.build_tick_command(
+            str(tmp_path), "vnx-dev", str(tmp_path / "state"), auto_close=False,
+        )
+        assert "--apply" not in cmd
+        assert "objective" in cmd
+        assert "reconcile" in cmd
+
+    def test_apply_appended_when_auto_close_true(self, tmp_path):
+        """auto_close=True → --apply present in command."""
+        cmd = objective_reconcile.build_tick_command(
+            str(tmp_path), "vnx-dev", str(tmp_path / "state"), auto_close=True,
+        )
+        assert "--apply" in cmd
+
+    def test_project_id_and_state_dir_in_command(self, tmp_path):
+        """--project-id and --state-dir are always present."""
+        sd = str(tmp_path / "state")
+        cmd = objective_reconcile.build_tick_command(
+            str(tmp_path), "my-project", sd, auto_close=False,
+        )
+        assert "--project-id" in cmd
+        assert "my-project" in cmd
+        assert "--state-dir" in cmd
+        assert sd in cmd
