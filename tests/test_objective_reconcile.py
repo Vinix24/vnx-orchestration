@@ -879,6 +879,26 @@ def test_stamp_roundtrip_empty_prref_unchanged_guarded(tmp_path, monkeypatch):
     assert _phase(sd, "T-rt5") == "done"
 
 
+@pytest.mark.parametrize("garbled_reason", [
+    'reopen pr_ref="#1400"garbled',
+    'reopen pr_ref="#1400"|missing-spaces',
+    'reopen pr_ref="#1400"x',
+])
+def test_stamp_garbled_trailing_chars_guarded(tmp_path, monkeypatch, garbled_reason):
+    """Trailing garbage after JSON string literal → fail-closed (reopened_guard)."""
+    from objective_reconcile import _parse_reopen_stamp
+    assert _parse_reopen_stamp(garbled_reason) is None, (
+        f"Expected None for garbled stamp: {garbled_reason!r}"
+    )
+
+
+def test_stamp_valid_bare_and_with_separator():
+    """Valid shapes: bare JSON string and JSON string + ' | text' both parse."""
+    from objective_reconcile import _parse_reopen_stamp
+    assert _parse_reopen_stamp('reopen pr_ref="#1400"') == "#1400"
+    assert _parse_reopen_stamp('reopen pr_ref="#1400" | operator note') == "#1400"
+
+
 def test_stamp_roundtrip_prref_with_double_quote_unchanged_guarded(tmp_path, monkeypatch):
     """pr_ref containing a double quote: JSON encoding handles it safely.
     Unchanged after reopen → reopened_guard."""

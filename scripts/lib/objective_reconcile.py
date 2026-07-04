@@ -249,6 +249,10 @@ def _parse_reopen_stamp(reason: str) -> Optional[str]:
         val = json.loads(m.group(0))
     except (json.JSONDecodeError, ValueError):
         return None
+    # Remainder must be empty or start with ' | ' — anything else is garbled.
+    remainder = rest[m.end():]
+    if remainder and not remainder.startswith(" | "):
+        return None
     # '-' is the sentinel for empty pr_ref
     return "" if val == "-" else val
 
