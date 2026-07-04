@@ -49,6 +49,7 @@ for _p in (_LIB, _HERE):
 import tracks as tracks_lib  # noqa: E402
 import seed_tracks_from_roadmap as seeder  # noqa: E402
 import track_reconciler  # noqa: E402
+import objective_reconcile  # noqa: E402
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -310,6 +311,86 @@ def _drift_reason(
     finally:
         conn.close()
     return "derived from linked dispatch/event state"
+
+
+def cmd_objective_reconcile(args: argparse.Namespace) -> int:
+    """Batch git-grounded auto-close: verify PR merge state via gh, close done tracks.
+
+    CHECK mode (default): nominates candidates and verifies PR states but does NOT
+    advance declared phase. Refreshes derived_status for all tracks in both modes.
+
+    --apply: for each CONFIRMED candidate (all PRs merged), calls close_track_if_done
+    with actor=system and an auto-reconcile approval_id. Writes a full audit trail.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+
+    if args.repo_root:
+        repo_root = Path(args.repo_root).resolve()
+    else:
+        try:
+            from project_root import resolve_project_root  # noqa: PLC0415
+            repo_root = resolve_project_root(__file__)
+        except Exception as exc:
+            print(f"reconcile: cannot resolve repo root: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        summary, exit_code = objective_reconcile.run_reconcile(
+            state_dir, project_id,
+            repo_root=repo_root,
+            apply=args.apply,
+            allow_closed_siblings=args.allow_closed_siblings,
+            max_gh_calls=args.max_gh_calls,
+        )
+    except Exception as exc:
+        print(f"reconcile: unexpected error: {exc}", file=sys.stderr)
+        return 3
+
+    if args.json:
+        print(json.dumps(summary, indent=2, default=str))
+        return exit_code
+
+    mode = summary.get("mode", "check")
+    gh = summary.get("evidence_source_health", {}).get("gh", "?")
+    c = summary.get("counts", {})
+    prov = summary.get("provenance", {})
+
+    print(f"\nvnx objective reconcile — {mode.upper()} (project '{project_id}')\n")
+    print(f"  gh health   : {gh}")
+    print(f"  provenance  : scanned={prov.get('scanned', 0)}  linked={prov.get('linked', 0)}")
+    print(f"  tracks      : {c.get('tracks', 0)}")
+    print(f"  nominated   : {c.get('nominated', 0)}")
+    print(f"  confirmed   : {c.get('confirmed', 0)}")
+    if mode == "apply":
+        print(f"  closed      : {c.get('closed', 0)}")
+        if c.get("stale", 0):
+            print(f"  stale       : {c.get('stale', 0)}")
+    print(
+        f"  skipped     : closed_sibling={c.get('closed_sibling', 0)}"
+        f"  open_pr={c.get('open_pr', 0)}"
+        f"  unverified={c.get('unverified', 0)}"
+        f"  deferred={c.get('deferred', 0)}"
+    )
+
+    per_track = summary.get("per_track", [])
+    if per_track:
+        print()
+        for pt in per_track:
+            verdict = pt.get("verdict", "?")
+            cr = pt.get("close_result", "")
+            suffix = f" -> {cr}" if cr else ""
+            print(f"  {pt['track_id']:<32} {verdict}{suffix}  (pr_ref: {pt.get('pr_ref', '-')})")
+
+    if exit_code == 0 and mode == "apply" and c.get("closed", 0):
+        print(f"\n  [ok] closed {c['closed']} track(s)")
+    elif exit_code == 3:
+        print(f"\n  [!] degraded — check unverified={c.get('unverified', 0)}, gh={gh}")
+    elif c.get("nominated", 0) == 0:
+        print("\n  (no tracks nominated — all have no pr_ref or are already done/parked)")
+
+    print()
+    return exit_code
 
 
 def cmd_objective_drift(args: argparse.Namespace) -> int:
@@ -1199,6 +1280,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_drift)
     p_drift.set_defaults(func=cmd_objective_drift)
+
+    p_reconcile = obj_sub.add_parser(
+        "reconcile",
+        help="batch git-grounded auto-close: verify PR merge state via gh and close done tracks",
+    )
+    _common(p_reconcile)
+    p_reconcile.add_argument(
+        "--apply", action="store_true",
+        help="close CONFIRMED tracks (default: check only — no phase writes)",
+    )
+    p_reconcile.add_argument(
+        "--allow-closed-siblings", action="store_true", dest="allow_closed_siblings",
+        help="CONFIRMED if ≥1 PR merged even when siblings are CLOSED-unmerged",
+    )
+    p_reconcile.add_argument(
+        "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
+        metavar="N",
+        help="cap live gh pr view calls per run (default 50; excess → deferred)",
+    )
+    p_reconcile.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for gh calls (default: auto-resolved from project root)",
+    )
+    p_reconcile.set_defaults(func=cmd_objective_reconcile)
 
     p_close = obj_sub.add_parser(
         "close",
