@@ -21,7 +21,9 @@ rewritten (ADR-005). The past is evidence: it is what governance verifies agains
 ### Current — the declared and derived present
 `runtime_coordination.db` holds the live state:
 - `tracks.phase` — the operator-authoritative **declared** status
-  (`queued → active → done`, plus `parked`). `done` is terminal.
+  (`queued → active → done`, plus `parked`). `done` is terminal for the
+  reconciler; an operator may reopen it via `objective reopen --approval-id
+  --reason` (the `done → active` edge), which re-arms the re-close guard.
 - `tracks.derived_status` — the reconciler-**computed** status (`done` / `blocked`
   / `in_progress` / `queued`), written independently of `phase`.
 - `dispatches.state` — in-flight work (`proposed → ready → active → completed`,
@@ -78,7 +80,11 @@ step 8 (you close). That window is deliberate — it is your human gate — and
 - **Write separation.** `phase` (declared) and `derived_status` (computed) are
   different columns with different writers. The reconciler can never silently
   flip your declared status.
-- **Phase immutability.** `done` is terminal; a closed track cannot regress.
+- **Phase immutability.** `done` is terminal for auto-close; the reconciler
+  never calls `done → active`. The operator-only reopen edge (`objective reopen
+  --approval-id --reason`) exists but stamps the pr_ref at reopen time — the
+  re-close guard disarms auto-close on the next reconcile run until the pr_ref
+  changes.
 - **Multi-source merge detection.** Four evidence sources mean a PR merged any
   way (receipt, ledger, ROADMAP, or raw `gh pr merge`) still grounds the track.
 - **Blocker + dependency gating.** Open `blocks` items and unmet `depends_on`

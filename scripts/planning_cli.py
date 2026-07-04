@@ -371,6 +371,7 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
         f"  open_pr={c.get('open_pr', 0)}"
         f"  unverified={c.get('unverified', 0)}"
         f"  deferred={c.get('deferred', 0)}"
+        f"  reopened_guard={c.get('reopened_guard', 0)}"
     )
 
     per_track = summary.get("per_track", [])
@@ -640,6 +641,77 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
 
     return _emit(lib_action or "unknown", False,
                  f"unexpected result from library: {lib_action}", 2)
+
+
+def cmd_objective_reopen(args: argparse.Namespace) -> int:
+    """Reopen a done track: done -> active (operator-gated, audited).
+
+    Both --approval-id and --reason are mandatory; exit 2 without them or
+    when the track is not in phase done. The reason stored in track_phase_history
+    is prefixed with a machine-parseable stamp: 'reopen pr_ref=<value> | <text>'
+    so the re-close guard in objective reconcile can detect when the pr_ref
+    changes (re-arming the track for the next auto-close cycle).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    approval_id = (getattr(args, "approval_id", None) or "").strip()
+    if not approval_id:
+        print(
+            "objective reopen: --approval-id is required (the operator's gate token). "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    reason_text = (getattr(args, "reason", None) or "").strip()
+    if not reason_text:
+        print(
+            "objective reopen: --reason is required. No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective reopen: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if track["phase"] != "done":
+        print(
+            f"objective reopen: track {track_id!r} is not in phase 'done' "
+            f"(current phase: {track['phase']!r}). Only done tracks can be reopened.",
+            file=sys.stderr,
+        )
+        return 2
+
+    current_pr_ref = (track.get("pr_ref") or "").strip() or "-"
+    stamped_reason = f"reopen pr_ref={json.dumps(current_pr_ref)} | {reason_text}"
+
+    try:
+        tracks_lib.transition_phase(
+            state_dir, track_id, project_id, "active",
+            actor="operator",
+            reason=stamped_reason,
+            approval_id=approval_id,
+        )
+    except tracks_lib.InvalidTransitionError as exc:
+        print(f"objective reopen: transition failed: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"objective reopen: unexpected error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Reopened {track_id}: done -> active  "
+        f"(pr_ref={current_pr_ref}, approval={approval_id})"
+    )
+    return 0
 
 
 def maybe_auto_seed(
@@ -1319,6 +1391,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_close.add_argument("--include-parked", action="store_true",
                          help="allow closing a PARKED track (un-parks it; off by default)")
     p_close.set_defaults(func=cmd_objective_close)
+
+    p_reopen = obj_sub.add_parser(
+        "reopen",
+        help="reopen a done track: done -> active (operator-gated, audited)",
+    )
+    _common(p_reopen)
+    p_reopen.add_argument("track_id")
+    p_reopen.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_reopen.add_argument(
+        "--reason", default="",
+        help="reason for reopening (REQUIRED); stored with a pr_ref stamp for the re-close guard",
+    )
+    p_reopen.set_defaults(func=cmd_objective_reopen)
 
     p_add = obj_sub.add_parser(
         "add",

@@ -598,3 +598,327 @@ def test_cache_is_repo_scoped(tmp_path, monkeypatch):
     assert summary2["counts"]["confirmed"] == 1
     pr_view_calls_2 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
     assert len(pr_view_calls_2) == 1, "repo-b run must trigger its own gh pr view (different repo key)"
+
+
+# ---------------------------------------------------------------------------
+# Re-close guard tests (D6)
+# ---------------------------------------------------------------------------
+
+def test_reopened_track_unchanged_prref_skipped_as_reopened_guard(tmp_path, monkeypatch):
+    """Reopened track (done→active) with unchanged pr_ref → verdict=reopened_guard;
+    not closed under --apply even when gh confirms all PRs merged."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-guard", phase="active", pr_ref="#1100")
+
+    # Transition to done, then reopen with the JSON-encoded stamp format.
+    tracks_lib.transition_phase(sd, "T-guard", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-guard", PROJECT_ID, "active",
+        actor="operator",
+        reason='reopen pr_ref="#1100" | test reopening',
+        approval_id="appr-guard-001",
+    )
+    assert _phase(sd, "T-guard") == "active"
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1100: _merged_pr(1100)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    # Guarded track is NOT nominated (pr_ref unchanged since reopen).
+    assert summary["counts"]["nominated"] == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    per = {pt["track_id"]: pt for pt in summary["per_track"]}
+    assert "T-guard" in per
+    assert per["T-guard"]["verdict"] == "reopened_guard"
+    assert _phase(sd, "T-guard") == "active"  # not auto-closed
+
+
+def test_reopened_track_changed_prref_eligible_and_closes(tmp_path, monkeypatch):
+    """Reopened track whose pr_ref changed after reopen is re-armed and eligible for close."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-rearmed", phase="active", pr_ref="#1200")
+
+    # Transition to done, reopen with JSON-encoded stamp of the old pr_ref.
+    tracks_lib.transition_phase(sd, "T-rearmed", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-rearmed", PROJECT_ID, "active",
+        actor="operator",
+        reason='reopen pr_ref="#1200" | follow-up needed',
+        approval_id="appr-rearmed-001",
+    )
+    # Change pr_ref to a new value — re-arms the track for auto-close.
+    tracks_lib.update_authored_fields(
+        sd, "T-rearmed", PROJECT_ID, pr_ref="#1201", actor="operator",
+    )
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1201: _merged_pr(1201)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert summary["counts"].get("reopened_guard", 0) == 0
+    assert _phase(sd, "T-rearmed") == "done"
+
+
+def test_reopened_track_unparseable_stamp_guarded_fail_closed(tmp_path, monkeypatch):
+    """Unparseable reopen stamp (no 'reopen pr_ref=' prefix) → fail-closed (reopened_guard)."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-badstamp", phase="active", pr_ref="#1300")
+
+    # Transition to done, then reopen with a NON-STANDARD reason (missing stamp).
+    tracks_lib.transition_phase(sd, "T-badstamp", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-badstamp", PROJECT_ID, "active",
+        actor="operator",
+        reason="manually reopened without proper stamp format",
+        approval_id="appr-badstamp-001",
+    )
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1300: _merged_pr(1300)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    per = {pt["track_id"]: pt for pt in summary["per_track"]}
+    assert "T-badstamp" in per
+    assert per["T-badstamp"]["verdict"] == "reopened_guard"
+    assert _phase(sd, "T-badstamp") == "active"  # not auto-closed
+
+
+def test_old_format_stamp_treated_as_guarded(tmp_path, monkeypatch):
+    """Old-format stamp (no JSON quotes) → fail-closed (reopened_guard), not re-armed."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-oldfmt", phase="active", pr_ref="#1400")
+
+    # Stamp uses the old raw format (no json.dumps)
+    tracks_lib.transition_phase(sd, "T-oldfmt", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-oldfmt", PROJECT_ID, "active",
+        actor="operator",
+        reason="reopen pr_ref=#1400 | old format stamp",
+        approval_id="appr-oldfmt-001",
+    )
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1400: _merged_pr(1400)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    per = {pt["track_id"]: pt for pt in summary["per_track"]}
+    assert per["T-oldfmt"]["verdict"] == "reopened_guard"
+    assert _phase(sd, "T-oldfmt") == "active"
+
+
+# ---------------------------------------------------------------------------
+# JSON stamp round-trip tests (D6 gate round 2)
+# ---------------------------------------------------------------------------
+
+def _json_reopen_stamp(pr_ref_value: str) -> str:
+    """Build a new-format JSON-encoded stamp (mirrors planning_cli.py)."""
+    import json as _json
+    encoded = pr_ref_value if pr_ref_value else "-"
+    return f"reopen pr_ref={_json.dumps(encoded)} | test-reason"
+
+
+def _do_reopen_with_stamp(sd: Path, track_id: str, pr_ref_at_reopen: str) -> None:
+    """Transition track done→active with a new-format JSON stamp."""
+    tracks_lib.transition_phase(sd, track_id, PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, track_id, PROJECT_ID, "active",
+        actor="operator",
+        reason=_json_reopen_stamp(pr_ref_at_reopen),
+        approval_id=f"appr-{track_id}",
+    )
+
+
+def test_stamp_roundtrip_simple_prref_unchanged_guarded(tmp_path, monkeypatch):
+    """Simple pr_ref=#994: unchanged after reopen → reopened_guard."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-rt1", phase="active", pr_ref="#994")
+    _do_reopen_with_stamp(sd, "T-rt1", "#994")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({994: _merged_pr(994)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    assert _phase(sd, "T-rt1") == "active"
+
+
+def test_stamp_roundtrip_prref_with_pipe_unchanged_guarded(tmp_path, monkeypatch):
+    """pr_ref containing ' | ' (#1400 | #1401): unchanged after reopen → reopened_guard.
+    This is the core Fix 1 case: old format would misparse and disarm the guard."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-rt2", phase="active", pr_ref="#1400 | #1401")
+    _do_reopen_with_stamp(sd, "T-rt2", "#1400 | #1401")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1400: _merged_pr(1400), 1401: _merged_pr(1401)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    assert _phase(sd, "T-rt2") == "active"
+
+
+def test_stamp_roundtrip_prref_with_pipe_changed_rearmed(tmp_path, monkeypatch):
+    """pr_ref was '#1400 | #1401' at reopen; changed to '#1402' → re-armed, closes."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-rt3", phase="active", pr_ref="#1400 | #1401")
+    _do_reopen_with_stamp(sd, "T-rt3", "#1400 | #1401")
+    # Update pr_ref — re-arms the track for auto-close
+    tracks_lib.update_authored_fields(sd, "T-rt3", PROJECT_ID, pr_ref="#1402", actor="operator")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1402: _merged_pr(1402)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 0
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert _phase(sd, "T-rt3") == "done"
+
+
+def test_stamp_roundtrip_comma_separated_unchanged_guarded(tmp_path, monkeypatch):
+    """Comma-separated pr_ref (#908,#909): unchanged after reopen → reopened_guard."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-rt4", phase="active", pr_ref="#908,#909")
+    _do_reopen_with_stamp(sd, "T-rt4", "#908,#909")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({908: _merged_pr(908), 909: _merged_pr(909)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    assert _phase(sd, "T-rt4") == "active"
+
+
+def test_stamp_roundtrip_empty_prref_unchanged_guarded(tmp_path, monkeypatch):
+    """Empty pr_ref (sentinel '-'): reopened with empty, still empty → reopened_guard.
+    Note: empty pr_ref tracks are not nominated for reconcile (pr_ref is required),
+    so this verifies the guard is correct when pr_ref is subsequently filled in
+    but matches the sentinel after round-trip."""
+    sd = _build_db(tmp_path)
+    # Create with empty pr_ref, reopen (stamps '-')
+    _seed_track(sd, "T-rt5", phase="active", pr_ref="")
+    _do_reopen_with_stamp(sd, "T-rt5", "")
+    # Now give it a pr_ref matching the empty-equivalent round-trip:
+    # Empty → stamped as '-' → parses back as '' → current pr_ref '' → guarded
+    # But to nominate it, we must set a non-empty pr_ref.
+    # Set pr_ref to a new value → different from '' → re-armed.
+    tracks_lib.update_authored_fields(sd, "T-rt5", PROJECT_ID, pr_ref="#2000", actor="operator")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({2000: _merged_pr(2000)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    # pr_ref changed from '' to '#2000' → re-armed → closes
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 0
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert _phase(sd, "T-rt5") == "done"
+
+
+@pytest.mark.parametrize("garbled_reason", [
+    'reopen pr_ref="#1400"garbled',
+    'reopen pr_ref="#1400"|missing-spaces',
+    'reopen pr_ref="#1400"x',
+])
+def test_stamp_garbled_trailing_chars_guarded(tmp_path, monkeypatch, garbled_reason):
+    """Trailing garbage after JSON string literal → fail-closed (reopened_guard)."""
+    from objective_reconcile import _parse_reopen_stamp
+    assert _parse_reopen_stamp(garbled_reason) is None, (
+        f"Expected None for garbled stamp: {garbled_reason!r}"
+    )
+
+
+def test_stamp_valid_bare_and_with_separator():
+    """Valid shapes: bare JSON string and JSON string + ' | text' both parse."""
+    from objective_reconcile import _parse_reopen_stamp
+    assert _parse_reopen_stamp('reopen pr_ref="#1400"') == "#1400"
+    assert _parse_reopen_stamp('reopen pr_ref="#1400" | operator note') == "#1400"
+
+
+def test_stamp_roundtrip_prref_with_double_quote_unchanged_guarded(tmp_path, monkeypatch):
+    """pr_ref containing a double quote: JSON encoding handles it safely.
+    Unchanged after reopen → reopened_guard."""
+    sd = _build_db(tmp_path)
+    # pr_ref that embeds a double-quote character (unusual but must not break parser)
+    tricky_pr_ref = '#994 "extra"'
+    _seed_track(sd, "T-rt6", phase="active", pr_ref=tricky_pr_ref)
+    _do_reopen_with_stamp(sd, "T-rt6", tricky_pr_ref)
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({994: _merged_pr(994)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    # '#994 "extra"' parses to PR 994, but unchanged pr_ref → guarded
+    assert code == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    assert _phase(sd, "T-rt6") == "active"

@@ -26,7 +26,7 @@ phases: queued → active → parked → done
   queued  → {active, parked}
   active  → {done, parked}
   parked  → {queued}
-  done    → {} (terminal)
+  done    → {active}  (operator-only reopen edge)
 ```
 
 | Phase    | Description |
@@ -34,7 +34,7 @@ phases: queued → active → parked → done
 | `queued` | Track is ready; dependencies may not yet be satisfied |
 | `active` | Track is being executed; dispatches are live |
 | `parked` | Execution paused (context-switch or blocked); resumes via `queued` |
-| `done`   | Track is complete; all PRs merged to main |
+| `done`   | Track is complete; all PRs merged to main. Operator may reopen via `objective reopen --approval-id --reason` (`done → active`); the reconciler never calls this edge and the re-close guard disarms auto-close on the next run until pr_ref changes. |
 
 ### 1.2 Track Identity
 

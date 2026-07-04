@@ -33,7 +33,7 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued":  frozenset({"active", "parked"}),
     "active":  frozenset({"done", "parked"}),
     "parked":  frozenset({"queued"}),
-    "done":    frozenset(),
+    "done":    frozenset({"active"}),
 }
 
 

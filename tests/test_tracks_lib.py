@@ -188,11 +188,38 @@ class TestTransitionPhase:
         t = tracks.transition_phase(state_dir, "track-01", "vnx-dev", "queued", actor="operator")
         assert t["phase"] == "queued"
 
-    def test_done_is_terminal(self, state_dir):
+    def test_done_to_queued_still_illegal(self, state_dir):
+        """done→queued is NOT an allowed transition (only done→active is)."""
         tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1", phase="active")
         tracks.transition_phase(state_dir, "track-01", "vnx-dev", "done", actor="T0")
         with pytest.raises(tracks.InvalidTransitionError):
-            tracks.transition_phase(state_dir, "track-01", "vnx-dev", "active", actor="operator")
+            tracks.transition_phase(state_dir, "track-01", "vnx-dev", "queued", actor="operator")
+
+    def test_done_to_active_allowed(self, state_dir):
+        """done→active is the reopen valve — allowed and writes a history row."""
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1", phase="active")
+        tracks.transition_phase(state_dir, "track-01", "vnx-dev", "done", actor="T0")
+        t = tracks.transition_phase(
+            state_dir, "track-01", "vnx-dev", "active",
+            actor="operator",
+            reason="reopen pr_ref=#42 | follow-up work needed",
+            approval_id="reopen-approval-001",
+        )
+        assert t["phase"] == "active"
+
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        row = conn.execute(
+            "SELECT from_phase, to_phase, actor, reason, approval_id "
+            "FROM track_phase_history "
+            "WHERE track_id='track-01' AND from_phase='done' AND to_phase='active'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "done"
+        assert row[1] == "active"
+        assert row[2] == "operator"
+        assert row[3] == "reopen pr_ref=#42 | follow-up work needed"
+        assert row[4] == "reopen-approval-001"
 
     def test_invalid_actor_raises(self, state_dir):
         tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1", phase="queued")
