@@ -376,6 +376,69 @@ def test_evidence_with_pr_results_closes_without_local_derived_done(tmp_path):
     assert hist[-1]["approval_id"] == "APR-EV"
 
 
+# ---------------------------------------------------------------------------
+# Closed-sibling policy enforcement
+# ---------------------------------------------------------------------------
+
+def test_evidence_closed_sibling_without_policy_stale(tmp_path):
+    """CLOSED sibling without allow_closed_siblings flag → stale_candidate, no write."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-cs-no-flag", PROJECT_ID, title="cs no flag", goal_state="y",
+        phase="active", pr_ref="#800,#801",
+    )
+
+    # Snapshot WITHOUT allow_closed_siblings (or set to False).
+    evidence = {
+        "pr_ref": "#800,#801",
+        "pr_results": [
+            {"number": 800, "state": "MERGED", "mergedAt": "2026-07-04T10:00:00Z"},
+            {"number": 801, "state": "CLOSED", "mergedAt": None},
+        ],
+        "verified_at": "2026-07-04T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-cs-no-flag", PROJECT_ID, actor="system", evidence=evidence,
+    )
+    assert result["action"] == "stale_candidate"
+    assert result["applied"] is False
+    assert _phase(sd, "T-cs-no-flag") == "active"  # no write
+    assert _derived_status(sd, "T-cs-no-flag") is None
+
+
+def test_evidence_closed_sibling_with_policy_closes(tmp_path):
+    """CLOSED sibling + allow_closed_siblings=True + ≥1 MERGED → closes."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-cs-flag", PROJECT_ID, title="cs with flag", goal_state="y",
+        phase="active", pr_ref="#802,#803",
+    )
+
+    # Snapshot WITH allow_closed_siblings=True.
+    evidence = {
+        "pr_ref": "#802,#803",
+        "pr_results": [
+            {"number": 802, "state": "MERGED", "mergedAt": "2026-07-04T10:00:00Z"},
+            {"number": 803, "state": "CLOSED", "mergedAt": None},
+        ],
+        "verified_at": "2026-07-04T10:00:00Z",
+        "allow_closed_siblings": True,
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-cs-flag", PROJECT_ID, actor="system", approval_id="APR-CS",
+        evidence=evidence,
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert _phase(sd, "T-cs-flag") == "done"
+
+    hist = _history(sd, "T-cs-flag")
+    assert hist, "expected track_phase_history rows"
+    assert hist[-1]["to_phase"] == "done"
+    assert hist[-1]["actor"] == "system"
+    assert hist[-1]["approval_id"] == "APR-CS"
+
+
 def test_mid_walk_failure_leaves_intermediate_and_is_resumable(tmp_path, monkeypatch):
     sd = _build_db(tmp_path)
     _seed_done_track(sd, "T-q2", phase="queued")  # queued -> active -> done (two steps)

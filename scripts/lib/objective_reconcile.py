@@ -466,6 +466,7 @@ def run_reconcile(
                 "pr_ref": pr_ref,
                 "pr_results": pr_list,
                 "verified_at": verified_at,
+                "allow_closed_siblings": allow_closed_siblings,
             }
             close_result = track_reconciler.close_track_if_done(
                 state_dir, track_id, project_id,

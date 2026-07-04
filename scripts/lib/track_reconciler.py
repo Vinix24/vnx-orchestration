@@ -502,14 +502,17 @@ def reconcile_all_tracks(
 class EvidenceSnapshot(TypedDict, total=False):
     """Nomination snapshot passed to close_track_if_done for close-time revalidation.
 
-    pr_ref:     the pr_ref value from the track row at nomination time.
-    pr_results: optional per-PR GitHub results (number, state, mergedAt) from gh.
-    verified_at: ISO-8601 timestamp when the nomination was taken.
+    pr_ref:              the pr_ref value from the track row at nomination time.
+    pr_results:          optional per-PR GitHub results (number, state, mergedAt) from gh.
+    verified_at:         ISO-8601 timestamp when the nomination was taken.
+    allow_closed_siblings: when True, a CLOSED PR alongside ≥1 MERGED PR is acceptable.
+                           When absent or False, any CLOSED entry triggers stale_candidate.
     """
 
     pr_ref: str
     pr_results: List[Dict[str, Any]]
     verified_at: str
+    allow_closed_siblings: bool
 
 
 def _close_evidence(
@@ -769,8 +772,8 @@ def close_track_if_done(
                     state = (entry.get("state") or "")
                     if state == "MERGED" and entry.get("mergedAt"):
                         has_merged_pr = True
-                    elif state == "CLOSED":
-                        pass  # closed sibling — allowed
+                    elif state == "CLOSED" and evidence.get("allow_closed_siblings") is True:
+                        pass  # closed sibling — allowed only when caller opted in
                     else:
                         return {
                             "track_id": track_id,
