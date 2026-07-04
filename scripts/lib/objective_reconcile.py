@@ -46,6 +46,9 @@ _HISTORY_FILE = "reconcile_history.ndjson"
 _SKIP_PHASES: FrozenSet[str] = frozenset({"done", "parked"})
 _VALID_VERDICTS: FrozenSet[str] = frozenset({"ok", "false-candidate"})
 
+# Number of consecutive clean advisory runs required before VNX_AUTO_CLOSE may flip.
+FLIP_STREAK_REQUIRED = 7
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -132,12 +135,14 @@ def compute_streak(
     A degraded run (gh != "ok", unverified > 0, or any false-candidate review)
     breaks the streak.
 
-    The VNX_AUTO_CLOSE flip criterion is met when the streak has ≥1 run with
-    ≥1 confirmed candidate that received an "ok" review.
+    The VNX_AUTO_CLOSE flip criterion is met when the streak has at least
+    FLIP_STREAK_REQUIRED (7) consecutive clean runs AND at least one run in
+    the streak has a confirmed candidate that received an "ok" review.
 
     Returns:
       {
         "streak_length": int,
+        "required_streak": int,    # always FLIP_STREAK_REQUIRED (7)
         "has_reviewed_confirmed": bool,
         "flip_criterion_met": bool,
         "runs": [...],     # run entries in streak (newest first)
@@ -202,10 +207,11 @@ def compute_streak(
             has_reviewed_confirmed = True
 
     streak_length = len(streak_runs)
-    flip_criterion_met = streak_length >= 1 and has_reviewed_confirmed
+    flip_criterion_met = streak_length >= FLIP_STREAK_REQUIRED and has_reviewed_confirmed
 
     return {
         "streak_length": streak_length,
+        "required_streak": FLIP_STREAK_REQUIRED,
         "has_reviewed_confirmed": has_reviewed_confirmed,
         "flip_criterion_met": flip_criterion_met,
         "runs": streak_runs,

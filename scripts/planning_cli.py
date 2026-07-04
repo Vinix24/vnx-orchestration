@@ -423,7 +423,8 @@ def cmd_objective_reconcile_streak(args: argparse.Namespace) -> int:
     """Compute the consecutive clean-run streak for the VNX_AUTO_CLOSE flip decision.
 
     A streak run is clean (gh==ok, zero unverified) with no false-candidate reviews.
-    The flip criterion is met when the streak has ≥1 confirmed candidate with an ok review.
+    The flip criterion is met when the streak has ≥7 clean runs AND ≥1 confirmed
+    candidate with an ok review in the current streak.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -435,24 +436,30 @@ def cmd_objective_reconcile_streak(args: argparse.Namespace) -> int:
         return 0
 
     streak = result["streak_length"]
+    required = result["required_streak"]
     flip = result["flip_criterion_met"]
     reviewed_confirmed = result["has_reviewed_confirmed"]
 
     print(f"\nvnx objective reconcile-streak (project '{project_id}')\n")
-    print(f"  streak_length         : {streak}")
+    print(f"  streak_length         : {streak}/{required}")
     print(f"  has_reviewed_confirmed: {reviewed_confirmed}")
     print(f"  flip_criterion_met    : {flip}")
 
     if flip:
         print(
-            "\n  [ok] VNX_AUTO_CLOSE flip criterion met: the current streak has a "
-            "confirmed candidate with an ok review."
+            "\n  [ok] VNX_AUTO_CLOSE flip criterion met: streak reached "
+            f"{required} consecutive clean runs with a confirmed ok-reviewed candidate."
         )
     else:
         if streak == 0:
             print(
                 "\n  [!] no clean consecutive runs yet "
                 "(degraded run or false-candidate review breaks the streak)"
+            )
+        elif streak < required:
+            print(
+                f"\n  [!] streak {streak}/{required}: need {required - streak} more "
+                "consecutive clean run(s) before the flip criterion can be met"
             )
         if not reviewed_confirmed:
             print(

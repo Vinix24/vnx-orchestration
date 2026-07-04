@@ -1100,14 +1100,35 @@ class TestComputeStreak:
         assert result["has_reviewed_confirmed"] is False
         assert result["flip_criterion_met"] is False
 
-    def test_flip_criterion_met_when_ok_reviewed_confirmed(self, tmp_path):
-        """Flip criterion met: streak has ≥1 confirmed candidate with ok review."""
+    def test_required_streak_field_present(self, tmp_path):
+        """compute_streak always returns required_streak == FLIP_STREAK_REQUIRED."""
         sd = _build_db(tmp_path)
-        self._write_summary(sd, "run-Y", gh="ok", unverified=0, confirmed=1)
-        self._write_review(sd, "run-Y", verdict="ok")
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["required_streak"] == objective_reconcile.FLIP_STREAK_REQUIRED
+
+    def test_flip_criterion_not_met_with_six_clean_runs(self, tmp_path):
+        """Six consecutive clean runs with a reviewed confirmed candidate is NOT enough."""
+        sd = _build_db(tmp_path)
+        for i in range(5):
+            self._write_summary(sd, f"run-c{i}", gh="ok", unverified=0, confirmed=0)
+        self._write_summary(sd, "run-c5", gh="ok", unverified=0, confirmed=1)
+        self._write_review(sd, "run-c5", verdict="ok")
 
         result = objective_reconcile.compute_streak(sd, PROJECT_ID)
-        assert result["streak_length"] == 1
+        assert result["streak_length"] == 6
+        assert result["has_reviewed_confirmed"] is True
+        assert result["flip_criterion_met"] is False, "6 runs is below the 7-run threshold"
+
+    def test_flip_criterion_met_when_ok_reviewed_confirmed(self, tmp_path):
+        """Flip criterion met: 7 consecutive clean runs with ≥1 confirmed ok-reviewed run."""
+        sd = _build_db(tmp_path)
+        for i in range(6):
+            self._write_summary(sd, f"run-Y{i}", gh="ok", unverified=0, confirmed=0)
+        self._write_summary(sd, "run-Y6", gh="ok", unverified=0, confirmed=1)
+        self._write_review(sd, "run-Y6", verdict="ok")
+
+        result = objective_reconcile.compute_streak(sd, PROJECT_ID)
+        assert result["streak_length"] == 7
         assert result["has_reviewed_confirmed"] is True
         assert result["flip_criterion_met"] is True
 
