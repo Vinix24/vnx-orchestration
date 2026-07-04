@@ -32,8 +32,10 @@ rewritten (ADR-005). The past is evidence: it is what governance verifies agains
   `related`); an unresolved `blocks` item keeps a track out of `done`.
 
 The split between **declared** `phase` and **derived** `derived_status` is the
-core of drift control: the reconciler may compute "this is done," but advancing
-the declared phase to `done` is always a human-gated act.
+core of drift control: the reconciler computes "this is done" independently of
+whether declared phase has caught up. Declared phase advances to `done` via two
+paths: the automated reconcile loop (`vnx objective reconcile --apply`, gh-verified,
+system actor) or an explicit human close (`vnx objective close --apply --approval-id`).
 
 ### Future — authored intent
 `ROADMAP.yaml` is the only hand-edited planning surface. `FEATURE_PLAN.md` and
@@ -59,32 +61,49 @@ the declared phase to `done` is always a human-gated act.
    in order: `pr_merged.ndjson` events → `t0_receipts.ndjson` → ROADMAP
    `pr_queue` status → (opt-in `VNX_RECONCILE_GIT`) live `gh pr list --state
    merged` (10-min cache). No local receipt is required — git reality suffices.
-6. **Reconcile.** `track_reconciler` computes `derived_status` independently of
-   `phase`: blocker open → `blocked`; unmet dependency → `blocked`; all
-   dispatches terminal AND PR merged → `done`. This is advisory; it never touches
-   `phase`.
+6. **Reconcile (derived refresh).** `track_reconciler` computes `derived_status`
+   independently of `phase`: blocker OI unresolved → `blocked`; unmet dependency
+   → `blocked`; all dispatches terminal → `done` when any of: no `pr_ref` set,
+   a `pr_merged` coordination event exists, declared phase is already `done`, or
+   all parsed PRs are confirmed merged via local evidence sources. This runs in
+   both check and apply mode; it only writes `tracks.derived_status`, never
+   `tracks.phase`.
 7. **See the drift.** `vnx objective drift` reports every track where
    `phase ≠ derived_status` — the list of "done in reality, not yet closed."
-8. **Close (your gate).** `vnx objective close <id> --apply --approval-id <id>`
-   walks the phase to `done` along the shortest legal path, atomically per step,
-   stamping `approval_id` + reason in `track_phase_history`. Only a track whose
-   `derived_status='done'` can close. ROADMAP stays untouched; the views
+   `objective reconcile` (default: check mode) shows what *would* close.
+8. **Close — two paths:**
+   - **Automated loop** (recommended): `vnx objective reconcile --project-id <pid>
+     --apply` nominates every eligible track (non-empty `pr_ref`, declared phase
+     not `done`/`parked`), verifies each PR with `gh pr view --json state,mergedAt`,
+     and calls `close_track_if_done(actor=system, approval_id=auto-reconcile-<run-id>)`
+     for every CONFIRMED candidate. gh absent or degraded → exit 3, nothing closes
+     (fail-closed). Blocker OIs and non-done dependencies refuse at close time;
+     `parked` tracks are never nominated.
+   - **Human gate**: `vnx objective close <id> --apply --approval-id <id>` walks
+     the phase to `done` along the shortest legal path, stamping `approval_id` +
+     reason in `track_phase_history`. Requires `derived_status='done'`.
+
+   Either path writes to `track_phase_history`. ROADMAP stays untouched; views
    regenerate.
 
 The only place structural drift can open is between step 6 (derived done) and
-step 8 (you close). That window is deliberate — it is your human gate — and
-`objective drift` keeps it visible so it never sits silently.
+step 8 (close). That window is deliberate — it is the boundary between advisory
+evidence and authoritative state — and `objective drift` keeps it visible so it
+never sits silently. The reconcile loop (`--apply`) collapses the window
+automatically when wired into a cron or post-merge hook.
 
 ## Drift-prevention mechanisms
 
 - **Write separation.** `phase` (declared) and `derived_status` (computed) are
   different columns with different writers. The reconciler can never silently
   flip your declared status.
-- **Phase immutability.** `done` is terminal for auto-close; the reconciler
-  never calls `done → active`. The operator-only reopen edge (`objective reopen
-  --approval-id --reason`) exists but stamps the pr_ref at reopen time — the
-  re-close guard disarms auto-close on the next reconcile run until the pr_ref
-  changes.
+- **Phase immutability.** `done` is terminal for auto-close; neither the
+  reconciler nor `close_track_if_done` ever touches a track already at `done`.
+  The operator reopen valve (`objective reopen --approval-id --reason`) is the
+  only `done → active` edge; it stamps the current `pr_ref` in the history row.
+  The re-close guard reads that stamp on every subsequent reconcile run and skips
+  the track (verdict `reopened_guard`) as long as `pr_ref` is unchanged — re-close
+  is re-armed only when the operator sets a new `pr_ref`.
 - **Multi-source merge detection.** Four evidence sources mean a PR merged any
   way (receipt, ledger, ROADMAP, or raw `gh pr merge`) still grounds the track.
 - **Blocker + dependency gating.** Open `blocks` items and unmet `depends_on`
@@ -92,8 +111,11 @@ step 8 (you close). That window is deliberate — it is your human gate — and
 - **Generated views + CI guard.** `FEATURE_PLAN.md` / `PR_QUEUE.md` are generated
   and drift-checked; status lives in one place (ROADMAP `launch_state` +
   `features[]`).
-- **Human-gated closure.** Advancing declared phase to `done` requires an
-  operator `approval_id` — the last set is always human.
+- **Closure authority.** Declared phase advances to `done` via two paths: the
+  automated reconcile loop (system actor, gh-verified evidence, `approval_id`
+  stamped `auto-reconcile-<run-id>`) or a human `objective close` (explicit
+  `approval_id`). Both write to `track_phase_history`; neither can bypass the
+  blocker-OI and dependency gates.
 
 ## Automated vs human-gated
 
@@ -105,30 +127,31 @@ step 8 (you close). That window is deliberate — it is your human gate — and
 | Dispatch created/run | Auto | ready-promotion (you) |
 | PR merged | Auto (git) | — |
 | Merge detected / derived_status | Auto (reconciler) | advisory only |
-| Track closed (phase → done) | **Human-gated** | `approval_id` |
+| Track closed — reconcile loop | Auto (`--apply`) | gh evidence + system `approval_id` |
+| Track closed — human gate | Manual | explicit operator `approval_id` |
 
 ## Known gaps / roadmap
 
-Two ergonomics would tighten the fabric further (candidate tracks, not yet built):
+One ergonomic improvement would tighten the fabric further (candidate track, not yet built):
 
 1. **`vnx open-item add --track <id> --title … --severity blocker`** — a single
    command that writes straight to `track_open_items`, so a new issue is captured
    the moment you hit it. Today it is two steps (`open_items_manager add` →
    `import_open_items_to_tracks`).
-2. **Multi-PR `ALL`-merged closure.** A track that lists several PRs in its
-   `pr_queue` currently derives `done` when **any** one merges
-   (`_parse_pr_numbers(pr_ref) & merged_pr_numbers`). For a feature that genuinely
-   needs all of them, `done` should require **all** required `pr_queue` entries
-   merged. The human close-gate catches the premature case today, but the derived
-   signal is looser than ideal.
+
+The multi-PR ALL-merged gap (any vs all) was fixed in the D1 derivation update:
+both the reconcile loop (`_decide_candidate`) and `track_reconciler` (`_parse_pr_numbers`
+subset check) require every PR in `pr_ref` to be MERGED before deriving or closing as done.
 
 ## Where the mechanisms live
 
 - Track DAL + phase state machine: `scripts/lib/tracks.py`
-- Reconciler + 4-source merge detection: `scripts/lib/track_reconciler.py`
-- `vnx objective list|show|sync|drift|close`: `scripts/planning_cli.py`
+- Derived-status reconciler + 4-source merge detection: `scripts/lib/track_reconciler.py`
+- Batch auto-close reconcile loop: `scripts/lib/objective_reconcile.py`
+- `vnx objective list|show|sync|drift|close|reconcile|reopen`: `scripts/planning_cli.py`
 - ROADMAP → tracks projection: `scripts/seed_tracks_from_roadmap.py`
 - Generated views: `scripts/build_feature_plan.py`, `scripts/build_pr_queue.py`
+- Operational guide + known behaviours: `docs/operations/OBJECTIVE_RECONCILE.md`
 - Receipt / audit ledger contract: ADR-005, `docs/core/11_RECEIPT_FORMAT.md`
 - Tenant scoping on all of the above: ADR-007
 - Dispatch + intelligence flow this feeds: `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`
