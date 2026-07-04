@@ -30,7 +30,9 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, TypedDict
+
+import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
 
 log = logging.getLogger(__name__)
 
@@ -491,3 +493,285 @@ def reconcile_all_tracks(
         project_id, len(results), sum(1 for r in results if r["drifted"]),
     )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Shared close-walk helpers
+# ---------------------------------------------------------------------------
+
+class EvidenceSnapshot(TypedDict, total=False):
+    """Nomination snapshot passed to close_track_if_done for close-time revalidation.
+
+    pr_ref:     the pr_ref value from the track row at nomination time.
+    pr_results: optional per-PR GitHub results (number, state, mergedAt) from gh.
+    verified_at: ISO-8601 timestamp when the nomination was taken.
+    """
+
+    pr_ref: str
+    pr_results: List[Dict[str, Any]]
+    verified_at: str
+
+
+def _close_evidence(
+    state_dir: "str | Path",
+    track_id: str,
+    project_id: str,
+) -> Dict[str, Any]:
+    """Summarize WHY a track derives terminal, so the operator gate is informed.
+
+    The reconciler's 'done' counts ALL terminal dispatch states — including
+    expired/dead_letter. A track whose every dispatch failed still derives 'done'.
+    Surface the breakdown + a has_success_signal flag. Best-effort; never raises.
+    """
+    ev: Dict[str, Any] = {
+        "completed": 0, "failed_terminal": 0, "in_flight": 0,
+        "pr_ref": None, "pr_merged": False, "has_success_signal": False,
+    }
+    db = Path(state_dir) / DB_FILENAME
+    try:
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            for r in conn.execute(
+                "SELECT state, COUNT(*) c FROM dispatches "
+                "WHERE track=? AND project_id=? GROUP BY state",
+                (track_id, project_id),
+            ):
+                st = (r["state"] or "").lower()
+                if st == "completed":
+                    ev["completed"] += r["c"]
+                elif st in ("expired", "dead_letter"):
+                    ev["failed_terminal"] += r["c"]
+                else:
+                    ev["in_flight"] += r["c"]
+            row = conn.execute(
+                "SELECT pr_ref FROM tracks WHERE track_id=? AND project_id=?",
+                (track_id, project_id),
+            ).fetchone()
+            ev["pr_ref"] = row["pr_ref"] if row else None
+            merged = conn.execute(
+                "SELECT COUNT(*) FROM coordination_events "
+                "WHERE event_type='pr_merged' AND project_id=? AND entity_id IN "
+                "(SELECT dispatch_id FROM dispatches WHERE track=? AND project_id=?)",
+                (project_id, track_id, project_id),
+            ).fetchone()[0]
+            ev["pr_merged"] = merged > 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.debug("close evidence query failed: %s", exc)
+    # ALL parsed PRs must be merged (subset check), mirroring _compute_derived_status.
+    try:
+        if ev["pr_ref"]:
+            nums = _parse_pr_numbers(ev["pr_ref"])
+            if nums and nums <= _load_merged_pr_numbers(state_dir):
+                ev["pr_merged"] = True
+    except Exception as exc:
+        log.debug("close evidence merged-PR check failed: %s", exc)
+    ev["has_success_signal"] = ev["completed"] > 0 or ev["pr_merged"]
+    return ev
+
+
+def _phase_path_to(start: str, target: str) -> Optional[List[str]]:
+    """Shortest list of phases to transition THROUGH to reach target from start,
+    following ALLOWED_TRANSITIONS. Excludes start; returns [] when already at
+    target, None when unreachable.
+
+    BFS over the (tiny, fixed) phase graph; seen guards the parked<->queued cycle.
+    """
+    if start == target:
+        return []
+    seen = {start}
+    queue: List[tuple] = [(start, [])]
+    while queue:
+        node, path = queue.pop(0)
+        for nxt in sorted(tracks_lib.ALLOWED_TRANSITIONS.get(node, frozenset())):
+            if nxt in seen:
+                continue
+            new_path = path + [nxt]
+            if nxt == target:
+                return new_path
+            seen.add(nxt)
+            queue.append((nxt, new_path))
+    return None
+
+
+def close_track_if_done(
+    state_dir: "str | Path",
+    track_id: str,
+    project_id: str,
+    *,
+    actor: str,
+    evidence: Optional[EvidenceSnapshot] = None,
+    approval_id: Optional[str] = None,
+    include_parked: bool = False,
+) -> Dict[str, Any]:
+    """Attempt to close a track by walking its declared phase to 'done'.
+
+    Reconciles derived_status, gates on it being terminal ('done'), then walks
+    the shortest legal phase path to 'done' via transition_phase.
+
+    evidence (optional nomination snapshot): when provided, performs CLOSE-TIME
+    REVALIDATION as the very first step — BEFORE reconcile_track — so that a
+    stale candidate causes zero DB writes (reconcile_track persists
+    derived_status; it must not run on a track that will return stale_candidate).
+    Fresh DB read checks:
+      (a) track's pr_ref unchanged vs evidence['pr_ref'],
+      (b) no unresolved blocker OI (link_type='blocks' AND resolved_at IS NULL),
+      (c) declared phase still eligible (queued/active; parked only with include_parked).
+    Any mismatch returns action='stale_candidate', applied=False, BEFORE
+    reconcile_track — so a stale candidate causes zero DB writes, derived_status
+    included.
+
+    When evidence is None (human objective-close path), no revalidation is done
+    and the flow is byte-for-byte identical to the pre-revalidation behaviour:
+    reconcile_track first, then the derived/declared/parked gates, then the walk.
+
+    The walk is NOT atomic with the checks: transition_phase (tracks.py) opens its
+    own connection and commits per step. A mid-walk failure leaves the track at an
+    intermediate phase; re-calling this function re-walks from the current declared
+    phase (bounded TOCTOU-narrowing, not atomicity).
+
+    Returns a dict with keys: track_id, project_id, action, applied, declared_phase,
+    derived_status, path (when applicable), evidence (when computed), error (on failure).
+
+    Possible action values:
+      noop_not_terminal     derived != 'done', nothing to close
+      noop_already_closed   declared already 'done'
+      rejected_parked       declared='parked' and include_parked=False
+      stale_candidate       revalidation mismatch (evidence path only); no write
+      rejected_no_path      no legal phase-graph path from declared to 'done'
+      rejected_not_found    track deleted during walk
+      rejected_walk_failed  transition failed mid-walk; declared_phase=stop-phase
+      closed                walk completed; declared_phase updated to 'done'
+    """
+    # Close-time revalidation runs FIRST when evidence is provided — before
+    # reconcile_track — so a stale candidate causes zero DB writes (reconcile_track
+    # persists derived_status; it must not run for a track that will be rejected).
+    if evidence is not None:
+        conn = _get_conn(state_dir)
+        try:
+            track_row = conn.execute(
+                "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
+                (track_id, project_id),
+            ).fetchone()
+
+            # (a) pr_ref must match the nomination snapshot.
+            current_pr_ref = track_row["pr_ref"] if track_row else None
+            if current_pr_ref != evidence.get("pr_ref"):
+                return {
+                    "track_id": track_id,
+                    "project_id": project_id,
+                    "declared_phase": track_row["phase"] if track_row else None,
+                    "derived_status": None,
+                    "action": "stale_candidate",
+                    "applied": False,
+                }
+
+            # (b) no unresolved blocker OI.
+            has_resolved = _has_col(conn, "track_open_items", "resolved_at")
+            has_pid = _has_col(conn, "track_open_items", "project_id")
+            if has_pid and has_resolved:
+                blocker = conn.execute(
+                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
+                    "AND link_type='blocks' AND resolved_at IS NULL LIMIT 1",
+                    (track_id, project_id),
+                ).fetchone()
+            elif has_pid:
+                blocker = conn.execute(
+                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
+                    "AND link_type='blocks' LIMIT 1",
+                    (track_id, project_id),
+                ).fetchone()
+            else:
+                blocker = conn.execute(
+                    "SELECT 1 FROM track_open_items WHERE track_id=? "
+                    "AND link_type='blocks' LIMIT 1",
+                    (track_id,),
+                ).fetchone()
+            if blocker:
+                return {
+                    "track_id": track_id,
+                    "project_id": project_id,
+                    "declared_phase": track_row["phase"] if track_row else None,
+                    "derived_status": None,
+                    "action": "stale_candidate",
+                    "applied": False,
+                }
+
+            # (c) declared phase still eligible after fresh read.
+            fresh_phase = track_row["phase"] if track_row else None
+            eligible = fresh_phase in ("queued", "active") or (
+                fresh_phase == "parked" and include_parked
+            )
+            if not eligible:
+                return {
+                    "track_id": track_id,
+                    "project_id": project_id,
+                    "declared_phase": fresh_phase,
+                    "derived_status": None,
+                    "action": "stale_candidate",
+                    "applied": False,
+                }
+        finally:
+            conn.close()
+
+    # Revalidation passed (or evidence=None path): reconcile derived_status now.
+    result = reconcile_track(state_dir, track_id, project_id)
+    derived = result["derived_status"]
+    declared = result["declared_phase"]
+    target = "done"
+
+    payload: Dict[str, Any] = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "declared_phase": declared,
+        "derived_status": derived,
+        "action": None,
+        "applied": False,
+    }
+
+    if derived != target:
+        payload["action"] = "noop_not_terminal"
+        return payload
+
+    if declared == target:
+        payload["action"] = "noop_already_closed"
+        return payload
+
+    if declared == "parked" and not include_parked:
+        payload["action"] = "rejected_parked"
+        return payload
+
+    payload["evidence"] = _close_evidence(state_dir, track_id, project_id)
+
+    path = _phase_path_to(declared, target)
+    if path is None:
+        payload["action"] = "rejected_no_path"
+        return payload
+    payload["path"] = [declared, *path]
+
+    cur = declared
+    try:
+        for step in path:
+            tracks_lib.transition_phase(
+                state_dir, track_id, project_id, step,
+                actor=actor,
+                reason=f"close-the-loop ({declared}->{target}, derived={derived})",
+                approval_id=approval_id,
+            )
+            cur = step
+    except tracks_lib.TrackNotFoundError as exc:
+        payload["action"] = "rejected_not_found"
+        payload["error"] = str(exc)
+        return payload
+    except Exception as exc:
+        payload["declared_phase"] = cur
+        payload["action"] = "rejected_walk_failed"
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+        return payload
+
+    payload["declared_phase"] = target
+    payload["action"] = "closed"
+    payload["applied"] = True
+    return payload
