@@ -166,17 +166,31 @@ class TestTrackDone:
         evt = transition_events[-1]
         assert evt["details"]["to"] == "done"
 
-    def test_done_to_any_is_rejected(self, state_dir):
-        """Phase 'done' has no allowed outgoing transitions."""
+    def test_done_to_active_allowed_other_transitions_rejected(self, state_dir):
+        """done → active is the operator-gated reopen edge (allowed).
+        done → parked remains rejected."""
         tracks_lib.create_track(state_dir, "feat-4", PROJECT_ID, "T4", "G4", phase="active")
         tracks_lib.transition_phase(
             state_dir, "feat-4", PROJECT_ID, "done",
             actor="operator", reason="closed"
         )
+        # done → active is the operator reopen edge — must succeed
+        t = tracks_lib.transition_phase(
+            state_dir, "feat-4", PROJECT_ID, "active",
+            actor="operator", reason="reopen",
+        )
+        assert t["phase"] == "active"
+
+        # Separate track: done → parked remains rejected
+        tracks_lib.create_track(state_dir, "feat-4b", PROJECT_ID, "T4b", "G4b", phase="active")
+        tracks_lib.transition_phase(
+            state_dir, "feat-4b", PROJECT_ID, "done",
+            actor="operator", reason="closed"
+        )
         with pytest.raises(tracks_lib.InvalidTransitionError):
             tracks_lib.transition_phase(
-                state_dir, "feat-4", PROJECT_ID, "active",
-                actor="operator", reason="reopen attempt"
+                state_dir, "feat-4b", PROJECT_ID, "parked",
+                actor="operator", reason="should fail"
             )
 
     def test_done_to_done_is_noop(self, state_dir):

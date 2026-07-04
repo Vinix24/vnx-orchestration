@@ -691,7 +691,7 @@ def cmd_objective_reopen(args: argparse.Namespace) -> int:
         return 2
 
     current_pr_ref = (track.get("pr_ref") or "").strip() or "-"
-    stamped_reason = f"reopen pr_ref={current_pr_ref} | {reason_text}"
+    stamped_reason = f"reopen pr_ref={json.dumps(current_pr_ref)} | {reason_text}"
 
     try:
         tracks_lib.transition_phase(

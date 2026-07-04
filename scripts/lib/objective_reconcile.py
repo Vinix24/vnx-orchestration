@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -218,23 +219,38 @@ def _get_latest_done_to_active_history(
         return None
 
 
+_REOPEN_STAMP_PREFIX = "reopen pr_ref="
+_JSON_STRING_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"')
+
+
 def _parse_reopen_stamp(reason: str) -> Optional[str]:
     """Parse the stamped pr_ref from a reopen history reason string.
 
-    Expected format: 'reopen pr_ref=<value> | <operator text>'
-    Returns the pr_ref value string, or None when the format is unrecognised.
+    New format: 'reopen pr_ref="<json-string>" | <operator text>'
+    The value is a JSON string literal so embedded pipes/quotes are safe.
+
+    Backwards-compat: old-format raw stamps (no leading quote) and garbled
+    stamps return None — callers treat None as GUARDED (fail-closed).
+
+    Returns the decoded pr_ref string ('' for the '-' sentinel), or None
+    when the format is not the new JSON format.
     """
     if not reason:
         return None
-    prefix = "reopen pr_ref="
-    if not reason.startswith(prefix):
+    if not reason.startswith(_REOPEN_STAMP_PREFIX):
         return None
-    rest = reason[len(prefix):]
-    sep = " | "
-    idx = rest.find(sep)
-    if idx < 0:
+    rest = reason[len(_REOPEN_STAMP_PREFIX):]
+    # New format: JSON string literal starting with '"'
+    m = _JSON_STRING_RE.match(rest)
+    if not m:
+        # Old-format (no leading quote) or malformed → fail-closed
         return None
-    return rest[:idx]
+    try:
+        val = json.loads(m.group(0))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    # '-' is the sentinel for empty pr_ref
+    return "" if val == "-" else val
 
 
 # ---------------------------------------------------------------------------

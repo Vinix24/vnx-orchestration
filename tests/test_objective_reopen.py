@@ -166,7 +166,7 @@ def test_reopen_happy_path(tmp_path):
     assert reopen_row is not None
     assert reopen_row["actor"] == "operator"
     assert reopen_row["approval_id"] == "appr-001"
-    assert reopen_row["reason"].startswith("reopen pr_ref=#42 | ")
+    assert reopen_row["reason"].startswith('reopen pr_ref="#42" | ')
     assert "follow-up work needed" in reopen_row["reason"]
 
 
@@ -238,5 +238,5 @@ def test_reopen_pr_ref_none_uses_dash(tmp_path):
     hist = _history(sd, "T-noref")
     reopen_row = next((h for h in hist if h["to_phase"] == "active"), None)
     assert reopen_row is not None
-    assert reopen_row["reason"].startswith("reopen pr_ref=- | ")
+    assert reopen_row["reason"].startswith('reopen pr_ref="-" | ')
     assert "reopening" in reopen_row["reason"]
