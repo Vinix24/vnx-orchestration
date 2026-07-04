@@ -63,9 +63,11 @@ system actor) or an explicit human close (`vnx objective close --apply --approva
    merged` (10-min cache). No local receipt is required — git reality suffices.
 6. **Reconcile (derived refresh).** `track_reconciler` computes `derived_status`
    independently of `phase`: blocker OI unresolved → `blocked`; unmet dependency
-   → `blocked`; all dispatches terminal AND all PRs in `pr_ref` merged → `done`.
-   This runs in both check and apply mode; it only writes `tracks.derived_status`,
-   never `tracks.phase`.
+   → `blocked`; all dispatches terminal → `done` when any of: no `pr_ref` set,
+   a `pr_merged` coordination event exists, declared phase is already `done`, or
+   all parsed PRs are confirmed merged via local evidence sources. This runs in
+   both check and apply mode; it only writes `tracks.derived_status`, never
+   `tracks.phase`.
 7. **See the drift.** `vnx objective drift` reports every track where
    `phase ≠ derived_status` — the list of "done in reality, not yet closed."
    `objective reconcile` (default: check mode) shows what *would* close.
@@ -79,8 +81,7 @@ system actor) or an explicit human close (`vnx objective close --apply --approva
      `parked` tracks are never nominated.
    - **Human gate**: `vnx objective close <id> --apply --approval-id <id>` walks
      the phase to `done` along the shortest legal path, stamping `approval_id` +
-     reason in `track_phase_history`. Requires `derived_status='done'` unless
-     invoked with gh evidence from the reconciler.
+     reason in `track_phase_history`. Requires `derived_status='done'`.
 
    Either path writes to `track_phase_history`. ROADMAP stays untouched; views
    regenerate.
