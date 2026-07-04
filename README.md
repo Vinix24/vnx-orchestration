@@ -12,7 +12,7 @@ This is not a security sandbox; it isolates work with tmux sessions and git work
 
 ## What's new in 1.0
 
-- **Packaged for pip.** A `pip`-installable distribution (`vnx init`, `vnx migrate`, `vnx doctor`) so a governed project can be scaffolded without a repo clone. The package builds from this tree; publishing to PyPI is the final 1.0 ship gate and has not happened yet. Until then, install from a checkout (see [Install](#install)).
+- **Packaged for pip.** A `pip`-installable distribution (`vnx init`, `vnx migrate`, `vnx doctor`) so a governed project can be scaffolded without a repo clone. Published to PyPI on 2026-07-02: `pip install vnx-orchestration`. For development, install from a checkout (see [Install](#install)).
 - **Provider-agnostic skill injection.** One skill folder, one structured prompt (role, assignment, resource index), identical for claude, kimi, codex, and deepseek workers. [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md).
 - **Realistic benchmark methodology.** A field-tests harness that measures provider lanes on production-derived tasks with programmatic verification per task, an LLM-judge fallback, and cost per quality-point. It lives in the repo under `scripts/benchmark/field-tests/` (not the pip package — the task seeds are repo-specific). A generalised "bring your own tasks" version is planned for 1.1.
 - **SSRF-safe URL policy.** Two-phase validator (lexical + DNS-resolution range-check, fail-closed) with an adversarial test suite. Ships as a governed building block in `scripts/lib/url_policy.py`; wiring into worker fetch paths is 1.0.1.
@@ -63,12 +63,8 @@ Per-provider maturity differs. Worktree isolation (`VNX_ISOLATED_WORKTREE`, defa
 
 ## Install
 
-The package is not on PyPI yet — publishing is the final 1.0 ship gate. Install from a checkout:
-
 ```bash
-git clone https://github.com/Vinix24/vnx-orchestration
-cd vnx-orchestration
-pip install -e .                          # editable install of the pip CLI
+pip install vnx-orchestration
 vnx init                                  # scaffold a VNX project in the current dir
 vnx migrate                               # apply runtime DB migrations
 vnx doctor                                # environment and dependency checks
@@ -84,7 +80,7 @@ usage. `vnx dispatch-agent` fails at spawn if no worker CLI is present — `vnx 
 a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not currently shipped;
 the old replay demo was retired.)
 
-There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check` and `new-worktree`. When the package publishes, `pip install vnx-orchestration` replaces the clone step.
+There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check` and `new-worktree` — for those, clone the repository and run `pip install -e .` from the checkout.
 
 ## Architecture
 

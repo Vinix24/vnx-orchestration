@@ -1348,7 +1348,7 @@ Creates a complete LeadFlow SaaS project with:
 
 ---
 
-**Document Status**: Active (VNX 1.0.0 release candidate — Dashboard Attention Model + intelligence injection). The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
+**Document Status**: Active (VNX 1.0.0, released 2026-07-02 — Dashboard Attention Model + intelligence injection). The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
 **Last Major Update**: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction). Prior: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
 **Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs; VNX 1.0.0)
 **Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
