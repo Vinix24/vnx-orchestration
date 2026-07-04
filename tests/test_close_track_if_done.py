@@ -311,6 +311,71 @@ def test_revalidation_clean_closes_and_records_actor_and_approval(tmp_path):
 # Mid-walk failure resumability
 # ---------------------------------------------------------------------------
 
+def test_evidence_path_dependency_not_done_stale(tmp_path):
+    """Evidence path: dependency track not done → stale_candidate, no write."""
+    sd = _build_db(tmp_path)
+    # Dep track: active (not done)
+    tracks_lib.create_track(sd, "T-dep-b", PROJECT_ID, title="dep b", goal_state="y", phase="active")
+    # Track under test: depends on T-dep-b
+    tracks_lib.create_track(
+        sd, "T-dep-a", PROJECT_ID, title="dep a", goal_state="y", phase="active", pr_ref="#555"
+    )
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO track_dependencies "
+        "(from_track_id, from_project_id, to_track_id, to_project_id, kind, derivation_source) "
+        "VALUES (?,?,?,?,?,?)",
+        ("T-dep-a", PROJECT_ID, "T-dep-b", PROJECT_ID, "hard", "manual"),
+    )
+    conn.commit()
+    conn.close()
+
+    evidence = {
+        "pr_ref": "#555",
+        "pr_results": [{"number": 555, "state": "MERGED", "mergedAt": "2026-07-04T10:00:00Z"}],
+        "verified_at": "2026-07-04T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-dep-a", PROJECT_ID, actor="system", evidence=evidence
+    )
+    assert result["action"] == "stale_candidate"
+    assert result["applied"] is False
+    assert _phase(sd, "T-dep-a") == "active"
+    assert _derived_status(sd, "T-dep-a") is None  # reconcile_track was not called
+
+
+def test_evidence_with_pr_results_closes_without_local_derived_done(tmp_path):
+    """Evidence path with non-empty pr_results: closes without any local merge evidence.
+
+    No dispatch, no pr_merged.ndjson, no coordination events → derived_status stays
+    'in_progress'. Fix 2: gh evidence in pr_results bypasses the derived_status gate.
+    """
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-ev-pr", PROJECT_ID, title="ev pr", goal_state="y", phase="active", pr_ref="#777"
+    )
+    # No local merge evidence of any kind.
+
+    evidence = {
+        "pr_ref": "#777",
+        "pr_results": [{"number": 777, "state": "MERGED", "mergedAt": "2026-07-04T10:00:00Z"}],
+        "verified_at": "2026-07-04T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-ev-pr", PROJECT_ID, actor="system", approval_id="APR-EV",
+        evidence=evidence,
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert _phase(sd, "T-ev-pr") == "done"
+
+    hist = _history(sd, "T-ev-pr")
+    assert hist, "expected track_phase_history rows"
+    assert hist[-1]["to_phase"] == "done"
+    assert hist[-1]["actor"] == "system"
+    assert hist[-1]["approval_id"] == "APR-EV"
+
+
 def test_mid_walk_failure_leaves_intermediate_and_is_resumable(tmp_path, monkeypatch):
     sd = _build_db(tmp_path)
     _seed_done_track(sd, "T-q2", phase="queued")  # queued -> active -> done (two steps)

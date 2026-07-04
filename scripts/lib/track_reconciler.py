@@ -648,6 +648,10 @@ def close_track_if_done(
     # Close-time revalidation runs FIRST when evidence is provided — before
     # reconcile_track — so a stale candidate causes zero DB writes (reconcile_track
     # persists derived_status; it must not run for a track that will be rejected).
+    # _skip_derived_gate is set True when gh evidence authorizes the close directly,
+    # making derived_status advisory rather than a hard gate.
+    _skip_derived_gate = False
+
     if evidence is not None:
         conn = _get_conn(state_dir)
         try:
@@ -713,10 +717,87 @@ def close_track_if_done(
                     "action": "stale_candidate",
                     "applied": False,
                 }
+
+            # (d) gh evidence authority — only when pr_results is non-empty.
+            # gh pr view is the SOLE merge authority on this path; derived_status
+            # becomes advisory (reconcile_track still runs for the derived refresh).
+            pr_results_list = evidence.get("pr_results") or []
+            if pr_results_list:
+                # Dependency check: every dep must have declared phase 'done'.
+                dep_rows = conn.execute(
+                    """
+                    SELECT t.phase
+                    FROM track_dependencies td
+                    JOIN tracks t
+                      ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
+                    WHERE td.from_track_id = ? AND td.from_project_id = ?
+                    """,
+                    (track_id, project_id),
+                ).fetchall()
+                for dep_row in dep_rows:
+                    if dep_row[0] != "done":
+                        return {
+                            "track_id": track_id,
+                            "project_id": project_id,
+                            "declared_phase": track_row["phase"] if track_row else None,
+                            "derived_status": None,
+                            "action": "stale_candidate",
+                            "applied": False,
+                        }
+
+                # gh evidence check: every parsed PR from pr_ref must appear in
+                # pr_results as MERGED (with mergedAt) or CLOSED (closed sibling).
+                # At least one must be MERGED. OPEN or unknown → stale.
+                pr_ref_snap = evidence.get("pr_ref") or ""
+                parsed_pns = _parse_pr_numbers(pr_ref_snap)
+                pr_results_by_num = {
+                    int(r["number"]): r for r in pr_results_list
+                    if isinstance(r, dict) and r.get("number") is not None
+                }
+                has_merged_pr = False
+                for pn in parsed_pns:
+                    entry = pr_results_by_num.get(pn)
+                    if entry is None:
+                        return {
+                            "track_id": track_id,
+                            "project_id": project_id,
+                            "declared_phase": track_row["phase"] if track_row else None,
+                            "derived_status": None,
+                            "action": "stale_candidate",
+                            "applied": False,
+                        }
+                    state = (entry.get("state") or "")
+                    if state == "MERGED" and entry.get("mergedAt"):
+                        has_merged_pr = True
+                    elif state == "CLOSED":
+                        pass  # closed sibling — allowed
+                    else:
+                        return {
+                            "track_id": track_id,
+                            "project_id": project_id,
+                            "declared_phase": track_row["phase"] if track_row else None,
+                            "derived_status": None,
+                            "action": "stale_candidate",
+                            "applied": False,
+                        }
+                if parsed_pns and not has_merged_pr:
+                    return {
+                        "track_id": track_id,
+                        "project_id": project_id,
+                        "declared_phase": track_row["phase"] if track_row else None,
+                        "derived_status": None,
+                        "action": "stale_candidate",
+                        "applied": False,
+                    }
+
+                _skip_derived_gate = True
         finally:
             conn.close()
 
     # Revalidation passed (or evidence=None path): reconcile derived_status now.
+    # When _skip_derived_gate is True, reconcile_track still runs for the derived
+    # refresh (persists derived_status for reporting) but its result does not gate
+    # the walk — gh evidence already authorized the close.
     result = reconcile_track(state_dir, track_id, project_id)
     derived = result["derived_status"]
     declared = result["declared_phase"]
@@ -731,7 +812,7 @@ def close_track_if_done(
         "applied": False,
     }
 
-    if derived != target:
+    if derived != target and not _skip_derived_gate:
         payload["action"] = "noop_not_terminal"
         return payload
 

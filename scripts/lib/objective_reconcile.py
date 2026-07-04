@@ -59,24 +59,77 @@ def _make_run_id() -> str:
 # Persistent MERGED cache
 # ---------------------------------------------------------------------------
 
-def _load_pr_state_cache(state_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """Load pr_state_cache.json: str(pr_number) → {state, mergedAt}. Errors → {}."""
-    path = state_dir / _PR_STATE_CACHE_FILE
+def _get_repo_key(repo_root: Path) -> str:
+    """Return a stable identifier for the repo at repo_root.
+
+    Scopes the persistent PR-state cache so a cached entry from repo A cannot
+    satisfy a lookup for the same PR number in repo B.
+
+    Tries ``git remote get-url origin``; strips trailing .git and whitespace.
+    Falls back to the resolved absolute path when the repo has no origin or
+    when git is absent/times out.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo_root),
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            if url:
+                if url.endswith(".git"):
+                    url = url[:-4]
+                return url
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return str(repo_root.resolve())
+
+
+def _load_full_cache_raw(path: Path) -> Dict[str, Any]:
+    """Load and validate pr_state_cache.json.
+
+    Returns {} on I/O error, JSON error, or when the file is in the old
+    (flat PR-number-keyed) format — old format is treated as empty so the
+    caller regenerates from live gh calls rather than migrating blindly.
+    """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            return raw
+        if not isinstance(raw, dict):
+            return {}
+        # Old format: top-level keys are PR numbers (pure digit strings).
+        # New format: top-level keys are repo identifiers (URLs or paths).
+        if any(str(k).strip().isdigit() for k in raw):
+            return {}
+        return raw
     except (OSError, ValueError, json.JSONDecodeError):
-        pass
-    return {}
+        return {}
 
 
-def _save_pr_state_cache(state_dir: Path, cache: Dict[str, Dict[str, Any]]) -> None:
-    """Atomically write pr_state_cache.json. Silently swallows I/O errors."""
+def _load_pr_state_cache(state_dir: Path, repo_key: str) -> Dict[str, Dict[str, Any]]:
+    """Load the per-repo MERGED cache for repo_key: str(pr_number) → {state, mergedAt}.
+
+    Returns {} on any error, on old-format files, or when repo_key is absent.
+    """
+    full = _load_full_cache_raw(state_dir / _PR_STATE_CACHE_FILE)
+    repo_data = full.get(repo_key, {})
+    return repo_data if isinstance(repo_data, dict) else {}
+
+
+def _save_pr_state_cache(
+    state_dir: Path, repo_key: str, repo_cache: Dict[str, Dict[str, Any]]
+) -> None:
+    """Atomically write/update pr_state_cache.json for repo_key.
+
+    Preserves existing entries for other repo keys.
+    Silently swallows I/O errors.
+    """
     path = state_dir / _PR_STATE_CACHE_FILE
+    full = _load_full_cache_raw(path)
+    full[repo_key] = repo_cache
     tmp = path.parent / (path.name + ".tmp")
     try:
-        tmp.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(full, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         pass
@@ -338,7 +391,8 @@ def run_reconcile(
     # ------------------------------------------------------------------ step 4b
     # Per-candidate verification with persistent MERGED cache.
     # ------------------------------------------------------------------ step 4b
-    pr_cache = _load_pr_state_cache(state_dir)
+    repo_key = _get_repo_key(repo_root)
+    pr_cache = _load_pr_state_cache(state_dir, repo_key)
     gh_calls_used = 0
     counts = {
         "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
@@ -378,7 +432,7 @@ def run_reconcile(
                 pr_cache[str(pn)] = data
 
         # Persist cache after each candidate's batch so timeouts don't lose cached merges.
-        _save_pr_state_cache(state_dir, pr_cache)
+        _save_pr_state_cache(state_dir, repo_key, pr_cache)
 
         verdict, pr_list = _decide_candidate(pr_numbers, pr_results, allow_closed_siblings)
 

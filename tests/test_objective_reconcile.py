@@ -281,12 +281,14 @@ def test_check_mode_nominates_confirmed_no_phase_write(tmp_path, monkeypatch):
 
 
 def test_apply_mode_confirmed_closes_and_records_actor(tmp_path, monkeypatch):
-    """Apply mode: CONFIRMED candidate closes; track_phase_history has actor=system and auto-reconcile approval_id."""
+    """Apply mode: CONFIRMED candidate closes; track_phase_history has actor=system and auto-reconcile approval_id.
+
+    Local merge evidence seeding removed — gh evidence alone now authorizes close (Fix 2).
+    """
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-apply", phase="active", pr_ref="#200")
-    _seed_dispatch(sd, "D-apply", "T-apply", state="completed")
-    # pr_merged.ndjson so derived_status becomes 'done' after reconcile
-    _seed_pr_merged_ndjson(sd, 200)
+    # No local merge evidence: no dispatch, no pr_merged.ndjson, no coordination events.
+    # gh pr view is the sole authority.
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -358,13 +360,13 @@ def test_closed_sibling_without_flag_skipped(tmp_path, monkeypatch):
 
 
 def test_closed_sibling_with_flag_and_merged_confirms(tmp_path, monkeypatch):
-    """CLOSED sibling + --allow-closed-siblings + ≥1 MERGED → CONFIRMED and closes in apply mode."""
+    """CLOSED sibling + --allow-closed-siblings + ≥1 MERGED → CONFIRMED and closes in apply mode.
+
+    Local merge evidence seeding removed — gh evidence alone now authorizes close (Fix 2).
+    """
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-sib2", phase="active", pr_ref="#500,#501")
-    _seed_dispatch(sd, "D-sib2", "T-sib2", state="completed")
-    # pr_merged coordination event makes derived_status = 'done' via dispatch-based path
-    # (pr_merged event on dispatch D-sib2 → _compute_derived_status returns 'done').
-    _seed_pr_merged_event(sd, "D-sib2")
+    # No local merge evidence: gh evidence (MERGED+CLOSED sibling) is the authority.
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -513,3 +515,86 @@ def test_parked_and_done_tracks_never_nominated(tmp_path, monkeypatch):
     assert "T-active" in track_ids
     assert "T-parked" not in track_ids
     assert "T-done" not in track_ids
+
+
+def test_apply_closes_on_gh_evidence_only(tmp_path, monkeypatch):
+    """CONFIRMED candidate with NO local merge evidence anywhere must close under --apply.
+
+    No pr_merged.ndjson, no coordination events, no dispatch, no ROADMAP.yaml.
+    gh pr view is the sole authority; derived_status stays non-done without local evidence.
+    With Fix 2, gh evidence in pr_results bypasses the derived_status gate.
+    """
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-gh-only", phase="active", pr_ref="#1001")
+    # Intentionally no local merge evidence of any kind.
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1001: _merged_pr(1001)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert _phase(sd, "T-gh-only") == "done"
+
+
+def test_cache_is_repo_scoped(tmp_path, monkeypatch):
+    """Two repo roots (different fake origin remotes), same PR number:
+    second repo must trigger its own gh pr view call, not reuse the first repo's cache entry.
+    """
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-scoped", phase="active", pr_ref="#1002")
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    call_log: list = []
+
+    def mock_run(cmd, **kwargs):
+        call_log.append(list(cmd))
+        if not isinstance(cmd, (list, tuple)) or not cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        if cmd[0] == "gh" and len(cmd) >= 2 and cmd[1] == "auth":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[0] == "gh" and len(cmd) >= 3 and cmd[1] == "pr" and cmd[2] == "view":
+            return subprocess.CompletedProcess(
+                cmd, 0, json.dumps({"state": "MERGED", "mergedAt": _MERGED_AT}), ""
+            )
+        if cmd[0] == "git" and "remote" in cmd:
+            cwd = str(kwargs.get("cwd", ""))
+            if "repo-a" in cwd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "https://github.com/fake/repo-a\n", ""
+                )
+            if "repo-b" in cwd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "https://github.com/fake/repo-b\n", ""
+                )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(objective_reconcile.subprocess, "run", mock_run)
+
+    # Run 1: repo-a fetches PR #1002 from gh and caches it under the repo-a key.
+    summary1, _ = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=repo_a, apply=False,
+    )
+    assert summary1["counts"]["confirmed"] == 1
+    pr_view_calls_1 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    assert len(pr_view_calls_1) == 1, "repo-a run must fetch PR 1002 from gh"
+
+    call_log.clear()
+
+    # Run 2: repo-b must NOT reuse repo-a's cache entry — different repo key.
+    summary2, _ = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=repo_b, apply=False,
+    )
+    assert summary2["counts"]["confirmed"] == 1
+    pr_view_calls_2 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    assert len(pr_view_calls_2) == 1, "repo-b run must trigger its own gh pr view (different repo key)"
