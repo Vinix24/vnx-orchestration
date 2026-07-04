@@ -291,6 +291,48 @@ def _register_migrate_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_learning_subparser(subparsers: argparse.Action) -> None:
+    learning_parser = subparsers.add_parser(
+        "learning",
+        help="operator-gated proposal tier for the intelligence self-learning loop",
+    )
+    learning_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory (default: current directory)",
+    )
+    learning_subs = learning_parser.add_subparsers(
+        dest="learning_subcommand", metavar="SUBCOMMAND"
+    )
+
+    lr_run = learning_subs.add_parser(
+        "run",
+        help="run the daily learning cycle and queue proposals for operator review",
+    )
+    lr_run.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_run.add_argument(
+        "--from-history",
+        dest="from_history",
+        action="store_true",
+        help="mine full receipt history (all-time window) instead of the default 24h window",
+    )
+
+    lr_status = learning_subs.add_parser("status", help="show pending proposal counts")
+    lr_status.add_argument("--project-dir", default=".", metavar="DIR")
+
+    lr_review = learning_subs.add_parser(
+        "review", help="show pending proposals for operator review"
+    )
+    lr_review.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_review.add_argument(
+        "--mode",
+        default="all",
+        choices=["all", "rules", "archival"],
+        help="which proposals to show: rules, archival, or all (default: all)",
+    )
+
+
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_parser = subparsers.add_parser(
         "dream",
@@ -364,6 +406,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.track import vnx_track
         sys.exit(vnx_track(args))
 
+    elif args.command == "learning":
+        from vnx_cli.commands.learning import vnx_learning
+        sys.exit(vnx_learning(args))
+
     elif args.command == "dream":
         from vnx_cli.commands.dream import vnx_dream
         sys.exit(vnx_dream(args))
@@ -396,6 +442,7 @@ def main() -> None:
     _register_update_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
     _register_track_subparser(subparsers)
+    _register_learning_subparser(subparsers)
     _register_dream_subparser(subparsers)
     _register_migrate_subparser(subparsers)
 
