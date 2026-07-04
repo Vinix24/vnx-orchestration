@@ -100,16 +100,33 @@ def llm_tags(text: str, paths: Optional[List[str]] = None) -> List[str]:
 
     Honours VNX_TAGGER_ENABLED (opt-in) and VNX_TAGGER_PROVIDER (model-agnostic).
     """
-    if not is_enabled() or not (text or paths):
-        return []
+    tags, _ = _llm_tags_with_cost(text, paths, enabled_override=False)
+    return tags
+
+
+def _llm_tags_with_cost(
+    text: str,
+    paths: Optional[List[str]] = None,
+    enabled_override: bool = False,
+) -> "tuple[List[str], float]":
+    """Like llm_tags but returns (tags, cost_usd). For A/B measurement use.
+
+    enabled_override=True bypasses VNX_TAGGER_ENABLED so the caller can run the
+    LLM arm regardless of the env flag (the A/B harness controls the flag itself).
+    Fail-silent: any error returns ([], 0.0).
+    """
+    if not enabled_override and not is_enabled():
+        return [], 0.0
+    if not (text or paths):
+        return [], 0.0
     try:
         from classifier_providers import get_provider
         provider = get_provider(get_tagger_provider_name())
         if not provider.is_available():
-            return []
+            return [], 0.0
         result = provider.classify(_build_prompt(text or "", paths), _max_tokens=200)
         if result.error:
-            return []
+            return [], 0.0
         data = result.parsed_json
         if data is None and result.raw_response:
             try:
@@ -117,11 +134,12 @@ def llm_tags(text: str, paths: Optional[List[str]] = None) -> List[str]:
             except (json.JSONDecodeError, TypeError):
                 data = None
         if not isinstance(data, dict):
-            return []
-        return validate_tags(list(data.get("tags", []))[: _MAX_TAGS * 2])
+            return [], 0.0
+        tags = validate_tags(list(data.get("tags", []))[: _MAX_TAGS * 2])
+        cost = float(getattr(result, "cost_usd", None) or 0.0)
+        return tags, cost
     except Exception:
-        # Fail-silent: callers fall back to the deterministic floor.
-        return []
+        return [], 0.0
 
 
 def enrich_tags(text: str, paths: Optional[List[str]] = None) -> List[str]:
