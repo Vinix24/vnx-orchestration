@@ -598,3 +598,109 @@ def test_cache_is_repo_scoped(tmp_path, monkeypatch):
     assert summary2["counts"]["confirmed"] == 1
     pr_view_calls_2 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
     assert len(pr_view_calls_2) == 1, "repo-b run must trigger its own gh pr view (different repo key)"
+
+
+# ---------------------------------------------------------------------------
+# Re-close guard tests (D6)
+# ---------------------------------------------------------------------------
+
+def test_reopened_track_unchanged_prref_skipped_as_reopened_guard(tmp_path, monkeypatch):
+    """Reopened track (done→active) with unchanged pr_ref → verdict=reopened_guard;
+    not closed under --apply even when gh confirms all PRs merged."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-guard", phase="active", pr_ref="#1100")
+
+    # Transition to done, then reopen with the stamp format cmd_objective_reopen uses.
+    tracks_lib.transition_phase(sd, "T-guard", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-guard", PROJECT_ID, "active",
+        actor="operator",
+        reason="reopen pr_ref=#1100 | test reopening",
+        approval_id="appr-guard-001",
+    )
+    assert _phase(sd, "T-guard") == "active"
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1100: _merged_pr(1100)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    # Guarded track is NOT nominated (pr_ref unchanged since reopen).
+    assert summary["counts"]["nominated"] == 0
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    per = {pt["track_id"]: pt for pt in summary["per_track"]}
+    assert "T-guard" in per
+    assert per["T-guard"]["verdict"] == "reopened_guard"
+    assert _phase(sd, "T-guard") == "active"  # not auto-closed
+
+
+def test_reopened_track_changed_prref_eligible_and_closes(tmp_path, monkeypatch):
+    """Reopened track whose pr_ref changed after reopen is re-armed and eligible for close."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-rearmed", phase="active", pr_ref="#1200")
+
+    # Transition to done, reopen with old pr_ref stamp.
+    tracks_lib.transition_phase(sd, "T-rearmed", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-rearmed", PROJECT_ID, "active",
+        actor="operator",
+        reason="reopen pr_ref=#1200 | follow-up needed",
+        approval_id="appr-rearmed-001",
+    )
+    # Change pr_ref to a new value — re-arms the track for auto-close.
+    tracks_lib.update_authored_fields(
+        sd, "T-rearmed", PROJECT_ID, pr_ref="#1201", actor="operator",
+    )
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1201: _merged_pr(1201)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert summary["counts"].get("reopened_guard", 0) == 0
+    assert _phase(sd, "T-rearmed") == "done"
+
+
+def test_reopened_track_unparseable_stamp_guarded_fail_closed(tmp_path, monkeypatch):
+    """Unparseable reopen stamp (no 'reopen pr_ref=' prefix) → fail-closed (reopened_guard)."""
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-badstamp", phase="active", pr_ref="#1300")
+
+    # Transition to done, then reopen with a NON-STANDARD reason (missing stamp).
+    tracks_lib.transition_phase(sd, "T-badstamp", PROJECT_ID, "done", actor="T0")
+    tracks_lib.transition_phase(
+        sd, "T-badstamp", PROJECT_ID, "active",
+        actor="operator",
+        reason="manually reopened without proper stamp format",
+        approval_id="appr-badstamp-001",
+    )
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1300: _merged_pr(1300)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    assert summary["counts"].get("reopened_guard", 0) == 1
+    assert summary["counts"].get("closed", 0) == 0
+    per = {pt["track_id"]: pt for pt in summary["per_track"]}
+    assert "T-badstamp" in per
+    assert per["T-badstamp"]["verdict"] == "reopened_guard"
+    assert _phase(sd, "T-badstamp") == "active"  # not auto-closed

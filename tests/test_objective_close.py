@@ -266,11 +266,17 @@ def test_evidence_success_signal_from_merged_pr_without_completed_dispatch(tmp_p
     assert ev["has_success_signal"] is True
 
 
-def test_phase_path_unreachable_returns_none():
-    # 'done' is terminal (no outgoing transitions) so it can reach nothing.
-    assert planning_cli._phase_path_to("done", "active") is None
+def test_phase_path_bfs():
+    # Same-phase returns empty path.
     assert planning_cli._phase_path_to("active", "active") == []
+    # Standard close path.
     assert planning_cli._phase_path_to("queued", "done") == ["active", "done"]
+    # done→active is the reopen valve — one step.
+    assert planning_cli._phase_path_to("done", "active") == ["active"]
+    # done→queued via done→active→parked→queued (BFS finds shortest).
+    assert planning_cli._phase_path_to("done", "queued") == ["active", "parked", "queued"]
+    # Invalid start phase returns None.
+    assert planning_cli._phase_path_to("nonexistent", "done") is None
 
 
 def _write_pr_merged_ndjson(state_dir: Path, pr_numbers: list) -> None:

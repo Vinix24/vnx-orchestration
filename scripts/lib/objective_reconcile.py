@@ -186,6 +186,58 @@ def _is_merged(pr_data: Optional[Dict[str, Any]]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Re-close guard helpers (D6)
+# ---------------------------------------------------------------------------
+
+def _get_latest_done_to_active_history(
+    state_dir: Path, track_id: str, project_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return the latest track_phase_history row (from_phase=done, to_phase=active)
+    for this track, project-scoped. Returns None when no such row exists or on error."""
+    db_path = state_dir / track_reconciler.DB_FILENAME
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT reason, approval_id, occurred_at
+                FROM track_phase_history
+                WHERE track_id = ? AND project_id = ?
+                  AND from_phase = 'done' AND to_phase = 'active'
+                ORDER BY occurred_at DESC
+                LIMIT 1
+                """,
+                (track_id, project_id),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.debug("reopen guard DB lookup failed for %s: %s", track_id, exc)
+        return None
+
+
+def _parse_reopen_stamp(reason: str) -> Optional[str]:
+    """Parse the stamped pr_ref from a reopen history reason string.
+
+    Expected format: 'reopen pr_ref=<value> | <operator text>'
+    Returns the pr_ref value string, or None when the format is unrecognised.
+    """
+    if not reason:
+        return None
+    prefix = "reopen pr_ref="
+    if not reason.startswith(prefix):
+        return None
+    rest = reason[len(prefix):]
+    sep = " | "
+    idx = rest.find(sep)
+    if idx < 0:
+        return None
+    return rest[:idx]
+
+
+# ---------------------------------------------------------------------------
 # Decision logic
 # ---------------------------------------------------------------------------
 
@@ -337,10 +389,12 @@ def run_reconcile(
 
     # ------------------------------------------------------------------ step 3
     # Nomination: non-empty pr_ref + declared phase not in {done, parked}.
-    # No gate on derived_status or aggregate merged-set.
+    # Re-close guard: skip tracks reopened from done→active when pr_ref
+    # matches the stamp (unchanged) — reported as reopened_guard, not closed.
     # ------------------------------------------------------------------ step 3
     all_tracks = tracks_lib.list_tracks(state_dir, project_id)
     candidates: List[Dict[str, Any]] = []
+    guarded_tracks: List[Dict[str, Any]] = []
     for t in all_tracks:
         phase = (t.get("phase") or "").strip()
         pr_ref = (t.get("pr_ref") or "").strip()
@@ -349,6 +403,32 @@ def run_reconcile(
         pr_numbers = _parse_pr_numbers(pr_ref)
         if not pr_numbers:
             continue
+
+        # Re-close guard: if a done→active reopen history row exists, compare
+        # its stamped pr_ref against the current pr_ref.
+        reopen_hist = _get_latest_done_to_active_history(state_dir, t["track_id"], project_id)
+        if reopen_hist is not None:
+            stamped_pr_ref = _parse_reopen_stamp(reopen_hist.get("reason") or "")
+            if stamped_pr_ref is None:
+                # Unparseable stamp — fail-closed.
+                guarded_tracks.append({
+                    "track_id": t["track_id"],
+                    "verdict": "reopened_guard",
+                    "pr_ref": pr_ref,
+                    "reason": "unparseable_reopen_stamp",
+                })
+                continue
+            if stamped_pr_ref == pr_ref:
+                # pr_ref unchanged since reopen — skip.
+                guarded_tracks.append({
+                    "track_id": t["track_id"],
+                    "verdict": "reopened_guard",
+                    "pr_ref": pr_ref,
+                    "reason": "pr_ref_unchanged_since_reopen",
+                })
+                continue
+            # pr_ref changed — re-armed; fall through to normal nomination.
+
         candidates.append({
             "track_id": t["track_id"],
             "pr_ref": pr_ref,
@@ -371,11 +451,12 @@ def run_reconcile(
                 "reason": gh_health,
             }
             for c in candidates
-        ]
+        ] + guarded_tracks
         counts = {
             "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
             "closed": 0, "closed_sibling": 0, "open_pr": 0,
             "unverified": len(candidates), "deferred": 0, "stale": 0,
+            "reopened_guard": len(guarded_tracks),
         }
         summary = {
             "run_id": run_id, "project_id": project_id, "mode": mode,
@@ -398,6 +479,7 @@ def run_reconcile(
         "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
         "closed": 0, "closed_sibling": 0, "open_pr": 0,
         "unverified": 0, "deferred": 0, "stale": 0,
+        "reopened_guard": len(guarded_tracks),
     }
     confirmed_candidates: List[Dict[str, Any]] = []
     per_track: List[Dict[str, Any]] = []
@@ -486,6 +568,9 @@ def run_reconcile(
                 counts["closed"] += 1
             elif action == "stale_candidate":
                 counts["stale"] += 1
+
+    # Add re-close guarded tracks to the per-track report.
+    per_track.extend(guarded_tracks)
 
     # ------------------------------------------------------------------ step 6
     # Summary + history.
