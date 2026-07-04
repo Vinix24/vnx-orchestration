@@ -394,6 +394,82 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_objective_reconcile_review(args: argparse.Namespace) -> int:
+    """Record an operator review of a reconcile run (ok or false-candidate).
+
+    Appends a review record to reconcile_history.ndjson. Exits 2 when the
+    run_id is not found in the history file.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    run_id = args.run_id
+    reviewer = args.reviewer
+    verdict = args.verdict
+    note = getattr(args, "note", None) or ""
+
+    try:
+        objective_reconcile.record_review(state_dir, run_id, reviewer, verdict, note)
+    except ValueError as exc:
+        print(f"reconcile-review: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"reconcile-review: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Recorded review: run_id={run_id}  verdict={verdict}  reviewer={reviewer}")
+    return 0
+
+
+def cmd_objective_reconcile_streak(args: argparse.Namespace) -> int:
+    """Compute the consecutive clean-run streak for the VNX_AUTO_CLOSE flip decision.
+
+    A streak run is clean (gh==ok, zero unverified) with no false-candidate reviews.
+    The flip criterion is met when the streak has ≥1 confirmed candidate with an ok review.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+
+    result = objective_reconcile.compute_streak(state_dir, project_id)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    streak = result["streak_length"]
+    flip = result["flip_criterion_met"]
+    reviewed_confirmed = result["has_reviewed_confirmed"]
+
+    print(f"\nvnx objective reconcile-streak (project '{project_id}')\n")
+    print(f"  streak_length         : {streak}")
+    print(f"  has_reviewed_confirmed: {reviewed_confirmed}")
+    print(f"  flip_criterion_met    : {flip}")
+
+    if flip:
+        print(
+            "\n  [ok] VNX_AUTO_CLOSE flip criterion met: the current streak has a "
+            "confirmed candidate with an ok review."
+        )
+    else:
+        if streak == 0:
+            print(
+                "\n  [!] no clean consecutive runs yet "
+                "(degraded run or false-candidate review breaks the streak)"
+            )
+        if not reviewed_confirmed:
+            print(
+                "\n  [!] no confirmed candidate with an ok review in the current streak"
+            )
+
+    if result["runs"]:
+        print(f"\n  streak runs (newest first):")
+        for r in result["runs"]:
+            conf = r.get("confirmed", 0)
+            rev_count = len(r.get("reviews", []))
+            print(f"    {r['run_id']}  confirmed={conf}  reviews={rev_count}")
+
+    print()
+    return 0
+
+
 def cmd_objective_drift(args: argparse.Namespace) -> int:
     """ADVISORY drift-gate: report tracks where declared phase != derived_status.
 
@@ -1348,7 +1424,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_drift = obj_sub.add_parser(
         "drift",
-        help="advisory drift-gate: report declared-vs-derived divergence (exit 0)",
+        help="advisory drift-gate: report declared-vs-derived divergence (exit 0); drift reports, `objective reconcile` fixes",
     )
     _common(p_drift)
     p_drift.set_defaults(func=cmd_objective_drift)
@@ -1419,6 +1495,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
     p_add.add_argument("--priority", default=None)
     p_add.set_defaults(func=cmd_objective_add)
+
+    p_rec_review = obj_sub.add_parser(
+        "reconcile-review",
+        help="record an operator review of a reconcile run (ok or false-candidate)",
+    )
+    _common(p_rec_review)
+    p_rec_review.add_argument("run_id", help="run_id from reconcile_history.ndjson")
+    p_rec_review.add_argument("--reviewer", required=True, help="reviewer name or id")
+    p_rec_review.add_argument(
+        "--verdict", required=True,
+        choices=["ok", "false-candidate"],
+        help="ok = candidate is correct; false-candidate = reconcile over-nominated this track",
+    )
+    p_rec_review.add_argument("--note", default="", help="optional review note")
+    p_rec_review.set_defaults(func=cmd_objective_reconcile_review)
+
+    p_rec_streak = obj_sub.add_parser(
+        "reconcile-streak",
+        help="compute the consecutive clean-run streak for the VNX_AUTO_CLOSE flip decision",
+    )
+    _common(p_rec_streak)
+    p_rec_streak.set_defaults(func=cmd_objective_reconcile_streak)
 
     # ------------------------------------------------------------------
     # deliverable subcommand (Phase 2)

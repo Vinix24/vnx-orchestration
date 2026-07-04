@@ -36,6 +36,7 @@ Efficiency: risk ≤ 0.3 + success + no blockers → fast path, skip deep verifi
 - **Review-gate evidence (3 surfaces, all required):** request in `.vnx-data/state/review_gates/requests/`, result in `.../results/`, normalized report in `$VNX_DATA_DIR/unified_reports/`. A result with empty `contract_hash` or empty `report_path`, or a report with no matching structured result, is **incomplete evidence → blocks completion**. `queued`/`requested` ≠ executing.
 - **CI workflow conclusion (mandatory):** `gh run list --branch <head> --workflow "VNX CI" --limit 1 --json conclusion --jq '.[0].conclusion'` must equal `success`. `gh pr checks` listing green names is NOT sufficient — a multi-step job can still produce a `failure` conclusion.
 - **Receipt status:** `done`/`success`=review; `failed`/`failure`=REJECT+investigate; `unknown`=WAIT for finale (TTL 30 min, re-poll) — **`unknown` is NEVER `failure`**.
+- **Post-merge sequence (mandatory):** after `gh pr merge`, run `git pull --ff-only` then `vnx objective reconcile --project-id <pid>` to auto-close any track whose `pr_ref` points to the just-merged PR (advisory CHECK by default; add `--apply` to write).
 
 ## 3. PR size + iteration caps
 

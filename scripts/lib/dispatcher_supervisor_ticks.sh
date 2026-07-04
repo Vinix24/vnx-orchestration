@@ -53,6 +53,41 @@ _maybe_auto_seed_tracks() {
         >> "$log_file" 2>&1 || true
 }
 
+# _maybe_objective_reconcile — throttled advisory-first git-grounded reconcile tick (D4).
+# Invokes `objective reconcile` at most once per VNX_OBJECTIVE_RECONCILE_INTERVAL seconds
+# when VNX_SUPERVISOR_MODE=unified. Default CHECK mode only; --apply added when
+# VNX_AUTO_CLOSE=1 (operator must set this after `objective reconcile-streak` confirms the
+# flip criterion). Best-effort (|| true); logged to objective_reconcile.log.
+# Default (unset/legacy) = no behaviour change.
+_maybe_objective_reconcile() {
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+    local interval="${VNX_OBJECTIVE_RECONCILE_INTERVAL:-900}"
+    local state_file="$STATE_DIR/.last_objective_reconcile_ts"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last < interval )); then
+        return 0
+    fi
+    local log_file="$VNX_LOGS_DIR/objective_reconcile.log"
+    mkdir -p "$(dirname "$log_file")"
+    local -a cmd=(
+        python3 "$VNX_DIR/scripts/planning_cli.py"
+        objective reconcile
+        --project-id "$VNX_PROJECT_ID"
+        --state-dir "$STATE_DIR"
+    )
+    if [[ "${VNX_AUTO_CLOSE:-0}" == "1" ]]; then
+        cmd+=(--apply)
+    fi
+    "${cmd[@]}" >> "$log_file" 2>&1 || true
+    echo "$now" > "$state_file"
+}
+
 # _unified_supervisor_lease_sweep_tick — throttled lease_sweep tick (SUP-PR2).
 # Invokes scripts/lib/lease_sweep.py at most once per
 # VNX_LEASE_SWEEP_INTERVAL_SEC seconds when VNX_SUPERVISOR_MODE=unified.
