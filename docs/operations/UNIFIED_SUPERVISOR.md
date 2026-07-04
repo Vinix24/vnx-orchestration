@@ -230,7 +230,7 @@ vnx objective reconcile-streak --project-id <pid>
 ```
 
 The flip criterion requires:
-- A consecutive streak of clean runs (gh=ok, zero unverified, no false-candidate reviews).
+- A consecutive streak of at least 7 clean runs (gh=ok, zero unverified, no false-candidate reviews).
 - At least one run in the streak has a confirmed candidate with an `ok` operator review.
 
 Record operator reviews with:
