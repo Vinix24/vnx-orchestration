@@ -41,7 +41,14 @@ def _resolve_merge_base(base_ref: str, head_ref: str, cwd: Path) -> str:
 def _git_diff_bytes(from_ref: str, to_ref: str, cwd: Path) -> bytes:
     """Unified diff bytes excluding .vnx-attest/ for stable content-key hashing."""
     result = subprocess.run(
-        ["git", "diff", from_ref, to_ref, "--", ".", _ATTEST_EXCLUDE],
+        [
+            "git",
+            "-c", "diff.algorithm=myers",
+            "-c", "diff.noprefix=false",
+            "-c", "diff.mnemonicPrefix=false",
+            "-c", "core.textconv=false",
+            "diff", from_ref, to_ref, "--", ".", _ATTEST_EXCLUDE,
+        ],
         cwd=str(cwd), capture_output=True,
     )
     # exit 0 = no diff, 1 = diff found; anything else is an error

@@ -7,6 +7,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+import os
+import tempfile
 
 from vnx_cli import _engine
 
@@ -118,30 +120,51 @@ def vnx_attest_verify(args) -> int:
     allowed_signers_str = getattr(args, "allowed_signers", None)
     base_ref = getattr(args, "base_ref", "origin/main")
 
-    if not allowed_signers_str:
-        for candidate in (
-            repo_root / ".vnx-attest" / "allowed_signers",
-            repo_root / ".vnx" / "allowed_signers",
-        ):
-            if candidate.exists():
-                allowed_signers_str = str(candidate)
-                break
-
-    if not allowed_signers_str:
-        print(
-            "Error: --allowed-signers not supplied and no default found.",
-            file=sys.stderr,
-        )
-        return 1
-
     _engine.ensure_engine_on_path()
     import attest_record as _ar
 
-    ok, reason = _ar.verify_attest_record(
-        allowed_signers=allowed_signers_str,
-        repo_root=repo_root,
-        base_ref=base_ref,
-    )
+    is_override = bool(allowed_signers_str)
+    tmp_path = None
+
+    if is_override:
+        # Opt-in explicit override — warn: caller must ensure the path is protected
+        print(
+            f"  [warn] --allowed-signers override: {allowed_signers_str!r} "
+            "(skipping base-branch resolution; ensure this path is CODEOWNERS-protected)",
+            file=sys.stderr,
+        )
+    else:
+        # Default: read from base branch — NEVER from the PR working tree.
+        # A PR can write .vnx-attest/allowed_signers, so trusting the working-tree
+        # copy allows a rogue key to self-verify.
+        content = _ar.read_allowed_signers_from_base(repo_root, base_ref)
+        if content is not None:
+            fd, tmp_path = tempfile.mkstemp(suffix=".allowed_signers")
+            try:
+                os.write(fd, content)
+            finally:
+                os.close(fd)
+            allowed_signers_str = tmp_path
+        else:
+            print(
+                f"Error: allowed_signers not found in base branch {base_ref!r}. "
+                "Add .vnx-attest/allowed_signers at base branch, or pass --allowed-signers.",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        ok, reason = _ar.verify_attest_record(
+            allowed_signers=allowed_signers_str,
+            repo_root=repo_root,
+            base_ref=base_ref,
+        )
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     if ok:
         print(f"  PASS: {reason}")

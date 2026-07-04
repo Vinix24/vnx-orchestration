@@ -22,6 +22,7 @@ References:
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -200,3 +201,34 @@ def verify_attest_record(
         return (False, "signature verification failed")
 
     return (True, "ok")
+
+
+def read_allowed_signers_from_base(
+    repo_root: "str | Path",
+    base_ref: str = "origin/main",
+) -> "bytes | None":
+    """Read allowed_signers bytes from the BASE branch, never the PR working tree.
+
+    A PR-writable allowed_signers file cannot be trusted as a trust anchor — a
+    rogue key committed to .vnx-attest/allowed_signers would verify itself.
+    Reading from base_ref (e.g. origin/main) ensures only keys present BEFORE
+    the PR can be used for verification.
+
+    Tries .vnx-attest/allowed_signers then .vnx/allowed_signers at base_ref.
+    Returns raw bytes of the file, or None if not found in either location.
+
+    Note: CODEOWNERS protection of .vnx-attest/allowed_signers on the protected
+    branch is the server-side enforcement complement (wired in D3/D5).
+    """
+    repo_root = Path(repo_root)
+    for candidate in (
+        f"{ATTEST_DIR}/allowed_signers",
+        ".vnx/allowed_signers",
+    ):
+        result = subprocess.run(
+            ["git", "show", f"{base_ref}:{candidate}"],
+            cwd=str(repo_root), capture_output=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    return None

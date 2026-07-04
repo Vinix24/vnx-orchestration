@@ -32,6 +32,7 @@ from attest_record import (
     build_attest_manifest,
     verify_attest_record,
     write_attest_record,
+    read_allowed_signers_from_base,
 )
 from attestation import build_governed_manifest, sign_manifest
 
@@ -504,3 +505,185 @@ class TestDiffBinding:
                 base_ref=base_sha,
             )
             assert ok, f"verify failed after committing attest record: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: allowed_signers trust anchor — base branch resolution
+# ---------------------------------------------------------------------------
+
+class TestAllowedSignersTrustAnchor:
+    """read_allowed_signers_from_base reads from the base ref, ignoring PR tree."""
+
+    def _base_with_allowed_signers(self, tmp: Path, pub_line: str) -> str:
+        """Init repo, add allowed_signers at base commit. Returns base SHA."""
+        _init_repo(tmp)
+        attest_dir = tmp / ATTEST_DIR
+        attest_dir.mkdir(parents=True, exist_ok=True)
+        (attest_dir / "allowed_signers").write_text(pub_line)
+        subprocess.run(["git", "add", ".vnx-attest/"], cwd=str(tmp), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add: allowed_signers"], cwd=str(tmp), check=True, capture_output=True)
+        return _head_sha(tmp)
+
+    def test_reads_from_base_ref_not_working_tree(self, ephemeral_key_dir):
+        """Working-tree mutation of allowed_signers does not affect base-ref resolution."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            identity = ephemeral_key_dir["identity"]
+            pub = ephemeral_key_dir["key_path"].with_suffix(".pub").read_text().strip()
+            base_sha = self._base_with_allowed_signers(repo, f"{identity} {pub}\n")
+
+            _add_file_commit(repo, "feature.py", "x = 1\n", "feat: feature")
+
+            # Overwrite working-tree allowed_signers with rogue content (uncommitted)
+            (repo / ATTEST_DIR / "allowed_signers").write_text("rogue@attacker rogue-key-blob\n")
+
+            content = read_allowed_signers_from_base(repo, base_sha)
+            assert content is not None, "Expected to find allowed_signers at base ref"
+            assert b"rogue" not in content, "Base-ref resolution must ignore working-tree mutation"
+            assert identity.encode() in content
+
+    def test_rogue_key_in_pr_tree_not_trusted(self, ephemeral_key_dir):
+        """Rogue key committed to PR tree cannot self-verify against base-branch signers."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            identity = ephemeral_key_dir["identity"]
+            pub = ephemeral_key_dir["key_path"].with_suffix(".pub").read_text().strip()
+            base_sha = self._base_with_allowed_signers(repo, f"{identity} {pub}\n")
+
+            _add_file_commit(repo, "feature.py", "x = 1\n", "feat: feature")
+
+            # Generate a rogue key
+            with tempfile.TemporaryDirectory() as rogue_dir:
+                rogue_key = Path(rogue_dir) / "rogue"
+                subprocess.run(
+                    ["ssh-keygen", "-t", "ed25519", "-f", str(rogue_key), "-N", ""],
+                    check=True, capture_output=True,
+                )
+                rogue_pub = rogue_key.with_suffix(".pub").read_text().strip()
+                rogue_identity = "rogue@attacker"
+
+                # Sign an attest record with the rogue key
+                write_attest_record(
+                    dispatch_id="D-rogue",
+                    deliverable_id="D2",
+                    track_id="t",
+                    plan_gate_ref="r",
+                    signer_identity=rogue_identity,
+                    timestamp="2026-07-04T12:00:00Z",
+                    key_path=rogue_key,
+                    repo_root=repo,
+                    base_ref=base_sha,
+                )
+
+                # PR-tree: commit rogue key into allowed_signers
+                (repo / ATTEST_DIR / "allowed_signers").write_text(f"{rogue_identity} {rogue_pub}\n")
+                subprocess.run(["git", "add", ".vnx-attest/"], cwd=str(repo), check=True, capture_output=True)
+                subprocess.run(
+                    ["git", "commit", "-m", "attack: add rogue key"],
+                    cwd=str(repo), check=True, capture_output=True,
+                )
+
+                # Base-branch resolution returns ORIGINAL allowed_signers (no rogue key)
+                base_content = read_allowed_signers_from_base(repo, base_sha)
+                assert base_content is not None
+                assert b"rogue" not in base_content
+
+                # Verify against base-branch allowed_signers → must FAIL
+                tmp_as = Path(rogue_dir) / "base_as"
+                tmp_as.write_bytes(base_content)
+                ok, reason = verify_attest_record(
+                    allowed_signers=tmp_as,
+                    repo_root=repo,
+                    base_ref=base_sha,
+                )
+                assert not ok, "Rogue-signed record must not verify against base-branch signers"
+                assert "signature" in reason.lower()
+
+    def test_valid_key_in_base_branch_verifies(self, ephemeral_key_dir):
+        """Valid signature passes when allowed_signers is resolved from base branch."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            identity = ephemeral_key_dir["identity"]
+            pub = ephemeral_key_dir["key_path"].with_suffix(".pub").read_text().strip()
+            base_sha = self._base_with_allowed_signers(repo, f"{identity} {pub}\n")
+
+            _add_file_commit(repo, "feature.py", "x = 1\n", "feat: feature")
+
+            write_attest_record(
+                dispatch_id="D-base-verify",
+                deliverable_id="D2",
+                track_id="t",
+                plan_gate_ref="r",
+                signer_identity=identity,
+                timestamp="2026-07-04T12:00:00Z",
+                key_path=ephemeral_key_dir["key_path"],
+                repo_root=repo,
+                base_ref=base_sha,
+            )
+
+            base_content = read_allowed_signers_from_base(repo, base_sha)
+            assert base_content is not None
+
+            with tempfile.TemporaryDirectory() as td:
+                tmp_as = Path(td) / "allowed_signers"
+                tmp_as.write_bytes(base_content)
+                ok, reason = verify_attest_record(
+                    allowed_signers=tmp_as,
+                    repo_root=repo,
+                    base_ref=base_sha,
+                )
+                assert ok, f"Valid key from base branch should pass verify: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: diff-determinism — pinned git config
+# ---------------------------------------------------------------------------
+
+class TestDiffDeterminism:
+    """content-key is byte-identical regardless of local git diff config."""
+
+    def test_identical_under_patience_algorithm(self):
+        """Switching local diff.algorithm=patience does not change the content-key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+            base_sha = _head_sha(repo)
+            _add_file_commit(repo, "f.py", "def hello():\n    return 'world'\n", "feat: f")
+
+            key_default = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+
+            subprocess.run(
+                ["git", "config", "diff.algorithm", "patience"],
+                cwd=str(repo), check=True, capture_output=True,
+            )
+            key_patience = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+            subprocess.run(
+                ["git", "config", "--unset", "diff.algorithm"],
+                cwd=str(repo), capture_output=True,
+            )
+
+            assert key_default == key_patience, (
+                f"diff.algorithm=patience changed content-key: {key_default!r} != {key_patience!r}"
+            )
+
+    def test_identical_under_mnemonic_prefix(self):
+        """Enabling mnemonicPrefix does not change the content-key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+            base_sha = _head_sha(repo)
+            _add_file_commit(repo, "f.py", "x = 42\n", "feat: f")
+
+            key_before = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+
+            subprocess.run(
+                ["git", "config", "diff.mnemonicPrefix", "true"],
+                cwd=str(repo), check=True, capture_output=True,
+            )
+            key_after = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+            subprocess.run(
+                ["git", "config", "--unset", "diff.mnemonicPrefix"],
+                cwd=str(repo), capture_output=True,
+            )
+
+            assert key_before == key_after, (
+                f"mnemonicPrefix change affected content-key: {key_before!r} != {key_after!r}"
+            )
