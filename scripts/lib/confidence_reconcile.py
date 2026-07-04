@@ -20,6 +20,14 @@ canonical confidence used by both the per-dispatch updater and the periodic
 reconciler.  It naturally weights by usage volume: a pattern with
 8 successes / 2 failures resolves to ``9 / 12 = 0.75`` while a single bad
 outcome moves only from the 0.5 prior to ``1 / 3 = 0.333``.
+
+Range contract (D1, 2026-07-04):
+  ``pattern_usage.confidence`` is an UNCLAMPED accumulator: the learning_loop
+  boost path pushes it to 2.0 (``learning_loop.py:286``).  Readers of that
+  column (``_aggregate_for_pattern`` legacy fallback and
+  ``recommendation_aggregator._read_confidence_trends``) see the raw value.
+  Clamping to [0.0, 1.0] happens ONLY at the write boundary to
+  ``success_patterns.confidence_score`` — inside this module.
 """
 
 from __future__ import annotations
@@ -107,6 +115,10 @@ def _aggregate_for_pattern(
         # Older rows that pre-date success_count/failure_count tracking
         # still carry a confidence value updated by the legacy decay/boost
         # path.  Treat that as a single weighted sample.
+        # Range contract: the raw conf may exceed 1.0 (learning_loop boost
+        # to 2.0).  Clamp here — this is the write-boundary for
+        # success_patterns.confidence_score.  Readers of pattern_usage.confidence
+        # must NOT clamp; they see the raw accumulator.
         return max(0.0, min(1.0, conf)), used, succ, fail
 
     return None
@@ -144,6 +156,15 @@ def reconcile_pattern_confidence(db_path: Path) -> int:
             if last_used_dt is not None:
                 beta = _recency_decay(beta, last_used_dt)
             new_score = round(beta, 6)
+            # Range contract: beta_score() + recency_decay() always yield
+            # [0.0, 1.0]; the legacy fallback clamps before returning.
+            # Assert here so any future writer that breaks the invariant is
+            # caught at the single write boundary rather than silently
+            # polluting success_patterns with an out-of-range score.
+            assert 0.0 <= new_score <= 1.0, (
+                f"confidence_score out of range before write: "
+                f"{new_score!r} for sp_id={sp_id}"
+            )
             current = float(current_score or 0.0)
             if abs(new_score - current) < 1e-6:
                 continue
