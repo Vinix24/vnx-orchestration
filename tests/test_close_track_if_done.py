@@ -119,6 +119,16 @@ def _phase(state_dir: Path, track_id: str) -> str:
     return row[0] if row else ""
 
 
+def _derived_status(state_dir: Path, track_id: str) -> "str | None":
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    row = conn.execute(
+        "SELECT derived_status FROM tracks WHERE track_id=? AND project_id=?",
+        (track_id, PROJECT_ID),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def _history(state_dir: Path, track_id: str) -> list:
     conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
     rows = conn.execute(
@@ -207,14 +217,51 @@ def test_revalidation_pr_ref_changed_stale_candidate(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Revalidation: stale_candidate causes no derived_status write (pr_ref variant)
+# ---------------------------------------------------------------------------
+
+def test_revalidation_stale_causes_no_derived_write(tmp_path):
+    sd = _build_db(tmp_path)
+    _seed_done_track(sd, "T-pr-stale", phase="active")
+
+    # Set pr_ref="#994" in DB + add pr_merged event so reconcile would derive "done".
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute(
+        "UPDATE tracks SET pr_ref=? WHERE track_id=? AND project_id=?",
+        ("#994", "T-pr-stale", PROJECT_ID),
+    )
+    conn.execute(
+        "INSERT INTO coordination_events "
+        "(event_id, event_type, entity_type, entity_id, occurred_at, project_id) "
+        "VALUES ('ev-994','pr_merged','dispatch',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?)",
+        ("D-T-pr-stale", PROJECT_ID),
+    )
+    conn.commit()
+    conn.close()
+
+    # Evidence snapshot carries a different pr_ref -> stale candidate.
+    evidence = {"pr_ref": "#993", "verified_at": "2026-07-04T10:00:00Z"}
+    result = track_reconciler.close_track_if_done(
+        sd, "T-pr-stale", PROJECT_ID, actor="system", evidence=evidence
+    )
+    assert result["action"] == "stale_candidate"
+    assert result["applied"] is False
+    assert _phase(sd, "T-pr-stale") == "active"
+    assert _derived_status(sd, "T-pr-stale") is None   # reconcile_track was not called
+
+
+# ---------------------------------------------------------------------------
 # Revalidation: stale_candidate on blocker OI
 # ---------------------------------------------------------------------------
 
-def test_revalidation_blocker_oi_appeared_stale_candidate(tmp_path, monkeypatch):
+def test_revalidation_blocker_oi_appeared_stale_candidate(tmp_path):
     sd = _build_db(tmp_path)
     _seed_done_track(sd, "T-blocked", phase="active")
 
-    # Add a blocker OI (arrived after the nomination snapshot was taken).
+    # Snapshot was taken before the blocker appeared (pr_ref=None matches current row).
+    evidence = {"pr_ref": None, "verified_at": "2026-07-04T10:00:00Z"}
+
+    # Blocker OI arrives AFTER nomination — post-nomination change.
     conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
     conn.execute(
         "INSERT INTO track_open_items "
@@ -225,29 +272,13 @@ def test_revalidation_blocker_oi_appeared_stale_candidate(tmp_path, monkeypatch)
     conn.commit()
     conn.close()
 
-    # Snapshot was taken before the blocker appeared.
-    evidence = {"pr_ref": None, "verified_at": "2026-07-04T10:00:00Z"}
-
-    # Monkeypatch reconcile_track to return "done" regardless of the blocker, simulating
-    # the TOCTOU window: blocker arrived after the nomination reconcile but before the
-    # revalidation fresh read inside close_track_if_done.
-    def fake_reconcile(state_dir, track_id, project_id, **kw):
-        return {
-            "track_id": track_id,
-            "project_id": project_id,
-            "derived_status": "done",
-            "declared_phase": "active",
-            "drifted": True,
-        }
-
-    monkeypatch.setattr(track_reconciler, "reconcile_track", fake_reconcile)
-
     result = track_reconciler.close_track_if_done(
         sd, "T-blocked", PROJECT_ID, actor="system", evidence=evidence
     )
     assert result["action"] == "stale_candidate"
     assert result["applied"] is False
-    assert _phase(sd, "T-blocked") == "active"  # no write
+    assert _phase(sd, "T-blocked") == "active"          # phase unchanged
+    assert _derived_status(sd, "T-blocked") is None     # reconcile_track was not called
 
 
 # ---------------------------------------------------------------------------

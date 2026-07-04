@@ -612,13 +612,20 @@ def close_track_if_done(
     the shortest legal phase path to 'done' via transition_phase.
 
     evidence (optional nomination snapshot): when provided, performs CLOSE-TIME
-    REVALIDATION immediately before the walk — a fresh DB read checking:
+    REVALIDATION as the very first step — BEFORE reconcile_track — so that a
+    stale candidate causes zero DB writes (reconcile_track persists
+    derived_status; it must not run on a track that will return stale_candidate).
+    Fresh DB read checks:
       (a) track's pr_ref unchanged vs evidence['pr_ref'],
       (b) no unresolved blocker OI (link_type='blocks' AND resolved_at IS NULL),
       (c) declared phase still eligible (queued/active; parked only with include_parked).
-    Any mismatch returns action='stale_candidate', applied=False, no write.
+    Any mismatch returns action='stale_candidate', applied=False, BEFORE
+    reconcile_track — so a stale candidate causes zero DB writes, derived_status
+    included.
 
-    When evidence is None (human objective-close path), no revalidation is done.
+    When evidence is None (human objective-close path), no revalidation is done
+    and the flow is byte-for-byte identical to the pre-revalidation behaviour:
+    reconcile_track first, then the derived/declared/parked gates, then the walk.
 
     The walk is NOT atomic with the checks: transition_phase (tracks.py) opens its
     own connection and commits per step. A mid-walk failure leaves the track at an
@@ -638,6 +645,78 @@ def close_track_if_done(
       rejected_walk_failed  transition failed mid-walk; declared_phase=stop-phase
       closed                walk completed; declared_phase updated to 'done'
     """
+    # Close-time revalidation runs FIRST when evidence is provided — before
+    # reconcile_track — so a stale candidate causes zero DB writes (reconcile_track
+    # persists derived_status; it must not run for a track that will be rejected).
+    if evidence is not None:
+        conn = _get_conn(state_dir)
+        try:
+            track_row = conn.execute(
+                "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
+                (track_id, project_id),
+            ).fetchone()
+
+            # (a) pr_ref must match the nomination snapshot.
+            current_pr_ref = track_row["pr_ref"] if track_row else None
+            if current_pr_ref != evidence.get("pr_ref"):
+                return {
+                    "track_id": track_id,
+                    "project_id": project_id,
+                    "declared_phase": track_row["phase"] if track_row else None,
+                    "derived_status": None,
+                    "action": "stale_candidate",
+                    "applied": False,
+                }
+
+            # (b) no unresolved blocker OI.
+            has_resolved = _has_col(conn, "track_open_items", "resolved_at")
+            has_pid = _has_col(conn, "track_open_items", "project_id")
+            if has_pid and has_resolved:
+                blocker = conn.execute(
+                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
+                    "AND link_type='blocks' AND resolved_at IS NULL LIMIT 1",
+                    (track_id, project_id),
+                ).fetchone()
+            elif has_pid:
+                blocker = conn.execute(
+                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
+                    "AND link_type='blocks' LIMIT 1",
+                    (track_id, project_id),
+                ).fetchone()
+            else:
+                blocker = conn.execute(
+                    "SELECT 1 FROM track_open_items WHERE track_id=? "
+                    "AND link_type='blocks' LIMIT 1",
+                    (track_id,),
+                ).fetchone()
+            if blocker:
+                return {
+                    "track_id": track_id,
+                    "project_id": project_id,
+                    "declared_phase": track_row["phase"] if track_row else None,
+                    "derived_status": None,
+                    "action": "stale_candidate",
+                    "applied": False,
+                }
+
+            # (c) declared phase still eligible after fresh read.
+            fresh_phase = track_row["phase"] if track_row else None
+            eligible = fresh_phase in ("queued", "active") or (
+                fresh_phase == "parked" and include_parked
+            )
+            if not eligible:
+                return {
+                    "track_id": track_id,
+                    "project_id": project_id,
+                    "declared_phase": fresh_phase,
+                    "derived_status": None,
+                    "action": "stale_candidate",
+                    "applied": False,
+                }
+        finally:
+            conn.close()
+
+    # Revalidation passed (or evidence=None path): reconcile derived_status now.
     result = reconcile_track(state_dir, track_id, project_id)
     derived = result["derived_status"]
     declared = result["declared_phase"]
@@ -663,57 +742,6 @@ def close_track_if_done(
     if declared == "parked" and not include_parked:
         payload["action"] = "rejected_parked"
         return payload
-
-    # Close-time revalidation: fresh read + three invariant checks.
-    if evidence is not None:
-        conn = _get_conn(state_dir)
-        try:
-            track_row = conn.execute(
-                "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
-                (track_id, project_id),
-            ).fetchone()
-
-            # (a) pr_ref must match the nomination snapshot.
-            current_pr_ref = track_row["pr_ref"] if track_row else None
-            if current_pr_ref != evidence.get("pr_ref"):
-                payload["action"] = "stale_candidate"
-                return payload
-
-            # (b) no unresolved blocker OI.
-            has_resolved = _has_col(conn, "track_open_items", "resolved_at")
-            has_pid = _has_col(conn, "track_open_items", "project_id")
-            if has_pid and has_resolved:
-                blocker = conn.execute(
-                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
-                    "AND link_type='blocks' AND resolved_at IS NULL LIMIT 1",
-                    (track_id, project_id),
-                ).fetchone()
-            elif has_pid:
-                blocker = conn.execute(
-                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
-                    "AND link_type='blocks' LIMIT 1",
-                    (track_id, project_id),
-                ).fetchone()
-            else:
-                blocker = conn.execute(
-                    "SELECT 1 FROM track_open_items WHERE track_id=? "
-                    "AND link_type='blocks' LIMIT 1",
-                    (track_id,),
-                ).fetchone()
-            if blocker:
-                payload["action"] = "stale_candidate"
-                return payload
-
-            # (c) declared phase still eligible after fresh read.
-            fresh_phase = track_row["phase"] if track_row else None
-            eligible = fresh_phase in ("queued", "active") or (
-                fresh_phase == "parked" and include_parked
-            )
-            if not eligible:
-                payload["action"] = "stale_candidate"
-                return payload
-        finally:
-            conn.close()
 
     payload["evidence"] = _close_evidence(state_dir, track_id, project_id)
 
