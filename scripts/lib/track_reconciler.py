@@ -55,7 +55,7 @@ def _parse_pr_number(pr_ref: Optional[str]) -> Optional[int]:
 def _parse_pr_numbers(pr_ref: Optional[str]) -> FrozenSet[int]:
     """Parse a single ref OR a comma/space-separated list ('#908,#909') into a
     set of ints. A track that landed across multiple PRs ('#908,#909') is done
-    when ANY of them is merged. Empty set when nothing parses."""
+    only when ALL of them are merged. Empty set when nothing parses."""
     if not pr_ref:
         return frozenset()
     nums: set = set()
@@ -264,9 +264,10 @@ def _compute_derived_status(
         # Historical dispatches stored 'A'/'B'/'C' in the track column instead of
         # feature track_ids, so the join above is empty for all pre-1.0 tracks.
         # If the track's own pr_ref (single or a '#911,#912' multi-PR list) is
-        # confirmed merged via any evidence source, derive 'done' without a
-        # dispatch match.
-        if _parse_pr_numbers(track_pr_ref) & merged_pr_numbers:
+        # confirmed merged via all evidence sources, derive 'done' without a
+        # dispatch match. ALL parsed PRs must be merged; partial merge = not done.
+        nums = _parse_pr_numbers(track_pr_ref)
+        if nums and nums <= merged_pr_numbers:
             return "done"
         # Absence of evidence is not evidence of queued. Historical dispatches may
         # be archived, so defer to declared phase (2026-06-15 migration panel).
@@ -302,9 +303,17 @@ def _compute_derived_status(
         if merged_event:
             return "done"
 
-        # Also accept the track's own pr_ref being confirmed merged via any
-        # evidence source (NDJSON / ROADMAP / git) — same as the no-dispatch path.
-        if _parse_pr_numbers(track_pr_ref) & merged_pr_numbers:
+        # Declared-done stability: a declared-done track with all terminal dispatches
+        # stays done even when PR evidence is incomplete (partial multi-PR merge or
+        # no coordination event). Blocker/dependency checks still win (run above).
+        if track_phase == "done":
+            return "done"
+
+        # Also accept the track's own pr_ref being confirmed merged via all
+        # evidence sources (NDJSON / ROADMAP / git) — same as the no-dispatch path.
+        # ALL parsed PRs must be merged; partial merge = not done.
+        nums = _parse_pr_numbers(track_pr_ref)
+        if nums and nums <= merged_pr_numbers:
             return "done"
 
         # All dispatches terminal but PR not confirmed merged yet.
