@@ -158,7 +158,8 @@ pointer-only — file:line ranges, never code bodies), and returns an `Intellige
 `confidence=1.0` (model-curated recon over deterministic candidates) and `evidence_count` equal to
 the number of ranked pointers (`sidecar_evidence_count`, `scout_prepass.py:181-184`).
 
-`EXCLUDE` verdicts are intentionally never rendered — they only shrink the `INCLUDE` set and would
+`EXCLUDE` verdicts are intentionally never rendered — they are simply omitted from the sketch
+(nothing removes an `INCLUDE` pointer for also appearing in `EXCLUDE`), since rendering them would
 add noise a worker shouldn't anchor on (`format_scout_sketch`, `scout_prepass.py:190-192`).
 
 ### Selection weight

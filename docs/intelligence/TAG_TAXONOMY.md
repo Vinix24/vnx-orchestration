@@ -12,8 +12,8 @@ for the governed dispatch pipeline.
 
 **Module**: `scripts/lib/vnx_tag_vocabulary.py` (95 lines).
 **Consumers**: `intelligence_selector.py`'s rank-then-budget scoring (opt-in
-`VNX_INTEL_RANK_THEN_BUDGET`), `vnx_tagger.py`'s LLM tagger (opt-in `VNX_TAGGER_ENABLED`), and
-`scripts/lib/scout_prepass.py` indirectly via the tag-overlap score. Full pipeline detail:
+`VNX_INTEL_RANK_THEN_BUDGET`) — which calls `derive_tags` to compute the tag-overlap score — and
+`vnx_tagger.py`'s LLM tagger (opt-in `VNX_TAGGER_ENABLED`). Full pipeline detail:
 [`SELF_LEARNING_LOOP.md`](SELF_LEARNING_LOOP.md) and [`SCOUT_PREPASS.md`](SCOUT_PREPASS.md).
 
 This is a **closed, faceted taxonomy** purpose-built for the VNX Orchestration codebase (not
