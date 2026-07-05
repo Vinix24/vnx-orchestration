@@ -3,9 +3,9 @@ name: featureplan-kickoff
 description: >
   VNX feature-execution kickoff preflight. USE THIS when starting or resuming a feature or
   track from its plan: checking worktree/queue/staging health, finding the first promoteable
-  dispatch, and handing off to @t0-orchestrator. Reads the feature's track + plan doc from the
-  tracks DB (`vnx objective`); the repo FEATURE_PLAN.md/PR_QUEUE.md are generic examples, not
-  the source.
+  dispatch, and handing off to @t0-orchestrator. Reads the feature's track + plan doc from
+  Horizon's tracks DB (`vnx horizon`, alias `vnx objective`); the repo FEATURE_PLAN.md/PR_QUEUE.md
+  are generic examples, not the source.
 user-invocable: true
 allowed-tools: [Read, Grep, Glob, Bash]
 paths: ["FEATURE_PLAN.md", ".vnx-data/**"]
