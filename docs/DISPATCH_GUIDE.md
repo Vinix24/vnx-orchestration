@@ -136,8 +136,9 @@ This prevents the classic multi-agent problem: two agents editing the same files
 ## 3b. Claude Workers: Concurrency and Permissions
 
 Every Claude worker in the tmux-spawn lane runs in its own fresh, isolated
-worktree — a full clone, not a shared checkout. Two consequences follow from
-that isolation:
+worktree — `git worktree add` gives each dispatch its own checked-out files and
+branch while sharing the repository's object database (not a full clone, and not
+a shared working tree). Two consequences follow from that isolation:
 
 **Concurrency defaults to one Claude worker at a time.** Claude subscription
 sessions share a concurrency cap across everything on the account, so VNX

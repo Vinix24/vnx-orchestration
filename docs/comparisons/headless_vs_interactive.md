@@ -15,7 +15,7 @@ We used VNX's dual-track execution to test this systematically:
 **Setup:**
 - Identical instruction bytes piped to both tracks (verified via `diff`)
 - Separate git worktrees with isolated runtime state
-- Workers: Claude Sonnet 4.6 (`claude -p --dangerously-skip-permissions`)
+- Workers: Claude Sonnet 4.6 — the pinned worker model as of this April 2026 benchmark (`claude -p --dangerously-skip-permissions`); the current worker pin is Sonnet 5
 - Orchestrator: Claude Opus 4.6 dispatching identically to both
 - Zero human intervention in either track
 - Metrics: LOC, file count, test count, structural equivalence

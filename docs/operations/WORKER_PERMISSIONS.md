@@ -28,7 +28,7 @@ def worker_scoped_enabled() -> bool:
 - **Unset / falsey (default):** the worker launches with blanket
   `--dangerously-skip-permissions`
   (`scripts/lib/tmux_interactive_dispatch.py:273`,
-  `scripts/lib/subprocess_adapter.py:75-89` `_build_worker_scope_args` →
+  `scripts/lib/subprocess_adapter.py:75-105` `_build_worker_scope_args` →
   `_LEGACY_SKIP_FLAG`).
 - **`VNX_WORKER_SCOPED=1` (opt back in):** the worker launches with
   `build_claude_scope_args(...)` instead — `--permission-mode acceptEdits`,
