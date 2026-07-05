@@ -124,7 +124,7 @@ The repo squash-merges PRs, so a commit-SHA-keyed attestation would break at mer
   consecutive PRs carrying valid signatures, operator-confirmed. Operator step to flip: promote
   the check to required + `enforce_admins` in branch-protection settings, then remove
   `continue-on-error: true`. The same staged-then-flip pattern is used elsewhere in this codebase
-  for `VNX_AUTO_CLOSE` (`scripts/lib/objective_reconcile.py:49`, `FLIP_STREAK_REQUIRED = 7`).
+  for `VNX_AUTO_CLOSE` (`scripts/lib/objective_reconcile.py:50`, `FLIP_STREAK_REQUIRED = 7`).
 
 ## D4 — Signed, budgeted, audited override
 
