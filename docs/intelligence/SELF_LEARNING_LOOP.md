@@ -1,7 +1,7 @@
 # VNX Self-Learning Loop — Operator-Gated Intelligence
 
 **Status**: Active (D1–D6 shipped on main, 2026-07-04). Verified against code again 2026-07-05
-(PRs #1001–#1017 drift-sweep).
+(PRs #1001–#1018 drift-sweep).
 **Related doc**: [`SCOUT_PREPASS.md`](SCOUT_PREPASS.md) covers the scout pre-pass and rank-then-budget
 selection in depth — this doc summarizes rank-then-budget below and defers detail there.
 **Ground truth**: the code modules cited throughout this doc (`scripts/learning_loop.py`,
@@ -257,13 +257,15 @@ These default ON, not off — they are off-switches for sub-steps of the learnin
 ### Current per-project state — `vnx-dev`
 
 The registry defaults above never change (a fresh `vnx init` project starts with every intelligence
-flag OFF). This project's `runtime_coordination.db: project_config` table currently overrides two of
-them, set by the operator through the config control-plane:
+flag OFF). Through the config control-plane the operator has flipped two of them ON for this project
+— `VNX_SCOUT_PREPASS` and `VNX_TAGGER_ENABLED` (both `config_value=1` in
+`runtime_coordination.db: project_config`). Runtime config is operator-flippable, so read the live
+table for the authoritative current state rather than a snapshot here:
 
-| Flag | Value | Updated |
-|------|-------|---------|
-| `VNX_SCOUT_PREPASS` | `1` | 2026-07-05T14:47:57Z |
-| `VNX_TAGGER_ENABLED` | `1` | 2026-07-05T15:35:56Z |
+```
+sqlite3 ~/.vnx-data/vnx-dev/state/runtime_coordination.db \
+  "SELECT config_key, config_value FROM project_config"
+```
 
 The tagger flip followed a `vnx learning tagger-ab` run that observed a 100% rescue rate at
 ~$0.0005/pattern (DeepSeek-Flash) — comfortably past the `rescue_rate >= 20% AND
@@ -407,5 +409,5 @@ Value grows as governed builds resume. The proposal tier is not a no-op even aga
 
 ---
 
-*Doc written 2026-07-05 for D7; updated 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1017).*
+*Doc written 2026-07-05 for D7; updated 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1018).*
 *Dispatch-ID: D-docs-intelligence (update); originally D-selfimprove-d7-docs.*

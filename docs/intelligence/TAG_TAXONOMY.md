@@ -1,6 +1,6 @@
 # VNX Tag Taxonomy
 
-**Last Updated**: 2026-07-05 (refreshed for the docs-intelligence sweep, PRs #1001–#1017)
+**Last Updated**: 2026-07-05 (refreshed for the docs-intelligence sweep, PRs #1001–#1018)
 
 **There are two separate, still-live tag systems in this codebase.** They serve different
 consumers and do not share a vocabulary. This doc covers both, in order of which is now the SSOT
@@ -207,5 +207,5 @@ migration for both `tag_combinations` and the closed-vocab keyword tables.
 
 ---
 
-*Doc written 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1017 drift-brief).*
+*Doc written 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1018 drift-brief).*
 *Dispatch-ID: D-docs-intelligence*

@@ -69,11 +69,14 @@ whole body in `try/except Exception` — "best-effort — NEVER raises" per its 
 |------|---------|------------|------|
 | `VNX_SCOUT_PREPASS` | `"0"` (off), category `intelligence` | `scout_prepass_enabled()` reads it through `config_runtime.get_bool()` — honours an operator dashboard/DB toggle, falls back to env, falls back to the registry default | `scripts/lib/config_registry.py:51-53`, `scripts/lib/scout_prepass.py:268-272` |
 
-**Current state for `vnx-dev`**: the registry default stays `"0"` — this is a per-project operator
-decision, not a code default change. The `project_config` DB row shows:
+**Current state for `vnx-dev`**: the registry default stays `"0"` — a per-project operator decision,
+not a code default change. The operator has flipped this flag ON for `vnx-dev` through the config
+control-plane (a `project_config` row with `config_value=1`). Runtime config is operator-flippable,
+so the live table is the source of truth rather than this doc:
 
 ```
-project_id=vnx-dev  config_key=VNX_SCOUT_PREPASS  config_value=1  updated_by=operator  updated_at=2026-07-05T14:47:57.660Z
+sqlite3 ~/.vnx-data/vnx-dev/state/runtime_coordination.db \
+  "SELECT config_key, config_value FROM project_config"
 ```
 
 A fresh `vnx init` project starts with scout OFF, exactly like every other intelligence flag in the
@@ -204,7 +207,7 @@ documented in [`TAG_TAXONOMY.md`](TAG_TAXONOMY.md).
 | `maybe_run_scout()` — opt-in, gated, never raises | `scripts/lib/scout_prepass.py:419-453` |
 | `scout_prepass_enabled()` reads `VNX_SCOUT_PREPASS` via `config_runtime` | `scripts/lib/scout_prepass.py:268-272` |
 | `VNX_SCOUT_PREPASS` registry default `"0"`, category `intelligence` | `scripts/lib/config_registry.py:51-53` |
-| Per-project operator override (`vnx-dev` = `1` since 2026-07-05) | `runtime_coordination.db: project_config` table |
+| Per-project operator override (operator-flippable; check the live table for current value) | `runtime_coordination.db: project_config` table |
 | `_scout_gate_ok()` — scope/lane/task_class gate | `scripts/lib/scout_prepass.py:285-304` |
 | `VNX_SCOUT_PROVIDER` / `VNX_SCOUT_MIN_PATHS` read via raw env (not `config_runtime`) | `scripts/lib/scout_prepass.py:275-282, 293` |
 | Provider allowlist — never a subscription lane | `scripts/lib/scout_prepass.py:265` |
@@ -224,5 +227,5 @@ documented in [`TAG_TAXONOMY.md`](TAG_TAXONOMY.md).
 
 ---
 
-*Doc written 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1017 drift-brief).*
+*Doc written 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1018 drift-brief).*
 *Dispatch-ID: D-docs-intelligence*
