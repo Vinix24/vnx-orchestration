@@ -1,0 +1,101 @@
+# D3: Attestation verification gate — STAGED ADVISORY (non-blocking)
+#
+# This check runs and REPORTS but does NOT block merges (continue-on-error: true).
+# It becomes a REQUIRED check after the flip criterion is met:
+#   - N=5 consecutive PRs carrying valid signatures, operator-confirmed.
+#   - Operator step: promote this check to required + enforce_admins in branch
+#     protection settings, then set continue-on-error: false in this file.
+#
+# Trust-anchor safety: allowed_signers is read from the BASE branch (origin/main),
+# never from the PR head.  A PR cannot neuter the gate by editing its own
+# allowed_signers.  CODEOWNERS guards .vnx-attest/allowed_signers and this file.
+#
+# Exempt lane residual: PRs touching only docs/, tests/, or *.md files bypass
+# this gate.  This is an un-attributed lane — accepted for v1, named as a risk.
+
+name: Attestation Gate (D3)
+
+on:
+  pull_request:
+
+jobs:
+  attestation-gate:
+    name: "Gov-D3: Attestation signature gate (advisory)"
+    runs-on: ubuntu-latest
+    # STAGED ADVISORY: reports but never blocks.
+    # Remove this line when flipping to required (see flip criterion above).
+    continue-on-error: true
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history so merge-base resolution works
+          fetch-depth: 0
+
+      - name: Fetch base branch for trust anchor + merge-base
+        run: |
+          git fetch origin main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Classify PR (feature vs exempt)
+        id: classify
+        run: |
+          set -euo pipefail
+          MERGE_BASE=$(git merge-base origin/main HEAD)
+
+          CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Feature-code paths that trigger the gate
+          FEATURE=$(echo "$CHANGED" | grep -E \
+            '^(scripts/|vnx_cli/|dashboard/|schemas/|\.vnx/|\.github/)' \
+            || true)
+
+          if [ -z "$FEATURE" ]; then
+            echo "classification=exempt" >> "$GITHUB_OUTPUT"
+            echo "::notice::Attestation gate: exempt (docs/tests/md only — un-attributed lane, named residual)"
+          else
+            echo "classification=feature" >> "$GITHUB_OUTPUT"
+            echo "Feature-code files that trigger the gate:"
+            echo "$FEATURE"
+          fi
+
+      - name: Read allowed_signers from BASE branch (trust anchor)
+        if: steps.classify.outputs.classification == 'feature'
+        id: read_signers
+        run: |
+          set -euo pipefail
+          # Read from origin/main — NEVER from the PR head.
+          # A PR cannot introduce a rogue key and self-verify.
+          SIGNERS_CONTENT=$(git show "origin/main:.vnx-attest/allowed_signers" 2>/dev/null || true)
+
+          if [ -z "$SIGNERS_CONTENT" ]; then
+            echo "::warning::allowed_signers not found at origin/main:.vnx-attest/allowed_signers"
+            echo "::warning::This PR would FAIL once the gate becomes required."
+            echo "::warning::See docs/governance/KEY_PROVISIONING.md to provision signing keys."
+            echo "signers_found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$SIGNERS_CONTENT" > /tmp/vnx_allowed_signers
+            echo "signers_found=true" >> "$GITHUB_OUTPUT"
+            ENTRY_COUNT=$(wc -l < /tmp/vnx_allowed_signers)
+            echo "::notice::allowed_signers resolved from origin/main (${ENTRY_COUNT} entries)"
+          fi
+
+      - name: Run attestation verify-pr
+        if: >
+          steps.classify.outputs.classification == 'feature' &&
+          steps.read_signers.outputs.signers_found == 'true'
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/lib/verify_pr.py" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --base-ref "origin/main" \
+            --head-ref HEAD \
+            --allowed-signers /tmp/vnx_allowed_signers \
+            --verbose

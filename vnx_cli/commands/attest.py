@@ -180,6 +180,37 @@ def vnx_attest(args) -> int:
         return vnx_attest_write(args)
     elif subcommand == "verify":
         return vnx_attest_verify(args)
+    elif subcommand == "verify-pr":
+        return vnx_attest_verify_pr(args)
     else:
-        print("  Usage: vnx attest {write,verify}", file=sys.stderr)
+        print("  Usage: vnx attest {write,verify,verify-pr}", file=sys.stderr)
         return 1
+
+
+def vnx_attest_verify_pr(args) -> int:
+    """Verify attestation for a PR — used by the D3 GitHub Action gate."""
+    repo_root = Path(getattr(args, "project_dir", ".")).resolve()
+    base_ref = getattr(args, "base_ref", "origin/main")
+    head_ref = getattr(args, "head_ref", "HEAD")
+    allowed_signers_override = getattr(args, "allowed_signers", None)
+    verbose = getattr(args, "verbose", False)
+
+    _engine.ensure_engine_on_path()
+    import verify_pr as _vpr
+
+    exit_code, message = _vpr.verify_pr(
+        repo_root=repo_root,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        allowed_signers_override=allowed_signers_override or None,
+        verbose=verbose,
+    )
+
+    if exit_code == 0:
+        print(f"  {message}")
+    elif exit_code == 2:
+        print(f"  {message}", file=sys.stderr)
+    else:
+        print(f"  {message}", file=sys.stderr)
+
+    return exit_code
