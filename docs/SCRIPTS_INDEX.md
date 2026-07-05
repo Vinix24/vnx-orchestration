@@ -85,6 +85,8 @@ Primary intelligence/governance scripts:
 
 Related docs:
 
+- `docs/intelligence/SELF_LEARNING_LOOP.md`
+- `docs/intelligence/SCOUT_PREPASS.md`
 - `docs/intelligence/TAG_TAXONOMY.md`
 - `docs/intelligence/COST_TRACKING_GUIDE.md`
 - `docs/core/technical/INTELLIGENCE_SYSTEM.md`
