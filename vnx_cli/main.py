@@ -278,6 +278,212 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
     toic_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
 
+_HORIZON_CHOICES = ("now", "next", "later")
+_PHASE_CHOICES = ("queued", "active", "parked", "done")
+_OUTPUT_KIND_CHOICES = ("pr", "post", "deal", "doc")
+
+
+def _common_horizon_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--project-id",
+        default=None,
+        metavar="PROJECT_ID",
+        help="project_id (default: resolved from VNX_PROJECT_ID / .vnx-project-id / "
+             "git remote; never silently 'vnx-dev' — ADR-007)",
+    )
+    p.add_argument("--project-dir", default=".", metavar="DIR")
+    p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+
+
+def _register_objective_verbs(subs: argparse.Action) -> None:
+    """Register the objective-domain verbs shared by `vnx horizon` and the
+    `vnx objective` backward-compat alias — same flags, same handlers."""
+    p_add = subs.add_parser("add", help="add an ad-hoc objective/track (no ROADMAP edit)")
+    _common_horizon_args(p_add)
+    p_add.add_argument("track_id", metavar="TRACK_ID")
+    p_add.add_argument("title", metavar="TITLE")
+    p_add.add_argument("goal_state", metavar="GOAL_STATE", help="what 'done' looks like")
+    p_add.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
+    p_add.add_argument("--priority", default=None)
+
+    p_list = subs.add_parser("list", help="list objectives grouped by horizon")
+    _common_horizon_args(p_list)
+    p_list.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
+    p_list.add_argument("--phase", choices=_PHASE_CHOICES, default=None)
+
+    p_show = subs.add_parser("show", help="show one objective")
+    _common_horizon_args(p_show)
+    p_show.add_argument("track_id", metavar="TRACK_ID")
+
+    p_sync = subs.add_parser(
+        "sync", help="re-project ROADMAP.yaml -> tracks (CHECK by default; --apply to write)"
+    )
+    _common_horizon_args(p_sync)
+    p_sync.add_argument("--apply", action="store_true",
+                        help="apply the idempotent projection (default: dry-run check)")
+    p_sync.add_argument("--roadmap", default=None, help="path to ROADMAP.yaml (default: project root)")
+
+    p_drift = subs.add_parser(
+        "drift",
+        help="advisory drift-gate: report declared-vs-derived divergence (exit 0)",
+    )
+    _common_horizon_args(p_drift)
+
+    p_reconcile = subs.add_parser(
+        "reconcile",
+        help="batch git-grounded auto-close: verify PR merge state via gh and close done tracks",
+    )
+    _common_horizon_args(p_reconcile)
+    p_reconcile.add_argument(
+        "--apply", action="store_true",
+        help="close CONFIRMED tracks (default: check only — no phase writes)",
+    )
+    p_reconcile.add_argument(
+        "--allow-closed-siblings", action="store_true", dest="allow_closed_siblings",
+        help="CONFIRMED if >=1 PR merged even when siblings are CLOSED-unmerged",
+    )
+    p_reconcile.add_argument(
+        "--max-gh-calls", type=int, default=50, dest="max_gh_calls", metavar="N",
+        help="cap live gh pr view calls per run (default 50; excess -> deferred)",
+    )
+    p_reconcile.add_argument(
+        "--repo-root", default="", dest="repo_root", metavar="PATH",
+        help="git repo root for gh calls (default: resolved --project-dir)",
+    )
+
+    p_rec_review = subs.add_parser(
+        "reconcile-review",
+        help="record an operator review of a reconcile run (ok or false-candidate)",
+    )
+    _common_horizon_args(p_rec_review)
+    p_rec_review.add_argument("run_id", help="run_id from reconcile_history.ndjson")
+    p_rec_review.add_argument("--reviewer", required=True, help="reviewer name or id")
+    p_rec_review.add_argument(
+        "--verdict", required=True, choices=["ok", "false-candidate"],
+        help="ok = candidate is correct; false-candidate = reconcile over-nominated this track",
+    )
+    p_rec_review.add_argument("--note", default="", help="optional review note")
+
+    p_rec_streak = subs.add_parser(
+        "reconcile-streak",
+        help="compute the consecutive clean-run streak for the VNX_AUTO_CLOSE flip decision",
+    )
+    _common_horizon_args(p_rec_streak)
+
+    p_close = subs.add_parser(
+        "close",
+        help="close-the-loop: advance declared phase to a terminal derived_status (human-gated)",
+    )
+    _common_horizon_args(p_close)
+    p_close.add_argument("track_id")
+    p_close.add_argument("--apply", action="store_true",
+                         help="write the transition (default: dry-run check)")
+    p_close.add_argument("--approval-id", default="",
+                         help="operator approval token (REQUIRED with --apply)")
+    p_close.add_argument("--include-parked", action="store_true",
+                         help="allow closing a PARKED track (un-parks it; off by default)")
+
+    p_reopen = subs.add_parser(
+        "reopen", help="reopen a done track: done -> active (operator-gated, audited)",
+    )
+    _common_horizon_args(p_reopen)
+    p_reopen.add_argument("track_id")
+    p_reopen.add_argument("--approval-id", default="", dest="approval_id",
+                          help="operator approval token (REQUIRED)")
+    p_reopen.add_argument("--reason", default="",
+                          help="reason for reopening (REQUIRED)")
+
+
+def _register_deliverable_verbs(subs: argparse.Action) -> None:
+    """Register the deliverable-domain verbs shared by `vnx horizon deliverable`
+    and the top-level `vnx deliverable` backward-compat alias."""
+    p_dadd = subs.add_parser("add", help="plan a deliverable (proposed dispatch)")
+    _common_horizon_args(p_dadd)
+    p_dadd.add_argument("--objective", required=True, metavar="TRACK_ID",
+                        help="track/objective this deliverable belongs to")
+    p_dadd.add_argument("--output-kind", required=True, choices=_OUTPUT_KIND_CHOICES,
+                        metavar="KIND", dest="output_kind")
+    p_dadd.add_argument("--title", required=True)
+
+    p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
+    _common_horizon_args(p_dlist)
+    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+
+    p_dpromote = subs.add_parser(
+        "promote", help="human gate: promote deliverable from proposed -> ready",
+    )
+    _common_horizon_args(p_dpromote)
+    p_dpromote.add_argument("dispatch_id")
+
+
+def _register_plan_gate_verbs(subs: argparse.Action) -> None:
+    """Register the plan-gate-domain verbs under `vnx horizon plan-gate`."""
+    p_pseed = subs.add_parser(
+        "seed", help="seed the OI-PLAN blocker (track stays blocked until the gate passes)",
+    )
+    _common_horizon_args(p_pseed)
+    p_pseed.add_argument("track_id")
+
+    p_prun = subs.add_parser(
+        "run", help="run the panel over a plan doc; on PASS, resolve the blocker",
+    )
+    _common_horizon_args(p_prun)
+    p_prun.add_argument("track_id")
+    p_prun.add_argument("--doc", required=True, help="path to the plan doc under review")
+
+    p_pstat = subs.add_parser(
+        "status", help="show a track's plan-gate state + derived_status",
+    )
+    _common_horizon_args(p_pstat)
+    p_pstat.add_argument("track_id")
+
+
+def _register_horizon_subparser(subparsers: argparse.Action) -> None:
+    horizon_parser = subparsers.add_parser(
+        "horizon",
+        help="planning layer: objectives, deliverables, plan-gate (aliases: objective, deliverable)",
+    )
+    horizon_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    horizon_subs = horizon_parser.add_subparsers(dest="horizon_verb", metavar="VERB")
+    _register_objective_verbs(horizon_subs)
+
+    dlv_parser = horizon_subs.add_parser(
+        "deliverable", help="deliverable plane (proposed dispatches)"
+    )
+    dlv_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    dlv_subs = dlv_parser.add_subparsers(dest="deliverable_verb", metavar="VERB")
+    _register_deliverable_verbs(dlv_subs)
+
+    pg_parser = horizon_subs.add_parser(
+        "plan-gate", help="plan-first gate: a multi-model panel reviews a plan before any build"
+    )
+    pg_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    pg_subs = pg_parser.add_subparsers(dest="plan_gate_verb", metavar="VERB")
+    _register_plan_gate_verbs(pg_subs)
+
+
+def _register_objective_subparser(subparsers: argparse.Action) -> None:
+    """Backward-compat alias: `vnx objective <verb>` — same verbs/handlers as
+    `vnx horizon <verb>` (bin/vnx parity)."""
+    objective_parser = subparsers.add_parser(
+        "objective", help="alias for `vnx horizon` (backward compat)",
+    )
+    objective_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    objective_subs = objective_parser.add_subparsers(dest="objective_verb", metavar="VERB")
+    _register_objective_verbs(objective_subs)
+
+
+def _register_deliverable_subparser(subparsers: argparse.Action) -> None:
+    """Backward-compat alias: `vnx deliverable <verb>` — same handlers as
+    `vnx horizon deliverable` (bin/vnx parity)."""
+    deliverable_parser = subparsers.add_parser(
+        "deliverable", help="alias for `vnx horizon deliverable` (backward compat)",
+    )
+    deliverable_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    deliverable_subs = deliverable_parser.add_subparsers(dest="deliverable_verb", metavar="VERB")
+    _register_deliverable_verbs(deliverable_subs)
+
+
 def _register_migrate_subparser(subparsers: argparse.Action) -> None:
     migrate_parser = subparsers.add_parser(
         "migrate",
@@ -560,6 +766,18 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.attest import vnx_attest
         sys.exit(vnx_attest(args))
 
+    elif args.command == "horizon":
+        from vnx_cli.commands.horizon import vnx_horizon
+        sys.exit(vnx_horizon(args))
+
+    elif args.command == "objective":
+        from vnx_cli.commands.horizon import vnx_objective
+        sys.exit(vnx_objective(args))
+
+    elif args.command == "deliverable":
+        from vnx_cli.commands.horizon import vnx_deliverable
+        sys.exit(vnx_deliverable(args))
+
     else:
         parser.print_help()
         sys.exit(0)
@@ -588,6 +806,9 @@ def main() -> None:
     _register_dream_subparser(subparsers)
     _register_migrate_subparser(subparsers)
     _register_attest_subparser(subparsers)
+    _register_horizon_subparser(subparsers)
+    _register_objective_subparser(subparsers)
+    _register_deliverable_subparser(subparsers)
 
     args = parser.parse_args()
     _dispatch_command(args, parser)
