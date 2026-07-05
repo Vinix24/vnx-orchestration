@@ -400,15 +400,104 @@ def _print_ab_report(result: dict) -> None:
     print("=" * 60)
 
 
+def _cmd_grounding_shadow(args) -> int:
+    """Compare V1 (substring-join) vs V2 (junction) grounding — read-only, no DB writes."""
+    import sqlite3 as _sqlite3
+    project_dir = Path(getattr(args, "project_dir", "."))
+    limit = int(getattr(args, "limit", 50))
+
+    state_dir = _resolve_state_dir(project_dir)
+    db_path = state_dir / "quality_intelligence.db"
+
+    if not db_path.exists():
+        print(f"error: quality_intelligence.db not found at {db_path}", file=sys.stderr)
+        print("Run `vnx init` to initialise the project first.", file=sys.stderr)
+        return 1
+
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=10.0)
+        conn.row_factory = _sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT dispatch_id, outcome_status FROM dispatch_metadata "
+                "WHERE outcome_status IN ('success', 'failure') "
+                "ORDER BY dispatched_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except _sqlite3.OperationalError:
+            rows = []
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"error: could not read dispatch_metadata: {exc}", file=sys.stderr)
+        return 1
+
+    if not rows:
+        print("No completed dispatches found in dispatch_metadata.")
+        print("Run some dispatches first to populate outcome data.")
+        return 0
+
+    dispatches = [
+        {"dispatch_id": r["dispatch_id"], "status": r["outcome_status"]}
+        for r in rows
+    ]
+
+    import intelligence_persist as _ip  # type: ignore[import]
+    report = _ip.shadow_grounding_compare(db_path, dispatches)
+
+    summary = report["summary"]
+    print("\nVNX Learning — Outcome Grounding Shadow (V1 vs V2)")
+    print("=" * 52)
+    print(f"Dispatches analysed : {summary['total_dispatches']}")
+    print(f"Junction available  : {'yes' if summary['junction_available'] else 'no'}")
+
+    if not summary["junction_available"]:
+        print()
+        print("No dispatch_pattern_offered junction table found.")
+        print("V2 grounding requires the junction — run `vnx migrate` to create it.")
+        return 0
+
+    diverged_entries = [e for e in report["dispatches"] if e["has_divergence"]]
+    if diverged_entries:
+        print()
+        for entry in diverged_entries:
+            n_v2_only = len(entry["v2_only"])
+            n_v1_only = len(entry["v1_only"])
+            tag = f"[{entry['status']}]"
+            print(f"  {entry['dispatch_id']} {tag}")
+            if n_v2_only:
+                print(f"    V2-only grounded (V1 missed): {n_v2_only} pattern(s)")
+            if n_v1_only:
+                print(f"    V1-only grounded (V2 skips) : {n_v1_only} pattern(s)")
+
+    print()
+    print("Divergence summary:")
+    print(f"  Diverged dispatches             : {summary['diverged_dispatches']}/{summary['total_dispatches']}")
+    print(f"  Patterns V2 grounds / V1 misses : {summary['v2_only_grounded']}")
+    print(f"  Patterns V1 grounds / V2 skips  : {summary['v1_only_grounded']}")
+
+    if summary["diverged_dispatches"] == 0:
+        print("\nNo divergence — V1 and V2 agree on all dispatches.")
+    else:
+        print()
+        print("To flip the default to V2 once shadow validates on real data:")
+        print("  Set VNX_OUTCOME_GROUNDING_V2=1 in your environment, or")
+        print("  flip the config toggle in the dashboard (requires operator approval).")
+
+    return 0
+
+
+
 def vnx_learning(args) -> int:
     sub = getattr(args, "learning_subcommand", None)
     dispatch = {
         "run": _cmd_run,
         "status": _cmd_status,
         "review": _cmd_review,
+        "grounding-shadow": _cmd_grounding_shadow,
         "tagger-ab": _cmd_tagger_ab,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx learning {run|status|review|tagger-ab}")
+    print("Usage: vnx learning {run|status|review|grounding-shadow|tagger-ab}")
     return 1
