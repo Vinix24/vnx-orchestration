@@ -39,22 +39,26 @@ Set file permissions: `chmod 600 ~/.ssh/vnx_sign_ed25519`.
 
 ---
 
-## Step 2 — Register the public key in `allowed_signers`
+## Step 2 — Register the public key in `.vnx-attest/allowed_signers`
+
+The D3 gate reads the trust anchor from `.vnx-attest/allowed_signers` on the base branch (falling
+back to `.vnx/allowed_signers`) — never repo-root `allowed_signers`. `vnx init` scaffolds the empty
+`.vnx-attest/allowed_signers`; append your public key to it:
 
 ```bash
 # In the repo root:
 echo "vnx-operator@$(hostname -s) $(cat ~/.ssh/vnx_sign_ed25519.pub)" \
-  >> allowed_signers
+  >> .vnx-attest/allowed_signers
 ```
 
 Or for the SK key:
 
 ```bash
 echo "vnx-operator@$(hostname -s) $(cat ~/.ssh/vnx_sign_ed25519_sk.pub)" \
-  >> allowed_signers
+  >> .vnx-attest/allowed_signers
 ```
 
-Commit `allowed_signers` to the repository.  It is a trust-root path — any change
+Commit `.vnx-attest/allowed_signers` to the repository.  It is a trust-root path — any change
 to it must be signed by a pre-existing trusted key and reviewed (see `CODEOWNERS`).
 
 ---
@@ -64,7 +68,7 @@ to it must be signed by a pre-existing trusted key and reviewed (see `CODEOWNERS
 ```bash
 git config --global gpg.format ssh
 git config --global user.signingkey ~/.ssh/vnx_sign_ed25519     # or _sk variant
-git config --global gpg.ssh.allowedSignersFile "$(pwd)/allowed_signers"
+git config --global gpg.ssh.allowedSignersFile "$(pwd)/.vnx-attest/allowed_signers"
 git config --global commit.gpgsign true
 ```
 
@@ -86,7 +90,7 @@ ssh-keygen -Y sign -f ~/.ssh/vnx_sign_ed25519 -n "vnx-attestation" /tmp/vnx_test
 
 # Verify the signature
 ssh-keygen -Y verify \
-  -f "$(pwd)/allowed_signers" \
+  -f "$(pwd)/.vnx-attest/allowed_signers" \
   -I "vnx-operator@$(hostname -s)" \
   -n "vnx-attestation" \
   -s /tmp/vnx_test_sign.txt.sig \
@@ -123,11 +127,11 @@ Key custody is entirely the operator's responsibility.
 
 ## Key rotation and revocation
 
-- To revoke a key: remove its line from `allowed_signers` (base-branch side).
+- To revoke a key: remove its line from `.vnx-attest/allowed_signers` (base-branch side).
   Past attestations in `.vnx-attest/governed.ndjson` remain valid via the
   receipt chain timestamp — they were signed when the key was trusted.
-- To rotate: add the new key line to `allowed_signers`, generate new key,
-  update `user.signingkey` in git config.  Sign the `allowed_signers` change
+- To rotate: add the new key line to `.vnx-attest/allowed_signers`, generate new key,
+  update `user.signingkey` in git config.  Sign the `.vnx-attest/allowed_signers` change
   with a **pre-existing** trusted key (the new key cannot self-authorize).
 - Validity windows: add a comment next to each key noting its active-from date
   so an auditor can match attestation timestamps against key validity.

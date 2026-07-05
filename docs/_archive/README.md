@@ -29,3 +29,9 @@ Moved during the 1.0 doc-update. Superseded by today's merged state.
 Moved during the post-release docs sweep (1.0.0 published to PyPI 2026-07-02).
 
 - `operations/wave1-rollback.md` — rollback procedures for the Wave 1 shadow-mode central-DB cutover (2026-05-09, PRs #450–#454). The cutover completed long ago; the `VNX_USE_CENTRAL_DB` flag semantics live in the active operations docs. Kept for traceability.
+
+## Governance docs sweep (archived 2026-07-05)
+
+Moved during the docs-governance sweep for the D1-D5 signed-attestation pipeline (PRs #1004-#1012).
+
+- `governance/week_2026_W15.md` — a single weekly governance report from 2026-04-10, every field marked "Geen data" (no data). No other week reports were ever produced; the practice never continued past this one file. Kept only because it is referenced from old history — do not use as a template for a reporting cadence that does not exist.

@@ -1,8 +1,13 @@
 # VNX Governance Architecture
 
-**Status**: Current Reference — April 2026
+**Status**: Current Reference — April 2026, refreshed 2026-07-05 (§3/§5/§7/§8 updated for the D1-D5 attestation gate)
 **Scope**: Decision framework, gate enforcement, trigger system, skill architecture
 **Audience**: Contributors, operators, and evaluators of headless T0 behavior
+
+> This document covers T0's decision framework and the **dispatch-level** gate-lock mechanism.
+> PR-merge-level enforcement — the signed-attestation CI gate — is a separate mechanism with its
+> own doc: see [`docs/governance/ATTESTATION_ENFORCEMENT.md`](../governance/ATTESTATION_ENFORCEMENT.md)
+> and [ADR-027](../governance/decisions/ADR-027-signed-attestation-enforcement.md).
 
 ---
 
@@ -61,7 +66,18 @@ The LLM receives a constrained prompt with 5 structured rules and is required to
 
 ## 3. Gate Locks
 
-Gate locks are file-based hard constraints that prevent `COMPLETE` until specific conditions are externally verified.
+Gate locks are file-based hard constraints that prevent `COMPLETE` until specific conditions are externally verified. This mechanism governs **dispatch-level** review gates (codex, gemini, CI) — it is one of two independent gate mechanisms in the system, not the only one.
+
+**A second, unrelated mechanism gates PR merges directly: the D1-D5 signed-attestation pipeline.**
+Where a gate lock is a file whose mere presence blocks T0 from outputting `COMPLETE`, the
+attestation gate (`docs/governance/ATTESTATION_ENFORCEMENT.md`) is a GitHub Actions required check
+that cryptographically verifies an SSH-signed manifest before a feature-code PR can merge — no
+lock file is written or read, and T0's pre-filter is not involved at all. The two mechanisms serve
+different moments: gate locks answer "has this dispatch's review gate passed" (pre-merge,
+dispatch-scoped); the attestation gate answers "does this merge carry a verifiable signature back
+to a governed dispatch" (at-merge, PR-scoped). Both can apply to the same PR. As of 2026-07-05 the
+attestation gate ships in staged-advisory mode (reports, never blocks) — see
+`docs/governance/ATTESTATION_ENFORCEMENT.md` for the flip criterion.
 
 ### How they work
 
@@ -128,34 +144,45 @@ Each check is a pure Python function against the context snapshot. No file I/O, 
 
 ## 5. 3-Layer Trigger System
 
-The trigger system controls when T0 wakes up to make a decision. Currently designed, not yet fully built.
+The 3-layer trigger system is implemented in `scripts/headless_trigger.py` (F41) — a long-running
+process that wakes a **headless** T0 when new work appears or when the system goes quiet:
 
-### Layer 1: Event-driven (file watcher)
+- **Layer 1 — file watcher** (`ReportWatcher`, `scripts/headless_trigger.py:492`): a `watchdog`
+  `Observer` fires on new `.md` reports in `unified_reports/`, debounced to at most one T0 trigger
+  per 30s.
+- **Layer 2 — silence watchdog** (`silence_watchdog`, `scripts/headless_trigger.py:306`): a
+  self-rescheduling timer runs every 600s (10 min), scanning for stale leases and orphaned/stuck
+  dispatches.
+- **Layer 3 — LLM triage** (`llm_triage`, `scripts/headless_trigger.py:235`): opt-in via
+  `VNX_HAIKU_CLASSIFY=1`, asks haiku to classify an anomaly as `stuck`/`normal`/`recovering`
+  before triggering a full T0 cycle; fail-open on timeout.
 
-- Watches `$VNX_DATA_DIR/unified_reports/` for new files.
-- On new report arrival: wake T0 immediately.
-- Covers the normal case: worker completes → report lands → T0 responds within seconds.
-- Cost: zero LLM invocations for the trigger itself.
+What this drives is a **headless** T0 invocation (`trigger_headless_t0`), not the interactive tmux
+loop — so on terminals where T0 runs interactively, this trigger process is simply not the wake
+path.
 
-### Layer 2: Silence watchdog (cron, every 10 minutes)
+**A separate, deterministic mechanism handles runtime housekeeping — not T0 decision-wakeup.** The
+unified supervisor (`docs/operations/UNIFIED_SUPERVISOR.md`), opt-in per project via
+`VNX_SUPERVISOR_MODE=unified`, runs three fixed-interval checks inside the dispatcher's own poll
+loop (`scripts/lib/dispatcher_supervisor_ticks.sh`):
 
-- Runs deterministic checks without LLM:
-  - Queue non-empty + no active dispatch? → wake T0.
-  - Receipt pending for > N minutes? → wake T0.
-  - Expected report overdue? → wake T0.
-- Catches silent failures: worker crashed, file watcher missed an event, network stall.
-- Cost: zero LLM invocations for the watchdog check itself.
+- `_unified_supervisor_lease_sweep_tick()` — every 30s → `scripts/lib/lease_sweep.py` (clears stale terminal leases)
+- `_maybe_runtime_supervise()` — every 60s → `scripts/lib/runtime_supervise.py` (daemon health)
+- `_maybe_objective_reconcile()` — every 900s → `scripts/lib/objective_reconcile.py` (git-grounded
+  track/roadmap reconciliation, §9)
 
-### Layer 3: LLM triage (anomaly-only)
+This is deterministic, LLM-free housekeeping — scoped to lease hygiene, daemon health, and track
+reconciliation rather than "should T0 look at this now." It runs regardless of whether T0 itself
+is interactive (tmux) or headless for a given terminal, and is independent of the
+`headless_trigger.py` wake path above.
 
-- Invoked only when Layer 2 detects an anomaly that requires interpretation.
-- Model: haiku (fast, cheap — this is signal classification, not full T0 reasoning).
-- Task: classify anomaly type → decide if T0 full-reasoning cycle is warranted.
-- Cost: ~$0.001 per triage call, invoked rarely.
+### Why this still matters
 
-### Why layered
-
-Layer 1 handles 90%+ of cycles instantly. Layer 2 catches silent failures without LLM cost. Layer 3 reserves expensive inference for genuine ambiguity. The system degrades gracefully: if Layer 1 fails, Layer 2 catches it within 10 minutes. If Layer 2 produces ambiguous output, Layer 3 escalates to human.
+The practical effect: on a headless terminal, `headless_trigger.py` provides the T0 wake path
+(Layers 1-3 above); on an interactive tmux terminal, the wake path is the tmux session itself.
+Independently, the supervisor tick system keeps runtime state (leases, daemons, track status) from
+silently drifting between T0 cycles. These are complementary — a wake trigger and a housekeeping
+loop — not substitutes for each other.
 
 ---
 
@@ -192,7 +219,7 @@ For subprocess-adapter terminals, the skill content is inlined directly into the
 
 ## 7. Review Gate Lifecycle
 
-Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released.
+Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released. This lifecycle applies to **headless review gates** (codex, gemini, wiring) that block a dispatch via a lock file (§3). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
 
 ```
 request → execute → report → result record → lock release → completion
@@ -258,6 +285,15 @@ An operator can always:
 
 None of these require code changes. The governance layer is transparent and operator-controllable at every stage.
 
+**These are dispatch-level overrides (§3 gate locks).** The D3 attestation gate does not have a
+"delete a file" override — deleting anything on the PR side changes nothing, since the gate reads
+its trust anchor from the base branch. Its override path is the D4 mechanism instead: a second
+signed attestation (`attestation_type: "override"`) with a mandatory, non-empty reason, capped at
+a rolling budget (default 5 per 30 days), permanently recorded in an append-only, hash-chained
+trail. It is a fundamentally different escalation shape from "delete a lock file" — auditable,
+rate-limited, and cryptographically bound to one specific diff rather than a blanket bypass. See
+`docs/governance/ATTESTATION_ENFORCEMENT.md#d4--signed-budgeted-and-audited-override`.
+
 ### The goal
 
 T0 should reach `ESCALATE` rarely — only in genuinely ambiguous situations. If T0 escalates frequently, it signals that the pre-filter rules or gate lifecycle are incomplete, not that the system is working correctly. Escalation rate is a quality metric.
@@ -300,4 +336,4 @@ the lifecycle diagram, see `docs/core/00_VNX_ARCHITECTURE.md`
 
 ---
 
-*Last updated: April 2026 — F39 Headless T0 Benchmark; §9 added 2026-06-14 for the 1.0.1 future-state reconciliation.*
+*Last updated: April 2026 — F39 Headless T0 Benchmark; §9 added 2026-06-14 for the 1.0.1 future-state reconciliation; §3/§5/§7/§8 refreshed 2026-07-05 for the D1-D5 signed-attestation gate (`docs/governance/ATTESTATION_ENFORCEMENT.md`, ADR-027) and the unified-supervisor tick system.*
