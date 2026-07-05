@@ -59,6 +59,91 @@ def test_parallel_claude_serializes(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# test_three_slots_concurrent_fourth_blocks
+# ---------------------------------------------------------------------------
+
+def test_three_slots_concurrent_fourth_blocks(tmp_path, monkeypatch):
+    """VNX_TMUX_MAX_CONCURRENT=3: three concurrent holders run simultaneously;
+    a fourth waiter blocks until one of the three releases."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "3")
+
+    concurrent_count = 0
+    max_concurrent_seen = 0
+    count_lock = threading.Lock()
+    release_gate = threading.Event()  # holds the first 3 workers inside the body
+    fourth_entered = threading.Event()
+    errors = []
+
+    def holder_worker(idx):
+        nonlocal concurrent_count, max_concurrent_seen
+        try:
+            with serialize_lane("claude-tmux", dispatch_id=f"holder-{idx}"):
+                with count_lock:
+                    concurrent_count += 1
+                    max_concurrent_seen = max(max_concurrent_seen, concurrent_count)
+                release_gate.wait(timeout=5)
+                with count_lock:
+                    concurrent_count -= 1
+        except Exception as exc:
+            errors.append((f"holder-{idx}", exc))
+
+    def fourth_worker():
+        try:
+            with serialize_lane("claude-tmux", dispatch_id="fourth"):
+                fourth_entered.set()
+        except Exception as exc:
+            errors.append(("fourth", exc))
+
+    holders = [threading.Thread(target=holder_worker, args=(i,)) for i in range(3)]
+    for t in holders:
+        t.start()
+
+    # Wait until all three holders are confirmed inside the body.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and concurrent_count < 3:
+        time.sleep(0.02)
+    assert concurrent_count == 3, "three holders did not all acquire concurrently"
+
+    fourth = threading.Thread(target=fourth_worker)
+    fourth.start()
+    # Fourth must NOT enter while all 3 slots are held.
+    assert not fourth_entered.wait(timeout=0.3), "fourth acquired before a slot freed"
+
+    release_gate.set()  # let the three holders release
+    for t in holders:
+        t.join(timeout=5)
+    fourth.join(timeout=5)
+
+    assert not errors, f"unexpected errors: {errors}"
+    assert max_concurrent_seen == 3, f"expected 3 concurrent holders, saw {max_concurrent_seen}"
+    assert fourth_entered.is_set(), "fourth waiter never acquired after a slot freed"
+
+
+# ---------------------------------------------------------------------------
+# test_max_concurrent clamping + defaults
+# ---------------------------------------------------------------------------
+
+def test_max_concurrent_defaults_to_one(monkeypatch):
+    """No VNX_TMUX_MAX_CONCURRENT set -> default concurrency is 1 (subscription-safe)."""
+    monkeypatch.delenv("VNX_TMUX_MAX_CONCURRENT", raising=False)
+    assert _ds_mod._max_concurrent() == 1
+
+
+def test_max_concurrent_accepts_valid_positive_value(monkeypatch):
+    """A valid positive integer is used verbatim."""
+    monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "3")
+    assert _ds_mod._max_concurrent() == 3
+
+
+@pytest.mark.parametrize("raw_value", ["0", "-1", "-100", "x", ""])
+def test_max_concurrent_clamps_bad_values(raw_value, monkeypatch):
+    """0, negative, or unparseable VNX_TMUX_MAX_CONCURRENT falls back to 1."""
+    monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", raw_value)
+    assert _ds_mod._max_concurrent() == 1
+
+
+# ---------------------------------------------------------------------------
 # test_provider_lanes_stay_parallel
 # ---------------------------------------------------------------------------
 
@@ -171,7 +256,7 @@ def test_force_release(tmp_path, monkeypatch, capsys):
 
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_dir / "claude-tmux.lock"
+    lock_file = lock_dir / "claude-tmux-slot-0.lock"
 
     # Write a stale lock file — simulates a prior holder whose process exited
     # without releasing (or whose pid no longer exists).
@@ -219,11 +304,11 @@ def test_lock_dir_is_account_level(tmp_path, monkeypatch):
 
     with serialize_lane("claude-tmux", dispatch_id="dir-scope-test"):
         # Lock file must be in VNX_LOCK_DIR
-        assert (account_lock_dir / "claude-tmux.lock").exists(), (
+        assert (account_lock_dir / "claude-tmux-slot-0.lock").exists(), (
             "lock file not created in VNX_LOCK_DIR"
         )
         # Lock file must NOT be in VNX_DATA_DIR
-        assert not (project_data_dir / "claude-tmux.lock").exists(), (
+        assert not (project_data_dir / "claude-tmux-slot-0.lock").exists(), (
             "lock file incorrectly created in project VNX_DATA_DIR"
         )
 
@@ -247,7 +332,7 @@ def test_force_release_warns_on_live_holder(tmp_path, monkeypatch, capsys):
 
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_dir / "claude-tmux.lock"
+    lock_file = lock_dir / "claude-tmux-slot-0.lock"
 
     # Current pid is guaranteed alive
     live_meta = {
@@ -277,7 +362,7 @@ def test_force_release_dead_holder_no_warning(tmp_path, monkeypatch, capsys):
 
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_dir / "claude-tmux.lock"
+    lock_file = lock_dir / "claude-tmux-slot-0.lock"
 
     dead_meta = {
         "pid": 999999,  # safely outside any realistic PID range on macOS/Linux
