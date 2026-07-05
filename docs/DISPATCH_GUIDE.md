@@ -133,6 +133,27 @@ This prevents the classic multi-agent problem: two agents editing the same files
 
 ---
 
+## 3b. Claude Workers: Concurrency and Permissions
+
+Every Claude worker in the tmux-spawn lane runs in its own fresh, isolated
+worktree — a full clone, not a shared checkout. Two consequences follow from
+that isolation:
+
+**Concurrency defaults to one Claude worker at a time.** Claude subscription
+sessions share a concurrency cap across everything on the account, so VNX
+serializes tmux-spawn dispatches by default. If you want more than one running
+in parallel, set `VNX_TMUX_MAX_CONCURRENT=<N>` — an explicit choice, not
+something the system escalates to on its own. Provider workers (Codex, Kimi,
+GLM, DeepSeek) don't share this cap and always run in parallel.
+
+**Workers get full tool access by default, scoped only on request.** Because
+each worker is already sandboxed to its own worktree, VNX skips permission
+prompts (`--dangerously-skip-permissions`) rather than making an isolated
+worker stop and ask. If you need a tighter, role-based tool allow-list for a
+specific dispatch instead, set `VNX_WORKER_SCOPED=1` for that dispatch.
+
+---
+
 ## 4. Bringing Your Own Ideas
 
 You don't need to wait for a feature plan. If you have specific tasks in mind, tell T0 what you want and let it organize the work.

@@ -1,6 +1,6 @@
 # Dispatch & Intelligence Architecture (current)
 
-**Status:** current as of 2026-06-23 (post single-entry-door flip, PR #896).
+**Status:** current as of 2026-07-05 (post single-entry-door flip PR #896; permissions-default flip #1016; N-slot concurrency #1017; Sonnet-5 worker pin #1013).
 **Scope:** how a dispatch flows from T0's intent to a governed receipt, and how intelligence is injected and learned. This is the end-to-end picture; the enforced ruleset T0 follows is `DISPATCH_RULES.md`, the lane detail is `PROVIDER_LANES.md`, the receipt shape is `11_RECEIPT_FORMAT.md`.
 
 ---
@@ -92,7 +92,7 @@ The claude tmux-spawn lane's readiness and submit detection ride on two hook sen
 
 When these hooks are wired, the lane uses the sentinels (reliable). When they are missing, it falls back to TUI-marker heuristics — which mis-fire across Claude Code TUI revisions (e.g. under 2.1.186 the lane can paste before the input is ready → the body never stages → the worker idles → reaped on `interactive_no_progress`). **Wiring these two hooks is a hard prerequisite for the claude tmux-spawn lane in any project.** The hook scripts also exist under `.vnx/scripts/hooks/` for vendored installs; they are no-ops without `VNX_TMUX_SIGNAL_DIR`, so they are safe to register globally.
 
-Other invariants: **Enter is ALWAYS a separate tmux keystroke** (a combined send-keys misses delivery); the worker launches scoped (`--permission-mode acceptEdits` + role allow-list) in the detached path, not blanket `--dangerously-skip-permissions`.
+Other invariants: **Enter is ALWAYS a separate tmux keystroke** (a combined send-keys misses delivery); since #1016 the detached worker launches with blanket `--dangerously-skip-permissions` by default (the spawn runs in an isolated per-dispatch worktree, so a scoped allow-list only stalls autonomous builds without adding real blast-radius protection) — the previously-default scoped posture (`--permission-mode acceptEdits` + empty ambient MCP + role allow-list) is now opt-in via `VNX_WORKER_SCOPED=1`. Detail: `docs/operations/WORKER_PERMISSIONS.md`.
 
 ## 6. Govern + the phantom-guard
 
