@@ -57,11 +57,11 @@ constraints:
     rule: require_route
     required_route:
       role: [T1, T2, T3]
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5
     reason: >-
-      Worker terminals standardize on Sonnet 4.6 for cost-quality balance.
-      Haiku regresses on multi-file edits; Opus is reserved for T0 so the
-      monthly budget stays predictable.
+      Worker terminals standardize on Sonnet 5 for cost-quality balance
+      (bumped from 4.6, 2026-07-05). Haiku regresses on multi-file edits;
+      Opus is reserved for T0 so the monthly budget stays predictable.
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
