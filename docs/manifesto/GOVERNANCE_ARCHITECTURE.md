@@ -144,33 +144,45 @@ Each check is a pure Python function against the context snapshot. No file I/O, 
 
 ## 5. 3-Layer Trigger System
 
-The trigger system as originally designed here — an event-driven file watcher, a cron-style
-silence watchdog, and haiku-model LLM triage, all aimed at waking T0's own decision loop — remains
-**not built as specified**. No file watcher and no LLM-triage layer exist in the codebase today.
+The 3-layer trigger system is implemented in `scripts/headless_trigger.py` (F41) — a long-running
+process that wakes a **headless** T0 when new work appears or when the system goes quiet:
 
-**What has shipped instead is a different, narrower mechanism for a related problem: periodic
-supervisory ticks, not T0 decision-wakeup.** The unified supervisor
-(`docs/operations/UNIFIED_SUPERVISOR.md`), opt-in per project via `VNX_SUPERVISOR_MODE=unified`,
-runs three fixed-interval checks inside the dispatcher's own poll loop:
+- **Layer 1 — file watcher** (`ReportWatcher`, `scripts/headless_trigger.py:492`): a `watchdog`
+  `Observer` fires on new `.md` reports in `unified_reports/`, debounced to at most one T0 trigger
+  per 30s.
+- **Layer 2 — silence watchdog** (`silence_watchdog`, `scripts/headless_trigger.py:306`): a
+  self-rescheduling timer runs every 600s (10 min), scanning for stale leases and orphaned/stuck
+  dispatches.
+- **Layer 3 — LLM triage** (`llm_triage`, `scripts/headless_trigger.py:235`): opt-in via
+  `VNX_HAIKU_CLASSIFY=1`, asks haiku to classify an anomaly as `stuck`/`normal`/`recovering`
+  before triggering a full T0 cycle; fail-open on timeout.
 
-- `_maybe_expire_stale_leases()` — every 30s → `scripts/lib/lease_sweep.py` (clears stale terminal leases)
+What this drives is a **headless** T0 invocation (`trigger_headless_t0`), not the interactive tmux
+loop — so on terminals where T0 runs interactively, this trigger process is simply not the wake
+path.
+
+**A separate, deterministic mechanism handles runtime housekeeping — not T0 decision-wakeup.** The
+unified supervisor (`docs/operations/UNIFIED_SUPERVISOR.md`), opt-in per project via
+`VNX_SUPERVISOR_MODE=unified`, runs three fixed-interval checks inside the dispatcher's own poll
+loop (`scripts/lib/dispatcher_supervisor_ticks.sh`):
+
+- `_unified_supervisor_lease_sweep_tick()` — every 30s → `scripts/lib/lease_sweep.py` (clears stale terminal leases)
 - `_maybe_runtime_supervise()` — every 60s → `scripts/lib/runtime_supervise.py` (daemon health)
 - `_maybe_objective_reconcile()` — every 900s → `scripts/lib/objective_reconcile.py` (git-grounded
   track/roadmap reconciliation, §9)
 
-This is deterministic, LLM-free housekeeping — closer in spirit to the original Layer 2 (silence
-watchdog) than to a T0 wake-up trigger, and scoped to lease hygiene, daemon health, and track
+This is deterministic, LLM-free housekeeping — scoped to lease hygiene, daemon health, and track
 reconciliation rather than "should T0 look at this now." It runs regardless of whether T0 itself
-is interactive (tmux) or headless for a given terminal. There is still no code that classifies an
-anomaly and decides whether a full T0 reasoning cycle is warranted (the original Layer 3); that
-gap is unchanged from the original design's "not yet fully built" status.
+is interactive (tmux) or headless for a given terminal, and is independent of the
+`headless_trigger.py` wake path above.
 
 ### Why this still matters
 
-The practical effect today: T0's own wake-up remains whatever the surrounding adapter provides
-(interactive tmux session, or a poll-driven headless dispatch), while the supervisor tick system
-independently keeps runtime state (leases, daemons, track status) from silently drifting between
-T0 cycles. These are complementary, not substitutes for each other.
+The practical effect: on a headless terminal, `headless_trigger.py` provides the T0 wake path
+(Layers 1-3 above); on an interactive tmux terminal, the wake path is the tmux session itself.
+Independently, the supervisor tick system keeps runtime state (leases, daemons, track status) from
+silently drifting between T0 cycles. These are complementary — a wake trigger and a housekeeping
+loop — not substitutes for each other.
 
 ---
 
@@ -207,7 +219,7 @@ For subprocess-adapter terminals, the skill content is inlined directly into the
 
 ## 7. Review Gate Lifecycle
 
-Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released. This lifecycle applies to **headless review gates** (codex, gemini, wiring) that block a dispatch via a lock file (§3). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and emits a PASS/FAIL/OVERRIDE verdict directly as the check's exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
+Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released. This lifecycle applies to **headless review gates** (codex, gemini, wiring) that block a dispatch via a lock file (§3). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
 
 ```
 request → execute → report → result record → lock release → completion

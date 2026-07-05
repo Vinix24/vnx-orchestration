@@ -39,11 +39,13 @@ criterion is met.**
    squashing/rebasing. The manifest embeds the diff hash it was signed for, so it cannot be
    silently repurposed for a different PR's code.
 3. **D3 — Server-side gate, staged advisory.** A GitHub Actions required check verifies: the
-   commit(s) carry a valid detached SSH signature, the signer is in `allowed_signers`, and the
-   manifest binds to this PR's diff — all resolved from the **base branch**, never the PR head, so
-   a PR cannot weaken its own verifier or trust anchor in the same change. Ships with
-   `continue-on-error: true`; flips to blocking only after 5 consecutive PRs carry valid
-   signatures, operator-confirmed.
+   attestation record carried in the PR (`.vnx-attest/<content-key>.json`) has a valid detached SSH
+   signature, the signer is in `allowed_signers`, and the manifest binds to this PR's diff. The
+   **trust anchor** (`allowed_signers`) and the **verifier code** are read from the **base branch**,
+   never the PR head, so a PR cannot weaken its own verifier or trust anchor in the same change. (The
+   signed record itself necessarily travels in the PR head; base-branch resolution applies to what
+   validates it, not to the record being validated.) Ships with `continue-on-error: true`; flips to
+   blocking only after 5 consecutive PRs carry valid signatures, operator-confirmed.
 4. **D4 — Signed, budgeted override.** An operator can bypass a failing gate only via a second
    signed attestation (type `"override"`) with a non-empty reason, capped at 5 per rolling 30-day
    window (`VNX_ATTEST_OVERRIDE_BUDGET`), counted from a tamper-evident append-only trail with
@@ -72,9 +74,11 @@ document) were scoped in the plan but not built in this slice.
    strategy. Content-keying by diff hash was therefore a correctness requirement from day one, not
    a later hardening pass.
 4. **A gate that its own PRs can disable is worthless.** CODEOWNERS-protecting `allowed_signers`,
-   the gate workflow, and the local enforcement config — combined with base-branch-only reads of
-   all three during verification — closes the "PR edits its own trust anchor" hole that an earlier
-   revision of this design left open.
+   the gate workflow, and the local enforcement config — combined with the gate reading its trust
+   anchor (`allowed_signers`) and verifier code only from the base branch during verification —
+   closes the "PR edits its own trust anchor" hole that an earlier revision of this design left
+   open. (The `.vnx/governance_enforcement.yaml` enforcement config is CODEOWNERS-guarded but is the
+   separate local detective layer, not read by the D3 CI gate.)
 5. **Staged rollout matches house style.** The same advisory-then-flip pattern already used for
    `VNX_AUTO_CLOSE` (`scripts/lib/objective_reconcile.py`, 7-consecutive-clean-run flip) is reused
    here (5-consecutive-signed-PR flip) rather than inventing a new rollout convention.

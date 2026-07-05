@@ -3,9 +3,10 @@
 **Status:** Current | **Shipped:** 2026-07-04/05 (PRs #1004, #1007, #1009, #1011, #1012) | **Stage:** advisory (non-blocking)
 
 This document narrates the signed-attestation system that gates whether feature code can merge
-without a cryptographically verifiable link back to a governed dispatch. It replaces file-based
-gate locks (see `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §3) with a server-side, key-custody-backed
-enforcement layer for the one moment that actually matters: PR merge.
+without a cryptographically verifiable link back to a governed dispatch. It **complements**
+file-based gate locks (see `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §3) — the two mechanisms
+coexist — adding a server-side, key-custody-backed enforcement layer at the one moment gate locks
+do not cover: PR merge.
 
 See also: [ADR-027](decisions/ADR-027-signed-attestation-enforcement.md) (the binding decision),
 [KEY_PROVISIONING.md](KEY_PROVISIONING.md) (the operator key-setup runbook).
@@ -149,10 +150,10 @@ recorded-and-signed one is acceptable.
 - **Gate-side triple enforcement** (`scripts/lib/verify_pr.py:255-327`), run when a regular
   attestation fails but a signed override is present:
   1. **Anti-reset** — the PR's override trail must append-only *extend* the base-branch trail;
-     truncating rows to free budget is rejected (`:266-284`).
+     truncating rows to free budget is rejected (`:271-284`).
   2. **Trail-membership** — a matching, validly-signed entry must exist in the append-only trail,
      not just the standalone override-record file, closing an audit-ledger-bypass path where the
-     record survives but its trail row is deleted (`:285-312`).
+     record survives but its trail row is deleted (`:289-312`).
   3. **Budget exhaustion** — count vs. `VNX_ATTEST_OVERRIDE_BUDGET`, checked again at the gate
      (`:313-327`).
   A verdict is never a silent PASS: it is either `"PASS: attestation valid"`, `"override: RECORDED
@@ -193,9 +194,12 @@ recorded-and-signed one is acceptable.
 ```
 
 A PR cannot self-authorize a new signing key, disable the gate workflow, or loosen the local
-detective enforcement config without a maintainer review — combined with the base-branch-only
-read of these files by the gate (D3), a PR that edits its own trust anchor gets reviewed *and*
-still gated against the pre-PR version of that trust anchor.
+detective enforcement config without a maintainer review. For the trust anchor specifically, this
+CODEOWNERS review combines with the gate reading `allowed_signers` (and its verifier code) only
+from the base branch (D3): a PR that edits its own trust anchor gets reviewed *and* is still gated
+against the pre-PR version of that anchor. Note that `.vnx/governance_enforcement.yaml` is
+CODEOWNERS-guarded but is the **separate local detective layer** — it is not read by the D3 CI
+gate at all (`verify_pr.py` reads only `allowed_signers` from base).
 
 ---
 
@@ -212,7 +216,7 @@ like "codex gate must have run" or "no blocking open items." Four enforcement le
 | 2 | `soft_mandatory` | blocks unless `VNX_OVERRIDE_<CHECK_NAME>` is set |
 | 3 | `hard_mandatory` | always blocks; cannot be overridden |
 
-Ten checks are defined today, e.g. `ci_green_required` (level 3), `codex_gate_required` (level 2,
+Eleven checks are defined today, e.g. `ci_green_required` (level 3), `codex_gate_required` (level 2,
 scoped to `scripts/`, `dashboard/`, `.github/`), `max_pr_lines` (level 1, threshold 300)
 (`.vnx/governance_enforcement.yaml:11-56`). Four presets (`strict`, `standard`, `relaxed`, `off`)
 let an operator dial the whole set up or down at once (`:58-98`); the active mode is set via
