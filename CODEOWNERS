@@ -1,0 +1,19 @@
+# CODEOWNERS — trust-root paths for the D3 attestation gate.
+#
+# Changes to the signing trust anchor or the gate workflow require review
+# from a maintainer.  The gate verifies allowed_signers from the BASE branch,
+# so adding a CODEOWNERS rule here means any PR modifying these paths triggers
+# a required review BEFORE the change can land.
+#
+# A PR cannot self-authorize a new signing key: the CODEOWNERS rule ensures
+# a human maintainer reviews the change, and the gate always reads
+# allowed_signers from the pre-existing base branch (never the PR head).
+
+# Signing trust anchor — who is allowed to sign attestations
+.vnx-attest/allowed_signers @Vinix24
+
+# Attestation gate workflow — the server-side enforcement mechanism
+.github/workflows/attestation-gate.yml @Vinix24
+
+# Governance enforcement config — local detective layer
+.vnx/governance_enforcement.yaml @Vinix24

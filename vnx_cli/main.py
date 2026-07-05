@@ -473,6 +473,21 @@ def _register_attest_subparser(subparsers: argparse.Action) -> None:
     av.add_argument("--project-dir", default=".", metavar="DIR",
                     help="repository root (default: current directory)")
 
+    avp = attest_subs.add_parser(
+        "verify-pr",
+        help="verify attestation for a PR (D3 gate — used by GitHub Action)",
+    )
+    avp.add_argument("--base-ref", dest="base_ref", default="origin/main", metavar="REF",
+                     help="base branch for merge-base (default: origin/main)")
+    avp.add_argument("--head-ref", dest="head_ref", default="HEAD", metavar="REF",
+                     help="PR head ref to verify (default: HEAD)")
+    avp.add_argument("--allowed-signers", dest="allowed_signers", default=None, metavar="PATH",
+                     help="override allowed_signers path (default: resolved from base branch)")
+    avp.add_argument("--verbose", action="store_true",
+                     help="emit diagnostic lines to stderr")
+    avp.add_argument("--project-dir", default=".", metavar="DIR",
+                     help="repository root (default: current directory)")
+
 
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
