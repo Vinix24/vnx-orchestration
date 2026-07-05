@@ -1,9 +1,9 @@
 # Wave 7 cost-routing policy
 # Maps task-class + complexity to preferred provider lane
-# Default: Anthropic Sonnet 4.6 (untouched safety default)
+# Default: Anthropic Sonnet 5 (untouched safety default)
 
 version: 1
-default_lane: "claude/sonnet-4-6"
+default_lane: "claude/sonnet-5"
 
 # Task-class -> lane mapping
 # First match wins; no match -> default_lane
@@ -19,8 +19,8 @@ rules:
     when:
       task_class: ["refactor", "module-split", "feature-implementation"]
       complexity: ["medium", "high"]
-    lane: "claude/sonnet-4-6"  # quality-default for code
-    rationale: "Refactor needs depth; Sonnet 4.6 remains baseline"
+    lane: "claude/sonnet-5"  # quality-default for code
+    rationale: "Refactor needs depth; Sonnet 5 remains baseline"
 
   - name: cost-optimized-code
     when:
@@ -52,10 +52,10 @@ rules:
 # kimi CLI lane — litellm:moonshot:* entries are kept for reference but
 # litellm:moonshot routing is blocked by kimi-via-cli-only (OI-223).
 fallback_chain:
-  "litellm:deepseek:*": ["kimi", "claude/sonnet-4-6"]
-  "kimi": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-4-6"]
-  "litellm:zai:*": ["kimi", "claude/sonnet-4-6"]
-  "claude/haiku-4-5": ["claude/sonnet-4-6"]
+  "litellm:deepseek:*": ["kimi", "claude/sonnet-5"]
+  "kimi": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-5"]
+  "litellm:zai:*": ["kimi", "claude/sonnet-5"]
+  "claude/haiku-4-5": ["claude/sonnet-5"]
   # Sonnet and Opus have no fallback (they are the safety net)
 
 # Lane-safety rules — ADVISORY, NOT YET ENFORCED IN CODE.
@@ -75,7 +75,7 @@ fallback_chain:
 # every entry carries measured evidence but inert enforcement.
 lane_safety:
   # Anthropic Claude Code interactive-session hang (Issues #63390 + #64153).
-  # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-4-6 hang for hours or exit
+  # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-5 hang for hours or exit
   # in 0.1s on complex content via the interactive tmux lane. The headless
   # `claude -p` path is unaffected. Force these models to the headless lane
   # until Anthropic ships a fix.
@@ -83,7 +83,7 @@ lane_safety:
     models:
       - claude-opus-4-8
       - claude-opus-4-8
-      - claude-sonnet-4-6
+      - claude-sonnet-5
     reason: "Anthropic interactive-hang (#63390 + #64153)"
     review_trigger: "Anthropic fix-release OR 2026-06-15 billing cutover"
     monitored_by: "OI-215 (weekly GitHub issue check)"

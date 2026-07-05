@@ -33,7 +33,7 @@ providers:
         supports_tool_calls: true
         task_classes: ["coding-premium", "review", "analysis"]
       sonnet:
-        litellm_name: "anthropic/claude-sonnet-4-6"
+        litellm_name: "anthropic/claude-sonnet-5"
         cost_input_per_mtok: 3.00
         cost_output_per_mtok: 15.00
         max_tokens: 64000
