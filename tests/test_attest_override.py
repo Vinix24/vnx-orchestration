@@ -688,3 +688,29 @@ class TestVerifyPRWithOverride:
             )
             assert exit_code == 1, f"Override past budget must be rejected, got: {message}"
             assert "budget" in message.lower() and "REJECT" in message
+
+    def test_override_record_without_trail_entry_rejected(self, ephemeral_key_dir):
+        """A record file present without a matching trail entry is rejected (round-3: audit-ledger bypass)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+            base_sha = _head_sha(repo)
+            from content_key import compute_diff_hash
+
+            _add_file_commit(repo, "scripts/lib/feature.py", "x = 1\n", "feat")
+            ck = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+            write_override_record(
+                content_key=ck, reason="incident", dispatch_id="D-x",
+                signer_identity=ephemeral_key_dir["identity"],
+                timestamp="2026-07-05T10:00:00Z",
+                key_path=ephemeral_key_dir["key_path"], repo_root=repo,
+                allowed_signers=ephemeral_key_dir["allowed_signers"],
+            )
+            # Attack: keep the signed record file but delete the trail row that
+            # records the deviation, to dodge the budget/audit ledger.
+            (repo / ATTEST_DIR / OVERRIDE_TRAIL_FILE).unlink()
+            exit_code, message = verify_pr(
+                repo_root=repo, base_ref=base_sha, head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 1, f"Override without a trail entry must be rejected: {message}"
+            assert "trail" in message.lower() and "REJECT" in message

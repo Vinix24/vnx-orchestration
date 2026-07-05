@@ -282,6 +282,34 @@ def verify_pr(
                             "override trail does not append-only extend the base "
                             "branch (budget-reset attempt)"
                         )
+                # Trail-membership (round-3 finding): the override RECORD file
+                # alone is not enough — a matching, validly-signed entry MUST exist
+                # in the append-only trail, else the audit ledger / rolling budget
+                # was bypassed by keeping the record but deleting the trail row.
+                if ov_ok:
+                    from attest_override import ATTESTATION_OVERRIDE as _AO_TYPE
+                    from attestation import verify_attestation as _verify
+                    from ndjson_hash_chain import walk_chain as _walk
+                    _ck = ov_manifest.get("content_key")
+                    _in_trail = False
+                    if _pr_trail.exists():
+                        for _i, _e, _h in _walk(_pr_trail):
+                            if not isinstance(_e, dict):
+                                continue
+                            if _e.get("attestation_type") != _AO_TYPE:
+                                continue
+                            if _e.get("content_key") != _ck:
+                                continue
+                            _m = {k: v for k, v in _e.items() if k != "prev_hash"}
+                            if _verify(_m, allowed_signers_path):
+                                _in_trail = True
+                                break
+                    if not _in_trail:
+                        ov_ok = False
+                        _ov_detail = (
+                            "override record is not recorded in the append-only "
+                            "trail (audit-ledger bypass)"
+                        )
                 if ov_ok:
                     try:
                         _used = count_overrides_in_window(
