@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Tests for the INTERIM worker capability-scoping fix.
+"""Tests for worker capability scoping.
 
-Per WORKER-CAPABILITY-SCOPING-DESIGN.md §5: ephemeral workers must spawn WITHOUT
-``--dangerously-skip-permissions`` and WITHOUT ambient MCP, while remaining fully
-functional code workers (Read/Write/Edit/Bash/Glob/Grep + git).
+Per operator decision (2026-07-05): tmux-spawn workers run in an isolated
+per-dispatch worktree, so the scoped allow-list only stalls autonomous builds
+on prompts for un-allow-listed ops. The default is now the blanket
+``--dangerously-skip-permissions``; the scoped posture (WITHOUT
+``--dangerously-skip-permissions`` and WITHOUT ambient MCP, while remaining a
+fully functional code worker: Read/Write/Edit/Bash/Glob/Grep + git) is opt-in
+via ``VNX_WORKER_SCOPED=1``.
 
 Covers:
   1. generate_claude_settings(default_profile) yields the code-worker allow-list
   2. build_claude_scope_args() — empty MCP, acceptEdits, allow/deny lists, no skip flag
-  3. SubprocessAdapter.deliver() spawn argv: empty MCP, no skip-permissions
+  3. SubprocessAdapter.deliver() spawn argv: blanket skip-permissions by default,
+     scoped (empty MCP, no skip-permissions) opt-in via VNX_WORKER_SCOPED=1
   4. resolve_worker_profile() fallback for unknown / empty roles
-  5. VNX_WORKER_SCOPED=0 feature flag restores the legacy skip-permissions posture
-  6. tmux _default_launch_command() detached spawn is scoped (no skip flag by default)
+  5. VNX_WORKER_SCOPED=1 feature flag opts into the scoped posture
+  6. tmux _default_launch_command() detached spawn is blanket by default (skip
+     flag present); VNX_WORKER_SCOPED=1 opts into the scoped posture
   7. negative-path: empty profile yields a still-valid scope argv
 """
 
@@ -158,7 +164,7 @@ class TestResolveWorkerProfile:
 # ---------------------------------------------------------------------------
 
 class TestDeliverSpawnArgv:
-    def test_argv_has_empty_mcp_and_no_skip_permissions(self):
+    def test_argv_has_skip_permissions_by_default(self):
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
@@ -167,12 +173,11 @@ class TestDeliverSpawnArgv:
 
         assert cmd[0] == "claude"
         assert "-p" in cmd
-        assert SKIP_FLAG not in cmd, "skip-permissions must be gone for the default worker"
-        assert "--strict-mcp-config" in cmd
-        idx = cmd.index("--mcp-config")
-        assert json.loads(cmd[idx + 1]) == {"mcpServers": {}}
+        assert SKIP_FLAG in cmd, "blanket skip-permissions is the default worker posture"
+        assert "--strict-mcp-config" not in cmd
 
-    def test_argv_keeps_functional_code_worker_tools(self):
+    def test_argv_keeps_functional_code_worker_tools_when_scoped(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
@@ -182,11 +187,14 @@ class TestDeliverSpawnArgv:
         allowed = set(cmd[allow_idx + 1].split(","))
         assert CODE_WORKER_ESSENTIALS.issubset(allowed)
 
-    def test_instruction_precedes_variadic_scope_flags(self):
+    def test_instruction_precedes_variadic_scope_flags_when_scoped(self, monkeypatch):
         # Regression: --allowedTools / --disallowedTools are variadic (<tools...>).
         # If the instruction is appended AFTER them it is swallowed as a tool value,
         # leaving claude --print with no prompt -> "Input must be provided" -> exit 1.
-        # The prompt must therefore come BEFORE the scope flags.
+        # The prompt must therefore come BEFORE the scope flags. Only relevant in
+        # the scoped posture (VNX_WORKER_SCOPED=1) — the blanket default has no
+        # variadic scope flags to be swallowed by.
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
@@ -201,15 +209,15 @@ class TestDeliverSpawnArgv:
         if "--disallowedTools" in cmd:
             assert instr_idx < cmd.index("--disallowedTools")
 
-    def test_feature_flag_off_restores_skip_permissions(self, monkeypatch):
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
+    def test_feature_flag_on_enables_scoping(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
             adapter.deliver("T1", "dispatch-cap-4", instruction="do work")
         cmd = mock_popen.call_args[0][0]
-        assert SKIP_FLAG in cmd
-        assert "--strict-mcp-config" not in cmd
+        assert SKIP_FLAG not in cmd
+        assert "--strict-mcp-config" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +225,12 @@ class TestDeliverSpawnArgv:
 # ---------------------------------------------------------------------------
 
 class TestTmuxDetachedSpawn:
-    def test_detached_default_is_scoped(self):
+    def test_detached_default_is_blanket(self):
         cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG not in cmd
-        assert "--strict-mcp-config" in cmd
-        assert "--permission-mode acceptEdits" in cmd
-        assert '{"mcpServers":{}}' in cmd
+        assert SKIP_FLAG in cmd
+        assert "--strict-mcp-config" not in cmd
+        assert "--permission-mode acceptEdits" not in cmd
+        assert '{"mcpServers":{}}' not in cmd
 
     def test_attached_run_unchanged(self):
         cmd = _default_launch_command("sonnet", skip_permissions=False)
@@ -230,11 +238,11 @@ class TestTmuxDetachedSpawn:
         assert "--strict-mcp-config" not in cmd
         assert cmd == "source ~/.zshrc 2>/dev/null; claude --model sonnet"
 
-    def test_detached_flag_off_restores_skip(self, monkeypatch):
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
+    def test_detached_flag_on_enables_scoping(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG in cmd
-        assert "--strict-mcp-config" not in cmd
+        assert SKIP_FLAG not in cmd
+        assert "--strict-mcp-config" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +250,9 @@ class TestTmuxDetachedSpawn:
 # ---------------------------------------------------------------------------
 
 class TestWorkerScopedEnabled:
-    def test_default_on(self, monkeypatch):
+    def test_default_off(self, monkeypatch):
         monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-        assert worker_scoped_enabled() is True
+        assert worker_scoped_enabled() is False
 
     @pytest.mark.parametrize("val", ["0", "false", "no", "off", "OFF", "False"])
     def test_falsey_values_disable(self, monkeypatch, val):
@@ -262,14 +270,22 @@ class TestWorkerScopedEnabled:
 # ---------------------------------------------------------------------------
 
 class TestTmuxDetachedNoStall:
-    """Detached worker gets --allowedTools so it can proceed without TTY prompts."""
+    """Detached worker gets the blanket skip flag by default so it can proceed
+    without TTY prompts; VNX_WORKER_SCOPED=1 opts into --allowedTools instead."""
 
-    def test_detached_spawn_has_allowed_tools(self):
+    def test_detached_spawn_has_skip_permissions_by_default(self):
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        assert SKIP_FLAG in cmd
+        assert "--allowedTools" not in cmd
+
+    def test_detached_spawn_scoped_has_allowed_tools(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         cmd = _default_launch_command("sonnet", skip_permissions=True)
         assert "--allowedTools" in cmd
         assert SKIP_FLAG not in cmd
 
-    def test_detached_spawn_allowed_tools_cover_code_essentials(self):
+    def test_detached_spawn_scoped_allowed_tools_cover_code_essentials(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         import shlex as _shlex
         cmd = _default_launch_command("sonnet", skip_permissions=True)
         tokens = _shlex.split(cmd)
@@ -278,10 +294,6 @@ class TestTmuxDetachedNoStall:
         assert CODE_WORKER_ESSENTIALS.issubset(allowed), (
             f"essentials missing from --allowedTools: {CODE_WORKER_ESSENTIALS - allowed}"
         )
-
-    def test_detached_spawn_no_dangerously_skip_permissions(self):
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG not in cmd
 
     def test_attached_spawn_no_allowed_tools_injected(self):
         # Attached (human-in-loop) sessions are unchanged; no allowedTools injected.
@@ -313,7 +325,10 @@ class TestRequiresMcpScoping:
         assert "--permission-mode" in args
         assert "--allowedTools" in args
 
-    def test_adapter_deliver_requires_mcp_false_empties_mcp(self):
+    def test_adapter_deliver_requires_mcp_false_empties_mcp(self, monkeypatch):
+        # requires_mcp threading only applies in the scoped posture — the blanket
+        # default ignores requires_mcp entirely (no MCP args either way).
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
@@ -323,7 +338,8 @@ class TestRequiresMcpScoping:
         idx = cmd.index("--mcp-config")
         assert json.loads(cmd[idx + 1]) == {"mcpServers": {}}
 
-    def test_adapter_deliver_requires_mcp_true_keeps_mcp(self):
+    def test_adapter_deliver_requires_mcp_true_keeps_mcp(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
