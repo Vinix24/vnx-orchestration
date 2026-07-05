@@ -2272,6 +2272,45 @@ def _resolve_state_dir() -> Path:
     return resolve_state_dir(caller_file=__file__)
 
 
+def _resolve_invocation_project_root() -> Path:
+    """Resolve the PROJECT repo root from the INVOCATION CONTEXT, not the lane
+    code's on-disk location.
+
+    In central-install mode the lane code lives under
+    ``~/.vnx-system/current/scripts/lib/``, so ``Path(__file__).parents[2]``
+    resolves to the shared VNX keystone, NOT the operator's project. The worker
+    must be spawned in the project (``cwd`` / worktree ``repo_root``), so resolve
+    from the invocation context instead:
+
+      1. ``VNX_PROJECT_ROOT`` env var (exported by the central-install shim) when
+         it points at a real directory.
+      2. The invoking CWD's git top-level.
+      3. Last resort: the lane code's own repo root (``parents[2]``) — correct for
+         the embedded/dev-checkout layout where code and project coincide.
+
+    Deliberately does NOT pass ``caller_file=__file__`` to the shared resolver:
+    that would re-introduce the keystone bug via its physical-location candidate.
+    """
+    raw = os.environ.get("VNX_PROJECT_ROOT", "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if out:
+            return Path(out).resolve()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    return TmuxInteractiveDispatch._resolve_project_root()
+
+
 def main(argv: "list[str] | None" = None) -> int:
     import argparse
 
@@ -2335,7 +2374,9 @@ def main(argv: "list[str] | None" = None) -> int:
         getattr(args, "reason", None),
     )
 
-    lane = TmuxInteractiveDispatch(_resolve_state_dir())
+    lane = TmuxInteractiveDispatch(
+        _resolve_state_dir(), project_root=_resolve_invocation_project_root()
+    )
 
     result = lane.dispatch(
         args.instruction,

@@ -480,7 +480,10 @@ def _execute_claude(
     require_permit is the first action — un-evadable. P0-3: sha256 of the instruction
     file is re-verified immediately before delivery to detect TOCTOU swaps.
     """
-    from tmux_interactive_dispatch import TmuxInteractiveDispatch  # noqa: PLC0415
+    from tmux_interactive_dispatch import (  # noqa: PLC0415
+        TmuxInteractiveDispatch,
+        _resolve_invocation_project_root,
+    )
 
     require_permit(plan, permit)  # un-evadable gate — FIRST action, cannot be moved
 
@@ -502,7 +505,13 @@ def _execute_claude(
             f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
         )
 
-    lane = TmuxInteractiveDispatch(state_dir)
+    # Thread the PROJECT repo root from the invocation context (VNX_PROJECT_ROOT /
+    # cwd-git), NOT the lane code's __file__: in central-install mode the code lives
+    # under the shared keystone, so the constructor's __file__ fallback would spawn
+    # the worker in the keystone instead of the operator's project.
+    lane = TmuxInteractiveDispatch(
+        state_dir, project_root=_resolve_invocation_project_root()
+    )
     result = lane.dispatch(
         instruction,
         plan.dispatch_id,
