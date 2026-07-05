@@ -369,6 +369,34 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         help="max recent dispatches to analyse (default: 50)",
     )
 
+    lr_sr = learning_subs.add_parser(
+        "skill-refine",
+        help=(
+            "generate operator-gated skill-refinement proposals from rework attribution. "
+            "Read-only w.r.t. skill files; writes pending_skill_refinements.json for review."
+        ),
+    )
+    lr_sr.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_sr.add_argument(
+        "--threshold",
+        type=float,
+        default=0.3,
+        metavar="RATE",
+        help="rework-rate threshold above which a role is considered rework-prone (default: 0.3)",
+    )
+
+    lr_srw = learning_subs.add_parser(
+        "skill-review",
+        help="show pending skill-refinement proposals for operator review",
+    )
+    lr_srw.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_srw.add_argument(
+        "--show-diff",
+        dest="show_diff",
+        action="store_true",
+        help="display the full unified diff for each proposal",
+    )
+
 
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_parser = subparsers.add_parser(
