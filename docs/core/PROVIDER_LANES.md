@@ -50,6 +50,23 @@ unified report and normalize the captured conversation into the event store. It
 is still being hardened; I do not yet claim it matches the headless lane on
 every surface (see Lane maturity).
 
+**Worker model pin (#1013):** T1/T2/T3 dispatches on this lane are pinned to
+`claude-sonnet-5` (`workers-sonnet-pinned` in `provider_constraints.yaml`,
+bumped from Sonnet 4.6 on 2026-07-05); T0 stays on Opus. `--model sonnet`
+resolves to this pin.
+
+**Worker permissions (#1016):** the detached spawn defaults to blanket
+`--dangerously-skip-permissions` — the isolated per-dispatch worktree already
+bounds blast radius, so a scoped allow-list only adds prompt friction, not
+protection. `VNX_WORKER_SCOPED=1` opts back into the scoped posture
+(`--permission-mode acceptEdits` + empty ambient MCP + role allow-list). Detail:
+`docs/operations/WORKER_PERMISSIONS.md`.
+
+**Concurrency (#1017):** the lane's serial lock is an N-slot semaphore, not a
+single mutex. Default `N=1` (fully serial, the subscription-safe default);
+`VNX_TMUX_MAX_CONCURRENT` raises it as an explicit operator opt-in. See
+`DISPATCH_RULES.md` §6.
+
 ### claude-subprocess
 
 The headless burst lane. `claude -p` runs via `subprocess_dispatch.py`, enriched

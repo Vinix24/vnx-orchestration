@@ -5,7 +5,7 @@ Each provider requires an API key set as an env var before dispatch.
 
 | Provider | Env var | Where to get | Pricing | Status |
 |---|---|---|---|---|
-| Anthropic Claude | ANTHROPIC_API_KEY (or OAuth via subscription) | console.anthropic.com | Sonnet 4.6 $3/$15 | default |
+| Anthropic Claude | ANTHROPIC_API_KEY (or OAuth via subscription) | console.anthropic.com | Sonnet 5 $3/$15 | default |
 | DeepSeek | DEEPSEEK_API_KEY | platform.deepseek.com | V4-Pro $0.435/$0.87, V4-Flash $0.14/$0.28 | Wave 7 PR-7.1 |
 | Kimi CLI | *(OAuth via `kimi login`)* | — | K2.6 / K2-0905 (free tier via CLI) | Wave 7 PR-7.7 |
 | Moonshot (Kimi) via LiteLLM | MOONSHOT_API_KEY | platform.moonshot.cn | K2-0905 $0.60/$2.50 | Wave 7 PR-7.2 |
@@ -16,7 +16,7 @@ accepted by the `litellm:zai` route. Passing `--model glm-4.5` or `--model glm-4
 raises an error. Direct Zhipu API integration (no OpenRouter margin) is deferred to
 Wave 7.3.1 — see `scripts/lib/providers/z_ai_custom_provider.py`.
 
-Pricing shown as input/output per MTok. Sonnet 4.6 reference included for cost comparison.
+Pricing shown as input/output per MTok. Sonnet 5 reference included for cost comparison.
 
 ## Provisioning
 
@@ -81,7 +81,7 @@ Two model tiers available under `--provider litellm:moonshot`:
 | kimi-k2-0905-default | moonshot/kimi-k2-0905-preview | $0.60 | $2.50 | coding, review, analysis |
 | kimi-k2-6 | moonshot/kimi-k2.6 | $0.95 | $4.00 | coding-premium |
 
-- Default lane: `kimi-k2-0905-preview` (~5x cheaper than Claude Sonnet 4.6 output)
+- Default lane: `kimi-k2-0905-preview` (~5x cheaper than Claude Sonnet 5 output)
 - Dispatch: `--provider litellm:moonshot` (default) or `--provider litellm:moonshot:kimi-k2-6` (premium)
 - Missing `MOONSHOT_API_KEY` → immediate exit(64) before subprocess spawn
 - Context: 8,192 tokens (both models); streaming + tool calls supported
