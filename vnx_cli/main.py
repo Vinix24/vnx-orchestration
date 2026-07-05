@@ -488,6 +488,28 @@ def _register_attest_subparser(subparsers: argparse.Action) -> None:
     avp.add_argument("--project-dir", default=".", metavar="DIR",
                      help="repository root (default: current directory)")
 
+    # D4: signed, budgeted, audited gate override
+    aov = attest_subs.add_parser(
+        "override",
+        help="record a signed, budgeted gate override (D4 — recorded deviation, never silent)",
+    )
+    aov.add_argument("--reason", required=True, metavar="REASON",
+                     help="non-empty justification (permanent audit record)")
+    aov.add_argument("--key", required=True, metavar="KEY_PATH",
+                     help="SSH private key for signing (must match an allowed_signers entry)")
+    aov.add_argument("--signer", default="vnx@local", metavar="IDENTITY",
+                     help="signer identity (must match an allowed_signers entry at base branch)")
+    aov.add_argument("--dispatch-id", dest="dispatch_id", default="override", metavar="ID",
+                     help="dispatch ID or override slug for traceability")
+    aov.add_argument("--base-ref", dest="base_ref", default="origin/main", metavar="REF",
+                     help="base branch for merge-base (default: origin/main)")
+    aov.add_argument("--head-ref", dest="head_ref", default="HEAD", metavar="REF",
+                     help="PR head ref (default: HEAD)")
+    aov.add_argument("--no-commit", dest="no_commit", action="store_true",
+                     help="write record files only; skip git add + commit")
+    aov.add_argument("--project-dir", default=".", metavar="DIR",
+                     help="repository root (default: current directory)")
+
 
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":

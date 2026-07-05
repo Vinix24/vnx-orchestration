@@ -205,6 +205,10 @@ def verify_pr(
     # Feature code in this PR — gate fires.
     # Resolve allowed_signers from base branch (never from PR tree).
     tmp_path = None
+    ok = False
+    reason = "unknown"
+    ov_ok = False
+    ov_manifest = None
     try:
         if allowed_signers_override is not None:
             allowed_signers_path = Path(allowed_signers_override)
@@ -234,6 +238,19 @@ def verify_pr(
             base_ref=base_ref,
             head_ref=head_ref,
         )
+
+        if not ok:
+            # Regular attestation failed — check for a valid signed override.
+            # An override is diff-bound and signer-pinned to base-branch
+            # allowed_signers.  It is NEVER a silent pass: the verdict is
+            # "override" and the deviation is permanently recorded in the trail.
+            from attest_override import verify_override_record
+            ov_ok, _ov_detail, ov_manifest = verify_override_record(
+                allowed_signers=allowed_signers_path,
+                repo_root=repo_root,
+                base_ref=base_ref,
+                head_ref=head_ref,
+            )
     finally:
         if tmp_path:
             try:
@@ -243,6 +260,17 @@ def verify_pr(
 
     if ok:
         return (0, "PASS: attestation valid")
+
+    if ov_ok and ov_manifest is not None:
+        signer = ov_manifest.get("signer_identity", "unknown")
+        ck_short = ov_manifest.get("content_key", "?")[:12]
+        ov_reason = ov_manifest.get("reason", "")
+        return (
+            0,
+            f"override: RECORDED deviation — signed by {signer!r} "
+            f"for {ck_short}\u2026 | reason: {ov_reason!r}",
+        )
+
     return (1, f"FAIL: {reason}")
 
 

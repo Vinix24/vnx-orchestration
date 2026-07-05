@@ -182,8 +182,10 @@ def vnx_attest(args) -> int:
         return vnx_attest_verify(args)
     elif subcommand == "verify-pr":
         return vnx_attest_verify_pr(args)
+    elif subcommand == "override":
+        return vnx_attest_override(args)
     else:
-        print("  Usage: vnx attest {write,verify,verify-pr}", file=sys.stderr)
+        print("  Usage: vnx attest {write,verify,verify-pr,override}", file=sys.stderr)
         return 1
 
 
@@ -214,3 +216,116 @@ def vnx_attest_verify_pr(args) -> int:
         print(f"  {message}", file=sys.stderr)
 
     return exit_code
+
+def vnx_attest_override(args) -> int:
+    """Record a signed, budgeted gate override for the current branch (D4).
+
+    Writes:
+      .vnx-attest/override-<content-key>.json  — signed override record
+      .vnx-attest/override-trail.ndjson         — append-only audit trail
+
+    The override is diff-bound (content-keyed) and signer-pinned to
+    base-branch allowed_signers.  Budget is enforced per rolling 30-day window
+    via the append-only trail.
+    """
+    repo_root = Path(getattr(args, "project_dir", ".")).resolve()
+    key_path_str = getattr(args, "key", None)
+    if not key_path_str:
+        print("  Error: --key is required for override", file=sys.stderr)
+        return 1
+    key_path = Path(key_path_str)
+    if not key_path.exists():
+        print(f"  Error: key not found: {key_path}", file=sys.stderr)
+        return 1
+
+    reason = getattr(args, "reason", "")
+    if not reason or not reason.strip():
+        print("  Error: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+
+    dispatch_id = getattr(args, "dispatch_id", "override")
+    signer_identity = getattr(args, "signer", "vnx@local")
+    base_ref = getattr(args, "base_ref", "origin/main")
+    head_ref = getattr(args, "head_ref", "HEAD")
+    no_commit = getattr(args, "no_commit", False)
+
+    _engine.ensure_engine_on_path()
+    import attest_override as _ao
+    import content_key as _ck
+
+    # Compute content-key for this branch
+    try:
+        ck = _ck.compute_diff_hash(
+            repo_root=repo_root, base_ref=base_ref, head_ref=head_ref
+        )
+    except RuntimeError as e:
+        print(f"  Error computing content-key: {e}", file=sys.stderr)
+        return 1
+
+    # Budget check — derived from append-only trail, not a mutable counter
+    budget = _ao.get_override_budget()
+    trail_path = repo_root / _ao.ATTEST_DIR / _ao.OVERRIDE_TRAIL_FILE
+    used = _ao.count_overrides_in_window(trail_path)
+    if used >= budget:
+        print(
+            f"  REFUSED: override budget exhausted "
+            f"({used}/{budget} used in the last {_ao.OVERRIDE_WINDOW_DAYS} days). "
+            "Wait for the window to roll or raise VNX_ATTEST_OVERRIDE_BUDGET.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Write override record + trail entry
+    try:
+        rec = _ao.write_override_record(
+            content_key=ck,
+            reason=reason,
+            dispatch_id=dispatch_id,
+            signer_identity=signer_identity,
+            timestamp=_utc_now(),
+            key_path=key_path,
+            repo_root=repo_root,
+        )
+    except (ValueError, RuntimeError) as e:
+        print(f"  override write failed: {e}", file=sys.stderr)
+        return 1
+
+    remaining_after = budget - (used + 1)
+    print(f"  content-key:   {rec.content_key[:12]}\u2026")
+    print(f"  record:        {rec.record_path}")
+    print(f"  trail:         {rec.trail_path}")
+    print(f"  reason:        {rec.manifest['reason']!r}")
+    print(
+        f"  budget:        {used + 1}/{budget} used in last {_ao.OVERRIDE_WINDOW_DAYS} days "
+        f"({remaining_after} remaining)"
+    )
+    print(f"  ** OVERRIDE RECORDED — this deviation is permanent in the audit trail **")
+
+    if no_commit:
+        print("  committed:     skipped (--no-commit)")
+        return 0
+
+    try:
+        _git_add(rec.record_path, repo_root)
+        _git_add(rec.trail_path, repo_root)
+    except subprocess.CalledProcessError as e:
+        print(f"  git add failed: {e}", file=sys.stderr)
+        return 1
+
+    reason_short = reason.strip()[:60]
+    commit_msg = f"chore(gov): attest override [{dispatch_id}] — {reason_short}"
+    git_signed = False
+    if key_path.exists():
+        git_signed = _try_signed_commit(commit_msg, repo_root, key_path)
+
+    if not git_signed:
+        ok = _plain_commit(commit_msg, repo_root)
+        if not ok:
+            print(
+                "  Warning: git commit failed — records staged but not committed.",
+                file=sys.stderr,
+            )
+            return 1
+
+    print(f"  committed:     {'SSH-signed' if git_signed else 'unsigned'}")
+    return 0
