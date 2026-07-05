@@ -149,6 +149,13 @@ def count_overrides_in_window(
         raise ValueError(
             f"override trail chain integrity failed ({trail_path}): {chain_err}"
         )
+    # A non-empty "unchained" trail = the hash-chain was stripped (production
+    # always writes via append_chained_entry). Refuse to trust it — otherwise an
+    # attacker replaces the chained ledger with raw rows to dodge the chain check.
+    if chain_err == "unchained" and trail_path.read_text(encoding="utf-8").strip():
+        raise ValueError(
+            f"override trail is unchained (hash-chain stripped): {trail_path}"
+        )
 
     if _now_ts is not None:
         now = datetime.fromisoformat(_now_ts.replace("Z", "+00:00"))

@@ -454,19 +454,58 @@ class TestBudgetEnforcement:
         """Overrides older than the window do not count against the budget."""
         with tempfile.TemporaryDirectory() as tmpdir:
             trail = Path(tmpdir) / "trail.ndjson"
-            # Write 10 entries older than 30 days
+            # Write 10 hash-chained entries older than 30 days
             now_ts = "2026-07-05T12:00:00Z"
             for i in range(10):
-                entry = {
+                append_chained_entry(trail, {
                     "attestation_type": ATTESTATION_OVERRIDE,
                     "timestamp": "2026-05-01T10:00:00Z",
                     "content_key": f"old{i}",
-                }
-                with trail.open("a") as f:
-                    f.write(json.dumps(entry) + "\n")
+                })
 
             count = count_overrides_in_window(trail, _now_ts=now_ts)
             assert count == 0, "Old overrides must not count against the budget"
+
+    def test_count_rejects_unchained_trail(self, tmp_path):
+        """A non-empty trail with the hash-chain stripped must raise (finding 2)."""
+        trail = tmp_path / "trail.ndjson"
+        # Raw rows, no prev_hash — a stripped/forged ledger.
+        with trail.open("a") as f:
+            f.write(json.dumps({
+                "attestation_type": ATTESTATION_OVERRIDE,
+                "timestamp": "2026-07-04T10:00:00Z",
+            }) + "\n")
+        with pytest.raises(ValueError):
+            count_overrides_in_window(trail, _now_ts="2026-07-05T12:00:00Z")
+
+    def test_write_override_record_refuses_when_exhausted(self, ephemeral_key_dir, monkeypatch):
+        """write_override_record enforces the budget itself (finding 4)."""
+        monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+            base_sha = _head_sha(repo)
+            from content_key import compute_diff_hash
+
+            _add_file_commit(repo, "scripts/lib/a.py", "a = 1\n", "feat: a")
+            ck_a = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+            write_override_record(
+                content_key=ck_a, reason="first", dispatch_id="D-1",
+                signer_identity=ephemeral_key_dir["identity"],
+                timestamp="2026-07-05T10:00:00Z",
+                key_path=ephemeral_key_dir["key_path"], repo_root=repo,
+                allowed_signers=ephemeral_key_dir["allowed_signers"],
+            )
+            # Budget is 1; a second write must be refused by write_override_record.
+            _add_file_commit(repo, "scripts/lib/b.py", "b = 2\n", "feat: b")
+            ck_b = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+            with pytest.raises(RuntimeError, match="budget exhausted"):
+                write_override_record(
+                    content_key=ck_b, reason="second", dispatch_id="D-2",
+                    signer_identity=ephemeral_key_dir["identity"],
+                    timestamp="2026-07-05T11:00:00Z",
+                    key_path=ephemeral_key_dir["key_path"], repo_root=repo,
+                    allowed_signers=ephemeral_key_dir["allowed_signers"],
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -613,3 +652,39 @@ class TestVerifyPRWithOverride:
             )
             assert exit_code == 1
             assert "FAIL" in message
+
+    def test_override_past_budget_rejected_by_gate(self, ephemeral_key_dir, monkeypatch):
+        """A validly-signed override past the rolling budget is REJECTED by the gate (finding 3)."""
+        from attest_override import build_override_manifest
+        from attestation import sign_manifest
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+            base_sha = _head_sha(repo)
+            from content_key import compute_diff_hash
+
+            _add_file_commit(repo, "scripts/lib/feature.py", "x = 1\n", "feat")
+            ck = compute_diff_hash(repo_root=repo, base_ref=base_sha)
+            # A valid override for the CURRENT diff.
+            write_override_record(
+                content_key=ck, reason="current", dispatch_id="D-cur",
+                signer_identity=ephemeral_key_dir["identity"],
+                timestamp="2026-07-05T11:00:00Z",
+                key_path=ephemeral_key_dir["key_path"], repo_root=repo,
+                allowed_signers=ephemeral_key_dir["allowed_signers"],
+            )
+            # A second, older, validly-signed override in the trail → window count = 2.
+            trail = repo / ATTEST_DIR / OVERRIDE_TRAIL_FILE
+            m2 = build_override_manifest(
+                content_key="other-key", reason="older override",
+                dispatch_id="D-old", signer_identity=ephemeral_key_dir["identity"],
+                timestamp="2026-07-05T09:00:00Z",
+            )
+            append_chained_entry(trail, sign_manifest(m2, ephemeral_key_dir["key_path"]))
+            # Budget of 1 — the gate must reject even a validly-signed override.
+            monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+            exit_code, message = verify_pr(
+                repo_root=repo, base_ref=base_sha, head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 1, f"Override past budget must be rejected, got: {message}"
+            assert "budget" in message.lower() and "REJECT" in message

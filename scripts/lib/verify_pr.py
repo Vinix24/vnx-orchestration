@@ -209,6 +209,7 @@ def verify_pr(
     reason = "unknown"
     ov_ok = False
     ov_manifest = None
+    _ov_detail = ""
     try:
         if allowed_signers_override is not None:
             allowed_signers_path = Path(allowed_signers_override)
@@ -251,6 +252,51 @@ def verify_pr(
                 base_ref=base_ref,
                 head_ref=head_ref,
             )
+            # Gate-side budget enforcement (round-2 finding 3) + anti-reset
+            # (finding 1): a validly-signed override still FAILS the gate if it
+            # exceeds the rolling budget, and the PR trail must append-only EXTEND
+            # the base-branch trail — deleting rows to free budget is rejected.
+            if ov_ok and ov_manifest is not None:
+                from attest_override import (
+                    ATTEST_DIR as _AO_DIR,
+                    OVERRIDE_TRAIL_FILE as _AO_TRAIL,
+                    count_overrides_in_window,
+                    get_override_budget,
+                )
+                _pr_trail = repo_root / _AO_DIR / _AO_TRAIL
+                _pr_lines = (
+                    _pr_trail.read_text(encoding="utf-8").splitlines()
+                    if _pr_trail.exists() else []
+                )
+                _base = subprocess.run(
+                    ["git", "show", f"{base_ref}:{_AO_DIR}/{_AO_TRAIL}"],
+                    cwd=str(repo_root), capture_output=True,
+                )
+                if _base.returncode == 0:
+                    _base_lines = _base.stdout.decode(
+                        "utf-8", "replace"
+                    ).splitlines()
+                    if _pr_lines[: len(_base_lines)] != _base_lines:
+                        ov_ok = False
+                        _ov_detail = (
+                            "override trail does not append-only extend the base "
+                            "branch (budget-reset attempt)"
+                        )
+                if ov_ok:
+                    try:
+                        _used = count_overrides_in_window(
+                            _pr_trail, allowed_signers=allowed_signers_path
+                        )
+                    except ValueError as _e:
+                        ov_ok = False
+                        _ov_detail = str(_e)
+                    else:
+                        _budget = get_override_budget()
+                        if _used > _budget:
+                            ov_ok = False
+                            _ov_detail = (
+                                f"override budget exhausted ({_used}/{_budget})"
+                            )
     finally:
         if tmp_path:
             try:
@@ -270,6 +316,11 @@ def verify_pr(
             f"override: RECORDED deviation — signed by {signer!r} "
             f"for {ck_short}\u2026 | reason: {ov_reason!r}",
         )
+
+    # An override was attempted (signed) but rejected by the budget / anti-reset
+    # / chain checks \u2014 never a silent pass, never falls back to the generic FAIL.
+    if ov_manifest is not None:
+        return (1, f"override REJECTED: {_ov_detail}")
 
     return (1, f"FAIL: {reason}")
 
