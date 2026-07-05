@@ -99,8 +99,22 @@ def _cmd_status(args) -> int:
             pass
     print(f"  Pending archival candidates:                {pending_archival}")
     print(f"  Pending supersede candidates (G-L4 gated): {pending_supersede}")
+
+    # Skill refinements
+    pending_skill_refinements_path = state_dir / "pending_skill_refinements.json"
+    pending_refinements = 0
+    if pending_skill_refinements_path.exists():
+        try:
+            data = json.loads(pending_skill_refinements_path.read_text(encoding="utf-8"))
+            pending_refinements = sum(
+                1 for p in data.get("proposals", []) if p.get("status") == "pending"
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
+    print(f"  Pending skill refinements:                  {pending_refinements}")
     print()
     print("To review proposals: vnx learning review")
+    print("To review skill refinements: vnx learning skill-review")
     return 0
 
 
@@ -400,6 +414,120 @@ def _print_ab_report(result: dict) -> None:
     print("=" * 60)
 
 
+def _cmd_skill_refine(args) -> int:
+    """Generate operator-gated skill-refinement proposals from rework attribution data."""
+    project_dir = Path(getattr(args, "project_dir", "."))
+    threshold = float(getattr(args, "threshold", 0.3))
+
+    state_dir = _resolve_state_dir(project_dir)
+    qi_db_path = state_dir / "quality_intelligence.db"
+
+    if not qi_db_path.exists():
+        print(f"error: quality_intelligence.db not found at {qi_db_path}", file=sys.stderr)
+        print("Run `vnx init` to initialise the project first.", file=sys.stderr)
+        return 1
+
+    import sqlite3 as _sqlite3
+    from vnx_cli import _engine
+
+    project_id = _engine.derive_project_id(project_dir)
+
+    try:
+        qi_conn = _sqlite3.connect(str(qi_db_path), timeout=10.0)
+    except _sqlite3.Error as exc:
+        print(f"error: could not open quality_intelligence.db: {exc}", file=sys.stderr)
+        return 1
+
+    from skill_refinement import generate_all_proposals, write_proposals  # type: ignore[import]
+
+    try:
+        proposals = generate_all_proposals(
+            qi_conn=qi_conn,
+            project_id=project_id,
+            project_root=project_dir,
+            threshold=threshold,
+        )
+    finally:
+        try:
+            qi_conn.close()
+        except Exception:
+            pass
+
+    output_path = state_dir / "pending_skill_refinements.json"
+    write_proposals(proposals, output_path, threshold=threshold)
+
+    print(f"\nSkill refinement proposals: {len(proposals)}")
+    for p in proposals:
+        print(
+            f"  [{p['id']}] {p['role']} — rework rate {p['rework_rate']:.0%} "
+            f"({p['reworked_count']}/{p['total_dispatches']} dispatches)"
+        )
+    if proposals:
+        print(f"\nProposals written to: {output_path}")
+        print("Review with: vnx learning skill-review")
+        print("Apply with:  vnx learning skill-refine --apply  (separate operator step)")
+    else:
+        print(f"No rework-prone roles above the {threshold:.0%} threshold — nothing to propose.")
+        print(f"Output: {output_path}")
+    return 0
+
+
+def _cmd_skill_review(args) -> int:
+    """Show pending skill-refinement proposals for operator review."""
+    project_dir = Path(getattr(args, "project_dir", "."))
+    state_dir = _resolve_state_dir(project_dir)
+    show_diff = getattr(args, "show_diff", False)
+
+    pending_path = state_dir / "pending_skill_refinements.json"
+    if not pending_path.exists():
+        print("No pending_skill_refinements.json found. Run `vnx learning skill-refine` first.")
+        return 0
+
+    try:
+        data = json.loads(pending_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"error reading pending_skill_refinements.json: {exc}", file=sys.stderr)
+        return 1
+
+    proposals = [p for p in data.get("proposals", []) if p.get("status") == "pending"]
+    threshold = data.get("threshold", 0.3)
+    generated_at = data.get("generated_at", "unknown")
+
+    print(f"Pending skill refinements (threshold={threshold:.0%}, generated {generated_at})")
+    print("=" * 60)
+
+    if not proposals:
+        print("No pending skill refinements.")
+        return 0
+
+    for p in proposals:
+        print(
+            f"[{p.get('id', '?')}] {p.get('role', '?')} — "
+            f"rework rate {p.get('rework_rate', 0):.0%} "
+            f"({p.get('reworked_count', '?')}/{p.get('total_dispatches', '?')})"
+        )
+        print(f"  Skill: {p.get('skill_path', '?')}")
+        print(f"  Rationale: {p.get('rationale', '')[:120]}")
+        print()
+        print("  Operator test:")
+        for line in p.get("operator_test", "").splitlines():
+            print(f"    {line}")
+        print()
+        if show_diff:
+            print("  Diff:")
+            for line in p.get("diff", "").splitlines():
+                print(f"    {line}")
+            print()
+        else:
+            diff_lines = len(p.get("diff", "").splitlines())
+            print(f"  Diff: {diff_lines} lines (use --show-diff to display)")
+            print()
+
+    print(f"Total pending: {len(proposals)}")
+    print("Apply with: vnx learning skill-refine --apply  (separate operator step)")
+    return 0
+
+
 def _cmd_grounding_shadow(args) -> int:
     """Compare V1 (substring-join) vs V2 (junction) grounding — read-only, no DB writes."""
     import sqlite3 as _sqlite3
@@ -496,8 +624,10 @@ def vnx_learning(args) -> int:
         "review": _cmd_review,
         "grounding-shadow": _cmd_grounding_shadow,
         "tagger-ab": _cmd_tagger_ab,
+        "skill-refine": _cmd_skill_refine,
+        "skill-review": _cmd_skill_review,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx learning {run|status|review|grounding-shadow|tagger-ab}")
+    print("Usage: vnx learning {run|status|review|grounding-shadow|tagger-ab|skill-refine|skill-review}")
     return 1
