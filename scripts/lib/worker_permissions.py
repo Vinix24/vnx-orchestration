@@ -138,18 +138,21 @@ def generate_claude_settings(profile: PermissionProfile) -> dict:
 
 
 def worker_scoped_enabled() -> bool:
-    """Whether headless workers spawn with scoped capabilities (default ON).
+    """Whether headless workers spawn with scoped capabilities (default OFF).
 
-    Returns True unless ``VNX_WORKER_SCOPED`` is explicitly set to a falsey value
-    (``0`` / ``false`` / ``no`` / ``off``). The falsey setting restores the legacy
-    ``--dangerously-skip-permissions`` posture — emergency rollback only, since it
-    re-opens the full ambient-MCP blast radius.
+    Tmux-spawn workers run in an isolated per-dispatch worktree, so the scoped
+    allow-list only stalls autonomous builds on prompts for un-allow-listed ops
+    (skills/ writes, mkdir, rm) without adding real blast-radius protection.
+    Returns False (blanket ``--dangerously-skip-permissions``) unless
+    ``VNX_WORKER_SCOPED`` is explicitly set to a truthy value (``1`` / ``true`` /
+    ``yes`` / ``on``), which opts back into the scoped posture (role allow-list +
+    empty ambient MCP).
     """
-    return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 

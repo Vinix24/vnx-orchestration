@@ -75,14 +75,15 @@ _FALLBACK_SCOPE_ARGS = [
 def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) -> List[str]:
     """Return the capability-scoping argv head for a headless ``claude`` spawn.
 
-    Default (``VNX_WORKER_SCOPED`` unset or truthy): drop the blanket
-    ``--dangerously-skip-permissions`` for ``--permission-mode acceptEdits`` +
-    empty ambient MCP + the role's tool allow-list. Set ``VNX_WORKER_SCOPED=0``
-    to restore the legacy skip-permissions posture (emergency rollback only).
+    Default (``VNX_WORKER_SCOPED`` unset or falsey): the blanket
+    ``--dangerously-skip-permissions`` flag. Set ``VNX_WORKER_SCOPED=1`` (a
+    truthy value) to opt into ``--permission-mode acceptEdits`` + empty
+    ambient MCP + the role's tool allow-list instead.
 
     ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
     is forwarded to ``build_claude_scope_args`` so the dispatch retains its normal
-    ambient MCP config instead of being force-emptied.
+    ambient MCP config instead of being force-emptied. Only takes effect in the
+    scoped (``VNX_WORKER_SCOPED=1``) posture — the blanket default ignores it.
     """
     if worker_scoped_enabled is not None and not worker_scoped_enabled():
         return [_LEGACY_SKIP_FLAG]
