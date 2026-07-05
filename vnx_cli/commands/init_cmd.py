@@ -114,6 +114,73 @@ VNX_DATA_INIT_SUBDIRS = [
 
 _VALID_TEMPLATES = {"default", "minimal"}
 
+# ---------------------------------------------------------------------------
+# D5a — attestation trust-root scaffold content
+# ---------------------------------------------------------------------------
+
+_ATTEST_ALLOWED_SIGNERS_SCAFFOLD = """\
+# VNX attestation trust-root — provisioned by vnx init.
+#
+# This file lists the SSH public keys that the attestation gate trusts.
+# An empty file means NO signatures are accepted — the gate will warn on every
+# PR until at least one key is added here.
+#
+# Format (SSH allowed_signers):
+#   <identity> <keytype> <base64-pubkey>
+#
+# Example:
+#   operator@your-repo ssh-ed25519 AAAA...
+#
+# Operator provisioning step: see docs/governance/KEY_PROVISIONING.md
+#   1. Generate a signing key (ssh-keygen -t ed25519)
+#   2. Append: <email> <keytype> <pubkey-contents>
+#   3. Run: git config gpg.ssh.allowedSignersFile .vnx-attest/allowed_signers
+#
+# NEVER commit the private key.  This file contains PUBLIC keys only.
+"""
+
+_ATTEST_README_CONTENT = """\
+# .vnx-attest/
+
+Attestation trust-root for the VNX governance gate.
+
+## Files
+
+- `allowed_signers` — SSH public keys trusted by the attestation gate.
+  Provisioned by `vnx init`.  Populated by the operator key-provisioning step.
+- `governed.ndjson` — Hash-chained ledger of governed attestation records.
+  Written by the signing step at governed build time.
+- `adhoc.ndjson` — Ledger of ad-hoc (ungoverned) attestation records.
+
+## Operator provisioning
+
+Before the attestation gate can accept any PR, complete the key-provisioning
+step described in:
+
+  docs/governance/KEY_PROVISIONING.md
+
+The private key is NEVER committed here.  This directory contains PUBLIC
+keys (in `allowed_signers`) and ledger records only.
+
+## CODEOWNERS protection
+
+`allowed_signers` and the gate workflow (`.github/workflows/attestation-gate.yml`)
+are CODEOWNERS-protected — any change requires a maintainer review.  This
+prevents a PR from self-authorizing a new signing key.
+"""
+
+# Sentinel line used for idempotency detection in CODEOWNERS.
+_CODEOWNERS_ATTEST_SENTINEL = ".vnx-attest/allowed_signers"
+
+_CODEOWNERS_ATTEST_BLOCK = """\
+
+# VNX attestation trust-root — provisioned by vnx init.
+# Replace @your-github-handle with your actual GitHub username.
+.vnx-attest/allowed_signers @your-github-handle
+.github/workflows/attestation-gate.yml @your-github-handle
+.vnx/governance_enforcement.yaml @your-github-handle
+"""
+
 
 def _atomic_write(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` via a tmp file + os.replace (atomic)."""
@@ -404,6 +471,73 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
         print(f"  warning: quality_intelligence.db bootstrap failed: {exc}", file=sys.stderr)
 
 
+def _provision_attest_trust_root(project_dir: Path, force: bool) -> None:
+    """Create .vnx-attest/ scaffold + idempotently add CODEOWNERS trust-root entries.
+
+    D5a: provisions the structure (allowed_signers scaffold + README).
+    NEVER generates a signing key — that is an operator Touch-ID step.
+    """
+    attest_dir = project_dir / ".vnx-attest"
+    attest_dir.mkdir(parents=True, exist_ok=True)
+
+    signers_path = attest_dir / "allowed_signers"
+    if not signers_path.exists() or force:
+        _atomic_write(signers_path, _ATTEST_ALLOWED_SIGNERS_SCAFFOLD)
+        print(f"  created .vnx-attest/allowed_signers (scaffold — no key generated)")
+    else:
+        print(f"  exists  .vnx-attest/allowed_signers")
+
+    readme_path = attest_dir / "README.md"
+    if not readme_path.exists() or force:
+        _atomic_write(readme_path, _ATTEST_README_CONTENT)
+        print(f"  created .vnx-attest/README.md")
+    else:
+        print(f"  exists  .vnx-attest/README.md")
+
+    # CODEOWNERS — idempotent: append only when the sentinel line is absent.
+    codeowners_path = project_dir / "CODEOWNERS"
+    existing = ""
+    if codeowners_path.exists():
+        try:
+            existing = codeowners_path.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+
+    if _CODEOWNERS_ATTEST_SENTINEL in existing:
+        print(f"  exists  CODEOWNERS (attest entries already present)")
+    else:
+        new_content = existing.rstrip() + _CODEOWNERS_ATTEST_BLOCK
+        _atomic_write(codeowners_path, new_content)
+        print(f"  {'updated' if existing else 'created'} CODEOWNERS (added attest trust-root entries)")
+
+
+def _provision_github_workflow(project_dir: Path) -> None:
+    """Copy attestation-gate.yml from the engine template into .github/workflows/.
+
+    D5b: idempotent — skips if the file already exists.  Never clobbers an
+    existing workflow.  If the template is absent (non-standard install), warns
+    and skips so the rest of init is not affected.
+    """
+    # Template is shipped in the engine's templates/init/ tree.
+    template_path = _engine.engine_root() / "templates" / "init" / "attestation-gate.yml"
+    if not template_path.exists():
+        print(
+            "  skipped .github/workflows/attestation-gate.yml "
+            "(template not found in engine root — provision manually)",
+            file=sys.stderr,
+        )
+        return
+
+    dest = project_dir / ".github" / "workflows" / "attestation-gate.yml"
+    if dest.exists():
+        print(f"  exists  .github/workflows/attestation-gate.yml")
+        return
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(dest, template_path.read_text(encoding="utf-8"))
+    print(f"  created .github/workflows/attestation-gate.yml")
+
+
 def vnx_init(args) -> int:
     raw_dir = getattr(args, "project_path", None) or args.project_dir
     project_dir = Path(raw_dir).resolve()
@@ -528,6 +662,16 @@ def vnx_init(args) -> int:
     _write_feature_plan(project_dir, force)
     _update_gitignore(project_dir)
 
+    # --- D5a: attestation trust-root (.vnx-attest/ + CODEOWNERS entries) ----
+    print()
+    print("Provisioning attestation trust-root...")
+    _provision_attest_trust_root(project_dir, force)
+
+    # --- D5b: gate workflow (.github/workflows/attestation-gate.yml) ---------
+    print()
+    print("Provisioning attestation gate workflow...")
+    _provision_github_workflow(project_dir)
+
     print()
     print(f"Runtime state: {data_root}")
     if inside_project:
@@ -543,5 +687,6 @@ def vnx_init(args) -> int:
     print("  2. Edit .claude/terminals/T0/CLAUDE.md for project-specific T0 instructions")
     print("  3. Run `vnx doctor` to validate your setup")
     print(f"  4. `vnx track new <id> --project-id {project_id} --title '...' --goal '...'`")
+    print(f"  5. Provision a signing key — see docs/governance/KEY_PROVISIONING.md")
 
     return 0
