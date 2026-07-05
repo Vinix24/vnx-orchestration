@@ -3,16 +3,15 @@ name: planner
 description: >
   Planning specialist that breaks a VNX feature or track into small, independently-shippable
   PRs with dependencies and per-PR task-class routing. USE THIS when the user wants to break a
-  feature down into PRs, sequence the work, or turn a plan into a PR queue. Delegated to by
-  @pm. Works from the tracks DB (`vnx objective`); the repo FEATURE_PLAN.md is a generated
-  generic example, not the source.
+  feature down into PRs, sequence the work, or produce a plan doc. Delegated to by
+  @pm. Works from the tracks DB (`vnx objective`); the plan doc lives in claudedocs/.
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
-paths: ["FEATURE_PLAN.md", "claudedocs/**"]
+paths: ["claudedocs/**"]
 ---
 
 # Planning Specialist
 
-Generate structured FEATURE_PLAN.md documents with PR-based breakdown for T0 orchestration.
+Generate plan documents with PR-based breakdown for T0 orchestration. Plans live in `claudedocs/`; the tracks-DB (`vnx objective`) is the SSOT for deliverables and status.
 
 ## Core Responsibilities
 - Break features into reviewable PRs (150-300 lines each)
@@ -36,9 +35,8 @@ Generate structured FEATURE_PLAN.md documents with PR-based breakdown for T0 orc
 
 **Flow**:
 ```
-FEATURE_PLAN.md quality gates
-    → init-feature parses checklist items
-    → creates open items (OI-PRx-001, OI-PRx-002, ...)
+plan doc quality gates (in claudedocs/)
+    → OIs created from checklist items (OI-PRx-001, OI-PRx-002, ...)
     → terminal executes work, receipt records evidence
     → T0 reviews evidence, closes satisfied items
     → all blockers/warns closed → PR complete
@@ -61,9 +59,9 @@ Items are auto-classified by `init-feature` based on keywords:
 
 **Rule of thumb**: If a failing item should block the PR, make sure its wording triggers `blocker` classification.
 
-## FEATURE_PLAN.md Format (Required)
+## Plan Doc Format
 
-Every FEATURE_PLAN.md MUST follow this structure for `init-feature` to parse correctly:
+Write the plan doc to `claudedocs/<feature>-PLAN.md`. Structure per PR:
 
 ```markdown
 # Feature: [Feature Name]
@@ -109,17 +107,10 @@ Every FEATURE_PLAN.md MUST follow this structure for `init-feature` to parse cor
 6. **PR separator**: Use `---` between PRs
 7. **Gate name**: Use backtick format `` `gate_prX_descriptive_name` ``
 
-### What init-feature Does
-When T0 runs `python3 pr_queue_manager.py init-feature FEATURE_PLAN.md`:
-1. Parses ALL PR sections from the plan
-2. Creates staging dispatches (one per PR) in `.vnx-data/dispatches/staging/`
-3. Creates open items from quality gate checklist items (one OI per item)
-4. T0 reviews staging dispatches and promotes when ready
-
 ## Examples
 - `/planner Create authentication system plan`
 - "Use planner skill to break down the refactoring"
-- "Generate FEATURE_PLAN for the API redesign"
+- "Generate a plan doc for the API redesign"
 
 ## PR Size Guidelines
 
@@ -136,7 +127,7 @@ When T0 runs `python3 pr_queue_manager.py init-feature FEATURE_PLAN.md`:
 
 ## Skill Assignment
 
-Available skills (use with @ prefix in FEATURE_PLAN, without @ in dispatches):
+Available skills (use with @ prefix in plan docs, without @ in dispatches):
 - `@backend-developer` - Python/API implementation
 - `@api-developer` - REST API endpoints
 - `@frontend-developer` - UI components

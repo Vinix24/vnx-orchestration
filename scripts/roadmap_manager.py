@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -22,7 +21,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt, utc_now_iso
-from pr_queue_manager import PRQueueManager
 from closure_verifier import verify_closure, _find_gate_result
 from gate_status import is_pass as gate_is_pass
 from project_scope import current_project_id
@@ -159,8 +157,6 @@ class RoadmapManager:
 
     def _materialize_plan(self, plan_path: Path) -> None:
         shutil.copy2(plan_path, _root_file(self.project_root, "FEATURE_PLAN.md"))
-        manager = PRQueueManager()
-        manager.load_feature_plan(str(_root_file(self.project_root, "FEATURE_PLAN.md")))
 
     def _ensure_feature_branch(self, branch_name: str) -> bool:
         """Create feature branch from origin/main if absent. Idempotent; returns True if created."""
@@ -380,19 +376,28 @@ Implement the minimum blocking fix required before the roadmap may advance.
         if not required_gates:
             return False
 
-        feature_plan_path = _root_file(self.project_root, "FEATURE_PLAN.md")
-        pr_ids: List[str] = []
-        if feature_plan_path.exists():
-            content = feature_plan_path.read_text(encoding="utf-8")
-            pr_ids = re.findall(r"^##\s+(PR-\d+):", content, re.MULTILINE)
-
-        if not pr_ids:
-            return True
-
         if not gate_results_dir.exists():
             return True
 
         branch = feature.get("branch_name", "")
+        # Derive PR IDs from gate evidence scoped to this branch (replaces retired FEATURE_PLAN.md source).
+        pr_ids: List[str] = []
+        for result_file in gate_results_dir.glob("*-contract.json"):
+            try:
+                data = json.loads(result_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if branch and (data.get("branch") or "") != branch:
+                continue
+            if data.get("project_id") and data["project_id"] != self.project_id:
+                continue
+            pr_id = data.get("pr_id")
+            if pr_id and pr_id not in pr_ids:
+                pr_ids.append(pr_id)
+
+        if not pr_ids:
+            return True
+
         for pr_id in pr_ids:
             for gate in required_gates:
                 # ADR-007 + ADR-005: scope lookup to current project_id and branch.
@@ -427,14 +432,21 @@ Implement the minimum blocking fix required before the roadmap may advance.
         if not feature:
             raise ValueError(f"Active feature missing from roadmap state: {current_id}")
 
-        verification = verify_closure(
-            project_root=self.project_root,
-            feature_plan=_root_file(self.project_root, "FEATURE_PLAN.md"),
-            pr_queue=_root_file(self.project_root, "PR_QUEUE.md"),
-            branch=feature["branch_name"],
-            mode="post_merge",
-            claim_file=(self.paths.state_dir / "closure_claim.json") if (self.paths.state_dir / "closure_claim.json").exists() else None,
-        )
+        fp = _root_file(self.project_root, "FEATURE_PLAN.md")
+        pq = _root_file(self.project_root, "PR_QUEUE.md")
+        if fp.exists() and pq.exists():
+            verification = verify_closure(
+                project_root=self.project_root,
+                feature_plan=fp,
+                pr_queue=pq,
+                branch=feature["branch_name"],
+                mode="post_merge",
+                claim_file=(self.paths.state_dir / "closure_claim.json") if (self.paths.state_dir / "closure_claim.json").exists() else None,
+            )
+        else:
+            # FEATURE_PLAN.md/PR_QUEUE.md retired — derive closure from gate evidence via tracks-DB
+            verification = {"verdict": "blocked", "checks": [], "reason": "feature_plan_retired",
+                            "note": "FEATURE_PLAN.md and PR_QUEUE.md retired; use tracks-DB for closure tracking"}
         drift_items = self._detect_blocking_drift() if verification["verdict"] == "pass" else []
         if verification["verdict"] == "pass" and drift_items:
             verdict = "drift_blocked"
@@ -612,70 +624,8 @@ Implement the minimum blocking fix required before the roadmap may advance.
         return {"advanced": True, "reason": "loaded_next_feature", "next_feature": next_feature["feature_id"]}
 
     def run_feature_step(self) -> Dict[str, Any]:
-        """Dispatch the next dependency-ready PR for the active feature.
-
-        ADR-007: emits project_id-stamped roadmap_dispatch_step receipt.
-        Respects VNX_QUEUE_POPUP_ENABLED env switch via promote_dispatch.
-        Returns dispatch_id + pr_id on success, or a no_ready_pr status without
-        side effects when no queued PR is dependency-ready.
-        """
-        state = self.load_state()
-        current_id = state.get("current_active_feature")
-        if not current_id:
-            return {"status": "no_active_feature", "reason": "no feature is currently active"}
-
-        pr_manager = PRQueueManager()
-        next_pr = pr_manager.get_next_pr()
-
-        if not next_pr:
-            emit_governance_receipt(
-                "roadmap_dispatch_step",
-                status="no_ready_pr",
-                project_id=self.project_id,
-                feature_id=current_id,
-            )
-            return {
-                "status": "no_ready_pr",
-                "feature_id": current_id,
-                "reason": "no dependency-ready PR in queue",
-            }
-
-        pr_id = next_pr["id"]
-        dispatch_id = pr_manager.create_dispatch_from_pr(pr_id)
-        if not dispatch_id:
-            return {
-                "status": "failed",
-                "feature_id": current_id,
-                "pr_id": pr_id,
-                "reason": "dispatch creation failed",
-            }
-
-        promoted = pr_manager.promote_dispatch(dispatch_id)
-        if not promoted:
-            return {
-                "status": "failed",
-                "feature_id": current_id,
-                "pr_id": pr_id,
-                "dispatch_id": dispatch_id,
-                "reason": "dispatch promotion failed",
-            }
-
-        pr_manager.update_pr_status(pr_id, "in_progress")
-
-        emit_governance_receipt(
-            "roadmap_dispatch_step",
-            status="success",
-            project_id=self.project_id,
-            feature_id=current_id,
-            pr_id=pr_id,
-            dispatch_id=dispatch_id,
-        )
-        return {
-            "status": "dispatched",
-            "feature_id": current_id,
-            "pr_id": pr_id,
-            "dispatch_id": dispatch_id,
-        }
+        """PR-queue-based dispatch retired. Use `vnx dispatch` directly with the tracks-DB."""
+        return {"status": "not_supported", "reason": "pr_queue_retired"}
 
     def autopilot_tick(self) -> Dict[str, Any]:
         """Single-iteration autopilot tick. Feature-flag gated (VNX_ROADMAP_AUTOPILOT=1).

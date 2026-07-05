@@ -84,11 +84,6 @@ except ImportError:
     _dr_read_events = None
 
 try:
-    from pr_queue_state import build_pr_queue_state as _build_pqs
-except ImportError:
-    _build_pqs = None
-
-try:
     import shadow_verifier as _shadow_verifier  # noqa: E402
     import shadow_logger as _shadow_logger  # noqa: E402
 except ImportError:
@@ -1668,23 +1663,6 @@ def _pytest_db_isolation_guard(state_dir: Path) -> None:
             "Ensure state_dir is a pytest-managed tmp_path."
         )
 
-def _build_pr_queue_section(state_dir: Path) -> Dict[str, Any]:
-    """Build pr_queue section. Best-effort — never raises."""
-    pr_queue: Dict[str, Any] = {
-        "schema": "pr_queue/1.0",
-        "timestamp": _now_iso(),
-        "open_prs": [],
-        "merged_today": [],
-        "queued_features": [],
-    }
-    if _build_pqs is not None:
-        try:
-            pr_queue = _build_pqs(state_dir)
-        except Exception as e:
-            log.warning("pr_queue_state build failed (best-effort): %s", e)
-    return pr_queue
-
-
 # ---------------------------------------------------------------------------
 # Track freshness (fabric-freshness): reconcile derived_status before projecting
 # ---------------------------------------------------------------------------
@@ -1839,7 +1817,6 @@ def build_t0_state(
     recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
     register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
-    pr_queue = _build_pr_queue_section(state_dir)  # R7.1: extracted helper
     strategic_state = _build_strategic_state(state_dir)
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     elapsed = time.monotonic() - start
@@ -1868,7 +1845,6 @@ def build_t0_state(
         "dispatch_register_events": register_events,
         "git_context": git_context,
         "system_health": system_health,
-        "pr_queue": pr_queue,
         "strategic_state": strategic_state,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
@@ -2165,13 +2141,6 @@ def _write_all_state_outputs(
         _gc_t0_detail(state_dir / "t0_detail")
     except Exception as exc:
         log.debug("GC of t0_detail failed (non-critical): %s", exc)
-    try:
-        pqs = state.get("pr_queue")
-        if pqs:
-            _write_atomic(state_dir / "pr_queue_state.json", pqs)
-    except Exception as exc:
-        log.warning("Failed to write pr_queue_state.json: %s", exc)
-        write_failed = True
     # Warning 4: guard against double-write when output_path == brief_path
     brief_path = state_dir / "t0_brief.json"
     if skip_paths is None or brief_path.resolve() not in skip_paths:
@@ -2187,12 +2156,6 @@ def _write_all_state_outputs(
         write_project_status(state_dir)
     except Exception as exc:
         log.debug("build_project_status unavailable or failed (non-critical): %s", exc)
-    # Error 2: derive FEATURE_PLAN.md path from effective_root so tests can isolate it
-    try:
-        from build_feature_plan import write_feature_plan
-        write_feature_plan(effective_root / "FEATURE_PLAN.md", state_dir=state_dir)
-    except Exception as exc:
-        log.debug("build_feature_plan unavailable or failed (non-critical): %s", exc)
     return write_failed
 
 

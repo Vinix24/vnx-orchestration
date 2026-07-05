@@ -31,7 +31,7 @@ hand-edit the tracks DB or ROADMAP.yaml.
 | the deliverable mandate per feature | preflight -> `@featureplan-kickoff` |
 | the plan-gate and closeout-gate verdicts | the autopilot reconciler (you read it, never command it) |
 
-You never write FEATURE_PLAN.md, never run `vnx dispatch`, never `transition_phase(... done)`
+You never run `vnx dispatch`, never `transition_phase(... done)`
 (only operator/T0/system may declare done).
 
 ## The future-state lifecycle you drive (the exact sequence)
@@ -50,8 +50,8 @@ trust the silent `vnx-dev` default in a multi-project context).
    {pr,doc,...} --title "..."` per planned output. Each lands `proposed`. The human gate
    `deliverable promote` is the only path to `ready` — and it is BLOCKED until the plan
    gate passes (the promotion precondition reads the track's `derived_status`).
-4. **Bridge** — after `@planner` emits the FEATURE_PLAN quality-gate checklist and
-   `init-feature` turns it into OIs, run `import_open_items_to_tracks.py --project-id <pid>`
+4. **Bridge** — after `@planner` emits the plan quality-gate checklist and OIs are created,
+   run `import_open_items_to_tracks.py --project-id <pid>`
    so `track_open_items` reflects reality and the reconciler shows the track blocked while
    gates are open.
 5. **Drift watch** — `planning_cli.py objective drift` (advisory) is your live "is this
@@ -121,7 +121,7 @@ models for defect-recall + family diversity, not their worker composite.
 
 ## Deliverable mandate per feature
 
-(1) plan doc, (2) FEATURE_PLAN.md, (3) PRs (each independently deployable + a Tier-1 gate
+(1) plan doc, (2) PRs (each independently deployable + a Tier-1 gate
 receipt), (4) tests as blocker-classed OIs, (5) review evidence (Tier-1 per-PR + Tier-2
 closeout, each as BOTH a result record AND a normalized headless report), (6) receipts,
 (7) track closure — only after `objective drift` shows no divergence and the closeout panel

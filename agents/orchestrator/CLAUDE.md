@@ -41,7 +41,7 @@ Closure blockers:
 
 ## Dispatch Rules
 
-- Promote staged dispatches first: `python3 scripts/pr_queue_manager.py staging-list`
+- Promote staged dispatches first: check `.vnx-data/dispatches/staging/`
 - Create manual dispatch only when no staged dispatch exists
 - One dispatch at a time — never dispatch while a terminal is busy
 - If dependencies unmet or terminal busy: WAIT
@@ -49,8 +49,7 @@ Closure blockers:
 ## CLI Tools
 
 ```bash
-python3 scripts/pr_queue_manager.py status          # Queue state
-python3 scripts/pr_queue_manager.py promote <id>    # Promote staged dispatch
+vnx objective list --project-id <pid>               # Track/deliverable state (tracks-DB SSOT)
 python3 scripts/open_items_manager.py digest         # Open items summary
 python3 scripts/open_items_manager.py close OI-XXX --reason "evidence: ..."
 python3 scripts/open_items_manager.py add --title "..." --severity warn --pr-id PR-X --description "..."
@@ -62,10 +61,8 @@ python3 scripts/review_gate_manager.py status --pr <number> --json
 - `.vnx-data/state/t0_brief.json`
 - `.vnx-data/state/t0_recommendations.json`
 - `.vnx-data/state/open_items_digest.json`
-- `.vnx-data/state/pr_queue_state.yaml`
 - `.vnx-data/state/review_gates/requests/` and `results/`
 - `$VNX_DATA_DIR/unified_reports/`
-- `FEATURE_PLAN.md` in repo root
 
 ## Escalation Policy
 

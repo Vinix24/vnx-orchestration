@@ -224,10 +224,6 @@ python3 scripts/validate_skill.py --list
 - `.vnx-data/state/review_gates/results/`
 - `$VNX_DATA_DIR/unified_reports/`
 
-## Feature Plan Path
-
-Use `FEATURE_PLAN.md` in repo root.
-
 ## Operator Policies (Default Behavior)
 
 These defaults apply unless the operator overrides for the current session.

@@ -33,12 +33,10 @@ LEGACY_DISPATCHES_DIR = (VNX_ROOT / "dispatches").resolve()
 RECEIPTS_FILE = STATE_DIR / "t0_receipts.ndjson"
 RECOMMENDATIONS_FILE = STATE_DIR / "t0_recommendations.json"
 ACTIVE_CONFLICTS_FILE = STATE_DIR / "active_conflicts.json"
-PR_QUEUE_STATE_FILE = STATE_DIR / "pr_queue_state.yaml"
 OPEN_ITEMS_DIGEST_FILE = STATE_DIR / "open_items_digest.json"
 STAGING_SEEN_FILE = STATE_DIR / "staging_seen.json"
 LEGACY_RECEIPTS_FILE = LEGACY_STATE_DIR / "t0_receipts.ndjson"
 LEGACY_RECOMMENDATIONS_FILE = LEGACY_STATE_DIR / "t0_recommendations.json"
-LEGACY_PR_QUEUE_STATE_FILE = LEGACY_STATE_DIR / "pr_queue_state.yaml"
 LEGACY_OPEN_ITEMS_DIGEST_FILE = LEGACY_STATE_DIR / "open_items_digest.json"
 LEGACY_STAGING_SEEN_FILE = LEGACY_STATE_DIR / "staging_seen.json"
 ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
@@ -99,7 +97,6 @@ class RecommendationEngine:
         self.completed_dispatches = {}
         self.active_conflicts = {}
         self.pending_dependencies = {}
-        self.pr_queue = None  # NEW: PR queue state integration
         self.open_items_digest = None  # NEW: Open items tracking
         self.staging_seen = set()  # NEW: Track seen staging files
         self.rollback_mode = _rollback_mode_enabled()
@@ -487,19 +484,6 @@ class RecommendationEngine:
 
         return None
 
-    def load_pr_queue_state(self):
-        """Load PR queue state if available (NEW)"""
-        source = _first_existing([PR_QUEUE_STATE_FILE, LEGACY_PR_QUEUE_STATE_FILE])
-        if not source:
-            return
-
-        try:
-            with open(source, 'r') as f:
-                self.pr_queue = yaml.safe_load(f)
-        except (yaml.YAMLError, OSError) as e:
-            print(f"⚠️  Failed to load PR queue state: {e}")
-            self.pr_queue = None
-
     def load_open_items_digest(self):
         """Load open items digest if available"""
         source = _first_existing([OPEN_ITEMS_DIGEST_FILE, LEGACY_OPEN_ITEMS_DIGEST_FILE])
@@ -608,12 +592,6 @@ class RecommendationEngine:
                     "reason": f"New staging proposal ready for review",
                     "priority": "P1",
                     "message": f"📥 New staging proposal: {dispatch_id} (PR: {pr_id})",
-                    "commands": [
-                        f"python {VNX_ROOT / 'scripts/pr_queue_manager.py'} show {dispatch_id}",
-                        f"python {VNX_ROOT / 'scripts/pr_queue_manager.py'} patch {dispatch_id} --file <patch>",
-                        f"python {VNX_ROOT / 'scripts/pr_queue_manager.py'} promote {dispatch_id}",
-                        f"python {VNX_ROOT / 'scripts/pr_queue_manager.py'} reject {dispatch_id} --reason '<reason>'",
-                    ],
                     "staging_file": str(dispatch_file),
                     "timestamp": datetime.now().isoformat()
                 })
@@ -621,48 +599,6 @@ class RecommendationEngine:
         # Save seen staging files
         if self.staging_seen:
             self.save_staging_seen()
-
-    def add_pr_dependency_recommendation(self):
-        """Add PR queue recommendations (NEW)"""
-        if not self.pr_queue:
-            return
-
-        # Check if current PR dependencies are met (supports parallel tracks)
-        in_progress = self.pr_queue.get('in_progress') or []
-        # Backward compat: legacy string format
-        if isinstance(in_progress, str):
-            in_progress = [in_progress] if in_progress else []
-        if in_progress:
-            # Import here to avoid circular dependency
-            from pr_queue_manager import PRQueueManager
-            manager = PRQueueManager()
-            for active_pr in in_progress:
-                deps_met, msg = manager.check_pr_dependencies(active_pr)
-
-                if not deps_met:
-                    self.add_recommendation({
-                        "trigger": "pr_blocked",
-                        "action": "wait_for_dependencies",
-                        "pr_id": active_pr,
-                        "reason": msg,
-                        "priority": "P0",
-                        "timestamp": datetime.now().isoformat()
-                    })
-
-        # Recommend next PR if available
-        next_available = self.pr_queue.get('next_available', [])
-        if next_available and not in_progress:
-            next_pr = next_available[0]
-            self.add_recommendation({
-                "trigger": "pr_ready",
-                "action": "start_next_pr",
-                "pr_id": next_pr,
-                "reason": f"Ready to start: {next_pr}",
-                "priority": "P1",
-                "suggested_instruction": f"Start work on {next_pr}",
-                "command": f"python {VNX_ROOT / 'scripts/pr_queue_manager.py'} dispatch {next_pr}",
-                "timestamp": datetime.now().isoformat()
-            })
 
     def add_recommendation(self, recommendation: Dict):
         """Add a recommendation if it is not a duplicate"""
@@ -739,11 +675,6 @@ class RecommendationEngine:
         print(f"🚀 VNX Recommendation Engine v1.2.0")
         print(f"📊 Analyzing receipts from last {self.lookback_minutes} minutes...")
 
-        # Load PR queue state (NEW)
-        self.load_pr_queue_state()
-        if self.pr_queue:
-            print(f"   Found PR queue: {self.pr_queue.get('active_feature', {}).get('name', 'Unknown')}")
-
         # Load open items digest (NEW)
         self.load_open_items_digest()
         if self.open_items_digest:
@@ -769,9 +700,6 @@ class RecommendationEngine:
 
         # Check for staging dispatches (NEW - updated)
         self.check_staging_dispatches()
-
-        # Add PR queue recommendations (NEW)
-        self.add_pr_dependency_recommendation()
 
         # Save recommendations
         self.save_recommendations()
