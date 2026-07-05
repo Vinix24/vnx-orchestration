@@ -40,6 +40,7 @@ from attest_override import (
 )
 from verify_pr import verify_pr
 from attest_record import write_attest_record
+from ndjson_hash_chain import append_chained_entry
 
 
 # ---------------------------------------------------------------------------
@@ -171,60 +172,56 @@ class TestCountOverridesInWindow:
     def test_counts_recent_overrides(self, tmp_path):
         trail = tmp_path / "trail.ndjson"
         now = "2026-07-05T12:00:00Z"
-        # Three recent override entries
+        # Three recent override entries, hash-chained (as production writes them).
         for i in range(3):
-            entry = {
+            append_chained_entry(trail, {
                 "attestation_type": ATTESTATION_OVERRIDE,
                 "timestamp": "2026-07-04T10:00:00Z",
                 "content_key": f"key{i}",
-            }
-            with trail.open("a") as f:
-                f.write(json.dumps(entry) + "\n")
+            })
         assert count_overrides_in_window(trail, _now_ts=now) == 3
 
     def test_excludes_old_overrides(self, tmp_path):
         trail = tmp_path / "trail.ndjson"
         now = "2026-07-05T12:00:00Z"
-        # Entry older than 30 days
-        old_entry = {
+        append_chained_entry(trail, {
             "attestation_type": ATTESTATION_OVERRIDE,
-            "timestamp": "2026-05-01T10:00:00Z",
+            "timestamp": "2026-05-01T10:00:00Z",  # older than 30 days
             "content_key": "old",
-        }
-        # Entry within 30 days
-        recent_entry = {
+        })
+        append_chained_entry(trail, {
             "attestation_type": ATTESTATION_OVERRIDE,
-            "timestamp": "2026-07-04T10:00:00Z",
+            "timestamp": "2026-07-04T10:00:00Z",  # within 30 days
             "content_key": "recent",
-        }
-        with trail.open("a") as f:
-            f.write(json.dumps(old_entry) + "\n")
-            f.write(json.dumps(recent_entry) + "\n")
+        })
         assert count_overrides_in_window(trail, _now_ts=now) == 1
 
     def test_excludes_non_override_entries(self, tmp_path):
         trail = tmp_path / "trail.ndjson"
         now = "2026-07-05T12:00:00Z"
-        entries = [
+        for e in [
             {"attestation_type": "governed", "timestamp": "2026-07-04T10:00:00Z"},
             {"attestation_type": ATTESTATION_OVERRIDE, "timestamp": "2026-07-04T10:00:00Z"},
             {"attestation_type": "ad-hoc", "timestamp": "2026-07-04T10:00:00Z"},
-        ]
-        with trail.open("a") as f:
-            for e in entries:
-                f.write(json.dumps(e) + "\n")
+        ]:
+            append_chained_entry(trail, e)
         assert count_overrides_in_window(trail, _now_ts=now) == 1
 
-    def test_ignores_invalid_json_lines(self, tmp_path):
+    def test_tampered_trail_raises(self, tmp_path):
+        """A spliced/tampered budget ledger must raise, never silently under-count."""
         trail = tmp_path / "trail.ndjson"
-        now = "2026-07-05T12:00:00Z"
-        with trail.open("a") as f:
-            f.write("not-json\n")
-            f.write(json.dumps({
-                "attestation_type": ATTESTATION_OVERRIDE,
-                "timestamp": "2026-07-04T10:00:00Z",
-            }) + "\n")
-        assert count_overrides_in_window(trail, _now_ts=now) == 1
+        for ts in ("2026-07-04T10:00:00Z", "2026-07-04T11:00:00Z"):
+            append_chained_entry(trail, {
+                "attestation_type": ATTESTATION_OVERRIDE, "timestamp": ts,
+            })
+        # Tamper with the first entry's body without recomputing the chain hash.
+        lines = trail.read_text().splitlines()
+        first = json.loads(lines[0])
+        first["content_key"] = "TAMPERED"
+        lines[0] = json.dumps(first)
+        trail.write_text("\n".join(lines) + "\n")
+        with pytest.raises(ValueError):
+            count_overrides_in_window(trail, _now_ts="2026-07-05T12:00:00Z")
 
 
 # ---------------------------------------------------------------------------

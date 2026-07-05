@@ -251,44 +251,83 @@ def vnx_attest_override(args) -> int:
 
     _engine.ensure_engine_on_path()
     import attest_override as _ao
+    import attest_record as _ar
     import content_key as _ck
 
-    # Compute content-key for this branch
-    try:
-        ck = _ck.compute_diff_hash(
-            repo_root=repo_root, base_ref=base_ref, head_ref=head_ref
-        )
-    except RuntimeError as e:
-        print(f"  Error computing content-key: {e}", file=sys.stderr)
-        return 1
+    # Resolve allowed_signers from the BASE branch (never the PR working tree) so
+    # the budget count verifies each trail entry's signature against a protected
+    # key set — a rogue key added in the PR cannot self-authorize or deflate the
+    # budget. An explicit --allowed-signers is an opt-in, CODEOWNERS-trust override.
+    allowed_signers_str = getattr(args, "allowed_signers", None)
+    _as_tmp = None
+    if not allowed_signers_str:
+        content = _ar.read_allowed_signers_from_base(repo_root, base_ref)
+        if content is None:
+            print(
+                f"  REFUSED: allowed_signers not found in base branch {base_ref!r}. "
+                "Add .vnx-attest/allowed_signers at base, or pass --allowed-signers.",
+                file=sys.stderr,
+            )
+            return 1
+        fd, _as_tmp = tempfile.mkstemp(suffix=".allowed_signers")
+        try:
+            os.write(fd, content)
+        finally:
+            os.close(fd)
+        allowed_signers_str = _as_tmp
 
-    # Budget check — derived from append-only trail, not a mutable counter
-    budget = _ao.get_override_budget()
-    trail_path = repo_root / _ao.ATTEST_DIR / _ao.OVERRIDE_TRAIL_FILE
-    used = _ao.count_overrides_in_window(trail_path)
-    if used >= budget:
-        print(
-            f"  REFUSED: override budget exhausted "
-            f"({used}/{budget} used in the last {_ao.OVERRIDE_WINDOW_DAYS} days). "
-            "Wait for the window to roll or raise VNX_ATTEST_OVERRIDE_BUDGET.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Write override record + trail entry
     try:
-        rec = _ao.write_override_record(
-            content_key=ck,
-            reason=reason,
-            dispatch_id=dispatch_id,
-            signer_identity=signer_identity,
-            timestamp=_utc_now(),
-            key_path=key_path,
-            repo_root=repo_root,
-        )
-    except (ValueError, RuntimeError) as e:
-        print(f"  override write failed: {e}", file=sys.stderr)
-        return 1
+        # Compute content-key for this branch
+        try:
+            ck = _ck.compute_diff_hash(
+                repo_root=repo_root, base_ref=base_ref, head_ref=head_ref
+            )
+        except RuntimeError as e:
+            print(f"  Error computing content-key: {e}", file=sys.stderr)
+            return 1
+
+        # Budget check BEFORE accepting — derived from the append-only trail with
+        # chain-integrity + signature verification (a forged entry cannot count).
+        budget = _ao.get_override_budget()
+        trail_path = repo_root / _ao.ATTEST_DIR / _ao.OVERRIDE_TRAIL_FILE
+        try:
+            used = _ao.count_overrides_in_window(
+                trail_path, allowed_signers=allowed_signers_str
+            )
+        except ValueError as e:
+            print(f"  REFUSED: {e}", file=sys.stderr)
+            return 1
+        if used >= budget:
+            print(
+                f"  REFUSED: override budget exhausted "
+                f"({used}/{budget} used in the last {_ao.OVERRIDE_WINDOW_DAYS} days). "
+                "Wait for the window to roll or raise VNX_ATTEST_OVERRIDE_BUDGET.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Write override record + trail entry (write_override_record re-checks the
+        # budget itself as defense in depth).
+        try:
+            rec = _ao.write_override_record(
+                content_key=ck,
+                reason=reason,
+                dispatch_id=dispatch_id,
+                signer_identity=signer_identity,
+                timestamp=_utc_now(),
+                key_path=key_path,
+                repo_root=repo_root,
+                allowed_signers=allowed_signers_str,
+            )
+        except (ValueError, RuntimeError) as e:
+            print(f"  override write failed: {e}", file=sys.stderr)
+            return 1
+    finally:
+        if _as_tmp:
+            try:
+                os.unlink(_as_tmp)
+            except OSError:
+                pass
 
     remaining_after = budget - (used + 1)
     print(f"  content-key:   {rec.content_key[:12]}\u2026")

@@ -45,7 +45,7 @@ from attestation import (
 )
 from attest_record import ATTEST_DIR
 from content_key import compute_diff_hash
-from ndjson_hash_chain import append_chained_entry
+from ndjson_hash_chain import append_chained_entry, verify_chain, walk_chain
 
 ATTESTATION_OVERRIDE = "override"
 
@@ -111,24 +111,44 @@ def build_override_manifest(
 def count_overrides_in_window(
     trail_path: "str | Path",
     window_days: int = OVERRIDE_WINDOW_DAYS,
+    allowed_signers: "str | Path | None" = None,
     _now_ts: "str | None" = None,
 ) -> int:
-    """Count override entries in the NDJSON trail within the rolling window.
+    """Count VALID override entries in the NDJSON trail within the rolling window.
 
-    Derived from the append-only trail — not a mutable counter.
-    An entry counts if its timestamp is within window_days of now.
+    Derived from the append-only trail — not a mutable counter. An entry only
+    counts toward the budget when it is (a) part of an intact hash-chain and,
+    when ``allowed_signers`` is given, (b) carries a valid detached signature.
+    A forged, unsigned, or chain-tampered entry MUST NOT count toward — nor be
+    able to deflate — the budget.
 
     Args:
         trail_path: Path to override-trail.ndjson.
         window_days: Rolling window in days (default: 30).
+        allowed_signers: allowed_signers file used to verify each entry's
+            signature. When None the signature is NOT checked — callers that
+            enforce a budget (the gate, write_override_record) MUST pass a
+            base-branch-pinned allowed_signers so a rogue key cannot self-authorize.
         _now_ts: ISO-8601 UTC 'now' — injected by tests; production omits.
 
     Returns:
         Count of valid override entries within the window.
+
+    Raises:
+        ValueError: If the trail's hash-chain integrity check fails (tamper) —
+            a tampered budget ledger must never be silently trusted.
     """
     trail_path = Path(trail_path)
     if not trail_path.exists():
         return 0
+
+    # Chain integrity first: a tampered/spliced trail must never be trusted for
+    # budgeting (an attacker could delete their own override rows to free budget).
+    chain_ok, _violations, chain_err = verify_chain(trail_path)
+    if not chain_ok:
+        raise ValueError(
+            f"override trail chain integrity failed ({trail_path}): {chain_err}"
+        )
 
     if _now_ts is not None:
         now = datetime.fromisoformat(_now_ts.replace("Z", "+00:00"))
@@ -137,21 +157,17 @@ def count_overrides_in_window(
 
     window_seconds = window_days * 86400
     count = 0
-    try:
-        lines = trail_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+    for _idx, entry, _entry_hash in walk_chain(trail_path):
+        if not isinstance(entry, dict):
             continue
         if entry.get("attestation_type") != ATTESTATION_OVERRIDE:
             continue
+        # Signature must be valid. Strip the chain pointer (prev_hash) added by
+        # append_chained_entry to reconstruct the exact signed manifest.
+        if allowed_signers is not None:
+            manifest = {k: v for k, v in entry.items() if k != "prev_hash"}
+            if not verify_attestation(manifest, allowed_signers):
+                continue
         ts_str = entry.get("timestamp", "")
         if not ts_str:
             continue
@@ -174,6 +190,8 @@ def write_override_record(
     timestamp: str,
     key_path: "str | Path",
     repo_root: "str | Path | None" = None,
+    allowed_signers: "str | Path | None" = None,
+    _now_ts: "str | None" = None,
 ) -> OverrideRecord:
     """Build, sign, and persist an override record + trail entry.
 
@@ -181,8 +199,11 @@ def write_override_record(
       .vnx-attest/override-<content_key>.json  — signed override record
       .vnx-attest/override-trail.ndjson         — append-only audit trail
 
-    The caller MUST check count_overrides_in_window against get_override_budget()
-    BEFORE calling this function.  This function does NOT enforce the budget.
+    Enforces the rolling budget itself (defense in depth): it re-derives the
+    used count from the (chain-verified, signature-checked) trail and REFUSES to
+    write when the budget is exhausted, even if a caller skipped its own check.
+    Pass ``allowed_signers`` (base-branch-pinned) so the budget count verifies
+    signatures; without it the count cannot reject a forged trail entry.
 
     Args:
         content_key: The diff hash this override applies to.
@@ -200,6 +221,20 @@ def write_override_record(
     repo_root = Path(repo_root) if repo_root else Path.cwd()
     attest_dir = repo_root / ATTEST_DIR
     attest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Defense in depth: enforce the rolling budget here too, re-derived from the
+    # chain-verified, signature-checked trail. A caller that forgot to check (or
+    # a race between check and write) must still not exceed the budget.
+    trail_path = attest_dir / OVERRIDE_TRAIL_FILE
+    budget = get_override_budget()
+    used = count_overrides_in_window(
+        trail_path, allowed_signers=allowed_signers, _now_ts=_now_ts
+    )
+    if used >= budget:
+        raise RuntimeError(
+            f"override budget exhausted ({used}/{budget} used in the last "
+            f"{OVERRIDE_WINDOW_DAYS} days); refusing to write override record"
+        )
 
     manifest = build_override_manifest(
         content_key=content_key,
