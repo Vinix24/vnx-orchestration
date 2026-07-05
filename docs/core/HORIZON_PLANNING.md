@@ -30,9 +30,9 @@ the tracks DB, reached through `vnx horizon`, not a hand-maintained file.
 | `list` | List objectives with phase/horizon/blocked state. |
 | `show` | Show one objective in detail. |
 | `sync` | Reconcile track rows against their declared source. |
-| `drift` | Report declared-status vs reality drift (read-only). |
+| `drift` | Advisory drift report; the reconciler persists `tracks.derived_status` + a `planning_drift.json` summary (never `tracks.phase`). |
 | `reconcile` | Close/advance tracks against merged-PR evidence (`--apply` to write). |
-| `reconcile-review` | Review the reconcile proposal before applying. |
+| `reconcile-review` | Record a post-run review verdict (`ok`/`false-candidate`) for a reconcile run in `reconcile_history.ndjson`. |
 | `reconcile-streak` | Report the auto-close streak (gates `VNX_AUTO_CLOSE`). |
 | `close` | Advance a track's phase to done (human-gated transition). |
 | `reopen` | Reopen a closed track. |
@@ -46,7 +46,7 @@ top-level alias `vnx deliverable <verb>`:
 |---|---|
 | `add` | Add a deliverable to a track. |
 | `list` | List a track's deliverables. |
-| `promote` | Promote a deliverable (e.g. queued → active). |
+| `promote` | Promote a deliverable (proposed → ready; human gate). |
 
 ### Plan-gate verbs
 
@@ -88,17 +88,19 @@ negative control (it fails if the resolver regresses).
 
 `vnx objective <verb>` and `vnx deliverable <verb>` dispatch to the SAME
 handler functions as `vnx horizon <verb>` / `vnx horizon deliverable <verb>`,
-matching `bin/vnx`'s top-level `objective` / `deliverable` commands. The
-`objective` alias covers the objective verbs only; the nested
-`deliverable` / `plan-gate` groups are reached through `vnx horizon` or their
-own top-level surface.
+matching `bin/vnx`'s top-level `objective` / `deliverable` commands. Only these
+two top-level aliases exist: `objective` covers the objective verbs, and
+`deliverable` covers the deliverable verbs. The `plan-gate` group has NO
+top-level alias — it is reached only through `vnx horizon plan-gate`.
 
 ## The roadmap is the tracks DB
 
 Objectives added through `vnx horizon add` live in the tracks database in the
 central per-project store (ADR-026), not in a checked-in roadmap file. A track
 enters `queued` and is plan-gated: it stays blocked until the plan-first panel
-passes (or the operator self-accepts at the panel's round cap). Merged-PR
+passes, or the operator manually accepts it. There is no automatic round-cap
+escape in the panel — a self-accept is a manual operator action: unlink the
+plan-gate open-item (`tracks.unlink_open_item`) and reconcile. Merged-PR
 evidence closes tracks through `reconcile`, so declared status is grounded in
 git reality rather than a hand-edited list.
 
