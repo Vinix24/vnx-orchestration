@@ -124,6 +124,14 @@ class TestClassifyPR:
         result = classify_pr(["setup.py"])
         assert result == "feature"
 
+    def test_new_top_level_dir_requires_attestation(self):
+        # Fail-closed: a new top-level directory is not in the exempt allowlist → feature
+        assert classify_pr(["newdir/somefile.py"]) == "feature"
+
+    def test_unclassified_build_file_requires_attestation(self):
+        # Fail-closed: pyproject.toml is not in the exempt allowlist → feature
+        assert classify_pr(["pyproject.toml"]) == "feature"
+
 
 class TestPathHelpers:
     def test_is_feature_file_scripts(self):

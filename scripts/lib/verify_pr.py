@@ -3,21 +3,31 @@
 Called by `vnx attest verify-pr` and by the GitHub Action
 .github/workflows/attestation-gate.yml.
 
-Checks (for a PR touching feature code):
-  1. Is the PR feature-code only or exempt (docs/tests/md only)?
-     Exempt PRs exit 0 with a named residual note.
+Checks (for a PR requiring attestation):
+  1. Classify changed files against the exempt allowlist (fail-closed).
+     Every path not in the exempt allowlist REQUIRES a valid attestation.
+     Un-classified paths (e.g. a new top-level dir) are never silently skipped.
   2. Read allowed_signers from the BASE branch (never the PR tree).
   3. Verify: .vnx-attest/<content-key>.json exists, diff_hash binds,
      signature is valid against allowed_signers.
 
-Feature-code paths  (gate fires on any match):
-  scripts/, vnx_cli/, dashboard/, schemas/, .vnx/, .github/
+Verifier safety: this file is executed from the BASE branch by the GitHub
+Action (extracted via `git show origin/main:scripts/lib/verify_pr.py`).
+The PR-tree copy of verify_pr.py is NEVER run for the gate decision, so a
+PR that weakens this file cannot affect the gate outcome.
 
-Exempt paths (gate skipped if ALL changed files match these):
-  docs/, tests/, *.md
+Exempt allowlist — explicit; fail-closed:
+  docs/   — documentation directory
+  tests/  — test-suite directory
+  *.md    — markdown files
+
+Everything else is REQUIRES-ATTESTATION by default.  Any new top-level file
+or directory that is not in the exempt allowlist requires a valid attestation.
+This is intentionally conservative: prefer a false-positive (unexpected
+attestation requirement) over a false-negative (silently ungated change).
 
 Exit codes:
-  0 — PASS (valid attest) or EXEMPT (docs/tests/md only)
+  0 — PASS (valid attest) or EXEMPT (all files in exempt allowlist)
   1 — FAIL (unsigned feature PR, bad sig, no record, diff mismatch)
   2 — CONFIG ERROR (allowed_signers not found at base branch)
 
@@ -34,6 +44,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Exempt allowlist — paths exempt from attestation.
+# MUST stay in sync with the bash classify step in attestation-gate.yml.
+# The gate logic is INVERTED: anything NOT exempt requires attestation.
+_EXEMPT_PREFIXES = (
+    "docs/",
+    "tests/",
+)
+
+# Note: _FEATURE_PREFIXES is kept for documentation / future audit use only.
+# Classification no longer depends on matching feature prefixes — it depends
+# on NOT matching the exempt allowlist.  Any path outside the exempt allowlist
+# is treated as requiring attestation (fail-closed).
 _FEATURE_PREFIXES = (
     "scripts/",
     "vnx_cli/",
@@ -41,11 +63,6 @@ _FEATURE_PREFIXES = (
     "schemas/",
     ".vnx/",
     ".github/",
-)
-
-_EXEMPT_PREFIXES = (
-    "docs/",
-    "tests/",
 )
 
 
@@ -75,6 +92,11 @@ def _is_feature_file(path: str) -> bool:
 
 
 def _is_exempt_file(path: str) -> bool:
+    """Return True if this path is in the exempt allowlist.
+
+    Exempt paths: docs/, tests/, *.md
+    Everything else is NOT exempt (requires attestation).
+    """
     for prefix in _EXEMPT_PREFIXES:
         if path.startswith(prefix):
             return True
@@ -99,23 +121,29 @@ def _resolve_merge_base(base_ref: str, head_ref: str, cwd: Path) -> str:
 def classify_pr(
     changed_files: list[str],
 ) -> str:
-    """Classify a PR's changed files.
+    """Classify a PR's changed files — fail-closed against the exempt allowlist.
+
+    Classification is EXHAUSTIVE: every changed path is either in the exempt
+    allowlist (EXEMPT) or requires attestation (feature).  There is no
+    un-classified / silently-skipped category.
 
     Returns:
-      "feature"  — at least one feature-path file → gate fires
-      "exempt"   — all files are docs/tests/md → gate skips
+      "feature"  — at least one file is NOT in the exempt allowlist → gate fires
+      "exempt"   — ALL files are in the exempt allowlist → gate skips
       "empty"    — no changed files (degenerate case → treat as exempt)
+
+    Exempt allowlist: docs/, tests/, *.md
+    Anything outside this list — including new top-level files or directories —
+    defaults to "feature" (requires attestation).
     """
     if not changed_files:
         return "empty"
-    feature_files = [f for f in changed_files if _is_feature_file(f)]
-    if feature_files:
-        return "feature"
-    # all files must be individually exempt; mixed non-feature non-exempt → feature
     all_exempt = all(_is_exempt_file(f) for f in changed_files)
     if all_exempt:
         return "exempt"
-    # files outside feature AND outside exempt prefixes: treat as feature
+    # At least one file is outside the exempt allowlist → gate fires.
+    # This covers feature-code paths (scripts/, vnx_cli/, ...) AND any
+    # un-classified path (e.g. setup.py, pyproject.toml, a new top-level dir).
     return "feature"
 
 

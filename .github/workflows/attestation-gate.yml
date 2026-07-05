@@ -10,8 +10,18 @@
 # never from the PR head.  A PR cannot neuter the gate by editing its own
 # allowed_signers.  CODEOWNERS guards .vnx-attest/allowed_signers and this file.
 #
-# Exempt lane residual: PRs touching only docs/, tests/, or *.md files bypass
-# this gate.  This is an un-attributed lane — accepted for v1, named as a risk.
+# Verifier safety (D3 gate-fix): verify_pr.py and its helper scripts are extracted
+# from the BASE branch (origin/main) before running.  A PR that weakens or
+# replaces verify_pr.py cannot affect the gate decision — the base-branch copy
+# is always executed.  The PR-tree copy of verify_pr.py is never trusted.
+#
+# Exempt allowlist — fail-closed: PRs touching only the following paths are
+# exempt from the attestation gate:
+#   docs/    — documentation
+#   tests/   — test suite
+#   *.md     — markdown files
+# Everything else (including any new top-level file or directory) REQUIRES a
+# valid attestation.  Un-classified paths are never silently skipped.
 
 name: Attestation Gate (D3)
 
@@ -42,6 +52,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Extract base-branch verifier
+        run: |
+          set -euo pipefail
+          # Obtain verify_pr.py and its dependency chain from origin/main.
+          # The PR-tree copy of any of these files is NEVER trusted or executed.
+          # A PR that weakens verify_pr.py cannot affect the gate decision.
+          VERIFIER_DIR="/tmp/vnx-base-verifier"
+          mkdir -p "$VERIFIER_DIR"
+          for f in verify_pr.py attest_record.py attestation.py content_key.py ndjson_hash_chain.py; do
+            git show "origin/main:scripts/lib/$f" > "$VERIFIER_DIR/$f"
+          done
+          echo "Base-branch verifier extracted to $VERIFIER_DIR"
+          ls -la "$VERIFIER_DIR"
+
       - name: Classify PR (feature vs exempt)
         id: classify
         run: |
@@ -52,18 +76,24 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          # Feature-code paths that trigger the gate
-          FEATURE=$(echo "$CHANGED" | grep -E \
-            '^(scripts/|vnx_cli/|dashboard/|schemas/|\.vnx/|\.github/)' \
-            || true)
+          # Fail-closed classification using the exempt allowlist.
+          # The logic is INVERTED from a feature-list check:
+          #   Every path that is NOT in the exempt allowlist requires attestation.
+          # Exempt allowlist: docs/, tests/, *.md
+          # Everything else — including new top-level files or directories —
+          # is treated as REQUIRES-ATTESTATION, never silently skipped.
+          NON_EXEMPT=$(echo "$CHANGED" | grep -vE '^(docs/|tests/)|\.md$' || true)
 
-          if [ -z "$FEATURE" ]; then
+          if [ -z "$CHANGED" ]; then
+            echo "classification=empty" >> "$GITHUB_OUTPUT"
+            echo "::notice::Attestation gate: empty PR — exempt"
+          elif [ -z "$NON_EXEMPT" ]; then
             echo "classification=exempt" >> "$GITHUB_OUTPUT"
-            echo "::notice::Attestation gate: exempt (docs/tests/md only — un-attributed lane, named residual)"
+            echo "::notice::Attestation gate: exempt — all files in exempt allowlist (docs/, tests/, *.md)"
           else
             echo "classification=feature" >> "$GITHUB_OUTPUT"
-            echo "Feature-code files that trigger the gate:"
-            echo "$FEATURE"
+            echo "Files requiring attestation (outside exempt allowlist):"
+            echo "$NON_EXEMPT"
           fi
 
       - name: Read allowed_signers from BASE branch (trust anchor)
@@ -93,7 +123,9 @@ jobs:
           steps.read_signers.outputs.signers_found == 'true'
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/scripts/lib/verify_pr.py" \
+          # Run the BASE-BRANCH copy of verify_pr.py — the PR-tree copy is NEVER executed.
+          PYTHONPATH="/tmp/vnx-base-verifier" \
+          python3 /tmp/vnx-base-verifier/verify_pr.py \
             --repo-root "$GITHUB_WORKSPACE" \
             --base-ref "origin/main" \
             --head-ref HEAD \
