@@ -332,6 +332,30 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         help="which proposals to show: rules, archival, or all (default: all)",
     )
 
+    lr_ab = learning_subs.add_parser(
+        "tagger-ab",
+        help=(
+            "read-only A/B: tag-overlap precision WITH tagger (LLM) vs WITHOUT "
+            "(deterministic derive_tags). Reports rescue-rate + cost. "
+            "Does NOT set VNX_TAGGER_ENABLED."
+        ),
+    )
+    lr_ab.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_ab.add_argument(
+        "--sample",
+        type=int,
+        default=20,
+        metavar="N",
+        help="number of patterns to sample (default: 20; keep small — each makes one LLM call)",
+    )
+    lr_ab.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        metavar="SEED",
+        help="random seed for deterministic sampling (default: 42)",
+    )
+
     lr_gs = learning_subs.add_parser(
         "grounding-shadow",
         help="compare V1 (substring-join) vs V2 (junction) confidence grounding — read-only",
