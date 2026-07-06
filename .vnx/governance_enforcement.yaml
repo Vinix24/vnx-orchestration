@@ -18,8 +18,8 @@ checks:
     scope: [scripts/, dashboard/, .github/]
 
   gemini_review_required:
-    level: 2
-    description: "Gemini review gate result must exist"
+    level: 0  # retired 2026-07-06 — gemini is no longer a required reviewer (CLI never wired; see pre10-gemini-complete). codex is the diff-mode reviewer.
+    description: "Gemini review gate (retired — not a required reviewer)"
     scope: [scripts/, dashboard/]
 
   ci_green_required:
@@ -59,7 +59,7 @@ presets:
   strict:
     gate_before_next_feature: 3
     codex_gate_required: 3
-    gemini_review_required: 3
+    gemini_review_required: 0  # retired 2026-07-06
     ci_green_required: 3
     pr_must_exist_before_next_dispatch: 3
     receipt_must_have_commit: 3
@@ -74,7 +74,7 @@ presets:
   relaxed:
     gate_before_next_feature: 1
     codex_gate_required: 1
-    gemini_review_required: 1
+    gemini_review_required: 0  # retired 2026-07-06
     ci_green_required: 3
     pr_must_exist_before_next_dispatch: 1
     receipt_must_have_commit: 1
