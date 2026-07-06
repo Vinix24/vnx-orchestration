@@ -1760,7 +1760,7 @@ def _reconcile_tracks_fresh(
             sys.path.insert(0, str(_LIB_DIR))
         from track_reconciler import reconcile_all_tracks
 
-        results = reconcile_all_tracks(store, pid)
+        results = reconcile_all_tracks(store, pid, repo_root=_PROJECT_ROOT)
     except RuntimeError as exc:
         # derived_status column absent (migration 0028 not applied to this
         # store). Not an error — reconcile is N/A here.

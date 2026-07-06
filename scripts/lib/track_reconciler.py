@@ -660,6 +660,7 @@ def close_track_if_done(
     evidence: Optional[EvidenceSnapshot] = None,
     approval_id: Optional[str] = None,
     include_parked: bool = False,
+    repo_root: "str | Path | None" = None,
 ) -> Dict[str, Any]:
     """Attempt to close a track by walking its declared phase to 'done'.
 
@@ -686,6 +687,10 @@ def close_track_if_done(
     own connection and commits per step. A mid-walk failure leaves the track at an
     intermediate phase; re-calling this function re-walks from the current declared
     phase (bounded TOCTOU-narrowing, not atomicity).
+
+    repo_root: optional project repo root, forwarded to the internal
+    reconcile_track call for its ROADMAP.yaml (Source-3) evidence path; falls
+    back to the CWD git-root then the legacy layout (see reconcile_track).
 
     Returns a dict with keys: track_id, project_id, action, applied, declared_phase,
     derived_status, path (when applicable), evidence (when computed), error (on failure).
@@ -853,7 +858,7 @@ def close_track_if_done(
     # When _skip_derived_gate is True, reconcile_track still runs for the derived
     # refresh (persists derived_status for reporting) but its result does not gate
     # the walk — gh evidence already authorized the close.
-    result = reconcile_track(state_dir, track_id, project_id)
+    result = reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
     derived = result["derived_status"]
     declared = result["declared_phase"]
     target = "done"

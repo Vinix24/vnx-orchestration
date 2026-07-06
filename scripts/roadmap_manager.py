@@ -814,7 +814,9 @@ Implement the minimum blocking fix required before the roadmap may advance.
             return {"status": "disabled", "reason": "VNX_ROADMAP_AUTOPILOT not set"}
 
         from track_reconciler import reconcile_all_tracks  # noqa: PLC0415
-        results = reconcile_all_tracks(self.state_dir, self.project_id)
+        results = reconcile_all_tracks(
+            self.state_dir, self.project_id, repo_root=self.project_root
+        )
         drifted_count = sum(1 for r in results if r.get("drifted"))
 
         emit_governance_receipt(

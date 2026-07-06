@@ -585,7 +585,9 @@ def run_reconcile(
     # Derived refresh — persists derived_status for every track.
     # ------------------------------------------------------------------ step 2
     try:
-        reconcile_results = track_reconciler.reconcile_all_tracks(state_dir, project_id)
+        reconcile_results = track_reconciler.reconcile_all_tracks(
+            state_dir, project_id, repo_root=repo_root
+        )
     except RuntimeError as exc:
         summary: Dict[str, Any] = {
             "run_id": run_id, "project_id": project_id, "mode": mode,
@@ -772,6 +774,7 @@ def run_reconcile(
                 actor="system",
                 evidence=evidence,
                 approval_id=f"auto-reconcile-{run_id}",
+                repo_root=repo_root,
             )
             action = close_result.get("action", "")
 
