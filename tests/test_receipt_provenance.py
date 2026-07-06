@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,6 +46,7 @@ from receipt_provenance import (
     find_receipts_by_dispatch,
     get_provenance_link,
     provenance_summary_for_dispatch,
+    reconcile_commit_provenance,
     register_provenance_link,
     validate_receipt_provenance,
 )
@@ -700,3 +703,238 @@ class TestBackwardCompatibility:
         # New fields present but optional
         assert "trace_token" in stored
         assert "pr_number" in stored
+
+
+# ---------------------------------------------------------------------------
+# D2 — track.pr_ref propagation from merge-side provenance reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _has_col(conn, table, col):
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == col for r in rows)
+
+
+def _add_track_layer(state_dir):
+    with get_connection(state_dir) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracks (
+                track_id TEXT NOT NULL PRIMARY KEY,
+                title TEXT NOT NULL,
+                goal_state TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'queued',
+                next_up INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                priority TEXT,
+                requires_operator_promotion INTEGER NOT NULL DEFAULT 1,
+                instruction_template TEXT,
+                context_composer_rules TEXT,
+                pr_ref TEXT,
+                trigger_condition TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                phase_changed_at TEXT,
+                completed_at TEXT,
+                metadata_json TEXT DEFAULT '{}'
+            )
+        """)
+        if not _has_col(conn, "dispatches", "project_id"):
+            conn.execute(
+                "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+            )
+        if not _has_col(conn, "dispatches", "track_id"):
+            conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
+        conn.commit()
+
+
+def _make_project(tmp_path, *, with_track_layer=True):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+        "HOME": str(tmp_path),
+    }
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    state_dir = repo / ".vnx-data" / "state"
+    init_schema(state_dir)
+    with get_connection(state_dir) as c:
+        if not _has_col(c, "dispatches", "project_id"):
+            c.execute(
+                "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+            )
+        c.commit()
+    if with_track_layer:
+        _add_track_layer(state_dir)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.row_factory = sqlite3.Row
+    return repo, state_dir, conn, env
+
+
+def _seed_track(conn, track_id, project_id, pr_ref=None):
+    conn.execute(
+        """
+        INSERT INTO tracks (track_id, project_id, title, goal_state, phase, pr_ref)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (track_id, project_id, f"Track {track_id}", f"ship {track_id}", "active", pr_ref),
+    )
+    conn.commit()
+
+
+def _seed_dispatch(conn, dispatch_id, project_id, track_id):
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track_id) VALUES (?, ?, ?, ?)",
+        (dispatch_id, project_id, "completed", track_id),
+    )
+    conn.commit()
+
+
+def _commit(repo, message, env):
+    i = len(list(repo.glob("*.txt")))
+    f = repo / f"f{i}.txt"
+    f.write_text(str(i))
+    subprocess.run(["git", "add", str(f)], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, env=env, check=True)
+
+
+class TestReconcileCommitProvenanceTrackLinkage:
+    DISPATCH_ID = "20260706-tl-d2-provenance-prref"
+
+    def _track_ref(self, conn, track_id, project_id):
+        row = conn.execute(
+            "SELECT pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return row["pr_ref"] if row else None
+
+    def test_links_pr_ref_from_squash_merge(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["linked"] == 1
+        assert result["pr_ref_linked"] == 1
+        assert self._track_ref(conn, "T-001", "test-proj") == "#412"
+        reg = conn.execute(
+            "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+            (self.DISPATCH_ID,),
+        ).fetchone()
+        assert reg["commit_sha"] is not None
+        conn.close()
+
+    def test_idempotent_dedup(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        first = reconcile_commit_provenance(repo, conn, max_commits=10)
+        second = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert first["pr_ref_linked"] == 1
+        assert second["pr_ref_linked"] == 0
+        assert self._track_ref(conn, "T-001", "test-proj") == "#412"
+        conn.close()
+
+    def test_preserves_existing_pr_ref(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj", pr_ref="#800")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_ref_linked"] == 1
+        assert self._track_ref(conn, "T-001", "test-proj") == "#800,#412"
+        conn.close()
+
+    def test_track_id_column_absent_is_noop(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path, with_track_layer=False)
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state) VALUES (?, ?, ?)",
+            (self.DISPATCH_ID, "test-proj", "completed"),
+        )
+        conn.commit()
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["linked"] == 1
+        assert result["pr_ref_linked"] == 0
+        reg = conn.execute(
+            "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+            (self.DISPATCH_ID,),
+        ).fetchone()
+        assert reg["commit_sha"] is not None
+        conn.close()
+
+    def test_null_track_id_is_noop(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state, track_id) VALUES (?, ?, ?, ?)",
+            (self.DISPATCH_ID, "test-proj", "completed", None),
+        )
+        conn.commit()
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_ref_linked"] == 0
+        assert self._track_ref(conn, "T-001", "test-proj") is None
+        conn.close()
+
+    def test_unknown_track_id_is_noop(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-missing")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_ref_linked"] == 0
+        assert self._track_ref(conn, "T-001", "test-proj") is None
+        conn.close()
+
+    def test_wrong_project_id_is_noop(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "other-proj", "T-001")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_ref_linked"] == 0
+        assert self._track_ref(conn, "T-001", "test-proj") is None
+        conn.close()
+
+    def test_no_pr_number_records_commit_only(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(repo, f"feat(x): do thing\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["linked"] == 1
+        assert result["pr_ref_linked"] == 0
+        assert self._track_ref(conn, "T-001", "test-proj") is None
+        reg = conn.execute(
+            "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+            (self.DISPATCH_ID,),
+        ).fetchone()
+        assert reg["commit_sha"] is not None
+        conn.close()

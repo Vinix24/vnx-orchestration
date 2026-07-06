@@ -21,15 +21,18 @@ Key responsibilities:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from runtime_coordination import _append_event, _now_utc
+
+logger = logging.getLogger(__name__)
 
 # ── Reuse trace token regexes from PR-0 ──────────────────────────────────
 
@@ -456,6 +459,110 @@ def register_provenance_link(
     )
 
 
+def _extract_pr_number(message: str) -> Optional[int]:
+    """Return the first ``#NNN`` PR number found in a commit message, or None."""
+    match = re.search(r"#(\d+)", message)
+    return int(match.group(1)) if match else None
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Best-effort column existence probe (tolerates missing table/locked DB)."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    return any(
+        (row[1] if not isinstance(row, sqlite3.Row) else row["name"]) == column
+        for row in rows
+    )
+
+
+def _connection_targets_db(conn: sqlite3.Connection, db_path: Path) -> bool:
+    """Return True when ``conn``'s main schema file is ``db_path``."""
+    try:
+        main_file = next(
+            (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+            None,
+        )
+    except sqlite3.Error:
+        return False
+    if not main_file:
+        return False
+    return Path(main_file).resolve() == Path(db_path).resolve()
+
+
+def _parse_pr_numbers(pr_ref: Optional[str]) -> Set[int]:
+    """Parse a comma/space separated pr_ref string into integer PR numbers."""
+    if not pr_ref:
+        return set()
+    numbers: Set[int] = set()
+    for token in re.split(r"[,\s]+", str(pr_ref).strip()):
+        if not token:
+            continue
+        try:
+            numbers.add(int(token.strip().lstrip("#").strip()))
+        except (TypeError, ValueError):
+            continue
+    return numbers
+
+
+def _link_pr_to_track(
+    state_conn: sqlite3.Connection,
+    dispatch_id: str,
+    pr_number: int,
+) -> bool:
+    """Upsert ``pr_number`` onto ``tracks.pr_ref`` for the track this dispatch points to.
+
+    Returns True when the track row was actually updated. Idempotent: a PR already
+    present is a no-op. Skips silently when the D1 ``track_id`` column is absent,
+    the dispatch has no track, or the track row does not exist.
+    """
+    if not _has_column(state_conn, "dispatches", "track_id"):
+        return False
+
+    has_project_id = _has_column(state_conn, "dispatches", "project_id")
+    if has_project_id:
+        row = state_conn.execute(
+            "SELECT track_id, project_id FROM dispatches WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+    else:
+        row = state_conn.execute(
+            "SELECT track_id FROM dispatches WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+
+    if not row:
+        return False
+
+    track_id = row[0]
+    if track_id is None:
+        return False
+
+    project_id = row[1] if has_project_id and len(row) > 1 else "vnx-dev"
+
+    if not _has_column(state_conn, "tracks", "pr_ref"):
+        return False
+
+    existing_row = state_conn.execute(
+        "SELECT pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    if not existing_row:
+        return False
+
+    existing = existing_row[0] or ""
+    if pr_number in _parse_pr_numbers(existing):
+        return False
+
+    new_ref = f"{existing},#{pr_number}" if existing else f"#{pr_number}"
+    state_conn.execute(
+        "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
+        (new_ref, track_id, project_id),
+    )
+    return True
+
+
 def reconcile_commit_provenance(
     repo_root: "str | Path",
     conn: sqlite3.Connection,
@@ -468,6 +575,10 @@ def reconcile_commit_provenance(
     This is the merge-side half of the chain (B1 wrote dispatch_id+receipt_id at append; this writes
     commit_sha so chain_status can reach 'complete'). Read-git + upsert-registry; best-effort — git
     errors yield ``{scanned: 0, linked: 0}``. Idempotent: register_provenance_link upserts per dispatch_id.
+
+    D2 extension: commits that carry a PR number (``(#NNN)``) and resolve to a dispatch with a
+    ``track_id`` also upsert that PR onto ``tracks.pr_ref`` in the project state store. This
+    step is order-independent with D1: if ``track_id`` is absent/NULL, the PR-link is skipped.
     """
     try:
         from trace_token_validator import extract_trace_tokens  # noqa: PLC0415
@@ -485,26 +596,62 @@ def reconcile_commit_provenance(
     if result.returncode != 0:
         return {"scanned": 0, "linked": 0}
 
-    scanned = linked = 0
-    for entry in result.stdout.split("\x1e"):
-        entry = entry.strip()
-        if not entry:
-            continue
-        sha, _sep, body = entry.partition("\x1f")
-        sha = sha.strip()
-        if not sha:
-            continue
-        scanned += 1
-        tokens = extract_trace_tokens(body)
-        dispatch_id = tokens.preferred or tokens.legacy_dispatch
-        if not dispatch_id:
-            continue
-        try:
-            register_provenance_link(conn, dispatch_id=dispatch_id, commit_sha=sha)
-            linked += 1
-        except sqlite3.Error:
-            continue
-    return {"scanned": scanned, "linked": linked}
+    # Open the project state DB once for the optional track.pr_ref upsert. If the
+    # supplied ``conn`` already targets that DB, reuse it to avoid a second connection
+    # (and the resulting lock contention in single-threaded callers). Failures here
+    # are non-fatal: provenance reconciliation must keep working exactly as before.
+    state_conn: Optional[sqlite3.Connection] = None
+    state_conn_borrowed = False
+    try:
+        from vnx_paths import resolve_state_dir  # noqa: PLC0415
+        state_dir = resolve_state_dir(repo_root)
+        state_db = (state_dir / "runtime_coordination.db").resolve()
+        if _connection_targets_db(conn, state_db):
+            state_conn = conn
+            state_conn_borrowed = True
+        else:
+            state_conn = sqlite3.connect(str(state_db), timeout=10.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not open project state db for pr_ref linking: %s", exc)
+        state_conn = None
+
+    scanned = linked = pr_ref_linked = 0
+    try:
+        for entry in result.stdout.split("\x1e"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            sha, _sep, body = entry.partition("\x1f")
+            sha = sha.strip()
+            if not sha:
+                continue
+            scanned += 1
+            tokens = extract_trace_tokens(body)
+            dispatch_id = tokens.preferred or tokens.legacy_dispatch
+            if not dispatch_id:
+                continue
+            try:
+                register_provenance_link(conn, dispatch_id=dispatch_id, commit_sha=sha)
+                linked += 1
+            except sqlite3.Error:
+                continue
+
+            pr_number = _extract_pr_number(body)
+            if pr_number is not None and state_conn is not None:
+                try:
+                    if _link_pr_to_track(state_conn, dispatch_id, pr_number):
+                        pr_ref_linked += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("pr_ref linking failed for %s: %s", dispatch_id, exc)
+    finally:
+        if state_conn is not None and not state_conn_borrowed:
+            try:
+                state_conn.commit()
+                state_conn.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("failed to commit/close project state db: %s", exc)
+
+    return {"scanned": scanned, "linked": linked, "pr_ref_linked": pr_ref_linked}
 
 
 def get_provenance_link(

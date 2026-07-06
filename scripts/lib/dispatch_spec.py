@@ -79,6 +79,7 @@ class DispatchSpec:
     skill: Optional[str] = None
     task_class: Optional[str] = None
     pr_id: Optional[str] = None
+    track_id: Optional[str] = None  # structural link to a tracks-table row (TL-D1); validated at the door
     deadline_seconds: int = 3600
     base_ref: str = "origin/main"
     isolation: Isolation = Isolation.WORKTREE
@@ -271,6 +272,14 @@ def validate(
                 f"allow_headless is only valid for provider=claude, got provider={spec.provider.value!r}; "
                 "headless api-metered billing is a claude-only lane",
             )
+
+    # Rule 13 — track_id format (presence + format only; existence against the tracks
+    # DB is deferred to dispatch_cli's door validation, which has DB access — mirrors
+    # how role/skill existence is deferred to compile_plan per the module docstring)
+    if spec.track_id is not None:
+        _track_id = spec.track_id.strip()
+        if not _track_id or not _ID_RE.match(_track_id):
+            return Reject("bad-track-id", f"track_id {spec.track_id!r} does not match id regex")
 
     return ValidatedSpec(
         spec=spec,

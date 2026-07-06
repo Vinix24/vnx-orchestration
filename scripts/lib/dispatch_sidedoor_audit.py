@@ -121,6 +121,7 @@ _RAW_SCAN_EXCLUDE_SUBSTR = (
     "/__pycache__/",
     "/hooks/pretooluse_",           # guards that DETECT raw spawns (hold the pattern, do not spawn)
     "/dispatch_sidedoor_audit.py",  # this auditor (holds the patterns as source)
+    "/process_cleanup.py",          # process-hygiene scanner: holds claude -p/--print as DETECTION patterns to hunt forbidden spawns, never spawns (#1029)
 )
 
 # Audited delivery callers (PR-2). A scanned file outside this set is a NEW side door and
