@@ -161,11 +161,28 @@ def test_haiku_provider_uses_correct_command():
 # ----------------------------------------------------------------------
 
 
+class _FakeResp:
+    """Minimal urlopen() context-manager stand-in returning a JSON envelope body."""
+
+    def __init__(self, body: str):
+        self._body = body.encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def test_ollama_provider_parses_output():
+    # The HTTP API returns the model completion in a {"response": "..."} envelope.
     prov = OllamaProvider(model="llama3.1:8b")
     with patch(
-        "classifier_providers.ollama_provider.subprocess.run",
-        return_value=_make_completed('{"x": 1}'),
+        "classifier_providers.ollama_provider.urllib.request.urlopen",
+        return_value=_FakeResp(json.dumps({"response": '{"x": 1}'})),
     ):
         result = prov.classify("test")
     assert result.error is None
@@ -174,41 +191,69 @@ def test_ollama_provider_parses_output():
     assert result.provider == "ollama"
 
 
-def test_ollama_provider_uses_correct_command():
+def test_ollama_provider_uses_http_json_api():
     prov = OllamaProvider(model="llama3.1:8b")
     captured = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        return _make_completed('{}')
+    def fake_urlopen(req, **kwargs):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(json.dumps({"response": "{}"}))
 
-    with patch("classifier_providers.ollama_provider.subprocess.run", side_effect=fake_run):
+    with patch(
+        "classifier_providers.ollama_provider.urllib.request.urlopen",
+        side_effect=fake_urlopen,
+    ):
         prov.classify("hi")
-    assert captured["cmd"] == ["ollama", "run", "llama3.1:8b"]
-    assert captured["kwargs"]["input"] == "hi"
+    assert captured["url"].endswith("/api/generate")
+    assert captured["body"]["model"] == "llama3.1:8b"
+    assert captured["body"]["prompt"] == "hi"
+    assert captured["body"]["stream"] is False
+    assert captured["body"]["format"] == "json"
 
 
-def test_ollama_provider_handles_missing_cli():
+def test_ollama_provider_handles_api_unreachable():
+    import urllib.error
+
     prov = OllamaProvider()
     with patch(
-        "classifier_providers.ollama_provider.subprocess.run",
-        side_effect=FileNotFoundError("ollama"),
+        "classifier_providers.ollama_provider.urllib.request.urlopen",
+        side_effect=urllib.error.URLError("connection refused"),
     ):
         result = prov.classify("test")
     assert result.error is not None
-    assert "not found" in result.error
+    assert "unreachable" in result.error
 
 
-def test_ollama_provider_handles_nonzero_exit():
+def test_ollama_provider_surfaces_error_envelope():
     prov = OllamaProvider()
     with patch(
-        "classifier_providers.ollama_provider.subprocess.run",
-        return_value=_make_completed("", returncode=1, stderr="model missing"),
+        "classifier_providers.ollama_provider.urllib.request.urlopen",
+        return_value=_FakeResp(json.dumps({"response": "", "error": "model missing"})),
     ):
         result = prov.classify("test")
-    assert result.error is not None
-    assert "exit 1" in result.error
+    assert result.error == "model missing"
+
+
+# ----------------------------------------------------------------------
+# parse_json_block robustness
+# ----------------------------------------------------------------------
+
+
+def test_parse_json_block_repairs_trailing_comma():
+    assert parse_json_block('{"a": 1, "b": [1, 2,],}') == {"a": 1, "b": [1, 2]}
+
+
+def test_parse_json_block_extracts_object_amid_prose():
+    text = 'noise {"include": [{"ref": "a.py:1-2"}], "plan": "do it"} trailing'
+    assert parse_json_block(text) == {"include": [{"ref": "a.py:1-2"}], "plan": "do it"}
+
+
+def test_parse_json_block_does_not_return_inner_object_when_outer_broken():
+    # A malformed OUTER object must read as a miss, never fall through to a valid
+    # inner sub-object (the bug that returned {"ref","why"} instead of the ranking).
+    text = '{"include": [{"ref": "a.py:1-2", "why": "x"}], "bad": }'
+    assert parse_json_block(text) is None
 
 
 # ----------------------------------------------------------------------
