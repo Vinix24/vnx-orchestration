@@ -31,6 +31,7 @@ from tmux_interactive_dispatch import (
     TmuxResult,
     _assert_no_headless_flags,
     _default_launch_command,
+    _resolve_invocation_project_root,
     _resolve_state_dir,
     _sanitize_session_name,
     main,
@@ -1021,6 +1022,104 @@ class TestStateDirMatchesCanonical(unittest.TestCase):
             lane_path,
             f"MISMATCH: lane={lane_path!r} != canonical={canonical_path!r}",
         )
+
+
+class TestInvocationProjectRootResolution(unittest.TestCase):
+    """Central-mode guard: project_root must come from the INVOCATION context.
+
+    In central-install mode the lane code lives under the shared keystone
+    (~/.vnx-system/current/scripts/lib/), so Path(__file__).parents[2] is the
+    keystone, NOT the operator's project. The lane must resolve the project from
+    VNX_PROJECT_ROOT / cwd-git instead, or workers spawn in the wrong directory.
+    """
+
+    def setUp(self) -> None:
+        # Snapshot + neutralize env so each case controls its own inputs.
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("VNX_PROJECT_ROOT", "VNX_CANONICAL_ROOT")
+        }
+        os.environ.pop("VNX_PROJECT_ROOT", None)
+        os.environ.pop("VNX_CANONICAL_ROOT", None)
+        self._cwd = Path.cwd()
+
+    def tearDown(self) -> None:
+        os.chdir(self._cwd)
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    @staticmethod
+    def _keystone() -> Path:
+        # What the buggy __file__.parents[2] fallback would return.
+        return TmuxInteractiveDispatch._resolve_project_root()
+
+    def test_env_var_wins_when_dir(self):
+        """VNX_PROJECT_ROOT (central-install shim export) resolves to the project."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            os.environ["VNX_PROJECT_ROOT"] = str(project)
+
+            resolved = _resolve_invocation_project_root()
+
+            self.assertEqual(resolved, project)
+            self.assertNotEqual(
+                resolved,
+                self._keystone(),
+                "central-mode must not resolve to the keystone (__file__.parents[2])",
+            )
+
+    def test_env_var_ignored_when_not_a_dir(self):
+        """A stale/bogus VNX_PROJECT_ROOT (non-dir) is skipped, not trusted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist"
+            os.environ["VNX_PROJECT_ROOT"] = str(missing)
+            # cwd is the vnx-orchestration repo (a git repo) during pytest, so
+            # candidate 2 (cwd-git) should carry the resolution.
+            resolved = _resolve_invocation_project_root()
+            self.assertTrue(resolved.is_dir())
+            self.assertNotEqual(resolved, missing)
+
+    def test_cwd_git_toplevel_used_when_no_env(self):
+        """With no env var, the invoking CWD's git top-level is the project."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            subprocess.run(
+                ["git", "init", "-q"], cwd=repo, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            nested = repo / "sub" / "dir"
+            nested.mkdir(parents=True)
+            os.chdir(nested)
+
+            resolved = _resolve_invocation_project_root()
+
+            # git top-level of the invocation cwd, not __file__.parents[2].
+            self.assertEqual(resolved, repo)
+            self.assertNotEqual(resolved, self._keystone())
+
+    def test_file_fallback_when_no_env_and_no_cwd_git(self):
+        """No env + a non-git cwd falls back to the lane code's own repo root."""
+        with tempfile.TemporaryDirectory() as tmp:
+            non_git = Path(tmp).resolve()
+            os.chdir(non_git)
+
+            resolved = _resolve_invocation_project_root()
+
+            self.assertEqual(resolved, self._keystone())
+
+    def test_constructor_threads_resolved_root(self):
+        """The lane instance's _project_root reflects the invocation-context root."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            os.environ["VNX_PROJECT_ROOT"] = str(project)
+            with tempfile.TemporaryDirectory() as state:
+                lane = TmuxInteractiveDispatch(
+                    state, project_root=_resolve_invocation_project_root()
+                )
+                self.assertEqual(lane._project_root, project)
 
 
 # ---------------------------------------------------------------------------
