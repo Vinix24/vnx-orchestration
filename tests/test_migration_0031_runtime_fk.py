@@ -155,7 +155,10 @@ _TRACK_CHAIN = (
 
 def _build_v30_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
     project_root = tmp_path / "project"
-    state_dir = project_root / ".vnx-data" / "state"
+    # Anchor the store under .vnx-data/<pid>/state so the static 0031 path can
+    # fail-closed-resolve the tenant identity ('vnx-dev' here) from the DB path
+    # (D3: the row-copy is stamped with the RESOLVED pid, not a hardcoded literal).
+    state_dir = project_root / ".vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
     conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
     conn.execute("PRAGMA foreign_keys=OFF")

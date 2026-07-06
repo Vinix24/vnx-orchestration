@@ -29,6 +29,23 @@ VALID_HORIZONS = frozenset({"now", "next", "later"})
 class InvalidHorizonError(ValueError):
     pass
 
+
+class HorizonColumnMissingError(RuntimeError):
+    """Raised when a horizon is requested but tracks.horizon does not exist.
+
+    Fail-closed (D5): a store predating migration 0027 lacks the horizon column.
+    The old behaviour silently DROPPED the requested horizon on create (and the
+    UPDATE path raised an opaque OperationalError), so `horizon add --horizon now`
+    appeared to succeed while the schedule was ignored. We now refuse loudly and
+    point the operator at `vnx migrate` instead of accepting a value we cannot store.
+    """
+    pass
+
+
+def _tracks_has_horizon(conn: sqlite3.Connection) -> bool:
+    """True when the tracks table carries the horizon column (migration 0027)."""
+    return any(row[1] == "horizon" for row in conn.execute("PRAGMA table_info('tracks')"))
+
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued":  frozenset({"active", "parked"}),
     "active":  frozenset({"done", "parked"}),
@@ -211,14 +228,23 @@ def create_track(
         )
 
     now = _now_utc()
-    _emit_track_event(state_dir, "track_created", track_id, project_id, "system", {"title": title})
     conn = _get_conn(state_dir)
     try:
         # horizon (migration 0027) is optional: only reference the column when it
         # exists, so the DAL stays compatible with pre-0027 (v24-era) databases.
-        has_horizon = any(
-            row[1] == "horizon" for row in conn.execute("PRAGMA table_info('tracks')")
-        )
+        # D5 fail-closed: if a horizon was REQUESTED but the column is absent, refuse
+        # loudly rather than silently drop it (the pre-fix silent no-op that hid the
+        # stuck-store gap). A pre-0027 store that requests NO horizon still works.
+        # Checked BEFORE the audit event so a refused create emits no track_created.
+        has_horizon = _tracks_has_horizon(conn)
+        if horizon is not None and not has_horizon:
+            raise HorizonColumnMissingError(
+                f"Cannot set horizon={horizon!r} on track {track_id!r}: the tracks "
+                "table has no 'horizon' column (store predates migration 0027). "
+                "Run `vnx migrate` to add the Horizon schema, then retry."
+            )
+        _emit_track_event(
+            state_dir, "track_created", track_id, project_id, "system", {"title": title})
         if has_horizon:
             conn.execute(
                 """
@@ -316,6 +342,17 @@ def update_authored_fields(
         ).fetchone()
         if not row:
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+
+        # D5 fail-closed: refuse a horizon write when the column is absent (pre-0027
+        # store) rather than crashing with an opaque "no such column: horizon". The
+        # unconditional `updates["horizon"] = horizon` above would otherwise reach the
+        # UPDATE and raise sqlite3.OperationalError. Checked before the audit event.
+        if "horizon" in updates and not _tracks_has_horizon(conn):
+            raise HorizonColumnMissingError(
+                f"Cannot set horizon={updates['horizon']!r} on track {track_id!r}: the "
+                "tracks table has no 'horizon' column (store predates migration 0027). "
+                "Run `vnx migrate` to add the Horizon schema, then retry."
+            )
 
         if updates:
             _emit_track_event(

@@ -10,6 +10,13 @@
 -- this static DDL atomically, and checks foreign_key_check + integrity_check
 -- before commit. The lease-token partial UNIQUE remains intentionally global
 -- because it is an incarnation token, not a tenant natural key.
+--
+-- TENANT PLACEHOLDER (ADR-007, D3): the ``'vnx-dev'`` literals below (the four
+-- project_id column DEFAULTs and the four row-copy INSERT...SELECT projections)
+-- are AT-REST PLACEHOLDERS ONLY. apply_migration_v31 renders this file through
+-- _render_static_0031_sql_with_pid(), substituting the DB-path-anchored,
+-- fail-closed-RESOLVED project_id before execution, so a non-vnx-dev store is
+-- never stamped 'vnx-dev'. Do NOT read these literals as a hardcoded tenant.
 
 PRAGMA foreign_keys = OFF;
 

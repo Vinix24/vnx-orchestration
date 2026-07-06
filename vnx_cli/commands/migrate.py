@@ -15,11 +15,110 @@ Use when:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 from vnx_cli import _engine
 from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+
+
+def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
+    """Drive the WHOLE future-system pipeline against the store at *data_root* (D4).
+
+    The bootstrap chain above only reaches the numbered runners with a paired
+    ``apply_NNNN.py`` (≤ v26). The Horizon schema (tracks.horizon, deliverables
+    view) plus the ADR-007 dispatches repair, version reconciliation, the 0027→0031
+    walk, and W1 tenant-stamping live in ``migrate_future_system.run()``, which was
+    NEVER wired into ``vnx migrate`` — leaving pre-Horizon stores missing
+    ``tracks.horizon`` (Bug A). This threads the EXACT canonical data root the CLI
+    already resolved (the runner would otherwise re-derive
+    ``<project_root>/.vnx-data`` — the D4 threading trap) and takes a VACUUM INTO
+    backup first. A W1 tenant-stamping failure is non-fatal here: the schema walk is
+    committed before W1 runs, so the store keeps ``tracks.horizon`` and the operator
+    is warned rather than losing the Horizon schema.
+    """
+    _engine.ensure_engine_on_path()
+    scripts_dir = _engine.engine_root() / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+
+    import migrate_future_system  # type: ignore
+
+    # Anchor the tenant on disk (not via a global env mutation that would leak across
+    # a fleet sweep or a shared test process): write the canonical .vnx-project-id
+    # marker in the data root when absent, so the fail-closed resolver in the runner
+    # resolves THIS store's project_id even for a non-central (XDG/local) layout the
+    # DB-path anchor can't cover. Never overwrites an existing marker.
+    marker = data_root / ".vnx-project-id"
+    if not marker.exists():
+        try:
+            marker.write_text(project_id + "\n", encoding="utf-8")
+        except OSError:
+            pass  # advisory — central stores still resolve via the DB-path anchor
+
+    # data_dir is threaded explicitly (D4 threading trap); no env mutation needed.
+    # run_tenant_stamp=False: W1 tenant-stamping is disabled for vnx migrate because it
+    # is currently broken for the stores this targets (pool_config UNIQUE collision on
+    # every bootstrapped store + a legacy recommendation_outcomes child-FK gap) and
+    # would only churn the store on a self-restoring failure. The schema fix that adds
+    # tracks.horizon (the actual gap) is delivered by the walk regardless. See run().
+    migrate_future_system.run(
+        data_dir=data_root,
+        tenant_stamp_fatal=False,
+        run_tenant_stamp=False,
+        backup=True,
+    )
+
+
+def _iter_central_project_stores() -> list[tuple[Path, str]]:
+    """Return ``[(data_root, project_id)]`` for every central per-project store.
+
+    A central store lives at ``<data_home>/<project_id>/state/runtime_coordination.db``
+    where <data_home> is ``$VNX_DATA_HOME`` or ``~/.vnx-data``. Only directory names
+    matching the project-id grammar (``^[a-z][a-z0-9-]{1,31}$``) are considered, so a
+    stray non-store dir cannot be swept and no path-traversal name is honoured.
+    """
+    import re as _re
+
+    pid_re = _re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+    data_home = Path(os.environ.get("VNX_DATA_HOME") or (Path.home() / ".vnx-data"))
+    if not data_home.is_dir():
+        return []
+    stores: list[tuple[Path, str]] = []
+    for child in sorted(data_home.iterdir()):
+        if not child.is_dir() or not pid_re.match(child.name):
+            continue
+        if (child / "state" / "runtime_coordination.db").exists():
+            stores.append((child, child.name))
+    return stores
+
+
+def migrate_all_central_stores() -> int:
+    """Fleet-sync: run the future-system pipeline on every central store (D4).
+
+    Invoked after ``vnx update`` flips the engine version so no per-project store is
+    left half-migrated behind a newer engine. Best-effort per store: a failure on one
+    store is logged and the sweep continues (never aborts the whole fleet). Each store
+    gets a VACUUM INTO backup and non-fatal W1. Returns the count that migrated cleanly.
+    """
+    stores = _iter_central_project_stores()
+    if not stores:
+        print("  no central per-project stores found — nothing to migrate.")
+        return 0
+    ok = 0
+    for data_root, project_id in stores:
+        print(f"\n[fleet-migrate] {project_id} — {data_root}")
+        try:
+            _run_future_system_pipeline(data_root, project_id)
+            ok += 1
+        except Exception as exc:
+            print(
+                f"  [fleet-migrate][WARN] {project_id}: migration failed: {exc}",
+                file=sys.stderr,
+            )
+    print(f"\n[fleet-migrate] {ok}/{len(stores)} central stores migrated cleanly.")
+    return ok
 
 
 def vnx_migrate(args) -> int:
@@ -43,6 +142,14 @@ def vnx_migrate(args) -> int:
         _bootstrap_runtime_dbs(data_root, project_id=project_id)
     except Exception as exc:
         print(f"\n  error: migration failed: {exc}", file=sys.stderr)
+        return 1
+
+    # D4: drive the future-system pipeline (0027→0031 + Horizon + W1) so
+    # tracks.horizon actually lands. Without this, vnx migrate stops at v26.
+    try:
+        _run_future_system_pipeline(data_root, project_id)
+    except Exception as exc:
+        print(f"\n  error: future-system migration failed: {exc}", file=sys.stderr)
         return 1
 
     print()
