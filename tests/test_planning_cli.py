@@ -265,9 +265,9 @@ def test_close_without_attest_still_refuses_non_terminal(tmp_path, capsys):
 # D5 blocker hint (guarded)
 # ---------------------------------------------------------------------------
 
-def test_close_blocked_calls_hint_renderer_guarded_no_crash(tmp_path, capsys):
-    """When derived_status is blocked, the guarded hint call must not crash
-    even though format_blocking_hint does not exist yet (D5)."""
+def test_close_blocked_renders_blocking_dependency_hint(tmp_path, capsys):
+    """When derived_status is blocked, the guarded hint call renders the
+    blocker hint now that format_blocking_hint exists (D5)."""
     sd = _build_db(tmp_path)
     tracks_lib.create_track(sd, "blocked", PROJECT_ID, title="x", goal_state="y", phase="queued")
     tracks_lib.create_track(sd, "dep", PROJECT_ID, title="dep", goal_state="y", phase="queued")
@@ -282,5 +282,5 @@ def test_close_blocked_calls_hint_renderer_guarded_no_crash(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "blocked" in out
-    # No crash means the test passes; format_blocking_hint is absent so no extra output.
-    assert not hasattr(track_reconciler, "format_blocking_hint")
+    assert "blocked by dependency dep" in out
+    assert "not done (phase=queued)" in out
