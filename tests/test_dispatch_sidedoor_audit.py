@@ -57,6 +57,15 @@ def test_no_unaudited_raw_claude_spawns():
     )
 
 
+def test_process_cleanup_detector_is_not_flagged_as_raw_claude_spawn():
+    # Regression: process_cleanup.py holds claude -p/--print as DETECTION patterns for its
+    # process-hygiene scan (#1029); it never spawns claude and must not be flagged.
+    result = audit_mod.audit()
+    assert "scripts/lib/process_cleanup.py" not in result["raw_claude_unaudited"], (
+        "process_cleanup.py is a detector, not a spawner; it should be excluded from the raw scan"
+    )
+
+
 def test_scan_detects_known_raw_claude_spawns():
     found = audit_mod.scan_raw_claude_spawns()
     for caller in (
