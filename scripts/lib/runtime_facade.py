@@ -66,8 +66,11 @@ def _resolve_state_dir() -> str:
     data_dir = os.environ.get("VNX_DATA_DIR", "")
     if data_dir:
         return str(Path(data_dir) / "state")
-    # Last-resort: repo-relative default (matches vnx_paths.py convention).
-    return str(Path(__file__).parent.parent.parent / ".vnx-data" / "state")
+    # Last-resort: canonical resolver (VNX_HOME + project-marker aware). A
+    # __file__.parents[3] walk would resolve the keystone
+    # (~/.vnx-system/current/.vnx-data) in a central install. See #1023.
+    from vnx_paths import resolve_state_dir as _canonical_state_dir
+    return str(_canonical_state_dir())
 
 
 def get_adapter(terminal: str) -> RuntimeAdapter:

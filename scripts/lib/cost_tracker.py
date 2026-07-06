@@ -73,8 +73,17 @@ def recent_cost_per_hour(
 
 
 def _resolve_receipts_path() -> Path:
-    """Resolve path via VNX_STATE_DIR or default."""
-    state_dir = os.environ.get("VNX_STATE_DIR", ".vnx-data/state")
+    """Resolve path via VNX_STATE_DIR or the canonical resolver.
+
+    A bare CWD-relative ``.vnx-data/state`` default is only correct when the CWD
+    happens to be a co-located dev checkout; route through the canonical resolver
+    (VNX_HOME + project-marker aware) so a central-mode project resolves
+    ~/.vnx-data/<project>/state instead.
+    """
+    state_dir = os.environ.get("VNX_STATE_DIR")
+    if not state_dir:
+        from vnx_paths import resolve_state_dir as _canonical_state_dir
+        state_dir = str(_canonical_state_dir())
     return Path(state_dir) / "t0_receipts.ndjson"
 
 

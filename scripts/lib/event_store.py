@@ -59,9 +59,13 @@ def _events_dir() -> Path:
     project_id = os.environ.get("VNX_PROJECT_ID", "")
     if project_id:
         return Path.home() / ".vnx-data" / project_id / "events"
-    # Backwards-compat: single-project environments without VNX_PROJECT_ID
-    script_dir = Path(__file__).resolve().parent
-    return script_dir.parent.parent / ".vnx-data" / "events"
+    # Backwards-compat: no explicit VNX_DATA_DIR and no VNX_PROJECT_ID. Route
+    # through the canonical resolver (VNX_HOME + project-marker aware), which
+    # resolves ~/.vnx-data/<project>. A __file__ walk (script_dir.parent.parent)
+    # would resolve the keystone (~/.vnx-system/current/.vnx-data) in a central
+    # install, losing the event stream. See #1023.
+    from vnx_paths import resolve_paths
+    return Path(resolve_paths()["VNX_DATA_DIR"]) / "events"
 
 
 class EventStore:

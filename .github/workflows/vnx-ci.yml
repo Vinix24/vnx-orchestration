@@ -75,6 +75,8 @@ jobs:
             "$VNX_HOME/tests/test_receipt_ci_guard.py" \
             "$VNX_HOME/tests/test_dispatch_sidedoor_audit.py" \
             "$VNX_HOME/tests/test_runtime_adapter_certification.py" \
+            "$VNX_HOME/tests/test_central_mode_path_gate.py" \
+            "$VNX_HOME/tests/test_central_mode_path_resolution.py" \
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
@@ -86,6 +88,16 @@ jobs:
           # Audit #2: the dispatch-lane exhaustiveness invariant — fail CI if a new direct delivery
           # caller bypasses the single-entry door without being audited.
           python3 "$VNX_HOME/scripts/lib/dispatch_sidedoor_audit.py"
+
+      - name: Central-mode path gate
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          # Fail CI if a new .vnx-data/ROADMAP.yaml path literal is derived from
+          # __file__/parents[N] in scripts/lib (would resolve the keystone, not
+          # ~/.vnx-data/<project>, in a central install). See #1023/#1024.
+          python3 "$VNX_HOME/scripts/check_no_file_derived_data_paths.py" "$VNX_HOME"
 
   trace-token-check:
     name: Trace Token Validation

@@ -144,6 +144,7 @@ class TestSessionIdNotSavedOnFailureOrTimeout(unittest.TestCase):
         adapter = _make_adapter(returncode=1)
 
         cms = _common_patches() + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
             patch("session_store.SessionStore", return_value=store),
             patch.dict("os.environ", {"VNX_SESSION_RESUME": "1"}, clear=False),
@@ -173,6 +174,7 @@ class TestSessionIdNotSavedOnFailureOrTimeout(unittest.TestCase):
         adapter = _make_adapter(returncode=None, was_timed_out=True)
 
         cms = _common_patches() + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
             patch("session_store.SessionStore", return_value=store),
             patch.dict("os.environ", {"VNX_SESSION_RESUME": "1"}, clear=False),
@@ -201,6 +203,7 @@ class TestSessionIdNotSavedOnFailureOrTimeout(unittest.TestCase):
                                 session_id="fresh-success-session")
 
         cms = _common_patches() + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
             patch("session_store.SessionStore", return_value=store),
             patch.dict("os.environ", {"VNX_SESSION_RESUME": "1"}, clear=False),

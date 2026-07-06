@@ -233,7 +233,9 @@ def test_load_merged_from_roadmap_yaml(tmp_path):
         "        status: merged\n",
         encoding="utf-8",
     )
-    result = _load_merged_pr_numbers(state_dir)
+    # repo_root points Source-3 at the test-controlled ROADMAP.yaml deterministically
+    # (independent of the CWD git-root), which is the project repo root.
+    result = _load_merged_pr_numbers(state_dir, repo_root=tmp_path)
     assert 800 in result
     assert 802 in result
     assert 801 not in result  # status=open, not merged
@@ -253,7 +255,7 @@ def test_load_merged_combines_sources(tmp_path):
         "features:\n  - feature_id: f\n    pr_queue:\n      - pr_id: '#757'\n        status: merged\n",
         encoding="utf-8",
     )
-    result = _load_merged_pr_numbers(state_dir)
+    result = _load_merged_pr_numbers(state_dir, repo_root=tmp_path)
     assert 676 in result
     assert 757 in result
 
@@ -476,13 +478,14 @@ def test_reconcile_all_tracks_prref_evidence(tmp_path):
     _seed_track(state_dir, "T-all-d", pr_ref=None)
     _seed_dispatch(state_dir, "D-all-d", "T-all-d", state="running")
 
-    # ROADMAP.yaml at project root (state_dir.parent.parent == tmp_path for deep=True)
+    # ROADMAP.yaml at the project repo root; repo_root threads it into Source-3
+    # deterministically (independent of the CWD git-root).
     (tmp_path / "ROADMAP.yaml").write_text(
         "features:\n  - feature_id: f\n    pr_queue:\n      - pr_id: '#756'\n        status: merged\n",
         encoding="utf-8",
     )
 
-    results = track_reconciler.reconcile_all_tracks(state_dir, PROJECT_ID)
+    results = track_reconciler.reconcile_all_tracks(state_dir, PROJECT_ID, repo_root=tmp_path)
     by_id = {r["track_id"]: r for r in results}
 
     assert by_id["T-all-a"]["derived_status"] == "done"

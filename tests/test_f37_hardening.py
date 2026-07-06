@@ -30,82 +30,102 @@ class TestEventArchiveOnCompletion(unittest.TestCase):
     """archive() must be called in the finally block after subprocess completes."""
 
     def _run_deliver(self, mock_adapter_cls, archive_raises=False):
-        """Helper: run deliver_via_subprocess with a mocked adapter."""
+        """Helper: run deliver_via_subprocess with a mocked adapter.
+
+        Also patches subprocess_dispatch.SubprocessAdapter to the SAME mock
+        class: delivery.py's finally block falls back to
+        `subprocess_dispatch.SubprocessAdapter()` for cleanup when
+        spawn_result is never assigned (e.g. an exception inside
+        spawn_claude before it returns) — leaving that binding real would
+        construct an actual SubprocessAdapter for event-store cleanup.
+        """
         mock_event_store = MagicMock()
         if archive_raises:
-            mock_event_store.archive.side_effect = RuntimeError("archive error")
+            mock_event_store.clear.side_effect = RuntimeError("archive error")
 
         mock_adapter = MagicMock()
-        mock_adapter._get_event_store.return_value = mock_event_store
+        mock_adapter.event_store = mock_event_store
         mock_adapter.deliver.return_value = MagicMock(success=True)
         mock_adapter.read_events_with_timeout.return_value = iter([])
         mock_adapter.trigger_report_pipeline.return_value = True
         mock_adapter_cls.return_value = mock_adapter
 
         from subprocess_dispatch import deliver_via_subprocess
-        deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-123")
+        with patch("subprocess_dispatch.SubprocessAdapter", new=mock_adapter_cls):
+            deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-123")
         return mock_event_store
 
-    @patch("subprocess_dispatch.SubprocessAdapter")
+    @patch("provider_spawns.claude_spawn.SubprocessAdapter")
     def test_archive_called_in_finally_on_success(self, mock_cls):
         es = self._run_deliver(mock_cls)
-        es.archive.assert_called_once_with("T1", "dispatch-123")
+        es.clear.assert_called_once_with("T1", archive_dispatch_id="dispatch-123")
 
-    @patch("subprocess_dispatch.SubprocessAdapter")
+    @patch("provider_spawns.claude_spawn.SubprocessAdapter")
     def test_archive_called_before_trigger(self, mock_cls):
-        """archive() must be called before trigger_report_pipeline()."""
+        """archive (via event_store.clear) must be called before trigger_report_pipeline()."""
         call_order = []
 
         mock_event_store = MagicMock()
-        mock_event_store.archive.side_effect = lambda *a: call_order.append("archive")
+        mock_event_store.clear.side_effect = lambda *a, **kw: call_order.append("archive")
 
         mock_adapter = MagicMock()
-        mock_adapter._get_event_store.return_value = mock_event_store
+        mock_adapter.event_store = mock_event_store
         mock_adapter.deliver.return_value = MagicMock(success=True)
         mock_adapter.read_events_with_timeout.return_value = iter([])
         mock_adapter.trigger_report_pipeline.side_effect = lambda *a, **kw: call_order.append("trigger")
         mock_cls.return_value = mock_adapter
 
         from subprocess_dispatch import deliver_via_subprocess
-        deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-123")
+        with patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls):
+            deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-123")
 
         self.assertEqual(call_order, ["archive", "trigger"])
 
-    @patch("subprocess_dispatch.SubprocessAdapter")
+    @patch("provider_spawns.claude_spawn.SubprocessAdapter")
     def test_archive_called_even_when_subprocess_raises(self, mock_cls):
-        """archive() runs in finally even when read_events raises."""
+        """archive (via event_store.clear) runs in finally even when read_events raises.
+
+        deliver_via_subprocess no longer swallows arbitrary exceptions from the
+        stream read (spawn_claude only catches SubprocessError/JSONDecodeError/
+        OSError) — RuntimeError propagates after the finally block runs, so this
+        asserts the raise instead of a False return. Also, spawn_result is never
+        assigned when spawn_claude raises, so the finally block's cleanup falls
+        back to subprocess_dispatch.SubprocessAdapter() — patch that binding too.
+        """
         mock_event_store = MagicMock()
         mock_adapter = MagicMock()
-        mock_adapter._get_event_store.return_value = mock_event_store
+        mock_adapter.event_store = mock_event_store
         mock_adapter.deliver.return_value = MagicMock(success=True)
         mock_adapter.read_events_with_timeout.side_effect = RuntimeError("stream error")
         mock_adapter.trigger_report_pipeline.return_value = True
         mock_cls.return_value = mock_adapter
 
         from subprocess_dispatch import deliver_via_subprocess
-        result = deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-abc")
-        self.assertFalse(result)
-        mock_event_store.archive.assert_called_once_with("T1", "dispatch-abc")
+        with patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls):
+            with self.assertRaises(RuntimeError):
+                deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-abc")
+        mock_event_store.clear.assert_called_once_with("T1", archive_dispatch_id="dispatch-abc")
 
-    @patch("subprocess_dispatch.SubprocessAdapter")
+    @patch("provider_spawns.claude_spawn.SubprocessAdapter")
     def test_archive_failure_does_not_crash(self, mock_cls):
         """archive() exception must not propagate — pipeline must remain non-crashing."""
         es = self._run_deliver(mock_cls, archive_raises=True)
-        es.archive.assert_called_once()  # was called; exception was swallowed
+        es.clear.assert_called_once()  # was called; exception was swallowed
 
-    @patch("subprocess_dispatch.SubprocessAdapter")
+    @patch("provider_spawns.claude_spawn.SubprocessAdapter")
     def test_no_archive_when_event_store_unavailable(self, mock_cls):
         """When _get_event_store() returns None, no crash."""
         mock_adapter = MagicMock()
-        mock_adapter._get_event_store.return_value = None
+        mock_adapter.event_store = None
         mock_adapter.deliver.return_value = MagicMock(success=True)
         mock_adapter.read_events_with_timeout.return_value = iter([])
         mock_adapter.trigger_report_pipeline.return_value = True
         mock_cls.return_value = mock_adapter
 
         from subprocess_dispatch import deliver_via_subprocess
-        # Should not raise
-        deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-xyz")
+        with patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls):
+            # Should not raise
+            deliver_via_subprocess("T1", "instruction", "sonnet", "dispatch-xyz")
 
 
 # ─── OI-1063: FALLBACK_POLICY in auto_report_contract ────────────────────────

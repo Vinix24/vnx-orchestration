@@ -547,11 +547,35 @@ def _persist_summary(state_dir: Path, summary: Dict[str, Any]) -> None:
 # Core run logic
 # ---------------------------------------------------------------------------
 
+def _resolve_effective_repo_root() -> Path:
+    """Resolve a concrete project repo root for gh + ROADMAP evidence.
+
+    Used when the caller passes ``repo_root=None``. Prefers the canonical
+    PROJECT_ROOT (VNX_HOME + project-marker aware — never the keystone), then the
+    CWD git-root, then the CWD. Always returns a real directory so ``gh``
+    subprocess ``cwd=`` and Source-3 resolution never receive ``None``.
+    """
+    try:
+        from vnx_paths import resolve_paths
+        candidate = Path(resolve_paths()["PROJECT_ROOT"])
+        if candidate.is_dir():
+            return candidate
+    except Exception:  # vnx-silent-except: best-effort — fall through to the git-root candidate
+        pass
+    try:
+        git_root = track_reconciler._git_toplevel(Path.cwd())
+        if git_root is not None:
+            return git_root
+    except Exception:  # vnx-silent-except: best-effort — fall through to the CWD fallback
+        pass
+    return Path.cwd()
+
+
 def run_reconcile(
     state_dir: Path,
     project_id: str,
     *,
-    repo_root: Path,
+    repo_root: Optional[Path] = None,
     apply: bool = False,
     allow_closed_siblings: bool = False,
     max_gh_calls: int = 50,
@@ -560,7 +584,16 @@ def run_reconcile(
 
     Returns (summary_dict, exit_code) where exit_code is 0, 2, or 3.
     Never raises — all errors are captured in the summary and returned as exit 3.
+
+    ``repo_root`` may be None: gh PR lookups and the ROADMAP.yaml (Source-3)
+    evidence need a concrete project repo, so a None is resolved here to the
+    canonical PROJECT_ROOT / CWD git-root / CWD (mirroring track_reconciler's
+    None-handling) rather than degrading gh to ``cwd="None"`` (= absent).
     """
+    # None-tolerance: never pass None into gh (cwd="None") or downstream.
+    if repo_root is None:
+        repo_root = _resolve_effective_repo_root()
+
     run_id = _make_run_id()
     started_at = _now_utc()
     mode = "apply" if apply else "check"
@@ -585,7 +618,9 @@ def run_reconcile(
     # Derived refresh — persists derived_status for every track.
     # ------------------------------------------------------------------ step 2
     try:
-        reconcile_results = track_reconciler.reconcile_all_tracks(state_dir, project_id)
+        reconcile_results = track_reconciler.reconcile_all_tracks(
+            state_dir, project_id, repo_root=repo_root
+        )
     except RuntimeError as exc:
         summary: Dict[str, Any] = {
             "run_id": run_id, "project_id": project_id, "mode": mode,
@@ -772,6 +807,7 @@ def run_reconcile(
                 actor="system",
                 evidence=evidence,
                 approval_id=f"auto-reconcile-{run_id}",
+                repo_root=repo_root,
             )
             action = close_result.get("action", "")
 

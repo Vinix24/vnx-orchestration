@@ -1,12 +1,48 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-07-02T06:18:25.424971+00:00
+**Last updated**: 2026-07-06T06:59:07.229673+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #1024 — fix(migrate): wire+repair the Horizon 0022-0031 pipeline into vnx migrate (P0) (#1024) (2026-07-06)
+- #1023 — fix(lane): thread project_root from invocation context so central-mode workers spawn in the project, not the keystone (#1023) (2026-07-06)
+- #1022 — docs(core): Horizon planning module (#1022) (2026-07-05)
+- #1019 — docs(governance): sweep to shipped reality (#1001-1018) (#1019) (2026-07-05)
+- #1021 — docs(intelligence): sweep to shipped reality (#1001-1018) (#1021) (2026-07-05)
+- #1020 — docs(dispatch): sweep to shipped reality (#1001-1018) (#1020) (2026-07-05)
+- #1018 — test(horizon): parity + ADR-007 cross-project isolation coverage [D3] (#1018) (2026-07-05)
+- #1017 — feat(dispatch): configurable tmux-spawn concurrency via VNX_TMUX_MAX_CONCURRENT (N-slot semaphore, default 1) (#1017) (2026-07-05)
+- #1016 — chore(dispatch): default tmux-spawn workers to --dangerously-skip-permissions (isolated worktree; VNX_WORKER_SCOPED=1 opts into scoped) (#1016) (2026-07-05)
+- #1015 — refactor(horizon): rename pm skill → horizon + reconcile terminology (pm alias kept) [D2] (#1015) (2026-07-05)
+- #1014 — feat(horizon): ship vnx horizon command group (full surface, tenant-safe resolver, objective/deliverable aliases) [D1] (#1014) (2026-07-05)
+- #1013 — chore(providers): bump worker pin Sonnet 4.6 → Sonnet 5 (#1013) (2026-07-05)
+- #1011 — feat(gov): signed budgeted audited gate override (recorded deviation, never silent) [D4] (#1011) (2026-07-05)
+- #1012 — feat(gov): init provisions attest trust-root + ships the gate workflow (no key) [D5] (#1012) (2026-07-05)
+- #1009 — feat(gov): server-side attestation verify gate, staged advisory + CODEOWNERS trust-root [D3] (#1009) (2026-07-05)
+- #1010 — docs(intel): self-learning loop — operator-gated tiers, off-switches, philosophy [D7] (#1010) (2026-07-05)
+- #1008 — feat(intel): operator-gated skill-refinement proposals from rework attribution [D6] (#1008) (2026-07-05)
+- #1006 — feat(intel): tagger A/B harness (optional precision, no default-on) [D4] (#1006) (2026-07-05)
+- #1007 — feat(gov): in-repo attest record, content-keyed + diff-bound (squash-safe) [D2] (#1007) (2026-07-04)
+- #1005 — feat(intel): outcome-grounding shadow-verify V2 vs V1 + directional check [D5] (#1005) (2026-07-04)
+- #1004 — feat(gov): SSH-key signing/verify + attestation manifest (test-key; keychain = operator step) [D1] (#1004) (2026-07-04)
+- #1003 — feat(intel): schedule operator-gated proposal tier + gate stale-pattern supersede [D3] (#1003) (2026-07-04)
+- #1002 — refactor(intel): drop dead success_rate column, reversible migration [D2] (#1002) (2026-07-04)
+- #1001 — refactor(intel): explicit confidence range contract + keep subprocess delta path [D1] (#1001) (2026-07-04)
+- #1000 — fix(reconcile): flip criterion requires 7 consecutive clean runs [Tier-2 finding] (#1000) (2026-07-04)
+- #999 — docs(reconcile): closed-loop backward closure — reconcile, reopen valve, operational notes [D5] (#999) (2026-07-04)
+- #998 — feat(reconcile): advisory-first continuous wiring — tick, review log, flip streak [D4] (#998) (2026-07-04)
+- #997 — feat(reconcile): audited done→active reopen valve + re-close guard [D6] (#997) (2026-07-04)
+- #996 — feat(reconcile): vnx objective reconcile — git-grounded batch auto-close [D3] (#996) (2026-07-04)
+- #995 — refactor(reconcile): extract close_track_if_done with close-time revalidation [D2] (#995) (2026-07-04)
+- #994 — feat(reconcile): ALL-merged multi-PR derivation + declared-done stability [D1] (#994) (2026-07-04)
+- #993 — docs(release): 1.0.0 post-launch sweep — released framing + SSOT reframe + archive (#993) (2026-07-04)
+- #992 — feat(skills): trigger-rich future-state skill descriptions + pm model-invocable (#992) (2026-07-03)
+- #991 — feat(gate): full provider-family panel for plan-gate assurance (#991) (2026-07-03)
+- #985 — docs(release): flip 1.0.0 RC framing to released 2026-07-02 (#985) (2026-07-02)
+- #984 — fix(security): block /state/ path traversal in dashboard [P0] (#984) (2026-07-02)
 - #983 — fix(launch): dependency + doc launch-blockers from the pre-1.0 provider-panel sweep (#983) (2026-07-01)
 - #982 — docs(launch): 1.0 HN-launch readiness — reconcile release status + refresh stale manifesto stamps (#982) (2026-07-01)
 - #981 — fix(governance): architecture batch A7+A6 — surface door-invariant breaches distinctly (#981) (2026-07-01)
@@ -57,7 +93,11 @@ _No active features._
 
 ## Completed
 
-_No completed features found in register or PR history._
+### F1
+All PRs merged. (#976 + #977)
+
+### F6
+All PRs merged. (#963)
 
 ## Planned (from ROADMAP.yaml)
 

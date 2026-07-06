@@ -206,9 +206,12 @@ class DispatchEnricher:
             p = Path(state_dir) / "quality_intelligence.db"
             if p.exists():
                 return p
-        # Fallback: repo-relative
-        here = Path(__file__).resolve()
-        candidate = here.parent.parent.parent / ".vnx-data" / "state" / "quality_intelligence.db"
+        # Fallback: canonical resolver (VNX_HOME + project-marker aware). A
+        # __file__.parents[3] walk would resolve the keystone
+        # (~/.vnx-system/current/.vnx-data) in a central install, where the
+        # intelligence DB never lives — silently disabling file-affinity intel.
+        from vnx_paths import resolve_state_dir as _canonical_state_dir
+        candidate = _canonical_state_dir() / "quality_intelligence.db"
         return candidate if candidate.exists() else None
 
     def _build_file_affinity_section(self, target_files: List[str]) -> str:

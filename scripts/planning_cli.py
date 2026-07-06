@@ -61,8 +61,11 @@ def _resolve_state_dir(explicit: str) -> Path:
     env = os.environ.get("VNX_STATE_DIR", "")
     if env:
         return Path(env)
-    from project_root import resolve_project_root
-    return resolve_project_root(__file__) / ".vnx-data" / "state"
+    # Canonical resolver: VNX_DATA_DIR + VNX_HOME + project-marker aware.
+    # resolve_project_root(__file__) resolves the KEYSTONE in a central install
+    # (and ignores VNX_DATA_DIR). See central-mode-path-correctness.
+    from vnx_paths import resolve_state_dir as _canonical_state_dir
+    return _canonical_state_dir()
 
 
 def _resolve_roadmap_path(explicit: str | None) -> Path:
@@ -71,8 +74,25 @@ def _resolve_roadmap_path(explicit: str | None) -> Path:
     env = os.environ.get("VNX_ROADMAP_PATH", "")
     if env:
         return Path(env)
-    from project_root import resolve_project_root
-    return resolve_project_root(__file__) / "ROADMAP.yaml"
+    # The project's ROADMAP.yaml lives at the resolved PROJECT_ROOT, not the
+    # keystone that resolve_project_root(__file__) yields in a central install.
+    from vnx_paths import resolve_paths
+    return Path(resolve_paths()["PROJECT_ROOT"]) / "ROADMAP.yaml"
+
+
+def _resolve_repo_root(explicit: str) -> Path | None:
+    """Resolve the project repo root ONLY when explicitly provided.
+
+    Returns None when no --repo-root is given, so track_reconciler's Source-3
+    resolver runs its own CWD-git-root -> legacy fallback. Deriving a default via
+    resolve_project_root(__file__) would yield the KEYSTONE in a central install
+    and -- because the reconciler treats any non-None repo_root as explicit
+    (track_reconciler._resolve_roadmap_path) -- poison the ROADMAP.yaml lookup.
+    Pass --repo-root to override when the CWD is not the project repo.
+    """
+    if explicit:
+        return Path(explicit).resolve()
+    return None
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -325,15 +345,11 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
 
-    if args.repo_root:
-        repo_root = Path(args.repo_root).resolve()
-    else:
-        try:
-            from project_root import resolve_project_root  # noqa: PLC0415
-            repo_root = resolve_project_root(__file__)
-        except Exception as exc:
-            print(f"reconcile: cannot resolve repo root: {exc}", file=sys.stderr)
-            return 2
+    try:
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+    except Exception as exc:
+        print(f"reconcile: cannot resolve repo root: {exc}", file=sys.stderr)
+        return 2
 
     try:
         summary, exit_code = objective_reconcile.run_reconcile(
@@ -488,7 +504,13 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
 
-    results = track_reconciler.reconcile_all_tracks(state_dir, project_id)
+    try:
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+    except Exception as exc:
+        logger.warning("drift: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
+        repo_root = None
+
+    results = track_reconciler.reconcile_all_tracks(state_dir, project_id, repo_root=repo_root)
 
     divergent = []
     for r in results:
@@ -572,13 +594,23 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     track_id = args.track_id
 
     try:
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+    except Exception as exc:
+        logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
+        repo_root = None
+
+    try:
         # Dry-run is READ-ONLY: peek computes derived_status without persisting.
         # --apply reconciles fresh (and persists derived_status) right before the
         # write, so the transition acts on current state.
         if args.apply:
-            result = track_reconciler.reconcile_track(state_dir, track_id, project_id)
+            result = track_reconciler.reconcile_track(
+                state_dir, track_id, project_id, repo_root=repo_root
+            )
         else:
-            result = track_reconciler.peek_derived_status(state_dir, track_id, project_id)
+            result = track_reconciler.peek_derived_status(
+                state_dir, track_id, project_id, repo_root=repo_root
+            )
     except Exception as exc:
         print(f"objective close failed: cannot reconcile {track_id}: {exc}", file=sys.stderr)
         return 1
@@ -638,7 +670,9 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
 
     # Surface the done-evidence so the operator gate is informed: the reconciler
     # derives 'done' from ANY terminal dispatch state, including expired/dead_letter.
-    payload["evidence"] = _close_evidence(state_dir, track_id, project_id)
+    # Thread repo_root so the dry-run merged-PR check reads the project's ROADMAP
+    # (Source-3), matching the --apply path via close_track_if_done.
+    payload["evidence"] = _close_evidence(state_dir, track_id, project_id, repo_root=repo_root)
 
     # The state machine forbids skips (e.g. queued -> done is illegal: a track
     # must pass through 'active'). A merged track stuck at queued/parked is
@@ -671,6 +705,7 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
         actor="operator",
         approval_id=args.approval_id,
         include_parked=getattr(args, "include_parked", False),
+        repo_root=repo_root,
     )
     lib_action = lib.get("action")
 
@@ -1434,6 +1469,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="advisory drift-gate: report declared-vs-derived divergence (exit 0); drift reports, `objective reconcile` fixes",
     )
     _common(p_drift)
+    p_drift.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+    )
     p_drift.set_defaults(func=cmd_objective_drift)
 
     p_reconcile = obj_sub.add_parser(
@@ -1473,6 +1513,11 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="operator approval token (REQUIRED with --apply)")
     p_close.add_argument("--include-parked", action="store_true",
                          help="allow closing a PARKED track (un-parks it; off by default)")
+    p_close.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+    )
     p_close.set_defaults(func=cmd_objective_close)
 
     p_reopen = obj_sub.add_parser(

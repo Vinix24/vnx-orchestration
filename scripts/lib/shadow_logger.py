@@ -33,9 +33,12 @@ def _resolve_ledger_path(ledger_path: Optional[Path]) -> Path:
     if ledger_path is not None:
         return ledger_path
     try:
-        from project_root import resolve_state_dir
+        # Canonical resolver (VNX_HOME + project-marker aware). project_root's
+        # resolve_state_dir(__file__) resolves the keystone git-root
+        # (~/.vnx-system/current/.vnx-data) in a central install. See #1023.
+        from vnx_paths import resolve_state_dir
 
-        return resolve_state_dir(__file__) / LEDGER_FILENAME
+        return resolve_state_dir() / LEDGER_FILENAME
     except Exception:
         return _DEFAULT_STATE_DIR / LEDGER_FILENAME
 

@@ -10,11 +10,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _project_root() -> Path:
-    """Resolve project root: scripts/lib/subprocess_dispatch_internals/ -> ../../../."""
-    return Path(__file__).resolve().parents[3]
-
-
 def _default_state_dir() -> Path:
     """Resolve VNX state directory from environment."""
     env = os.environ.get("VNX_STATE_DIR", "")
@@ -23,7 +18,11 @@ def _default_state_dir() -> Path:
     data_dir = os.environ.get("VNX_DATA_DIR", "")
     if data_dir:
         return Path(data_dir) / "state"
-    return _project_root() / ".vnx-data" / "state"
+    # Canonical resolver (VNX_HOME + project-marker aware). A Path(__file__)
+    # walk resolves the keystone (~/.vnx-system/current/.vnx-data) in a central
+    # install, never the project store. See central-mode-path-correctness.
+    from vnx_paths import resolve_state_dir as _canonical_state_dir
+    return _canonical_state_dir()
 
 
 def _resolve_active_dispatch_file(dispatch_id: str) -> Path | None:
@@ -33,11 +32,11 @@ def _resolve_active_dispatch_file(dispatch_id: str) -> Path | None:
     another path).  Used by the deliver_with_recovery exit hooks.
     """
     data_dir = os.environ.get("VNX_DATA_DIR", "")
-    base = (
-        Path(data_dir) / "dispatches" / "active"
-        if data_dir
-        else _project_root() / ".vnx-data" / "dispatches" / "active"
-    )
+    if data_dir:
+        base = Path(data_dir) / "dispatches" / "active"
+    else:
+        from vnx_paths import resolve_paths
+        base = Path(resolve_paths()["VNX_DISPATCH_DIR"]) / "active"
     if not base.is_dir():
         return None
     for path in base.iterdir():
@@ -51,7 +50,8 @@ def _dispatch_manifest_dir(stage: str, dispatch_id: str) -> Path:
     data_dir = os.environ.get("VNX_DATA_DIR", "")
     if data_dir:
         return Path(data_dir) / "dispatches" / stage / dispatch_id
-    return _project_root() / ".vnx-data" / "dispatches" / stage / dispatch_id
+    from vnx_paths import resolve_paths
+    return Path(resolve_paths()["VNX_DISPATCH_DIR"]) / stage / dispatch_id
 
 
 def _safe_remove_active_dir(src_dir: Path) -> bool:

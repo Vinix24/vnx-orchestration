@@ -25,7 +25,12 @@ from subprocess_dispatch import deliver_via_subprocess
 
 @pytest.fixture
 def mock_adapter():
-    with patch("subprocess_dispatch.SubprocessAdapter") as cls:
+    # spawn_claude() (provider_spawns/claude_spawn.py) constructs its own
+    # SubprocessAdapter directly, separate from subprocess_dispatch's binding;
+    # patch both (sharing one mock) so deliver_via_subprocess never touches a
+    # real, unmocked adapter that would attempt an actual claude subprocess spawn.
+    with patch("provider_spawns.claude_spawn.SubprocessAdapter") as cls, \
+         patch("subprocess_dispatch.SubprocessAdapter", new=cls):
         instance = MagicMock()
         instance.was_timed_out.return_value = False
         deliver_result = MagicMock()
@@ -40,7 +45,7 @@ def mock_adapter():
         obs = MagicMock()
         obs.transport_state = {"returncode": 0}
         instance.observe.return_value = obs
-        instance._get_event_store.return_value = None
+        instance.event_store = None
         instance.get_session_id.return_value = "sess-abc"
         cls.return_value = instance
         yield instance

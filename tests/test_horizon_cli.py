@@ -340,3 +340,50 @@ def test_objective_and_deliverable_alias_help(monkeypatch, capsys):
     assert rc == 0
     for verb in ("add", "list", "promote"):
         assert verb in out
+
+
+# ---------------------------------------------------------------------------
+# repo_root defaulting + drift no-crash (central-mode-path-correctness, round 3)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from vnx_cli.commands import horizon as _horizon  # noqa: E402
+
+
+def test_default_repo_root_sets_from_project_dir(tmp_path):
+    args = SimpleNamespace(project_dir=str(tmp_path))
+    _horizon._default_repo_root(args)
+    assert args.repo_root == str(tmp_path.resolve())
+
+
+def test_default_repo_root_preserves_explicit(tmp_path):
+    args = SimpleNamespace(project_dir=str(tmp_path), repo_root="/explicit/root")
+    _horizon._default_repo_root(args)
+    assert args.repo_root == "/explicit/root"
+
+
+def test_horizon_drift_no_repo_root_crash(project, monkeypatch, capsys):
+    """`vnx horizon drift` must not raise 'Namespace has no attribute repo_root'
+    nor emit 'cannot resolve repo root' — the pip CLI defaults repo_root and the
+    reconciler tolerates it."""
+    project_dir, _ = project
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "drift",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert "has no attribute 'repo_root'" not in err
+    assert "cannot resolve repo root" not in err
+    assert rc == 0
+
+
+def test_horizon_reconcile_no_repo_root_crash(project, monkeypatch, capsys):
+    project_dir, _ = project
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "reconcile",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert "has no attribute 'repo_root'" not in err
+    assert "cannot resolve repo root" not in err
+    # reconcile returns 0 (nothing to close) or 3 (gh absent) — never a crash.
+    assert rc in (0, 3)

@@ -67,6 +67,7 @@ class TestManifestStageRoutedByOutcome(unittest.TestCase):
         promote = MagicMock(return_value="/tmp/destination.json")
         adapter = _make_adapter(returncode=returncode, was_timed_out=was_timed_out)
         cms = _common_patches(promote) + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
         ]
         for cm in cms:

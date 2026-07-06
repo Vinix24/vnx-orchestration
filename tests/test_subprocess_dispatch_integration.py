@@ -53,9 +53,12 @@ class TestDeliverViaSubprocess(unittest.TestCase):
     """Unit tests for the deliver_via_subprocess() helper."""
 
     def test_returns_true_on_success(self):
-        with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as MockAdapter, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=MockAdapter):
             instance = MockAdapter.return_value
             instance.deliver.return_value = _delivery_result(success=True)
+            instance.read_events_with_timeout.return_value = iter([])
+            instance.was_timed_out.return_value = False
             obs = MagicMock()
             obs.transport_state = {"returncode": 0}
             instance.observe.return_value = obs
@@ -75,7 +78,8 @@ class TestDeliverViaSubprocess(unittest.TestCase):
         self.assertIsNone(call_kwargs.get("cwd"))
 
     def test_returns_false_on_failure(self):
-        with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as MockAdapter, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=MockAdapter):
             instance = MockAdapter.return_value
             instance.deliver.return_value = _delivery_result(success=False)
 
@@ -89,7 +93,8 @@ class TestDeliverViaSubprocess(unittest.TestCase):
         self.assertFalse(result.success)
 
     def test_passes_model_to_adapter(self):
-        with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as MockAdapter, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=MockAdapter):
             instance = MockAdapter.return_value
             instance.deliver.return_value = _delivery_result(success=True)
 
@@ -115,7 +120,8 @@ class TestSubprocessRoutingEnvVar(unittest.TestCase):
     def test_subprocess_adapter_called_when_env_set(self):
         """When VNX_ADAPTER_T1=subprocess, deliver_via_subprocess must be called."""
         with patch.dict(os.environ, {"VNX_ADAPTER_T1": "subprocess"}):
-            with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:
+            with patch("provider_spawns.claude_spawn.SubprocessAdapter") as MockAdapter, \
+                 patch("subprocess_dispatch.SubprocessAdapter", new=MockAdapter):
                 instance = MockAdapter.return_value
                 instance.deliver.return_value = _delivery_result(success=True)
 

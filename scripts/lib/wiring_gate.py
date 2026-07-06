@@ -58,7 +58,14 @@ class WiringGateResult:
 
 def _load_skip_list(state_dir: Optional[Path] = None) -> set:
     if state_dir is None:
-        state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+        env = os.environ.get("VNX_STATE_DIR")
+        if env:
+            state_dir = Path(env)
+        else:
+            # Canonical resolver (VNX_HOME + project-marker aware) instead of a
+            # bare CWD-relative default, so central-mode resolves the project store.
+            from vnx_paths import resolve_state_dir as _canonical_state_dir
+            state_dir = _canonical_state_dir()
     skip_path = state_dir / "wiring_skip.yaml"
     if not skip_path.exists():
         return set()
