@@ -256,6 +256,47 @@ def test_provider_validation_raises_before_write(tmp_state):
 
 
 # ---------------------------------------------------------------------------
+# Durability (fsync) tests
+# ---------------------------------------------------------------------------
+
+def test_emit_is_durable_and_fsyncs_the_append(tmp_state, monkeypatch):
+    """The append is fsync'd before the lock releases, and the record is on disk."""
+    import governance_emit as ge
+
+    contexts = []
+    real_fsync = ge.fsync_fileno
+
+    def spy(fh, **kwargs):
+        contexts.append(kwargs.get("context"))
+        return real_fsync(fh, **kwargs)
+
+    monkeypatch.setattr(ge, "fsync_fileno", spy)
+
+    emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
+
+    assert contexts, "emit must fsync the receipt append for durability"
+    assert any("test-dispatch-001" in (c or "") for c in contexts)
+
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert data["dispatch_id"] == "test-dispatch-001"
+
+
+def test_emit_survives_fsync_failure(tmp_state, monkeypatch):
+    """An fsync failure (fs without fsync support) must degrade, not break the write."""
+    import ndjson_io
+
+    def boom(_fd):
+        raise OSError("fsync not supported on this filesystem")
+
+    monkeypatch.setattr(ndjson_io.os, "fsync", boom)
+
+    path = emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
+    assert path.exists()
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert data["dispatch_id"] == "test-dispatch-001"
+
+
+# ---------------------------------------------------------------------------
 # Unified report tests
 # ---------------------------------------------------------------------------
 

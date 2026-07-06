@@ -19,9 +19,18 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Ensure the sibling scripts/lib modules resolve even when a caller imports
+# governance_emit by path without scripts/lib already on sys.path.
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from ndjson_io import fsync_fileno
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +117,11 @@ def emit_dispatch_receipt(
             try:
                 fh.write(line)
                 fh.flush()
+                # Durability: force the appended record to stable storage before
+                # the lock releases, so a crash after this point cannot lose the
+                # receipt. Best-effort — a filesystem that rejects fsync degrades
+                # with a warning rather than failing the write (never raises).
+                fsync_fileno(fh, context=f"dispatch={dispatch_id}")
             finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
     except OSError as exc:
