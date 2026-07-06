@@ -167,28 +167,66 @@ _IDENT_PATTERN = r'"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*'
 _IDENT_RE = re.compile(_IDENT_PATTERN)
 _CONSTRAINT_KW = ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT")
 
+#: Safe tenant-slug grammar (codex injection fix). A resolved project_id gets inlined
+#: into DDL DEFAULTs / row-copy where a bind param can't reach, so it must be a slug
+#: with no quote/semicolon/paren/whitespace. Bounded length caps abuse. Matches every
+#: legitimate VNX id (`^[a-z][a-z0-9-]{1,31}$` and `vnx-<hex>`), rejects hostile input
+#: like `x'); DROP TABLE tracks;--`.
+_SAFE_PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
 
 def _mask_quoted_sql(sql: str) -> str:
-    """Mask quoted content while preserving length and quote delimiters.
+    """Mask quoted content AND SQL comments while preserving length.
 
     Handles SQL strings plus double-quoted, backtick-quoted, and bracket-quoted
-    identifiers, including doubled closing delimiters. This is intentionally a
-    bounded scanner for the existing CREATE TABLE/INDEX helpers, not a SQL parser.
+    identifiers (including doubled closing delimiters), and additionally masks
+    ``-- line`` comments and ``/* block */`` comments before any paren-balance,
+    comma-split, or keyword scan runs against the masked copy. A ``)`` / ``(`` /
+    ``,`` living inside a comment (or a doubled string delimiter) must never
+    perturb `_matching_paren`, `_split_columns_and_constraints`, or the inline
+    keyword scans — sqlite_master stores CREATE TABLE/INDEX text verbatim, so a
+    legacy schema carrying a comment with an unbalanced paren was raising
+    "unbalanced parentheses in SQL" (B.1). Comment bytes (delimiters included)
+    become the mask byte; string/identifier quote delimiters are preserved so the
+    downstream scanners still see the token boundaries. Length is preserved
+    exactly (`zip(body, masked)` in `_split_columns_and_constraints` depends on
+    it). This is a bounded scanner for the CREATE TABLE/INDEX helpers, not a full
+    SQL parser.
     """
-    out, i = list(sql), 0
-    while i < len(sql):
-        opener = sql[i]
-        if opener not in ("'", '"', "`", "["):
+    out, i, n = list(sql), 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        # -- line comment: mask through (but not including) the newline. A `--`
+        # inside a string is consumed by the quote inner-loop below, never here.
+        if ch == "-" and nxt == "-":
+            while i < n and sql[i] != "\n":
+                out[i] = "\x00"
+                i += 1
+            continue
+        # /* block comment */: mask through the closing delimiter, inclusive.
+        if ch == "/" and nxt == "*":
+            out[i] = out[i + 1] = "\x00"
+            i += 2
+            while i < n:
+                if sql[i] == "*" and i + 1 < n and sql[i + 1] == "/":
+                    out[i] = out[i + 1] = "\x00"
+                    i += 2
+                    break
+                out[i] = "\x00"
+                i += 1
+            continue
+        if ch not in ("'", '"', "`", "["):
             i += 1
             continue
-        closer = "]" if opener == "[" else opener
+        closer = "]" if ch == "[" else ch
         i += 1
-        while i < len(sql):
+        while i < n:
             if sql[i] != closer:
                 out[i] = "\x00"
                 i += 1
                 continue
-            if i + 1 < len(sql) and sql[i + 1] == closer:
+            if i + 1 < n and sql[i + 1] == closer:
                 out[i] = out[i + 1] = "\x00"
                 i += 2
                 continue
@@ -403,7 +441,49 @@ def _resolve_validated_project_id(db_path) -> str:
             "No silent 'vnx-dev' default (R3.1). See docs/governance/decisions/"
             "ADR-007-multitenant-project-id-stamping.md"
         )
-    return distinct.pop()
+    resolved = distinct.pop()
+    # Charset validation (codex injection fix): the resolved tenant is inlined into
+    # DDL DEFAULTs / index names / row-copy where a bind parameter cannot reach, so a
+    # marker or env value carrying a quote/semicolon/paren/space could inject SQL. A
+    # legitimate VNX project_id is a slug; reject anything outside the safe grammar
+    # BEFORE it is used anywhere. This is the last line of defense — _sql_quote_literal
+    # and bound parameters still apply at the use-sites.
+    if not _SAFE_PROJECT_ID_RE.match(resolved):
+        raise RuntimeError(
+            f"ADR-007 fail-closed: resolved project_id {resolved!r} is not a valid "
+            f"tenant slug (must match {_SAFE_PROJECT_ID_RE.pattern}). Refusing to use "
+            "an unsafe/injectable identity."
+        )
+    return resolved
+
+
+def _sql_quote_literal(value: str) -> str:
+    """Return *value* as a safely single-quoted SQL string literal (R3.1/ADR-007).
+
+    Used to inline a fail-closed-RESOLVED project_id into DDL where a bind
+    parameter is impossible (a CREATE TABLE column DEFAULT, or the static-file
+    row-copy substitution). Single quotes are doubled. Callers pass only an
+    already-validated project_id (`^[a-z][a-z0-9-]{1,31}$`), so this is defense in
+    depth, never the primary guard. NEVER used to inline the 'vnx-dev' sentinel.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _render_static_0031_sql_with_pid(sql: str, project_id: str) -> str:
+    """Substitute the tenant placeholder in the static 0031 DDL with the RESOLVED
+    project_id (D3, ADR-007 damage-causer fix).
+
+    `schemas/migrations/0031_runtime_tenant_fk_repair.sql` uses ``'vnx-dev'`` at
+    rest as a placeholder for BOTH the column DEFAULT and the four row-copy
+    ``INSERT ... SELECT`` literals. Applying that verbatim on a non-vnx-dev store
+    (e.g. sales-copilot) would stamp every rebuilt runtime row with the wrong
+    tenant — corruption. The clean-v30-legacy path therefore renders the file with
+    the DB-path-anchored, fail-closed-resolved tenant identity before executing
+    it. `project_id` is never the sentinel: it comes from
+    `_resolve_validated_project_id`. Idempotent for a store whose real tenant IS
+    'vnx-dev' (the substitution is then a no-op replacement of like-for-like).
+    """
+    return sql.replace("'vnx-dev'", _sql_quote_literal(project_id))
 
 
 def _validate_existing_project_id_or_abort(conn: sqlite3.Connection,
@@ -2213,7 +2293,7 @@ CREATE TABLE {staging} (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_id      TEXT    NOT NULL,
     dispatch_id     TEXT    NOT NULL,
-    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+    project_id      TEXT    NOT NULL DEFAULT {pid},
     attempt_number  INTEGER NOT NULL DEFAULT 1,
     terminal_id     TEXT    NOT NULL,
     state           TEXT    NOT NULL DEFAULT 'pending',
@@ -2230,7 +2310,7 @@ CREATE TABLE {staging} (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id                  TEXT    NOT NULL,
     dispatch_id             TEXT    NOT NULL,
-    project_id              TEXT    NOT NULL DEFAULT 'vnx-dev',
+    project_id              TEXT    NOT NULL DEFAULT {pid},
     attempt_id              TEXT    NOT NULL,
     target_id               TEXT    NOT NULL,
     target_type             TEXT    NOT NULL,
@@ -2261,7 +2341,7 @@ CREATE TABLE {staging} (
 CREATE TABLE {staging} (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     terminal_id         TEXT    NOT NULL,
-    project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+    project_id          TEXT    NOT NULL DEFAULT {pid},
     state               TEXT    NOT NULL DEFAULT 'idle',
     dispatch_id         TEXT,
     generation          INTEGER NOT NULL DEFAULT 1,
@@ -2279,7 +2359,7 @@ CREATE TABLE {staging} (
     "worker_states": """\
 CREATE TABLE {staging} (
     terminal_id      TEXT    NOT NULL,
-    project_id       TEXT    NOT NULL DEFAULT 'vnx-dev',
+    project_id       TEXT    NOT NULL DEFAULT {pid},
     dispatch_id      TEXT    NOT NULL,
     state            TEXT    NOT NULL DEFAULT 'initializing',
     last_output_at   TEXT,
@@ -2526,20 +2606,24 @@ def _copy_rows_into_v31_staging(
     collision — never silent data loss.
     """
     src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
+    # resolved_pid is passed as a BOUND PARAMETER (codex injection fix) — never
+    # string-interpolated into the SQL, even though _resolve_validated_project_id
+    # already charset-validates it (defense in depth).
     if has_pid:
         # project_id column exists: copy it, filling NULL/'' with resolved_pid.
         dst_col_list = ", ".join(f'"{c}"' for c in base_copy_cols + ["project_id"])
         pid_expr = (
             "CASE WHEN \"project_id\" IS NULL OR \"project_id\" = '' "
-            f"THEN '{resolved_pid}' ELSE \"project_id\" END"
+            "THEN ? ELSE \"project_id\" END"
         )
         select_sql = f'SELECT {src_col_list}, {pid_expr} FROM "{table}"'
     else:
         # project_id column absent: add it set to resolved_pid for all rows.
         dst_col_list = src_col_list + ', "project_id"'
-        select_sql = f"SELECT {src_col_list}, '{resolved_pid}' FROM \"{table}\""
+        select_sql = f'SELECT {src_col_list}, ? FROM "{table}"'
     try:
-        conn.execute(f'INSERT INTO "{staging}" ({dst_col_list}) {select_sql}')
+        conn.execute(
+            f'INSERT INTO "{staging}" ({dst_col_list}) {select_sql}', (resolved_pid,))
     except sqlite3.IntegrityError as exc:
         raise RuntimeError(
             f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
@@ -2579,9 +2663,14 @@ def _adaptive_rebuild_table(
         f'SELECT COUNT(*) FROM "{table}"'
     ).fetchone()[0]
 
-    # Build + populate the staging table
+    # Build + populate the staging table. The project_id column DEFAULT is the
+    # RESOLVED tenant (D3), never the 'vnx-dev' sentinel — inlined because a
+    # CREATE TABLE DEFAULT cannot be a bind parameter. Row values are still set
+    # explicitly by _copy_rows_into_v31_staging; the DEFAULT only governs any
+    # future INSERT that omits project_id, and must not be a wrong tenant.
     conn.execute(f'DROP TABLE IF EXISTS "{staging}"')
-    conn.execute(ddl_template.format(staging=f'"{staging}"'))
+    conn.execute(ddl_template.format(
+        staging=f'"{staging}"', pid=_sql_quote_literal(resolved_pid)))
 
     _copy_rows_into_v31_staging(conn, table, staging, base_copy_cols, resolved_pid, has_pid)
 
@@ -2819,12 +2908,86 @@ def _run_adaptive_v31_repair(
     _verify_foreign_keys_restored(conn, original_fk)
 
 
+_CREATE_INDEX_NAME_RE = re.compile(
+    r'(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?("?)([A-Za-z0-9_]+)\1')
+
+
+#: worker_pool_membership canonical indexes (0020 legacy == v31 adaptive rebuild).
+#: WPM has no entry in _V31_TABLE_INDEXES — the adaptive WPM rebuild
+#: (_adaptive_rebuild_worker_pool_membership) creates these inline — so they are
+#: enumerated here for the conflict guard, which iterates WPM (it is in
+#: _RUNTIME_V31_TABLES). Without this a same-name partial-WHERE drift on
+#: idx_pool_membership_active would go undetected (codex round-3 gap 2).
+_WPM_CANONICAL_INDEXES = (
+    "CREATE UNIQUE INDEX idx_pool_membership_active "
+    "ON worker_pool_membership(terminal_id, project_id) WHERE released_at IS NULL",
+    "CREATE INDEX idx_pool_membership_pool ON worker_pool_membership(project_id, pool_id)",
+)
+
+
+def _canonical_runtime_index_defs() -> dict[str, set[str]]:
+    """Map index name → {acceptable normalized CREATE INDEX definitions}, over the
+    legacy (_RUNTIME_V30_LEGACY_INDEX_SQL), v31 (_V31_TABLE_INDEXES), and
+    worker_pool_membership (_WPM_CANONICAL_INDEXES) canonical sets. An index of a
+    canonical name whose definition matches none of these has drifted."""
+    acc: dict[str, set[str]] = {}
+    for sqls in _V31_TABLE_INDEXES.values():
+        for sql in sqls:
+            m = _CREATE_INDEX_NAME_RE.match(sql)
+            if m:
+                acc.setdefault(m.group(2), set()).add(_normalize_create_index_sql(sql))
+    for by_name in _RUNTIME_V30_LEGACY_INDEX_SQL.values():
+        for name, sql in by_name.items():
+            acc.setdefault(name, set()).add(_normalize_create_index_sql(sql))
+    for sql in _WPM_CANONICAL_INDEXES:
+        m = _CREATE_INDEX_NAME_RE.match(sql)
+        if m:
+            acc.setdefault(m.group(2), set()).add(_normalize_create_index_sql(sql))
+    return acc
+
+
+def _assert_no_conflicting_runtime_index_redefinition(conn: sqlite3.Connection) -> None:
+    """Refuse (do NOT silently coerce/drop) a runtime index that REUSES a canonical
+    index name with a DIFFERENT definition (codex safety fix). The adaptive rebuild
+    recreates indexes from the authoritative v31 set, so a same-name index carrying
+    different semantics (e.g. a rogue UNIQUE(idx_lease_state) on other columns) would
+    be silently replaced — a real, possibly load-bearing constraint change. A drifted
+    canonical-named index whose normalized definition matches neither the legacy nor
+    the v31 canonical def aborts the migration for operator review. Custom-named
+    (non-canonical) indexes are out of scope here."""
+    acc = _canonical_runtime_index_defs()
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in _RUNTIME_V31_TABLES:
+        if table not in present:
+            continue
+        for name, sql in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? "
+            "AND sql IS NOT NULL", (table,)).fetchall():
+            if name in acc and _normalize_create_index_sql(sql) not in acc[name]:
+                raise RuntimeError(
+                    f"0031 refuses to proceed: index {name!r} on {table!r} definition "
+                    f"differs from every canonical/legacy runtime definition "
+                    f"(found {sql!r}). Refusing to silently coerce or drop conflicting "
+                    "index semantics — resolve the index manually first.")
+
+
 def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
     migration_path = _MIGRATIONS / "0031_runtime_tenant_fk_repair.sql"
     if not migration_path.exists():
         raise FileNotFoundError(f"Migration not found: {migration_path}")
 
     current_version = schema_migration.get_user_version(conn)
+
+    # Refuse conflicting canonical-named index redefinitions FIRST — before EVERY
+    # early return, including the already-v31 fast-return (codex round-3) and the
+    # v31-complete / tables-absent fast paths (codex round-2). Neither the
+    # user_version >= 31 check nor the manifest's v31-complete check compares ASC/DESC
+    # direction or collation, so a same-name index that differs ONLY in
+    # direction/collation would otherwise slip through silently. The guard skips absent
+    # tables, so it is a no-op on the tables-absent / fresh paths.
+    _assert_no_conflicting_runtime_index_redefinition(conn)
+
     if current_version >= 31:
         print(f"  [skip] migration 0031 already applied (user_version={current_version})")
         return
@@ -2843,9 +3006,9 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         return
 
     # Adaptive branch (W1B spec): when the cluster is NEITHER v31-complete (above)
-    # NOR clean-v30-legacy (the guard below would refuse), run the adaptive FK-repair.
-    # This handles the "mixed" state where runtime tables already carry an out-of-band
-    # project_id but FKs are not yet composite (e.g. seocrawler-v2 at v30).
+    # NOR clean-v30-legacy, run the adaptive FK-repair (mixed state, e.g. seocrawler-v2
+    # / sales-copilot at v30). Otherwise apply the static 0031 DDL. Both resolve the
+    # tenant identity and stamp the RESOLVED project_id, never the 'vnx-dev' sentinel.
     try:
         _assert_runtime_v30_legacy_shape(conn)
         is_legacy_clean = True
@@ -2853,31 +3016,48 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         is_legacy_clean = False
 
     if not is_legacy_clean:
-        # Mixed/contaminated store — run the adaptive repair path.
-        # Resolve the DB path from the connection (PRAGMA database_list row 0, col 2).
-        db_file = conn.execute("PRAGMA database_list").fetchone()[2]
-        if not db_file:
-            raise RuntimeError(
-                "0031 adaptive: cannot resolve project_id — connection has no database file "
-                "(in-memory or unnamed). Pass a real DB path."
-            )
-        resolved_pid = _resolve_validated_project_id(db_file)
-        print(
-            f"  [adapt] 0031 mixed store detected (project_id already present but FKs not composite). "
-            f"Running adaptive FK-repair for pid='{resolved_pid}' ..."
-        )
-        # D1: foreign-tenant pre-flight (tables that have project_id)
-        _adaptive_foreign_tenant_preflight(conn, list(_ADAPTIVE_RUNTIME_TABLES), resolved_pid)
-        # D1: orphan pre-flight (conservative — abort on any orphans)
-        _adaptive_orphan_preflight(conn)
-        # D2–D5 + stamp user_version=31 in one FK-off BEGIN IMMEDIATE transaction
-        _run_adaptive_v31_repair(conn, resolved_pid)
-        print(f"  [ok]    adaptive repair complete; user_version → {schema_migration.get_user_version(conn)}")
-        return
+        _apply_adaptive_0031(conn)
+    else:
+        _apply_static_0031(conn, migration_path)
 
-    # Clean v30-legacy shape — use the static 0031 DDL path (original behavior).
-    sql = migration_path.read_text(encoding="utf-8")
-    print("  [apply] migration 0031_runtime_tenant_fk_repair.sql ...")
+
+def _resolve_0031_pid_from_conn(conn: sqlite3.Connection, label: str) -> str:
+    """Resolve+validate the tenant identity for 0031 from the connection's DB file."""
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+    if not db_file:
+        raise RuntimeError(
+            f"0031 {label}: cannot resolve project_id — connection has no database "
+            "file (in-memory or unnamed). Pass a real DB path.")
+    return _resolve_validated_project_id(db_file)
+
+
+def _apply_adaptive_0031(conn: sqlite3.Connection) -> None:
+    """Mixed/contaminated store — adaptive FK-repair with the RESOLVED project_id."""
+    resolved_pid = _resolve_0031_pid_from_conn(conn, "adaptive")
+    print(
+        f"  [adapt] 0031 mixed store detected (project_id already present but FKs not "
+        f"composite). Running adaptive FK-repair for pid='{resolved_pid}' ...")
+    # D1: foreign-tenant + orphan pre-flights (fail-closed) before any mutation.
+    _adaptive_foreign_tenant_preflight(conn, list(_ADAPTIVE_RUNTIME_TABLES), resolved_pid)
+    _adaptive_orphan_preflight(conn)
+    # D2–D5 + stamp user_version=31 in one FK-off BEGIN IMMEDIATE transaction.
+    _run_adaptive_v31_repair(conn, resolved_pid)
+    print(f"  [ok]    adaptive repair complete; user_version → "
+          f"{schema_migration.get_user_version(conn)}")
+
+
+def _apply_static_0031(conn: sqlite3.Connection, migration_path: Path) -> None:
+    """Clean v30-legacy shape — static 0031 DDL, tenant-stamped with the RESOLVED
+    project_id (D3). The file's 'vnx-dev' placeholders (column DEFAULT + the four
+    row-copy INSERT...SELECT literals) are substituted for the DB-path-anchored,
+    fail-closed tenant identity before execution so a non-vnx-dev store is never
+    corrupted. The FK-off-before-BEGIN-IMMEDIATE envelope lives in
+    _run_runtime_v31_transaction (the in-file `PRAGMA foreign_keys=OFF` is a no-op
+    inside the open transaction — D6)."""
+    resolved_pid = _resolve_0031_pid_from_conn(conn, "static")
+    sql = _render_static_0031_sql_with_pid(
+        migration_path.read_text(encoding="utf-8"), resolved_pid)
+    print(f"  [apply] migration 0031_runtime_tenant_fk_repair.sql (tenant={resolved_pid!r}) ...")
     _run_runtime_v31_transaction(
         conn,
         schema_migration._split_sql_statements(sql),
@@ -2890,11 +3070,42 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+#: The numbered-walk preflight hooks, as (version, fn) — the single source for both
+#: the import-time registrations above and the defensive re-assert in _run_pipeline.
+_PREFLIGHT_SPECS = (
+    (22, _assert_dispatches_schema_intact),
+    (24, _assert_tracks_v22_intact),
+    (27, _ensure_dispatches_output_columns),
+    (27, _assert_tracks_v24_intact),
+    (28, _assert_tracks_v27_intact),
+    (29, _assert_tracks_v28_intact),
+    (30, _assert_tracks_v29_intact),
+)
+
+
+def _register_preflights() -> None:
+    """(Re)register the numbered-walk preflight hooks idempotently.
+
+    The hooks are registered at import, but a caller/test may have cleared
+    schema_migration._PREFLIGHT_HOOKS (bootstrap-isolation fixtures do this to keep
+    the v22 pre-hook from firing during a fresh bootstrap). The future-system walk
+    DEPENDS on them — notably v27's _ensure_dispatches_output_columns, which adds
+    dispatches.output_ref before the 0027 deliverables view (else: "no such column:
+    output_ref"). run() re-asserts them defensively, registering each only when
+    absent so import-time registration is never duplicated. The v22 pre-hook stays a
+    no-op here because run() executes AFTER the bootstrap has already reached ≥ v22
+    (0022 is then a user_version skip that never invokes its preflight)."""
+    for version, fn in _PREFLIGHT_SPECS:
+        if fn not in schema_migration._PREFLIGHT_HOOKS.get(version, []):
+            schema_migration.register_preflight(version, fn)
+
+
 def _run_numbered_walk(conn: sqlite3.Connection, project_root: Path) -> None:
     """Step C of run(): apply the numbered migrations 0022 → 0031 in order, each
     idempotent via user_version, committing after each. Preflights (steps 3-12) are
     manifest-backed (schema_manifest). See the module docstring for the full ordering.
     """
+    _register_preflights()  # defensive: the walk depends on these hooks (v27 output_ref)
     apply_migration(conn, project_root)       # 0022 — track tables; dispatches w/o track FK
     conn.commit()
     apply_migration_v24(conn, project_root)   # 0024 — composite (track_id, project_id) PK/FK
@@ -2978,21 +3189,81 @@ def _run_w1_coupled_migration(rc_db_path: Path) -> None:
         print("  [W1] No tenant-stamping changes needed (RC + QI already clean).")
 
 
-def run(project_root: Path | None = None) -> None:
-    """Apply future-system migrations through 0031.
+def backup_store_vacuum_into(db_path: Path) -> Path:
+    """D6 data-safety: consistent pre-migration backup via ``VACUUM INTO``.
+
+    The store runs in WAL mode, so a plain file copy can miss committed data
+    still in the -wal (not a valid safety proof). ``VACUUM INTO`` writes a single
+    self-consistent snapshot file using a short-lived read connection (no
+    migration lock held). Writes ``<db>.premigrate-<UTC>.bak`` beside the store
+    and returns it. Raises if the snapshot is not produced — a store is never
+    migrated without a provable backup. The rebuild is NOT purely additive
+    (0022/0024/0031 rebuild tables), so this backup is the abort-and-restore path.
+    """
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    backup_path = db_path.with_name(f"{db_path.name}.premigrate-{ts}.bak")
+    if backup_path.exists():
+        backup_path = db_path.with_name(
+            f"{db_path.name}.premigrate-{ts}-{os.getpid()}.bak")
+    src = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        src.execute("VACUUM INTO ?", (str(backup_path),))
+    finally:
+        src.close()
+    if not backup_path.exists():
+        raise RuntimeError(
+            f"pre-migration VACUUM INTO backup was not created at {backup_path}; "
+            "refusing to migrate without a provable backup (D6).")
+    print(f"  [backup] pre-migration snapshot → {backup_path}")
+    return backup_path
+
+
+def run(
+    project_root: Path | None = None,
+    *,
+    data_dir: Path | None = None,
+    tenant_stamp_fatal: bool = True,
+    run_tenant_stamp: bool = True,
+    backup: bool = False,
+) -> None:
+    """Apply future-system migrations through 0031 (+ optional W1 tenant-stamping).
 
     DB path resolution (mirrors dispatch_cli.py:69-74):
+    - Explicit ``data_dir`` argument wins (D4 threading trap): the CLI has already
+      resolved the canonical data root, so it threads the EXACT directory here
+      instead of letting the runner re-derive ``<project_root>/.vnx-data``.
     - VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set: use the explicit data dir's
       state directory (allows targeting a central per-project store for migrations).
-    - Fallback: the project-local state directory under project_root (no central data dir).
+    - Fallback: the project-local state directory under project_root.
+
+    ``run_tenant_stamp`` (D-W1): when True (default, direct/strict callers) the W1
+    3-phase tenant-stamping runs after the schema walk. The ``vnx migrate`` CLI passes
+    FALSE: W1 is DISABLED there because it is currently broken for the store shapes
+    vnx migrate targets — a normally-bootstrapped store carries BOTH a ('vnx-dev',
+    'default') pool_config row (migration 0020 seed) and a (<pid>, 'default') row
+    (init bootstrap seed), so Phase 2's 'vnx-dev'→<pid> restamp always collides on
+    pool_config's UNIQUE(project_id, pool_id); legacy stores additionally trip a
+    child-FK-widening gap (recommendation_outcomes → recommendations). W1 self-restores
+    on failure, so it achieves nothing but heavy checkpoint churn here. The SCHEMA fix
+    (tracks.horizon, the actual gap) is delivered by the walk regardless. Re-enable W1
+    once the tenant_stamping follow-up ships. ``tenant_stamp_fatal`` governs whether a
+    W1 failure aborts (True) or downgrades to a WARNING after the committed walk (False)
+    — only consulted when ``run_tenant_stamp`` is True.
+
+    ``backup`` (D6): when True, take a ``VACUUM INTO`` snapshot of the store before
+    any mutation.
     """
     _project_root_provided = project_root is not None
     if project_root is None:
         project_root = resolve_project_root(__file__)
     _pytest_db_isolation_guard(project_root)
 
-    data_dir = _resolve_data_dir(project_root, project_root_provided=_project_root_provided)
-    state_dir = data_dir / "state"
+    if data_dir is not None:
+        resolved_data_dir = Path(data_dir).resolve()
+    else:
+        resolved_data_dir = _resolve_data_dir(
+            project_root, project_root_provided=_project_root_provided)
+    state_dir = resolved_data_dir / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / "runtime_coordination.db"
 
@@ -3004,40 +3275,50 @@ def run(project_root: Path | None = None) -> None:
 
     print(f"\nVNX migrate_future_system — db: {db_path}")
 
+    if backup:
+        backup_store_vacuum_into(db_path)
+
+    _run_pipeline(db_path, project_root,
+                  tenant_stamp_fatal=tenant_stamp_fatal,
+                  run_tenant_stamp=run_tenant_stamp)
+
+
+def _run_pipeline(
+    db_path: Path, project_root: Path, *,
+    tenant_stamp_fatal: bool, run_tenant_stamp: bool = True,
+) -> None:
+    """Steps A–E of run(): ADR-007 repair → version reconcile → 0022→0031 walk →
+    convergence guard → W1 tenant-stamping. Extracted from run() so each stays within
+    the 70-line function-size gate; behaviour is identical."""
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
-
     try:
-        # (A) ADR-007 pre-migration repair (R1/R2.2/R3.1): convert any single-column
-        # dispatch_id uniqueness into composite UNIQUE(dispatch_id, project_id).
-        # No-op when already composite; resolves the tenant only when needed.
+        # (A) ADR-007 pre-migration repair: convert any single-column dispatch_id
+        # uniqueness into composite UNIQUE(dispatch_id, project_id). No-op when already
+        # composite; resolves the tenant only when needed.
         _run_adr007_dispatches_repair(conn, db_path)
-
-        # (B) Numbered version reconciliation (R2.1/R2.2): validate the claimed
-        # user_version against the invariant manifest; a DB that LIES about its
-        # version is downgraded to its true version so the walk re-applies what the
-        # downgrade exposed. Runs AFTER the repair, BEFORE the numbered walk (PRD §6).
+        # (B) Numbered version reconciliation: a DB that LIES about its user_version is
+        # downgraded to its true version so the walk re-applies what the downgrade
+        # exposed. Runs AFTER the repair, BEFORE the numbered walk (PRD §6).
         _run_version_reconciliation(conn, db_path)
-
         if schema_migration.get_user_version(conn) < 22:
             _assert_dispatches_schema_intact(conn)
-
-        # (C) Numbered migration walk: 0022 → 0031 (each idempotent via user_version).
+        # (C) Numbered migration walk 0022 → 0031 (each idempotent via user_version).
         _run_numbered_walk(conn, project_root)
-
-        # (D) Oscillation guard (R2.1): the terminal version's manifest MUST hold;
-        # a downgrade+re-walk that did not converge aborts here rather than looping.
+        # (D) Oscillation guard: the terminal version's manifest MUST hold or abort.
         _assert_manifest_converged(conn)
-
-        # (E) W1 tenant-stamping (1.0-blocker): close conn first (the 3-phase
-        # runner opens its own — avoids WAL conflicts), then run the COUPLED
-        # two-DB orchestrator so BOTH RC and QI migrate (QI path resolved inside).
+        # (E) W1 tenant-stamping: close conn first (the 3-phase runner opens its own,
+        # avoiding WAL conflicts). The walk (C) + convergence (D) are already COMMITTED
+        # per-step, so a non-fatal W1 failure keeps the converged terminal schema. The
+        # vnx migrate CLI disables W1 (run_tenant_stamp=False) — see run()'s docstring.
         conn.close()
         conn = None
-        _run_w1_coupled_migration(db_path)
+        if run_tenant_stamp:
+            _run_w1_step(db_path, tenant_stamp_fatal=tenant_stamp_fatal)
+        else:
+            print("  [W1][skip] tenant-stamping disabled by caller (schema-only migrate).")
         print("\n  Migration complete. Schema at user_version (RC verified by manifest converge).\n")
-
     except Exception:
         if conn is not None:
             try:
@@ -3048,6 +3329,24 @@ def run(project_root: Path | None = None) -> None:
     finally:
         if conn is not None:
             conn.close()
+
+
+def _run_w1_step(db_path: Path, *, tenant_stamp_fatal: bool) -> None:
+    """Run W1 coupled tenant-stamping. On a non-fatal failure (the vnx migrate CLI)
+    W1 self-checkpoints + restores its own partial work, so the converged terminal
+    schema (tracks.horizon) is preserved and the operator is warned (D-W1)."""
+    try:
+        _run_w1_coupled_migration(db_path)
+    except Exception as w1_exc:
+        if tenant_stamp_fatal:
+            raise
+        print(
+            "\n  [W1][WARN] deep tenant-stamping did not converge and was rolled back "
+            f"to its pre-W1 checkpoint: {w1_exc}\n"
+            "  The schema migration (through 0031, tracks.horizon) DID land and is "
+            "committed. Any residual legacy ('vnx-dev'/NULL) tenant rows in runtime/"
+            "intelligence tables remain unstamped — re-run once the tenant-stamping "
+            "follow-up ships. No data was lost.\n")
 
 
 if __name__ == "__main__":

@@ -250,7 +250,19 @@ def vnx_update(args) -> int:
 
     if dry_run:
         print(f"[dry-run] Update to '{target}' would succeed.")
-    else:
-        print(f"VNX updated to '{target}'.")
+        print("[dry-run] Would migrate all central per-project stores to the new schema.")
+        return 0
+
+    print(f"VNX updated to '{target}'.")
+
+    # D4 fleet-sync: after flipping the engine version, migrate every central
+    # per-project store so none is left half-migrated behind the newer engine.
+    # Best-effort — a per-store failure is logged, never aborts the update.
+    try:
+        print("\nMigrating central per-project stores to the new schema ...")
+        from vnx_cli.commands.migrate import migrate_all_central_stores
+        migrate_all_central_stores()
+    except Exception as exc:
+        print(f"  warning: fleet store migration sweep failed: {exc}", file=sys.stderr)
 
     return 0
