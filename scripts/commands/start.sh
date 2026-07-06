@@ -7,7 +7,6 @@
 # _update_last_used, _detect_worktree_context, cmd_intelligence_export, etc.)
 # are available when this runs.
 
-
 # Detect whether a tmux pane has an active CLI (claude/codex/gemini/node) in
 # its process tree. Checked via `ps`, not tmux's `#{pane_current_command}`:
 # a running claude process can report its own version string (e.g. "2.1.201")
