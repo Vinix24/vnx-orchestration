@@ -16,11 +16,55 @@ Use when:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 from vnx_cli import _engine
 from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+
+#: Central store layout ``.../.vnx-data/<pid>/`` — anchors the tenant on the data path.
+_DATA_PATH_PID_RE = re.compile(r"(?:^|/)\.vnx-data/([a-z0-9][a-z0-9._-]{0,63})/?$")
+
+
+def _read_marker_pid(data_root: Path) -> "str | None":
+    """First non-empty line of ``data_root/.vnx-project-id`` (the tenant marker)."""
+    marker = data_root / ".vnx-project-id"
+    if not marker.is_file():
+        return None
+    try:
+        first = marker.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    return first or None
+
+
+def _reconcile_tenant_or_fail(data_root: Path, project_id: str) -> None:
+    """FAIL-CLOSED tenant reconciliation before migrating (codex split-tenant fix).
+
+    The CLI seeds pool_config with the CLI-derived ``project_id`` while the runner's
+    fail-closed resolver stamps rows from the ``.vnx-project-id`` marker / VNX_PROJECT_ID
+    / data-path anchor. If those DISAGREE, the store would be split-tenant (codex saw
+    terminal_leases stamped 'otherproj' while pool_config was seeded 'myproject'). We
+    refuse when any present source disagrees with the CLI-derived id rather than
+    silently stamping one and seeding another.
+    """
+    sources = {
+        "cli-derived": project_id,
+        "marker": _read_marker_pid(data_root),
+        "env:VNX_PROJECT_ID": (os.environ.get("VNX_PROJECT_ID") or "").strip() or None,
+    }
+    m = _DATA_PATH_PID_RE.search(str(data_root).rstrip("/"))
+    if m:
+        sources["data-path"] = m.group(1)
+    present = {k: v for k, v in sources.items() if v}
+    if len(set(present.values())) > 1:
+        detail = ", ".join(f"{k}={v!r}" for k, v in present.items())
+        raise RuntimeError(
+            "refusing to migrate a split-tenant store: the tenant sources disagree "
+            f"({detail}). Resolve .vnx-project-id / VNX_PROJECT_ID / the data-path so "
+            "they all name one project before migrating (ADR-007 fail-closed)."
+        )
 
 
 def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
@@ -45,11 +89,15 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
 
     import migrate_future_system  # type: ignore
 
+    # FAIL-CLOSED first: refuse to migrate if the CLI-derived tenant disagrees with an
+    # existing marker / VNX_PROJECT_ID / the data-path anchor (no split-tenant store).
+    _reconcile_tenant_or_fail(data_root, project_id)
+
     # Anchor the tenant on disk (not via a global env mutation that would leak across
     # a fleet sweep or a shared test process): write the canonical .vnx-project-id
     # marker in the data root when absent, so the fail-closed resolver in the runner
     # resolves THIS store's project_id even for a non-central (XDG/local) layout the
-    # DB-path anchor can't cover. Never overwrites an existing marker.
+    # DB-path anchor can't cover. Never overwrites an existing marker (reconciled above).
     marker = data_root / ".vnx-project-id"
     if not marker.exists():
         try:

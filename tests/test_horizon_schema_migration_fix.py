@@ -400,6 +400,96 @@ class TestD6Safety:
 
 
 # ===========================================================================
+# codex diff-gate fixes — tenant reconciliation + resolved-pid validation
+# ===========================================================================
+
+class TestTenantReconciliation:
+    """Fix 1: vnx migrate must refuse a split-tenant store rather than stamp one
+    tenant while seeding another."""
+
+    def test_mismatched_marker_vs_cli_pid_refuses(self, tmp_path: Path) -> None:
+        from vnx_cli.commands.migrate import _reconcile_tenant_or_fail
+        data_root = tmp_path / ".vnx-data" / "myproject"
+        data_root.mkdir(parents=True)
+        (data_root / ".vnx-project-id").write_text("otherproj\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="split-tenant"):
+            _reconcile_tenant_or_fail(data_root, "myproject")
+
+    def test_agreeing_marker_passes(self, tmp_path: Path) -> None:
+        from vnx_cli.commands.migrate import _reconcile_tenant_or_fail
+        data_root = tmp_path / ".vnx-data" / "myproject"
+        data_root.mkdir(parents=True)
+        (data_root / ".vnx-project-id").write_text("myproject\n", encoding="utf-8")
+        _reconcile_tenant_or_fail(data_root, "myproject")  # must not raise
+
+    def test_env_pid_mismatch_refuses(self, tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        from vnx_cli.commands.migrate import _reconcile_tenant_or_fail
+        monkeypatch.setenv("VNX_PROJECT_ID", "envproj")
+        data_root = tmp_path / "xdg"
+        data_root.mkdir()
+        with pytest.raises(RuntimeError, match="split-tenant"):
+            _reconcile_tenant_or_fail(data_root, "cliproj")
+
+    def test_vnx_migrate_refuses_split_tenant_end_to_end(self, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+        """The wired vnx migrate returns non-zero (does not migrate) on a marker/CLI
+        tenant mismatch."""
+        import argparse
+        from vnx_cli.commands.migrate import vnx_migrate
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+        xdg = tmp_path / "xdg"
+        xdg.mkdir()
+        (xdg / ".vnx-project-id").write_text("otherproj\n", encoding="utf-8")
+        monkeypatch.setenv("VNX_DATA_DIR", str(xdg))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        rc = vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+        assert rc == 1
+
+
+class TestResolvedPidValidation:
+    """Fix 2: the resolved project_id is charset-validated and never raw-interpolated."""
+
+    def test_hostile_pid_rejected_not_executed(self, tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VNX_PROJECT_ID", "x'); DROP TABLE tracks;--")
+        db = tmp_path / "state" / "runtime_coordination.db"
+        db.parent.mkdir(parents=True)
+        with pytest.raises(RuntimeError, match="not a valid tenant slug"):
+            mfs._resolve_validated_project_id(db)
+
+    def test_valid_slug_accepted(self, tmp_path: Path,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VNX_PROJECT_ID", "sales-copilot")
+        db = tmp_path / "state" / "runtime_coordination.db"
+        db.parent.mkdir(parents=True)
+        assert mfs._resolve_validated_project_id(db) == "sales-copilot"
+
+    def test_hostile_pid_via_pipeline_leaves_store_intact(self, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        """A hostile marker on a store that needs the adaptive 0031 repair aborts the
+        migration WITHOUT executing the injected SQL (tracks table survives)."""
+        pid = "inject-test"
+        data_root = _central_data_root(tmp_path, pid)
+        db_path = _bootstrap_store(data_root)
+        # Overwrite the data-path-anchored identity with a hostile marker so the
+        # resolver picks it up and must reject it.
+        (data_root / ".vnx-project-id").write_text(
+            "x'); DROP TABLE tracks;--\n", encoding="utf-8")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        with pytest.raises(RuntimeError):
+            mfs.run(data_dir=data_root, run_tenant_stamp=False)
+        c = sqlite3.connect(str(db_path))
+        try:
+            assert c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='tracks'"
+            ).fetchone() is not None, "tracks table must survive — injection not executed"
+        finally:
+            c.close()
+
+
+# ===========================================================================
 # D5 — fail-closed horizon guards in the tracks DAL
 # ===========================================================================
 

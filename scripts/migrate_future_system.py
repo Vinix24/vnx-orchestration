@@ -167,6 +167,13 @@ _IDENT_PATTERN = r'"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*'
 _IDENT_RE = re.compile(_IDENT_PATTERN)
 _CONSTRAINT_KW = ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT")
 
+#: Safe tenant-slug grammar (codex injection fix). A resolved project_id gets inlined
+#: into DDL DEFAULTs / row-copy where a bind param can't reach, so it must be a slug
+#: with no quote/semicolon/paren/whitespace. Bounded length caps abuse. Matches every
+#: legitimate VNX id (`^[a-z][a-z0-9-]{1,31}$` and `vnx-<hex>`), rejects hostile input
+#: like `x'); DROP TABLE tracks;--`.
+_SAFE_PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
 
 def _mask_quoted_sql(sql: str) -> str:
     """Mask quoted content AND SQL comments while preserving length.
@@ -434,7 +441,20 @@ def _resolve_validated_project_id(db_path) -> str:
             "No silent 'vnx-dev' default (R3.1). See docs/governance/decisions/"
             "ADR-007-multitenant-project-id-stamping.md"
         )
-    return distinct.pop()
+    resolved = distinct.pop()
+    # Charset validation (codex injection fix): the resolved tenant is inlined into
+    # DDL DEFAULTs / index names / row-copy where a bind parameter cannot reach, so a
+    # marker or env value carrying a quote/semicolon/paren/space could inject SQL. A
+    # legitimate VNX project_id is a slug; reject anything outside the safe grammar
+    # BEFORE it is used anywhere. This is the last line of defense — _sql_quote_literal
+    # and bound parameters still apply at the use-sites.
+    if not _SAFE_PROJECT_ID_RE.match(resolved):
+        raise RuntimeError(
+            f"ADR-007 fail-closed: resolved project_id {resolved!r} is not a valid "
+            f"tenant slug (must match {_SAFE_PROJECT_ID_RE.pattern}). Refusing to use "
+            "an unsafe/injectable identity."
+        )
+    return resolved
 
 
 def _sql_quote_literal(value: str) -> str:
@@ -2586,20 +2606,24 @@ def _copy_rows_into_v31_staging(
     collision — never silent data loss.
     """
     src_col_list = ", ".join(f'"{c}"' for c in base_copy_cols)
+    # resolved_pid is passed as a BOUND PARAMETER (codex injection fix) — never
+    # string-interpolated into the SQL, even though _resolve_validated_project_id
+    # already charset-validates it (defense in depth).
     if has_pid:
         # project_id column exists: copy it, filling NULL/'' with resolved_pid.
         dst_col_list = ", ".join(f'"{c}"' for c in base_copy_cols + ["project_id"])
         pid_expr = (
             "CASE WHEN \"project_id\" IS NULL OR \"project_id\" = '' "
-            f"THEN '{resolved_pid}' ELSE \"project_id\" END"
+            "THEN ? ELSE \"project_id\" END"
         )
         select_sql = f'SELECT {src_col_list}, {pid_expr} FROM "{table}"'
     else:
         # project_id column absent: add it set to resolved_pid for all rows.
         dst_col_list = src_col_list + ', "project_id"'
-        select_sql = f"SELECT {src_col_list}, '{resolved_pid}' FROM \"{table}\""
+        select_sql = f'SELECT {src_col_list}, ? FROM "{table}"'
     try:
-        conn.execute(f'INSERT INTO "{staging}" ({dst_col_list}) {select_sql}')
+        conn.execute(
+            f'INSERT INTO "{staging}" ({dst_col_list}) {select_sql}', (resolved_pid,))
     except sqlite3.IntegrityError as exc:
         raise RuntimeError(
             f"0031 adaptive row-copy composite-key collision in '{table}': {exc}. "
@@ -2884,6 +2908,52 @@ def _run_adaptive_v31_repair(
     _verify_foreign_keys_restored(conn, original_fk)
 
 
+_CREATE_INDEX_NAME_RE = re.compile(
+    r'(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?("?)([A-Za-z0-9_]+)\1')
+
+
+def _canonical_runtime_index_defs() -> dict[str, set[str]]:
+    """Map index name → {acceptable normalized CREATE INDEX definitions}, over the
+    legacy (_RUNTIME_V30_LEGACY_INDEX_SQL) and v31 (_V31_TABLE_INDEXES) canonical sets.
+    An index of a canonical name whose definition matches none of these has drifted."""
+    acc: dict[str, set[str]] = {}
+    for sqls in _V31_TABLE_INDEXES.values():
+        for sql in sqls:
+            m = _CREATE_INDEX_NAME_RE.match(sql)
+            if m:
+                acc.setdefault(m.group(2), set()).add(_normalize_create_index_sql(sql))
+    for by_name in _RUNTIME_V30_LEGACY_INDEX_SQL.values():
+        for name, sql in by_name.items():
+            acc.setdefault(name, set()).add(_normalize_create_index_sql(sql))
+    return acc
+
+
+def _assert_no_conflicting_runtime_index_redefinition(conn: sqlite3.Connection) -> None:
+    """Refuse (do NOT silently coerce/drop) a runtime index that REUSES a canonical
+    index name with a DIFFERENT definition (codex safety fix). The adaptive rebuild
+    recreates indexes from the authoritative v31 set, so a same-name index carrying
+    different semantics (e.g. a rogue UNIQUE(idx_lease_state) on other columns) would
+    be silently replaced — a real, possibly load-bearing constraint change. A drifted
+    canonical-named index whose normalized definition matches neither the legacy nor
+    the v31 canonical def aborts the migration for operator review. Custom-named
+    (non-canonical) indexes are out of scope here."""
+    acc = _canonical_runtime_index_defs()
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in _RUNTIME_V31_TABLES:
+        if table not in present:
+            continue
+        for name, sql in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? "
+            "AND sql IS NOT NULL", (table,)).fetchall():
+            if name in acc and _normalize_create_index_sql(sql) not in acc[name]:
+                raise RuntimeError(
+                    f"0031 refuses to proceed: index {name!r} on {table!r} definition "
+                    f"differs from every canonical/legacy runtime definition "
+                    f"(found {sql!r}). Refusing to silently coerce or drop conflicting "
+                    "index semantics — resolve the index manually first.")
+
+
 def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
     migration_path = _MIGRATIONS / "0031_runtime_tenant_fk_repair.sql"
     if not migration_path.exists():
@@ -2906,6 +2976,11 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         print("  [stamp] runtime tenant/FK repair already complete; user_version → 31")
         _run_runtime_v31_transaction(conn, ("PRAGMA user_version = 31",))
         return
+
+    # Refuse conflicting canonical-named index redefinitions BEFORE choosing a repair
+    # path — this RuntimeError must propagate (it is NOT the "mixed shape" signal that
+    # the try/except below converts into the adaptive path).
+    _assert_no_conflicting_runtime_index_redefinition(conn)
 
     # Adaptive branch (W1B spec): when the cluster is NEITHER v31-complete (above)
     # NOR clean-v30-legacy, run the adaptive FK-repair (mixed state, e.g. seocrawler-v2
