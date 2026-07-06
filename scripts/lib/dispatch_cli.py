@@ -130,6 +130,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         skill=(raw.get("skill") or None),
         task_class=(raw.get("task_class") or None),
         pr_id=(raw.get("pr_id") or None),
+        track_id=(raw.get("track_id") or None),
         deadline_seconds=int(raw.get("deadline_seconds", 3600)),
         base_ref=str(raw.get("base_ref", "origin/main")),
         isolation=Isolation(raw.get("isolation", "worktree")),
@@ -319,6 +320,154 @@ def _check_staging_binding_verdict(
 
 
 # ---------------------------------------------------------------------------
+# TL-D1 — track_id door validation + persistence
+#
+# Structural link dispatch -> track, validated at the door (fail-closed on an
+# invalid/nonexistent/done track_id) and staged advisory->required on absence
+# via VNX_REQUIRE_DISPATCH_TRACK (mirrors the wiring_gate.py VNX_WIRING_GATE_REQUIRED
+# shadow/blocking staging pattern). Tracks live in the same runtime_coordination.db
+# as the dispatches table (schemas/migrations/0022_track_layer.sql).
+# ---------------------------------------------------------------------------
+
+_TRACKS_DB_FILENAME = "runtime_coordination.db"
+
+_NO_TRACK_ESCAPE_RE = _re.compile(r"^no-track:.+$")
+
+
+def _tracks_db_path(state_dir: Path) -> Path:
+    return state_dir / _TRACKS_DB_FILENAME
+
+
+def _has_col(conn, table: str, col: str) -> bool:
+    return any(r[1] == col for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _has_no_track_escape(tags: "tuple[str, ...]") -> bool:
+    return any(_NO_TRACK_ESCAPE_RE.match(t) for t in tags)
+
+
+def _lookup_track_phase(db_path: Path, track_id: str, project_id: str) -> Optional[str]:
+    """Return the track's phase for (track_id, project_id), or None if no such track.
+
+    Read-only URI connection: a missing DB file raises immediately rather than
+    silently creating an empty one. Caller degrades any exception to a WARN
+    verdict (fail-open on tracks-DB unavailability; never crash the door).
+    """
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    try:
+        row = conn.execute(
+            "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return row[0] if row is not None else None
+    finally:
+        conn.close()
+
+
+def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[ConstraintVerdict]:
+    """Validate spec.track_id at the door.
+
+    - track_id present, references a nonexistent or already-done track -> blocking Reject
+      (the tag-vs-link mistake becomes impossible).
+    - track_id present, references a live track -> None (passes clean).
+    - tracks DB unavailable while checking a present track_id -> WARN, never crash.
+    - track_id absent -> staged advisory (VNX_REQUIRE_DISPATCH_TRACK OFF, default) WARN,
+      or required (ON) blocking Reject unless tags carries a 'no-track:<reason>' escape.
+    """
+    track_id = (spec.track_id or "").strip()
+    db_path = _tracks_db_path(state_dir)
+
+    if track_id:
+        try:
+            phase = _lookup_track_phase(db_path, track_id, spec.project_id)
+        except Exception as exc:
+            return ConstraintVerdict(
+                code="tracks-db-unavailable",
+                severity="warn",
+                message=(
+                    f"tracks DB unavailable ({exc}); cannot verify track_id={track_id!r}, "
+                    "degrading to warn"
+                ),
+            )
+        if phase is None:
+            return ConstraintVerdict(
+                code="bad-track-link",
+                severity="blocking",
+                message=(
+                    f"track_id={track_id!r} does not reference an existing track "
+                    f"for project_id={spec.project_id!r}"
+                ),
+            )
+        if phase == "done":
+            return ConstraintVerdict(
+                code="bad-track-link",
+                severity="blocking",
+                message=f"track_id={track_id!r} references a track already in phase='done'",
+            )
+        return None
+
+    import config_runtime
+    required = config_runtime.get_bool("VNX_REQUIRE_DISPATCH_TRACK")
+    if not required:
+        return ConstraintVerdict(
+            code="track_unlinked",
+            severity="warn",
+            message="dispatch has no track_id (VNX_REQUIRE_DISPATCH_TRACK is OFF; advisory-only)",
+        )
+    if _has_no_track_escape(spec.tags):
+        logger.info(
+            "[dispatch_cli] dispatch=%s: no-track escape applied (tags=%r)",
+            spec.dispatch_id, spec.tags,
+        )
+        return None
+    return ConstraintVerdict(
+        code="track-required",
+        severity="blocking",
+        message=(
+            "VNX_REQUIRE_DISPATCH_TRACK=1 requires a track_id; add a tags entry "
+            "'no-track:<reason>' to opt out for a genuinely exploratory dispatch"
+        ),
+    )
+
+
+def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """Best-effort: attach spec.track_id to an EXISTING dispatches row (UPDATE-only).
+
+    Never INSERTs. The dispatches table (runtime_coordination.db) is read by the
+    worker-pool claim query, the runtime reconciler, and the runtime supervisor's
+    stuck/ghost-dispatch sweeps, all keyed off `state`. Fabricating a row for the
+    leaseless claude-tmux lane (which has no pre-existing tracker row) risks
+    tripping those sweeps. D2 treats an absent/None track_id as a no-op, so a
+    dispatch with no pre-existing row is a safe, anticipated case here, not a
+    partial failure. Adds the track_id column additively (_has_col-guarded) when
+    missing. Never raises.
+    """
+    track_id = (spec.track_id or "").strip()
+    if not track_id:
+        return
+    db_path = _tracks_db_path(state_dir)
+    if not db_path.exists():
+        return
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            if not _has_col(conn, "dispatches", "track_id"):
+                conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
+                conn.commit()
+            conn.execute(
+                "UPDATE dispatches SET track_id = ? WHERE dispatch_id = ? AND project_id = ?",
+                (track_id, spec.dispatch_id, spec.project_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("[dispatch_cli] track_id persist skipped: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # build_runtime_snapshot — all I/O lives here
 # ---------------------------------------------------------------------------
 
@@ -445,6 +594,12 @@ def build_runtime_snapshot(
         )
         if binding_verdict is not None:
             constraint_verdicts = constraint_verdicts + (binding_verdict,)
+
+    # TL-D1: track_id door validation (fail-closed on invalid/nonexistent/done;
+    # staged advisory->required WARN/Reject when absent).
+    track_verdict = _check_track_link_verdict(spec, state_dir=data_dir / "state")
+    if track_verdict is not None:
+        constraint_verdicts = constraint_verdicts + (track_verdict,)
 
     if is_claude_lane:
         target_health: dict[str, str] = {"ephemeral": "healthy"}
@@ -600,6 +755,13 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                 )
             except Exception as exc:
                 logger.debug("[dispatch_cli] scout pre-pass skipped: %s", exc)
+
+            # TL-D1: export the resolved track_id alongside VNX_CURRENT_DISPATCH_ID and
+            # persist it onto the dispatch tracker row so D2 can propagate it to
+            # track.pr_ref on merge. Best-effort — never blocks the door.
+            if vspec.spec.track_id:
+                os.environ["VNX_CURRENT_TRACK_ID"] = vspec.spec.track_id
+                _persist_track_id(vspec.spec, state_dir=state_dir)
 
         permit = issue_permit(plan)
         try:

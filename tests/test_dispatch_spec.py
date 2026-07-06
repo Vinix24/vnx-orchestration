@@ -493,3 +493,46 @@ class TestHeadlessNonClaudeProvider:
         spec = _valid_spec(ifile, allow_headless=False, headless_reason=None, provider=Provider.CODEX)
         result = _do_validate(spec, monkeypatch)
         assert isinstance(result, ValidatedSpec)
+
+
+# ---------------------------------------------------------------------------
+# Rule 13 — track_id format (TL-D1)
+# ---------------------------------------------------------------------------
+
+class TestRule13TrackId:
+    def test_default_none_passes(self, tmp_path, monkeypatch):
+        """track_id defaults to None → ValidatedSpec (rule only fires when set)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        assert result.spec.track_id is None
+
+    def test_accepts_valid_track_id(self, tmp_path, monkeypatch):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, track_id="track-linkage-enforcement")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        assert result.spec.track_id == "track-linkage-enforcement"
+
+    @pytest.mark.parametrize("bad_track_id", [
+        "",
+        "   ",
+        "has spaces",
+        "!invalid",
+        "a" * 129,  # too long
+    ])
+    def test_rejects_bad_track_id(self, tmp_path, monkeypatch, bad_track_id):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, track_id=bad_track_id)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "bad-track-id"
+
+    def test_existence_against_tracks_db_is_not_checked_here(self, tmp_path, monkeypatch):
+        """validate() has no DB access — a well-formed but nonexistent track_id still
+        passes format validation; existence is a dispatch_cli door rule."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, track_id="totally-nonexistent-track")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
