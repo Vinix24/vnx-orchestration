@@ -2967,6 +2967,14 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         raise RuntimeError(
             f"0031 requires user_version=30 after the prior numbered walk; got {current_version}.")
 
+    # Refuse conflicting canonical-named index redefinitions FIRST — before the
+    # v31-complete / tables-absent fast paths (codex round-2 fast-path-bypass fix). The
+    # manifest's v31-complete check compares key columns/unique/partial only, NOT
+    # ASC/DESC direction or collation, so a same-name index that differs ONLY in
+    # direction/collation would slip through the fast path and be silently accepted.
+    # The guard skips absent tables, so it is a no-op on the tables-absent path.
+    _assert_no_conflicting_runtime_index_redefinition(conn)
+
     if _runtime_v31_tables_absent(conn):
         print("  [skip] migration 0031 runtime tables absent; user_version → 31")
         conn.execute("PRAGMA user_version = 31")
@@ -2976,11 +2984,6 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         print("  [stamp] runtime tenant/FK repair already complete; user_version → 31")
         _run_runtime_v31_transaction(conn, ("PRAGMA user_version = 31",))
         return
-
-    # Refuse conflicting canonical-named index redefinitions BEFORE choosing a repair
-    # path — this RuntimeError must propagate (it is NOT the "mixed shape" signal that
-    # the try/except below converts into the adaptive path).
-    _assert_no_conflicting_runtime_index_redefinition(conn)
 
     # Adaptive branch (W1B spec): when the cluster is NEITHER v31-complete (above)
     # NOR clean-v30-legacy, run the adaptive FK-repair (mixed state, e.g. seocrawler-v2

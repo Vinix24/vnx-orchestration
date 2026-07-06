@@ -184,6 +184,16 @@ def vnx_migrate(args) -> int:
     # Derive project_id so the bootstrap seeds the correct pool_config row.
     project_id = _engine.derive_project_id(project_dir)
 
+    # FAIL-CLOSED FIRST GATE (codex round-2 ordering fix): reconcile the tenant BEFORE
+    # bootstrap so a split-tenant store is refused with ZERO rows created or seeded —
+    # bootstrap seeds pool_config with the CLI-derived id, which must never happen on a
+    # store whose marker/env/data-path names a different tenant.
+    try:
+        _reconcile_tenant_or_fail(data_root, project_id)
+    except Exception as exc:
+        print(f"\n  error: {exc}", file=sys.stderr)
+        return 1
+
     print(f"Migrating VNX runtime databases at: {data_root}")
 
     try:

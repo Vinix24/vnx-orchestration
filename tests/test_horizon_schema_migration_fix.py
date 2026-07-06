@@ -431,10 +431,11 @@ class TestTenantReconciliation:
         with pytest.raises(RuntimeError, match="split-tenant"):
             _reconcile_tenant_or_fail(data_root, "cliproj")
 
-    def test_vnx_migrate_refuses_split_tenant_end_to_end(self, tmp_path: Path,
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
-        """The wired vnx migrate returns non-zero (does not migrate) on a marker/CLI
-        tenant mismatch."""
+    def test_vnx_migrate_refuses_split_tenant_leaves_store_untouched(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The reconcile is the FIRST gate (before bootstrap): a marker/CLI mismatch
+        returns rc 1 with ZERO rows created or seeded — no DB, no pool_config, and the
+        marker is not overwritten (codex round-2 ordering fix)."""
         import argparse
         from vnx_cli.commands.migrate import vnx_migrate
         project_dir = tmp_path / "myproject"
@@ -446,6 +447,11 @@ class TestTenantReconciliation:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
         rc = vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
         assert rc == 1
+        # Bootstrap never ran → no store, no seed. Marker unchanged.
+        assert not (xdg / "state" / "runtime_coordination.db").exists(), (
+            "refused split-tenant store must have NO runtime_coordination.db (bootstrap "
+            "must not have run/seeded)")
+        assert (xdg / ".vnx-project-id").read_text(encoding="utf-8").strip() == "otherproj"
 
 
 class TestResolvedPidValidation:
@@ -465,6 +471,39 @@ class TestResolvedPidValidation:
         db = tmp_path / "state" / "runtime_coordination.db"
         db.parent.mkdir(parents=True)
         assert mfs._resolve_validated_project_id(db) == "sales-copilot"
+
+    def test_normalize_index_distinguishes_direction_collation_partial(self) -> None:
+        """Proof (codex round-2): _normalize_create_index_sql already distinguishes
+        ASC/DESC, COLLATE, and partial WHERE — so the guard compares full semantics,
+        not just name+columns. No change needed to the normalizer itself."""
+        n = mfs._normalize_create_index_sql
+        assert n("CREATE INDEX ix ON t(a, b DESC)") != n("CREATE INDEX ix ON t(a, b ASC)")
+        assert n("CREATE INDEX ix ON t(a COLLATE NOCASE)") != n("CREATE INDEX ix ON t(a COLLATE BINARY)")
+        assert n("CREATE INDEX ix ON t(a) WHERE x='running'") != n("CREATE INDEX ix ON t(a)")
+
+    def test_v31_complete_store_asc_vs_desc_index_aborts(self, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fast-path-bypass fix: a v31-COMPLETE store carrying a same-name index that
+        differs only in ASC-vs-canonical-DESC is REFUSED, not silently accepted via the
+        v31-complete fast path (the manifest ignores index direction)."""
+        pid = "fastpath-test"
+        data_root = _central_data_root(tmp_path, pid)
+        db_path = _bootstrap_store(data_root)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        mfs.run(data_dir=data_root, run_tenant_stamp=False)  # → v31
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("DROP INDEX idx_headless_run_state")
+        conn.execute(
+            "CREATE INDEX idx_headless_run_state ON headless_runs(state, started_at ASC)")
+        conn.execute("PRAGMA user_version = 30")
+        conn.commit()
+        # The store still looks v31-complete to the manifest (direction is not checked),
+        # so without the fix the fast path would stamp v31 and accept the drift.
+        assert mfs._runtime_v31_complete(conn) is True
+        conn.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(RuntimeError, match="idx_headless_run_state.*differs"):
+            mfs.apply_migration_v31(conn, data_root)
+        conn.close()
 
     def test_hostile_pid_via_pipeline_leaves_store_intact(self, tmp_path: Path,
                                                           monkeypatch: pytest.MonkeyPatch) -> None:
