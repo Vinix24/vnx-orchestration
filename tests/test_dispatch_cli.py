@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -21,8 +22,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 from dispatch_cli import (
+    _check_track_link_verdict,
     _execute_claude,
     _execute_claude_headless,
+    _has_col,
+    _persist_track_id,
+    _tracks_db_path,
     build_runtime_snapshot,
     fingerprint,
     load_spec,
@@ -1370,3 +1375,489 @@ class TestLoadSpecHeadlessReasonSanitization:
         spec_file.write_text(json.dumps(spec), encoding="utf-8")
         loaded = load_spec(spec_file)
         assert loaded.headless_reason is None
+
+
+# ---------------------------------------------------------------------------
+# TL-D1 — track_id: load_spec parsing
+# ---------------------------------------------------------------------------
+
+class TestLoadSpecTrackId:
+    def test_track_id_parsed(self, tmp_path):
+        spec_file = _make_spec_file(tmp_path, extra={"track_id": "track-linkage-enforcement"})
+        loaded = load_spec(spec_file)
+        assert loaded.track_id == "track-linkage-enforcement"
+
+    def test_track_id_absent_is_none(self, tmp_path):
+        spec_file = _make_spec_file(tmp_path)
+        loaded = load_spec(spec_file)
+        assert loaded.track_id is None
+
+    def test_track_id_empty_string_is_none(self, tmp_path):
+        spec_file = _make_spec_file(tmp_path, extra={"track_id": ""})
+        loaded = load_spec(spec_file)
+        assert loaded.track_id is None
+
+
+# ---------------------------------------------------------------------------
+# TL-D1 — track_id: tracks DB fixture helper
+# ---------------------------------------------------------------------------
+
+def _make_tracks_db(
+    state_dir: Path,
+    *,
+    tracks: "dict[str, str] | None" = None,
+    dispatches: "list[dict] | None" = None,
+    dispatches_has_track_id_col: bool = False,
+) -> Path:
+    """Build a minimal runtime_coordination.db with `tracks` (+ optionally `dispatches`).
+
+    tracks: {track_id: phase}. dispatches: list of {dispatch_id, project_id, state}.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    db_path = state_dir / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE tracks (
+            track_id TEXT NOT NULL PRIMARY KEY,
+            phase TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+        )
+        """
+    )
+    for tid, phase in (tracks or {}).items():
+        conn.execute(
+            "INSERT INTO tracks (track_id, phase, project_id) VALUES (?, ?, 'vnx-dev')",
+            (tid, phase),
+        )
+    if dispatches is not None:
+        track_col = ", track_id TEXT" if dispatches_has_track_id_col else ""
+        conn.execute(
+            f"""
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                state TEXT NOT NULL DEFAULT 'queued'{track_col},
+                UNIQUE(dispatch_id, project_id)
+            )
+            """
+        )
+        for row in dispatches:
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, project_id, state) VALUES (?, ?, ?)",
+                (row["dispatch_id"], row.get("project_id", "vnx-dev"), row.get("state", "queued")),
+            )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+# ---------------------------------------------------------------------------
+# TL-D1 — _check_track_link_verdict unit tests
+# ---------------------------------------------------------------------------
+
+class TestCheckTrackLinkVerdict:
+    def test_valid_live_track_passes(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _make_tracks_db(state_dir, tracks={"my-track": "active"})
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+        )
+        assert _check_track_link_verdict(spec, state_dir=state_dir) is None
+
+    def test_nonexistent_track_rejects(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _make_tracks_db(state_dir, tracks={"other-track": "active"})
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="does-not-exist",
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=state_dir)
+        assert verdict is not None
+        assert verdict.severity == "blocking"
+        assert verdict.code == "bad-track-link"
+
+    def test_done_track_rejects(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _make_tracks_db(state_dir, tracks={"finished-track": "done"})
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="finished-track",
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=state_dir)
+        assert verdict is not None
+        assert verdict.severity == "blocking"
+        assert verdict.code == "bad-track-link"
+
+    def test_wrong_project_id_treated_as_nonexistent(self, tmp_path):
+        """A track that exists but under a different project_id must not leak across tenants."""
+        state_dir = tmp_path / "state"
+        db_path = _make_tracks_db(state_dir, tracks={})
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO tracks (track_id, phase, project_id) VALUES ('shared-name', 'active', 'other-project')"
+        )
+        conn.commit()
+        conn.close()
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="shared-name",
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=state_dir)
+        assert verdict is not None
+        assert verdict.severity == "blocking"
+        assert verdict.code == "bad-track-link"
+
+    def test_missing_tracks_db_degrades_to_warn(self, tmp_path, monkeypatch):
+        """Never crash: a present track_id with no tracks DB at all -> WARN, not an exception."""
+        state_dir = tmp_path / "state-does-not-exist"
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=state_dir)
+        assert verdict is not None
+        assert verdict.severity == "warn"
+        assert verdict.code == "tracks-db-unavailable"
+
+    def test_absent_flag_off_warns(self, tmp_path, monkeypatch):
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key: False)
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id=None,
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=tmp_path / "state")
+        assert verdict is not None
+        assert verdict.severity == "warn"
+        assert verdict.code == "track_unlinked"
+
+    def test_absent_flag_on_no_escape_rejects(self, tmp_path, monkeypatch):
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id=None, tags=(),
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=tmp_path / "state")
+        assert verdict is not None
+        assert verdict.severity == "blocking"
+        assert verdict.code == "track-required"
+
+    def test_absent_flag_on_with_escape_passes(self, tmp_path, monkeypatch):
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id=None,
+            tags=("no-track:exploratory spike",),
+        )
+        verdict = _check_track_link_verdict(spec, state_dir=tmp_path / "state")
+        assert verdict is None
+
+
+# ---------------------------------------------------------------------------
+# TL-D1 — _persist_track_id unit tests
+# ---------------------------------------------------------------------------
+
+class TestPersistTrackId:
+    def test_persists_onto_existing_row(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _make_tracks_db(
+            state_dir,
+            dispatches=[{"dispatch_id": "d1", "project_id": "vnx-dev", "state": "queued"}],
+        )
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+        )
+        _persist_track_id(spec, state_dir=state_dir)
+
+        conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
+        row = conn.execute(
+            "SELECT track_id, state FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            ("d1", "vnx-dev"),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "my-track"
+        assert row[1] == "queued", "persistence must never mutate the state column"
+
+    def test_adds_track_id_column_when_missing(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _make_tracks_db(
+            state_dir,
+            dispatches=[{"dispatch_id": "d1"}],
+            dispatches_has_track_id_col=False,
+        )
+        conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
+        assert not _has_col(conn, "dispatches", "track_id")
+        conn.close()
+
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+        )
+        _persist_track_id(spec, state_dir=state_dir)
+
+        conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
+        assert _has_col(conn, "dispatches", "track_id")
+        row = conn.execute("SELECT track_id FROM dispatches WHERE dispatch_id = 'd1'").fetchone()
+        conn.close()
+        assert row[0] == "my-track"
+
+    def test_noop_when_no_matching_row(self, tmp_path):
+        """UPDATE-only: no pre-existing dispatches row (the leaseless claude-tmux lane's
+        normal case today) must be a safe no-op, never an INSERT, never a raise."""
+        state_dir = tmp_path / "state"
+        _make_tracks_db(state_dir, dispatches=[])
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="ghost-dispatch", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+        )
+        _persist_track_id(spec, state_dir=state_dir)  # must not raise
+
+        conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
+        count = conn.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0]
+        conn.close()
+        assert count == 0, "must never INSERT a synthetic dispatches row"
+
+    def test_noop_when_track_id_absent(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _make_tracks_db(
+            state_dir,
+            dispatches=[{"dispatch_id": "d1", "project_id": "vnx-dev", "state": "queued"}],
+        )
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id=None,
+        )
+        _persist_track_id(spec, state_dir=state_dir)  # must not raise, must not touch the DB
+
+    def test_noop_when_db_missing(self, tmp_path):
+        """Never crash when the tracks DB file doesn't exist at all."""
+        state_dir = tmp_path / "state-does-not-exist"
+        spec = DispatchSpec(
+            schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
+            instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
+            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+        )
+        _persist_track_id(spec, state_dir=state_dir)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# TL-D1 — end-to-end run_dispatch tests
+# ---------------------------------------------------------------------------
+
+class TestTrackIdEndToEnd:
+    def test_valid_track_id_persists_and_proceeds(self, tmp_path, monkeypatch):
+        data_dir = tmp_path / "vnx-data"
+        state_dir = data_dir / "state"
+        staging_id = "20260706-staging-tl-d1"
+        bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+        bundle_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.delenv("VNX_CURRENT_TRACK_ID", raising=False)
+
+        _make_tracks_db(
+            state_dir,
+            tracks={"track-linkage-enforcement": "active"},
+            dispatches=[{"dispatch_id": "20260706-tl-e2e-valid", "project_id": "vnx-dev", "state": "queued"}],
+        )
+
+        instruction = bundle_dir / "instruction.md"
+        instruction.write_text("Do something useful.", encoding="utf-8")
+        spec_dict = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260706-tl-e2e-valid",
+            "staging_id": staging_id,
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+            "track_id": "track-linkage-enforcement",
+        }
+        spec_file = bundle_dir / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_execute.assert_called_once()
+        assert os.environ.get("VNX_CURRENT_TRACK_ID") == "track-linkage-enforcement"
+
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        row = conn.execute(
+            "SELECT track_id FROM dispatches WHERE dispatch_id = ?", ("20260706-tl-e2e-valid",)
+        ).fetchone()
+        conn.close()
+        assert row[0] == "track-linkage-enforcement"
+
+    def test_nonexistent_track_id_rejects(self, tmp_path, monkeypatch, capsys):
+        data_dir = tmp_path / "vnx-data"
+        state_dir = data_dir / "state"
+        staging_id = "20260706-staging-tl-d1-bad"
+        bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+        bundle_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        _make_tracks_db(state_dir, tracks={"some-other-track": "active"})
+
+        instruction = bundle_dir / "instruction.md"
+        instruction.write_text("Do something useful.", encoding="utf-8")
+        spec_dict = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260706-tl-e2e-bad",
+            "staging_id": staging_id,
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+            "track_id": "does-not-exist",
+        }
+        spec_file = bundle_dir / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+        with patch("dispatch_cli._execute_claude") as mock_execute:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 1
+        mock_execute.assert_not_called()
+        err = capsys.readouterr().err
+        assert "bad-track-link" in err
+
+    def test_absent_track_id_default_off_warns_and_proceeds(self, tmp_path, monkeypatch, capsys):
+        """Flag OFF (default): an unlinked dispatch WARNs (visible in dry-run) but proceeds."""
+        data_dir = tmp_path / "vnx-data"
+        staging_id = "20260706-staging-tl-d1-unlinked"
+        bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+        bundle_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        instruction = bundle_dir / "instruction.md"
+        instruction.write_text("Do something useful.", encoding="utf-8")
+        spec_dict = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260706-tl-e2e-unlinked",
+            "staging_id": staging_id,
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+        }
+        spec_file = bundle_dir / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+        rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "track_unlinked" in out
+
+    def test_absent_track_id_flag_on_rejects(self, tmp_path, monkeypatch, capsys):
+        data_dir = tmp_path / "vnx-data"
+        staging_id = "20260706-staging-tl-d1-required"
+        bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+        bundle_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        instruction = bundle_dir / "instruction.md"
+        instruction.write_text("Do something useful.", encoding="utf-8")
+        spec_dict = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260706-tl-e2e-required",
+            "staging_id": staging_id,
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+        }
+        spec_file = bundle_dir / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+
+        with patch("dispatch_cli._execute_claude") as mock_execute:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 1
+        mock_execute.assert_not_called()
+        err = capsys.readouterr().err
+        assert "track-required" in err
+
+    def test_absent_track_id_flag_on_with_escape_proceeds(self, tmp_path, monkeypatch):
+        data_dir = tmp_path / "vnx-data"
+        staging_id = "20260706-staging-tl-d1-escape"
+        bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+        bundle_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        instruction = bundle_dir / "instruction.md"
+        instruction.write_text("Do something useful.", encoding="utf-8")
+        spec_dict = {
+            "schema_version": 1,
+            "project_id": "vnx-dev",
+            "dispatch_id": "20260706-tl-e2e-escape",
+            "staging_id": staging_id,
+            "instruction_file": str(instruction),
+            "role": "backend-developer",
+            "target_slot": "T1",
+            "gate": "human-promoted",
+            "dispatch_paths": [],
+            "provider": "claude",
+            "deadline_seconds": 3600,
+            "isolation": "worktree",
+            "tags": ["no-track:exploratory spike"],
+        }
+        spec_file = bundle_dir / "dispatch-spec.json"
+        spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_execute.assert_called_once()
