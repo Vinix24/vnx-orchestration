@@ -571,6 +571,7 @@ def _close_evidence(
     state_dir: "str | Path",
     track_id: str,
     project_id: str,
+    repo_root: "str | Path | None" = None,
 ) -> Dict[str, Any]:
     """Summarize WHY a track derives terminal, so the operator gate is informed.
 
@@ -619,7 +620,7 @@ def _close_evidence(
     try:
         if ev["pr_ref"]:
             nums = _parse_pr_numbers(ev["pr_ref"])
-            if nums and nums <= _load_merged_pr_numbers(state_dir):
+            if nums and nums <= _load_merged_pr_numbers(state_dir, repo_root):
                 ev["pr_merged"] = True
     except Exception as exc:
         log.debug("close evidence merged-PR check failed: %s", exc)
@@ -884,7 +885,7 @@ def close_track_if_done(
         payload["action"] = "rejected_parked"
         return payload
 
-    payload["evidence"] = _close_evidence(state_dir, track_id, project_id)
+    payload["evidence"] = _close_evidence(state_dir, track_id, project_id, repo_root=repo_root)
 
     path = _phase_path_to(declared, target)
     if path is None:

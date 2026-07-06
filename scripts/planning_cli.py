@@ -61,8 +61,11 @@ def _resolve_state_dir(explicit: str) -> Path:
     env = os.environ.get("VNX_STATE_DIR", "")
     if env:
         return Path(env)
-    from project_root import resolve_project_root
-    return resolve_project_root(__file__) / ".vnx-data" / "state"
+    # Canonical resolver: VNX_DATA_DIR + VNX_HOME + project-marker aware.
+    # resolve_project_root(__file__) resolves the KEYSTONE in a central install
+    # (and ignores VNX_DATA_DIR). See central-mode-path-correctness.
+    from vnx_paths import resolve_state_dir as _canonical_state_dir
+    return _canonical_state_dir()
 
 
 def _resolve_roadmap_path(explicit: str | None) -> Path:
@@ -71,20 +74,25 @@ def _resolve_roadmap_path(explicit: str | None) -> Path:
     env = os.environ.get("VNX_ROADMAP_PATH", "")
     if env:
         return Path(env)
-    from project_root import resolve_project_root
-    return resolve_project_root(__file__) / "ROADMAP.yaml"
+    # The project's ROADMAP.yaml lives at the resolved PROJECT_ROOT, not the
+    # keystone that resolve_project_root(__file__) yields in a central install.
+    from vnx_paths import resolve_paths
+    return Path(resolve_paths()["PROJECT_ROOT"]) / "ROADMAP.yaml"
 
 
-def _resolve_repo_root(explicit: str) -> Path:
-    """Resolve the project repo root: explicit --repo-root > canonical resolver.
+def _resolve_repo_root(explicit: str) -> Path | None:
+    """Resolve the project repo root ONLY when explicitly provided.
 
-    Central-mode workers can run from a CWD that is not the project repo
-    (e.g. the keystone), so CWD-based git-root detection is not safe here.
+    Returns None when no --repo-root is given, so track_reconciler's Source-3
+    resolver runs its own CWD-git-root -> legacy fallback. Deriving a default via
+    resolve_project_root(__file__) would yield the KEYSTONE in a central install
+    and -- because the reconciler treats any non-None repo_root as explicit
+    (track_reconciler._resolve_roadmap_path) -- poison the ROADMAP.yaml lookup.
+    Pass --repo-root to override when the CWD is not the project repo.
     """
     if explicit:
         return Path(explicit).resolve()
-    from project_root import resolve_project_root
-    return resolve_project_root(__file__)
+    return None
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

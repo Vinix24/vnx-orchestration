@@ -119,13 +119,31 @@ GRANDFATHERED: Dict[str, Set[str]] = {
     },
     # .is_dir()-gated upward walks that look for an EXISTING .vnx-data; canonical
     # resolution (VNX_DATA_DIR env, or ensure_env()) is tried first in each caller.
+    # :848 reuses the same project_root, guarded by the VNX_DATA_DIR default.
     "scripts/lib/subprocess_adapter.py": {
         'search / ".vnx-data"',
+        'Path(project_root) / ".vnx-data"',
     },
     "scripts/lib/headless_dispatch_writer.py": {
         # vnx_paths.ensure_env() is the primary resolver here; this walk is the
         # except-branch last resort.
         'candidate / ".vnx-data"',
+    },
+    # Surfaced by the helper-return tracing (below). Pre-existing, out of this
+    # task's remit; each is env-first / .exists()-gated / repo_root-param-threaded
+    # with the __file__ walk only as a fallback. Tracked for follow-up migration.
+    "scripts/lib/event_analyzer.py": {
+        # .exists()-gated: only returns the derived archive dir if it exists.
+        'repo_root / ".vnx-data" / "events" / "archive"',
+    },
+    "scripts/lib/headless_dispatch_daemon.py": {
+        # env-first (VNX_DATA_DIR); _repo_root() is the helper-return fallback.
+        '_repo_root() / ".vnx-data"',
+    },
+    "scripts/lib/tmux_worktree.py": {
+        # _resolve_repo_root threads an explicit repo_root first (#1023); the
+        # __file__ branch is the no-arg fallback.
+        'root / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"',
     },
 }
 
@@ -135,38 +153,62 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 # ---------------------------------------------------------------------------
 
 
-def _file_anchored_names(tree: ast.AST) -> Set[str]:
-    """Names bound anywhere to an expression that references ``__file__``.
-
-    Catches module-level and local assignments such as
-    ``_REPO_ROOT = Path(__file__).resolve().parents[2]`` or
-    ``here = Path(__file__).resolve()``.
-    """
-    anchored: Set[str] = set()
-    for node in ast.walk(tree):
-        value = None
-        targets: List[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            value = node.value
-            targets = list(node.targets)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            value = node.value
-            targets = [node.target]
-        if value is None:
-            continue
-        if any(isinstance(n, ast.Name) and n.id == "__file__" for n in ast.walk(value)):
-            for tgt in targets:
-                if isinstance(tgt, ast.Name):
-                    anchored.add(tgt.id)
-    return anchored
-
-
 def _references_file_anchor(node: ast.AST, anchored: Set[str]) -> bool:
-    """True if the subtree references ``__file__`` or a file-anchored name."""
+    """True if the subtree references ``__file__`` or a file-anchored name.
+
+    A file-anchored name is a variable OR a helper function whose call resolves
+    from ``__file__`` (see :func:`_file_anchored_names`). Because a call
+    ``_project_root()`` carries the function name as an ``ast.Name`` in
+    ``node.func``, this walk catches ``_project_root() / ".vnx-data"`` once
+    ``_project_root`` is in ``anchored``.
+    """
     for sub in ast.walk(node):
         if isinstance(sub, ast.Name) and (sub.id == "__file__" or sub.id in anchored):
             return True
     return False
+
+
+def _file_anchored_names(tree: ast.AST) -> Set[str]:
+    """Names that resolve from ``__file__`` — variables AND helper functions.
+
+    Iterated to a fixpoint so the anchor propagates transitively:
+      * assignments  — ``_REPO_ROOT = Path(__file__).resolve().parents[2]``,
+        ``here = Path(__file__).resolve()``;
+      * function defs — a helper whose ``return`` yields a ``__file__``-anchored
+        expression (e.g. ``def _project_root(): return Path(__file__)...``), so a
+        later ``_project_root() / ".vnx-data"`` join is caught even though the
+        ``__file__`` reference is hidden behind the call.
+    """
+    anchored: Set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                value = node.value
+                if value is None:
+                    continue
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if _references_file_anchor(value, anchored):
+                    for tgt in targets:
+                        if isinstance(tgt, ast.Name) and tgt.id not in anchored:
+                            anchored.add(tgt.id)
+                            changed = True
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in anchored:
+                    continue
+                for ret in ast.walk(node):
+                    if (
+                        isinstance(ret, ast.Return)
+                        and ret.value is not None
+                        and _references_file_anchor(ret.value, anchored)
+                    ):
+                        anchored.add(node.name)
+                        changed = True
+                        break
+    return anchored
 
 
 def _has_data_marker_constant(node: ast.AST) -> bool:

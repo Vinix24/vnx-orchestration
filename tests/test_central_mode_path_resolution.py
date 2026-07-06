@@ -41,12 +41,18 @@ import t0_decision_reconcile  # noqa: E402
 import t0_escalations_log  # noqa: E402
 import track_reconciler  # noqa: E402
 import wiring_gate  # noqa: E402
+from subprocess_dispatch_internals import state_paths  # noqa: E402
+
+sys.path.insert(0, str(VNX_ROOT / "scripts"))
+import planning_cli  # noqa: E402
 
 _ENV_VARS = (
     "VNX_DATA_DIR",
     "VNX_STATE_DIR",
     "VNX_DATA_DIR_EXPLICIT",
     "VNX_PROJECT_ID",
+    "VNX_ROADMAP_PATH",
+    "VNX_DISPATCH_DIR",
 )
 
 
@@ -63,7 +69,12 @@ def central(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vnx_paths,
         "resolve_paths",
-        lambda: {"VNX_DATA_DIR": str(data), "VNX_STATE_DIR": str(state)},
+        lambda: {
+            "VNX_DATA_DIR": str(data),
+            "VNX_STATE_DIR": str(state),
+            "VNX_DISPATCH_DIR": str(data / "dispatches"),
+            "PROJECT_ROOT": str(tmp_path / "project-repo"),
+        },
     )
     monkeypatch.setattr(
         vnx_paths, "resolve_state_dir", lambda project_root=None: state
@@ -179,6 +190,112 @@ def test_env_vnx_state_dir_honored(monkeypatch, tmp_path):
     assert runtime_facade._resolve_state_dir() == str(state)
     assert cleanup_worker_exit._resolve_state_dir() == state
     assert cost_tracker._resolve_receipts_path() == state / "t0_receipts.ndjson"
+
+
+# ---------------------------------------------------------------------------
+# state_paths (subprocess_dispatch_internals) — helper-return __file__ sites
+# ---------------------------------------------------------------------------
+
+
+def test_state_paths_default_state_dir(central):
+    _, state = central
+    assert state_paths._default_state_dir() == state
+
+
+def test_state_paths_active_dispatch_dir_uses_dispatch_dir(central, monkeypatch):
+    data, _ = central
+    active = data / "dispatches" / "active"
+    active.mkdir(parents=True)
+    marker = active / "d-999-foo.md"
+    marker.write_text("x", encoding="utf-8")
+    assert state_paths._resolve_active_dispatch_file("d-999") == marker
+
+
+def test_state_paths_manifest_dir_uses_dispatch_dir(central):
+    data, _ = central
+    resolved = state_paths._dispatch_manifest_dir("pending", "d-123")
+    assert resolved == data / "dispatches" / "pending" / "d-123"
+
+
+def test_state_paths_no_project_root_helper_remains():
+    # The __file__-anchored _project_root helper must be gone entirely.
+    assert not hasattr(state_paths, "_project_root")
+
+
+# ---------------------------------------------------------------------------
+# planning_cli default resolvers (Gap 1)
+# ---------------------------------------------------------------------------
+
+
+def test_planning_cli_repo_root_none_when_not_explicit():
+    # Must return None (not a __file__-derived keystone path) so the reconciler's
+    # own CWD/legacy fallback runs. Passing a non-None value is treated as explicit.
+    assert planning_cli._resolve_repo_root("") is None
+
+
+def test_planning_cli_repo_root_explicit_resolved(tmp_path):
+    resolved = planning_cli._resolve_repo_root(str(tmp_path))
+    assert resolved == tmp_path.resolve()
+
+
+def test_planning_cli_state_dir_routes_through_resolver(central):
+    _, state = central
+    assert planning_cli._resolve_state_dir("") == state
+
+
+def test_planning_cli_roadmap_routes_through_project_root(central, tmp_path):
+    resolved = planning_cli._resolve_roadmap_path(None)
+    assert resolved == tmp_path / "project-repo" / "ROADMAP.yaml"
+    assert ".vnx-system" not in str(resolved)
+
+
+# ---------------------------------------------------------------------------
+# Close-evidence threads repo_root (Gap 3)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_reconciler_db(state_dir: Path, track_id: str, project_id: str, pr_ref: str):
+    """Create the minimal tables _close_evidence queries, with one track."""
+    import sqlite3
+
+    db = state_dir / track_reconciler.DB_FILENAME
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE dispatches (dispatch_id TEXT, track TEXT, project_id TEXT, state TEXT);"
+        "CREATE TABLE tracks (track_id TEXT, project_id TEXT, pr_ref TEXT);"
+        "CREATE TABLE coordination_events (event_type TEXT, project_id TEXT, entity_id TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO tracks (track_id, project_id, pr_ref) VALUES (?, ?, ?)",
+        (track_id, project_id, pr_ref),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_close_evidence_uses_repo_root_roadmap(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    state = tmp_path / ".vnx-data" / "proj-x" / "state"
+    state.mkdir(parents=True)
+    _minimal_reconciler_db(state, "T-close", "proj-x", "#4242")
+
+    repo = tmp_path / "project-repo"
+    repo.mkdir()
+    (repo / "ROADMAP.yaml").write_text(
+        "features:\n  - pr_queue:\n      - pr_id: '#4242'\n        status: merged\n",
+        encoding="utf-8",
+    )
+
+    # With repo_root -> reads the repo roadmap -> #4242 merged -> pr_merged True.
+    ev = track_reconciler._close_evidence("%s" % state, "T-close", "proj-x", repo_root=repo)
+    assert ev["pr_merged"] is True
+    assert ev["has_success_signal"] is True
+
+    # Without repo_root, and with the CWD git-root roadmap forced empty, the same
+    # evidence renders pr_merged False — proving repo_root is what carried it.
+    monkeypatch.setattr(track_reconciler, "_git_toplevel", lambda p: None)
+    ev_none = track_reconciler._close_evidence("%s" % state, "T-close", "proj-x")
+    assert ev_none["pr_merged"] is False
 
 
 # ---------------------------------------------------------------------------

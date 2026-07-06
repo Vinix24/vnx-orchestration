@@ -48,6 +48,60 @@ def test_file_derived_data_paths_flagged(src: str) -> None:
     assert len(violations) >= 1, f"expected a violation for:\n{src}"
 
 
+def test_helper_return_of_file_flagged() -> None:
+    # The helper-return false-negative: __file__ hidden behind a helper's return.
+    src = (
+        "from pathlib import Path\n"
+        "def _project_root():\n"
+        "    return Path(__file__).resolve().parents[3]\n"
+        "def bad():\n"
+        '    return _project_root() / ".vnx-data" / "state"\n'
+    )
+    assert len(check_source(src)) >= 1
+
+
+def test_transitive_helper_anchor_flagged() -> None:
+    # Anchor propagates through a chain of helpers to a fixpoint.
+    src = (
+        "from pathlib import Path\n"
+        "def _root():\n"
+        "    return Path(__file__).resolve()\n"
+        "def _repo():\n"
+        "    return _root().parent\n"
+        "def bad():\n"
+        '    return _repo() / ".vnx-data"\n'
+    )
+    assert len(check_source(src)) >= 1
+
+
+def test_env_helper_return_not_flagged() -> None:
+    # A helper returning an ENV-derived (not __file__) path is not anchored.
+    src = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "def _root():\n"
+        "    return Path(os.environ['X'])\n"
+        "def ok():\n"
+        '    return _root() / ".vnx-data"\n'
+    )
+    assert check_source(src) == []
+
+
+def test_planted_helper_return_in_subdir_fails(tmp_path: Path) -> None:
+    pkg = tmp_path / "scripts" / "lib" / "some_pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "paths.py").write_text(
+        "from pathlib import Path\n"
+        "def _root():\n"
+        "    return Path(__file__).resolve().parents[3]\n"
+        "def d():\n"
+        '    return _root() / ".vnx-data" / "state"\n',
+        encoding="utf-8",
+    )
+    violations = scan_dir(tmp_path)
+    assert any(rel.endswith("paths.py") for rel, _, _ in violations)
+
+
 def test_state_dir_param_not_flagged() -> None:
     # state_dir is a resolved runtime Path parameter, NOT __file__-anchored.
     src = (
