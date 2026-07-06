@@ -50,10 +50,11 @@ _CLAUDE_PROVIDERS = {"claude"}
 # Full diverse-family assurance panel: (label, provider string, model_arg).
 # One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI) so a
 # plan is reviewed from five independent vantage points before any code is written.
-# NOTE: with the current fail-safe rule, a panelist that emits no verdict (a down proxy or an
-# uninstalled CLI) forces an unconditional REVISE. Keep every provider here runnable, and see
-# the `panel-quorum-fix` track for the retry/quorum/abstain rule that makes a large panel
-# robust to a single flake. glm-harness requires the local litellm proxy on :4141.
+# NOTE: a panelist that flakes (a down proxy, an uninstalled CLI, or an unparseable verdict) is
+# RETRIED once (VNX_PANEL_RETRY, see run_panel) and, if it still yields no readable verdict,
+# ABSTAINS as a non-scoring lane instead of vetoing — so a single down lane no longer forces a
+# REVISE (apply_panel_rule's liveness quorum). Keep every provider here runnable anyway; the
+# retry only rescues transient flakes. glm-harness requires the local litellm proxy on :4141.
 DEFAULT_PANEL: List[Dict[str, str]] = [
     {"label": "opus", "provider": "claude", "model_arg": "opus"},
     {"label": "kimi", "provider": "kimi", "model_arg": "kimi-k2-7-code"},
@@ -415,6 +416,49 @@ def _make_default_dispatcher(
     return _dispatch
 
 
+def _panel_retry_count() -> int:
+    """Extra attempts for a flaked panelist (``VNX_PANEL_RETRY``, default 1, clamped >= 0).
+
+    A panelist whose verdict is unparseable (parse_error) or that failed to dispatch is a
+    transient-flake suspect (the codex verdict-JSON flake, the glm parse flake). It is retried
+    up to this many times before it falls through to the abstain/non-scoring path — recovering
+    the flake without letting one down lane force a REVISE. A malformed value falls back to 1.
+    """
+    raw = os.environ.get("VNX_PANEL_RETRY", "").strip()
+    if not raw:
+        return 1
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1
+
+
+def _dispatch_one(
+    dispatcher: DispatcherFn, member: Dict[str, str], instruction: str, dispatch_id: str,
+) -> PanelistResult:
+    """Dispatch ONE panelist once and parse its verdict into a ``PanelistResult``.
+
+    Best-effort and non-raising: a dispatch / report-read failure returns a non-scoring result
+    (``dispatched=False``, ``error`` set); a returned report whose verdict block does not parse
+    returns ``parse_error=True``. Both outcomes are RETRYABLE by ``run_panel`` before they fall
+    through to the abstain path — a retry that itself errors just degrades to the same abstain.
+    """
+    try:
+        report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
+    except Exception as exc:  # dispatch / report-read failure -> no verdict
+        return PanelistResult(
+            label=member["label"], provider=member["provider"],
+            dispatched=False, error=str(exc), report_path=dispatch_id,
+        )
+    parsed = parse_verdict(report_text)
+    return PanelistResult(
+        label=member["label"], provider=member["provider"],
+        verdict=parsed["verdict"], blocking_findings=parsed["blocking_findings"],
+        rationale=parsed["rationale"], parse_error=parsed["parse_error"],
+        dispatched=True, report_path=dispatch_id,
+    )
+
+
 def run_panel(
     doc_path: str | Path,
     *,
@@ -436,24 +480,22 @@ def run_panel(
     doc_text = Path(doc_path).read_text(encoding="utf-8")
     instruction = build_plan_review_instruction(doc_text, track_id)
 
+    retries = _panel_retry_count()
+
     results: List[PanelistResult] = []
     for member in panel:
-        did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
-        try:
-            report_text = dispatcher(member["provider"], member["model_arg"], instruction, did)
-        except Exception as exc:  # dispatch / report-read failure -> no verdict
-            results.append(PanelistResult(
-                label=member["label"], provider=member["provider"],
-                dispatched=False, error=str(exc), report_path=did,
-            ))
-            continue
-        parsed = parse_verdict(report_text)
-        results.append(PanelistResult(
-            label=member["label"], provider=member["provider"],
-            verdict=parsed["verdict"], blocking_findings=parsed["blocking_findings"],
-            rationale=parsed["rationale"], parse_error=parsed["parse_error"],
-            dispatched=True, report_path=did,
-        ))
+        # One dispatch, plus up to `retries` retries when the lane flakes (a dispatch failure
+        # or an unparseable verdict). The first SCORING verdict wins and short-circuits; if a
+        # retry also flakes we keep its (still non-scoring) result, which then abstains via
+        # apply_panel_rule. Never more than `retries` extra attempts — each is a fresh governed
+        # dispatch id so the retry lands its own report -> receipt.
+        result: PanelistResult
+        for _ in range(retries + 1):
+            did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
+            result = _dispatch_one(dispatcher, member, instruction, did)
+            if result.dispatched and not result.parse_error:
+                break  # readable verdict — no retry needed
+        results.append(result)
 
     summary = apply_panel_rule(results)
     return {
