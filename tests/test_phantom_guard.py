@@ -65,3 +65,72 @@ def test_unmeasured_tokens_mapping_is_none():
     assert pg._extract_token_usage({"token_usage": {"input": 0, "output": 0}}) is None
     assert pg._extract_token_usage({"token_usage": 42}) == 42
     assert pg._extract_token_usage({}) is None
+
+
+# ---------------------------------------------------------------------------
+# TOKEN_BLIND_PROVIDERS — per-provider-billing-phantom PR
+# ---------------------------------------------------------------------------
+
+def test_kimi_zero_tokens_with_evidence_is_not_phantom():
+    # kimi-cli reports token_usage=0 on a real push; a non-token evidence reference
+    # (commit/PR) must stand in for the (still empty, e.g. post-merge) diff.
+    v = pg.phantom_guard(
+        status="done", worktree_diff="", token_usage=0, role="backend-developer",
+        provider="kimi", non_token_evidence="pr#1234",
+    )
+    assert not v.is_phantom
+    assert "kimi" in v.reason
+
+
+def test_kimi_zero_tokens_no_evidence_is_still_phantom():
+    # the genuine phantom case: kimi, no diff, no evidence at all — still rejected.
+    v = pg.phantom_guard(
+        status="done", worktree_diff="", token_usage=0, role="backend-developer",
+        provider="kimi", non_token_evidence=None,
+    )
+    assert v.is_phantom
+
+
+def test_non_kimi_provider_with_evidence_is_still_phantom():
+    # the evidence escape hatch is provider-scoped: a token-reporting provider (claude)
+    # gets no such exemption — empty diff is still a phantom regardless of "evidence".
+    v = pg.phantom_guard(
+        status="done", worktree_diff="", token_usage=0, role="backend-developer",
+        provider="claude", non_token_evidence="pr#1234",
+    )
+    assert v.is_phantom
+
+
+def test_kimi_with_real_diff_and_no_evidence_is_not_phantom_as_before():
+    # non-empty diff still short-circuits before the evidence check is ever consulted.
+    v = pg.phantom_guard(
+        status="done", worktree_diff="diff --git a/x b/x\n+y\n", token_usage=0,
+        role="backend-developer", provider="kimi", non_token_evidence=None,
+    )
+    assert not v.is_phantom
+
+
+def test_guard_receipt_kimi_pr_id_evidence_not_phantom():
+    receipt = {
+        "status": "done", "role": "backend-developer", "provider": "kimi",
+        "token_usage": 0, "pr_id": "1234",
+    }
+    v = pg.guard_receipt(receipt, worktree_diff="")
+    assert not v.is_phantom
+
+
+def test_guard_receipt_kimi_no_evidence_is_phantom():
+    receipt = {
+        "status": "done", "role": "backend-developer", "provider": "kimi",
+        "token_usage": 0,
+    }
+    v = pg.guard_receipt(receipt, worktree_diff="")
+    assert v.is_phantom
+
+
+def test_extract_non_token_evidence_checks_known_keys_in_order():
+    assert pg._extract_non_token_evidence({"pr_id": "42"}) == "42"
+    assert pg._extract_non_token_evidence({"pr_id": "none", "commit_sha": "abc123"}) == "abc123"
+    assert pg._extract_non_token_evidence({"branch": "dispatch/foo"}) == "dispatch/foo"
+    assert pg._extract_non_token_evidence({}) is None
+    assert pg._extract_non_token_evidence({"pr_id": None, "commit_sha": ""}) is None

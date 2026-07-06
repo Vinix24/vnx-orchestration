@@ -181,6 +181,56 @@ class TestProviderLaneParallel:
 
 
 # ---------------------------------------------------------------------------
+# test_billing_classification — per-provider-billing-phantom PR
+# ---------------------------------------------------------------------------
+
+class TestBillingClassification:
+    """kimi/glm-harness/litellm:zai/deepseek-harness are OAuth/own-key harness
+    lanes for this account, not per-token metered — billing_lanes.py SSOT."""
+
+    @pytest.mark.parametrize(
+        "provider",
+        [Provider.KIMI, Provider.LITELLM_ZAI, Provider.GLM_HARNESS, Provider.DEEPSEEK_HARNESS],
+    )
+    def test_subscription_lane_providers_classify_as_subscription(
+        self, provider: Provider, tmp_path: Path
+    ) -> None:
+        vspec = _make_vspec(provider=provider, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "subscription", (
+            f"expected subscription billing for {provider.value}, got {plan.billing!r}"
+        )
+
+    def test_claude_lane_stays_subscription(self, tmp_path: Path) -> None:
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "subscription"
+
+    @pytest.mark.parametrize(
+        "provider",
+        [Provider.CODEX, Provider.GEMINI, Provider.LITELLM_DEEPSEEK, Provider.LITELLM_MOONSHOT],
+    )
+    def test_genuinely_metered_providers_stay_provider_metered(
+        self, provider: Provider, tmp_path: Path
+    ) -> None:
+        vspec = _make_vspec(provider=provider, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "provider_metered", (
+            f"expected provider_metered billing for {provider.value}, got {plan.billing!r}"
+        )
+
+    def test_headless_claude_stays_api_metered(self, tmp_path: Path) -> None:
+        """Headless claude (allow_headless=True) is the one genuinely metered claude lane."""
+        vspec = _make_vspec_headless(tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "api_metered"
+
+
+# ---------------------------------------------------------------------------
 # test_staging_gate
 # ---------------------------------------------------------------------------
 

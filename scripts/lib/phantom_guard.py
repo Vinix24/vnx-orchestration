@@ -18,9 +18,20 @@ Decision rule (a delivery worker is a phantom when):
     role NOT in REVIEW_ROLES
     AND status claims completion (done/success)
     AND the worktree diff is empty
+    AND no non-token evidence was accepted (see below)
 token_usage is corroborating DETAIL only — token>0 does NOT exempt (it means an LLM thought, not
 that a deliverable was produced; a delivery task that changed nothing is a phantom even if tokens
 were spent). Reviews are exempt; a legitimate no-op delivery uses VNX_OVERRIDE_PHANTOM_GUARD.
+
+Provider-aware non-token evidence (TOKEN_BLIND_PROVIDERS): kimi's CLI does not reliably surface a
+token count, and a real kimi push can still read as an empty diff if the diff is captured after the
+dispatch branch already merged into base (base..head reads empty once head is an ancestor of base).
+Requiring token_usage>0 as the ONLY escape hatch would make every such push a false phantom. So for
+a provider in TOKEN_BLIND_PROVIDERS, an explicit non-token evidence reference (a commit sha, branch
+name, or PR id/ref proving the dispatch produced output) is accepted in place of a non-empty diff.
+This does NOT weaken the guard for the genuine phantom case: no diff AND no evidence reference is
+still rejected, and non-token-blind providers (claude, codex, ...) get no such escape hatch — their
+empty-diff receipts are phantoms regardless of token_usage, exactly as before.
 """
 from __future__ import annotations
 
@@ -38,6 +49,14 @@ REVIEW_ROLES = frozenset({"plan-reviewer", "code-reviewer", "security-reviewer",
 
 # Receipt status values that assert the work completed.
 COMPLETION_STATUSES = frozenset({"done", "success", "complete", "completed"})
+
+# Providers whose CLI does not reliably surface a token count (kimi-cli emits no
+# token_count event on a normal run). For these, token_usage==0/None must never be
+# read as "no work happened" — see the non-token evidence path in phantom_guard().
+# Extend here only when a provider's lane is MEASURED to have the same reporting gap;
+# providers that do report tokens (claude, codex, glm-harness/deepseek-harness via the
+# claude-CLI harness) get no such escape hatch.
+TOKEN_BLIND_PROVIDERS = frozenset({"kimi"})
 
 
 @dataclass(frozen=True)
@@ -59,15 +78,27 @@ def phantom_guard(
     worktree_diff: Optional[str],
     token_usage: Optional[int] = None,
     role: Optional[str] = None,
+    provider: Optional[str] = None,
+    non_token_evidence: Optional[str] = None,
 ) -> PhantomVerdict:
     """Pure decision. See module docstring for the rule. worktree_diff is the REAL diff of the
-    worker's worktree/branch (caller-computed), NOT the receipt's main-repo provenance."""
+    worker's worktree/branch (caller-computed), NOT the receipt's main-repo provenance.
+
+    ``provider`` + ``non_token_evidence`` are the TOKEN_BLIND_PROVIDERS escape hatch: when the
+    diff itself is empty, a token-blind provider (kimi at minimum) may still pass a non-token
+    evidence reference (commit sha / branch / PR id) proving the dispatch produced output.
+    """
     if role is not None and role.strip().lower() in REVIEW_ROLES:
         return _ok(f"review role {role!r} — a verdict, not a diff, is expected")
     if (status or "").strip().lower() not in COMPLETION_STATUSES:
         return _ok(f"status {status!r} is not a completion claim — nothing to falsify")
     if (worktree_diff or "").strip():
         return _ok("non-empty worktree diff — work is present")
+    if (provider or "").strip().lower() in TOKEN_BLIND_PROVIDERS and (non_token_evidence or "").strip():
+        return _ok(
+            f"token-blind provider {provider!r} — accepted non-token evidence {non_token_evidence!r} "
+            f"in place of token_usage/diff"
+        )
     # Empty diff on a delivery completion claim = PHANTOM, REGARDLESS of token_usage. token>0
     # means an LLM thought/read, NOT that a deliverable was produced — a delivery task that
     # changed nothing is a phantom even if tokens were spent (the earlier token>0 short-circuit
@@ -141,6 +172,11 @@ def guard_receipt(
     explicit ``worktree_diff`` > ``worktree_path`` (compute_worktree_diff) > ``head_ref``
     (compute_branch_diff). If none is given, the diff is treated as empty (caller asserted no
     out-of-band evidence) — the strictest reading.
+
+    ``provider`` and the non-token evidence reference are read straight off the receipt
+    (``receipt["provider"]``, ``receipt["pr_id"]``/``pr_ref``/``commit_sha``/``branch``) so a
+    token-blind provider's receipt (kimi at minimum) is not false-rejected purely because
+    ``token_usage`` is 0/absent — see TOKEN_BLIND_PROVIDERS in the module docstring.
     """
     if worktree_diff is None:
         if worktree_path is not None:
@@ -154,6 +190,8 @@ def guard_receipt(
         worktree_diff=worktree_diff,
         token_usage=_extract_token_usage(receipt),
         role=receipt.get("role") or receipt.get("agent"),
+        provider=receipt.get("provider"),
+        non_token_evidence=_extract_non_token_evidence(receipt),
     )
 
 
@@ -166,6 +204,8 @@ def guard_at_govern(
     worktree_path: Optional[Path] = None,
     base_sha: Optional[str] = None,
     worktree_diff: Optional[str] = None,
+    provider: Optional[str] = None,
+    non_token_evidence: Optional[str] = None,
 ) -> PhantomVerdict:
     """Inline govern-time phantom check for BOTH lanes (claude tmux via dispatch_govern.govern,
     providers via dispatch_envelope._govern — the kimi/glm/deepseek fabrication vector).
@@ -178,6 +218,10 @@ def guard_at_govern(
          GovernSpec — not torn down until after govern),
       2. else the dispatch's own branch ``dispatch/<sanitized id>`` (still-present isolated branch),
       3. else ABSTAIN — return ok (an unresolvable/torn-down ref must never read as "empty diff").
+
+    ``provider`` + ``non_token_evidence`` forward to ``phantom_guard()``'s TOKEN_BLIND_PROVIDERS
+    escape hatch (kimi at minimum): when the resolved diff is still empty, a caller-supplied
+    non-token evidence reference (commit sha / branch / PR id) is accepted in its place.
 
     Honors ``VNX_OVERRIDE_PHANTOM_GUARD=1`` (operator escape for a legitimate no-op delivery). This
     function performs NO receipt I/O — the caller appends the corrective ``failed`` receipt on a
@@ -200,7 +244,10 @@ def guard_at_govern(
                 diff = compute_branch_diff(branch, base_ref=base)
         except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
             return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
-    return phantom_guard(status=status, worktree_diff=diff, token_usage=token_usage, role=role)
+    return phantom_guard(
+        status=status, worktree_diff=diff, token_usage=token_usage, role=role,
+        provider=provider, non_token_evidence=non_token_evidence,
+    )
 
 
 def record_phantom_if_any(
@@ -213,6 +260,8 @@ def record_phantom_if_any(
     base_sha: Optional[str] = None,
     worktree_diff: Optional[str] = None,
     receipts_file: Optional[str] = None,
+    provider: Optional[str] = None,
+    non_token_evidence: Optional[str] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
@@ -227,6 +276,7 @@ def record_phantom_if_any(
     verdict = guard_at_govern(
         dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
         worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
+        provider=provider, non_token_evidence=non_token_evidence,
     )
     if verdict.is_phantom and receipts_file:
         try:
@@ -311,6 +361,23 @@ def _extract_token_usage(receipt: Mapping[str, Any]) -> Optional[int]:
     return None
 
 
+# Receipt keys checked, in order, for a non-token evidence reference (commit sha, branch
+# name, or PR id/ref). First truthy, non-placeholder value wins.
+_NON_TOKEN_EVIDENCE_KEYS = ("pr_id", "pr_ref", "commit_sha", "branch")
+
+
+def _extract_non_token_evidence(receipt: Mapping[str, Any]) -> Optional[str]:
+    """Best-effort non-token evidence reference from a receipt; None when absent."""
+    for key in _NON_TOKEN_EVIDENCE_KEYS:
+        value = receipt.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "none":
+            return text
+    return None
+
+
 def main(argv: Optional[list] = None) -> int:
     import argparse
     import json
@@ -321,6 +388,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--status", help="Receipt status (when not passing --receipt-json).")
     p.add_argument("--role", default=None)
     p.add_argument("--token-usage", type=int, default=None)
+    p.add_argument("--provider", default=None, help="Dispatch provider (e.g. kimi) — enables the TOKEN_BLIND_PROVIDERS evidence path.")
+    p.add_argument("--non-token-evidence", default=None, help="Commit sha / branch / PR id proving the dispatch produced output.")
     src = p.add_mutually_exclusive_group()
     src.add_argument("--worktree", help="Path to the worker's worktree (diff it vs --base).")
     src.add_argument("--branch", help="Pushed branch ref to diff vs --base.")
@@ -344,6 +413,7 @@ def main(argv: Optional[list] = None) -> int:
         verdict = phantom_guard(
             status=args.status, worktree_diff=diff,
             token_usage=args.token_usage, role=args.role,
+            provider=args.provider, non_token_evidence=args.non_token_evidence,
         )
 
     print(verdict.reason, file=sys.stderr)
