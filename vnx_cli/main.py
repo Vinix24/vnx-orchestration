@@ -328,6 +328,11 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
         help="advisory drift-gate: report declared-vs-derived divergence (exit 0)",
     )
     _common_horizon_args(p_drift)
+    p_drift.add_argument(
+        "--repo-root", default="", dest="repo_root", metavar="PATH",
+        help="project repo root for the ROADMAP.yaml (Source-3) evidence "
+             "(default: resolved --project-dir)",
+    )
 
     p_reconcile = subs.add_parser(
         "reconcile",
@@ -382,6 +387,11 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
                          help="operator approval token (REQUIRED with --apply)")
     p_close.add_argument("--include-parked", action="store_true",
                          help="allow closing a PARKED track (un-parks it; off by default)")
+    p_close.add_argument(
+        "--repo-root", default="", dest="repo_root", metavar="PATH",
+        help="project repo root for the ROADMAP.yaml (Source-3) evidence "
+             "(default: resolved --project-dir)",
+    )
 
     p_reopen = subs.add_parser(
         "reopen", help="reopen a done track: done -> active (operator-gated, audited)",

@@ -78,6 +78,20 @@ def _prep(args: Any) -> None:
     args.project_id = resolve_project_id(args)
 
 
+def _default_repo_root(args: Any) -> None:
+    """Default ``--repo-root`` to the resolved project_dir when not set.
+
+    The pip CLI runs against ``--project-dir`` and the caller's CWD is not
+    necessarily the project repo (central-mode), so ``gh`` PR lookups and the
+    ROADMAP.yaml (Source-3) evidence must anchor on the project_dir — not the
+    packaged engine's own location or a stray CWD. Also guarantees the attribute
+    exists so ``planning_cli`` never hits ``AttributeError: 'Namespace' object
+    has no attribute 'repo_root'``.
+    """
+    if not getattr(args, "repo_root", ""):
+        args.repo_root = str(Path(args.project_dir).resolve())
+
+
 # ---------------------------------------------------------------------------
 # objective-domain verbs
 # ---------------------------------------------------------------------------
@@ -109,16 +123,14 @@ def _cmd_sync(args: Any) -> int:
 def _cmd_drift(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
+    _default_repo_root(args)
     return pc.cmd_objective_drift(args)
 
 
 def _cmd_reconcile(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
-    # Default repo_root to the resolved project_dir (not the packaged engine's
-    # own location) so `gh` PR lookups run against the caller's actual repo.
-    if not getattr(args, "repo_root", ""):
-        args.repo_root = str(Path(args.project_dir).resolve())
+    _default_repo_root(args)
     return pc.cmd_objective_reconcile(args)
 
 
@@ -137,6 +149,7 @@ def _cmd_reconcile_streak(args: Any) -> int:
 def _cmd_close(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
+    _default_repo_root(args)
     return pc.cmd_objective_close(args)
 
 

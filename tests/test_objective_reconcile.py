@@ -1199,3 +1199,121 @@ class TestBuildTickCommand:
         assert "my-project" in cmd
         assert "--state-dir" in cmd
         assert sd in cmd
+
+
+# ---------------------------------------------------------------------------
+# repo_root None-tolerance (central-mode-path-correctness, round 3)
+# ---------------------------------------------------------------------------
+
+import planning_cli  # noqa: E402
+import vnx_paths  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+
+def test_resolve_effective_repo_root_prefers_project_root(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {"PROJECT_ROOT": str(proj)})
+    assert objective_reconcile._resolve_effective_repo_root() == proj
+
+
+def test_resolve_effective_repo_root_falls_back_to_cwd_git(tmp_path, monkeypatch):
+    def _boom():
+        raise RuntimeError("no paths")
+    monkeypatch.setattr(vnx_paths, "resolve_paths", _boom)
+    git_root = tmp_path / "gitrepo"
+    monkeypatch.setattr(
+        objective_reconcile.track_reconciler, "_git_toplevel", lambda p: git_root
+    )
+    assert objective_reconcile._resolve_effective_repo_root() == git_root
+
+
+def test_run_reconcile_none_repo_root_resolves_internally(tmp_path, monkeypatch):
+    # None must be resolved to a concrete repo root (never passed as None into gh).
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-none", phase="active", pr_ref="#100")
+    _seed_dispatch(sd, "D-none", "T-none", state="completed")
+    _seed_pr_merged_ndjson(sd, 100)
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({100: _merged_pr(100)}),
+    )
+    resolved_calls = []
+
+    def _spy():
+        resolved_calls.append(True)
+        return tmp_path
+
+    monkeypatch.setattr(objective_reconcile, "_resolve_effective_repo_root", _spy)
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=None, apply=False,
+    )
+    assert resolved_calls, "None repo_root must trigger internal resolution"
+    assert code == 0
+    assert summary["counts"]["confirmed"] == 1
+
+
+def test_run_reconcile_explicit_repo_root_not_resolved(tmp_path, monkeypatch):
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-exp", phase="active", pr_ref="#100")
+    _seed_dispatch(sd, "D-exp", "T-exp", state="completed")
+    _seed_pr_merged_ndjson(sd, 100)
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({100: _merged_pr(100)}),
+    )
+    resolved_calls = []
+    monkeypatch.setattr(
+        objective_reconcile, "_resolve_effective_repo_root",
+        lambda: resolved_calls.append(True) or tmp_path,
+    )
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=False,
+    )
+    assert not resolved_calls, "explicit repo_root must NOT trigger internal resolution"
+    assert code == 0
+
+
+def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monkeypatch):
+    # Gap 2: the dry-run close path must read the project ROADMAP (Source-3) via
+    # repo_root, so pr_merged is True when the repo roadmap lists the PR merged.
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-dry", phase="active", pr_ref="#4242")
+    _seed_dispatch(sd, "D-dry", "T-dry", state="completed")  # derives 'done'
+
+    repo = tmp_path / "project-repo"
+    repo.mkdir()
+    (repo / "ROADMAP.yaml").write_text(
+        "features:\n  - pr_queue:\n      - pr_id: '#4242'\n        status: merged\n",
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(
+        state_dir=str(sd),
+        project_id=PROJECT_ID,
+        track_id="T-dry",
+        repo_root=str(repo),
+        apply=False,
+        approval_id=None,
+        include_parked=False,
+        json=True,
+    )
+    captured = {}
+    real_close_evidence = planning_cli._close_evidence
+
+    def _spy(state_dir, track_id, project_id, repo_root=None):
+        captured["repo_root"] = repo_root
+        return real_close_evidence(state_dir, track_id, project_id, repo_root=repo_root)
+
+    monkeypatch.setattr(planning_cli, "_close_evidence", _spy)
+
+    rc = planning_cli.cmd_objective_close(args)
+    assert rc == 0
+    # The dry-run path forwarded repo_root...
+    assert captured.get("repo_root") == Path(str(repo)).resolve()
+    # ...and the evidence read the repo roadmap -> pr_merged True (would be False
+    # if repo_root were dropped and the CWD-git-root roadmap read instead).
+    ev = real_close_evidence(str(sd), "T-dry", PROJECT_ID, repo_root=Path(str(repo)).resolve())
+    assert ev["pr_merged"] is True

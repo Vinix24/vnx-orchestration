@@ -346,7 +346,7 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
     project_id = args.project_id
 
     try:
-        repo_root = _resolve_repo_root(args.repo_root)
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
     except Exception as exc:
         print(f"reconcile: cannot resolve repo root: {exc}", file=sys.stderr)
         return 2
@@ -505,7 +505,7 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
     project_id = args.project_id
 
     try:
-        repo_root = _resolve_repo_root(args.repo_root)
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
     except Exception as exc:
         logger.warning("drift: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
         repo_root = None
@@ -594,7 +594,7 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     track_id = args.track_id
 
     try:
-        repo_root = _resolve_repo_root(args.repo_root)
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
     except Exception as exc:
         logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
         repo_root = None
@@ -670,7 +670,9 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
 
     # Surface the done-evidence so the operator gate is informed: the reconciler
     # derives 'done' from ANY terminal dispatch state, including expired/dead_letter.
-    payload["evidence"] = _close_evidence(state_dir, track_id, project_id)
+    # Thread repo_root so the dry-run merged-PR check reads the project's ROADMAP
+    # (Source-3), matching the --apply path via close_track_if_done.
+    payload["evidence"] = _close_evidence(state_dir, track_id, project_id, repo_root=repo_root)
 
     # The state machine forbids skips (e.g. queued -> done is illegal: a track
     # must pass through 'active'). A merged track stuck at queued/parked is
