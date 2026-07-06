@@ -505,6 +505,49 @@ class TestResolvedPidValidation:
             mfs.apply_migration_v31(conn, data_root)
         conn.close()
 
+    def test_v31_store_index_drift_aborts_through_run(self, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """codex round-3 gap 1: an already-v31 store carrying a same-name ASC-vs-DESC
+        drift aborts through mfs.run() (the walk's apply_migration_v31 runs the guard
+        BEFORE the user_version >= 31 early-return; the manifest ignores direction so
+        version reconciliation does not downgrade it away)."""
+        pid = "run-drift-test"
+        data_root = _central_data_root(tmp_path, pid)
+        db_path = _bootstrap_store(data_root)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        mfs.run(data_dir=data_root, run_tenant_stamp=False)  # → v31
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("DROP INDEX idx_headless_run_state")
+        conn.execute(
+            "CREATE INDEX idx_headless_run_state ON headless_runs(state, started_at ASC)")
+        conn.commit()
+        conn.close()
+        assert _uv(db_path) == 31  # store stays v31 — the >= 31 fast-return would apply
+        with pytest.raises(RuntimeError, match="idx_headless_run_state.*differs"):
+            mfs.run(data_dir=data_root, run_tenant_stamp=False)
+
+    def test_wpm_partial_where_drift_aborts(self, tmp_path: Path,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        """codex round-3 gap 2: a same-name partial-WHERE drift on
+        idx_pool_membership_active (worker_pool_membership) is detected/aborted like the
+        other runtime tables — its canonical defs are now in the guard's set."""
+        pid = "wpm-drift-test"
+        data_root = _central_data_root(tmp_path, pid)
+        db_path = _bootstrap_store(data_root)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        mfs.run(data_dir=data_root, run_tenant_stamp=False)  # → v31; WPM canonical indexes
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("DROP INDEX idx_pool_membership_active")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_pool_membership_active "
+            "ON worker_pool_membership(terminal_id, project_id) WHERE released_at IS NOT NULL")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+        # Guard runs before the >= 31 early-return, so it fires at user_version 31 too.
+        with pytest.raises(RuntimeError, match="idx_pool_membership_active.*differs"):
+            mfs.apply_migration_v31(conn, data_root)
+        conn.close()
+
     def test_hostile_pid_via_pipeline_leaves_store_intact(self, tmp_path: Path,
                                                           monkeypatch: pytest.MonkeyPatch) -> None:
         """A hostile marker on a store that needs the adaptive 0031 repair aborts the

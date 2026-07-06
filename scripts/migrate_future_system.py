@@ -2912,10 +2912,24 @@ _CREATE_INDEX_NAME_RE = re.compile(
     r'(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?("?)([A-Za-z0-9_]+)\1')
 
 
+#: worker_pool_membership canonical indexes (0020 legacy == v31 adaptive rebuild).
+#: WPM has no entry in _V31_TABLE_INDEXES — the adaptive WPM rebuild
+#: (_adaptive_rebuild_worker_pool_membership) creates these inline — so they are
+#: enumerated here for the conflict guard, which iterates WPM (it is in
+#: _RUNTIME_V31_TABLES). Without this a same-name partial-WHERE drift on
+#: idx_pool_membership_active would go undetected (codex round-3 gap 2).
+_WPM_CANONICAL_INDEXES = (
+    "CREATE UNIQUE INDEX idx_pool_membership_active "
+    "ON worker_pool_membership(terminal_id, project_id) WHERE released_at IS NULL",
+    "CREATE INDEX idx_pool_membership_pool ON worker_pool_membership(project_id, pool_id)",
+)
+
+
 def _canonical_runtime_index_defs() -> dict[str, set[str]]:
     """Map index name → {acceptable normalized CREATE INDEX definitions}, over the
-    legacy (_RUNTIME_V30_LEGACY_INDEX_SQL) and v31 (_V31_TABLE_INDEXES) canonical sets.
-    An index of a canonical name whose definition matches none of these has drifted."""
+    legacy (_RUNTIME_V30_LEGACY_INDEX_SQL), v31 (_V31_TABLE_INDEXES), and
+    worker_pool_membership (_WPM_CANONICAL_INDEXES) canonical sets. An index of a
+    canonical name whose definition matches none of these has drifted."""
     acc: dict[str, set[str]] = {}
     for sqls in _V31_TABLE_INDEXES.values():
         for sql in sqls:
@@ -2925,6 +2939,10 @@ def _canonical_runtime_index_defs() -> dict[str, set[str]]:
     for by_name in _RUNTIME_V30_LEGACY_INDEX_SQL.values():
         for name, sql in by_name.items():
             acc.setdefault(name, set()).add(_normalize_create_index_sql(sql))
+    for sql in _WPM_CANONICAL_INDEXES:
+        m = _CREATE_INDEX_NAME_RE.match(sql)
+        if m:
+            acc.setdefault(m.group(2), set()).add(_normalize_create_index_sql(sql))
     return acc
 
 
@@ -2960,20 +2978,22 @@ def apply_migration_v31(conn: sqlite3.Connection, project_root: Path) -> None:
         raise FileNotFoundError(f"Migration not found: {migration_path}")
 
     current_version = schema_migration.get_user_version(conn)
+
+    # Refuse conflicting canonical-named index redefinitions FIRST — before EVERY
+    # early return, including the already-v31 fast-return (codex round-3) and the
+    # v31-complete / tables-absent fast paths (codex round-2). Neither the
+    # user_version >= 31 check nor the manifest's v31-complete check compares ASC/DESC
+    # direction or collation, so a same-name index that differs ONLY in
+    # direction/collation would otherwise slip through silently. The guard skips absent
+    # tables, so it is a no-op on the tables-absent / fresh paths.
+    _assert_no_conflicting_runtime_index_redefinition(conn)
+
     if current_version >= 31:
         print(f"  [skip] migration 0031 already applied (user_version={current_version})")
         return
     if current_version != 30:
         raise RuntimeError(
             f"0031 requires user_version=30 after the prior numbered walk; got {current_version}.")
-
-    # Refuse conflicting canonical-named index redefinitions FIRST — before the
-    # v31-complete / tables-absent fast paths (codex round-2 fast-path-bypass fix). The
-    # manifest's v31-complete check compares key columns/unique/partial only, NOT
-    # ASC/DESC direction or collation, so a same-name index that differs ONLY in
-    # direction/collation would slip through the fast path and be silently accepted.
-    # The guard skips absent tables, so it is a no-op on the tables-absent path.
-    _assert_no_conflicting_runtime_index_redefinition(conn)
 
     if _runtime_v31_tables_absent(conn):
         print("  [skip] migration 0031 runtime tables absent; user_version → 31")
