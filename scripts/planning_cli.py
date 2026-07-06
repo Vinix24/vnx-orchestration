@@ -75,6 +75,18 @@ def _resolve_roadmap_path(explicit: str | None) -> Path:
     return resolve_project_root(__file__) / "ROADMAP.yaml"
 
 
+def _resolve_repo_root(explicit: str) -> Path:
+    """Resolve the project repo root: explicit --repo-root > canonical resolver.
+
+    Central-mode workers can run from a CWD that is not the project repo
+    (e.g. the keystone), so CWD-based git-root detection is not safe here.
+    """
+    if explicit:
+        return Path(explicit).resolve()
+    from project_root import resolve_project_root
+    return resolve_project_root(__file__)
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write JSON atomically: temp file in the same dir + os.replace."""
     import tempfile
@@ -325,15 +337,11 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
 
-    if args.repo_root:
-        repo_root = Path(args.repo_root).resolve()
-    else:
-        try:
-            from project_root import resolve_project_root  # noqa: PLC0415
-            repo_root = resolve_project_root(__file__)
-        except Exception as exc:
-            print(f"reconcile: cannot resolve repo root: {exc}", file=sys.stderr)
-            return 2
+    try:
+        repo_root = _resolve_repo_root(args.repo_root)
+    except Exception as exc:
+        print(f"reconcile: cannot resolve repo root: {exc}", file=sys.stderr)
+        return 2
 
     try:
         summary, exit_code = objective_reconcile.run_reconcile(
@@ -488,7 +496,13 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
 
-    results = track_reconciler.reconcile_all_tracks(state_dir, project_id)
+    try:
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+    except Exception as exc:
+        logger.warning("drift: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
+        repo_root = None
+
+    results = track_reconciler.reconcile_all_tracks(state_dir, project_id, repo_root=repo_root)
 
     divergent = []
     for r in results:
@@ -572,13 +586,23 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     track_id = args.track_id
 
     try:
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+    except Exception as exc:
+        logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
+        repo_root = None
+
+    try:
         # Dry-run is READ-ONLY: peek computes derived_status without persisting.
         # --apply reconciles fresh (and persists derived_status) right before the
         # write, so the transition acts on current state.
         if args.apply:
-            result = track_reconciler.reconcile_track(state_dir, track_id, project_id)
+            result = track_reconciler.reconcile_track(
+                state_dir, track_id, project_id, repo_root=repo_root
+            )
         else:
-            result = track_reconciler.peek_derived_status(state_dir, track_id, project_id)
+            result = track_reconciler.peek_derived_status(
+                state_dir, track_id, project_id, repo_root=repo_root
+            )
     except Exception as exc:
         print(f"objective close failed: cannot reconcile {track_id}: {exc}", file=sys.stderr)
         return 1
@@ -671,6 +695,7 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
         actor="operator",
         approval_id=args.approval_id,
         include_parked=getattr(args, "include_parked", False),
+        repo_root=repo_root,
     )
     lib_action = lib.get("action")
 
