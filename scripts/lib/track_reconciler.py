@@ -371,6 +371,118 @@ def _compute_derived_status(
     return "queued"
 
 
+def _blocking_detail(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+) -> Dict[str, Any]:
+    """Identify WHY a track derives 'blocked' (read-only; writes nothing).
+
+    Mirrors the step-1 (blocker open-item) / step-2 (dependency) query shapes
+    in _compute_derived_status exactly, but returns the blocking ids (and a
+    label, when the OI table happens to carry one) instead of a LIMIT-1
+    existence probe — so the caller can NAME the blocker instead of merely
+    detecting it. Reuses the same pre-0030 / project_id-column fallbacks.
+
+    Returns {"blocking_ois": [...], "blocking_deps": [...]}; both empty when
+    neither check currently blocks (i.e. when called for a non-blocked track).
+    """
+    has_project_id_col = _has_col(conn, "track_open_items", "project_id")
+    has_resolved_at_col = _has_col(conn, "track_open_items", "resolved_at")
+    label_col = next(
+        (c for c in ("title", "text") if _has_col(conn, "track_open_items", c)), None
+    )
+    select_cols = "oi_id" + (f", {label_col}" if label_col else "")
+
+    if has_project_id_col and has_resolved_at_col:
+        rows = conn.execute(
+            f"""
+            SELECT {select_cols} FROM track_open_items
+            WHERE track_id = ? AND project_id = ? AND link_type = 'blocks'
+              AND resolved_at IS NULL
+            ORDER BY oi_id ASC
+            """,
+            (track_id, project_id),
+        ).fetchall()
+    elif has_project_id_col:
+        rows = conn.execute(
+            f"""
+            SELECT {select_cols} FROM track_open_items
+            WHERE track_id = ? AND project_id = ? AND link_type = 'blocks'
+            ORDER BY oi_id ASC
+            """,
+            (track_id, project_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT {select_cols} FROM track_open_items
+            WHERE track_id = ? AND link_type = 'blocks'
+            ORDER BY oi_id ASC
+            """,
+            (track_id,),
+        ).fetchall()
+
+    blocking_ois: List[Dict[str, Any]] = []
+    for row in rows:
+        entry: Dict[str, Any] = {"oi_id": row["oi_id"]}
+        if label_col:
+            entry["label"] = row[label_col]
+        blocking_ois.append(entry)
+
+    dep_rows = conn.execute(
+        """
+        SELECT td.to_track_id, t.phase
+        FROM track_dependencies td
+        JOIN tracks t
+          ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
+        WHERE td.from_track_id = ? AND td.from_project_id = ?
+        """,
+        (track_id, project_id),
+    ).fetchall()
+    blocking_deps = [
+        {"track_id": row["to_track_id"], "phase": row["phase"]}
+        for row in dep_rows
+        if row["phase"] != "done"
+    ]
+
+    return {"blocking_ois": blocking_ois, "blocking_deps": blocking_deps}
+
+
+def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
+    """Render an operator-facing hint naming each blocker + its exact resolving
+    command — "transparantie zonder actie is inert": the surface must point at
+    the action, not just restate the fact of being blocked.
+
+    Blocker-OI resolution stays HUMAN-GATED: this only formats the command; it
+    never runs it and never clears the open-item itself.
+
+    Returns "" when detail is None/empty or names no blockers.
+    """
+    if not detail:
+        return ""
+    blocking_ois = detail.get("blocking_ois") or []
+    blocking_deps = detail.get("blocking_deps") or []
+    if not blocking_ois and not blocking_deps:
+        return ""
+
+    lines: List[str] = []
+    for oi in blocking_ois:
+        oi_id = oi.get("oi_id")
+        label = oi.get("label")
+        suffix = f" ({label})" if label else ""
+        lines.append(
+            f"blocked by open-item {oi_id}{suffix} -- resolve: "
+            f'vnx track oi-close {oi_id} --reason "<why this no longer blocks>"'
+        )
+    for dep in blocking_deps:
+        lines.append(
+            f"blocked by dependency {dep.get('track_id')} "
+            f"-- not done (phase={dep.get('phase')})"
+        )
+    return "\n".join(lines)
+
+
 def _write_derived_status(
     conn: sqlite3.Connection,
     track_id: str,
@@ -443,13 +555,16 @@ def reconcile_track(
 
         _log_drift(track_id, project_id, declared, derived)
 
-        return {
+        result: Dict[str, Any] = {
             "track_id": track_id,
             "project_id": project_id,
             "derived_status": derived,
             "declared_phase": declared,
             "drifted": declared != derived,
         }
+        if derived == "blocked":
+            result["blocking_detail"] = _blocking_detail(conn, track_id, project_id)
+        return result
     finally:
         conn.close()
 
@@ -483,13 +598,16 @@ def peek_derived_status(
             (track_id, project_id),
         ).fetchone()
         declared = track_row["phase"] if track_row else None
-        return {
+        result: Dict[str, Any] = {
             "track_id": track_id,
             "project_id": project_id,
             "derived_status": derived,
             "declared_phase": declared,
             "drifted": declared != derived,
         }
+        if derived == "blocked":
+            result["blocking_detail"] = _blocking_detail(conn, track_id, project_id)
+        return result
     finally:
         conn.close()
 
@@ -539,6 +657,10 @@ def reconcile_all_tracks(
             "reconciled track=%s derived=%s declared=%s drift=%s",
             track_id, result["derived_status"], result["declared_phase"], result["drifted"],
         )
+        if result["derived_status"] == "blocked":
+            hint = format_blocking_hint(result.get("blocking_detail"))
+            if hint:
+                log.info("track_blocked: track=%s project=%s\n%s", track_id, project_id, hint)
 
     log.info(
         "track_reconciler: project=%s tracks=%d drifted=%d",
