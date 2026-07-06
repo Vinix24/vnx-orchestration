@@ -99,6 +99,55 @@ def _phase(state_dir: Path, track_id: str, project_id: str = PROJECT_ID) -> str:
     return row[0] if row else ""
 
 
+def _build_db_plan_gate(tmp_path: Path) -> Path:
+    """Same as `_build_db` but with migration 0030 applied (track_open_items
+    .resolved_at / .resolution_reason) — required for the plan-gate blocker
+    seed/resolve lifecycle (`_plan_gate_supported`)."""
+    state_dir = _build_db(tmp_path)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    schema_migration.apply_script_if_below(
+        conn, 30, (_MIGRATIONS / "0030_track_oi_resolved_at.sql").read_text(encoding="utf-8")
+    )
+    conn.commit()
+    conn.close()
+    return state_dir
+
+
+def _plan_oi_resolved_at(state_dir: Path, track_id: str, project_id: str = PROJECT_ID):
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    row = conn.execute(
+        "SELECT resolved_at FROM track_open_items "
+        "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+        (track_id, project_id, f"OI-PLAN-{track_id}"),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def _derived_status(state_dir: Path, track_id: str, project_id: str = PROJECT_ID):
+    t = tracks_lib.get_track(state_dir, track_id, project_id)
+    return t.get("derived_status") if t else None
+
+
+def _plan_attest_args(
+    state_dir: Path,
+    track_id: str,
+    *,
+    reason: str = "",
+    approval_id: str = "",
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir),
+        project_id=project_id,
+        track_id=track_id,
+        reason=reason,
+        approval_id=approval_id,
+        json=json,
+    )
+
+
 def _history_count(state_dir: Path, track_id: str, project_id: str = PROJECT_ID) -> int:
     conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
     n = conn.execute(
@@ -284,3 +333,87 @@ def test_close_blocked_renders_blocking_dependency_hint(tmp_path, capsys):
     assert "blocked" in out
     assert "blocked by dependency dep" in out
     assert "not done (phase=queued)" in out
+
+
+# ---------------------------------------------------------------------------
+# plan-gate attest
+# ---------------------------------------------------------------------------
+
+def test_plan_gate_attest_resolves_blocker_and_writes_audit(tmp_path):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="shipped", phase="queued")
+    assert planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID) is True
+    assert _derived_status(sd, "T") == "blocked"
+
+    rc = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="already shipped+merged pre-gate", approval_id="APR-1")
+    )
+    assert rc == 0
+    assert _plan_oi_resolved_at(sd, "T") is not None
+    assert _derived_status(sd, "T") != "blocked"
+
+    events = _track_events(sd, "T", "plan_gate_attest")
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["reason"] == "already shipped+merged pre-gate"
+    assert details["approval_id"] == "APR-1"
+    assert details["track_id"] == "T"
+
+
+def test_plan_gate_attest_requires_reason_and_approval_id(tmp_path):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+
+    rc_no_reason = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="", approval_id="APR-1")
+    )
+    assert rc_no_reason == 2
+    assert _plan_oi_resolved_at(sd, "T") is None
+
+    rc_no_approval = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="shipped", approval_id="")
+    )
+    assert rc_no_approval == 2
+    assert _plan_oi_resolved_at(sd, "T") is None
+    assert _track_events(sd, "T", "plan_gate_attest") == []
+
+
+def test_plan_gate_attest_no_blocker_reports_honestly(tmp_path, capsys):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    # No _seed_plan_blocker call: nothing to resolve.
+
+    rc = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="shipped", approval_id="APR-1")
+    )
+    assert rc == 1
+    assert _track_events(sd, "T", "plan_gate_attest") == []
+    assert "no unresolved plan blocker" in capsys.readouterr().out
+
+
+def test_plan_gate_attest_track_not_found(tmp_path):
+    sd = _build_db_plan_gate(tmp_path)
+    rc = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "missing", reason="x", approval_id="y")
+    )
+    assert rc == 1
+
+
+def test_plan_gate_attest_still_blocked_reports_plainly(tmp_path, capsys):
+    """Resolving the plan blocker clears IT, but a hard dependency still blocks —
+    attest must report that plainly, not claim a full unblock."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    tracks_lib.create_track(sd, "dep", PROJECT_ID, title="dep", goal_state="y", phase="queued")
+    tracks_lib.add_dependency(sd, "T", PROJECT_ID, "dep", PROJECT_ID, kind="hard", derivation_source="manual")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+
+    rc = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="shipped", approval_id="APR-1")
+    )
+    assert rc == 2
+    assert _plan_oi_resolved_at(sd, "T") is not None  # the plan blocker itself WAS resolved
+    assert _derived_status(sd, "T") == "blocked"  # but still blocked by the dependency
+    assert len(_track_events(sd, "T", "plan_gate_attest")) == 1
+    assert "STILL" in capsys.readouterr().out

@@ -1767,6 +1767,109 @@ def cmd_plan_gate_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
+    """Operator escape-hatch: attest a track's plan gate as passed WITHOUT re-running
+    the panel (mirrors `_close_with_attest`'s design for the sibling ops-track case).
+
+    For the class of bug the track-linkage arc fixes: work already shipped, merged,
+    and CI-green via an ad-hoc dispatch BEFORE the plan-gate ran. Re-running a
+    pre-work plan panel against already-merged work is category-wrong; this is the
+    human-gated override.
+
+    Human-gated: --reason AND --approval-id are BOTH required. On success, resolves
+    the OI-PLAN-<track_id> blocker via `_resolve_plan_blocker` (which also
+    reconciles the track) and emits a `plan_gate_attest` audit event. Never claims a
+    clear that didn't happen: a track with no unresolved plan blocker (not seeded,
+    or already passed) is reported honestly and exits non-zero; a track still
+    blocked by another blocker/dependency after resolving is reported plainly
+    (mirrors the honesty in `cmd_plan_gate_run`).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    reason = (getattr(args, "reason", None) or "").strip()
+    approval_id = (getattr(args, "approval_id", None) or "").strip()
+    if not reason or not approval_id:
+        print(
+            "plan-gate attest: --reason and --approval-id are both required "
+            "(the operator's gate token). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"plan-gate attest: track not found: {track_id!r} (project {project_id!r}). "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    payload: dict[str, Any] = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "action": None,
+        "applied": False,
+    }
+
+    try:
+        resolved = _resolve_plan_blocker(state_dir, track_id, project_id)
+    except Exception as exc:
+        print(f"plan-gate attest: unexpected error resolving blocker: {exc}", file=sys.stderr)
+        return 1
+
+    if not resolved:
+        payload["action"] = "noop_not_blocked"
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx plan-gate attest — {track_id} (project '{project_id}')\n")
+            print(
+                "  no unresolved plan blocker found (gate not seeded, or already "
+                "passed). No change made.\n"
+            )
+        return 1
+
+    # Audit the operator attestation (reason + approval_id + track_id).
+    tracks_lib._emit_track_event(
+        state_dir,
+        "plan_gate_attest",
+        track_id,
+        project_id,
+        "operator",
+        {"reason": reason, "approval_id": approval_id, "track_id": track_id},
+    )
+
+    post = tracks_lib.get_track(state_dir, track_id, project_id)
+    derived = post.get("derived_status") if isinstance(post, dict) else None
+    payload["action"] = "attested"
+    payload["applied"] = True
+    payload["derived_status"] = derived
+
+    if derived == "blocked":
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx plan-gate attest — {track_id} (project '{project_id}')\n")
+            print(f"  attested: {reason} (approval={approval_id})")
+            print(
+                f"  plan blocker resolved={resolved}, but track {track_id} is STILL "
+                "blocked (another blocker or hard dependency remains). Clear the "
+                "remaining blocker first.\n"
+            )
+        return 2
+
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx plan-gate attest — {track_id} (project '{project_id}')\n")
+        print(f"  attested: {reason} (approval={approval_id})")
+        print(f"  plan gate cleared. derived_status={derived}.\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -1980,6 +2083,19 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_pstat)
     p_pstat.add_argument("track_id")
     p_pstat.set_defaults(func=cmd_plan_gate_status)
+
+    p_pattest = pg_sub.add_parser(
+        "attest",
+        help="operator escape-hatch: attest the plan gate as passed without re-running the panel",
+    )
+    _common(p_pattest)
+    p_pattest.add_argument("track_id")
+    p_pattest.add_argument("--reason", default="", help="operator attestation reason (REQUIRED)")
+    p_pattest.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_pattest.set_defaults(func=cmd_plan_gate_attest)
 
     return parser
 

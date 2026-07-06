@@ -449,10 +449,19 @@ def _blocking_detail(
     return {"blocking_ois": blocking_ois, "blocking_deps": blocking_deps}
 
 
+_PLAN_OI_PREFIX = "OI-PLAN-"
+
+
 def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
     """Render an operator-facing hint naming each blocker + its exact resolving
     command — "transparantie zonder actie is inert": the surface must point at
     the action, not just restate the fact of being blocked.
+
+    OI-type-aware: a synthetic ``OI-PLAN-<track>`` blocker (the plan-first gate)
+    resolves through the plan-gate CLI, NOT the generic open-item path — the
+    track_id is derived from the oi_id itself. Any other (generic) blocking
+    open-item has no dedicated CLI resolver today; the hint says so explicitly
+    and names the real underlying mechanism instead of a dead command.
 
     Blocker-OI resolution stays HUMAN-GATED: this only formats the command; it
     never runs it and never clears the open-item itself.
@@ -468,13 +477,26 @@ def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
 
     lines: List[str] = []
     for oi in blocking_ois:
-        oi_id = oi.get("oi_id")
+        oi_id = oi.get("oi_id") or ""
         label = oi.get("label")
         suffix = f" ({label})" if label else ""
-        lines.append(
-            f"blocked by open-item {oi_id}{suffix} -- resolve: "
-            f'vnx track oi-close {oi_id} --reason "<why this no longer blocks>"'
-        )
+        if oi_id.startswith(_PLAN_OI_PREFIX):
+            plan_track = oi_id[len(_PLAN_OI_PREFIX):]
+            lines.append(
+                f"blocked by open-item {oi_id}{suffix} -- this is the plan-first "
+                f"gate; resolve with EITHER: re-run the panel: "
+                f"vnx plan-gate run {plan_track} --doc <plan-doc>  OR operator "
+                f'override: vnx plan-gate attest {plan_track} --reason '
+                f'"<why this is already done>" --approval-id <token>'
+            )
+        else:
+            lines.append(
+                f"blocked by open-item {oi_id}{suffix} -- no CLI resolver exists "
+                f"today; clear via tracks.unlink_open_item(state_dir, track_id, "
+                f"project_id, {oi_id!r}, 'blocks', reason=\"<why this no longer "
+                f"blocks>\") in scripts/lib/tracks.py (sets resolved_at "
+                f"non-destructively; the row is never deleted)"
+            )
     for dep in blocking_deps:
         lines.append(
             f"blocked by dependency {dep.get('track_id')} "
