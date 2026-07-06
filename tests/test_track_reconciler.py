@@ -480,6 +480,100 @@ def test_0028_down_removes_derived_status(tmp_path):
     assert row == ("t-down", "queued")
 
 
+def test_blocking_detail_names_blocker_oi(tmp_path):
+    """blocking_detail.blocking_ois names the unresolved blocker OI; the hint
+    carries the exact oi-close command to resolve it."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-hint-oi")
+    _seed_dispatch(state_dir, "D-hint-oi-1", "T-hint-oi", state="completed")
+    _seed_pr_merged_event(state_dir, "D-hint-oi-1")
+    tracks_lib.link_open_item(state_dir, "T-hint-oi", PROJECT_ID, "OI-777", "blocks", "manual")
+
+    result = track_reconciler.reconcile_track(state_dir, "T-hint-oi", PROJECT_ID)
+    assert result["derived_status"] == "blocked"
+    detail = result["blocking_detail"]
+    assert detail["blocking_ois"] == [{"oi_id": "OI-777"}]
+    assert detail["blocking_deps"] == []
+
+    hint = track_reconciler.format_blocking_hint(detail)
+    assert "OI-777" in hint
+    assert "vnx track oi-close OI-777" in hint
+
+
+def test_blocking_detail_names_dependency(tmp_path):
+    """blocking_detail.blocking_deps names the not-done dependency track."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-hint-dep-parent", phase="queued")
+    _seed_track(state_dir, "T-hint-dep-child")
+    tracks_lib.add_dependency(
+        state_dir,
+        "T-hint-dep-child", PROJECT_ID,
+        "T-hint-dep-parent", PROJECT_ID,
+        kind="hard", derivation_source="manual",
+    )
+    _seed_dispatch(state_dir, "D-hint-dep-1", "T-hint-dep-child", state="completed")
+
+    result = track_reconciler.reconcile_track(state_dir, "T-hint-dep-child", PROJECT_ID)
+    assert result["derived_status"] == "blocked"
+    detail = result["blocking_detail"]
+    assert detail["blocking_ois"] == []
+    assert detail["blocking_deps"] == [{"track_id": "T-hint-dep-parent", "phase": "queued"}]
+
+    hint = track_reconciler.format_blocking_hint(detail)
+    assert "T-hint-dep-parent" in hint
+    assert "not done" in hint
+
+
+def test_no_blocking_detail_when_not_blocked(tmp_path):
+    """A non-blocked track carries no blocking_detail key; its hint is empty."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-hint-clean")
+    _seed_dispatch(state_dir, "D-hint-clean-1", "T-hint-clean", state="completed")
+    _seed_pr_merged_event(state_dir, "D-hint-clean-1")
+
+    result = track_reconciler.reconcile_track(state_dir, "T-hint-clean", PROJECT_ID)
+    assert result["derived_status"] != "blocked"
+    assert "blocking_detail" not in result
+    assert track_reconciler.format_blocking_hint(result.get("blocking_detail")) == ""
+
+
+def test_blocking_detail_works_pre_0030_without_resolved_at(tmp_path):
+    """No resolved_at column (pre-migration-0030 DB) — the presence-only
+    fallback still NAMES the blocker OI, not just detects it."""
+    state_dir = _build_db(tmp_path)
+    db = state_dir / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db))
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(track_open_items)")]
+    conn.close()
+    assert "resolved_at" not in cols  # _build_db never applies migration 0030
+
+    _seed_track(state_dir, "T-hint-pre0030")
+    _seed_dispatch(state_dir, "D-hint-pre0030-1", "T-hint-pre0030", state="completed")
+    tracks_lib.link_open_item(state_dir, "T-hint-pre0030", PROJECT_ID, "OI-888", "blocks", "manual")
+
+    result = track_reconciler.reconcile_track(state_dir, "T-hint-pre0030", PROJECT_ID)
+    assert result["derived_status"] == "blocked"
+    assert result["blocking_detail"]["blocking_ois"] == [{"oi_id": "OI-888"}]
+
+
+def test_format_blocking_hint_none_and_empty():
+    """format_blocking_hint tolerates None and an empty dict — both '' """
+    assert track_reconciler.format_blocking_hint(None) == ""
+    assert track_reconciler.format_blocking_hint({}) == ""
+
+
+def test_peek_derived_status_carries_blocking_detail(tmp_path):
+    """peek_derived_status (read-only preview) also carries blocking_detail."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-hint-peek")
+    _seed_dispatch(state_dir, "D-hint-peek-1", "T-hint-peek", state="completed")
+    tracks_lib.link_open_item(state_dir, "T-hint-peek", PROJECT_ID, "OI-555", "blocks", "manual")
+
+    result = track_reconciler.peek_derived_status(state_dir, "T-hint-peek", PROJECT_ID)
+    assert result["derived_status"] == "blocked"
+    assert result["blocking_detail"]["blocking_ois"] == [{"oi_id": "OI-555"}]
+
+
 def test_0028_down_preserves_track_dependencies(tmp_path):
     """Down migration must not break FK-referenced data."""
     conn, _ = _base_v27_db(tmp_path)
