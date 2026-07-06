@@ -41,12 +41,6 @@ if str(_THIS_DIR) not in sys.path:
 
 import state_writer
 
-try:
-    from project_root import resolve_data_dir, resolve_state_dir
-except ImportError:  # pragma: no cover - bootstrap failure
-    resolve_data_dir = None  # type: ignore[assignment]
-    resolve_state_dir = None  # type: ignore[assignment]
-
 
 VALID_EXIT_STATUSES = ("success", "failure", "timeout", "killed", "stuck")
 
@@ -103,20 +97,28 @@ def _now_iso() -> str:
 
 
 def _resolve_state_dir() -> Path:
-    """Resolve VNX state dir using project_root with explicit-env fallbacks."""
-    if resolve_state_dir is not None:
-        try:
-            return resolve_state_dir(__file__)
-        except Exception as exc:
-            _emit("WARN", "state_dir_resolution_failed", error=str(exc))
+    """Resolve VNX state dir: explicit env > canonical resolver (central-mode-aware).
 
+    The canonical ``vnx_paths.resolve_state_dir()`` honors VNX_HOME + the project
+    marker, so in a central install it resolves ``~/.vnx-data/<project>/state``.
+    ``project_root.resolve_state_dir(__file__)`` (git-from-caller-file) and a
+    ``_THIS_DIR`` walk both land on the keystone git-root
+    (``~/.vnx-system/current/.vnx-data``) in central mode. See #1023/#1024.
+    """
     state_env = os.environ.get("VNX_STATE_DIR")
     if state_env:
         return Path(state_env)
     data_env = os.environ.get("VNX_DATA_DIR")
     if data_env:
         return Path(data_env) / "state"
-    return _THIS_DIR.parent.parent / ".vnx-data" / "state"
+    try:
+        from vnx_paths import resolve_state_dir as _canonical_state_dir
+        return _canonical_state_dir()
+    except Exception as exc:  # pragma: no cover - resolver is defensive, never raises
+        _emit("WARN", "state_dir_resolution_failed", error=str(exc))
+    # Terminal fallback (only if the resolver import fails): stay project-relative,
+    # never a __file__ keystone walk.
+    return Path.cwd() / ".vnx-data" / "state"
 
 
 def _resolve_dispatch_register_path() -> Path:
@@ -129,12 +131,12 @@ def _resolve_dispatch_register_path() -> Path:
         and os.environ.get("VNX_DATA_DIR")
     ):
         return Path(os.environ["VNX_DATA_DIR"]) / "state" / "dispatch_register.ndjson"
-    if resolve_state_dir is not None:
-        try:
-            return resolve_state_dir(__file__) / "dispatch_register.ndjson"
-        except (OSError, RuntimeError, KeyError) as exc:
-            _emit("WARN", "dispatch_register_path_resolution_failed", error=str(exc))
-    return _THIS_DIR.parent.parent / ".vnx-data" / "state" / "dispatch_register.ndjson"
+    try:
+        from vnx_paths import resolve_state_dir as _canonical_state_dir
+        return _canonical_state_dir() / "dispatch_register.ndjson"
+    except Exception as exc:  # pragma: no cover - resolver is defensive, never raises
+        _emit("WARN", "dispatch_register_path_resolution_failed", error=str(exc))
+    return Path.cwd() / ".vnx-data" / "state" / "dispatch_register.ndjson"
 
 
 def _release_lease_step(

@@ -98,13 +98,50 @@ def _load_merged_prs_from_gh(state_path: Path, ttl_seconds: int = 600) -> Frozen
     return frozenset(nums)
 
 
-def _load_merged_pr_numbers(state_dir: str | Path) -> FrozenSet[int]:
+def _git_toplevel(path: Path) -> Optional[Path]:
+    """Return the git worktree root for ``path``, or None when not a git repo."""
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    return Path(out).resolve() if out else None
+
+
+def _resolve_roadmap_path(state_dir: Path, repo_root: "Path | None") -> Path:
+    """Resolve the project's ROADMAP.yaml (Source-3 evidence), central-mode aware.
+
+    Priority: explicit ``repo_root`` > CWD git-root > legacy ``state.parent.parent``.
+
+    The ROADMAP lives at the project *repo* root, not next to the state dir. In a
+    central install ``state_dir`` is ``~/.vnx-data/<project>/state`` so the legacy
+    two-up (``state.parent.parent``) resolves ``~/.vnx-data/`` — which holds no
+    ROADMAP.yaml, silently voiding the Source-3 evidence path. So prefer an
+    explicit repo_root the caller threads, then the CWD git-root (``vnx horizon
+    reconcile`` runs from the project dir), and only then the co-located legacy
+    layout that a dev checkout still relies on. Best-effort — never raises.
+    """
+    if repo_root is not None:
+        return Path(repo_root) / "ROADMAP.yaml"
+    cwd_root = _git_toplevel(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root / "ROADMAP.yaml"
+    return state_dir.parent.parent / "ROADMAP.yaml"
+
+
+def _load_merged_pr_numbers(
+    state_dir: str | Path,
+    repo_root: "str | Path | None" = None,
+) -> FrozenSet[int]:
     """Load confirmed-merged PR numbers.
 
     Sources (all optional; errors silently ignored):
       1. {state_dir}/../events/pr_merged.ndjson  — ADR-005 event ledger
       2. {state_dir}/t0_receipts.ndjson           — receipt log
-      3. {state_dir}/../../ROADMAP.yaml           — authoritative feature list
+      3. {repo_root|cwd-git-root|state.parent.parent}/ROADMAP.yaml — feature list
          pr_queue[*].status=merged entries cover recent PRs not yet in NDJSON files
       4. git/GitHub via ``gh`` (OPT-IN, ``VNX_RECONCILE_GIT`` set) — cache-first
          (10-min TTL), silent-on-failure. Closes the gap where a PR merged via raw
@@ -145,8 +182,13 @@ def _load_merged_pr_numbers(state_dir: str | Path) -> FrozenSet[int]:
             pass
 
     # Source 3: ROADMAP.yaml — authoritative for recent PRs not yet backfilled to NDJSON.
-    # Path: state_dir is .vnx-data/state; ROADMAP.yaml is at project root two levels up.
-    roadmap_path = state_path.parent.parent / "ROADMAP.yaml"
+    # Resolved from the project REPO-root (explicit repo_root > CWD git-root >
+    # legacy co-located layout), so central-mode projects (state at
+    # ~/.vnx-data/<project>/state) find the roadmap at their repo root instead of
+    # the roadmap-less ~/.vnx-data/. See _resolve_roadmap_path.
+    roadmap_path = _resolve_roadmap_path(
+        state_path, Path(repo_root) if repo_root is not None else None
+    )
     try:
         import yaml  # available in all VNX environments
         data = yaml.safe_load(roadmap_path.read_text(encoding="utf-8")) or {}
@@ -361,6 +403,7 @@ def reconcile_track(
     project_id: str,
     *,
     _merged_pr_numbers: Optional[FrozenSet[int]] = None,
+    repo_root: "str | Path | None" = None,
 ) -> Dict[str, Any]:
     """Compute and persist derived_status for a single track.
 
@@ -373,6 +416,8 @@ def reconcile_track(
     _merged_pr_numbers: internal kwarg — pre-loaded merged PR set. When None,
     _load_merged_pr_numbers(state_dir) is called. Pass a pre-loaded set when
     calling from reconcile_all_tracks to avoid per-track file I/O.
+    repo_root: optional project repo root for the ROADMAP.yaml (Source-3)
+    evidence path; falls back to the CWD git-root then the legacy layout.
     """
     conn = _get_conn(state_dir)
     try:
@@ -384,7 +429,7 @@ def reconcile_track(
         merged = (
             _merged_pr_numbers
             if _merged_pr_numbers is not None
-            else _load_merged_pr_numbers(state_dir)
+            else _load_merged_pr_numbers(state_dir, repo_root)
         )
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         _write_derived_status(conn, track_id, project_id, derived)
@@ -413,6 +458,8 @@ def peek_derived_status(
     state_dir: str | Path,
     track_id: str,
     project_id: str,
+    *,
+    repo_root: "str | Path | None" = None,
 ) -> Dict[str, Any]:
     """READ-ONLY: compute derived_status for one track WITHOUT persisting it.
 
@@ -429,7 +476,7 @@ def peek_derived_status(
             raise RuntimeError(
                 "tracks.derived_status column absent; apply migration 0028 first."
             )
-        merged = _load_merged_pr_numbers(state_dir)
+        merged = _load_merged_pr_numbers(state_dir, repo_root)
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         track_row = conn.execute(
             "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
@@ -450,6 +497,8 @@ def peek_derived_status(
 def reconcile_all_tracks(
     state_dir: str | Path,
     project_id: str,
+    *,
+    repo_root: "str | Path | None" = None,
 ) -> List[Dict[str, Any]]:
     """Compute and persist derived_status for all tracks in project_id.
 
@@ -458,6 +507,9 @@ def reconcile_all_tracks(
 
     Raises RuntimeError if derived_status column is absent (migration 0028
     must be applied first).
+
+    repo_root: optional project repo root for the ROADMAP.yaml (Source-3)
+    evidence path; falls back to the CWD git-root then the legacy layout.
     """
     conn = _get_conn(state_dir)
     try:
@@ -474,7 +526,7 @@ def reconcile_all_tracks(
     finally:
         conn.close()
 
-    merged_pr_numbers = _load_merged_pr_numbers(state_dir)
+    merged_pr_numbers = _load_merged_pr_numbers(state_dir, repo_root)
 
     results = []
     for track_id in track_ids:

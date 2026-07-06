@@ -551,7 +551,13 @@ if __name__ == "__main__":
                     args.model = _r_model            # pass recommended model to provider_dispatch
                 _auto_route_applied = True  # G7: always skip routing_policy when smart_router ran
 
-            _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+            _state_env = os.environ.get("VNX_STATE_DIR")
+            if not _state_env:
+                # Canonical resolver (VNX_HOME + project-marker aware) instead of a
+                # bare CWD-relative default, so central-mode resolves the project store.
+                from vnx_paths import resolve_state_dir as _canonical_state_dir
+                _state_env = str(_canonical_state_dir())
+            _state_dir = Path(_state_env)
             write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
             import logging as _log_mod  # noqa: PLC0415
             _log_mod.getLogger(__name__).info(

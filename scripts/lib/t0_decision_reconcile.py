@@ -38,7 +38,12 @@ def _data_dir() -> Path:
     vnx_data = os.environ.get("VNX_DATA_DIR")
     if vnx_data:
         return Path(vnx_data).expanduser().resolve()
-    return Path(__file__).resolve().parent.parent.parent / ".vnx-data"
+    # Central-mode-correct fallback: route through the canonical resolver, which
+    # honors VNX_HOME + the project marker and resolves ~/.vnx-data/<project>.
+    # A __file__.parents[3] walk would resolve the keystone
+    # (~/.vnx-system/current/.vnx-data) in a central install. See #1023.
+    from vnx_paths import resolve_paths
+    return Path(resolve_paths()["VNX_DATA_DIR"])
 
 
 def _state_dir() -> Path:

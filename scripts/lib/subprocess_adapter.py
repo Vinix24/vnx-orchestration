@@ -693,8 +693,11 @@ class SubprocessAdapter:
         if vnx_data_dir:
             log_dir = Path(vnx_data_dir) / "logs" / "subprocess"
         else:
-            # Fall back: derive from module location (useful in tests)
-            log_dir = Path(__file__).resolve().parent.parent.parent / ".vnx-data" / "logs" / "subprocess"
+            # Fall back to the canonical resolver (VNX_HOME + project-marker aware).
+            # A __file__.parents[3] walk would resolve the keystone
+            # (~/.vnx-system/current/.vnx-data) in a central install. See #1023.
+            from vnx_paths import resolve_paths
+            log_dir = Path(resolve_paths()["VNX_DATA_DIR"]) / "logs" / "subprocess"
         return log_dir / f"{terminal_id}_{dispatch_id}.stderr.log"
 
     # ------------------------------------------------------------------
