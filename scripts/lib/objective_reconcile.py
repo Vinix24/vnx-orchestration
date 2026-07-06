@@ -560,13 +560,13 @@ def _resolve_effective_repo_root() -> Path:
         candidate = Path(resolve_paths()["PROJECT_ROOT"])
         if candidate.is_dir():
             return candidate
-    except Exception:
+    except Exception:  # vnx-silent-except: best-effort — fall through to the git-root candidate
         pass
     try:
         git_root = track_reconciler._git_toplevel(Path.cwd())
         if git_root is not None:
             return git_root
-    except Exception:
+    except Exception:  # vnx-silent-except: best-effort — fall through to the CWD fallback
         pass
     return Path.cwd()
 
