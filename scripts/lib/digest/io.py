@@ -7,11 +7,11 @@ Public surface:
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 from atomic_io import atomic_write_text
+from ndjson_io import read_ndjson
 
 logger = logging.getLogger(__name__)
 
@@ -22,24 +22,11 @@ def write_digest_output(content: str, output_path: Path) -> None:
 
 
 def read_state_ndjson(path: Path) -> list[dict]:
-    """Read NDJSON file line by line, skipping malformed lines.
+    """Read NDJSON file line by line, tolerating a torn tail and malformed lines.
 
-    Returns [] when the file does not exist (FileNotFoundError).
-    Skips and debug-logs each line that fails json.JSONDecodeError.
-    No other exceptions caught — OSError (e.g. permission denied) propagates.
+    Returns [] when the file does not exist. Delegates to the shared
+    :func:`ndjson_io.read_ndjson` guard so a partial final line left by a crash
+    mid-append is skipped instead of breaking the reader. OSError (other than a
+    missing file) propagates.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
-
-    records: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            logger.debug("digest.io: skipping malformed NDJSON line in %s", path)
-    return records
+    return read_ndjson(path)

@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
+from ndjson_io import read_ndjson
 from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection, release_all_leases
 from failure_classifier import classify_failure
 from runtime_state_reconciler import ZOMBIE_LEASE, RuntimeStateReconciler
@@ -636,15 +637,17 @@ class RuntimeCore:
             receipts_path = state_path / "t0_receipts.ndjson"
             if not receipts_path.exists():
                 return {"ok": True, "reason": "receipts_file_not_found"}
-            lines = [l.strip() for l in receipts_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-            if not lines:
+            # Torn-tail-safe read: a crash mid-append can leave a partial last
+            # line — skip it rather than fail the linkage check on it.
+            records = read_ndjson(receipts_path)
+            if not records:
                 return {"ok": True, "reason": "no_receipts_yet"}
-            last = json.loads(lines[-1])
+            last = records[-1]
             has_dispatch_id = (
                 "dispatch_id" in last or "dispatch-id" in last
                 or "dispatch_id" in last.get("metadata", {})
             )
-            return {"ok": True, "has_dispatch_id": has_dispatch_id, "receipt_count": len(lines)}
+            return {"ok": True, "has_dispatch_id": has_dispatch_id, "receipt_count": len(records)}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
