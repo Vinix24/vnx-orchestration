@@ -8,6 +8,7 @@ invocation (mocked), anti-hallucination ref-snapping, atomic sidecar write, and
 the never-raises fail-open contract. The producer never uses a subscription lane.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,8 @@ class _FakeResult:
         self.parsed_json = parsed
         self.error = error
         self.extra = {"model": model}
+        self.cost_usd = 0.0
+        self.latency_ms = 0
 
 
 class _FakeProvider:
@@ -74,8 +77,90 @@ def test_disabled_by_default(tmp_path, monkeypatch):
     assert _run(tmp_path) is None
 
 
-def test_gate_too_few_paths(tmp_path, enabled):
-    assert _run(tmp_path, dispatch_paths=["scripts/lib/foo.py"]) is None
+def test_gate_pathless_short_instruction(tmp_path, enabled):
+    # Paths are optional now (discovery fills them from the instruction), but a
+    # PATHLESS dispatch needs a richer instruction than a path-bearing one; the
+    # 65-char default is below the pathless floor, so it still gates out.
+    assert _run(tmp_path, dispatch_paths=[], instruction_text=_INSTRUCTION) is None
+
+
+def test_gate_pathless_rich_instruction_proceeds(tmp_path, enabled, monkeypatch):
+    # A pathless dispatch with a rich enough instruction is NOT gated on path count:
+    # discovery (mocked via the `enabled` _candidate_refs stub) + the provider run.
+    _patch_provider(monkeypatch, _FakeProvider(parsed={"include": [{"ref": _REFS[0]}]}))
+    rich = _INSTRUCTION + " Add regression tests and update the docs accordingly."
+    assert _run(tmp_path, dispatch_paths=[], instruction_text=rich) is not None
+
+
+# ---------------------------------------------------------------------------
+# Scouted flag + idempotency + pending sweep
+# ---------------------------------------------------------------------------
+
+def test_is_scouted_flag(tmp_path, enabled, monkeypatch):
+    _patch_provider(monkeypatch, _FakeProvider(parsed={"include": [{"ref": _REFS[0]}]}))
+    assert scout_prepass.is_scouted(tmp_path, "D-1") is False
+    assert _run(tmp_path) is not None
+    assert scout_prepass.is_scouted(tmp_path, "D-1") is True
+    # sha-bound: the flag holds only for the instruction it was scouted against.
+    sha = scout_prepass._instruction_sha256(_INSTRUCTION)
+    assert scout_prepass.is_scouted(tmp_path, "D-1", sha) is True
+    assert scout_prepass.is_scouted(tmp_path, "D-1", "deadbeef") is False
+
+
+def test_maybe_run_scout_skips_when_already_scouted(tmp_path, enabled, monkeypatch):
+    _patch_provider(monkeypatch, _FakeProvider(parsed={"include": [{"ref": _REFS[0]}]}))
+    assert _run(tmp_path) is not None
+
+    def _boom(*a, **k):
+        raise AssertionError("model re-invoked for an already-scouted dispatch")
+
+    monkeypatch.setattr(scout_prepass, "_invoke_scout_model", _boom)
+    assert _run(tmp_path) is not None  # returns the existing sidecar, no re-scout
+
+
+def test_scout_pending_sweep(tmp_path, enabled, monkeypatch):
+    _patch_provider(monkeypatch, _FakeProvider(parsed={"include": [{"ref": _REFS[0]}]}))
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    pending = data_dir / "dispatches" / "pending"
+    long_instr = _INSTRUCTION + " Add regression tests and update the docs accordingly."
+    for did in ("D-a", "D-b"):
+        bundle = pending / did
+        bundle.mkdir(parents=True)
+        (bundle / "instruction.md").write_text(long_instr)
+        (bundle / "dispatch-spec.json").write_text(
+            json.dumps({"dispatch_paths": [], "role": "backend"})
+        )
+    summary = scout_prepass.scout_pending_sweep(data_dir, state_dir)
+    assert summary["produced"] == 2
+    assert scout_prepass.is_scouted(state_dir, "D-a") is True
+    # Idempotent: a second sweep re-scouts nothing.
+    again = scout_prepass.scout_pending_sweep(data_dir, state_dir)
+    assert again["produced"] == 0
+    assert again["already"] == 2
+
+
+def test_scout_emits_dispatch_linked_receipt(tmp_path, enabled, monkeypatch):
+    _patch_provider(monkeypatch, _FakeProvider(parsed={"include": [{"ref": _REFS[0]}]}))
+    assert _run(tmp_path) is not None
+    receipts = scout_prepass.scout_receipts_path(tmp_path)
+    assert receipts.exists()
+    rows = [json.loads(ln) for ln in receipts.read_text().splitlines() if ln.strip()]
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["event_type"] == "scout_prepass"
+    assert r["dispatch_id"] == "D-1"  # linkage back to the dispatch
+    assert "cost_usd" in r and "duration_seconds" in r
+    assert r["sidecar_path"].endswith("D-1.json")  # linkage to the scout data
+    assert r["anchors"]["include"] == 1
+
+
+def test_scout_receipt_not_re_emitted_when_already_scouted(tmp_path, enabled, monkeypatch):
+    _patch_provider(monkeypatch, _FakeProvider(parsed={"include": [{"ref": _REFS[0]}]}))
+    _run(tmp_path)
+    _run(tmp_path)  # idempotent skip — must not append a second receipt
+    rows = scout_prepass.scout_receipts_path(tmp_path).read_text().splitlines()
+    assert len([r for r in rows if r.strip()]) == 1
 
 
 def test_gate_short_instruction(tmp_path, enabled):

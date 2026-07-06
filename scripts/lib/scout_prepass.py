@@ -34,6 +34,7 @@ Sidecar schema (v1):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -46,7 +47,13 @@ logger = logging.getLogger(__name__)
 
 SCOUT_SUBDIR = "scout"
 SCOUT_SIDECAR_SUFFIX = ".json"
+SCOUT_RECEIPTS_FILE = "scout_receipts.ndjson"
 SCHEMA_VERSION = 1
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-posix
+    fcntl = None  # type: ignore[assignment]
 
 # Path-containment contract: a dispatch_id becomes a filesystem path segment, so
 # it must not carry separators, '..', or absolute-path markers. Mirrors
@@ -252,7 +259,19 @@ def _ref_line(item: Dict[str, str]) -> str:
 # stands). It never reads or rewrites the instruction file, so the permit /
 # instruction_sha256 TOCTOU is untouched.
 
-_DEFAULT_MIN_PATHS = 2
+# Pathless dispatches are scouted via instruction-driven discovery (git-grep over
+# the repo for the instruction's salient terms), so they need a richer instruction
+# to discover from than a path-bearing dispatch does.
+_MIN_INSTRUCTION_CHARS_PATHLESS = 80
+_MAX_DISCOVERED_FILES = 5
+_MAX_DISCOVERY_TERMS = 6
+_MAX_FILES_PER_DISCOVERY_TERM = 40
+# Discovery prefers code files over docs at equal hit-count: a code task wants code
+# anchors; a docs task hits mostly docs anyway and still gets them.
+_CODE_EXTS = frozenset({
+    "py", "js", "ts", "tsx", "jsx", "go", "rs", "java", "rb", "sh", "sql",
+    "c", "cpp", "cc", "h", "hpp", "php", "kt", "swift", "scala",
+})
 _MIN_INSTRUCTION_CHARS = 40
 # task_classes where a code-anchor recon adds little (no source to rank).
 _SKIP_TASK_CLASSES = frozenset({"docs_synthesis", "channel_response", "ops_watchdog"})
@@ -288,14 +307,12 @@ def _scout_gate_ok(
     task_class: "str | None",
     lane: "str | None",
 ) -> bool:
-    """Scope/lane/task_class gate — skip trivial, non-code, or headless dispatches."""
-    try:
-        min_paths = int(os.environ.get("VNX_SCOUT_MIN_PATHS", _DEFAULT_MIN_PATHS))
-    except (TypeError, ValueError):
-        min_paths = _DEFAULT_MIN_PATHS
-    if not dispatch_paths or len(dispatch_paths) < max(1, min_paths):
-        return False
-    if not instruction_text or len(instruction_text.strip()) < _MIN_INSTRUCTION_CHARS:
+    """Scope/lane/task_class gate. Paths are OPTIONAL: a pathless dispatch passes so
+    the scout can DISCOVER candidate files from the instruction — it just needs a
+    richer instruction to discover from. Still skips non-code and headless work."""
+    instr = (instruction_text or "").strip()
+    min_chars = _MIN_INSTRUCTION_CHARS if dispatch_paths else _MIN_INSTRUCTION_CHARS_PATHLESS
+    if len(instr) < min_chars:
         return False
     if task_class and str(task_class).strip().lower() in _SKIP_TASK_CLASSES:
         return False
@@ -304,13 +321,78 @@ def _scout_gate_ok(
     return True
 
 
+def _resolve_repo_root() -> Path:
+    """The project repo root the scout ranks/greps against (VNX_PROJECT_ROOT-aware)."""
+    try:
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["PROJECT_ROOT"])
+    except Exception:
+        return Path(".")
+
+
+def _discover_candidate_paths(instruction_text: str, repo_root: Path) -> List[str]:
+    """Discover candidate files for a PATHLESS dispatch by git-grepping the repo for
+    the instruction's salient terms. Returns repo-relative paths ranked by how many
+    distinct terms hit each file. Best-effort — returns [] on any failure.
+
+    This is what lets the scout give an instruction-only dispatch ("fix the tagger")
+    warm file:line starting points instead of no scout at all.
+    """
+    try:
+        from code_anchor_finder import extract_terms
+    except ImportError:
+        return []
+    import subprocess
+    from collections import Counter
+
+    terms = [t for t in (extract_terms(instruction_text) or []) if len(t) >= 3]
+    if not terms:
+        return []
+    hits: "Counter[str]" = Counter()
+    for term in terms[:_MAX_DISCOVERY_TERMS]:
+        try:
+            out = subprocess.run(
+                ["git", "grep", "-l", "-I", "--fixed-strings", "-e", term],
+                cwd=str(repo_root), capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            continue
+        if out.returncode not in (0, 1):  # 1 = no match (fine); other = git error
+            continue
+        files = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+        if len(files) > _MAX_FILES_PER_DISCOVERY_TERM:
+            continue  # term too common to be a useful anchor
+        for f in files:
+            hits[f] += 1
+
+    def _rank(item: "tuple[str, int]") -> "tuple[int, int]":
+        f, count = item
+        ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+        return (1 if ext in _CODE_EXTS else 0, count)
+
+    return [f for f, _ in sorted(hits.items(), key=_rank, reverse=True)[:_MAX_DISCOVERED_FILES]]
+
+
 def _candidate_refs(dispatch_paths: List[str], instruction_text: str) -> List[str]:
-    """Deterministic code-anchor candidate refs (file:line ranges), pointer-only."""
+    """Deterministic code-anchor candidate refs (file:line ranges), pointer-only.
+
+    A path-bearing dispatch is ranked within its own paths. A PATHLESS dispatch first
+    has its candidate files discovered from the instruction, so it still gets warm
+    anchors instead of no scout at all.
+    """
     try:
         import code_anchor_finder as _caf
     except ImportError:
         return []
-    anchors = _caf.fetch_code_anchors(dispatch_paths, instruction_text, refs_only=True)
+    repo_root = _resolve_repo_root()
+    paths = list(dispatch_paths or [])
+    if not paths:
+        paths = _discover_candidate_paths(instruction_text, repo_root)
+    if not paths:
+        return []
+    anchors = _caf.fetch_code_anchors(
+        paths, instruction_text, refs_only=True, repo_root=repo_root
+    )
     return [f"{a.file_path}:{a.line_start}-{a.line_end}" for a in anchors]
 
 
@@ -336,26 +418,34 @@ def _build_scout_prompt(instruction_text: str, candidate_refs: List[str]) -> str
     )
 
 
-def _invoke_scout_model(prompt: str, provider_name: str) -> "tuple[Optional[Dict[str, Any]], str]":
-    """Call the cheap key-auth classifier. Returns (parsed JSON | None, model)."""
+def _invoke_scout_model(
+    prompt: str, provider_name: str
+) -> "tuple[Optional[Dict[str, Any]], str, float, int]":
+    """Call the cheap key-auth classifier.
+
+    Returns (parsed JSON | None, model, cost_usd, latency_ms) — the cost/latency feed
+    the scout receipt so the model call is cost-tracked in the governed audit trail.
+    """
     try:
         from classifier_providers import get_provider
     except ImportError:
-        return None, ""
+        return None, "", 0.0, 0
     try:
         provider = get_provider(provider_name)
     except ValueError:
         logger.debug("scout: unknown provider %r", provider_name)
-        return None, ""
+        return None, "", 0.0, 0
     if not provider.is_available():
         logger.debug("scout: provider %r unavailable (no key / CLI)", provider_name)
-        return None, ""
+        return None, "", 0.0, 0
     result = provider.classify(prompt)
     model = str((result.extra or {}).get("model") or "")
+    cost = float(result.cost_usd or 0.0)
+    latency_ms = int(result.latency_ms or 0)
     if result.error or not result.parsed_json:
         logger.debug("scout: provider %r returned no usable JSON (%s)", provider_name, result.error)
-        return None, model
-    return result.parsed_json, model
+        return None, model, cost, latency_ms
+    return result.parsed_json, model, cost, latency_ms
 
 
 def _snap_refs(bucket: Any, allowed: "set[str]") -> List[Dict[str, str]]:
@@ -388,6 +478,7 @@ def _assemble_sidecar(
     candidate_refs: List[str],
     provider_name: str,
     model: str,
+    instruction_sha256: str = "",
 ) -> Dict[str, Any]:
     """Build the sidecar from the model verdicts, snapped to real candidates."""
     allowed = set(candidate_refs)
@@ -397,6 +488,7 @@ def _assemble_sidecar(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider_name,
         "model": model,
+        "scouted_instruction_sha256": instruction_sha256,
         "include": _snap_refs(parsed.get("include"), allowed),
         "maybe": _snap_refs(parsed.get("maybe"), allowed),
         "exclude": _snap_refs(parsed.get("exclude"), allowed),
@@ -416,6 +508,89 @@ def write_scout_sidecar(state_dir: "Path | str", dispatch_id: str, sidecar: Dict
     return path
 
 
+def scout_receipts_path(state_dir: "Path | str") -> Path:
+    """The dispatch-linkable scout audit trail: ``<state_dir>/scout_receipts.ndjson``."""
+    return Path(state_dir) / SCOUT_RECEIPTS_FILE
+
+
+def _emit_scout_receipt(
+    state_dir: "Path | str",
+    dispatch_id: str,
+    provider: str,
+    model: str,
+    cost_usd: float,
+    latency_ms: int,
+    sidecar: Dict[str, Any],
+    sidecar_path: Path,
+    instruction_sha256: str,
+) -> None:
+    """Append a scout receipt to ``scout_receipts.ndjson`` — the governed audit entry
+    for the scout model call, keyed to ``dispatch_id`` and pointing at the sidecar.
+
+    Kept SEPARATE from ``t0_receipts.ndjson`` (option B) so the receipt processor's
+    dispatch-lifecycle logic is untouched; joining on ``dispatch_id`` reunites the
+    scout cost/anchors with the dispatch's own receipt. Best-effort — an audit-write
+    failure must never break the (fail-open) scout.
+    """
+    try:
+        receipt = {
+            "event_type": "scout_prepass",
+            "dispatch_id": dispatch_id,
+            "provider": provider,
+            "model": model,
+            "cost_usd": round(float(cost_usd or 0.0), 6),
+            "duration_seconds": round((latency_ms or 0) / 1000.0, 3),
+            "sidecar_path": str(sidecar_path),
+            "scouted_instruction_sha256": instruction_sha256,
+            "anchors": {
+                "include": len(sidecar.get("include") or []),
+                "maybe": len(sidecar.get("maybe") or []),
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        path = scout_receipts_path(state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(receipt, separators=(",", ":")) + "\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                fh.write(line)
+                fh.flush()
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+    except Exception as exc:  # audit is best-effort, never blocks the scout
+        logger.debug("scout receipt emit failed for %s: %s", dispatch_id, exc)
+
+
+def _instruction_sha256(instruction_text: str) -> str:
+    """SHA-256 of the instruction the scout ran against — recorded in the sidecar so
+    a later instruction change (new digest) triggers a re-scout while an unchanged
+    one is recognised as already scouted."""
+    return hashlib.sha256((instruction_text or "").encode("utf-8")).hexdigest()
+
+
+def is_scouted(
+    state_dir: "Path | str | None",
+    dispatch_id: str,
+    instruction_sha256: "str | None" = None,
+) -> bool:
+    """True when a fresh scout sidecar exists for *dispatch_id* — the scouted flag.
+
+    The sidecar's existence IS the flag. When *instruction_sha256* is given, the flag
+    only holds if the sidecar was produced against that same instruction, so a changed
+    instruction reads as not-yet-scouted (re-scout) rather than stale-clean. Fail-open:
+    any read problem returns False.
+    """
+    sidecar = read_scout_sidecar(state_dir, dispatch_id)
+    if not sidecar:
+        return False
+    if instruction_sha256 is None:
+        return True
+    return sidecar.get("scouted_instruction_sha256") == instruction_sha256
+
+
 def maybe_run_scout(
     *,
     dispatch_id: str,
@@ -433,7 +608,15 @@ def maybe_run_scout(
     """
     if not scout_prepass_enabled():
         return None
+    sha = _instruction_sha256(instruction_text)
     try:
+        # Idempotent, and the source of the scouted flag: a fresh sidecar for this
+        # exact instruction already stands (produced by the async pending sweep or a
+        # prior pass), so skip the model call — a pre-scouted dispatch adds no
+        # dispatch-time latency. A changed instruction (new sha) falls through and
+        # re-scouts.
+        if is_scouted(state_dir, dispatch_id, sha):
+            return scout_sidecar_path(state_dir, dispatch_id)
         if not _scout_gate_ok(dispatch_paths, instruction_text, task_class, lane):
             return None
         candidate_refs = _candidate_refs(list(dispatch_paths or []), instruction_text)
@@ -441,13 +624,88 @@ def maybe_run_scout(
             return None
         provider_name = _scout_provider_name()
         prompt = _build_scout_prompt(instruction_text, candidate_refs)
-        parsed, model = _invoke_scout_model(prompt, provider_name)
+        parsed, model, cost_usd, latency_ms = _invoke_scout_model(prompt, provider_name)
         if not parsed:
             return None
-        sidecar = _assemble_sidecar(dispatch_id, parsed, candidate_refs, provider_name, model)
+        sidecar = _assemble_sidecar(dispatch_id, parsed, candidate_refs, provider_name, model, sha)
         if not (sidecar["include"] or sidecar["maybe"] or sidecar["plan_sketch"]):
             return None  # nothing useful — don't write an empty sidecar
-        return write_scout_sidecar(state_dir, dispatch_id, sidecar)
+        path = write_scout_sidecar(state_dir, dispatch_id, sidecar)
+        _emit_scout_receipt(
+            state_dir, dispatch_id, provider_name, model,
+            cost_usd, latency_ms, sidecar, path, sha,
+        )
+        return path
     except Exception as exc:  # fail-open: a scout failure must never block the door
         logger.debug("maybe_run_scout: fail-open for %s (%s)", dispatch_id, exc)
         return None
+
+
+def scout_pending_sweep(
+    data_dir: "Path | str",
+    state_dir: "Path | str",
+    *,
+    limit: "int | None" = None,
+) -> Dict[str, Any]:
+    """Async pre-dispatch scout over the pending queue (lane-agnostic).
+
+    For every staged bundle under ``<data_dir>/dispatches/pending/<dispatch_id>/``
+    that is not already scouted against its current instruction, run the scout
+    producer and write the sidecar BEFORE any lane picks the dispatch up. This is
+    where the scout does its real work: it enriches the backlog ahead of time, so
+    execution never waits on recon and the executing lane is irrelevant.
+
+    Idempotent (skips already-scouted bundles via the sidecar sha flag), best-effort
+    (a bad bundle is skipped, never raised), and a no-op when the scout is disabled.
+    Returns a summary dict.
+    """
+    summary: Dict[str, Any] = {
+        "scanned": 0, "produced": 0, "already": 0, "gated_out": 0, "errors": 0,
+    }
+    if not scout_prepass_enabled():
+        summary["disabled"] = True
+        return summary
+    pending = Path(data_dir) / "dispatches" / "pending"
+    if not pending.is_dir():
+        return summary
+    for bundle in sorted(p for p in pending.iterdir() if p.is_dir()):
+        if limit is not None and summary["produced"] >= limit:
+            break
+        summary["scanned"] += 1
+        try:
+            dispatch_id = bundle.name
+            instr_file = bundle / "instruction.md"
+            if not instr_file.is_file():
+                continue
+            instruction_text = instr_file.read_text(encoding="utf-8")
+            if is_scouted(state_dir, dispatch_id, _instruction_sha256(instruction_text)):
+                summary["already"] += 1
+                continue
+            paths: List[str] = []
+            task_class: Optional[str] = None
+            lane: Optional[str] = None
+            spec_file = bundle / "dispatch-spec.json"
+            if spec_file.is_file():
+                spec = json.loads(spec_file.read_text(encoding="utf-8"))
+                for dp in spec.get("dispatch_paths") or []:
+                    p = dp.get("path") if isinstance(dp, dict) else str(dp)
+                    if p:
+                        paths.append(p)
+                task_class = spec.get("task_class") or spec.get("role")
+                lane = spec.get("lane") or spec.get("provider")
+            produced = maybe_run_scout(
+                dispatch_id=dispatch_id,
+                instruction_text=instruction_text,
+                dispatch_paths=paths,
+                state_dir=state_dir,
+                task_class=task_class,
+                lane=lane,
+            )
+            if produced is None:
+                summary["gated_out"] += 1
+            else:
+                summary["produced"] += 1
+        except Exception as exc:  # never let one bad bundle break the sweep
+            summary["errors"] += 1
+            logger.debug("scout_pending_sweep: skipped %s (%s)", bundle.name, exc)
+    return summary
