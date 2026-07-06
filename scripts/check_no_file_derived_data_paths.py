@@ -117,14 +117,6 @@ GRANDFATHERED: Dict[str, Set[str]] = {
         # env-first (VNX_STATE_DIR), .exists()-gated; _PROJECT_ROOT is __file__-anchored.
         '_PROJECT_ROOT / ".vnx-data" / "state" / "quality_intelligence.db"',
     },
-    # script_dir.parent.parent / ".vnx-data" _data_dir() siblings of the two this
-    # task migrated (t0_escalations_log / t0_decision_reconcile); env-first.
-    "scripts/lib/t0_decision_log.py": {
-        'script_dir.parent.parent / ".vnx-data"',
-    },
-    "scripts/lib/t0_decision_summarizer.py": {
-        'script_dir.parent.parent / ".vnx-data"',
-    },
     # .is_dir()-gated upward walks that look for an EXISTING .vnx-data; canonical
     # resolution (VNX_DATA_DIR env, or ensure_env()) is tried first in each caller.
     "scripts/lib/subprocess_adapter.py": {
