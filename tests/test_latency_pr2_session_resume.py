@@ -191,7 +191,8 @@ class TestSessionResumePassthrough:
 
         mock_adapter = _make_deliver_mocks("new-session-id")
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
@@ -215,7 +216,8 @@ class TestSessionResumePassthrough:
 
         mock_adapter = _make_deliver_mocks("new-session-id")
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
@@ -240,7 +242,8 @@ class TestSessionResumePassthrough:
 
         mock_adapter = _make_deliver_mocks("new-session-id")
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
@@ -266,7 +269,8 @@ class TestSessionPersistenceAfterDelivery:
 
         mock_adapter = _make_deliver_mocks("fresh-session-xyz")
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
@@ -290,7 +294,8 @@ class TestSessionPersistenceAfterDelivery:
 
         mock_adapter = _make_deliver_mocks("some-session-id")
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
@@ -316,7 +321,8 @@ class TestSessionPersistenceAfterDelivery:
         broken_store.load.side_effect = RuntimeError("disk full")
         broken_store.save.side_effect = RuntimeError("disk full")
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \

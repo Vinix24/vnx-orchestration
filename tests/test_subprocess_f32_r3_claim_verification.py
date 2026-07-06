@@ -35,9 +35,21 @@ def _make_observe(returncode):
 
 @pytest.fixture
 def mock_adapter():
-    with patch("subprocess_dispatch.SubprocessAdapter") as cls:
+    with patch("provider_spawns.claude_spawn.SubprocessAdapter") as cls, \
+         patch("subprocess_dispatch.SubprocessAdapter", new=cls):
         instance = MagicMock()
         cls.return_value = instance
+        # was_timed_out() is a real bool on SubprocessAdapter (default False,
+        # absent an actual timeout) — an unstubbed MagicMock is truthy and
+        # would force every "clean exit" scenario into fail-closed via the
+        # `spawn_result.timed_out` branch in delivery.py.
+        instance.was_timed_out.return_value = False
+        # Real SubprocessAdapter._returncode_cache is a plain dict; an
+        # unstubbed MagicMock attribute would make the claude_spawn.py
+        # `.get(terminal_id)` fallback return a truthy Mock (int(Mock())==1)
+        # instead of None, defeating the None-returncode "treated as clean"
+        # path.
+        instance._returncode_cache = {}
         yield instance
 
 
@@ -117,14 +129,16 @@ class TestFailClosedOnNonZeroExit:
         mock_adapter.observe.assert_not_called()
         mock_adapter.read_events_with_timeout.assert_not_called()
 
-    def test_exit_none_treated_as_clean(self, mock_adapter):
-        """returncode=None (process removed after timeout kill) is treated as clean.
+    def test_exit_none_treated_as_failure(self, mock_adapter):
+        """returncode=None (truly unknown, no cache entry either) fails closed.
 
-        The timeout path in read_events_with_timeout calls stop() which removes
-        the process from _processes.  observe() then returns a transport_state
-        without 'returncode', so .get('returncode') returns None.  None must NOT
-        trigger fail-closed — the caller sees an empty event stream and handles
-        the timeout separately.
+        #490 (PR-4.6.2, codex round-1) deliberately hardened the
+        claude_spawn.py fallback chain: when neither observe()'s
+        transport_state nor adapter._returncode_cache has a returncode, the
+        final default became `returncode = 1` (previously `0`) "for the same
+        fail-closed contract" as the stream-read-exception handling added in
+        that PR (see tests/test_claude_spawn_fail_closed.py). An indeterminate
+        returncode must not be classified as success.
         """
         mock_adapter.deliver.return_value = MagicMock(success=True)
         mock_adapter.read_events_with_timeout.return_value = iter([])
@@ -134,7 +148,7 @@ class TestFailClosedOnNonZeroExit:
 
         result = deliver_via_subprocess("T1", "do work", "sonnet", "d-106")
 
-        assert result.success is True
+        assert result.success is False
 
     def test_event_count_preserved_on_fail_closed(self, mock_adapter):
         """Event count in _SubprocessResult must reflect parsed events even on failure."""

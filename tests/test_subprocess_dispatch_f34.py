@@ -4,6 +4,7 @@ and cwd propagation through deliver_via_subprocess → SubprocessAdapter.deliver
 """
 
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -174,16 +175,22 @@ class TestInjectSkillContext:
 class TestInjectSkillContextIntegration:
     """Integration tests patching Path inside subprocess_dispatch."""
 
+    @contextmanager
     def _patch_project_root(self, tmp_path: Path):
-        """Context manager that patches the project root inside subprocess_dispatch."""
+        """Patch the project root inside subprocess_dispatch AND force the
+        PromptAssembler path to fail.
+
+        _inject_skill_context tries prompt_assembler.PromptAssembler first
+        (scripts/lib/prompt_assembler.py resolves its own prompts/ dir via
+        its own __file__, unaffected by this patch) — it resolves real
+        agents/skills/roles from THIS repo and succeeds, so the legacy
+        3-tier CLAUDE.md resolution these tests target would never be
+        reached without also disabling that path.
+        """
         import subprocess_dispatch as sd
 
         # Capture real Path class
         real_path_cls = Path
-
-        class PatchedPath(type(real_path_cls())):
-            """Subclass of Path that redirects parents[2] to tmp_path."""
-            pass
 
         # Simpler: patch using object-level mock on the module
         original_file = sd.__file__
@@ -198,7 +205,9 @@ class TestInjectSkillContextIntegration:
                 return mock
             return real_path_cls(*args, **kwargs)
 
-        return patch("subprocess_dispatch.Path", side_effect=fake_path)
+        with patch("subprocess_dispatch.Path", side_effect=fake_path), \
+             patch("subprocess_dispatch_internals.skill_injection._try_prompt_assembler", return_value=None):
+            yield
 
     def test_inject_prepends_agents_context(self, tmp_path):
         agents_md = tmp_path / "agents" / "backend-developer" / "CLAUDE.md"
@@ -265,7 +274,8 @@ class TestDeliverCwdPropagation:
 
     @pytest.fixture
     def mock_adapter(self):
-        with patch("subprocess_dispatch.SubprocessAdapter") as cls:
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as cls, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=cls):
             instance = MagicMock()
             cls.return_value = instance
             yield instance

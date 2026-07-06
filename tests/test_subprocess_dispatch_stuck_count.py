@@ -103,7 +103,8 @@ class TestDeliverWithRecoveryStuckCount(unittest.TestCase):
 
     def test_stuck_count_forwarded_to_write_receipt_on_success(self):
         """On success, _write_receipt receives stuck_event_count from monitor.stuck_count."""
-        with patch("subprocess_dispatch.SubprocessAdapter") as mock_cls, \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as mock_cls, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls), \
              patch("subprocess_dispatch._write_receipt") as mock_receipt, \
              patch("subprocess_dispatch._check_commit_since", return_value=False), \
              patch("subprocess_dispatch._get_commit_hash", return_value="abc123"), \
@@ -137,7 +138,8 @@ class TestDeliverWithRecoveryStuckCount(unittest.TestCase):
 
     def test_stuck_count_zero_forwarded_on_success(self):
         """Zero stuck_count is correctly forwarded (no STUCK events occurred)."""
-        with patch("subprocess_dispatch.SubprocessAdapter") as mock_cls, \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as mock_cls, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls), \
              patch("subprocess_dispatch._write_receipt") as mock_receipt, \
              patch("subprocess_dispatch._check_commit_since", return_value=False), \
              patch("subprocess_dispatch._get_commit_hash", return_value="abc123"), \
@@ -167,7 +169,8 @@ class TestDeliverWithRecoveryStuckCount(unittest.TestCase):
 
     def test_stuck_count_forwarded_on_failure(self):
         """On final failure, stuck_count is still forwarded to the failure receipt."""
-        with patch("subprocess_dispatch.SubprocessAdapter") as mock_cls, \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as mock_cls, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls), \
              patch("subprocess_dispatch._write_receipt") as mock_receipt, \
              patch("subprocess_dispatch._check_commit_since", return_value=False), \
              patch("subprocess_dispatch._get_commit_hash", return_value="abc123"), \

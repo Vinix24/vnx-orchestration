@@ -404,6 +404,7 @@ class TestDeliverViaSubprocessTouchedFiles(unittest.TestCase):
         adapter.trigger_report_pipeline.return_value = None
 
         cms = self._patch_chain() + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
         ]
         for cm in cms:
@@ -440,6 +441,7 @@ class TestDeliverViaSubprocessTouchedFiles(unittest.TestCase):
         adapter.trigger_report_pipeline.return_value = None
 
         cms = self._patch_chain() + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
         ]
         for cm in cms:
@@ -479,6 +481,7 @@ class TestDeliverViaSubprocessTouchedFiles(unittest.TestCase):
         adapter.trigger_report_pipeline.return_value = None
 
         cms = self._patch_chain() + [
+            patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter),
             patch("subprocess_dispatch.SubprocessAdapter", return_value=adapter),
         ]
         for cm in cms:

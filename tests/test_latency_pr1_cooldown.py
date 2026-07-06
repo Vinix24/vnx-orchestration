@@ -247,7 +247,8 @@ class TestSubprocessDispatchEnvOverride:
         mock_instance.read_events_with_timeout.return_value = iter([])
         mock_instance.get_session_id.return_value = None
 
-        with patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_instance), \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_instance), \
+             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_instance), \
              patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
              patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
              patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \

@@ -253,7 +253,8 @@ class TestInstructionCharsAccuracy:
         with _patch_selector(result):
             with patch.dict(sys.modules, {"prompt_assembler": None}):
                 with patch("subprocess_dispatch._write_manifest", side_effect=_capture_write):
-                    with patch("subprocess_dispatch.SubprocessAdapter") as mock_adapter_cls:
+                    with patch("provider_spawns.claude_spawn.SubprocessAdapter") as mock_adapter_cls, \
+                         patch("subprocess_dispatch.SubprocessAdapter", new=mock_adapter_cls):
                         instance = MagicMock()
                         instance.deliver.return_value = MagicMock(success=False)
                         mock_adapter_cls.return_value = instance

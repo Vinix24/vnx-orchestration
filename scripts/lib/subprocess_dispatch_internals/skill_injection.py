@@ -216,7 +216,7 @@ def _legacy_claude_md_resolution(
     can intercept the resolution (test_skill_context_injection).
     """
     import subprocess_dispatch as _sd
-    project_root = Path(_sd.__file__).resolve().parents[2]
+    project_root = _sd.Path(_sd.__file__).resolve().parents[2]
 
     candidates: list[Path] = []
     if role:

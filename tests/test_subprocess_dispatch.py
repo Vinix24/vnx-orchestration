@@ -17,11 +17,21 @@ from subprocess_dispatch import deliver_via_subprocess, _build_intelligence_sect
 
 @pytest.fixture
 def mock_adapter():
-    """Patch SubprocessAdapter and return the mock instance."""
-    with patch("subprocess_dispatch.SubprocessAdapter") as cls:
-        instance = MagicMock()
-        instance.was_timed_out.return_value = False
-        cls.return_value = instance
+    """Patch SubprocessAdapter and return the mock instance.
+
+    Patches both bindings: `provider_spawns.claude_spawn.SubprocessAdapter` is
+    where spawn_claude() actually instantiates it (Wave 4.6 PR-4.6.2 moved the
+    spawn+stream slice there), and `subprocess_dispatch.SubprocessAdapter` is
+    still referenced as a cleanup-path fallback in
+    subprocess_dispatch_internals.delivery. Patching only the latter (as this
+    fixture used to) leaves the former unmocked, so deliver_via_subprocess()
+    would construct a real SubprocessAdapter and attempt an actual `claude`
+    subprocess spawn.
+    """
+    instance = MagicMock()
+    instance.was_timed_out.return_value = False
+    with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=instance), \
+         patch("subprocess_dispatch.SubprocessAdapter", return_value=instance):
         yield instance
 
 
