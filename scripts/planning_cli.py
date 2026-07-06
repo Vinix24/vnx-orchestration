@@ -34,7 +34,7 @@ import os
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -572,6 +572,326 @@ _close_evidence = track_reconciler._close_evidence
 _phase_path_to = track_reconciler._phase_path_to
 
 
+def _normalize_pr_ref(raw: str) -> Optional[str]:
+    """Parse '#756', '756', or 'PR-42' -> '#756'. Returns None on failure."""
+    try:
+        n = int(str(raw).strip().lstrip("#").strip())
+    except (TypeError, ValueError):
+        return None
+    return f"#{n}"
+
+
+def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Optional[str], list[str], list[str]]:
+    """Merge new PR refs into an existing comma-separated pr_ref.
+
+    Returns (new_pr_ref, added_refs, already_present_refs). Preserves order and
+    deduplicates by PR number.
+    """
+    seen: set[int] = set()
+    merged: list[str] = []
+
+    def _add(raw: str) -> tuple[Optional[str], bool]:
+        norm = _normalize_pr_ref(raw)
+        if norm is None:
+            return None, False
+        n = int(norm.lstrip("#"))
+        if n in seen:
+            return norm, False
+        seen.add(n)
+        merged.append(norm)
+        return norm, True
+
+    # Existing first (preserve order).
+    for tok in str(existing or "").split(","):
+        _add(tok)
+
+    added: list[str] = []
+    already: list[str] = []
+    for raw in incoming:
+        # Accept comma-separated or repeated args.
+        for tok in str(raw).split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            norm, is_new = _add(tok)
+            if norm is None:
+                continue
+            (added if is_new else already).append(norm)
+
+    new_ref = ",".join(merged) if merged else None
+    return new_ref, added, already
+
+
+def cmd_objective_link_pr(args: argparse.Namespace) -> int:
+    """Manually link PR ref(s) to a track (retroactive/override; audited).
+
+    Accepts comma-separated or repeated PR arguments. Normalizes each to #NNN,
+    deduplicates against the track's existing pr_ref, and preserves order.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective link-pr: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    existing = track.get("pr_ref")
+    new_ref, added, already = _merge_pr_refs(existing, list(args.pr))
+
+    if new_ref is None:
+        print(
+            f"objective link-pr: no valid PR refs provided for {track_id!r}. "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if new_ref == (existing or ""):
+        if args.json:
+            print(json.dumps({
+                "track_id": track_id,
+                "project_id": project_id,
+                "pr_ref": new_ref,
+                "added": added,
+                "already_present": already,
+                "action": "noop_no_change",
+                "applied": False,
+            }, indent=2, default=str))
+        else:
+            print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
+            print(f"  pr_ref: {new_ref}")
+            print(f"  all provided PR refs already present; no change made.\n")
+        return 0
+
+    # ADR-007: write is scoped to (track_id, project_id).
+    conn = _db_conn(state_dir)
+    try:
+        conn.execute(
+            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
+            (new_ref, track_id, project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # ADR-005 audit event: specific operator action.
+    tracks_lib._emit_track_event(
+        state_dir,
+        "track_pr_linked",
+        track_id,
+        project_id,
+        "operator",
+        {"added": added, "already_present": already, "pr_ref": new_ref},
+    )
+
+    if args.json:
+        print(json.dumps({
+            "track_id": track_id,
+            "project_id": project_id,
+            "pr_ref": new_ref,
+            "added": added,
+            "already_present": already,
+            "action": "linked",
+            "applied": True,
+        }, indent=2, default=str))
+    else:
+        print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
+        print(f"  pr_ref: {new_ref}")
+        if added:
+            print(f"  + added: {', '.join(added)}")
+        if already:
+            print(f"  = already present: {', '.join(already)}")
+        print()
+    return 0
+
+
+def _close_with_attest(
+    args: argparse.Namespace,
+    state_dir: Path,
+    track_id: str,
+    project_id: str,
+    reason: str,
+    repo_root: Optional[str | Path],
+) -> int:
+    """Attested close path for ops-tracks with no PR evidence.
+
+    Human-gated: --attest REQUIRES --apply AND --approval-id. Sets
+    tracks.pr_ref = 'ops-attest:<YYYY-MM-DD>', emits an audit event, then walks
+    the track's declared phase to 'done' through tracks.transition_phase (the
+    single-writer). This is an explicit operator override; it does NOT resolve
+    blocker open-items.
+    """
+    if not args.apply:
+        print(
+            "objective close --attest: --apply is required to write an attestation. "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    approval_id = (args.approval_id or "").strip()
+    if not approval_id:
+        print(
+            "objective close --attest: --approval-id is required (the operator's gate token). "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective close --attest: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    declared = track["phase"]
+    target = "done"
+    payload: dict[str, Any] = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "declared_phase": declared,
+        "action": None,
+        "applied": False,
+    }
+
+    if declared == target:
+        payload["action"] = "noop_already_closed"
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+            print(f"  already closed (phase={declared}).\n")
+        return 0
+
+    # Respect the same deliberate stop-signal as the evidence-grounded path.
+    if declared == "parked" and not getattr(args, "include_parked", False):
+        payload["action"] = "rejected_parked"
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+            print(
+                "  track is PARKED (a deliberate stop). Pass --include-parked to close "
+                "it anyway, or un-park it first. No change made.\n"
+            )
+        return 2
+
+    path = _phase_path_to(declared, target)
+    if path is None:
+        payload["action"] = "rejected_no_path"
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+            print(
+                f"  ERROR: no legal transition path {declared} -> {target} "
+                f"(ALLOWED_TRANSITIONS). No change made.\n"
+            )
+        return 2
+    payload["path"] = [declared, *path]
+
+    # Stamp the explicit attestation on the track.
+    attest_ref = f"ops-attest:{date.today().isoformat()}"
+    conn = _db_conn(state_dir)
+    try:
+        conn.execute(
+            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
+            (attest_ref, track_id, project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Audit the operator attestation (reason + approval_id).
+    tracks_lib._emit_track_event(
+        state_dir,
+        "track_ops_attest",
+        track_id,
+        project_id,
+        "operator",
+        {"reason": reason, "approval_id": approval_id, "pr_ref": attest_ref},
+    )
+
+    # Walk the legal phase path via the single-writer.
+    cur = declared
+    try:
+        for step in path:
+            tracks_lib.transition_phase(
+                state_dir, track_id, project_id, step,
+                actor="operator",
+                reason=f"close-the-loop attested ({declared}->{target}): {reason}",
+                approval_id=approval_id,
+            )
+            cur = step
+    except tracks_lib.TrackNotFoundError as exc:
+        payload["declared_phase"] = cur
+        payload["action"] = "rejected_not_found"
+        payload["error"] = str(exc)
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+            print(f"  ERROR: {exc}\n")
+        return 2
+    except tracks_lib.InvalidTransitionError as exc:
+        payload["declared_phase"] = cur
+        payload["action"] = "rejected_walk_failed"
+        payload["error"] = str(exc)
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+            print(
+                f"  ERROR: transition failed at '{cur}': {exc}. "
+                f"Track left at '{cur}'.\n"
+            )
+        return 2
+    except Exception as exc:
+        payload["declared_phase"] = cur
+        payload["action"] = "rejected_walk_failed"
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+            print(
+                f"  ERROR: transition failed at '{cur}': {exc}. "
+                f"Track left at '{cur}'.\n"
+            )
+        return 2
+
+    # Best-effort refresh of derived_status now that phase is 'done'.
+    try:
+        track_reconciler.reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
+    except Exception:
+        logger.warning("close --attest: derived refresh failed after transition", exc_info=True)
+
+    payload["action"] = "closed"
+    payload["applied"] = True
+    payload["declared_phase"] = target
+    payload["pr_ref"] = attest_ref
+
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+        print(f"  attested: {reason}")
+        print(f"  pr_ref set: {attest_ref}")
+        print(
+            f"  closed: {' -> '.join([declared, *path])} "
+            f"(actor=operator, approval={approval_id}).\n"
+        )
+    return 0
+
+
 def cmd_objective_close(args: argparse.Namespace) -> int:
     """Close-the-loop: resolve phase_drift by advancing a track's DECLARED phase
     to its derived_status when the work is genuinely done (PR merged).
@@ -588,6 +908,11 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
       - The write goes through tracks.transition_phase (the single-writer): it
         enforces ALLOWED_TRANSITIONS, stamps completed_at, and records a
         track_phase_history row + event with the approval_id (full audit trail).
+
+    --attest <reason> is the escape hatch for ops-tracks with no PR evidence
+    (e.g. a fleet-sync or docs-sweep). It still requires --apply + --approval-id,
+    writes tracks.pr_ref = 'ops-attest:<date>', emits an audit event, then walks
+    the phase to 'done'. It does NOT resolve blocker open-items.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -598,6 +923,10 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     except Exception as exc:
         logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
         repo_root = None
+
+    attest_reason = getattr(args, "attest", None)
+    if attest_reason is not None:
+        return _close_with_attest(args, state_dir, track_id, project_id, attest_reason, repo_root)
 
     try:
         # Dry-run is READ-ONLY: peek computes derived_status without persisting.
@@ -648,6 +977,13 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
                           "(no completed dispatch, no merged PR) — likely all-failed. "
                           "Confirm this is really done before --apply.")
             print(f"  {message}\n")
+            # Surface D5's blocker hint when close is blocked (guarded: no crash
+            # until D5 lands format_blocking_hint + blocking_detail).
+            if action == "noop_not_terminal" and derived == "blocked":
+                _fmt = getattr(track_reconciler, "format_blocking_hint", None)
+                detail = result.get("blocking_detail") if isinstance(result, dict) else None
+                if _fmt and detail:
+                    print(_fmt(detail))
         return rc
 
     if derived != target:
@@ -1435,7 +1771,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
 
-    obj = sub.add_parser("objective", help="strategic-layer objectives (tracks)")
+    obj = sub.add_parser("objective", aliases=["horizon"], help="strategic-layer objectives (tracks)")
     obj_sub = obj.add_subparsers(dest="action", required=True)
 
     def _common(p: argparse.ArgumentParser) -> None:
@@ -1518,7 +1854,23 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
     )
+    p_close.add_argument(
+        "--attest", default=None, metavar="REASON",
+        help="operator attestation for ops-tracks with no PR evidence (requires --apply --approval-id)",
+    )
     p_close.set_defaults(func=cmd_objective_close)
+
+    p_link_pr = obj_sub.add_parser(
+        "link-pr",
+        help="manually link PR ref(s) to a track (retroactive/override; audited)",
+    )
+    _common(p_link_pr)
+    p_link_pr.add_argument("track_id")
+    p_link_pr.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_link_pr.set_defaults(func=cmd_objective_link_pr)
 
     p_reopen = obj_sub.add_parser(
         "reopen",
