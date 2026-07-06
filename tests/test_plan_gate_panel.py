@@ -154,14 +154,12 @@ def _fake_dispatcher(verdict_by_provider):
 def test_run_panel_all_pass(tmp_path):
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
-    disp = _fake_dispatcher({
-        "claude": '{"verdict": "pass"}',
-        "kimi": '{"verdict": "pass"}',
-        "glm-harness": '{"verdict": "pass"}',
-    })
+    # every default-panel provider passes -> PASS across the full family panel (panel grew to
+    # five families in #991, so map every default provider rather than a hard-coded three).
+    disp = _fake_dispatcher({m["provider"]: '{"verdict": "pass"}' for m in pgp.DEFAULT_PANEL})
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=disp)
     assert out["decision"] == "PASS"
-    assert len(out["panelists"]) == 3
+    assert len(out["panelists"]) == len(pgp.DEFAULT_PANEL)
 
 
 def test_run_panel_one_block_revises(tmp_path):
@@ -192,6 +190,159 @@ def test_run_panel_dispatch_exception_is_no_verdict(tmp_path):
     assert kimi["dispatched"] is False
     assert "kimi cli not installed" in kimi["error"]
     assert "non-scoring (abstained): kimi" in out["summary"]["rationale"]
+
+
+# --------------------------------------------------------------------------
+# panel-quorum-fix: bounded single retry of a flaked panelist (VNX_PANEL_RETRY)
+# in front of the (already-shipped) abstain/quorum rule.
+# --------------------------------------------------------------------------
+
+def test_panel_retry_count_default_is_one(monkeypatch):
+    monkeypatch.delenv("VNX_PANEL_RETRY", raising=False)
+    assert pgp._panel_retry_count() == 1
+
+
+def test_panel_retry_count_honors_env(monkeypatch):
+    monkeypatch.setenv("VNX_PANEL_RETRY", "3")
+    assert pgp._panel_retry_count() == 3
+    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    assert pgp._panel_retry_count() == 0
+
+
+def test_panel_retry_count_malformed_falls_back_to_one(monkeypatch):
+    monkeypatch.setenv("VNX_PANEL_RETRY", "not-a-number")
+    assert pgp._panel_retry_count() == 1
+    monkeypatch.setenv("VNX_PANEL_RETRY", "-4")  # clamped to >= 0
+    assert pgp._panel_retry_count() == 0
+
+
+def test_run_panel_first_flake_then_success_recovers(tmp_path, monkeypatch):
+    # A panelist that flakes once (no verdict fence) then succeeds must recover to a SCORING
+    # verdict via the single retry — the codex verdict-JSON / glm parse flake case.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls = {"kimi": 0}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "kimi":
+            calls["kimi"] += 1
+            if calls["kimi"] == 1:
+                return "# review\n\nno verdict fence emitted this time\n"  # first attempt flakes
+            return _report('{"verdict": "pass"}')  # retry succeeds
+        return _report('{"verdict": "pass"}')
+
+    out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert calls["kimi"] == 2  # one dispatch + one retry
+    kimi = next(p for p in out["panelists"] if p["label"] == "kimi")
+    assert kimi["parse_error"] is False  # retry recovered a readable verdict
+    assert kimi["verdict"] == "pass"
+    assert out["decision"] == "PASS"
+
+
+def test_run_panel_first_dispatch_error_then_success_recovers(tmp_path, monkeypatch):
+    # A dispatch that raises on the first attempt (down proxy) then succeeds must also recover.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls = {"glm-harness": 0}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "glm-harness":
+            calls["glm-harness"] += 1
+            if calls["glm-harness"] == 1:
+                raise RuntimeError("litellm proxy on :4141 not up yet")
+            return _report('{"verdict": "pass"}')
+        return _report('{"verdict": "pass"}')
+
+    out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert calls["glm-harness"] == 2
+    glm = next(p for p in out["panelists"] if p["provider"] == "glm-harness")
+    assert glm["dispatched"] is True
+    assert glm["parse_error"] is False
+    assert out["decision"] == "PASS"
+
+
+def test_run_panel_persistent_flake_still_abstains(tmp_path, monkeypatch):
+    # A lane that flakes on every attempt exhausts the retry budget and abstains (non-scoring);
+    # the two readable PASS voices still meet quorum -> PASS. The retry must not raise.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls = {"glm-harness": 0}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "glm-harness":
+            calls["glm-harness"] += 1
+            return "# review\n\nstill no verdict fence\n"  # flakes every attempt
+        return _report('{"verdict": "pass"}')
+
+    out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert calls["glm-harness"] == 2  # initial + one retry, then it gives up
+    glm = next(p for p in out["panelists"] if p["provider"] == "glm-harness")
+    assert glm["parse_error"] is True
+    assert glm["verdict"] != "pass"  # a flaked lane is never counted as a pass
+    assert out["decision"] == "PASS"
+    assert "non-scoring (abstained): glm-5.2-harness" in out["summary"]["rationale"]
+
+
+def test_run_panel_retry_count_is_honored_and_bounded(tmp_path, monkeypatch):
+    # VNX_PANEL_RETRY=2 -> at most 1 initial + 2 retries = 3 attempts, never more.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "2")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls = {"kimi": 0}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "kimi":
+            calls["kimi"] += 1
+            raise RuntimeError("kimi cli down")  # dispatch failure every attempt
+        return _report('{"verdict": "pass"}')
+
+    out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert calls["kimi"] == 3  # bounded by the configured budget
+    kimi = next(p for p in out["panelists"] if p["label"] == "kimi")
+    assert kimi["dispatched"] is False
+    assert out["decision"] == "PASS"  # two readable PASS voices meet quorum
+
+
+def test_run_panel_retry_zero_disables_retry(tmp_path, monkeypatch):
+    # VNX_PANEL_RETRY=0 -> exactly one attempt per panelist, no retry.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls = {"kimi": 0}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "kimi":
+            calls["kimi"] += 1
+            return "# review\n\nno verdict fence\n"  # would-be retryable flake
+        return _report('{"verdict": "pass"}')
+
+    pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert calls["kimi"] == 1  # retry disabled -> single attempt
+
+
+def test_run_panel_success_first_try_does_not_retry(tmp_path, monkeypatch):
+    # A clean first-try verdict must NOT trigger a retry even with a generous budget.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "3")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls: dict = {}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        calls[provider] = calls.get(provider, 0) + 1
+        return _report('{"verdict": "pass"}')
+
+    out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert out["decision"] == "PASS"
+    assert all(n == 1 for n in calls.values())  # every lane dispatched exactly once
 
 
 # --------------------------------------------------------------------------
