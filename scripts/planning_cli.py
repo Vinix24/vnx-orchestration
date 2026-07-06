@@ -497,7 +497,7 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
     project_id = args.project_id
 
     try:
-        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+        repo_root = _resolve_repo_root(args.repo_root)
     except Exception as exc:
         logger.warning("drift: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
         repo_root = None
@@ -586,7 +586,7 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     track_id = args.track_id
 
     try:
-        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+        repo_root = _resolve_repo_root(args.repo_root)
     except Exception as exc:
         logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
         repo_root = None
@@ -1459,6 +1459,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="advisory drift-gate: report declared-vs-derived divergence (exit 0); drift reports, `objective reconcile` fixes",
     )
     _common(p_drift)
+    p_drift.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+    )
     p_drift.set_defaults(func=cmd_objective_drift)
 
     p_reconcile = obj_sub.add_parser(
@@ -1498,6 +1503,11 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="operator approval token (REQUIRED with --apply)")
     p_close.add_argument("--include-parked", action="store_true",
                          help="allow closing a PARKED track (un-parks it; off by default)")
+    p_close.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+    )
     p_close.set_defaults(func=cmd_objective_close)
 
     p_reopen = obj_sub.add_parser(
