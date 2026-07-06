@@ -66,6 +66,14 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 Follow the full procedure in `@t0-orchestrator` §7 (Startup / recovery / runbooks), which points to `docs/core/DISPATCH_RULES.md` §10.
 Quick reference: validate schema → repair stale leases → reconcile queue → check orphaned dispatches → check incidents.
 
+## Role-File Load Check (fleet drift)
+
+If you are reading this file, your role loaded correctly — Claude Code found it by walking up from cwd, which only happens when cwd is (under) `.claude/terminals/T0`. If a tmux restart, `tmux-resurrect`/`continuum` auto-restore, or manual re-attach ever drops cwd back to the project root, a T0 session silently loses this entire file with no error — it just runs the generic project `CLAUDE.md` instead. `vnx start` self-heals this on the next launch for genuinely stale sessions; it cannot touch a session with a live CLI already running (by design — it will not kill your session). To check the whole fleet for this drift without disturbing any running session:
+
+```bash
+bash scripts/commands/t0_role_audit.sh
+```
+
 ## Runtime Policy
 
 - T0 runtime is Claude Opus only.
