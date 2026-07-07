@@ -77,6 +77,7 @@ jobs:
             "$VNX_HOME/tests/test_runtime_adapter_certification.py" \
             "$VNX_HOME/tests/test_central_mode_path_gate.py" \
             "$VNX_HOME/tests/test_central_mode_path_resolution.py" \
+            "$VNX_HOME/tests/test_fabric_audit.py" \
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 

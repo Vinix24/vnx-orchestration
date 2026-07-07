@@ -30,6 +30,30 @@ def _register_doctor_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_fabric_audit_subparser(subparsers: argparse.Action) -> None:
+    fa_parser = subparsers.add_parser(
+        "fabric-audit",
+        help="audit the governance fabric: no shared-store fork, per-project ledgers, hash-chain integrity",
+    )
+    fa_parser.add_argument(
+        "--data-home",
+        default=None,
+        metavar="DIR",
+        help="central data-home root (default: $VNX_DATA_HOME or ~/.vnx-data)",
+    )
+    fa_parser.add_argument(
+        "--registry",
+        default=None,
+        metavar="FILE",
+        help="project registry JSON (default: ~/.vnx/projects.json)",
+    )
+    fa_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit results as JSON",
+    )
+
+
 def _register_version_subparser(subparsers: argparse.Action) -> None:
     version_parser = subparsers.add_parser(
         "version",
@@ -736,6 +760,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.doctor import vnx_doctor
         sys.exit(vnx_doctor(args))
 
+    elif args.command == "fabric-audit":
+        from vnx_cli.commands.fabric_audit import vnx_fabric_audit
+        sys.exit(vnx_fabric_audit(args))
+
     elif args.command == "status":
         from vnx_cli.commands.status import vnx_status
         sys.exit(vnx_status(args))
@@ -805,6 +833,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     _register_doctor_subparser(subparsers)
+    _register_fabric_audit_subparser(subparsers)
     _register_version_subparser(subparsers)
     _register_status_subparser(subparsers)
     _register_init_subparser(subparsers)

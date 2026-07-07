@@ -277,6 +277,7 @@ Commands:
   start --last           Start with last-used startup configuration
   stop               Stop VNX tmux session and orchestration processes
   doctor             Validate layout, dependencies, and path hygiene
+  fabric-audit       Audit the governance fabric: no shared-store fork, per-project ledgers, hash-chain integrity
   smoke              Run one-shot local receipt pipeline smoke test
   cost-report        Aggregate model usage + estimated cost from receipts
   package-check      Fail if runtime artifacts exist inside dist
@@ -2073,6 +2074,9 @@ main() {
       ;;
     doctor)
       cmd_doctor "$@"
+      ;;
+    fabric-audit)
+      python3 "$VNX_HOME/scripts/fabric_audit.py" "$@"
       ;;
     smoke)
       cmd_smoke "$@"
