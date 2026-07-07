@@ -12,7 +12,11 @@ Checks (each GREEN / RED / SKIP):
      should live under `<data_home>/<project-id>/state/` was written to a
      shared, project-agnostic location instead. RED when found, with the
      newest *.db mtime so an operator can tell a stale relic (safe to retire)
-     from a live writer (must be traced first).
+     from a live writer (must be traced first). The active/stale decision also
+     weighs `.db-wal`/`.db-shm` sidecar mtimes: a fresh sidecar on an old .db
+     means a connection opened the store recently (uncheckpointed), so it is
+     treated as a possible live writer (RED, verify with `lsof`) rather than a
+     safe stale relic.
 
   B. Per-project stores are canonical.
      Every registered project should own `<data_home>/<project-id>/state/`.
@@ -72,6 +76,29 @@ def _newest_db_mtime(directory: Path) -> Optional[float]:
     try:
         for entry in directory.iterdir():
             if entry.suffix == ".db" and entry.is_file():
+                m = entry.stat().st_mtime
+                if newest is None or m > newest:
+                    newest = m
+    except OSError:
+        return None
+    return newest
+
+
+def _newest_sidecar_mtime(directory: Path) -> Optional[float]:
+    """Newest mtime among SQLite sidecar files (``*.db-wal`` / ``*.db-shm``) directly
+    in ``directory``.
+
+    A fresh sidecar means a connection opened the store recently even when the
+    ``.db`` mtime (its last checkpoint) stayed old. Check A used to read only
+    ``.db`` mtimes, so a Jun-20 ``.db`` with a same-day ``.db-wal`` reported as a
+    safe 17-day stale relic while a connection had in fact just touched it. mtime
+    alone cannot tell a leftover sidecar from a live handle, so a recent sidecar
+    must escalate the finding (verify with ``lsof`` before retiring).
+    """
+    newest: Optional[float] = None
+    try:
+        for entry in directory.iterdir():
+            if entry.is_file() and (entry.name.endswith(".db-wal") or entry.name.endswith(".db-shm")):
                 m = entry.stat().st_mtime
                 if newest is None or m > newest:
                     newest = m
@@ -159,15 +186,29 @@ def check_shared_root_state(data_home: Path) -> CheckResult:
     if findings:
         import time
 
-        newest = _newest_db_mtime(bare_state)
-        age_days = (time.time() - newest) / 86400 if newest else None
+        newest_db = _newest_db_mtime(bare_state)
+        newest_sidecar = _newest_sidecar_mtime(bare_state)
+        findings[0]["newest_sidecar_mtime"] = _fmt_ts(newest_sidecar)
+        # A recent -wal/-shm touch means a connection opened the store recently even
+        # when the .db was never checkpointed (its mtime stays old). Drive the
+        # active/stale decision off the newest of the two so an old .db can never
+        # read as a safe stale relic while a sidecar was just written.
+        activity = max((m for m in (newest_db, newest_sidecar) if m is not None), default=None)
+        age_days = (time.time() - activity) / 86400 if activity else None
         active = age_days is not None and age_days < ACTIVE_FORK_STALE_DAYS
         status = "RED" if active else "WARN"
-        kind = (
-            "ACTIVE fork — a live writer is still resolving to the shared store"
-            if active
-            else f"stale relic ({int(age_days)}d old) — cleanup debt, retire when convenient"
+        sidecar_recent = newest_sidecar is not None and (
+            newest_db is None or newest_sidecar > newest_db
         )
+        if active:
+            kind = "ACTIVE fork — a live writer may still be resolving to the shared store"
+            if sidecar_recent:
+                kind += (
+                    f" (a -wal/-shm connection touched it at {_fmt_ts(newest_sidecar)}, "
+                    f"newer than the last .db checkpoint — verify with `lsof` before retiring)"
+                )
+        else:
+            kind = f"stale relic ({int(age_days)}d old) — cleanup debt, retire when convenient"
         detail = (
             f"legacy shared store {findings[0]['path']} "
             f"({findings[0]['db_count']} *.db, newest write {findings[0]['newest_db_mtime']}) — {kind}; "
