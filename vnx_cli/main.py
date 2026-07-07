@@ -471,6 +471,17 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     _common_horizon_args(p_pstat)
     p_pstat.add_argument("track_id")
 
+    p_patt = subs.add_parser(
+        "attest",
+        help="operator escape-hatch: attest the plan gate as passed without re-running the panel",
+    )
+    _common_horizon_args(p_patt)
+    p_patt.add_argument("track_id")
+    p_patt.add_argument("--reason", default=None,
+                        help="operator attestation reason (REQUIRED)")
+    p_patt.add_argument("--approval-id", dest="approval_id", default=None,
+                        help="operator approval token (REQUIRED)")
+
 
 def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_parser = subparsers.add_parser(
