@@ -85,6 +85,9 @@ Backward-compat: terminal-pin via subprocess_dispatch.py still works.
 SubprocessAdapter path: `scripts/lib/subprocess_adapter.py` + `scripts/lib/subprocess_dispatch.py`.
 Single dispatch entry is the door (`vnx dispatch`): decision-tree enforced in code + side-door blocking.
 Dispatch mechanics, lanes, and failure modes: `docs/core/DISPATCH_RULES.md`.
+No T0 role file loaded (autonomous/project-root T0)? The staging flow for a governed dispatch
+(track → central `stage_spec_bundle` → dry-run → fire → post-merge `link-pr`) is
+`docs/core/DISPATCH_RULES.md` §12 "Autonomous dispatch — the staging flow".
 </important>
 
 <important if="working on receipt processor or governance/audit trail">
