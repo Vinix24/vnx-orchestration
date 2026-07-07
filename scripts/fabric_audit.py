@@ -90,9 +90,17 @@ def _load_project_ids(registry_file: Path) -> list[tuple[str, str]]:
     else falls back to the registry name — so the audit still names the project.
     """
     out: list[tuple[str, str]] = []
+    if not registry_file.exists():
+        return out  # no registry is legitimate — nothing to enumerate
     try:
         data = json.loads(registry_file.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, json.JSONDecodeError) as exc:
+        # A registry that EXISTS but is unreadable/malformed is a real fault:
+        # surface it instead of silently auditing zero projects.
+        print(
+            f"fabric-audit: WARNING — cannot read project registry {registry_file}: {exc}",
+            file=sys.stderr,
+        )
         return out
     for p in data.get("projects", []):
         path = p.get("path", "") or ""
@@ -100,12 +108,17 @@ def _load_project_ids(registry_file: Path) -> list[tuple[str, str]]:
         pid = name
         if path:
             id_file = Path(path) / ".vnx-project-id"
-            try:
-                first = id_file.read_text(encoding="utf-8").splitlines()[0].strip()
-                if first:
-                    pid = first
-            except Exception:
-                pass
+            if id_file.exists():
+                try:
+                    first = id_file.read_text(encoding="utf-8").splitlines()[0].strip()
+                    if first:
+                        pid = first
+                except (OSError, IndexError) as exc:
+                    print(
+                        f"fabric-audit: WARNING — cannot read {id_file}: {exc}; "
+                        f"falling back to registry name {name!r}",
+                        file=sys.stderr,
+                    )
         if pid:
             out.append((pid, path))
     return out
