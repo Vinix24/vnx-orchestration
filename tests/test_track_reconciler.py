@@ -481,8 +481,9 @@ def test_0028_down_removes_derived_status(tmp_path):
 
 
 def test_blocking_detail_names_blocker_oi(tmp_path):
-    """blocking_detail.blocking_ois names the unresolved blocker OI; the hint
-    carries the exact oi-close command to resolve it."""
+    """blocking_detail.blocking_ois names the unresolved blocker OI; a generic
+    (non-plan) blocker has no CLI resolver today, so the hint says so honestly
+    and points at the real underlying mechanism instead of a dead command."""
     state_dir = _build_db(tmp_path)
     _seed_track(state_dir, "T-hint-oi")
     _seed_dispatch(state_dir, "D-hint-oi-1", "T-hint-oi", state="completed")
@@ -497,7 +498,32 @@ def test_blocking_detail_names_blocker_oi(tmp_path):
 
     hint = track_reconciler.format_blocking_hint(detail)
     assert "OI-777" in hint
-    assert "vnx track oi-close OI-777" in hint
+    assert "no CLI resolver exists" in hint
+    assert "tracks.unlink_open_item" in hint
+    assert "vnx track oi-close" not in hint
+
+
+def test_blocking_detail_plan_oi_yields_plan_gate_hint(tmp_path):
+    """An OI-PLAN-<track> blocker (the plan-first gate) yields a plan-gate
+    run|attest hint — never the dead `oi-close` command — and derives the
+    track id from the oi_id itself."""
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-hint-plan")
+    _seed_dispatch(state_dir, "D-hint-plan-1", "T-hint-plan", state="completed")
+    tracks_lib.link_open_item(
+        state_dir, "T-hint-plan", PROJECT_ID, "OI-PLAN-T-hint-plan", "blocks", "manual"
+    )
+
+    result = track_reconciler.reconcile_track(state_dir, "T-hint-plan", PROJECT_ID)
+    assert result["derived_status"] == "blocked"
+    detail = result["blocking_detail"]
+    assert detail["blocking_ois"] == [{"oi_id": "OI-PLAN-T-hint-plan"}]
+
+    hint = track_reconciler.format_blocking_hint(detail)
+    assert "vnx plan-gate run T-hint-plan --doc" in hint
+    assert "vnx plan-gate attest T-hint-plan --reason" in hint
+    assert "--approval-id" in hint
+    assert "vnx track oi-close" not in hint
 
 
 def test_blocking_detail_names_dependency(tmp_path):
