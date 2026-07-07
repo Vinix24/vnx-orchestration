@@ -446,14 +446,22 @@ jobs:
           # path gate" only scans scripts/; the footgun actually lived in the T0 role,
           # templates, skills and docs. Ban the relative pin across every shipped surface.
           # tests/ legitimately point VNX_STATE_DIR at tmp dirs; daily-log/ only narrates it.
+          # rg exits 0 (matches), 1 (no matches), 2+ (error). Distinguish them: a bare `|| true`
+          # would mask an rg error (bad regex, unreadable tree) as a clean pass.
+          set +e
           matches=$(rg -n "VNX_STATE_DIR[[:space:]]*=[[:space:]]*[\"']?\.{0,2}/?\.vnx-data" . \
             --glob "!**/tests/**" \
             --glob "!**/daily-log/**" \
             --glob "!**/archive*/**" \
             --glob "!**/.git/**" \
             --glob "!**/.vnx-data/**" \
-            --glob "!**/*.DEPRECATED" \
-            || true)
+            --glob "!**/*.DEPRECATED")
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then
+            echo "ripgrep errored (exit $rc) — failing the gate instead of masking it as a pass"
+            exit "$rc"
+          fi
           if [ -n "$matches" ]; then
             echo "$matches"
             echo ""
