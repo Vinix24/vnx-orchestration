@@ -84,6 +84,37 @@ def test_no_projects_is_skip(tmp_path):
     assert r.status == "SKIP"
 
 
+def test_unreadable_registry_makes_check_b_red(tmp_path):
+    r = fa.check_per_project_stores(tmp_path, [], registry_error="cannot read registry: boom")
+    assert r.status == "RED"
+    assert "unreadable" in r.detail
+
+
+def test_malformed_registry_returns_error_not_silent_empty(tmp_path):
+    reg = tmp_path / "projects.json"
+    reg.write_text("{not valid json", encoding="utf-8")
+    projects, err = fa._load_project_ids(reg)
+    assert projects == []
+    assert err is not None  # surfaced, not silently swallowed
+
+
+def test_missing_registry_is_not_an_error(tmp_path):
+    projects, err = fa._load_project_ids(tmp_path / "does-not-exist.json")
+    assert projects == []
+    assert err is None
+
+
+def test_unsafe_project_id_is_skipped(tmp_path):
+    proj = tmp_path / "repo"
+    proj.mkdir()
+    (proj / ".vnx-project-id").write_text("../escape\n", encoding="utf-8")
+    reg = tmp_path / "projects.json"
+    reg.write_text(json.dumps({"projects": [{"name": "repo", "path": str(proj)}]}), encoding="utf-8")
+    projects, err = fa._load_project_ids(reg)
+    assert projects == []  # traversal id skipped
+    assert err is None
+
+
 # ── Check C: hash-chain integrity ───────────────────────────────────────────
 
 def test_unchained_ledger_is_green(tmp_path):
@@ -130,7 +161,8 @@ def test_run_audit_resolves_project_id_from_file(tmp_path):
     data_home.mkdir()
     reg = _registry(tmp_path, [("vnx-dev", "vnx-orchestration")])
     _mk_project(data_home, "vnx-dev")  # store keyed by the id, not the registry name
-    b = fa.check_per_project_stores(data_home, fa._load_project_ids(reg))
+    projects, err = fa._load_project_ids(reg)
+    b = fa.check_per_project_stores(data_home, projects, err)
     assert b.status == "GREEN"
 
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,10 @@ except Exception:  # pragma: no cover - import guard
 # Directory names at the data-home root that are shared/legacy by construction,
 # never a project-id. `state` holding *.db is the hard split-brain signal.
 SHARED_ROOT_DIRS = ("state", "events", "locks")
+
+# A resolved project-id is used as a path component under <data_home>; reject
+# anything that could traverse or is otherwise not a plain id.
+SAFE_PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # A bare shared store written within this many days is an ACTIVE fork (RED);
 # older than this it is a stale relic = cleanup debt (WARN, does not block).
@@ -83,25 +88,25 @@ def _fmt_ts(ts: Optional[float]) -> str:
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def _load_project_ids(registry_file: Path) -> list[tuple[str, str]]:
-    """Return [(project_id, project_path)] for registered projects.
+def _load_project_ids(registry_file: Path) -> tuple[list[tuple[str, str]], Optional[str]]:
+    """Return ``([(project_id, project_path)], registry_error)``.
 
-    project_id comes from `<path>/.vnx-project-id` (first line) when readable,
-    else falls back to the registry name — so the audit still names the project.
+    ``registry_error`` is a message when the registry EXISTS but is unreadable
+    or malformed — the caller turns that into a RED finding so the audit never
+    reports clean while it was actually blind to the project set. A registry
+    that simply does not exist yields ``([], None)`` (legitimate).
+
+    project_id comes from ``<path>/.vnx-project-id`` (first line) when readable,
+    else falls back to the registry name. A resolved id that is not a safe path
+    component is skipped with a warning (traversal guard).
     """
     out: list[tuple[str, str]] = []
     if not registry_file.exists():
-        return out  # no registry is legitimate — nothing to enumerate
+        return out, None
     try:
         data = json.loads(registry_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        # A registry that EXISTS but is unreadable/malformed is a real fault:
-        # surface it instead of silently auditing zero projects.
-        print(
-            f"fabric-audit: WARNING — cannot read project registry {registry_file}: {exc}",
-            file=sys.stderr,
-        )
-        return out
+        return out, f"cannot read project registry {registry_file}: {exc}"
     for p in data.get("projects", []):
         path = p.get("path", "") or ""
         name = p.get("name") or p.get("id") or ""
@@ -119,9 +124,17 @@ def _load_project_ids(registry_file: Path) -> list[tuple[str, str]]:
                         f"falling back to registry name {name!r}",
                         file=sys.stderr,
                     )
-        if pid:
-            out.append((pid, path))
-    return out
+        if not pid:
+            continue
+        if "/" in pid or ".." in pid or not SAFE_PROJECT_ID.match(pid):
+            print(
+                f"fabric-audit: WARNING — skipping project with unsafe id {pid!r} "
+                f"(from {path or 'registry'}) — not used as a path component",
+                file=sys.stderr,
+            )
+            continue
+        out.append((pid, path))
+    return out, None
 
 
 def check_shared_root_state(data_home: Path) -> CheckResult:
@@ -171,7 +184,17 @@ def check_shared_root_state(data_home: Path) -> CheckResult:
     return CheckResult("A", "Legacy shared state at data root", "GREEN", "no bare shared state store")
 
 
-def check_per_project_stores(data_home: Path, projects: list[tuple[str, str]]) -> CheckResult:
+def check_per_project_stores(
+    data_home: Path, projects: list[tuple[str, str]], registry_error: Optional[str] = None
+) -> CheckResult:
+    if registry_error:
+        # A registry we could not read must never read as clean — the audit
+        # was blind to the project set, so it cannot vouch for the stores.
+        return CheckResult(
+            "B", "Per-project stores canonical", "RED",
+            f"project registry unreadable — cannot verify per-project stores: {registry_error}",
+            [{"registry_error": registry_error}],
+        )
     if not projects:
         return CheckResult("B", "Per-project stores canonical", "SKIP", "no registered projects")
     missing = []
@@ -196,7 +219,12 @@ def check_per_project_stores(data_home: Path, projects: list[tuple[str, str]]) -
 
 def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> CheckResult:
     if verify_chain is None:
-        return CheckResult("C", "Receipt hash-chain integrity", "SKIP", "verify_chain unavailable")
+        # The integrity verifier failing to import is itself a problem — the
+        # audit cannot vouch for chain integrity, so surface it (not a silent SKIP).
+        return CheckResult(
+            "C", "Receipt hash-chain integrity", "WARN",
+            "integrity verifier (ndjson_hash_chain.verify_chain) could not be imported — chains NOT checked",
+        )
     if not projects:
         return CheckResult("C", "Receipt hash-chain integrity", "SKIP", "no registered projects")
     broken = []
@@ -235,10 +263,10 @@ def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> Check
 
 
 def run_audit(data_home: Path, registry_file: Path) -> list[CheckResult]:
-    projects = _load_project_ids(registry_file)
+    projects, registry_error = _load_project_ids(registry_file)
     return [
         check_shared_root_state(data_home),
-        check_per_project_stores(data_home, projects),
+        check_per_project_stores(data_home, projects, registry_error),
         check_hash_chains(data_home, projects),
     ]
 
