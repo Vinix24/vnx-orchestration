@@ -158,13 +158,15 @@ When uncertain, use this order:
 Before the first promote of any new feature chain, check all target terminals for stale leases in runtime_coordination.db. The dispatcher fails closed on expired-but-uncleaned leases.
 
 ```bash
-export VNX_STATE_DIR=.vnx-data/state VNX_DATA_DIR=.vnx-data VNX_DISPATCH_DIR=.vnx-data/dispatches
+# VNX paths (VNX_STATE_DIR / VNX_DATA_DIR / VNX_DISPATCH_DIR) resolve centrally
+# via the vnx runtime — do NOT hardcode .vnx-data/ literals here. A repo-local
+# pin forks state from the central store (~/.vnx-data/<project>) = split-brain.
 # Check each terminal
 for T in T1 T2 T3; do
   python3 scripts/runtime_core_cli.py check-terminal --terminal $T --dispatch-id <new-dispatch-id>
 done
 # If any shows lease_expired_not_cleaned, find generation and release:
-sqlite3 .vnx-data/state/runtime_coordination.db "SELECT * FROM terminal_leases WHERE terminal_id='<T>';"
+sqlite3 "$VNX_STATE_DIR/runtime_coordination.db" "SELECT * FROM terminal_leases WHERE terminal_id='<T>';"
 python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch-id <old-dispatch> --generation <gen> --reason "stale_lease_cleanup"
 ```
 

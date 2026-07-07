@@ -3,11 +3,13 @@
 1.0 scope: progress-only path. D3-D5 collectors wired in 1.0.1.
 
 Usage:
-  VNX_STATE_DIR=.vnx-data/state VNX_DATA_DIR=.vnx-data python3 scripts/build_decisions_digest.py
+  python3 scripts/build_decisions_digest.py
 
 Env vars:
-  VNX_STATE_DIR  — state directory (default: .vnx-data/state)
-  VNX_DATA_DIR   — data root directory (default: .vnx-data)
+  VNX_STATE_DIR  — state directory (default: resolved centrally via vnx_paths →
+                   ~/.vnx-data/<project>/state; do not pin repo-local)
+  VNX_DATA_DIR   — data root directory (default: resolved centrally via vnx_paths →
+                   ~/.vnx-data/<project>)
 """
 
 from __future__ import annotations

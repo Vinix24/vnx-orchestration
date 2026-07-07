@@ -20,7 +20,9 @@ This lane runs Claude workers on the **subscription** (interactive `claude`, nev
 ## Canonical command
 
 ```bash
-export VNX_STATE_DIR=.vnx-data/state VNX_DATA_DIR=.vnx-data VNX_DISPATCH_DIR=.vnx-data/dispatches
+# VNX paths (VNX_STATE_DIR / VNX_DATA_DIR / VNX_DISPATCH_DIR) resolve centrally
+# via the vnx runtime — do NOT hardcode .vnx-data/ literals here. A repo-local
+# pin forks state from the central store (~/.vnx-data/<project>) = split-brain.
 
 python3 scripts/lib/tmux_interactive_dispatch.py \
   --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
