@@ -22,14 +22,32 @@
 
 set -uo pipefail
 
+# All descendant PIDs of $1 (the FULL process tree, not just direct children).
+# BFS over pgrep -P; process trees are acyclic so this always terminates.
+_t0_audit_descendants() {
+  local queue="$1" next child kids acc=""
+  while [ -n "$queue" ]; do
+    next=""
+    for child in $queue; do
+      kids="$(pgrep -P "$child" 2>/dev/null)"
+      [ -z "$kids" ] && continue
+      acc="$acc $kids"
+      next="$next $kids"
+    done
+    queue="$next"
+  done
+  printf '%s' "$acc"
+}
+
 # Detect whether a tmux pane has an active CLI (claude/codex/gemini/node) in
 # its process tree. Checked via `ps`, not tmux's `#{pane_current_command}`:
 # a running claude process can report its own version string (e.g. "2.1.201")
-# there instead of the literal binary name.
+# there instead of the literal binary name. Walks the whole descendant tree so
+# a CLI launched under an intermediate shell/wrapper is still detected.
 _t0_audit_active_cli() {
   local pane_pid="$1" pid comm
   [ -z "$pane_pid" ] && return 1
-  for pid in "$pane_pid" $(pgrep -P "$pane_pid" 2>/dev/null); do
+  for pid in "$pane_pid" $(_t0_audit_descendants "$pane_pid"); do
     comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
     comm="${comm##*/}"
     case "$comm" in
@@ -55,7 +73,9 @@ main() {
   local found_any=0
   local seen_roots=""
 
-  while IFS=' ' read -r pane_id pane_path pane_pid; do
+  # pane_current_path is read LAST so an embedded space in the cwd is absorbed
+  # into pane_path by read's remainder rule, instead of shifting into pane_pid.
+  while IFS=' ' read -r pane_id pane_pid pane_path; do
     [ -z "$pane_id" ] && continue
 
     # Skip per-dispatch worker worktrees (tmux_interactive_dispatch.py checks
@@ -91,7 +111,7 @@ main() {
     _t0_audit_active_cli "$pane_pid" && cli="running"
 
     _t0_audit_row "$(basename "$project_root")" "T0" "$loaded" "$cli" "$pane_path"
-  done < <(tmux list-panes -a -F '#{pane_id} #{pane_current_path} #{pane_pid}' 2>/dev/null)
+  done < <(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_current_path}' 2>/dev/null)
 
   if [ "$found_any" -eq 0 ]; then
     echo "(no live T0 sessions found)"
@@ -111,8 +131,15 @@ seen = set(seen_raw.split())
 try:
     with open(registry_file) as f:
         data = json.load(f)
-except Exception:
-    sys.exit(0)
+except Exception as exc:
+    # Fail loud: a registry that exists but cannot be read/parsed is a real
+    # error — swallowing it as exit 0 would report a clean audit while the
+    # not-running-projects cross-reference was silently skipped.
+    print(
+        f"warning: could not read/parse T0 project registry {registry_file}: {exc}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 for p in data.get("projects", []):
     root = p.get("path", "")
