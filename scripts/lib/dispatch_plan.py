@@ -23,6 +23,7 @@ from dispatch_spec import (
     Reject,
     ValidatedSpec,
 )
+from providers.billing_lanes import is_subscription_lane
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +172,10 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     if is_claude_headless:
         billing = "api_metered"
     elif is_claude_lane:
+        billing = "subscription"
+    elif is_subscription_lane(provider.value):
+        # kimi/glm-harness/deepseek-harness are OAuth/own-key harness lanes for this
+        # account, not per-token metered against the shared cost budget (billing_lanes.py).
         billing = "subscription"
     else:
         billing = "provider_metered"
