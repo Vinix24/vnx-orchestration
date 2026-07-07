@@ -16,11 +16,72 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# File size thresholds
+# File size thresholds. The blocking threshold is a HARD CEILING: over it a file is a
+# monolith that must be split. Below it, the warning threshold is advisory only.
 FILE_SIZE_WARNING_PYTHON = 500
-FILE_SIZE_BLOCKING_PYTHON = 800
+FILE_SIZE_BLOCKING_PYTHON = 1200
 FILE_SIZE_WARNING_SHELL = 300
 FILE_SIZE_BLOCKING_SHELL = 600
+
+# Files that ALREADY exceed the hard ceiling predate this gate. Blocking every PR that
+# touches one would freeze legitimate work, so each is grandfathered here with a reason and
+# surfaced as a standing advisory (refactor backlog) instead of a hard block. A NEW file
+# over the ceiling is NOT on this list and therefore blocks — that is the point: no new
+# monoliths; the existing ones get a refactor entry, not an eternal silent exempt.
+# Refactor home: horizon tracks `quality-advisory-code-health` + `retire-redundant-architecture`.
+# Keys are EXTENSION-LESS repo-relative paths, matched against the suffix-stripped file path.
+# Extension-less on purpose: a lane-monolith path with its ".py" suffix would read as a
+# lane-script delivery reference to dispatch_sidedoor_audit.py and false-flag this file as a
+# side door. Dropping the suffix keeps that exhaustiveness audit pure without an allowlist exception.
+FILE_SIZE_ALLOWLIST: Dict[str, str] = {
+    "scripts/migrate_future_system": "grandfathered monolith; future-state migration",
+    "scripts/pr_queue_manager": "grandfathered monolith; PR-queue manager",
+    "scripts/lib/tmux_interactive_dispatch": "grandfathered monolith; tmux subscription lane",
+    "scripts/build_t0_state": "grandfathered monolith; T0 state projection",
+    "scripts/migrate_to_central_vnx": "grandfathered monolith; central-store migration",
+    "scripts/planning_cli": "grandfathered monolith; planning/horizon CLI",
+    "scripts/lib/provider_dispatch": "grandfathered monolith; provider dispatch lane",
+    "scripts/llm_benchmark": "grandfathered monolith; model benchmark harness",
+    "scripts/gather_intelligence": "grandfathered monolith; intelligence gather",
+    "scripts/aggregator/t0_lifecycle": "grandfathered monolith; aggregator lifecycle",
+    "scripts/quality_db_init": "grandfathered monolith; quality DB init",
+    "scripts/lib/tenant_stamping": "grandfathered monolith; ADR-007 tenant stamping",
+    "scripts/closure_verifier": "grandfathered monolith; closure verifier",
+    "scripts/retroactive_backfill": "grandfathered monolith; retroactive backfill tool",
+    "scripts/commands/dispatch": "grandfathered shell monolith; dispatch entrypoint",
+    "scripts/commands/start": "grandfathered shell monolith; start command",
+    "scripts/dispatcher_minimal": "grandfathered shell monolith; dispatcher",
+    "scripts/generate_t0_brief": "grandfathered shell monolith; T0 brief generator",
+    "scripts/smart_tap_json_translator": "grandfathered shell monolith; smart-tap translator",
+    "dashboard/api_intelligence": "grandfathered monolith; dashboard intelligence API",
+    "dashboard/api_operator": "grandfathered monolith; dashboard operator API",
+}
+
+
+def _is_test_file(file_path: Path) -> bool:
+    """Test files are exempt from the file-size BLOCK: a thorough suite is legitimately large.
+    They still get the advisory warning, never a hard block."""
+    name = file_path.name
+    return (
+        "tests" in file_path.parts
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+    )
+
+
+def _file_size_allowlist_reason(file_path: Path) -> Optional[str]:
+    """Return the grandfather reason if ``file_path`` is on the size allowlist, else None.
+
+    Keys are extension-less; the file path's own extension is stripped before matching, on
+    exact key or a path-suffix (with a ``/`` boundary) so the absolute resolved path the
+    diff scanner passes still resolves.
+    """
+    stem = str(file_path.with_suffix(""))
+    for rel, reason in FILE_SIZE_ALLOWLIST.items():
+        if stem == rel or stem.endswith("/" + rel):
+            return reason
+    return None
 
 # Function size thresholds
 FUNCTION_SIZE_WARNING_PYTHON = 40
@@ -167,14 +228,38 @@ def check_file_size(file_path: Path) -> List[QualityCheck]:
             return checks
 
         if line_count > blocking_threshold:
-            checks.append(QualityCheck(
-                check_id="file_size_blocking",
-                severity="warning",
-                file=str(file_path),
-                message=f"File is large: {line_count} lines (soft max {blocking_threshold})",
-                evidence=f"lines={line_count},max={blocking_threshold}",
-                action_required=False,
-            ))
+            allow_reason = _file_size_allowlist_reason(file_path)
+            if allow_reason is None and not _is_test_file(file_path):
+                # Over the hard ceiling and not grandfathered: a real block. A HOLD here
+                # stops a new monolith from landing (split it, or add a reasoned allowlist entry).
+                checks.append(QualityCheck(
+                    check_id="file_size_blocking",
+                    severity="blocking",
+                    file=str(file_path),
+                    message=(
+                        f"File exceeds the hard size ceiling: {line_count} lines "
+                        f"(max {blocking_threshold}). Split it, or add a reasoned "
+                        f"FILE_SIZE_ALLOWLIST entry if the size is deliberate."
+                    ),
+                    evidence=f"lines={line_count},max={blocking_threshold}",
+                    action_required=True,
+                ))
+            else:
+                # Grandfathered monolith or a (large-but-legitimate) test file: surfaced as a
+                # standing advisory (refactor backlog), not a block, so touching it never
+                # freezes legitimate work.
+                _reason = allow_reason or "test file (size gate is advisory for tests)"
+                checks.append(QualityCheck(
+                    check_id="file_size_grandfathered",
+                    severity="warning",
+                    file=str(file_path),
+                    message=(
+                        f"Large file (advisory): {line_count} lines "
+                        f"(over {blocking_threshold}) — {_reason}"
+                    ),
+                    evidence=f"lines={line_count},max={blocking_threshold},allowlisted=1",
+                    action_required=False,
+                ))
         elif line_count > warning_threshold:
             checks.append(QualityCheck(
                 check_id="file_size_warning",
