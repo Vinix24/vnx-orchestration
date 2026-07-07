@@ -8,6 +8,16 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 Future-state reconciliation batch (`adr007-composite-keys-batch` / future-state milestone). It makes the track ↔ dispatch ↔ open-item future state reflect reality *automatically* and brings the `dispatches` table into ADR-007 composite-key tenancy. `VERSION` is still `1.0.0`: these changes are on `main` but not yet cut as a tagged release. Driven by `claudedocs/PRD-future-state-reconciliation-v1.1.md` (database-engineer skill under T0 governance). The 1.0 launch does not depend on this batch. Cite ADR-007.
 
+### Fabric + quality hardening (2026-07-08)
+
+Phase-0 fabric hardening (ADR-028) and a code-health gate, from the autonomous horizon run.
+
+- **fabric-audit `-wal`/`-shm` awareness (#1047)** — `fabric_audit.py` check A read only `.db` mtimes, so a Jun-20 `.db` with a same-day `.db-wal` reported as a safe 17-day stale relic while a connection had just opened the store. mtime alone cannot tell a leftover sidecar from a live handle, so a fresh sidecar now drives the active/stale decision and escalates to RED with a "verify with `lsof` before retiring" note. Proven empirically during the store retirement below (the audit gave a false-clean signal).
+- **Repo-local state-pin gate (#1047)** — a standalone `state-pin-gate` CI job bans a repo-local `VNX_STATE_DIR=.vnx-data` pin across every shipped surface (templates, skills, docs, the T0 role — not just `scripts/`, which the pre-existing "Legacy path gate" covered). Durability guard for the #1043 footgun.
+- **CI apt-flake fix (#1047)** — strip the flaky `packages.microsoft.com` apt source before `apt-get update` in every ripgrep-install step; it broke the install ~4×/night with a NOSPLIT/hash-sum mismatch.
+- **Legacy shared-store retirement** — the orphaned `~/.vnx-data/state/` (last real write 2026-06-20) was moved to `~/.vnx-data/state.pre-retirement` (reversible; ADR-028 Phase-0 30-day hold) after confirming no live writer via `lsof`. `vnx fabric-audit` → **GREEN**.
+- **File-size gate escalates to BLOCKING (#1048)** — `quality_advisory.py` had a "blocking" file-size threshold that only ever emitted `severity="warning"`, so monoliths (up to 3357 lines) grew unchecked. The Python hard ceiling is now 1200 (warn stays 500) and over it emits `severity="blocking"` (HOLDs `pre_merge_gate`). A `FILE_SIZE_ALLOWLIST` grandfathers every current over-ceiling source file (surfaced as a standing advisory, not a block); test files are exempt. A genuinely new monolith blocks.
+
 ### Pre-ship hardening sprint (2026-06-26)
 
 A pre-PyPI-ship pass: five real production bugs and the future-state drift, then a stale-test and docs sweep. None change the 1.0 feature surface; they make it tip-top before publish.
