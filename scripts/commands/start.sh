@@ -7,6 +7,25 @@
 # _update_last_used, _detect_worktree_context, cmd_intelligence_export, etc.)
 # are available when this runs.
 
+# Detect whether a tmux pane has an active CLI (claude/codex/gemini/node) in
+# its process tree. Checked via `ps`, not tmux's `#{pane_current_command}`:
+# a running claude process can report its own version string (e.g. "2.1.201")
+# there instead of the literal binary name, which makes pane_current_command
+# an unreliable liveness signal and causes a genuinely-running T0 to be
+# misdetected as a stale/idle session.
+_vnx_pane_active_cli() {
+  local pane_pid="$1" pid comm
+  [ -z "$pane_pid" ] && return 1
+  for pid in "$pane_pid" $(pgrep -P "$pane_pid" 2>/dev/null); do
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
+    comm="${comm##*/}"
+    case "$comm" in
+      claude|codex|gemini|node) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 cmd_start() {
   local session_name="vnx-$(basename "$PROJECT_ROOT")"
   local terms_dir="$PROJECT_ROOT/.claude/terminals"
@@ -188,8 +207,11 @@ cmd_start() {
   # contain idle shells (no active Claude/Codex/Gemini process).
   if tmux has-session -t "$session_name" 2>/dev/null; then
     local active_cli_count=0
-    active_cli_count="$(tmux list-panes -t "$session_name" -F '#{pane_current_command}' 2>/dev/null \
-      | awk '$1=="node" || $1=="claude" || $1=="codex" || $1=="gemini" {c++} END {print c+0}')"
+    local _acc_pane_pid
+    while IFS= read -r _acc_pane_pid; do
+      [ -z "$_acc_pane_pid" ] && continue
+      _vnx_pane_active_cli "$_acc_pane_pid" && active_cli_count=$((active_cli_count + 1))
+    done < <(tmux list-panes -t "$session_name" -F '#{pane_pid}' 2>/dev/null)
 
     # If a profile was explicitly selected, kill the existing session and restart
     # fresh so the chosen T0 provider is actually applied.
@@ -207,8 +229,18 @@ cmd_start() {
       # Without this, re-heal creates duplicate supervisors/receipt_processors.
       vnx_kill_all_orchestration "$scripts_dir" "$log_dir" "session_reheal"
 
+      # T0-only layout guarantees exactly one persistent pane per session.
+      # Do NOT filter by cwd here: if the pane's cwd has already drifted away
+      # from $terms_dir/T0 (the exact condition this re-heal path exists to
+      # fix), a cwd-based filter matches nothing, the cd+relaunch below is
+      # silently skipped, and the drift becomes permanent — every future
+      # `vnx start` reports "re-heal complete" without ever sending a single
+      # keystroke. Exclude only the transient queue-popup window
+      # (queue_popup_watcher.sh: "VNX-Queue"), which self-destructs after use
+      # and can briefly coexist as a second window in this session.
       local T0
-      T0="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T0" '$2==p {print $1; exit}')"
+      T0="$(tmux list-panes -t "$session_name" -F '#{window_name} #{pane_id}' 2>/dev/null \
+        | awk '$1!="VNX-Queue" {print $2; exit}')"
 
       local node_path=""
       node_path="$(_resolve_node_path 2>/dev/null)" || node_path=""
