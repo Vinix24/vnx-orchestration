@@ -48,16 +48,55 @@ class TestFileSizeGates:
         assert checks[0].check_id == "file_size_warning"
         assert "600" in checks[0].message
 
-    def test_python_file_blocking_threshold(self, tmp_path):
-        """Python file over soft-max threshold should produce advisory warning (not blocking)."""
+    def test_python_file_between_warning_and_ceiling_is_warning(self, tmp_path):
+        """900 lines is over the 500 warning but under the 1200 hard ceiling: advisory warning."""
         test_file = tmp_path / "test.py"
-        test_file.write_text("\n" * 900)  # 900 lines, over 800 soft max
+        test_file.write_text("\n" * 900)
 
         checks = check_file_size(test_file)
 
         assert len(checks) == 1
         assert checks[0].severity == "warning"
+        assert checks[0].check_id == "file_size_warning"
+
+    def test_python_file_over_hard_ceiling_blocks(self, tmp_path):
+        """A new (non-allowlisted) Python file over the 1200 hard ceiling is a real block."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("\n" * 1300)
+
+        checks = check_file_size(test_file)
+
+        assert len(checks) == 1
+        assert checks[0].severity == "blocking"
         assert checks[0].check_id == "file_size_blocking"
+        assert checks[0].action_required is True
+
+    def test_allowlisted_monolith_over_ceiling_is_advisory(self, tmp_path):
+        """A grandfathered monolith over the ceiling is surfaced as advisory, not blocking,
+        so touching it does not HOLD the gate (path-suffix match on the allowlist key)."""
+        f = tmp_path / "scripts" / "migrate_future_system.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("\n" * 1300)
+
+        checks = check_file_size(f)
+
+        assert len(checks) == 1
+        assert checks[0].severity == "warning"
+        assert checks[0].check_id == "file_size_grandfathered"
+        assert checks[0].action_required is False
+
+    def test_large_test_file_is_advisory_not_blocking(self, tmp_path):
+        """A large test file is exempt from the hard-ceiling block: a thorough suite is
+        legitimately large, so it stays advisory rather than HOLDing the gate."""
+        f = tmp_path / "tests" / "test_big.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("\n" * 1300)
+
+        checks = check_file_size(f)
+
+        assert len(checks) == 1
+        assert checks[0].severity == "warning"
+        assert checks[0].check_id == "file_size_grandfathered"
         assert checks[0].action_required is False
 
     def test_shell_file_warning_threshold(self, tmp_path):
@@ -70,16 +109,17 @@ class TestFileSizeGates:
         assert len(checks) == 1
         assert checks[0].severity == "warning"
 
-    def test_shell_file_blocking_threshold(self, tmp_path):
-        """Shell file over soft-max threshold should produce advisory warning (not blocking)."""
+    def test_shell_file_over_ceiling_blocks(self, tmp_path):
+        """A new (non-allowlisted) shell file over the 600 hard ceiling is a real block."""
         test_file = tmp_path / "test.sh"
-        test_file.write_text("\n" * 650)  # 650 lines, over 600 soft max for shell
+        test_file.write_text("\n" * 650)  # 650 lines, over the 600 shell ceiling
 
         checks = check_file_size(test_file)
 
         assert len(checks) == 1
-        assert checks[0].severity == "warning"
-        assert checks[0].action_required is False
+        assert checks[0].severity == "blocking"
+        assert checks[0].check_id == "file_size_blocking"
+        assert checks[0].action_required is True
 
 
 class TestFunctionSizeGates:
@@ -146,9 +186,11 @@ def small_function():
 
 
 class TestSizeAdvisoryPolicy:
-    """Size findings are advisory (warning), never blocking."""
+    """File size over the hard ceiling now BLOCKS (unless grandfathered); function size and
+    sub-ceiling file size stay advisory (warning)."""
 
     def test_900_line_python_file_is_warning_not_blocking(self, tmp_path):
+        # 900 < the 1200 hard ceiling: still just a warning, not a block.
         test_file = tmp_path / "big.py"
         test_file.write_text("\n" * 900)
 
@@ -156,7 +198,7 @@ class TestSizeAdvisoryPolicy:
 
         assert len(checks) == 1
         assert checks[0].severity == "warning"
-        assert checks[0].check_id == "file_size_blocking"
+        assert checks[0].check_id == "file_size_warning"
         assert checks[0].action_required is False
 
     def test_100_line_python_function_is_warning_not_blocking(self, tmp_path):
@@ -188,12 +230,13 @@ class TestSizeAdvisoryPolicy:
         assert checks[0].check_id == "function_size_blocking"
         assert checks[0].action_required is False
 
-    def test_no_size_check_ever_emits_blocking(self, tmp_path):
-        """Exhaustive: no size check path can emit severity='blocking'."""
+    def test_function_size_checks_stay_advisory(self, tmp_path):
+        """Function-size findings remain advisory (warning) — only FILE size over the hard
+        ceiling escalates to blocking (covered in TestFileSizeGates)."""
         py_file = tmp_path / "x.py"
-        # 1500-line file with a 200-line function — worst case
+        # A 200-line function is well over the 70-line function-blocking threshold.
         lines = ["def monster():"]
-        for i in range(1499):
+        for i in range(200):
             lines.append(f"    x{i} = {i}")
         py_file.write_text("\n".join(lines))
 
@@ -205,9 +248,9 @@ class TestSizeAdvisoryPolicy:
         sh_file.write_text("\n".join(sh_lines))
 
         for f in [py_file, sh_file]:
-            for check in check_file_size(f) + check_function_sizes(f):
+            for check in check_function_sizes(f):
                 assert check.severity != "blocking", (
-                    f"Size check emitted blocking for {f}: {check}"
+                    f"Function-size check emitted blocking for {f}: {check}"
                 )
 
 
