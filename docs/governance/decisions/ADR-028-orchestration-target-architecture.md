@@ -63,7 +63,11 @@ Ratified under an explicit overnight operator mandate. The four open operator-de
    **Default (chosen):** YES. Kept out of this ADR to preserve focus; recorded as a follow-up ADR candidate (ADR-029) covering the pinned-daemon-alongside-door structural friction (see memory `dispatch-structure-not-consolidated-friction`). **`[FLAG — morning review]`** — confirm splitting vs folding into this ADR.
 
 3. **Approve starting Phase 0 NOW?**
-   **Resolved: YES — approved and in progress.** The overnight mandate is the approval. Phase-0 work already landed this session: the repo-local `VNX_STATE_DIR` footgun removed from the T0 role/template/skill/docs (PR #1043), with `vnx fabric-audit`, hash-chain completion, and unknown-identity invalidation as the remaining Phase-0 items being worked in the same session. Phase 0 is a correctness fix independent of the future architecture.
+   **Resolved: YES — approved and largely landed.** The overnight mandate is the approval. Phase-0 progress:
+   - `VNX_STATE_DIR` repo-local footgun removed from the T0 role/template/skill/docs (PR #1043), plus a durable `state-pin-gate` CI job so it cannot creep back in any shipped surface (PR #1047).
+   - `vnx fabric-audit` shipped (PR #1045) and hardened to weigh `.db-wal`/`.db-shm` sidecar mtimes, so a recent open on a stale `.db` no longer reads as safe-to-retire (PR #1047).
+   - The orphaned shared `~/.vnx-data/state/` **retired** to `.pre-retirement` (reversible, 30-day hold) after an `lsof` no-live-writer check; `vnx fabric-audit` is **GREEN**.
+   - **Remaining Phase-0 items (parked for a supervised governed dispatch, decision-path):** hash-chain completion default-on (judge decisions exclusively via `append_chained_entry`) — blast-radius on fabric-audit check C requires epoch rotation first — and unknown-identity invalidation. Phase 0 is a correctness fix independent of the future architecture.
 
 4. **Is panel coverage complete?**
    **Resolved: YES — no re-run needed.** deepseek + codex + kimi-r2 converge (high confidence); glm is dead for long synthesis (flaked empty twice, persistent). The draft's own conclusion, carried forward.
