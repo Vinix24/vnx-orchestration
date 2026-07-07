@@ -444,8 +444,11 @@ jobs:
           # #1043 footgun: pinning VNX_STATE_DIR to a repo-local .vnx-data path breaks
           # central-mode resolution and forks the audit trail. The pre-existing "Legacy
           # path gate" only scans scripts/; the footgun actually lived in the T0 role,
-          # templates, skills and docs. Ban the relative pin across every shipped surface.
-          # tests/ legitimately point VNX_STATE_DIR at tmp dirs; daily-log/ only narrates it.
+          # templates, skills and docs. Ban the relative pin across every RUNTIME surface
+          # (scripts, hooks, templates, skills, .claude role/skill md, bin, vnx_cli).
+          # tests/ legitimately point VNX_STATE_DIR at tmp dirs; prose docs that only
+          # DESCRIBE the footgun (CHANGELOG, README, docs/, claudedocs/, daily-log/) have no
+          # runtime effect and are excluded so documenting the pattern does not fail the gate.
           # rg exits 0 (matches), 1 (no matches), 2+ (error). Distinguish them: a bare `|| true`
           # would mask an rg error (bad regex, unreadable tree) as a clean pass.
           set +e
@@ -455,7 +458,11 @@ jobs:
             --glob "!**/archive*/**" \
             --glob "!**/.git/**" \
             --glob "!**/.vnx-data/**" \
-            --glob "!**/*.DEPRECATED")
+            --glob "!**/*.DEPRECATED" \
+            --glob "!docs/**" \
+            --glob "!claudedocs/**" \
+            --glob "!CHANGELOG.md" \
+            --glob "!README.md")
           rc=$?
           set -e
           if [ "$rc" -gt 1 ]; then
