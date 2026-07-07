@@ -29,30 +29,32 @@ FILE_SIZE_BLOCKING_SHELL = 600
 # over the ceiling is NOT on this list and therefore blocks — that is the point: no new
 # monoliths; the existing ones get a refactor entry, not an eternal silent exempt.
 # Refactor home: horizon tracks `quality-advisory-code-health` + `retire-redundant-architecture`.
-# Keys are repo-relative paths; matched by exact string or path-suffix so an absolute
-# resolved path still resolves.
+# Keys are EXTENSION-LESS repo-relative paths, matched against the suffix-stripped file path.
+# Extension-less on purpose: a lane-monolith path with its ".py" suffix would read as a
+# lane-script delivery reference to dispatch_sidedoor_audit.py and false-flag this file as a
+# side door. Dropping the suffix keeps that exhaustiveness audit pure without an allowlist exception.
 FILE_SIZE_ALLOWLIST: Dict[str, str] = {
-    "scripts/migrate_future_system.py": "grandfathered monolith; future-state migration",
-    "scripts/pr_queue_manager.py": "grandfathered monolith; PR-queue manager",
-    "scripts/lib/tmux_interactive_dispatch.py": "grandfathered monolith; tmux subscription lane",
-    "scripts/build_t0_state.py": "grandfathered monolith; T0 state projection",
-    "scripts/migrate_to_central_vnx.py": "grandfathered monolith; central-store migration",
-    "scripts/planning_cli.py": "grandfathered monolith; planning/horizon CLI",
-    "scripts/lib/provider_dispatch.py": "grandfathered monolith; provider dispatch lane",
-    "scripts/llm_benchmark.py": "grandfathered monolith; model benchmark harness",
-    "scripts/gather_intelligence.py": "grandfathered monolith; intelligence gather",
-    "scripts/aggregator/t0_lifecycle.py": "grandfathered monolith; aggregator lifecycle",
-    "scripts/quality_db_init.py": "grandfathered monolith; quality DB init",
-    "scripts/lib/tenant_stamping.py": "grandfathered monolith; ADR-007 tenant stamping",
-    "scripts/closure_verifier.py": "grandfathered monolith; closure verifier",
-    "scripts/retroactive_backfill.py": "grandfathered monolith; retroactive backfill tool",
-    "scripts/commands/dispatch.sh": "grandfathered shell monolith; dispatch entrypoint",
-    "scripts/commands/start.sh": "grandfathered shell monolith; start command",
-    "scripts/dispatcher_minimal.sh": "grandfathered shell monolith; dispatcher",
-    "scripts/generate_t0_brief.sh": "grandfathered shell monolith; T0 brief generator",
-    "scripts/smart_tap_json_translator.sh": "grandfathered shell monolith; smart-tap translator",
-    "dashboard/api_intelligence.py": "grandfathered monolith; dashboard intelligence API",
-    "dashboard/api_operator.py": "grandfathered monolith; dashboard operator API",
+    "scripts/migrate_future_system": "grandfathered monolith; future-state migration",
+    "scripts/pr_queue_manager": "grandfathered monolith; PR-queue manager",
+    "scripts/lib/tmux_interactive_dispatch": "grandfathered monolith; tmux subscription lane",
+    "scripts/build_t0_state": "grandfathered monolith; T0 state projection",
+    "scripts/migrate_to_central_vnx": "grandfathered monolith; central-store migration",
+    "scripts/planning_cli": "grandfathered monolith; planning/horizon CLI",
+    "scripts/lib/provider_dispatch": "grandfathered monolith; provider dispatch lane",
+    "scripts/llm_benchmark": "grandfathered monolith; model benchmark harness",
+    "scripts/gather_intelligence": "grandfathered monolith; intelligence gather",
+    "scripts/aggregator/t0_lifecycle": "grandfathered monolith; aggregator lifecycle",
+    "scripts/quality_db_init": "grandfathered monolith; quality DB init",
+    "scripts/lib/tenant_stamping": "grandfathered monolith; ADR-007 tenant stamping",
+    "scripts/closure_verifier": "grandfathered monolith; closure verifier",
+    "scripts/retroactive_backfill": "grandfathered monolith; retroactive backfill tool",
+    "scripts/commands/dispatch": "grandfathered shell monolith; dispatch entrypoint",
+    "scripts/commands/start": "grandfathered shell monolith; start command",
+    "scripts/dispatcher_minimal": "grandfathered shell monolith; dispatcher",
+    "scripts/generate_t0_brief": "grandfathered shell monolith; T0 brief generator",
+    "scripts/smart_tap_json_translator": "grandfathered shell monolith; smart-tap translator",
+    "dashboard/api_intelligence": "grandfathered monolith; dashboard intelligence API",
+    "dashboard/api_operator": "grandfathered monolith; dashboard operator API",
 }
 
 
@@ -71,12 +73,13 @@ def _is_test_file(file_path: Path) -> bool:
 def _file_size_allowlist_reason(file_path: Path) -> Optional[str]:
     """Return the grandfather reason if ``file_path`` is on the size allowlist, else None.
 
-    Matches on exact repo-relative key or a path-suffix (with a ``/`` boundary) so an
-    absolute resolved path — which is what the diff scanner passes — still resolves.
+    Keys are extension-less; the file path's own extension is stripped before matching, on
+    exact key or a path-suffix (with a ``/`` boundary) so the absolute resolved path the
+    diff scanner passes still resolves.
     """
-    s = str(file_path)
+    stem = str(file_path.with_suffix(""))
     for rel, reason in FILE_SIZE_ALLOWLIST.items():
-        if s == rel or s.endswith("/" + rel):
+        if stem == rel or stem.endswith("/" + rel):
             return reason
     return None
 
