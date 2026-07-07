@@ -16,6 +16,9 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
+          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y ripgrep
 

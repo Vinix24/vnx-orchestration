@@ -33,6 +33,9 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
+          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y ripgrep
 
@@ -274,6 +277,9 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
+          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y ripgrep
 
@@ -415,3 +421,52 @@ jobs:
         run: |
           set -euo pipefail
           bash "$GITHUB_WORKSPACE/scripts/ci/pip_install_smoke.sh"
+
+  state-pin-gate:
+    name: Repo-local state-pin gate (#1043 footgun)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: |
+          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
+          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Ban repo-local VNX_STATE_DIR pins
+        run: |
+          set -euo pipefail
+          # #1043 footgun: pinning VNX_STATE_DIR to a repo-local .vnx-data path breaks
+          # central-mode resolution and forks the audit trail. The pre-existing "Legacy
+          # path gate" only scans scripts/; the footgun actually lived in the T0 role,
+          # templates, skills and docs. Ban the relative pin across every shipped surface.
+          # tests/ legitimately point VNX_STATE_DIR at tmp dirs; daily-log/ only narrates it.
+          # rg exits 0 (matches), 1 (no matches), 2+ (error). Distinguish them: a bare `|| true`
+          # would mask an rg error (bad regex, unreadable tree) as a clean pass.
+          set +e
+          matches=$(rg -n "VNX_STATE_DIR[[:space:]]*=[[:space:]]*[\"']?\.{0,2}/?\.vnx-data" . \
+            --glob "!**/tests/**" \
+            --glob "!**/daily-log/**" \
+            --glob "!**/archive*/**" \
+            --glob "!**/.git/**" \
+            --glob "!**/.vnx-data/**" \
+            --glob "!**/*.DEPRECATED")
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then
+            echo "ripgrep errored (exit $rc) — failing the gate instead of masking it as a pass"
+            exit "$rc"
+          fi
+          if [ -n "$matches" ]; then
+            echo "$matches"
+            echo ""
+            echo "Repo-local VNX_STATE_DIR pin detected (#1043 footgun)."
+            echo "Resolve state via VNX_DATA_DIR / vnx_paths — never pin a repo-local .vnx-data path."
+            exit 1
+          fi
+          echo "[ok] no repo-local VNX_STATE_DIR pins in shipped surfaces"

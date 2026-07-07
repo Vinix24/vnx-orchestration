@@ -63,6 +63,36 @@ def test_bare_state_without_db_is_green(tmp_path):
     assert r.status == "GREEN"
 
 
+def test_recent_wal_on_stale_db_is_red(tmp_path):
+    """A stale .db (old mtime) with a FRESH -wal sidecar is a possible live writer,
+    not a safe stale relic — the split-brain false-clean this guards against
+    (Jun-20 .db, same-day .db-wal read as 17d stale before this fix)."""
+    bare = tmp_path / "state"
+    bare.mkdir()
+    db = bare / "runtime_coordination.db"
+    db.write_bytes(b"x")
+    old = time.time() - (fa.ACTIVE_FORK_STALE_DAYS + 10) * 86400
+    os.utime(db, (old, old))
+    (bare / "runtime_coordination.db-wal").write_bytes(b"")  # fresh mtime = now
+    r = fa.check_shared_root_state(tmp_path)
+    assert r.status == "RED"
+    assert "lsof" in r.detail
+
+
+def test_stale_db_with_stale_wal_stays_warn(tmp_path):
+    """Old .db + old sidecar is still just cleanup debt — no false RED."""
+    bare = tmp_path / "state"
+    bare.mkdir()
+    old = time.time() - (fa.ACTIVE_FORK_STALE_DAYS + 10) * 86400
+    for name in ("runtime_coordination.db", "runtime_coordination.db-wal"):
+        f = bare / name
+        f.write_bytes(b"")
+        os.utime(f, (old, old))
+    r = fa.check_shared_root_state(tmp_path)
+    assert r.status == "WARN"
+    assert "stale relic" in r.detail
+
+
 # ── Check B: per-project stores ─────────────────────────────────────────────
 
 def test_all_project_stores_present_is_green(tmp_path):
