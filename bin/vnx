@@ -264,6 +264,8 @@ Commands:
   init               Create .vnx-data runtime layout and .vnx/config.yml
   init-db            Initialize quality intelligence database from schema
   bootstrap-skills   Create/link ./\.claude/skills from shipped dist skills
+  role sync          Refresh ./\.claude/terminals/T0/role-orchestrator.md (canonical
+                     fleet-identical role) from the installed VNX; project CLAUDE.md untouched
   skills sync        Refresh ./\.claude/skills from the installed VNX (canonical),
                      with a timestamped backup. Default --dry-run; --apply to update.
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
@@ -1378,6 +1380,112 @@ HELP
   fi
 }
 
+# cmd_role_sync — idempotent refresh of a project's CANONICAL orchestrator role
+# (.claude/terminals/T0/role-orchestrator.md) from the installed VNX. This is the
+# fleet-canonicalization companion to skills sync: the role file is byte-identical
+# across the whole fleet, while each project's terminals/T0/CLAUDE.md stays local
+# (a thin `@role-orchestrator.md` import + project-specific context — the only
+# sanctioned per-project deviation, NEVER touched here).
+# Safe by design: timestamped backup before any overwrite, dry-run preview is the
+# DEFAULT, and the project CLAUDE.md is left untouched (project context preserved).
+cmd_role_sync() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
+  local apply=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)   apply=1; shift ;;
+      --dry-run) apply=0; shift ;;
+      -h|--help) echo "Usage: vnx role sync [--apply|--dry-run]"; return 0 ;;
+      *) err "[role-sync] unknown argument: $1"; return 1 ;;
+    esac
+  done
+
+  local shipped_role="$VNX_HOME/.claude/terminals/T0/role-orchestrator.md"
+  local project_t0_dir="$PROJECT_ROOT/.claude/terminals/T0"
+  local project_role="$project_t0_dir/role-orchestrator.md"
+
+  if [ ! -f "$shipped_role" ]; then
+    err "[role-sync] missing canonical role in VNX: $shipped_role"; return 1
+  fi
+  if [ ! -d "$project_t0_dir" ]; then
+    err "[role-sync] no project T0 dir — run 'vnx bootstrap-terminals' first: $project_t0_dir"
+    return 1
+  fi
+
+  if [ -f "$project_role" ] && cmp -s "$shipped_role" "$project_role"; then
+    log "[role-sync] canonical role already current with $VNX_HOME (no changes)"
+    return 0
+  fi
+
+  log "[role-sync] canonical role differs from project (or is absent) — would update:"
+  log "  $project_role"
+  if [ -f "$project_role" ]; then
+    diff -u "$project_role" "$shipped_role" 2>/dev/null | head -40 || true
+  fi
+
+  # Warn (do not block) when the project CLAUDE.md is still a monolith and does
+  # not yet import the canonical role — syncing the role file has no effect until
+  # terminals/T0/CLAUDE.md is converted to `@role-orchestrator.md`.
+  if [ -f "$project_t0_dir/CLAUDE.md" ] && ! grep -q "@role-orchestrator" "$project_t0_dir/CLAUDE.md" 2>/dev/null; then
+    log "[role-sync] NOTE: $project_t0_dir/CLAUDE.md does not import @role-orchestrator.md yet."
+    log "[role-sync]       Convert it to a thin '@role-orchestrator.md' + project-context to activate this."
+  fi
+
+  if [ "$apply" -eq 0 ]; then
+    log "[role-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
+    return 0
+  fi
+
+  if [ -f "$project_role" ]; then
+    local ts backup
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="$project_role.bak.$ts"
+    if ! cp "$project_role" "$backup"; then
+      err "[role-sync] backup failed; aborting (no changes made)"; return 1
+    fi
+    log "[role-sync] backed up current role -> $backup"
+  fi
+
+  # Atomic replace: write a same-directory temp file, then rename over the target.
+  # A rename on the same filesystem is atomic, so a T0 reader never sees a
+  # truncated/partial role file even if this is interrupted mid-write.
+  local tmp
+  tmp="$(mktemp "$project_t0_dir/.role-orchestrator.XXXXXX")" || {
+    err "[role-sync] could not create temp file in $project_t0_dir; aborting"; return 1
+  }
+  if ! cp "$shipped_role" "$tmp"; then
+    rm -f "$tmp"; err "[role-sync] copy to temp failed; aborting (no changes made)"; return 1
+  fi
+  if ! mv -f "$tmp" "$project_role"; then
+    rm -f "$tmp"; err "[role-sync] atomic replace failed; aborting (backup preserved)"; return 1
+  fi
+  log "[role-sync] refreshed role-orchestrator.md from $VNX_HOME (project CLAUDE.md untouched)"
+  log "[role-sync] done. Verify a T0 launch loads it: bash scripts/commands/t0_role_audit.sh"
+}
+
+# cmd_role — 'vnx role <sub>' dispatcher (same convention as cmd_skills).
+cmd_role() {
+  local sub="${1:-}"
+  if [ "$sub" = "sync" ]; then
+    shift
+    cmd_role_sync "$@"
+  elif [ -z "$sub" ] || [ "$sub" = "-h" ] || [ "$sub" = "--help" ]; then
+    cat <<'HELP'
+Usage: vnx role <command>
+
+Commands:
+  sync [--apply|--dry-run]   Refresh .claude/terminals/T0/role-orchestrator.md (the
+                             canonical, fleet-identical orchestrator role) from the
+                             installed VNX, with a timestamped backup. The project
+                             terminals/T0/CLAUDE.md (thin import + project context) is
+                             left untouched. Default is --dry-run (preview).
+HELP
+  else
+    err "[role] unknown subcommand: $sub (try 'vnx role --help')"
+    return 1
+  fi
+}
+
 cmd_bootstrap_terminals() {
   _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local terminals_dir="$PROJECT_ROOT/.claude/terminals"
@@ -2045,6 +2153,9 @@ main() {
       ;;
     skills)
       cmd_skills "$@"
+      ;;
+    role)
+      cmd_role "$@"
       ;;
     bootstrap-terminals)
       cmd_bootstrap_terminals "$@"
