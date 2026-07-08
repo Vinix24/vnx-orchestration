@@ -50,7 +50,7 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "cost-report", "analyze-sessions", "intelligence-export",
     "intelligence-import", "init-feature", "bootstrap-skills",
     "bootstrap-terminals", "bootstrap-hooks", "regen-settings", "regen-worker-permissions",
-    "skills",
+    "skills", "role",
     "patch-agent-files", "register", "list-projects", "unregister",
     "roadmap", "insights", "objective", "deliverable",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
