@@ -29,6 +29,7 @@ for p in (_LIB, _SCRIPTS):
 import schema_migration
 import seed_tracks_from_roadmap as seeder
 import planning_cli
+import tracks as tracks_lib
 
 
 SAMPLE_ROADMAP = """
@@ -170,3 +171,42 @@ def test_objective_show_missing_returns_nonzero(seeded_state, capsys):
         "--state-dir", str(seeded_state),
     ])
     assert rc == 1
+
+
+def test_objective_show_no_open_items(seeded_state, capsys):
+    rc = planning_cli.main([
+        "objective", "show", "feat-a", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "open items : (none)" in out
+
+
+def test_objective_show_lists_open_blocking_finding(seeded_state, capsys):
+    """A gate-recorded `blocks` open-item must surface here without any PR read."""
+    tracks_lib.link_open_item(
+        seeded_state, "feat-a", "vnx-dev", "gate:pre_merge_gate:d-1", "blocks", "manual",
+    )
+    rc = planning_cli.main([
+        "objective", "show", "feat-a", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "open items (unresolved):" in out
+    assert "[blocks] gate:pre_merge_gate:d-1" in out
+
+
+def test_objective_show_json_includes_open_items(seeded_state, capsys):
+    tracks_lib.link_open_item(
+        seeded_state, "feat-a", "vnx-dev", "gate:pre_merge_gate:d-1", "blocks", "manual",
+    )
+    rc = planning_cli.main([
+        "objective", "show", "feat-a", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state), "--json",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert len(data["open_items"]) == 1
+    assert data["open_items"][0]["oi_id"] == "gate:pre_merge_gate:d-1"

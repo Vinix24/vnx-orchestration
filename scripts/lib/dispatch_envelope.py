@@ -459,6 +459,7 @@ def _govern(
             base_sha=None,
             worktree_diff=phantom_diff,  # F1: pre-captured before the worktree teardown
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+            state_dir=spec.state_dir,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(

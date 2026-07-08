@@ -280,6 +280,7 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
             worktree_path=spec.worktree_path,
             base_sha=spec.base_sha,
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+            state_dir=spec.state_dir,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)

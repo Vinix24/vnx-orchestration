@@ -24,10 +24,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+_LOG = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -42,6 +45,7 @@ from quality_advisory import (
     get_changed_files,
 )
 from cqs_calculator import calculate_cqs
+from gate_findings_bridge import record_gate_finding, resolve_gate_finding
 
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
@@ -645,6 +649,23 @@ def _find_dispatch_for_pr(pr_id: str, dispatch_dir: Path) -> Optional[Path]:
     return candidates[0]
 
 
+def _resolve_dispatch_id_for_pr(pr_id: str, dispatch_dir: Path) -> Optional[str]:
+    """Best-effort dispatch_id for a PR, via its dispatch file's 'Dispatch-ID:' footer.
+
+    Reuses the same dispatch-file lookup as the contract/artifact checks. Returns None
+    (never raises) when no dispatch file is found or it carries no Dispatch-ID footer —
+    the fabric-linking bridge treats that as an unlinked gate (quiet no-op).
+    """
+    dispatch_file = _find_dispatch_for_pr(pr_id, dispatch_dir)
+    if dispatch_file is None:
+        return None
+    try:
+        dispatch_id = parse_contract_from_file(dispatch_file).dispatch_id
+    except OSError:
+        return None
+    return dispatch_id or None
+
+
 def _is_artifact_path(path: str) -> bool:
     """Check if a path refers to a PDF or XLSX artifact."""
     lower = path.lower()
@@ -740,6 +761,45 @@ def _get_net_line_deletion(project_root: Path) -> Optional[int]:
 # Gate orchestrator
 # ---------------------------------------------------------------------------
 
+def _sync_fabric_finding(
+    pr_id: str,
+    dispatch_dir: Path,
+    state_dir: Path,
+    verdict: str,
+    hold_checks: List[Dict[str, Any]],
+) -> None:
+    """Best-effort: mirror the overall gate verdict onto the dispatch's track.
+
+    HOLD records a single `blocks` open-item (gate_name="pre_merge_gate") carrying every
+    HOLD check's detail — this also covers quality_advisory's severity="blocking" path,
+    since a quality-advisory HOLD already surfaces as one of ``hold_checks``. GO resolves
+    a previously-recorded finding (a fixed-and-repushed PR going green). Never raises and
+    never changes ``verdict`` — a finding-emit failure is observability only, logged and
+    swallowed by record_gate_finding/resolve_gate_finding themselves.
+    """
+    dispatch_id = _resolve_dispatch_id_for_pr(pr_id, dispatch_dir)
+    if not dispatch_id:
+        return
+    try:
+        if verdict == "HOLD":
+            summary = "; ".join(f"{c['check']}: {c.get('detail', '')}" for c in hold_checks)
+            record_gate_finding(
+                state_dir, dispatch_id=dispatch_id, gate_name="pre_merge_gate",
+                summary=summary, pr_ref=pr_id,
+            )
+        else:
+            resolve_gate_finding(
+                state_dir, dispatch_id=dispatch_id, gate_name="pre_merge_gate",
+                reason="pre_merge_gate clean run",
+            )
+    except Exception as exc:  # noqa: BLE001 — defense in depth: the bridge is already
+        # non-raising by design, but the gate's verdict must survive even a regression
+        # in that contract.
+        _LOG.warning(
+            "pre_merge_gate: fabric finding sync failed dispatch=%s: %s", dispatch_id, exc,
+        )
+
+
 def run_gate_checks(
     pr_id: str,
     project_root: Path,
@@ -768,6 +828,8 @@ def run_gate_checks(
 
     hold_checks = [c for c in checks if c.get("status") == "HOLD"]
     verdict = "HOLD" if hold_checks else "GO"
+
+    _sync_fabric_finding(pr_id, dispatch_dir, state_dir, verdict, hold_checks)
 
     return {
         "pr_id": pr_id,

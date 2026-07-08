@@ -565,6 +565,7 @@ def link_open_item(
     *,
     conn: Optional[sqlite3.Connection] = None,
     event_sink: Optional[list] = None,
+    details: Optional[dict] = None,
 ) -> None:
     """Upsert an active track↔open-item link (INSERT OR REPLACE; reopen-safe).
 
@@ -577,6 +578,12 @@ def link_open_item(
 
     Without ``conn`` (owns=True, standalone) the function self-manages its
     connection, emits the event in-line, and commits — unchanged behaviour.
+
+    ``details`` merges extra keys (e.g. a gate finding's summary/pr_ref) into the
+    ``track_oi_linked`` ledger event on top of the always-present ``oi_id``/
+    ``link_type``. ``track_open_items`` itself carries no free-text column (by
+    design — ``oi_id`` is a pointer), so richer context lives in the Past-layer
+    event, not the Current-layer row.
     """
     valid_link_types = frozenset({"blocks", "warns", "related"})
     valid_link_sources = frozenset({"file_path", "mention", "manual"})
@@ -604,9 +611,12 @@ def link_open_item(
             """,
             (track_id, project_id, oi_id, link_type, link_source, _now_utc()),
         )
+        event_details = {"oi_id": oi_id, "link_type": link_type}
+        if details:
+            event_details.update(details)
         _emit_or_defer(
             event_sink, state_dir, "track_oi_linked", track_id, project_id,
-            "system", {"oi_id": oi_id, "link_type": link_type},
+            "system", event_details,
         )
         if owns:
             _conn.commit()
