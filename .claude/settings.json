@@ -46,6 +46,16 @@
     ],
     "SessionStart": [
       {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/session_reconcile_autoclose.sh\"'",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
         "matcher": "terminals/T0",
         "hooks": [
           {
