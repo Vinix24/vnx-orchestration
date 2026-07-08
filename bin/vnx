@@ -1446,7 +1446,19 @@ cmd_role_sync() {
     log "[role-sync] backed up current role -> $backup"
   fi
 
-  cp "$shipped_role" "$project_role"
+  # Atomic replace: write a same-directory temp file, then rename over the target.
+  # A rename on the same filesystem is atomic, so a T0 reader never sees a
+  # truncated/partial role file even if this is interrupted mid-write.
+  local tmp
+  tmp="$(mktemp "$project_t0_dir/.role-orchestrator.XXXXXX")" || {
+    err "[role-sync] could not create temp file in $project_t0_dir; aborting"; return 1
+  }
+  if ! cp "$shipped_role" "$tmp"; then
+    rm -f "$tmp"; err "[role-sync] copy to temp failed; aborting (no changes made)"; return 1
+  fi
+  if ! mv -f "$tmp" "$project_role"; then
+    rm -f "$tmp"; err "[role-sync] atomic replace failed; aborting (backup preserved)"; return 1
+  fi
   log "[role-sync] refreshed role-orchestrator.md from $VNX_HOME (project CLAUDE.md untouched)"
   log "[role-sync] done. Verify a T0 launch loads it: bash scripts/commands/t0_role_audit.sh"
 }
