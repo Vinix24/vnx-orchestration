@@ -213,6 +213,7 @@ def record_phantom_if_any(
     base_sha: Optional[str] = None,
     worktree_diff: Optional[str] = None,
     receipts_file: Optional[str] = None,
+    state_dir: Optional[Path] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
@@ -223,11 +224,28 @@ def record_phantom_if_any(
     worker's ``done`` win). So the dispatch resolves FAILED while the worker's original ``done``
     receipt is PRESERVED (the contradiction is recorded, not overwritten — audit-honest, the ISAE
     lens). Never raises: a corrective-append failure is logged, not propagated.
+
+    A phantom verdict also, best-effort, records a `blocks` fabric open-item on the
+    dispatch's linked track (via gate_findings_bridge) when ``state_dir`` is supplied —
+    the ppb #1039 gap: a blocking finding must surface on the track, not only the
+    receipt. Degrades quietly on an unlinked dispatch; never fatal to the guard itself.
     """
     verdict = guard_at_govern(
         dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
         worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
     )
+    if verdict.is_phantom and state_dir:
+        try:
+            from gate_findings_bridge import record_gate_finding  # noqa: PLC0415
+            record_gate_finding(
+                state_dir, dispatch_id=dispatch_id, gate_name="phantom_guard",
+                summary=verdict.reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break the guard on a fabric-link failure
+            _LOG.warning(
+                "phantom_guard: gate_findings_bridge record failed dispatch=%s: %s",
+                dispatch_id, exc,
+            )
     if verdict.is_phantom and receipts_file:
         try:
             import os  # noqa: PLC0415

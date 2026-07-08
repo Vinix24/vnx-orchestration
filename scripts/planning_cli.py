@@ -203,10 +203,12 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
         return 1
 
     deps = _dependencies_for(state_dir, args.track_id, project_id)
+    open_items = tracks_lib.get_linked_open_items(state_dir, args.track_id, project_id)
 
     if args.json:
         out = dict(track)
         out["depends_on"] = deps
+        out["open_items"] = open_items
         print(json.dumps(out, indent=2, default=str))
         return 0
 
@@ -219,6 +221,12 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  pr_ref   : {track.get('pr_ref') or '-'}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
     print(f"  depends  : {', '.join(deps) if deps else '(none)'}")
+    if open_items:
+        print("  open items (unresolved):")
+        for oi in open_items:
+            print(f"    - [{oi['link_type']}] {oi['oi_id']}  (linked {oi.get('linked_at', '?')})")
+    else:
+        print("  open items : (none)")
     print()
     return 0
 

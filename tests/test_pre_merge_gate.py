@@ -18,6 +18,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import pre_merge_gate
 from pre_merge_gate import (
     check_open_items,
     check_cqs,
@@ -33,6 +34,7 @@ from pre_merge_gate import (
     store_gate_result,
     format_human_readable,
     _find_dispatch_for_pr,
+    _resolve_dispatch_id_for_pr,
     _is_artifact_path,
     CQS_THRESHOLD,
     DELETION_FILE_WARN,
@@ -491,6 +493,106 @@ class TestHelpers:
     def test_find_dispatch_for_pr_not_found(self, dispatch_dir):
         found = _find_dispatch_for_pr("PR-99", dispatch_dir)
         assert found is None
+
+    def test_resolve_dispatch_id_for_pr(self, dispatch_dir):
+        content = "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: gate-findings-fabric-test\n"
+        (dispatch_dir / "active" / "d.md").write_text(content)
+        assert _resolve_dispatch_id_for_pr("PR-6", dispatch_dir) == "gate-findings-fabric-test"
+
+    def test_resolve_dispatch_id_for_pr_no_dispatch_file(self, dispatch_dir):
+        assert _resolve_dispatch_id_for_pr("PR-99", dispatch_dir) is None
+
+
+# ---------------------------------------------------------------------------
+# Gate -> fabric wiring (gate_findings_bridge)
+# ---------------------------------------------------------------------------
+
+class TestFabricFindingWiring:
+    """run_gate_checks must call the bridge best-effort, keyed on the resolved
+    dispatch_id, without ever changing its own verdict."""
+
+    def test_hold_records_finding_when_dispatch_resolved(
+        self, state_dir, dispatch_dir, tmp_path, monkeypatch
+    ):
+        (dispatch_dir / "active" / "d.md").write_text(
+            "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-hold\n"
+        )
+        oi = {"schema_version": "1.0", "items": [
+            {"id": "OI-001", "status": "open", "severity": "blocker", "title": "x", "pr_id": "PR-6"},
+        ]}
+        (state_dir / "open_items.json").write_text(json.dumps(oi))
+
+        captured = {}
+        monkeypatch.setattr(
+            pre_merge_gate, "record_gate_finding",
+            lambda state_dir, **kw: captured.update(kw) or True,
+        )
+        result = run_gate_checks(
+            pr_id="PR-6", project_root=tmp_path, state_dir=state_dir,
+            dispatch_dir=dispatch_dir, skip_pytest=True,
+        )
+        assert result["verdict"] == "HOLD"
+        assert captured["dispatch_id"] == "d-hold"
+        assert captured["gate_name"] == "pre_merge_gate"
+        assert captured["pr_ref"] == "PR-6"
+        assert "open_items" in captured["summary"]
+
+    def test_go_resolves_finding_when_dispatch_resolved(
+        self, state_dir, dispatch_dir, tmp_path, monkeypatch
+    ):
+        (dispatch_dir / "active" / "d.md").write_text(
+            "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-go\n"
+        )
+        captured = {}
+        monkeypatch.setattr(
+            pre_merge_gate, "resolve_gate_finding",
+            lambda state_dir, **kw: captured.update(kw) or True,
+        )
+        result = run_gate_checks(
+            pr_id="PR-6", project_root=tmp_path, state_dir=state_dir,
+            dispatch_dir=dispatch_dir, skip_pytest=True,
+        )
+        assert result["verdict"] == "GO"
+        assert captured["dispatch_id"] == "d-go"
+        assert captured["gate_name"] == "pre_merge_gate"
+
+    def test_no_dispatch_file_skips_bridge_entirely(
+        self, state_dir, dispatch_dir, tmp_path, monkeypatch
+    ):
+        """No dispatch file for this PR -> unresolved dispatch_id -> bridge never called."""
+        calls = {"n": 0}
+        monkeypatch.setattr(
+            pre_merge_gate, "record_gate_finding",
+            lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
+        )
+        monkeypatch.setattr(
+            pre_merge_gate, "resolve_gate_finding",
+            lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
+        )
+        run_gate_checks(
+            pr_id="PR-6", project_root=tmp_path, state_dir=state_dir,
+            dispatch_dir=dispatch_dir, skip_pytest=True,
+        )
+        assert calls["n"] == 0
+
+    def test_bridge_failure_never_changes_verdict(
+        self, state_dir, dispatch_dir, tmp_path, monkeypatch
+    ):
+        """Defense in depth: even if the (already best-effort) bridge itself regressed and
+        raised, run_gate_checks must still return its verdict rather than crash."""
+        (dispatch_dir / "active" / "d.md").write_text(
+            "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-boom\n"
+        )
+
+        def _boom(*a, **k):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr(pre_merge_gate, "resolve_gate_finding", _boom)
+        result = run_gate_checks(
+            pr_id="PR-6", project_root=tmp_path, state_dir=state_dir,
+            dispatch_dir=dispatch_dir, skip_pytest=True,
+        )
+        assert result["verdict"] == "GO"
 
 
 # ---------------------------------------------------------------------------

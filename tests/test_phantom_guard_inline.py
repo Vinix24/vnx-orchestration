@@ -94,3 +94,56 @@ def test_record_phantom_append_failure_is_non_fatal(monkeypatch, tmp_path):
     v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
                                  receipts_file=str(tmp_path / "r.ndjson"))
     assert v.is_phantom  # verdict still returned, no exception escaped
+
+
+def test_record_phantom_calls_gate_findings_bridge(monkeypatch, tmp_path):
+    """A phantom verdict, given state_dir, records a fabric finding (the ppb #1039 gap)."""
+    monkeypatch.setattr(pg, "guard_at_govern",
+                        lambda **kw: pg.PhantomVerdict(True, "PHANTOM: test reason"))
+    import append_receipt
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", lambda *a, **k: None)
+    import gate_findings_bridge
+    captured = {}
+    monkeypatch.setattr(
+        gate_findings_bridge, "record_gate_finding",
+        lambda state_dir, **kw: captured.update(state_dir=state_dir, kw=kw) or True,
+    )
+    pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+                             receipts_file=str(tmp_path / "r.ndjson"), state_dir=tmp_path)
+    assert captured["state_dir"] == tmp_path
+    assert captured["kw"]["dispatch_id"] == "d1"
+    assert captured["kw"]["gate_name"] == "phantom_guard"
+
+
+def test_record_phantom_bridge_failure_is_non_fatal(monkeypatch, tmp_path):
+    monkeypatch.setattr(pg, "guard_at_govern",
+                        lambda **kw: pg.PhantomVerdict(True, "PHANTOM: test reason"))
+    import append_receipt
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", lambda *a, **k: None)
+    import gate_findings_bridge
+
+    def _boom(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(gate_findings_bridge, "record_gate_finding", _boom)
+    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+                                 receipts_file=str(tmp_path / "r.ndjson"), state_dir=tmp_path)
+    assert v.is_phantom  # verdict unaffected by a bridge failure
+
+
+def test_record_phantom_no_bridge_call_without_state_dir(monkeypatch, tmp_path):
+    """state_dir omitted (older/unaware caller) -> the bridge is never touched."""
+    monkeypatch.setattr(pg, "guard_at_govern",
+                        lambda **kw: pg.PhantomVerdict(True, "PHANTOM: test reason"))
+    import append_receipt
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", lambda *a, **k: None)
+    import gate_findings_bridge
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        gate_findings_bridge, "record_gate_finding",
+        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
+    )
+    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+                                 receipts_file=str(tmp_path / "r.ndjson"))
+    assert v.is_phantom
+    assert calls["n"] == 0
