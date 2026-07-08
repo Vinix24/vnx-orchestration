@@ -152,7 +152,7 @@ class TestReadmeVsModeTiers:
         bin_cmds = _extract_bin_vnx_commands(vnx_path) if vnx_path.exists() else set()
         # Pip-CLI-only commands (vnx_cli/main.py) — real commands the README documents that are not
         # in the bash mode tiers or bin/vnx case branches (they route through `python -m vnx_cli.main`).
-        pip_surface = {"dispatch-agent", "version"}
+        pip_surface = {"dispatch-agent", "version", "horizon", "objective", "deliverable"}
         all_known = mode_cmds | bin_cmds | pip_surface
         # Remove non-command words and subcommand prefixes that regex picks up
         noise = {"clone", "install", "path", "cd", "brew", "ref", "pip", "worktree"}
