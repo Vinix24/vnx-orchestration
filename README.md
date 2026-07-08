@@ -1,4 +1,26 @@
-# VNX
+<div align="center">
+
+# 🧾 VNX Orchestration
+
+### Governance-first runtime for AI coding agents
+
+**Glass-box governance · Local NDJSON receipts · No vendor SDK**
+
+[![PyPI version](https://img.shields.io/pypi/v/vnx-orchestration?color=1f6feb&label=pypi)](https://pypi.org/project/vnx-orchestration/)
+&nbsp;![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+&nbsp;[![License: MIT](https://img.shields.io/github/license/Vinix24/vnx-orchestration?color=2ea043)](LICENSE)
+&nbsp;[![CI](https://img.shields.io/github/actions/workflow/status/Vinix24/vnx-orchestration/public-ci.yml?branch=main&label=CI)](https://github.com/Vinix24/vnx-orchestration/actions)
+
+[![Stars](https://img.shields.io/github/stars/Vinix24/vnx-orchestration?logo=github)](https://github.com/Vinix24/vnx-orchestration/stargazers)
+&nbsp;![Forks](https://img.shields.io/github/forks/Vinix24/vnx-orchestration?logo=github)
+&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-14k%2B%20receipts-2ea043)
+&nbsp;![Vendor SDK](https://img.shields.io/badge/vendor%20SDK-none-24292f)
+
+**[Docs](docs/) · [Architecture](docs/core/00_VNX_ARCHITECTURE.md) · [State Fabric](docs/core/STATE_FABRIC.md) · [ADRs](docs/governance/decisions/) · [Writing](https://vincentvandeth.nl) · [Changelog](CHANGELOG.md)**
+
+</div>
+
+---
 
 VNX runs AI coding CLI workers in tmux, isolated git worktrees, through review gates, with an append-only NDJSON receipt per dispatch.
 
