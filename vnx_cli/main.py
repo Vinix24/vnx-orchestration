@@ -153,6 +153,41 @@ def _register_pool_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_role_subparser(subparsers: argparse.Action) -> None:
+    role_parser = subparsers.add_parser(
+        "role",
+        help="sync the canonical, fleet-wide T0 orchestrator role (Claude/Codex/Kimi)",
+    )
+    role_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="target repo directory (default: current directory's git root)",
+    )
+    role_subs = role_parser.add_subparsers(dest="role_subcommand", metavar="SUBCOMMAND")
+
+    rs_parser = role_subs.add_parser(
+        "sync",
+        help="refresh role-orchestrator.md + AGENTS.md/GEMINI.md role block from canonical VNX",
+    )
+    rs_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="target repo directory (default: current directory's git root)",
+    )
+    rs_apply_group = rs_parser.add_mutually_exclusive_group()
+    rs_apply_group.add_argument(
+        "--apply", action="store_true", dest="apply",
+        help="write changes, with a timestamped backup first (default: dry-run preview)",
+    )
+    rs_apply_group.add_argument(
+        "--dry-run", action="store_false", dest="apply",
+        help="preview only, no writes (default)",
+    )
+    rs_parser.set_defaults(apply=False)
+
+
 def _register_update_subparser(subparsers: argparse.Action) -> None:
     update_parser = subparsers.add_parser(
         "update",
@@ -787,6 +822,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.pool import main as pool_main
         sys.exit(pool_main(argv=getattr(args, "pool_args", None) or None))
 
+    elif args.command == "role":
+        from vnx_cli.commands.role import vnx_role
+        sys.exit(vnx_role(args))
+
     elif args.command == "version":
         from vnx_cli.commands.version import vnx_version
         sys.exit(vnx_version(args))
@@ -849,6 +888,7 @@ def main() -> None:
     _register_status_subparser(subparsers)
     _register_init_subparser(subparsers)
     _register_pool_subparser(subparsers)
+    _register_role_subparser(subparsers)
     _register_update_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
     _register_track_subparser(subparsers)

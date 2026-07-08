@@ -1380,28 +1380,80 @@ HELP
   fi
 }
 
+# Returns 0 if upserting the marked block described by $2-$4 into $1 would be
+# a no-op (already current), 1 otherwise. Runs the real vnx_upsert_marked_block
+# against a scratch copy, so callers get an exact answer without touching the
+# real target file — shared by role-sync's dry-run reporting and its
+# backup-only-on-real-change guard in --apply mode.
+_role_sync_block_current() {
+  local target_file="$1" snippet_file="$2" marker_begin="$3" marker_end="$4"
+  local scratch probe_result
+  scratch="$(mktemp)"
+  if [ -f "$target_file" ]; then
+    cp "$target_file" "$scratch"
+  else
+    rm -f "$scratch"
+  fi
+  if vnx_upsert_marked_block "$scratch" "$snippet_file" "$marker_begin" "$marker_end"; then
+    probe_result=0
+  else
+    probe_result=$?
+  fi
+  rm -f "$scratch"
+  [ "$probe_result" -eq 0 ]
+}
+
 # cmd_role_sync — idempotent refresh of a project's CANONICAL orchestrator role
-# (.claude/terminals/T0/role-orchestrator.md) from the installed VNX. This is the
-# fleet-canonicalization companion to skills sync: the role file is byte-identical
-# across the whole fleet, while each project's terminals/T0/CLAUDE.md stays local
-# (a thin `@role-orchestrator.md` import + project-specific context — the only
-# sanctioned per-project deviation, NEVER touched here).
-# Safe by design: timestamped backup before any overwrite, dry-run preview is the
-# DEFAULT, and the project CLAUDE.md is left untouched (project context preserved).
+# (.claude/terminals/T0/role-orchestrator.md) from the installed VNX, and
+# provider-agnostic mirrors of it (marked block in AGENTS.md / GEMINI.md,
+# alongside role-orchestrator.md in the T0 dir) so an orchestrator session
+# running under Codex or Kimi/Gemini gets the SAME canonical role as Claude.
+# This is the fleet-canonicalization companion to skills sync: the role is
+# byte-identical across the whole fleet, while each project's
+# terminals/T0/CLAUDE.md stays local (a thin `@role-orchestrator.md` import +
+# project-specific context — the only sanctioned per-project deviation, NEVER
+# touched here).
+# Safe by design: timestamped backup before any overwrite, dry-run preview is
+# the DEFAULT, and the project CLAUDE.md is left untouched.
+#
+# Target resolution: independent of the ambient $PROJECT_ROOT. A standalone
+# dev checkout of vnx-orchestration always resolves its own $PROJECT_ROOT to
+# $VNX_HOME (runtime/bootstrap stays local to the checkout) — correct for
+# every other command, but wrong here, since role sync's whole job is to
+# target a *different*, consumer repo. Resolves fresh from cwd's git root (or
+# --project-dir) every invocation instead.
 cmd_role_sync() {
-  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local apply=0
+  local project_dir_arg=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --apply)   apply=1; shift ;;
       --dry-run) apply=0; shift ;;
-      -h|--help) echo "Usage: vnx role sync [--apply|--dry-run]"; return 0 ;;
+      --project-dir)
+        [ "$#" -ge 2 ] || { err "[role-sync] --project-dir requires a value"; return 1; }
+        project_dir_arg="$2"; shift 2 ;;
+      -h|--help)
+        echo "Usage: vnx role sync [--apply|--dry-run] [--project-dir DIR]"
+        return 0
+        ;;
       *) err "[role-sync] unknown argument: $1"; return 1 ;;
     esac
   done
 
+  local target_root
+  if [ -n "$project_dir_arg" ]; then
+    target_root="$(cd "$project_dir_arg" 2>/dev/null && pwd)" || {
+      err "[role-sync] --project-dir not found: $project_dir_arg"; return 1
+    }
+  else
+    target_root="$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null)" || target_root=""
+    [ -n "$target_root" ] || target_root="$(pwd)"
+  fi
+
+  _guard_not_vnx_home "$target_root" || return 1
+
   local shipped_role="$VNX_HOME/.claude/terminals/T0/role-orchestrator.md"
-  local project_t0_dir="$PROJECT_ROOT/.claude/terminals/T0"
+  local project_t0_dir="$target_root/.claude/terminals/T0"
   local project_role="$project_t0_dir/role-orchestrator.md"
 
   if [ ! -f "$shipped_role" ]; then
@@ -1412,15 +1464,16 @@ cmd_role_sync() {
     return 1
   fi
 
+  local role_current=0
   if [ -f "$project_role" ] && cmp -s "$shipped_role" "$project_role"; then
-    log "[role-sync] canonical role already current with $VNX_HOME (no changes)"
-    return 0
-  fi
-
-  log "[role-sync] canonical role differs from project (or is absent) — would update:"
-  log "  $project_role"
-  if [ -f "$project_role" ]; then
-    diff -u "$project_role" "$shipped_role" 2>/dev/null | head -40 || true
+    role_current=1
+    log "[role-sync] role-orchestrator.md already current with $VNX_HOME (no changes)"
+  else
+    log "[role-sync] canonical role differs from project (or is absent) — would update:"
+    log "  $project_role"
+    if [ -f "$project_role" ]; then
+      diff -u "$project_role" "$shipped_role" 2>/dev/null | head -40 || true
+    fi
   fi
 
   # Warn (do not block) when the project CLAUDE.md is still a monolith and does
@@ -1431,35 +1484,92 @@ cmd_role_sync() {
     log "[role-sync]       Convert it to a thin '@role-orchestrator.md' + project-context to activate this."
   fi
 
+  # Provider-agnostic (anti-lock-in): mirror the canonical role into a marked
+  # block in AGENTS.md (Codex) and GEMINI.md (Gemini/Kimi), sitting alongside
+  # role-orchestrator.md in the T0 dir. Reuses the same insert-or-replace
+  # marked-block helper as `patch-agent-files` (vnx_upsert_marked_block), with
+  # its own marker pair so it never collides with the project-root bootstrap
+  # block those commands manage.
+  local role_marker_begin="<!-- VNX:BEGIN T0-ROLE -->"
+  local role_marker_end="<!-- VNX:END T0-ROLE -->"
+  local changed_files=()
+  local provider_file base
+
+  for provider_file in "$project_t0_dir/AGENTS.md" "$project_t0_dir/GEMINI.md"; do
+    base="$(basename "$provider_file")"
+
+    if _role_sync_block_current "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end"; then
+      log "[role-sync] $base already current (no changes)"
+      continue
+    fi
+
+    if [ "$apply" -eq 0 ]; then
+      log "[role-sync] would sync canonical role block -> $provider_file"
+      continue
+    fi
+
+    if [ -f "$provider_file" ]; then
+      local ts backup
+      ts="$(date +%Y%m%d-%H%M%S)"
+      backup="$provider_file.bak.$ts"
+      if ! cp "$provider_file" "$backup"; then
+        err "[role-sync] backup failed for $provider_file; aborting"; return 1
+      fi
+      log "[role-sync] backed up $base -> $backup"
+    fi
+
+    local result
+    if vnx_upsert_marked_block "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end"; then
+      result=0
+    else
+      result=$?
+    fi
+    case "$result" in
+      0) log "[role-sync] $base already current (no changes)" ;;
+      1) log "[role-sync] created $provider_file"; changed_files+=("$base") ;;
+      2) log "[role-sync] updated $provider_file"; changed_files+=("$base") ;;
+      *) err "[role-sync] failed to update $provider_file"; return 1 ;;
+    esac
+  done
+
   if [ "$apply" -eq 0 ]; then
     log "[role-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
     return 0
   fi
 
-  if [ -f "$project_role" ]; then
-    local ts backup
-    ts="$(date +%Y%m%d-%H%M%S)"
-    backup="$project_role.bak.$ts"
-    if ! cp "$project_role" "$backup"; then
-      err "[role-sync] backup failed; aborting (no changes made)"; return 1
+  if [ "$role_current" -eq 0 ]; then
+    if [ -f "$project_role" ]; then
+      local ts backup
+      ts="$(date +%Y%m%d-%H%M%S)"
+      backup="$project_role.bak.$ts"
+      if ! cp "$project_role" "$backup"; then
+        err "[role-sync] backup failed; aborting (no changes made)"; return 1
+      fi
+      log "[role-sync] backed up current role -> $backup"
     fi
-    log "[role-sync] backed up current role -> $backup"
+
+    # Atomic replace: write a same-directory temp file, then rename over the target.
+    # A rename on the same filesystem is atomic, so a T0 reader never sees a
+    # truncated/partial role file even if this is interrupted mid-write.
+    local tmp
+    tmp="$(mktemp "$project_t0_dir/.role-orchestrator.XXXXXX")" || {
+      err "[role-sync] could not create temp file in $project_t0_dir; aborting"; return 1
+    }
+    if ! cp "$shipped_role" "$tmp"; then
+      rm -f "$tmp"; err "[role-sync] copy to temp failed; aborting (no changes made)"; return 1
+    fi
+    if ! mv -f "$tmp" "$project_role"; then
+      rm -f "$tmp"; err "[role-sync] atomic replace failed; aborting (backup preserved)"; return 1
+    fi
+    log "[role-sync] refreshed role-orchestrator.md from $VNX_HOME (project CLAUDE.md untouched)"
+    changed_files+=("role-orchestrator.md")
   fi
 
-  # Atomic replace: write a same-directory temp file, then rename over the target.
-  # A rename on the same filesystem is atomic, so a T0 reader never sees a
-  # truncated/partial role file even if this is interrupted mid-write.
-  local tmp
-  tmp="$(mktemp "$project_t0_dir/.role-orchestrator.XXXXXX")" || {
-    err "[role-sync] could not create temp file in $project_t0_dir; aborting"; return 1
-  }
-  if ! cp "$shipped_role" "$tmp"; then
-    rm -f "$tmp"; err "[role-sync] copy to temp failed; aborting (no changes made)"; return 1
+  if [ "${#changed_files[@]}" -gt 0 ]; then
+    log "[role-sync] changed: ${changed_files[*]}"
+  else
+    log "[role-sync] no changes (already current)"
   fi
-  if ! mv -f "$tmp" "$project_role"; then
-    rm -f "$tmp"; err "[role-sync] atomic replace failed; aborting (backup preserved)"; return 1
-  fi
-  log "[role-sync] refreshed role-orchestrator.md from $VNX_HOME (project CLAUDE.md untouched)"
   log "[role-sync] done. Verify a T0 launch loads it: bash scripts/commands/t0_role_audit.sh"
 }
 
@@ -1474,11 +1584,17 @@ cmd_role() {
 Usage: vnx role <command>
 
 Commands:
-  sync [--apply|--dry-run]   Refresh .claude/terminals/T0/role-orchestrator.md (the
-                             canonical, fleet-identical orchestrator role) from the
-                             installed VNX, with a timestamped backup. The project
-                             terminals/T0/CLAUDE.md (thin import + project context) is
-                             left untouched. Default is --dry-run (preview).
+  sync [--apply|--dry-run] [--project-dir DIR]
+                             Refresh the canonical, fleet-identical T0 orchestrator
+                             role in the target repo's .claude/terminals/T0/: Claude's
+                             role-orchestrator.md (imported by CLAUDE.md), plus a
+                             marked canonical-role block in AGENTS.md (Codex) and
+                             GEMINI.md (Gemini/Kimi) — same role, any provider. Target
+                             repo defaults to the current directory's git root;
+                             override with --project-dir. Timestamped backup before
+                             any overwrite. The project terminals/T0/CLAUDE.md (thin
+                             import + project context) is left untouched. Default is
+                             --dry-run (preview).
 HELP
   else
     err "[role] unknown subcommand: $sub (try 'vnx role --help')"
