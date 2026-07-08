@@ -4,9 +4,48 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
-## [1.0.1] — Unreleased
+## [1.1.0] — 2026-07-08
 
-Future-state reconciliation batch (`adr007-composite-keys-batch` / future-state milestone). It makes the track ↔ dispatch ↔ open-item future state reflect reality *automatically* and brings the `dispatches` table into ADR-007 composite-key tenancy. `VERSION` is still `1.0.0`: these changes are on `main` but not yet cut as a tagged release. Driven by `claudedocs/PRD-future-state-reconciliation-v1.1.md` (database-engineer skill under T0 governance). The 1.0 launch does not depend on this batch. Cite ADR-007.
+The first minor since 1.0.0. Headlines: the **Horizon planning module** (`vnx horizon`), **signed attestation enforcement** (ADR-027), **track-linkage + git-grounded backward closure** (the future-state fabric now closes itself against merged PRs), **`vnx fabric-audit`** (ADR-028 Phase-0 store-hygiene), and an **operator-gated self-learning proposal tier**. The 1.0.1 future-state reconciliation batch is folded in below — it landed on `main` but was never tagged separately.
+
+### Added — Horizon planning module
+
+- **`vnx horizon` command group (#1014, #1015, #1018, #1022)** — the future-state layer gets a named, tenant-safe command surface: `list / show / add / sync / drift / reconcile / close / reopen / plan-gate / deliverable`. The `pm` skill was renamed to `horizon` (pm alias kept), with parity + ADR-007 cross-project isolation test coverage. Documented in `docs/core/` (Horizon planning module).
+- **plan-gate attest + link-pr / close --attest escape-hatches (#1033, #1038, #1046)** — an operator can attest a plan-gate as passed without re-running the panel, link a PR to a track, and close a track with an evidence attestation; wired into the canonical `vnx horizon` surface.
+
+### Added — Governance: signed attestation enforcement (ADR-027)
+
+- **D1–D5 attestation gate (#1004, #1007, #1009, #1011, #1012)** — SSH-key signing + verification and an attestation manifest; an in-repo, content-keyed, diff-bound (squash-safe) attest record; a server-side verify gate (staged advisory + CODEOWNERS trust-root); a signed, budgeted, audited gate-override (recorded deviation, never silent); and `vnx init` provisioning of the attest trust-root + shipping the gate workflow.
+
+### Added — Track-linkage + git-grounded backward closure
+
+- **Track-linkage TL-D1–D5 (#1032, #1034, #1035)** — `track_id` on the dispatch spec + door validation + persistence; auto-population of `track.pr_ref` from `dispatch.track_id` on merge; and a reconcile hint that names the blocking open-item + the exact `oi-close` command on a blocked derivation.
+- **Git-grounded batch auto-close (#994–#1000)** — `vnx horizon reconcile` verifies PR merge state via `gh` and closes CONFIRMED tracks (system actor, no human approval-id); an audited `done → active` reopen valve + re-close guard; advisory-first continuous wiring (tick, review log, flip streak); and ALL-merged multi-PR derivation. The flip to auto-apply requires 7 consecutive clean runs plus an operator review (#1000).
+
+### Added — Self-learning proposal tier (operator-gated)
+
+- **Intelligence D1–D7 (#1001–#1010)** — an explicit confidence-range contract; a reversible drop of the dead `success_rate` column; an operator-gated proposal tier that supersedes stale patterns; a tagger A/B harness (opt-in, no default-on); outcome-grounding shadow-verify (V2 vs V1); operator-gated skill-refinement proposals from rework attribution; and the philosophy write-up (operator-gated tiers, off-switches). Nothing auto-activates: proposals land for a human to accept.
+
+### Added — fabric-audit, durability, quality, dispatch
+
+- **`vnx fabric-audit` (#1045)** — Phase-0 fabric hardening check (split-brain stores, per-project ledgers, receipt hash-chain integrity), ADR-028.
+- **NDJSON durability (#1031, #1041)** — `fsync` on the audit append + a shared torn-tail read guard.
+- **Configurable tmux-spawn concurrency (#1017)** — `VNX_TMUX_MAX_CONCURRENT` (N-slot semaphore, default 1).
+- **Async scout pre-pass (#1027)** — pending-sweep + discovery + dispatch-linked receipts.
+- **Global process-hygiene scan (#1029)** — violation / idle / protected classification.
+- **Full provider-family plan-gate panel (#991)** and **plan-gate bounded single-retry before abstain (#1030, #1042)**.
+
+### Changed
+
+- **Worker model pin Sonnet 4.6 → Sonnet 5 (#1013).**
+- **`gemini_review` retired as a required gate (#1028)** — codex is the required review gate; gemini is opt-in.
+- **tmux-spawn workers default to `--dangerously-skip-permissions` in an isolated worktree (#1016)** — `VNX_WORKER_SCOPED=1` opts into scoped permissions.
+- **Central-mode path correctness (#1023, #1025)** — `__file__`-anchored data-dir/roadmap paths route through the canonical resolvers (+ a CI grep-gate), and workers spawn in the project rather than the keystone.
+- **ADR-028 ratified (#1044)** — target orchestration architecture (folder-per-agent + two-tier ephemeral judge).
+
+---
+
+**Folded-in: the 1.0.1 future-state reconciliation batch** (`adr007-composite-keys-batch`). It makes the track ↔ dispatch ↔ open-item future state reflect reality *automatically* and brings the `dispatches` table into ADR-007 composite-key tenancy. Driven by `claudedocs/PRD-future-state-reconciliation-v1.1.md` (database-engineer skill under T0 governance). Cite ADR-007.
 
 ### Fabric + quality hardening (2026-07-08)
 
