@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import quality_advisory as quality_advisory_module
 from quality_advisory import (
     QualityCheck,
+    build_whole_repo_file_size_backlog,
     check_file_size,
     check_function_sizes,
     calculate_risk_score,
@@ -454,6 +455,73 @@ class TestQualityAdvisoryGeneration:
         assert all(w.severity == "warning" for w in warnings)
         assert all(w.level == "warn" for w in warnings)
         assert all(w["code"] == "tool_unavailable" for w in warnings)
+
+
+class TestWholeRepoFileSizeBacklog:
+    """Test the whole-repo advisory backlog pass."""
+
+    def test_backlog_lists_oversized_allowlisted_and_skips_small(self, tmp_path):
+        """Whole-repo pass surfaces warning + allowlisted files and skips under-threshold files."""
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        lib = scripts / "lib"
+        lib.mkdir(parents=True)
+
+        big = scripts / "too_big.py"
+        big.write_text("\n" * 600)  # over python warning (500), under blocking (1200)
+
+        allowed = lib / "provider_dispatch.py"
+        allowed.write_text("\n" * 1300)  # over blocking, allowlisted
+
+        small = scripts / "small.py"
+        small.write_text("\n" * 100)  # under warning
+
+        backlog = build_whole_repo_file_size_backlog(tmp_path)
+
+        files = {e["repo_relative"] for e in backlog["backlog"]}
+        assert "scripts/too_big.py" in files
+        assert "scripts/lib/provider_dispatch.py" in files
+        assert "scripts/small.py" not in files
+
+        by_rel = {e["repo_relative"]: e for e in backlog["backlog"]}
+        assert by_rel["scripts/too_big.py"]["status"] == "warning"
+        assert by_rel["scripts/lib/provider_dispatch.py"]["status"] == "allowlisted"
+        assert "allowlist_reason" in by_rel["scripts/lib/provider_dispatch.py"]
+        assert "grandfathered monolith" in by_rel["scripts/lib/provider_dispatch.py"]["allowlist_reason"]
+
+        # Sorted worst-first
+        counts = [e["line_count"] for e in backlog["backlog"]]
+        assert counts == sorted(counts, reverse=True)
+
+        assert backlog["total_backlog"] == 2
+        assert backlog["warning_count"] == 1
+        assert backlog["allowlisted_count"] == 1
+        assert backlog["blocking_count"] == 0
+
+    def test_backlog_flags_non_allowlisted_blocking_monolith(self, tmp_path):
+        """A file over the hard ceiling that is NOT allowlisted is flagged blocking."""
+        f = tmp_path / "new_monolith.py"
+        f.write_text("\n" * 1300)
+
+        backlog = build_whole_repo_file_size_backlog(tmp_path)
+
+        assert backlog["total_backlog"] == 1
+        entry = backlog["backlog"][0]
+        assert entry["status"] == "blocking"
+        assert entry["severity"] == "blocking"
+        assert entry["line_count"] == 1300
+
+    def test_backlog_skips_ignored_directories(self, tmp_path):
+        """Files in skipped directories (e.g. __pycache__) do not pollute the backlog."""
+        cache = tmp_path / "__pycache__"
+        cache.mkdir()
+        (cache / "big.pyc").write_bytes(b"x" * 10000)  # irrelevant binary
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "small.py").write_text("\n" * 100)
+
+        backlog = build_whole_repo_file_size_backlog(tmp_path)
+        assert backlog["total_backlog"] == 0
 
 
 class TestTerminalSnapshot:

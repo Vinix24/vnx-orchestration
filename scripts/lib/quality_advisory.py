@@ -739,3 +739,121 @@ def generate_quality_advisory(
     advisory.t0_recommendation = make_t0_decision(all_checks, risk_score)
 
     return advisory
+
+
+# Directories that are never source code for the whole-repo advisory scan.
+_BACKLOG_SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".vnx-data",
+    "dist",
+    "build",
+    ".tox",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".egg-info",
+    ".claude",
+}
+
+
+def build_whole_repo_file_size_backlog(
+    repo_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Scan the entire repository for the file-size refactor backlog.
+
+    Unlike the diff-scoped blocking gate, this pass is purely ADVISORY. It walks
+    every source file under ``repo_root`` and returns every file that exceeds the
+    language warning threshold, sorted worst-first. Files over the blocking
+    threshold are flagged as ``blocking`` unless they are on the size allowlist
+    (then ``allowlisted`` with the grandfather reason) or are test files (then
+    ``warning`` with ``is_test_file`` set). Nothing in this function fails or
+    raises a gate hold.
+
+    Args:
+        repo_root: Repository root to scan. Defaults to the current working
+            directory.
+
+    Returns:
+        A dict describing the backlog, including ``backlog`` (list of entries),
+        counts, thresholds, and metadata.
+    """
+    if repo_root is None:
+        repo_root = Path.cwd()
+    repo_root = repo_root.resolve()
+
+    backlog: List[Dict[str, Any]] = []
+
+    for path in repo_root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix not in (".py", ".sh") and not path.name.endswith(".bash"):
+            continue
+        rel_parts = path.relative_to(repo_root).parts
+        if any(part in _BACKLOG_SKIP_DIRS for part in rel_parts):
+            continue
+
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        line_count = len(lines)
+        if path.suffix == ".py":
+            warning_threshold = FILE_SIZE_WARNING_PYTHON
+            blocking_threshold = FILE_SIZE_BLOCKING_PYTHON
+        else:
+            warning_threshold = FILE_SIZE_WARNING_SHELL
+            blocking_threshold = FILE_SIZE_BLOCKING_SHELL
+
+        if line_count <= warning_threshold:
+            continue
+
+        rel = path.relative_to(repo_root)
+        allow_reason = _file_size_allowlist_reason(path)
+        test_file = _is_test_file(path)
+
+        entry: Dict[str, Any] = {
+            "file": str(path),
+            "repo_relative": str(rel),
+            "line_count": line_count,
+            "warning_threshold": warning_threshold,
+            "blocking_threshold": blocking_threshold,
+            "status": "warning",
+            "severity": "warning",
+        }
+        if test_file:
+            entry["is_test_file"] = True
+
+        if line_count > blocking_threshold:
+            if allow_reason is not None:
+                entry["status"] = "allowlisted"
+                entry["allowlist_reason"] = allow_reason
+            elif test_file:
+                entry["status"] = "warning"
+            else:
+                entry["status"] = "blocking"
+                entry["severity"] = "blocking"
+
+        backlog.append(entry)
+
+    backlog.sort(key=lambda e: (-e["line_count"], e["repo_relative"]))
+
+    return {
+        "version": "1.0",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "repo_root": str(repo_root),
+        "warning_threshold_python": FILE_SIZE_WARNING_PYTHON,
+        "blocking_threshold_python": FILE_SIZE_BLOCKING_PYTHON,
+        "warning_threshold_shell": FILE_SIZE_WARNING_SHELL,
+        "blocking_threshold_shell": FILE_SIZE_BLOCKING_SHELL,
+        "allowlisted_count": sum(1 for e in backlog if e["status"] == "allowlisted"),
+        "blocking_count": sum(1 for e in backlog if e["status"] == "blocking"),
+        "warning_count": sum(
+            1 for e in backlog if e["status"] not in ("allowlisted", "blocking")
+        ),
+        "total_backlog": len(backlog),
+        "backlog": backlog,
+    }
