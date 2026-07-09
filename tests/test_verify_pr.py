@@ -26,6 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 from verify_pr import classify_pr, verify_pr, _is_feature_file, _is_exempt_file
 from attest_record import ATTEST_DIR, write_attest_record
 from content_key import compute_diff_hash
+from evidence_bound_gate import (
+    emit_evidence_attestation,
+    EVIDENCE_TEST_PASS,
+    EVIDENCE_TIER1_GATE_PASS,
+    EVIDENCE_TIER2_PANEL_PASS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -411,3 +417,266 @@ class TestPRTreeAllowedSignersIgnored:
                 f"Rogue self-authorization should fail but got exit_code={exit_code}: {message}"
             )
             assert "FAIL" in message
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: evidence-bound gate (D3 bootstrap)
+# ---------------------------------------------------------------------------
+
+def _write_evidence(repo: Path, content_key: str, evidence_type: str, key_dir: dict, track_id: str = "evidence-bound") -> None:
+    """Append a signed, diff-bound evidence entry to .vnx-attest/governed.ndjson."""
+    emit_evidence_attestation(
+        evidence_type=evidence_type,
+        content_key=content_key,
+        dispatch_id=f"D-ev-{evidence_type}",
+        track_id=track_id,
+        signer_identity=key_dir["identity"],
+        timestamp="2026-07-09T12:00:00Z",
+        key_path=key_dir["key_path"],
+        repo_root=repo,
+    )
+
+
+def _setup_feature_branch_with_attest(
+    tmpdir: str,
+    ephemeral_key_dir: dict,
+    *,
+    task_class: "str | None" = None,
+) -> tuple[Path, str, str]:
+    """Create a repo with a feature commit and a signed attestation record.
+
+    Returns (repo, base_sha, content_key).
+    """
+    repo = _init_repo(Path(tmpdir))
+    base_sha = _head_sha(repo)
+
+    _add_file_commit(repo, "scripts/lib/feature.py", "x = 1\n", "feat: feature")
+    content_key = compute_diff_hash(repo_root=repo, base_ref=base_sha, head_ref="HEAD")
+
+    write_attest_record(
+        dispatch_id="D-evidence-bound",
+        deliverable_id="D3",
+        track_id="evidence-bound-gate",
+        plan_gate_ref="gate-ref",
+        signer_identity=ephemeral_key_dir["identity"],
+        timestamp="2026-07-09T12:00:00Z",
+        key_path=ephemeral_key_dir["key_path"],
+        repo_root=repo,
+        base_ref=base_sha,
+        task_class=task_class,
+    )
+    return repo, base_sha, content_key
+
+
+class TestEvidenceBoundGate:
+    """VNX_EVIDENCE_BOUND_GATE off/advisory/required bootstrap behaviour."""
+
+    def test_required_mode_blocks_missing_evidence(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, _content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="implementation"
+            )
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 1, f"Expected FAIL (required missing evidence) but got {exit_code}: {message}"
+            assert "evidence-bound gate required" in message.lower()
+            assert "test_pass" in message.lower() or "tier1_gate_pass" in message.lower()
+
+    def test_advisory_mode_allows_missing_evidence_with_log(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "advisory")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, _content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="implementation"
+            )
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            captured = capsys.readouterr()
+            assert exit_code == 0, f"Expected PASS/advisory but got {exit_code}: {message}"
+            assert "PASS" in message
+            assert "[evidence-bound advisory]" in captured.err
+            assert "test_pass" in captured.err.lower() or "tier1_gate_pass" in captured.err.lower()
+
+    def test_default_advisory_allows_missing_evidence(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        """With no env set, the gate defaults to advisory and never blocks."""
+        monkeypatch.delenv("VNX_EVIDENCE_BOUND_GATE", raising=False)
+        monkeypatch.delenv("VNX_OVERRIDE_EVIDENCE_BOUND_GATE", raising=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, _content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="implementation"
+            )
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            captured = capsys.readouterr()
+            assert exit_code == 0, f"Expected default-advisory PASS but got {exit_code}: {message}"
+            assert "[evidence-bound advisory]" in captured.err
+
+    def test_off_mode_skips_evidence_check(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "off")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, _content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="implementation"
+            )
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            captured = capsys.readouterr()
+            assert exit_code == 0, f"Expected PASS but got {exit_code}: {message}"
+            assert "evidence-bound advisory" not in captured.err.lower()
+
+    def test_required_mode_passes_with_valid_evidence(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="implementation"
+            )
+            _write_evidence(repo, content_key, EVIDENCE_TEST_PASS, ephemeral_key_dir)
+            _write_evidence(repo, content_key, EVIDENCE_TIER1_GATE_PASS, ephemeral_key_dir)
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 0, f"Expected PASS with evidence but got {exit_code}: {message}"
+            assert "PASS" in message
+            assert "evidence-bound gate required" not in message.lower()
+
+    def test_closeout_requires_tier2_panel_evidence(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="closeout"
+            )
+            _write_evidence(repo, content_key, EVIDENCE_TEST_PASS, ephemeral_key_dir)
+            _write_evidence(repo, content_key, EVIDENCE_TIER1_GATE_PASS, ephemeral_key_dir)
+
+            # Missing Tier-2 panel evidence should block closeout.
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            captured = capsys.readouterr()
+            assert exit_code == 1, f"Expected FAIL (missing panel evidence) but got {exit_code}: {message}"
+            assert "tier2_panel_pass" in captured.err or "tier2_panel_pass" in message
+
+            # Add the panel evidence and verify the gate now passes.
+            _write_evidence(repo, content_key, EVIDENCE_TIER2_PANEL_PASS, ephemeral_key_dir)
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 0, f"Expected PASS after panel evidence but got {exit_code}: {message}"
+
+    def test_stale_wrong_diff_evidence_does_not_satisfy_bound(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        """A test receipt from an older green run must not cover a new diff."""
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+            base_sha = _head_sha(repo)
+
+            _add_file_commit(repo, "scripts/lib/feature.py", "x = 1\n", "feat: v1")
+            old_content_key = compute_diff_hash(
+                repo_root=repo, base_ref=base_sha, head_ref="HEAD"
+            )
+            # Evidence bound to the OLD diff.
+            _write_evidence(repo, old_content_key, EVIDENCE_TEST_PASS, ephemeral_key_dir)
+            _write_evidence(repo, old_content_key, EVIDENCE_TIER1_GATE_PASS, ephemeral_key_dir)
+
+            # Add more feature code — the diff (and content-key) changes.
+            _add_file_commit(repo, "scripts/lib/feature.py", "x = 2\n", "feat: v2")
+
+            # Attest the NEW diff.
+            write_attest_record(
+                dispatch_id="D-evidence-bound-stale",
+                deliverable_id="D3",
+                track_id="evidence-bound-gate",
+                plan_gate_ref="gate-ref",
+                signer_identity=ephemeral_key_dir["identity"],
+                timestamp="2026-07-09T12:00:00Z",
+                key_path=ephemeral_key_dir["key_path"],
+                repo_root=repo,
+                base_ref=base_sha,
+                task_class="implementation",
+            )
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 1, f"Expected FAIL (stale evidence) but got {exit_code}: {message}"
+            assert "evidence-bound gate required" in message.lower()
+            assert "missing evidence" in message.lower()
+
+    def test_invalid_signature_evidence_is_rejected(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha, content_key = _setup_feature_branch_with_attest(
+                tmpdir, ephemeral_key_dir, task_class="implementation"
+            )
+            # Evidence signed with the legitimate key is accepted.
+            _write_evidence(repo, content_key, EVIDENCE_TEST_PASS, ephemeral_key_dir)
+            _write_evidence(repo, content_key, EVIDENCE_TIER1_GATE_PASS, ephemeral_key_dir)
+
+            # Corrupt the Tier-1 evidence signature.
+            ledger = repo / ".vnx-attest" / "governed.ndjson"
+            lines = ledger.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines):
+                entry = json.loads(line)
+                if entry.get("evidence_type") == EVIDENCE_TIER1_GATE_PASS:
+                    entry["signature"] = entry["signature"][:-8] + "deadbeef"
+                    lines[i] = json.dumps(entry)
+                    break
+            ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            exit_code, message = verify_pr(
+                repo_root=repo,
+                base_ref=base_sha,
+                head_ref="HEAD",
+                allowed_signers_override=ephemeral_key_dir["allowed_signers"],
+            )
+            assert exit_code == 1, f"Expected FAIL (invalid evidence signature) but got {exit_code}: {message}"
+            assert "evidence-bound gate required" in message.lower()
+            assert "invalid signature" in message.lower()

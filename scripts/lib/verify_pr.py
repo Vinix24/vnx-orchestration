@@ -38,11 +38,14 @@ References:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import evidence_bound_gate
 
 # Exempt allowlist — paths exempt from attestation.
 # MUST stay in sync with the bash classify step in attestation-gate.yml.
@@ -333,6 +336,61 @@ def verify_pr(
                 pass
 
     if ok:
+        # Evidence-bound gate (D3 bootstrap): advisory by default, never weakens
+        # the provenance-only pass above.  Reuses D1/D2 signing and the hash-chain.
+        state = evidence_bound_gate.gate_state()
+        if state != "off":
+            try:
+                from content_key import compute_diff_hash
+
+                content_key = compute_diff_hash(
+                    repo_root=repo_root, base_ref=base_ref, head_ref=head_ref
+                )
+                record_path = repo_root / ".vnx-attest" / f"{content_key}.json"
+                manifest = json.loads(
+                    record_path.read_text(encoding="utf-8")
+                )
+                ev_ok, ev_status, ev_details = (
+                    evidence_bound_gate.verify_evidence_bound(
+                        repo_root=repo_root,
+                        base_ref=base_ref,
+                        head_ref=head_ref,
+                        allowed_signers=allowed_signers_path,
+                        manifest=manifest,
+                        verbose=verbose,
+                    )
+                )
+                if not ev_ok:
+                    if state == "required":
+                        return (
+                            1,
+                            f"FAIL: evidence-bound gate required — {ev_status}",
+                        )
+                    # Advisory mode: make the gap visible but allow the merge.
+                    for detail in ev_details:
+                        print(
+                            f"[evidence-bound advisory] {detail}",
+                            file=sys.stderr,
+                        )
+                    if verbose:
+                        print(
+                            f"[evidence-bound advisory] status={ev_status}",
+                            file=sys.stderr,
+                        )
+            except Exception as exc:
+                # Any internal evidence-check failure is surfaced as an advisory
+                # only — the provenance gate must not crash because of a
+                # bootstrap instrumentation problem.
+                if state == "required":
+                    return (
+                        1,
+                        f"FAIL: evidence-bound gate required — internal error: {exc}",
+                    )
+                print(
+                    f"[evidence-bound advisory] internal error: {exc}",
+                    file=sys.stderr,
+                )
+
         return (0, "PASS: attestation valid")
 
     if ov_ok and ov_manifest is not None:

@@ -78,6 +78,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_WIRING_GATE_REQUIRED": _e(
         "VNX_WIRING_GATE_REQUIRED", "bool", "0", "gate",
         "Require the wiring gate.", approval=True),
+    "VNX_EVIDENCE_BOUND_GATE": _e(
+        "VNX_EVIDENCE_BOUND_GATE", "enum", "advisory", "gate",
+        "Evidence-bound merge gate mode: off | advisory | required. "
+        "Advisory logs missing/invalid evidence but never blocks; required enforces evidence before merge. "
+        "Default is advisory for D3 bootstrap.", approval=True),
     "VNX_USE_CENTRAL_DB": _e(
         "VNX_USE_CENTRAL_DB", "enum", "", "dispatch",
         "Central-DB read mode (''=per-project | '1'=central | 'shadow'). Process-start routing — "

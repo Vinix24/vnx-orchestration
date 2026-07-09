@@ -71,6 +71,7 @@ def build_governed_manifest(
     plan_gate_ref: str,
     signer_identity: str,
     timestamp: str,
+    task_class: Optional[str] = None,
 ) -> dict:
     """Build a governed attestation manifest dict (without chain/signature fields).
 
@@ -81,8 +82,10 @@ def build_governed_manifest(
         plan_gate_ref: Reference to the plan-gate pass (e.g. PASS commit or receipt hash).
         signer_identity: The signer identity string matching an allowed_signers entry.
         timestamp: ISO-8601 UTC timestamp (caller supplies — no Date.now in scripts).
+        task_class: Optional task class (e.g. "implementation" or "closeout") used by
+            the evidence-bound gate to decide the required evidence set.
     """
-    return {
+    manifest: dict = {
         "schema_version": SCHEMA_VERSION,
         "attestation_type": ATTESTATION_GOVERNED,
         "dispatch_id": dispatch_id,
@@ -92,6 +95,9 @@ def build_governed_manifest(
         "signer_identity": signer_identity,
         "timestamp": timestamp,
     }
+    if task_class is not None:
+        manifest["task_class"] = task_class
+    return manifest
 
 
 def build_adhoc_manifest(
@@ -240,6 +246,7 @@ def emit_governed_attestation(
     timestamp: str,
     key_path: "str | Path",
     repo_root: "str | Path | None" = None,
+    task_class: Optional[str] = None,
 ) -> AttestationRecord:
     """Build, sign, hash-chain, and persist a governed attestation.
 
@@ -268,6 +275,7 @@ def emit_governed_attestation(
         plan_gate_ref=plan_gate_ref,
         signer_identity=signer_identity,
         timestamp=timestamp,
+        task_class=task_class,
     )
     signed = sign_manifest(manifest, key_path)
     chain_hash = append_chained_entry(ledger_path, signed)
