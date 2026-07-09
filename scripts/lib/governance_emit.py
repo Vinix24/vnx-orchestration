@@ -64,6 +64,7 @@ def emit_dispatch_receipt(
     state_dir: Path,
     report_path: Optional[str] = None,
     events_path: Optional[str] = None,
+    permission_enforcement: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson. fcntl.flock for concurrent safety.
 
@@ -78,6 +79,11 @@ def emit_dispatch_receipt(
     dispatch lane produces no event stream (tmux, claude subprocess) or when the
     archive step was skipped.  Turns dispatch→stream linkage from convention
     (matching dispatch_id in the filename) into an explicit data pointer.
+
+    ``permission_enforcement``: when provided (e.g. "enforced"), stamps the
+    receipt with the ADR-012 worker-permission enforcement mode. Only set when
+    ``VNX_ENFORCE_WORKER_PERMISSIONS`` is active so flag-off receipts remain
+    byte-identical to the pre-feature shape.
 
     Raises:
         ValueError: provider field doesn't match required pattern
@@ -106,6 +112,8 @@ def emit_dispatch_receipt(
         "timestamp": now_ts,
         "recorded_at": recorded_ts,
     }
+    if permission_enforcement:
+        receipt["permission_enforcement"] = permission_enforcement
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)

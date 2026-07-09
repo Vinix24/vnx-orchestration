@@ -156,6 +156,25 @@ def worker_scoped_enabled() -> bool:
     )
 
 
+def worker_permission_enforcement_enabled() -> bool:
+    """Whether role-scoped worker permission enforcement is active (default OFF).
+
+    This is the ADR-012 enforcement flag: when ON, detached workers launch with
+    role-derived ``--allowedTools`` / ``--disallowedTools`` /
+    ``--permission-mode`` instead of the blanket
+    ``--dangerously-skip-permissions``. Default OFF preserves the historical
+    skip-permissions behavior exactly.
+
+    Truthy values: ``1``, ``true``, ``yes``, ``on``.
+    """
+    return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def default_code_worker_profile() -> PermissionProfile:
     """Functional least-privilege profile for a headless code worker.
 

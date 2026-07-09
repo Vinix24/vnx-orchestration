@@ -54,12 +54,14 @@ try:
     from worker_permissions import (
         build_claude_scope_args,
         resolve_worker_profile,
+        worker_permission_enforcement_enabled,
         worker_scoped_enabled,
     )
 except Exception:  # pragma: no cover - sibling import is available in-tree
     build_claude_scope_args = None
     resolve_worker_profile = None
     worker_scoped_enabled = None
+    worker_permission_enforcement_enabled = None
 
 _LEGACY_SKIP_FLAG = "--dangerously-skip-permissions"
 # Inline fallback used only if worker_permissions cannot be imported — still
@@ -75,17 +77,24 @@ _FALLBACK_SCOPE_ARGS = [
 def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) -> List[str]:
     """Return the capability-scoping argv head for a headless ``claude`` spawn.
 
-    Default (``VNX_WORKER_SCOPED`` unset or falsey): the blanket
-    ``--dangerously-skip-permissions`` flag. Set ``VNX_WORKER_SCOPED=1`` (a
-    truthy value) to opt into ``--permission-mode acceptEdits`` + empty
+    Default (``VNX_ENFORCE_WORKER_PERMISSIONS`` and ``VNX_WORKER_SCOPED`` both
+    unset/falsey): the blanket ``--dangerously-skip-permissions`` flag, preserving
+    historical behavior. Set ``VNX_ENFORCE_WORKER_PERMISSIONS=1`` (or the legacy
+    ``VNX_WORKER_SCOPED=1``) to opt into ``--permission-mode acceptEdits`` + empty
     ambient MCP + the role's tool allow-list instead.
 
     ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
     is forwarded to ``build_claude_scope_args`` so the dispatch retains its normal
     ambient MCP config instead of being force-emptied. Only takes effect in the
-    scoped (``VNX_WORKER_SCOPED=1``) posture — the blanket default ignores it.
+    scoped posture — the blanket default ignores it.
     """
-    if worker_scoped_enabled is not None and not worker_scoped_enabled():
+    # New enforcement flag OR legacy scoped flag opts into scoped args.
+    # If worker_permissions is unavailable, fall through to the scoped fallback
+    # below (fail-closed — never silently re-open skip-permissions).
+    scoped = False
+    if worker_scoped_enabled is not None and worker_permission_enforcement_enabled is not None:
+        scoped = worker_scoped_enabled() or worker_permission_enforcement_enabled()
+    if not scoped:
         return [_LEGACY_SKIP_FLAG]
     if resolve_worker_profile is not None and build_claude_scope_args is not None:
         try:

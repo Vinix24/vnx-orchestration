@@ -31,6 +31,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# ADR-012 worker-permission enforcement flag (default OFF). Imported defensively.
+try:
+    from worker_permissions import worker_permission_enforcement_enabled
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
+        return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
 logger = logging.getLogger(__name__)
 
 # scripts/ dir resolved from this file's location (scripts/lib/dispatch_govern.py → scripts/).
@@ -138,6 +147,9 @@ def ensure_receipt(
         "model": spec.model or "unknown",
         "lane": lane,
     }
+    # ADR-012 worker-permission enforcement audit marker (only when flag ON).
+    if worker_permission_enforcement_enabled():
+        synthesized_receipt["worker_permission_enforcement"] = "enforced"
     if report_path is not None:
         synthesized_receipt["report_path"] = str(report_path)
 
