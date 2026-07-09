@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 RECEIPT_FILE = "t0_receipts.ndjson"
@@ -503,5 +505,7 @@ def report_to_dict(report: EffectivenessReport) -> Dict[str, Any]:
 
 def write_artifact(path: Path, report: EffectivenessReport) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report_to_dict(report), indent=2) + "\n", encoding="utf-8")
+    # Atomic write (tmp + os.replace via atomic_io) so an interruption cannot
+    # truncate/corrupt a previously-written artifact (codex gate finding, PR #1072).
+    atomic_write_json(path, report_to_dict(report))
     return path
