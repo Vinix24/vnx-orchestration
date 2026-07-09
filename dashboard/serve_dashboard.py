@@ -181,6 +181,7 @@ from api_intelligence import (  # noqa: E402
     _intelligence_get_dispatch_outcomes,
     _intelligence_get_transcript,
     _intelligence_get_proposals,
+    _intelligence_get_learning_proposals,
     _intelligence_accept_proposal,
     _intelligence_reject_proposal,
     _intelligence_apply_proposals,
@@ -500,6 +501,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/intelligence/proposals":
             _json_response(self, HTTPStatus.OK, _intelligence_get_proposals(params))
+            return
+
+        if path == "/api/intelligence/learning-proposals":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_learning_proposals(params))
             return
 
         if path == "/api/intelligence/confidence-trends":

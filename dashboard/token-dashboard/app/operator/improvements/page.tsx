@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { RefreshCw, Lightbulb, TrendingUp, BookOpen, CheckCircle2, XCircle, Play } from 'lucide-react';
+import { RefreshCw, Lightbulb, TrendingUp, BookOpen, CheckCircle2, XCircle, Play, GraduationCap, Shield, Archive } from 'lucide-react';
 import {
   LineChart,
   Line,
@@ -12,9 +12,9 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
-import { useProposals, useConfidenceTrends, useWeeklyDigest } from '@/lib/hooks';
+import { useProposals, useConfidenceTrends, useWeeklyDigest, useLearningProposals } from '@/lib/hooks';
 import { acceptProposal, rejectProposal, applyProposals, generateWeeklyDigest } from '@/lib/operator-api';
-import type { Proposal, WeeklyDigest } from '@/lib/types';
+import type { Proposal, LearningProposal, WeeklyDigest } from '@/lib/types';
 
 // ---- Helpers ----
 
@@ -24,6 +24,12 @@ const CATEGORY_COLORS: Record<string, { bg: string; border: string; text: string
   prompt: { bg: 'rgba(107, 138, 230, 0.08)', border: 'rgba(107, 138, 230, 0.22)', text: '#6B8AE6' },
   workflow: { bg: 'rgba(249, 115, 22, 0.08)', border: 'rgba(249, 115, 22, 0.22)', text: '#f97316' },
   default: { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.1)', text: 'var(--color-muted)' },
+};
+
+const LEARNING_TYPE_META: Record<string, { icon: typeof Lightbulb; label: string; color: string }> = {
+  skill_refinement: { icon: GraduationCap, label: 'Skill refinement', color: '#6B8AE6' },
+  rule: { icon: Shield, label: 'Prevention rule', color: '#50fa7b' },
+  archival: { icon: Archive, label: 'Archival / supersede', color: '#ff6b6b' },
 };
 
 function categoryStyle(cat: string) {
@@ -180,6 +186,76 @@ function ProposalCard({
               </button>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Learning Proposals Section (self-learning loop) ----
+
+function LearningProposalCard({ proposal }: { proposal: LearningProposal }) {
+  const meta = LEARNING_TYPE_META[proposal.type] ?? { icon: Lightbulb, label: proposal.type, color: 'var(--color-muted)' };
+  const Icon = meta.icon;
+
+  return (
+    <div style={{ padding: '14px 16px', borderRadius: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2" style={{ flex: 1 }}>
+          <Icon size={14} style={{ color: meta.color, flexShrink: 0 }} />
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-foreground)', lineHeight: 1.45 }}>
+            {proposal.target}
+          </span>
+        </div>
+        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: meta.color, flexShrink: 0 }}>
+          {meta.label}
+        </span>
+      </div>
+
+      <p style={{ fontSize: 12, color: 'var(--color-muted)', lineHeight: 1.5 }}>
+        {proposal.summary || proposal.rationale}
+      </p>
+
+      <div>
+        <div className="flex items-center justify-between" style={{ marginBottom: 2 }}>
+          <span style={{ fontSize: 11, color: 'var(--color-muted)' }}>
+            conf <strong style={{ color: meta.color }}>{(proposal.confidence * 100).toFixed(0)}%</strong>
+          </span>
+          <span style={{ fontSize: 10, color: 'var(--color-muted)' }}>
+            {proposal.created_at ? new Date(proposal.created_at).toLocaleString() : '—'}
+          </span>
+        </div>
+        <ConfidenceBar value={proposal.confidence} />
+      </div>
+
+      <div className="flex gap-2" style={{ marginTop: 2 }}>
+        <span style={{ fontSize: 10, color: 'var(--color-muted)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 5, padding: '2px 6px' }}>
+          Review via <code>vnx learning {proposal.type === 'skill_refinement' ? 'skill-review' : 'review'}</code>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function LearningProposalsSection() {
+  const { data, error, isLoading } = useLearningProposals();
+  const proposals = data?.proposals ?? [];
+
+  return (
+    <div style={{ padding: '20px 24px', borderRadius: 14, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', marginBottom: 24 }}>
+      <SectionHeader icon={GraduationCap} title="Self-Learning Proposals" count={proposals.length} />
+
+      {isLoading && <LoadingSpinner />}
+      {error && <EmptyState label="Failed to load self-learning proposals" />}
+      {!isLoading && !error && proposals.length === 0 && (
+        <EmptyState label="No pending self-learning proposals — run `vnx learning run` or `vnx learning skill-refine` to generate them" />
+      )}
+
+      {proposals.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {proposals.map(p => (
+            <LearningProposalCard key={`${p.type}-${p.id}`} proposal={p} />
+          ))}
         </div>
       )}
     </div>
@@ -432,6 +508,7 @@ export default function ImprovementsPage() {
         </p>
       </div>
 
+      <LearningProposalsSection />
       <ProposalsSection />
       <ConfidenceTrendsSection />
       <WeeklyDigestSection />

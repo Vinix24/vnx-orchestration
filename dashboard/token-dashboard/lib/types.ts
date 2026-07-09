@@ -654,6 +654,21 @@ export interface ProposalActionResponse {
   error?: string;
 }
 
+export interface LearningProposal {
+  id: string;
+  type: 'skill_refinement' | 'rule' | 'archival';
+  target: string;
+  summary: string;
+  rationale: string;
+  confidence: number;
+  created_at: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface LearningProposalsResponse {
+  proposals: LearningProposal[];
+}
+
 // ===== Dispatch Viewer Types =====
 
 export type DispatchStage = 'staging' | 'pending' | 'active' | 'review' | 'done' | 'rejected';
