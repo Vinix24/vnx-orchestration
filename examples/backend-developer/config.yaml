@@ -1,0 +1,8 @@
+governance_profile: minimal
+description: "Generic backend-developer worker for a single governed dispatch"
+default_instruction: "Implement the change described in the dispatch instruction: make the code change, add or update tests, and commit."
+isolation:
+  scope_type: example
+  allowed_paths:
+    - "examples/backend-developer/"
+    - ".vnx-data/unified_reports/"

@@ -201,6 +201,25 @@ def test_hello_world_resolves_without_project_dir():
     assert result.name == "CLAUDE.md"
 
 
+def test_backend_developer_config_has_default_instruction():
+    """examples/backend-developer/config.yaml must have default_instruction."""
+    config_path = REPO_ROOT / "examples" / "backend-developer" / "config.yaml"
+    assert config_path.is_file(), "examples/backend-developer/config.yaml missing"
+    instruction = _read_default_instruction(config_path)
+    assert instruction, "default_instruction must be non-empty in backend-developer config.yaml"
+
+
+def test_backend_developer_resolves_without_project_dir():
+    """backend-developer resolves from engine root even in an empty project dir,
+    same packaged-examples fallback consumer repos (MC/SEO/sales-copilot) rely on
+    since they ship no local agents/ dir."""
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = Path(tmp)
+        result = _resolve_agent_path(empty, "backend-developer")
+    assert result is not None, "backend-developer not found via engine root fallback"
+    assert result.name == "CLAUDE.md"
+
+
 # ---------------------------------------------------------------------------
 # 7. pyproject.toml declares examples/ in package-data
 # ---------------------------------------------------------------------------

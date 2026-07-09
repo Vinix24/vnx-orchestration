@@ -62,6 +62,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 **Worker dispatch policy:**
 
 - All dispatches go through the single-entry door `vnx dispatch <pending-id>`, which decides the lane. Calling a lane script directly is a side door (rollback only: `VNX_DISPATCH_LEGACY=1`).
+- Source vs. consumer: the door above (`bin/vnx dispatch <id>`) is the fabric source repo's form. In a pip-installed consumer repo (no `bin/`), the equivalent governed door is `vnx dispatch-agent --agent <name>` (it routes through the same `deliver_via_door` bridge); `vnx pool` replaces `bin/vnx pool`.
 - Provider→lane (hard): `claude`/Opus/Sonnet route via the tmux-spawn lane (`scripts/lib/tmux_interactive_dispatch.py`, interactive, subscription-preserving) — NEVER `provider_dispatch`, NEVER `claude -p`. `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
 - Default model: sonnet. For complex reasoning: `--model opus` with `VNX_OVERRIDE_WORKERS_SONNET_PINNED=1`.
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
