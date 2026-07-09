@@ -39,10 +39,42 @@ def _read_default_instruction(config_path: Path) -> str | None:
     return None
 
 
+def _resolve_agent_config(
+    agent: str,
+    agent_claude_md: Path,
+    project_dir: Path,
+) -> tuple[dict[str, object] | None, bool]:
+    """Load extended agent config when VNX_AGENT_FOLDERS is enabled.
+
+    Returns (agent_config, enabled). On import or parse errors, falls back to
+    legacy behavior (config=None) so a broken resolver never blocks dispatch.
+    """
+    try:
+        from agent_resolver import agent_folders_enabled, resolve_agent
+    except ImportError:
+        return None, False
+
+    if not agent_folders_enabled():
+        return None, False
+
+    agent_config = resolve_agent(
+        agent,
+        project_dir=project_dir,
+        engine_root=_engine.engine_root(),
+    )
+    if agent_config is None or agent_config.claude_md != agent_claude_md:
+        return None, True
+    return {
+        "provider": agent_config.provider,
+        "model": agent_config.model,
+        "default_instruction": agent_config.default_instruction,
+    }, True
+
+
 def vnx_dispatch_agent(args) -> int:
     agent = args.agent
     instruction = getattr(args, "instruction", None)
-    model = getattr(args, "model", "sonnet")
+    model = getattr(args, "model", None)
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
 
     # Validate agent CLAUDE.md exists
@@ -55,10 +87,20 @@ def vnx_dispatch_agent(args) -> int:
         )
         return 1
 
-    # Resolve instruction: explicit arg > default_instruction in config.yaml
+    # Add the packaged engine to sys.path so subprocess_dispatch is importable
+    # for both editable checkouts and pip-installed wheels. Also required so
+    # scripts/lib/agent_resolver.py can be imported in the pip package layout.
+    _engine.ensure_engine_on_path()
+
+    agent_config, agent_folders_on = _resolve_agent_config(agent, agent_claude_md, project_dir)
+
+    # Resolve instruction: explicit arg > config default_instruction > legacy scan
     if not instruction:
-        config_path = agent_claude_md.parent / "config.yaml"
-        instruction = _read_default_instruction(config_path)
+        if agent_config is not None:
+            instruction = agent_config.get("default_instruction")  # type: ignore[assignment]
+        if not instruction:
+            config_path = agent_claude_md.parent / "config.yaml"
+            instruction = _read_default_instruction(config_path)
 
     if not instruction:
         print(
@@ -68,12 +110,15 @@ def vnx_dispatch_agent(args) -> int:
         )
         return 1
 
+    # Resolve model: explicit arg > config model > legacy default sonnet
+    if not model:
+        if agent_config is not None and agent_config.get("model"):
+            model = agent_config["model"]  # type: ignore[assignment]
+        else:
+            model = "sonnet"
+
     # Generate a dispatch ID
     dispatch_id = f"D-{uuid.uuid4().hex[:8]}"
-
-    # Add the packaged engine to sys.path so subprocess_dispatch is importable
-    # for both editable checkouts and pip-installed wheels.
-    _engine.ensure_engine_on_path()
 
     try:
         from subprocess_dispatch import deliver_with_recovery  # type: ignore[import]

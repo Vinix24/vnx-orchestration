@@ -104,6 +104,45 @@ After completing the task, append a VNX unified report block:
 
 ---
 
+## Optional extended fields (ADR-028 Phase 1)
+
+`config.yaml` can also declare the agent's provider, model, permissions, and
+skills. These fields are **optional**; omitting them keeps the legacy behavior
+unchanged, so every existing agent continues to work.
+
+```yaml
+governance_profile: light
+provider: claude              # default: claude
+model: sonnet                 # default: falls back to CLI / VNX_MODEL default
+skills:
+  - backend-developer
+  - reviewer
+permissions:
+  allowed_tools: [Read, Write]
+  denied_tools: [Bash]
+  bash_allow_patterns: ["^git "]
+  bash_deny_patterns: ["rm -rf /"]
+isolation:
+  scope_type: business_folder
+  allowed_paths:
+    - "agents/<name>/"
+    - ".vnx-data/unified_reports/"
+  denied_paths:
+    - "scripts/"
+```
+
+- `provider` — target provider for provider-agnostic dispatch (default: `claude`).
+- `model` — model override for this agent; used only when the caller does not
+  pass an explicit `--model` (default: falls back to `sonnet`).
+- `skills` — list of skill names to inject into the agent context (default: `[]`).
+- `permissions` — role-scoped tool policy:
+  - `allowed_tools` / `denied_tools` — tool allow/deny lists.
+  - `bash_allow_patterns` / `bash_deny_patterns` — regex patterns for Bash
+    command filtering.
+
+The extended resolver is gated by `VNX_AGENT_FOLDERS` and defaults to **on**.
+Rollback to legacy behavior: `VNX_AGENT_FOLDERS=0`.
+
 ## Governance Profiles
 
 Profiles are defined in `.vnx/governance_profiles.yaml`. Three profiles ship by default:
