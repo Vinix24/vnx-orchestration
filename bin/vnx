@@ -1316,9 +1316,19 @@ cmd_skills_sync() {
     err "[skills-sync] rsync required for sync (and its dry-run preview)"; return 1
   fi
 
+  # Directory-based sync: every directory containing a SKILL.md propagates.
+  # Opt-out marker (.vnx-skip-sync) lets project-local-only skills live under
+  # skills/ without leaking to consumer projects.
+  local -a rsync_excludes=("--exclude=.vnx-skip-sync")
+  local skill_dir
+  for skill_dir in "$shipped_skills_dir"/*; do
+    [ -d "$skill_dir" ] || continue
+    [ -f "$skill_dir/.vnx-skip-sync" ] && rsync_excludes+=("--exclude=$(basename "$skill_dir")/")
+  done
+
   # Itemized dry-run: lines NOT starting with '.' are real changes (transfers/creates).
   local changes
-  changes="$(rsync -ai --dry-run "$shipped_skills_dir/" "$project_skills_dir/" 2>/dev/null \
+  changes="$(rsync -ai --dry-run "${rsync_excludes[@]}" "$shipped_skills_dir/" "$project_skills_dir/" 2>/dev/null \
     | grep -vE '^(\.| *$|sending|sent |total )' || true)"
 
   if [ -z "$changes" ]; then
@@ -1342,16 +1352,16 @@ cmd_skills_sync() {
   fi
   log "[skills-sync] backed up current skills -> $backup"
 
-  rsync -a "$shipped_skills_dir/" "$project_skills_dir/"
+  rsync -a "${rsync_excludes[@]}" "$shipped_skills_dir/" "$project_skills_dir/"
   log "[skills-sync] refreshed .claude/skills/ from $VNX_HOME (project-only skills preserved)"
 
   # Mirror to the provider skill paths if those tools + dirs are present (matches bootstrap-skills).
   if command -v codex >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.agents/skills" ]; then
-    rsync -a "$shipped_skills_dir/" "$PROJECT_ROOT/.agents/skills/"
+    rsync -a "${rsync_excludes[@]}" "$shipped_skills_dir/" "$PROJECT_ROOT/.agents/skills/"
     log "[skills-sync] mirrored to Codex (.agents/skills/)"
   fi
   if command -v gemini >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.gemini/skills" ]; then
-    rsync -a "$shipped_skills_dir/" "$PROJECT_ROOT/.gemini/skills/"
+    rsync -a "${rsync_excludes[@]}" "$shipped_skills_dir/" "$PROJECT_ROOT/.gemini/skills/"
     log "[skills-sync] mirrored to Gemini (.gemini/skills/)"
   fi
 

@@ -17,7 +17,10 @@ Exit codes:
 import sys
 import yaml
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from vnx_skills import iter_skill_dirs  # noqa: E402
 
 
 class SkillValidator:
@@ -35,6 +38,7 @@ class SkillValidator:
         self.skills_dir = Path(paths["VNX_SKILLS_DIR"])
         self.skills_file = self.skills_dir / "skills.yaml"
         self.skills = self._load_skills()
+        self.directory_skills = self._load_directory_skills()
 
     def _load_skills(self) -> Dict:
         """Load skills from YAML registry"""
@@ -46,9 +50,19 @@ class SkillValidator:
             data = yaml.safe_load(f)
             return data.get('skills', {})
 
+    def _load_directory_skills(self) -> Set[str]:
+        """Discover skill directories not explicitly listed in the manifest."""
+        manifest_names = {self.normalize_skill_name(data['name']) for data in self.skills.values()}
+        return {
+            self.normalize_skill_name(p.name)
+            for p in iter_skill_dirs(self.skills_dir)
+            if self.normalize_skill_name(p.name) not in manifest_names
+        }
+
     def get_valid_skills(self) -> List[str]:
         """Get list of all valid skill names (without @ prefix)"""
-        return [skill_data['name'].lstrip('@') for skill_data in self.skills.values()]
+        manifest = [skill_data['name'].lstrip('@') for skill_data in self.skills.values()]
+        return sorted(set(manifest) | self.directory_skills)
 
     def normalize_skill_name(self, skill: str) -> str:
         """Normalize skill name (strip @ and / prefixes)"""
@@ -74,7 +88,7 @@ class SkillValidator:
 
         if normalized in valid_skills:
             if not self.skill_md_exists(normalized):
-                return True, f"Warning: {normalized} is in registry but SKILL.md not found on disk"
+                return True, f"Warning: {normalized} is valid but SKILL.md not found on disk"
             return True, None
         else:
             # Find similar skills (fuzzy match)

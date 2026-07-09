@@ -79,6 +79,11 @@ def _scan_code_roles(project_root: Path) -> Set[str]:
     return refs
 
 
+def _is_opted_out(skill_dir: Path) -> bool:
+    """Project-local-only skills may carry .vnx-skip-sync to avoid propagation."""
+    return (skill_dir / ".vnx-skip-sync").is_file()
+
+
 def _scan_local_skills_dir(project_root: Path) -> tuple[Set[str], List[dict]]:
     refs: Set[str] = set()
     skipped: List[dict] = []
@@ -95,7 +100,7 @@ def _scan_local_skills_dir(project_root: Path) -> tuple[Set[str], List[dict]]:
             logger.warning("skill_coverage: skipped %s due to %s: %s", skills_yaml, type(e).__name__, e)
             skipped.append({"path": str(skills_yaml), "error": f"{type(e).__name__}: {e}"})
     for child in skills_dir.iterdir():
-        if child.is_dir() and not child.name.startswith("."):
+        if child.is_dir() and not child.name.startswith(".") and not _is_opted_out(child):
             refs.add(_norm(child.name))
     return refs, skipped
 
@@ -133,7 +138,7 @@ def _list_skills_in_dir(skills_dir: Path) -> tuple[Dict[str, Path], List[dict]]:
             logger.warning("skill_coverage: skipped %s due to %s: %s", skills_yaml, type(e).__name__, e)
             skipped.append({"path": str(skills_yaml), "error": f"{type(e).__name__}: {e}"})
     for child in skills_dir.iterdir():
-        if child.is_dir() and not child.name.startswith("."):
+        if child.is_dir() and not child.name.startswith(".") and not _is_opted_out(child):
             name = _norm(child.name)
             if name not in available:
                 available[name] = child
