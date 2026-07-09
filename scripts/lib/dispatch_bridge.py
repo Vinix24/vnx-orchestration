@@ -31,7 +31,6 @@ owns lane selection (claude→tmux unless allow_headless). No Anthropic SDK impo
 from __future__ import annotations
 
 import hashlib
-import os
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -205,13 +204,19 @@ def bridge_dispatch(*, dry_run: bool = False, **stage_kwargs) -> int:
     error (e.g. unsafe dispatch_id, symlink escape) is surfaced as a clean 1 so a
     caller never falls back to a side-door delivery.
     """
-    if stage_kwargs.get("allow_headless") and os.environ.get("VNX_OVERRIDE_CLAUDE_HEADLESS") != "1":
-        print(
-            "[dispatch_bridge] REJECT [headless-blocked]: claude_headless lane blocked by default; "
-            "set VNX_OVERRIDE_CLAUDE_HEADLESS=1 to opt in",
-            file=sys.stderr,
-        )
-        return 1
+    if stage_kwargs.get("allow_headless"):
+        from routing_policy import is_claude_headless_blocked, load_lane_safety  # noqa: PLC0415
+        lane_safety = load_lane_safety()
+        if is_claude_headless_blocked(lane_safety):
+            override_env = (lane_safety.get("headless_block") or {}).get(
+                "override_env", "VNX_OVERRIDE_CLAUDE_HEADLESS"
+            )
+            print(
+                "[dispatch_bridge] REJECT [headless-blocked]: claude_headless lane blocked by default "
+                f"(lane_safety.headless_block, routing_policy.yaml); set {override_env}=1 to opt in",
+                file=sys.stderr,
+            )
+            return 1
     try:
         spec_file = stage_spec_bundle(**stage_kwargs)
     except (ValueError, OSError) as exc:

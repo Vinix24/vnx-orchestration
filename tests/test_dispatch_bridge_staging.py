@@ -107,3 +107,79 @@ def test_bridge_dispatch_rejects_unsafe_id_as_exit_1(tmp_path):
         target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
     )
     assert rc == 1  # clean reject — never falls back to a side-door delivery
+
+
+# --- claude_headless lane_safety gate (OI-223): fail-closed by default, yaml-driven ---
+
+def test_bridge_headless_blocked_by_default_before_staging(tmp_path, monkeypatch, capsys):
+    """allow_headless=True without the override env var: REJECT before stage_spec_bundle
+    ever runs — no bundle is written, no side-door path is reachable."""
+    monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
+    reached_staging = []
+    monkeypatch.setattr(
+        dispatch_bridge, "stage_spec_bundle",
+        lambda **kw: reached_staging.append(kw),
+    )
+    rc = dispatch_bridge.bridge_dispatch(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path,
+        allow_headless=True, headless_reason="benchmark", dry_run=True,
+    )
+    assert rc == 1
+    assert reached_staging == []
+    err = capsys.readouterr().err
+    assert "headless-blocked" in err
+    assert "VNX_OVERRIDE_CLAUDE_HEADLESS" in err
+
+
+def test_bridge_headless_wrong_override_value_still_blocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "true")  # only "1" opts in
+    reached_staging = []
+    monkeypatch.setattr(
+        dispatch_bridge, "stage_spec_bundle",
+        lambda **kw: reached_staging.append(kw),
+    )
+    rc = dispatch_bridge.bridge_dispatch(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path,
+        allow_headless=True, headless_reason="benchmark", dry_run=True,
+    )
+    assert rc == 1
+    assert reached_staging == []
+
+
+def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):
+    """allow_headless=True + VNX_OVERRIDE_CLAUDE_HEADLESS=1: the gate is lifted and
+    execution proceeds into stage_spec_bundle (a real bundle gets written)."""
+    monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "1")
+    import dispatch_cli
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    rc = dispatch_bridge.bridge_dispatch(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path,
+        allow_headless=True, headless_reason="benchmark", dry_run=True,
+    )
+
+    assert rc == 0
+    bundle = tmp_path / "dispatches" / "pending" / _GOOD_ID
+    payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
+    assert payload["allow_headless"] is True
+
+
+def test_bridge_non_headless_dispatch_never_consults_the_gate(tmp_path, monkeypatch):
+    """allow_headless absent (default False): the claude tmux subscription lane is
+    unaffected — staging proceeds without the headless gate firing at all."""
+    monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
+    import dispatch_cli
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    rc = dispatch_bridge.bridge_dispatch(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
+    )
+
+    assert rc == 0
+    bundle = tmp_path / "dispatches" / "pending" / _GOOD_ID
+    payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
+    assert payload["allow_headless"] is False

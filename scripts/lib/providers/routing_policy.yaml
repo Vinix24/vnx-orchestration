@@ -45,12 +45,15 @@ rules:
 
 # Fallback chain when preferred lane fails (API down, rate-limited, etc)
 #
-# STATUS (2026-06-11, sweep H4 routing-conflict fix): this block is ADVISORY
-# only. No runner or dispatcher currently reads fallback_chain at runtime.
-# Entries document intended fallback behaviour; they do NOT trigger automatic
-# lane switching on their own. The kimi entry below reflects the corrected
-# kimi CLI lane — litellm:moonshot:* entries are kept for reference but
-# litellm:moonshot routing is blocked by kimi-via-cli-only (OI-223).
+# STATUS (2026-07-09, OI-223 lane_safety loader): still ADVISORY. decide_lane()
+# reads this block and resolves a chain onto RoutingDecision.fallback_chain, but
+# subprocess_dispatch._select_dispatch_path deliberately discards it for non-Claude
+# lanes ("This function never touches fallback_chain for non-Claude lanes") to avoid
+# silently rerouting a cheap-lane dispatch back onto Claude. No caller triggers
+# automatic lane switching on a failure. This is unrelated to the lane_safety block
+# below — OI-223 wired lane_safety.headless_block live, NOT fallback_chain. The kimi
+# entry below reflects the corrected kimi CLI lane — litellm:moonshot:* entries are
+# kept for reference but litellm:moonshot routing is blocked by kimi-via-cli-only.
 fallback_chain:
   "litellm:deepseek:*": ["kimi", "claude/sonnet-5"]
   "kimi": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-5"]
@@ -58,27 +61,45 @@ fallback_chain:
   "claude/haiku-4-5": ["claude/sonnet-5"]
   # Sonnet and Opus have no fallback (they are the safety net)
 
-# Lane-safety rules — ADVISORY, NOT YET ENFORCED IN CODE.
+# Lane-safety rules.
 #
-# STATUS (2026-06-07, codex-gate PR #831 finding F6): these entries are
-# DECLARATIVE. No runner or dispatcher currently reads this block. They
-# document measured lane behaviour and the intended guard so the evidence
-# is findable, but they do NOT change routing on their own. Do not rely on
-# them as live guards.
-#
-# The ONE rule that IS live (force_headless) is enforced separately as a
-# hardcoded set in scripts/benchmark/field-tests/runners/lane_adapter.py
-# (HEADLESS_FORCED_MODELS) — kept in sync by hand, not read from here.
-#
-# Wiring a loader so the dispatcher reads these rules is tracked as a 1.0.1
-# open item (see PR #831 deferred-findings). Until then: advisory only,
-# every entry carries measured evidence but inert enforcement.
+# STATUS (2026-07-09, OI-223 lane_safety loader): the loader is now LIVE.
+# scripts/lib/routing_policy.load_lane_safety() parses this block and
+# is_claude_headless_blocked() reads `headless_block` below; both are
+# consulted at scripts/lib/dispatch_bridge.py (pre-stage reject) and
+# scripts/lib/dispatch_cli.py::_execute_claude_headless (the last gate
+# before spawn) instead of a hardcoded env-only check. Every OTHER entry in
+# this block (force_headless, claude_serial_under_load, codex_retry_once,
+# kimi_quota_fail_fast, tmux_spawn_max_runtime, haiku_receipt_nondeterminism)
+# remains DECLARATIVE — exposed by load_lane_safety() for tooling/tests, but
+# not read by any runtime gating decision. Do not rely on them as live guards.
 lane_safety:
+  # claude-headless-lane-block (OI-223 fold-in). LIVE as of this PR — see
+  # is_claude_headless_blocked() above. Refuses the claude_headless lane
+  # (`claude -p`, API-metered) by default; the tmux subscription lane stays
+  # the default for claude. Protects the production OAuth subscription
+  # post-2026-06-15 billing cutover (headless now bills API credits, not
+  # subscription quota). Set enabled: false here to lift the block yaml-side,
+  # or export the override_env var =1 to opt in per-dispatch.
+  headless_block:
+    enabled: true
+    override_env: "VNX_OVERRIDE_CLAUDE_HEADLESS"
+    reason: "claude -p (headless) is API-metered post-2026-06-15 cutover; the tmux subscription lane is the safe default for claude"
+
   # Anthropic Claude Code interactive-session hang (Issues #63390 + #64153).
   # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-5 hang for hours or exit
   # in 0.1s on complex content via the interactive tmux lane. The headless
   # `claude -p` path is unaffected. Force these models to the headless lane
   # until Anthropic ships a fix.
+  #
+  # SUPERSEDED (2026-06-15 empirical re-test, scripts/benchmark/field-tests/
+  # runners/lane_adapter.py HEADLESS_FORCED_MODELS): opus-4-8/4-7/sonnet-4-6
+  # completed trivial tasks cleanly on the tmux lane post-cutover; the hang did
+  # NOT reproduce, so that runner emptied its forced-model set. Left DECLARATIVE
+  # here (not wired into routing) deliberately: forcing these models onto
+  # headless would fight headless_block above and re-introduce the exact
+  # API-billing exposure OI-223 closes. Re-activate only via an explicit
+  # operator decision if the hang reproduces on a t3-complex (>1h) run.
   force_headless:
     models:
       - claude-opus-4-8

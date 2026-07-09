@@ -16,7 +16,9 @@ from routing_policy import (
     _resolve_fallback_chain,
     _rule_matches,
     decide_lane,
+    is_claude_headless_blocked,
     lane_to_claude_model,
+    load_lane_safety,
     load_routing_policy,
 )
 
@@ -70,7 +72,7 @@ def test_non_mapping_yaml_raises(tmp_path: Path) -> None:
 
 def test_default_lane_unmatched() -> None:
     decision = decide_lane("unknown-task-class", complexity="medium", env=_env())
-    assert decision.lane == "claude/sonnet-4-6"
+    assert decision.lane == "claude/sonnet-5"
     assert decision.rule_name == "default"
 
 
@@ -87,19 +89,19 @@ def test_doc_update_routes_to_haiku() -> None:
 
 def test_refactor_medium_routes_to_sonnet() -> None:
     decision = decide_lane("refactor", complexity="medium", env=_env())
-    assert decision.lane == "claude/sonnet-4-6"
+    assert decision.lane == "claude/sonnet-5"
     assert decision.rule_name == "refactor-code-default"
 
 
 def test_refactor_high_routes_to_sonnet() -> None:
     decision = decide_lane("refactor", complexity="high", env=_env())
-    assert decision.lane == "claude/sonnet-4-6"
+    assert decision.lane == "claude/sonnet-5"
 
 
 def test_opt_in_deepseek_requires_flag() -> None:
     # Without opt-in flag: refactor + medium -> refactor-code-default (sonnet)
     without_flag = decide_lane("refactor", complexity="medium", env=_env())
-    assert without_flag.lane == "claude/sonnet-4-6"
+    assert without_flag.lane == "claude/sonnet-5"
     assert without_flag.rule_name == "refactor-code-default"
 
     # With opt-in flag: cost-optimized-code rule fires first because rules are ordered
@@ -115,7 +117,7 @@ def test_opt_in_deepseek_requires_flag() -> None:
     # So with the current yaml order, sonnet still wins even with the flag.
     # This is intentional: operators must move cost-optimized-code above refactor-code-default
     # in the yaml to activate it for refactor tasks.
-    assert with_flag.lane == "claude/sonnet-4-6"
+    assert with_flag.lane == "claude/sonnet-5"
 
     # Directly validate that _rule_matches respects opt_in_flag:
     cost_rule = {
@@ -158,8 +160,8 @@ def test_research_high_routes_to_opus() -> None:
 def test_fallback_chain_resolution_deepseek() -> None:
     decision = decide_lane("code-review", complexity="medium", env=_env())
     # review-analysis -> kimi (CLI lane)
-    # Its fallback chain: kimi -> [litellm:deepseek:deepseek-v4-pro, claude/sonnet-4-6]
-    assert "claude/sonnet-4-6" in decision.fallback_chain
+    # Its fallback chain: kimi -> [litellm:deepseek:deepseek-v4-pro, claude/sonnet-5]
+    assert "claude/sonnet-5" in decision.fallback_chain
 
 
 def test_fallback_chain_wildcard_deepseek() -> None:
@@ -167,7 +169,7 @@ def test_fallback_chain_wildcard_deepseek() -> None:
     policy = load_routing_policy(_POLICY_PATH)
     fallback_map = policy.get("fallback_chain", {})
     chain = _resolve_fallback_chain("litellm:deepseek:deepseek-v4-pro", fallback_map)
-    assert "claude/sonnet-4-6" in chain
+    assert "claude/sonnet-5" in chain
     assert len(chain) >= 2
 
 
@@ -175,14 +177,14 @@ def test_fallback_chain_haiku() -> None:
     policy = load_routing_policy(_POLICY_PATH)
     fallback_map = policy.get("fallback_chain", {})
     chain = _resolve_fallback_chain("claude/haiku-4-5", fallback_map)
-    assert chain == ["claude/sonnet-4-6"]
+    assert chain == ["claude/sonnet-5"]
 
 
 def test_fallback_chain_sonnet_empty() -> None:
     """Sonnet and Opus have no fallback — they are the safety net."""
     policy = load_routing_policy(_POLICY_PATH)
     fallback_map = policy.get("fallback_chain", {})
-    assert _resolve_fallback_chain("claude/sonnet-4-6", fallback_map) == []
+    assert _resolve_fallback_chain("claude/sonnet-5", fallback_map) == []
     assert _resolve_fallback_chain("claude/opus", fallback_map) == []
 
 
@@ -288,3 +290,77 @@ def test_policy_lanes_pass_constraint_preflight() -> None:
         + "\n".join(f"  - {v}" for v in violations_found)
         + "\n\nFix: update the lane in routing_policy.yaml to a non-blocked provider."
     )
+
+
+# ---------------------------------------------------------------------------
+# load_lane_safety / is_claude_headless_blocked — OI-223 lane_safety loader
+# ---------------------------------------------------------------------------
+
+
+def test_load_lane_safety_reads_production_yaml() -> None:
+    """lane_safety is actually loaded from the production routing_policy.yaml."""
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    assert "headless_block" in lane_safety
+    assert "force_headless" in lane_safety
+
+
+def test_load_lane_safety_missing_block_returns_empty(tmp_path: Path) -> None:
+    policy_file = tmp_path / "routing_policy.yaml"
+    policy_file.write_text("version: 1\ndefault_lane: claude/sonnet-5\n")
+    assert load_lane_safety(policy_file) == {}
+
+
+def test_load_lane_safety_non_mapping_raises(tmp_path: Path) -> None:
+    policy_file = tmp_path / "routing_policy.yaml"
+    policy_file.write_text("version: 1\ndefault_lane: claude/sonnet-5\nlane_safety: [1, 2]\n")
+    with pytest.raises(ValueError, match="lane_safety block must be a mapping"):
+        load_lane_safety(policy_file)
+
+
+def test_production_headless_block_is_blocked_without_override() -> None:
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    assert is_claude_headless_blocked(lane_safety, env={}) is True
+
+
+def test_production_headless_block_lifted_with_override() -> None:
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    assert is_claude_headless_blocked(
+        lane_safety, env={"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}
+    ) is False
+
+
+def test_headless_block_wrong_override_value_still_blocked() -> None:
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    assert is_claude_headless_blocked(
+        lane_safety, env={"VNX_OVERRIDE_CLAUDE_HEADLESS": "yes"}
+    ) is True
+
+
+def test_headless_blocked_missing_block_fails_closed() -> None:
+    """No `headless_block` entry at all -> still blocked (fail-closed default)."""
+    assert is_claude_headless_blocked({}, env={}) is True
+    assert is_claude_headless_blocked({}, env={"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}) is False
+
+
+def test_headless_blocked_disabled_via_yaml() -> None:
+    lane_safety = {"headless_block": {"enabled": False}}
+    assert is_claude_headless_blocked(lane_safety, env={}) is False
+
+
+def test_headless_blocked_custom_override_env_name() -> None:
+    lane_safety = {"headless_block": {"enabled": True, "override_env": "MY_CUSTOM_FLAG"}}
+    assert is_claude_headless_blocked(lane_safety, env={}) is True
+    assert is_claude_headless_blocked(lane_safety, env={"MY_CUSTOM_FLAG": "1"}) is False
+    # The default env var name is NOT the override when a custom name is configured.
+    assert is_claude_headless_blocked(
+        lane_safety, env={"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}
+    ) is True
+
+
+def test_headless_blocked_defaults_env_to_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    """env=None falls back to os.environ (real dispatcher call pattern)."""
+    lane_safety = {"headless_block": {"enabled": True}}
+    monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
+    assert is_claude_headless_blocked(lane_safety) is True
+    monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "1")
+    assert is_claude_headless_blocked(lane_safety) is False
