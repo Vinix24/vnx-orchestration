@@ -89,9 +89,10 @@ constraints:
       provider: zai
       via: direct
     reason: >-
-      Native Zhipu integration is deferred. Wave 7 PR-7.3 routes GLM-5.1
-      through OpenRouter; direct Zhipu API calls bypass the cost-tracking
-      pipeline and the fallback chain configured in routing_policy.yaml.
+      Native Zhipu integration is deferred. Wave 7 PR-7.3 routes GLM (GLM-5.2
+      current, GLM-5.1 available) through OpenRouter; direct Zhipu API calls
+      bypass the cost-tracking pipeline and the fallback chain configured in
+      routing_policy.yaml.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false
@@ -102,10 +103,10 @@ constraints:
       provider: zai
       model: [glm-4.5, glm-4.6]
     reason: >-
-      GLM-4.5 and GLM-4.6 are legacy and superseded by GLM-5.1 (verified
-      2026-05-10, project_kimi_glm_integration_paths.md). The provider
-      will retire the legacy snapshots; new dispatches must use the
-      glm-5.1-default model key.
+      GLM-4.5 and GLM-4.6 are legacy and superseded by the GLM-5.x line
+      (verified 2026-05-10, project_kimi_glm_integration_paths.md). The
+      provider will retire the legacy snapshots; new dispatches use a
+      current GLM-5.x key (glm-5.2 preferred, glm-5.1 available).
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false
