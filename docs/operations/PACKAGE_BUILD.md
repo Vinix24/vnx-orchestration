@@ -34,9 +34,6 @@ is used.
 ```bash
 # From repo root:
 pip install -e dist/vnx-orchestration
-
-# With OTel export extras:
-pip install -e "dist/vnx-orchestration[otel]"
 ```
 
 Editable installs link directly to the source tree, so code changes take effect

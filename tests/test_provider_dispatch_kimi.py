@@ -230,6 +230,30 @@ class TestComputeKimiCost(unittest.TestCase):
         self.assertEqual(usage["input"], 300)
         self.assertEqual(usage["output"], 120)
         self.assertEqual(usage["cache_hit"], 5)
+        self.assertNotIn("unavailable", usage)
+
+    def test_extract_token_usage_kimi_no_usage_reported_is_marked_unavailable(self):
+        """kimi-cli stream-json reports no usage event -> token_usage stays None on the
+        spawn result. The receipt must record this as explicitly unavailable, not 0/0
+        (a bare 0/0 would be indistinguishable from a real zero-token dispatch)."""
+        import provider_dispatch as pd
+        from provider_spawns.kimi_spawn import KimiSpawnResult
+
+        result = KimiSpawnResult(
+            returncode=0,
+            completion_text="done",
+            events_written=1,
+            session_id=None,
+            timed_out=False,
+            token_usage=None,
+        )
+        self.assertFalse(result.token_usage_measured)
+        usage = pd._extract_token_usage(result, "kimi")
+        self.assertEqual(usage["input"], 0)
+        self.assertEqual(usage["output"], 0)
+        self.assertTrue(usage["unavailable"])
+        # Cost computation must treat unavailable as not-billable, not $0-confirmed.
+        self.assertIsNone(pd._compute_cost("kimi", "kimi-default", usage))
 
 
 if __name__ == "__main__":
