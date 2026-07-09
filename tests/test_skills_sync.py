@@ -26,6 +26,9 @@ REPO = Path(__file__).resolve().parent.parent
 VNX = REPO / "bin" / "vnx"
 SHIPPED_SKILLS = REPO / "skills"
 
+sys.path.insert(0, str(REPO / "scripts" / "lib"))
+from vnx_skills import resolve_sync_set, SKILL_OPT_OUT_MARKER  # noqa: E402
+
 
 def _run_sync(project_root: Path, *args: str):
     env = dict(os.environ)
@@ -106,6 +109,35 @@ class TestSkillsSync:
         ).stdout
         assert before == after, "vnx skills sync must not modify the repo's own .claude/skills/"
         assert not list(REPO.glob(".claude/skills.bak.*")), "no backup leak into the repo"
+
+
+class TestDirectoryBasedSyncSet:
+    """Directory-based discovery: the sync set is derived from skill directories,
+    not from a manual manifest, with an explicit opt-out marker."""
+
+    def test_shipped_skills_include_horizon_and_fabric_reference(self):
+        sync_set = resolve_sync_set(SHIPPED_SKILLS)
+        assert "horizon" in sync_set, "horizon must be in the shipped sync set"
+        assert "fabric-reference" in sync_set, "fabric-reference must be in the shipped sync set"
+
+    def test_new_fixture_skill_is_included(self, tmp_path):
+        source = tmp_path / "skills"
+        source.mkdir()
+        (source / "fixture-new-skill").mkdir()
+        (source / "fixture-new-skill" / "SKILL.md").write_text("# Fixture\n")
+        assert "fixture-new-skill" in resolve_sync_set(source)
+
+    def test_opt_out_marker_excludes_skill_from_sync_set(self, tmp_path):
+        source = tmp_path / "skills"
+        source.mkdir()
+        (source / "local-only").mkdir()
+        (source / "local-only" / "SKILL.md").write_text("# Local\n")
+        (source / "local-only" / SKILL_OPT_OUT_MARKER).write_text("project-local\n")
+        (source / "fixture-shipped").mkdir()
+        (source / "fixture-shipped" / "SKILL.md").write_text("# Shipped\n")
+        sync_set = resolve_sync_set(source)
+        assert "local-only" not in sync_set
+        assert "fixture-shipped" in sync_set  # sanity: non-opted-out still included
 
 
 if __name__ == "__main__":

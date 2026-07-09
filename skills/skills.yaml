@@ -19,6 +19,11 @@ skills:
     file: "planner/SKILL.md"
     type: planning
 
+  horizon:
+    name: "@horizon"
+    file: "horizon/SKILL.md"
+    type: planning
+
   architect:
     name: "@architect"
     file: "architect/SKILL.md"
@@ -120,6 +125,11 @@ skills:
     file: "t0-orchestrator/SKILL.md"
     type: orchestration
     terminal: T0
+
+  fabric-reference:
+    name: "@fabric-reference"
+    file: "fabric-reference/SKILL.md"
+    type: reference
 
 # ─── Common Mistakes ───────────────────────────────────────────────
 
