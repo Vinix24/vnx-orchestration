@@ -26,7 +26,7 @@
 
 ## 2. User Modes
 
-VNX supports three user modes. All modes share the same canonical runtime model — they differ in surface complexity, not in underlying behavior. Receipts, provenance, and governance controls apply in all modes.
+VNX supports two user modes. All modes share the same canonical runtime model — they differ in surface complexity, not in underlying behavior. Receipts, provenance, and governance controls apply in all modes.
 
 ### 2.1 Starter Mode
 
@@ -79,46 +79,12 @@ VNX supports three user modes. All modes share the same canonical runtime model 
 
 **Boundaries**: None — this is the full system.
 
-### 2.3 Demo Mode
-
-> **RETIRED 2026-06-27 (audit #9).** The `vnx demo` command, its `vnx_demo.py` wrapper, and the
-> `demo/` replay assets have been removed. The dry-run replay assets were never shipped (the command
-> errored on a fresh clone), and the old 4-tmux T1-T3 model it reflected is superseded by the
-> single-entry door. This section is kept for the decision trail; the capabilities below are no
-> longer available.
-
-**Purpose**: Showcase VNX capabilities without requiring a real project or persistent state. For marketing, talks, and evaluation.
-
-| Property | Value |
-|----------|-------|
-| **tmux required** | No (optional for visual demo) |
-| **Terminals** | Simulated or single |
-| **Providers** | None required (uses dry-run / recorded flows) |
-| **Dispatch model** | Replay or dry-run |
-| **Governance** | Receipts emitted to temp directory |
-| **Dashboard** | Available (read-only, with sample state) |
-| **Worktrees** | Not available |
-| **Intelligence** | Sample data only |
-
-**Capabilities**:
-- `vnx demo` — launch demo with sample dispatches and state
-- `vnx demo --dashboard` — launch dashboard with sample data
-- `vnx demo --replay <scenario>` — replay a recorded orchestration flow
-- Dashboard visualization with pre-built state
-
-**Boundaries**:
-- No real dispatch execution
-- No persistent state changes to user project
-- Temp directory for all runtime artifacts (cleaned on exit)
-- Cannot transition to starter/operator without `vnx init`
-
-### 2.4 Mode Detection and Switching
+### 2.3 Mode Detection and Switching
 
 ```
 vnx init --starter     → creates .vnx-data/mode.json {"mode": "starter"}
 vnx init --operator    → creates .vnx-data/mode.json {"mode": "operator"}  (default if no flag)
 vnx init               → interactive prompt: starter or operator
-vnx demo               → no init required; uses temp state
 ```
 
 Mode is stored in `.vnx-data/mode.json` and checked at command dispatch time. Commands unavailable in the current mode return a clear error with upgrade instructions.
@@ -179,13 +145,6 @@ All 47 commands are available in operator mode. The public command surface must 
 | `vnx smoke` | Run smoke tests |
 | `vnx package-check` | Package integrity check |
 | `vnx init-db` | Initialize database |
-
-#### Tier 4: Demo Only (RETIRED 2026-06-27, audit #9 — `vnx demo` removed)
-| Command | Description |
-|---------|-------------|
-| `vnx demo` | Launch demo mode |
-| `vnx demo --dashboard` | Demo with dashboard |
-| `vnx demo --replay <scenario>` | Replay recorded flow |
 
 ### 3.3 Command Gating
 
@@ -256,7 +215,7 @@ Scripts ranked by fragility score (methodology: weighted composite of path sensi
 
 | Criterion | Target |
 |-----------|--------|
-| README explains all three modes | Yes, with quickstart for each |
+| README explains both modes | Yes, with quickstart for each |
 | Comparison vs raw Claude Code | Honest, differentiating |
 | Comparison vs OpenClaw / similar | Honest, differentiating |
 | Example flows cover coding + non-coding | At least 3 example flows |
@@ -277,7 +236,6 @@ Scripts ranked by fragility score (methodology: weighted composite of path sensi
 | Criterion | Target |
 |-----------|--------|
 | Starter mode emits receipts | Yes — verified in tests |
-| Demo mode emits receipts (to temp) | Yes — verified in tests |
 | Provenance tracking in all modes | Yes — no mode bypasses provenance |
 | Mode cannot be silently changed | Mode stored in `.vnx-data/mode.json`, checked at dispatch |
 | Audit trail covers mode transitions | Mode changes logged in receipt stream |
@@ -334,7 +292,6 @@ These invariants hold across all modes. No PR in this feature may violate them.
 | Starter mode feels too limited, users skip to operator before ready | Medium | Clear documentation of what starter enables; graduated command unlocking |
 | Python migration introduces regressions in operator mode | High | Test-before-demote rule; shell originals kept as fallback during transition |
 | Path resolution diverges between shell and Python during migration | High | Single `vnx_common.py` resolver; shell wrappers call Python for paths |
-| Demo mode creates false expectations about system complexity | Medium | Demo clearly labeled; shows governance overhead, not just happy path |
 | Mode detection adds latency to every command | Low | Mode file is a single JSON read; < 1ms |
 | Packaging story (git clone) too primitive for enterprise adoption | Medium | Future: consider pip install / brew; out of scope for this feature |
 
