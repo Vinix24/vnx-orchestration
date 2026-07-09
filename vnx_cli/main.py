@@ -369,6 +369,8 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     _common_horizon_args(p_list)
     p_list.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
     p_list.add_argument("--phase", choices=_PHASE_CHOICES, default=None)
+    p_list.add_argument("--all", action="store_true",
+                        help="include done tracks (hidden by default)")
 
     p_show = subs.add_parser("show", help="show one objective")
     _common_horizon_args(p_show)

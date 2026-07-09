@@ -148,6 +148,44 @@ def test_horizon_add_list_round_trip(project, monkeypatch, capsys):
     assert {d["track_id"] for d in data} == {"feat-h1"}
 
 
+def test_horizon_list_hides_done_by_default(project, monkeypatch, capsys):
+    """Actionable-by-default: `horizon list` hides done tracks (they stay in
+    their band + the receipt ledger); --all and --phase done surface them
+    explicitly. Keeps a reconciled-but-unarchived track from reading as drift."""
+    project_dir, state_dir = project
+    pid = "horizon-test"
+
+    for tid in ("feat-open", "feat-shipped"):
+        rc, _, err = _run(monkeypatch, capsys, [
+            "horizon", "add", tid, f"Title {tid}", "shipped",
+            "--project-id", pid, "--project-dir", str(project_dir),
+        ])
+        assert rc == 0, err
+
+    # `add` always creates phase=queued; mark one done directly.
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    try:
+        conn.execute(
+            "UPDATE tracks SET phase = 'done' WHERE track_id = ? AND project_id = ?",
+            ("feat-shipped", pid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def _ids(extra):
+        rc, out, err = _run(monkeypatch, capsys, [
+            "horizon", "list", "--project-id", pid,
+            "--project-dir", str(project_dir), "--json", *extra,
+        ])
+        assert rc == 0, err
+        return {d["track_id"] for d in json.loads(out)}
+
+    assert _ids([]) == {"feat-open"}                                  # default: done hidden
+    assert _ids(["--all"]) == {"feat-open", "feat-shipped"}           # --all: both
+    assert _ids(["--phase", "done"]) == {"feat-shipped"}              # explicit done
+
+
 def test_horizon_resolves_central_store_not_repo_local(project, monkeypatch, capsys):
     project_dir, state_dir = project
 
