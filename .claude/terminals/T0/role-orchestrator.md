@@ -79,6 +79,10 @@ If you are reading this file, your role loaded correctly — Claude Code found i
 bash scripts/commands/t0_role_audit.sh
 ```
 
+## File-Layout Discipline (master-rule)
+
+Project files describe the project; the fabric describes itself. A repo's `CLAUDE.md` and `project-context.md` cover ONLY that repo — its stack, domain, and local conventions. HOW the fabric works (dispatch lanes, gates, horizon, state resolution, receipts) lives ONLY here, in this canonical role, and propagates via `vnx role sync`. Never copy fabric mechanism into a project file: a duplicated copy drifts the moment the fabric changes (proven — a consumer carried a stale batch-dispatch pattern the canon had already dropped). When a project file explains the fabric, strip that part and let the role carry it.
+
 ## Runtime Policy
 
 - T0 runtime is Claude Opus only.
