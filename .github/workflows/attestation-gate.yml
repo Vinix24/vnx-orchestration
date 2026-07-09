@@ -60,8 +60,18 @@ jobs:
           # A PR that weakens verify_pr.py cannot affect the gate decision.
           VERIFIER_DIR="/tmp/vnx-base-verifier"
           mkdir -p "$VERIFIER_DIR"
-          for f in verify_pr.py attest_record.py attestation.py content_key.py ndjson_hash_chain.py; do
-            git show "origin/main:scripts/lib/$f" > "$VERIFIER_DIR/$f"
+          for f in verify_pr.py attest_record.py attestation.py content_key.py ndjson_hash_chain.py evidence_bound_gate.py; do
+            if git show "origin/main:scripts/lib/$f" > "$VERIFIER_DIR/$f" 2>/dev/null; then
+              echo "Extracted $f from origin/main"
+            elif [ "$f" = "evidence_bound_gate.py" ]; then
+              # Bootstrap: the evidence-bound gate module lands in origin/main only after
+              # this PR.  Old base-branch verifiers do not import it, so a missing copy is
+              # safe during the advisory rollout window.
+              echo "Skipping $f — not yet present in origin/main (bootstrap)"
+            else
+              echo "Required verifier $f missing from origin/main" >&2
+              exit 1
+            fi
           done
           echo "Base-branch verifier extracted to $VERIFIER_DIR"
           ls -la "$VERIFIER_DIR"

@@ -55,6 +55,7 @@ def build_attest_manifest(
     signer_identity: str,
     timestamp: str,
     diff_hash: str,
+    task_class: "str | None" = None,
 ) -> dict:
     """Governed manifest extended with diff_hash for diff-binding.
 
@@ -68,6 +69,7 @@ def build_attest_manifest(
         plan_gate_ref=plan_gate_ref,
         signer_identity=signer_identity,
         timestamp=timestamp,
+        task_class=task_class,
     )
     manifest["diff_hash"] = diff_hash
     return manifest
@@ -85,6 +87,7 @@ def write_attest_record(
     repo_root: "str | Path | None" = None,
     base_ref: str = "origin/main",
     head_ref: str = "HEAD",
+    task_class: "str | None" = None,
 ) -> AttestRecord:
     """Compute content-key, build + sign manifest, write .vnx-attest/<key>.json.
 
@@ -124,6 +127,7 @@ def write_attest_record(
         signer_identity=signer_identity,
         timestamp=timestamp,
         diff_hash=diff_hash,
+        task_class=task_class,
     )
 
     if key_path is not None:

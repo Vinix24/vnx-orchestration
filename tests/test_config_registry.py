@@ -40,6 +40,13 @@ def test_gate_flags_default_off_matching_code():
     assert cr.CONFIG_REGISTRY["VNX_WIRING_GATE_REQUIRED"].default == "0"
 
 
+def test_evidence_bound_gate_default_advisory_and_requires_approval():
+    entry = cr.CONFIG_REGISTRY["VNX_EVIDENCE_BOUND_GATE"]
+    assert entry.default == "advisory"
+    assert entry.type == "enum"
+    assert entry.requires_approval is True
+
+
 def test_feature_toggles_default_off_and_provider_deepseek():
     assert cr.CONFIG_REGISTRY["VNX_SCOUT_PREPASS"].default == "0"
     assert cr.CONFIG_REGISTRY["VNX_TAGGER_ENABLED"].default == "0"
@@ -49,6 +56,8 @@ def test_feature_toggles_default_off_and_provider_deepseek():
 
 def test_gate_and_autopilot_require_approval():
     assert cr.CONFIG_REGISTRY["VNX_CI_GATE_REQUIRED"].requires_approval is True
+    assert cr.CONFIG_REGISTRY["VNX_WIRING_GATE_REQUIRED"].requires_approval is True
+    assert cr.CONFIG_REGISTRY["VNX_EVIDENCE_BOUND_GATE"].requires_approval is True
     assert cr.CONFIG_REGISTRY["VNX_ROADMAP_AUTOPILOT"].requires_approval is True
     # fail-safe intelligence toggles do not require approval
     assert cr.CONFIG_REGISTRY["VNX_SCOUT_PREPASS"].requires_approval is False
