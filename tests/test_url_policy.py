@@ -16,7 +16,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
-from url_policy import URLPolicy, URLPolicyViolation
+from url_policy import (
+    URLPolicy,
+    URLPolicyViolation,
+    open_pinned_connection,
+)
 
 
 @pytest.fixture
@@ -48,7 +52,7 @@ def _fake_getaddrinfo(mapping: dict[str, list[str]]):
 def test_01_private_ipv4_rejected(policy: URLPolicy) -> None:
     with pytest.raises(URLPolicyViolation) as exc:
         policy.validate("http://10.0.0.5/admin")
-    assert "private_ip" in exc.value.reason
+    assert "non_global_ip" in exc.value.reason
     assert "10.0.0.5" in exc.value.reason
 
 
@@ -116,7 +120,7 @@ def test_07_dns_resolves_to_private_rejected(
     )
     with pytest.raises(URLPolicyViolation) as exc:
         policy.validate("https://sneaky.example.com/path")
-    assert "private_ip" in exc.value.reason
+    assert "non_global_ip" in exc.value.reason
     assert "10.20.30.40" in exc.value.reason
 
 
@@ -138,6 +142,150 @@ def test_10_userinfo_evasion_rejected(policy: URLPolicy) -> None:
         policy.validate("http://example.com@127.0.0.1/admin")
     assert "loopback_ip" in exc.value.reason
     assert "127.0.0.1" in exc.value.reason
+
+
+def test_11_cgnat_rejected(policy: URLPolicy) -> None:
+    """F1 — 100.64.0.0/10 (CGNAT) is not ``is_private`` but is non-global."""
+    for host in ("100.64.0.1", "100.127.255.255"):
+        with pytest.raises(URLPolicyViolation) as exc:
+            policy.validate(f"http://{host}/")
+        assert "non_global_ip" in exc.value.reason, host
+        assert host in exc.value.reason, host
+
+
+def test_11b_public_ip_still_passes_cgnat_fix(
+    policy: URLPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 regression guard: a real public IP must still validate cleanly."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _fake_getaddrinfo({"public.example.com": ["93.184.216.34"]}),
+    )
+    policy.validate("http://93.184.216.34/")
+    policy.validate("https://public.example.com/")
+
+
+# ---------------------------------------------------------------------------
+# F2 — DNS-rebinding TOCTOU (validate_and_pin)
+# ---------------------------------------------------------------------------
+
+
+def test_12_validate_and_pin_returns_vetted_ip(
+    policy: URLPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _fake_getaddrinfo({"api.example.com": ["93.184.216.34"]}),
+    )
+    target = policy.validate_and_pin("https://api.example.com/v1")
+    assert target.hostname == "api.example.com"
+    assert target.pinned_ip == "93.184.216.34"
+    assert target.port == 443
+    assert target.scheme == "https"
+    assert target.url == "https://api.example.com/v1"
+
+
+def test_13_validate_and_pin_rejects_unsafe_target(
+    policy: URLPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _fake_getaddrinfo({"sneaky.example.com": ["10.20.30.40"]}),
+    )
+    with pytest.raises(URLPolicyViolation):
+        policy.validate_and_pin("https://sneaky.example.com/")
+
+
+def test_14_pin_survives_dns_rebind(
+    policy: URLPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulates the classic TOCTOU: the resolver answers with a public IP
+    at validate-time, then flips to a private IP on the next lookup (as a
+    rebind attacker's authoritative DNS server would for a low-TTL record).
+    A caller connecting via the pinned target must still reach the public
+    IP that was actually vetted, never the rebound private one.
+    """
+    calls = {"n": 0}
+
+    def rebinding_resolver(host, *_args, **_kwargs):
+        calls["n"] += 1
+        addr = "93.184.216.34" if calls["n"] == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (addr, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding_resolver)
+
+    target = policy.validate_and_pin("http://rebind.example.com/")
+    assert target.pinned_ip == "93.184.216.34"
+
+    # A later, independent resolution of the same host now returns the
+    # rebound private IP — proving the window exists...
+    second_lookup = socket.getaddrinfo("rebind.example.com", None)
+    assert second_lookup[0][4][0] == "127.0.0.1"
+
+    # ...but the pinned target is untouched: it never re-resolves.
+    assert target.pinned_ip == "93.184.216.34"
+
+    connect_calls = []
+
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_create_connection(address, *_args, **_kwargs):
+        connect_calls.append(address)
+        return _FakeSocket()
+
+    conn = open_pinned_connection(target, timeout=1.0)
+    monkeypatch.setattr(conn, "_create_connection", fake_create_connection)
+    conn.connect()
+
+    # The socket connects to the pinned IP, never to a fresh DNS answer —
+    # even though "rebind.example.com" now resolves to 127.0.0.1.
+    assert connect_calls == [("93.184.216.34", 80)]
+    assert conn.host == "rebind.example.com"
+
+
+def test_15_https_pin_connects_by_ip_but_verifies_original_hostname(
+    policy: URLPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTPS pinning must dial the pinned IP while still presenting the
+    original hostname for TLS SNI + certificate verification — otherwise
+    the connection either fails cert validation or (worse) silently skips
+    it."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _fake_getaddrinfo({"secure.example.com": ["93.184.216.34"]}),
+    )
+    target = policy.validate_and_pin("https://secure.example.com/")
+
+    connect_calls = []
+    wrap_calls = []
+
+    class _FakeSocket:
+        pass
+
+    def fake_create_connection(address, *_args, **_kwargs):
+        connect_calls.append(address)
+        return _FakeSocket()
+
+    def fake_wrap_socket(sock, server_hostname=None, **_kwargs):
+        wrap_calls.append(server_hostname)
+        return sock
+
+    conn = open_pinned_connection(target, timeout=1.0)
+    monkeypatch.setattr(conn, "_create_connection", fake_create_connection)
+    monkeypatch.setattr(conn._context, "wrap_socket", fake_wrap_socket)
+    conn.connect()
+
+    assert connect_calls == [("93.184.216.34", 443)]
+    assert wrap_calls == ["secure.example.com"]
 
 
 # ---------------------------------------------------------------------------
