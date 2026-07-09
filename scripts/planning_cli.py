@@ -144,6 +144,16 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
     if args.horizon:
         tracks = [t for t in tracks if _horizon_key(t) == args.horizon]
 
+    # Actionable-by-default: hide done tracks unless --all or an explicit
+    # --phase done. Done work stays in its band and the receipt ledger; the
+    # default view should surface only what still needs a human, so a
+    # reconciled-but-unarchived track no longer reads as live drift.
+    hidden_done = 0
+    if not getattr(args, "all", False) and args.phase is None:
+        before = len(tracks)
+        tracks = [t for t in tracks if t["phase"] != "done"]
+        hidden_done = before - len(tracks)
+
     if args.json:
         out = [
             {
@@ -163,8 +173,12 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
         return 0
 
     if not tracks:
-        print(f"No objectives found for project '{project_id}'.")
-        print("Seed from ROADMAP: python3 scripts/seed_tracks_from_roadmap.py --apply")
+        if hidden_done:
+            print(f"No open objectives for project '{project_id}' "
+                  f"({hidden_done} done hidden — --all to show).")
+        else:
+            print(f"No objectives found for project '{project_id}'.")
+            print("Seed from ROADMAP: python3 scripts/seed_tracks_from_roadmap.py --apply")
         return 0
 
     # Group by horizon band.
@@ -191,6 +205,8 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
                 f"{t.get('priority') or '-':<3} {t['title']}{pr_str}{dep_str}"
             )
         print()
+    if hidden_done:
+        print(f"({hidden_done} done hidden — --all or --phase done to show)\n")
     return 0
 
 
@@ -1894,6 +1910,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_list)
     p_list.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
     p_list.add_argument("--phase", choices=sorted(tracks_lib.VALID_PHASES), default=None)
+    p_list.add_argument("--all", action="store_true",
+                        help="include done tracks (hidden by default)")
     p_list.set_defaults(func=cmd_objective_list)
 
     p_show = obj_sub.add_parser("show", help="show one objective")
