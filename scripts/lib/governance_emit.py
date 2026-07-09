@@ -65,6 +65,7 @@ def emit_dispatch_receipt(
     report_path: Optional[str] = None,
     events_path: Optional[str] = None,
     permission_enforcement: Optional[str] = None,
+    mandate_id: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson. fcntl.flock for concurrent safety.
 
@@ -114,6 +115,8 @@ def emit_dispatch_receipt(
     }
     if permission_enforcement:
         receipt["permission_enforcement"] = permission_enforcement
+    if mandate_id:
+        receipt["mandate_id"] = mandate_id
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)

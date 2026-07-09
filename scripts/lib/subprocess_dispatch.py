@@ -239,6 +239,7 @@ def deliver_with_recovery(
     gate: str = "",
     dispatch_paths: "list[str] | None" = None,
     pr_id: str | None = None,
+    mandate_id: str | None = None,
 ) -> bool:
     """Deliver while suppressing shared preparation in benchmark equal-context mode."""
     kwargs = {
@@ -254,6 +255,7 @@ def deliver_with_recovery(
         "gate": gate,
         "dispatch_paths": dispatch_paths,
         "pr_id": pr_id,
+        "mandate_id": mandate_id,
     }
     if not _bench_equal_context_enabled():
         return _deliver_with_recovery(
@@ -372,6 +374,14 @@ def _build_cheap_lane_argv(
         argv.extend(["--pr-id", args.pr_id])
     if getattr(args, "no_repo_map", False):
         argv.append("--no-repo-map")
+    if getattr(args, "approval_id", None):
+        argv.extend(["--approval-id", args.approval_id])
+    if getattr(args, "mandate_id", None):
+        argv.extend(["--mandate-id", args.mandate_id])
+    if getattr(args, "session_id", None):
+        argv.extend(["--session-id", args.session_id])
+    if getattr(args, "task_class", None):
+        argv.extend(["--task-class", args.task_class])
     return argv
 
 
@@ -480,6 +490,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--requires-mcp", action="store_true", default=False,
         help="Preserve ambient MCP config for this dispatch (Requires-MCP: true in dispatch file).",
+    )
+    parser.add_argument(
+        "--approval-id", default=None,
+        help="Per-dispatch operator approval token (required when VNX_SIGNED_DELEGATION is off).",
+    )
+    parser.add_argument(
+        "--mandate-id", default=None,
+        help="Signed delegation mandate ID (used when VNX_SIGNED_DELEGATION=1).",
+    )
+    parser.add_argument(
+        "--session-id", default=None,
+        help="Session identifier for mandate scope matching.",
     )
     # ADR-006: staging→pending→promote gate enforcement.
     parser.add_argument(
@@ -591,6 +613,51 @@ if __name__ == "__main__":
     _db_path = _state_dir / "runtime_coordination.db"
     _project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
 
+    # Signed-delegation mandate gate (VNX_SIGNED_DELEGATION, default OFF).
+    # When the flag is off this block is skipped entirely, preserving the
+    # legacy per-dispatch approval path unchanged.
+    _current_mandate_id: "str | None" = None
+    try:
+        import delegation_mandate as _dm  # noqa: PLC0415
+    except ImportError:
+        _dm = None  # type: ignore[assignment]
+    if _dm is not None and _dm.is_signed_delegation_enabled():
+        _repo_root = Path(os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
+        _allowed_signers = _dm.resolve_allowed_signers_for_runtime(_repo_root)
+        if _allowed_signers is None:
+            print(
+                "[subprocess_dispatch] REJECT: VNX_SIGNED_DELEGATION=1 but no "
+                ".vnx-attest/allowed_signers trust anchor found.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _ctx = _dm.DispatchContext(
+            project_id=_project_id,
+            session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+            task_class=getattr(args, "task_class", None) or None,
+            dispatch_id=args.dispatch_id,
+        )
+        _ok, _recorded_mandate, _reason = _dm.resolve_signed_delegation(
+            _ctx,
+            getattr(args, "approval_id", None),
+            getattr(args, "mandate_id", None),
+            allowed_signers=_allowed_signers,
+            repo_root=_repo_root,
+        )
+        if not _ok:
+            print(
+                f"[subprocess_dispatch] REJECT: signed-delegation gate failed: {_reason}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _current_mandate_id = _recorded_mandate
+        if _current_mandate_id:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).info(
+                "signed-delegation: dispatch=%s covered by mandate=%s",
+                args.dispatch_id, _current_mandate_id,
+            )
+
     try:
         from pool_state_repo import PoolStateRepository
         _pid_repo = PoolStateRepository(_db_path, _project_id)
@@ -673,6 +740,7 @@ if __name__ == "__main__":
             gate=args.gate,
             dispatch_paths=_dispatch_paths,
             pr_id=args.pr_id,
+            mandate_id=_current_mandate_id,
         )
     finally:
         _hb_stop.set()
