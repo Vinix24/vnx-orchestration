@@ -124,3 +124,17 @@ class TestRobustness:
         agent_dir = _make_agent(tmp_path, "bad-yaml", config="not yaml: [")
         cfg = resolve_agent("bad-yaml", tmp_path)
         assert cfg is not None and cfg.claude_md == agent_dir / "CLAUDE.md" and cfg.provider == "claude"
+
+
+def test_resolve_agent_rejects_path_traversal(tmp_path):
+    """A traversal agent name must never resolve to a path outside the agent dirs."""
+    import agent_resolver as ar
+    # Plant a CLAUDE.md two levels up to prove traversal can't reach it.
+    (tmp_path / "CLAUDE.md").write_text("outside", encoding="utf-8")
+    proj = tmp_path / "proj"
+    (proj / "agents").mkdir(parents=True)
+    for bad in ["../../CLAUDE-dir", "..", "a/b", "../../../etc", "foo/../bar"]:
+        assert ar._resolve_agent_claude_md(bad, proj) is None
+        assert ar.resolve_agent(bad, proj) is None
+    assert ar._is_safe_agent_name("backend-developer") is True
+    assert ar._is_safe_agent_name("../x") is False

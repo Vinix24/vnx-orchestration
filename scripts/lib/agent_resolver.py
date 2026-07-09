@@ -9,6 +9,7 @@ schema into a typed, backward-compatible result.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,6 +17,15 @@ from typing import Any, Mapping
 import yaml
 
 VNX_AGENT_FOLDERS_ENV = "VNX_AGENT_FOLDERS"
+
+# Agent names are simple slugs; reject anything that could traverse the filesystem
+# (path separators, `..`, dots) before the name is ever joined into a path.
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _is_safe_agent_name(name: str) -> bool:
+    """True only for a slug-safe agent name — blocks path traversal (`../`, `/`, `..`)."""
+    return isinstance(name, str) and _AGENT_NAME_RE.match(name) is not None
 
 
 @dataclass(frozen=True)
@@ -45,6 +55,8 @@ def _resolve_agent_claude_md(
     engine_root: Path | None = None,
 ) -> Path | None:
     """Find ``<name>/CLAUDE.md`` using project agents/, examples/, then engine examples/."""
+    if not _is_safe_agent_name(name):
+        return None
     candidates = [
         project_dir / "agents" / name / "CLAUDE.md",
         project_dir / "examples" / name / "CLAUDE.md",
