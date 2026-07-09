@@ -167,11 +167,18 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         adapter = "provider"
     fired.append("D1")
 
-    # D2 — billing
+    # D2 — billing. Provider lanes are metered by default, with two exceptions:
+    # kimi runs on a flat CLI-OAuth subscription (kimi-via-cli-only), and
+    # local-gemma runs on-device with no API cost. Labeling both as
+    # provider_metered overstated cost and hid their real quota model.
     if is_claude_headless:
         billing = "api_metered"
     elif is_claude_lane:
         billing = "subscription"
+    elif provider == Provider.KIMI:
+        billing = "subscription"
+    elif provider == Provider.LOCAL_GEMMA:
+        billing = "local"
     else:
         billing = "provider_metered"
     fired.append("D2")

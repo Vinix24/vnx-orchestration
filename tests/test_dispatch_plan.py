@@ -179,6 +179,33 @@ class TestProviderLaneParallel:
         assert plan.serialization_class is None
         assert plan.billing == "provider_metered"
 
+    def test_kimi_is_subscription_not_metered(self, tmp_path: Path) -> None:
+        # kimi runs on a flat CLI-OAuth subscription (kimi-via-cli-only), not
+        # per-token API billing; it must not be labeled provider_metered.
+        vspec = _make_vspec(provider=Provider.KIMI, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.lane == "provider"
+        assert plan.billing == "subscription"
+
+    def test_local_gemma_is_local_not_metered(self, tmp_path: Path) -> None:
+        # local-gemma runs on-device with no API cost.
+        vspec = _make_vspec(provider=Provider.LOCAL_GEMMA, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "local"
+
+    def test_metered_providers_stay_metered(self, tmp_path: Path) -> None:
+        # glm-harness (OpenRouter) and deepseek-harness (own key) are genuinely
+        # metered — the kimi/local exceptions must not leak to them.
+        for prov in (Provider.GLM_HARNESS, Provider.DEEPSEEK_HARNESS, Provider.GEMINI):
+            plan = compile_plan(
+                _make_vspec(provider=prov, target_slot="T1", tmp_path=tmp_path),
+                _healthy_snapshot(),
+            )
+            assert isinstance(plan, ExecutionPlan), prov
+            assert plan.billing == "provider_metered", prov
+
 
 # ---------------------------------------------------------------------------
 # test_staging_gate
