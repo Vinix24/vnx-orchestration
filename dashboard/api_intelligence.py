@@ -488,6 +488,116 @@ def _scripts_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "scripts"
 
 
+# ---------------------------------------------------------------------------
+# Self-learning proposal sources (operator-gated, read-only)
+# ---------------------------------------------------------------------------
+
+def _load_json_state(path: Path) -> dict:
+    """Best-effort read of a JSON state file; return empty dict on any error."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError, TypeError):
+        return {}
+
+
+def _read_skill_refinement_proposals(state_dir: Path) -> list[dict]:
+    """Return pending skill-refinement proposals from pending_skill_refinements.json."""
+    data = _load_json_state(state_dir / "pending_skill_refinements.json")
+    proposals: list[dict] = []
+    for p in data.get("proposals", []):
+        if p.get("status") != "pending":
+            continue
+        proposals.append({
+            "id": p.get("id"),
+            "type": "skill_refinement",
+            "target": p.get("skill_path", p.get("role", "")),
+            "summary": p.get("rationale", ""),
+            "rationale": p.get("rationale", ""),
+            "confidence": float(p.get("rework_rate", 0)) if p.get("rework_rate") is not None else 0.0,
+            "created_at": p.get("generated_at", ""),
+            "meta": {
+                "role": p.get("role", ""),
+                "rework_rate": p.get("rework_rate"),
+                "reworked_count": p.get("reworked_count"),
+                "total_dispatches": p.get("total_dispatches"),
+                "diff_lines": len((p.get("diff") or "").splitlines()),
+            },
+        })
+    return proposals
+
+
+def _read_pending_rules(state_dir: Path) -> list[dict]:
+    """Return pending prevention-rule proposals from pending_rules.json."""
+    data = _load_json_state(state_dir / "pending_rules.json")
+    proposals: list[dict] = []
+    for r in data.get("pending_rules", []):
+        if r.get("status") != "pending":
+            continue
+        proposals.append({
+            "id": r.get("id"),
+            "type": "rule",
+            "target": r.get("terminal_constraint", "any"),
+            "summary": r.get("pattern", ""),
+            "rationale": r.get("prevention", ""),
+            "confidence": float(r.get("confidence", 0)) if r.get("confidence") is not None else 0.0,
+            "created_at": r.get("created_at", ""),
+            "meta": {
+                "occurrence_count": r.get("occurrence_count"),
+            },
+        })
+    return proposals
+
+
+def _read_archival_candidates(state_dir: Path) -> list[dict]:
+    """Return pending archival / supersede candidates from pending_archival.json."""
+    data = _load_json_state(state_dir / "pending_archival.json")
+    proposals: list[dict] = []
+    for c in data.get("pending_archival", []):
+        if c.get("status") != "pending":
+            continue
+        action = c.get("action") or "archive"
+        proposals.append({
+            "id": c.get("pattern_id"),
+            "type": "archival",
+            "target": c.get("title", ""),
+            "summary": c.get("reason", ""),
+            "rationale": f"{action}: {c.get('reason', '')}".strip(),
+            "confidence": float(c.get("confidence", 0)) if c.get("confidence") is not None else 0.0,
+            "created_at": c.get("queued_at", ""),
+            "meta": {
+                "action": action,
+                "source_table": c.get("source_table", ""),
+                "last_used": c.get("last_used"),
+            },
+        })
+    return proposals
+
+
+def _intelligence_get_learning_proposals(params: dict) -> dict:
+    """Return all pending operator-gated self-learning proposals.
+
+    Sources:
+      - pending_skill_refinements.json (skill-refine)
+      - pending_rules.json (learning run)
+      - pending_archival.json (learning run)
+    """
+    state_dir = _state_dir()
+    proposals: list[dict] = []
+    try:
+        proposals.extend(_read_skill_refinement_proposals(state_dir))
+        proposals.extend(_read_pending_rules(state_dir))
+        proposals.extend(_read_archival_candidates(state_dir))
+    except Exception as exc:  # vnx-silent-except: best-effort enrichment
+        _logger.debug("failed to read self-learning proposals: %s", exc)
+
+    # Stable ordering: newest first; fall back to type then target.
+    proposals.sort(key=lambda p: (p.get("created_at") or "", p.get("type", ""), p.get("target", "")), reverse=True)
+    return {"proposals": proposals}
+
+
 def _load_pending_edits() -> dict:
     path = _state_dir() / "pending_edits.json"
     if not path.exists():

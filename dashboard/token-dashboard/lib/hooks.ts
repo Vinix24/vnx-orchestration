@@ -22,6 +22,7 @@ import {
   fetchIntelligenceClassifications,
   fetchIntelligenceDispatchOutcomes,
   fetchProposals,
+  fetchLearningProposals,
   fetchConfidenceTrends,
   fetchWeeklyDigest,
   fetchDispatches,
@@ -38,6 +39,7 @@ import type {
   ReportsEnvelope, AgentsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
   ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
+  LearningProposalsResponse,
   DispatchesResponse, DispatchDetailResponse, DispatchEventsResponse, DispatchResultResponse,
 } from './types';
 
@@ -285,6 +287,14 @@ export function useProposals() {
   return useSWR<ProposalsResponse>(
     'intelligence-proposals',
     () => fetchProposals(),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useLearningProposals() {
+  return useSWR<LearningProposalsResponse>(
+    'intelligence-learning-proposals',
+    () => fetchLearningProposals(),
     { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
   );
 }

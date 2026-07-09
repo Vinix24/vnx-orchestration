@@ -28,6 +28,7 @@ import type {
   ConfidenceTrendsResponse,
   WeeklyDigest,
   ProposalActionResponse,
+  LearningProposalsResponse,
   DispatchesResponse,
   DispatchDetailResponse,
   DispatchEventsResponse,
@@ -206,6 +207,10 @@ export function fetchIntelligenceDispatchOutcomes(limit = 200): Promise<Dispatch
 
 export function fetchProposals(): Promise<ProposalsResponse> {
   return get('/api/intelligence/proposals');
+}
+
+export function fetchLearningProposals(): Promise<LearningProposalsResponse> {
+  return get('/api/intelligence/learning-proposals');
 }
 
 export function acceptProposal(id: number): Promise<ProposalActionResponse> {
