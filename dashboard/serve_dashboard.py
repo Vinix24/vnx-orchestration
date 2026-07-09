@@ -132,6 +132,7 @@ from api_operator import (  # noqa: E402
     _operator_get_open_items,
     _operator_get_open_items_aggregate,
     _operator_get_projects,
+    _operator_get_sessions,
     _operator_get_report_content,
     _operator_get_reports,
     _operator_get_session,
@@ -372,6 +373,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path.startswith("/api/operator/terminal/"):
             tid = path[len("/api/operator/terminal/"):]
             _json_response(self, HTTPStatus.OK, _operator_get_terminal(tid))
+            return
+
+        if path == "/api/operator/sessions":
+            _json_response(self, HTTPStatus.OK, _operator_get_sessions())
             return
 
         if path == "/api/operator/open-items/aggregate":

@@ -552,3 +552,93 @@ class TestSignalStore:
         assert len(lines) == 2
         for line in lines:
             json.loads(line)  # each line must be valid JSON
+
+
+# ---------------------------------------------------------------------------
+# /api/operator/sessions
+# ---------------------------------------------------------------------------
+
+class TestOperatorSessions:
+    """Live sessions read-model composes tmux state with session-store state."""
+
+    def test_tmux_absent_returns_empty_session_list(self) -> None:
+        with patch.object(ao.shutil, "which", return_value=None):
+            result = sd._operator_get_sessions()
+        assert isinstance(result, dict)
+        assert result["view"] == "live-sessions"
+        assert result["data"] == []
+        assert result["degraded"] is False
+
+    def test_composes_tmux_and_session_store(self) -> None:
+        tmux_sessions = [
+            {
+                "name": "vnx-demo",
+                "project": "demo",
+                "status": "idle",
+                "last_activity": "2026-07-09T20:00:00Z",
+                "age_seconds": 3600,
+            },
+            {
+                "name": "t0-probe",
+                "project": "system",
+                "status": "busy",
+                "last_activity": "2026-07-09T20:30:00Z",
+                "age_seconds": 1800,
+            },
+        ]
+        store_entries = {
+            "vnx-demo": {
+                "session_id": "sess-123",
+                "dispatch_id": "disp-456",
+                "updated_at": "2026-07-09T21:00:00Z",
+            },
+            "orphan-terminal": {
+                "session_id": "sess-789",
+                "dispatch_id": "disp-000",
+                "updated_at": "2026-07-09T19:00:00Z",
+            },
+        }
+
+        with (
+            patch.object(ao, "_list_tmux_sessions", return_value=(tmux_sessions, [])),
+            patch.object(ao, "_load_session_store_entries", return_value=store_entries),
+        ):
+            result = sd._operator_get_sessions()
+
+        assert result["degraded"] is False
+        sessions = result["data"]
+        assert len(sessions) == 3
+
+        names = [s["name"] for s in sessions]
+        assert names == ["vnx-demo", "orphan-terminal", "t0-probe"]
+
+        demo = next(s for s in sessions if s["name"] == "vnx-demo")
+        assert demo["project"] == "demo"
+        assert demo["status"] == "idle"
+        assert demo["session_id"] == "sess-123"
+        assert demo["dispatch_id"] == "disp-456"
+        # session-store updated_at is fresher than tmux activity, so it wins
+        assert demo["last_activity"] == "2026-07-09T21:00:00Z"
+        assert isinstance(demo["age_seconds"], int)
+
+        probe = next(s for s in sessions if s["name"] == "t0-probe")
+        assert probe["project"] == "system"
+        assert probe["status"] == "busy"
+        assert probe["session_id"] is None
+        assert probe["dispatch_id"] is None
+
+        orphan = next(s for s in sessions if s["name"] == "orphan-terminal")
+        assert orphan["project"] == "orphan-terminal"
+        assert orphan["status"] == "idle"
+        assert orphan["session_id"] == "sess-789"
+
+    def test_degraded_on_session_store_read_failure(self) -> None:
+        with (
+            patch.object(ao, "_list_tmux_sessions", return_value=([], [])),
+            patch.object(ao, "_load_session_store_entries", side_effect=RuntimeError("locked")),
+        ):
+            result = sd._operator_get_sessions()
+
+        assert result["degraded"] is True
+        assert any("session store" in reason.lower() for reason in result["degraded_reasons"])
+        assert result["data"] == []

@@ -18,6 +18,7 @@ import type {
   ConfigSetResponse,
   ConfigAuditEnvelope,
   ObservabilityEnvelope,
+  LiveSessionsEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
   PatternsResponse,
@@ -147,6 +148,10 @@ export function fetchConfig(): Promise<ConfigEnvelope> {
 
 export function fetchObservability(): Promise<ObservabilityEnvelope> {
   return get(`${BASE}/observability`);
+}
+
+export function fetchLiveSessions(): Promise<LiveSessionsEnvelope> {
+  return get(`${BASE}/sessions`);
 }
 
 export function postConfigSet(req: ConfigSetRequest): Promise<ConfigSetResponse> {

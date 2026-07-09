@@ -152,6 +152,19 @@ export interface FreshnessEnvelope<T = unknown> {
 export interface ProjectsEnvelope extends FreshnessEnvelope<ProjectEntry[]> {}
 export interface SessionEnvelope extends FreshnessEnvelope<SessionData> {}
 export interface TerminalsEnvelope extends FreshnessEnvelope<TerminalEntry[]> {}
+
+export interface LiveSession {
+  name: string;
+  project: string | null;
+  status: 'idle' | 'busy';
+  last_activity: string | null;
+  age_seconds: number | null;
+  session_id: string | null;
+  dispatch_id: string | null;
+  remote_control_url: string | null;
+}
+
+export interface LiveSessionsEnvelope extends FreshnessEnvelope<LiveSession[]> {}
 export interface TerminalEnvelope extends FreshnessEnvelope<TerminalEntry> {}
 export interface OpenItemsEnvelope extends FreshnessEnvelope<{ items: OpenItem[]; summary: OpenItemSummary }> {}
 export interface AggregateOpenItemsEnvelope extends FreshnessEnvelope<{

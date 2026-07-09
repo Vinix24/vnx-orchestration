@@ -18,6 +18,7 @@ const OPERATOR_NAV = [
   { href: '/operator/intelligence', label: 'Intelligence', icon: Brain },
   { href: '/operator/dispatches', label: 'Dispatches', icon: ClipboardList },
   { href: '/operator/improvements', label: 'Improvements', icon: Lightbulb },
+  { href: '/operator/sessions', label: 'Live Sessions', icon: Activity },
   { href: '/operator/reports', label: 'Reports', icon: FileText },
   { href: '/operator/health', label: 'System Health', icon: HeartPulse },
   { href: '/agent-stream', label: 'Agent Stream', icon: Activity },

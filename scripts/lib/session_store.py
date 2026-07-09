@@ -199,3 +199,22 @@ class SessionStore:
         except Exception as exc:
             logger.debug("SessionStore.all_sessions: %s", exc)
             return {}
+
+    def all_entries(self) -> Dict[str, Dict[str, Any]]:
+        """Return full terminal entries for read-only consumers.
+
+        Mirrors ``all_sessions`` but preserves ``dispatch_id`` and
+        ``updated_at`` so dashboards can show last-mutated timestamps without
+        re-parsing the raw file.
+        """
+        try:
+            data = self._read_raw()
+            terminals = data.get("terminals", {})
+            result: Dict[str, Dict[str, Any]] = {}
+            for tid, entry in terminals.items():
+                if isinstance(entry, dict) and entry.get("session_id"):
+                    result[tid] = dict(entry)
+            return result
+        except Exception as exc:
+            logger.debug("SessionStore.all_entries: %s", exc)
+            return {}
