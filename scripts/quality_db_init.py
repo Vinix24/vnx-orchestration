@@ -25,7 +25,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 26
+HIGHEST_QI_VERSION = 27
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1044,6 +1044,72 @@ def _migrate_v26_down(conn: sqlite3.Connection) -> None:
     log('INFO', 'Reversed V26: re-added success_rate column to success_patterns')
 
 
+# ADR-007: composite UNIQUE indexes over project_id for tables that historically
+# carried only a single-column PK/UNIQUE. Each entry is (table, [columns]).
+_QI_COMPOSITE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("dispatch_experiments", ("project_id", "id")),
+    ("success_patterns", ("project_id", "id")),
+    ("antipatterns", ("project_id", "id")),
+    ("pattern_usage", ("project_id", "pattern_id")),
+    ("prevention_rules", ("project_id", "id")),
+    ("session_analytics", ("project_id", "id")),
+    ("confidence_events", ("project_id", "id")),
+    ("dispatch_pattern_offered", ("project_id", "dispatch_id", "pattern_id")),
+    ("dream_pattern_archives", ("project_id", "archive_id")),
+)
+
+
+def _migrate_v27(conn: sqlite3.Connection) -> None:
+    """V27: ADR-007 composite UNIQUE indexes over project_id (non-destructive).
+
+    Creates ``CREATE UNIQUE INDEX IF NOT EXISTS ux_<table>_pid`` for each table
+    listed in ``_QI_COMPOSITE_KEYS``. Each index creation is wrapped in its own
+    try/except: a missing column or existing duplicate rows in a given table only
+    skips that one table and logs a clear warning. The migration never aborts,
+    never deletes rows, and never rewrites data.
+
+    The version stamp is advanced only after the best-effort pass, so re-runs
+    are no-ops via ``IF NOT EXISTS``.
+    """
+    for table, cols in _QI_COMPOSITE_KEYS:
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            log('WARNING', f'composite-keys: skipped {table} — table does not exist')
+            continue
+
+        actual_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        missing = [c for c in cols if c not in actual_cols]
+        if missing:
+            log('WARNING', f"composite-keys: skipped {table} — missing column(s): {', '.join(missing)}")
+            continue
+
+        index_name = f"ux_{table}_pid"
+        col_list = ", ".join(cols)
+        try:
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table} ({col_list})"
+            )
+            log('INFO', f'composite-keys: created UNIQUE INDEX {index_name} ON {table}({col_list}) (ADR-007)')
+        except sqlite3.Error as exc:
+            log('WARNING', f'composite-keys: skipped {table} — {exc}')
+
+
+def _migrate_v27_down(conn: sqlite3.Connection) -> None:
+    """Down migration for V27: drop the ADR-007 composite UNIQUE indexes.
+
+    Idempotent — ``DROP INDEX IF EXISTS`` is a no-op when the index is absent.
+    """
+    for table, _ in _QI_COMPOSITE_KEYS:
+        index_name = f"ux_{table}_pid"
+        try:
+            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+            log('INFO', f'composite-keys: dropped {index_name} (V27 down)')
+        except sqlite3.Error as exc:
+            log('WARNING', f'composite-keys: failed to drop {index_name} — {exc}')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1072,6 +1138,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     24: _migrate_v24,
     25: _migrate_v25,
     26: _migrate_v26,
+    27: _migrate_v27,
 }
 
 

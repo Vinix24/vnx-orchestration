@@ -32,6 +32,9 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+import schema_migration
+from coordination_db import _migrate_v11_composite_keys
+
 DEFAULT_PROJECT_ID = "vnx-dev"
 
 log = logging.getLogger(__name__)
@@ -360,6 +363,12 @@ def run_runtime_coordination_migration(
         # Self-heal the 2nd schema-code drift: terminal_leases.worker_pid.
         # Independent of the project_id columns above; nullable INTEGER.
         worker_pid_status = ensure_worker_pid_column(conn)
+
+        # ADR-007: composite UNIQUE indexes over project_id. Applied here (after the
+        # project_id columns exist) so the normal vnx migrate flow creates them even
+        # when init_schema ran before migration 0010. Idempotent via user_version.
+        schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS runtime_schema_version ("
             "version INTEGER PRIMARY KEY, "
