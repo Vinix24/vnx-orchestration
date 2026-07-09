@@ -45,13 +45,14 @@ from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, class
 # by default (tmux-spawn workers run in an isolated per-dispatch worktree, so
 # the scoped allow-list only stalls autonomous builds on prompts for
 # un-allow-listed ops). Scoped (empty ambient MCP + acceptEdits + role
-# allow-list) is opt-in via VNX_WORKER_SCOPED=1. Imported defensively; if
-# unavailable the detached branch keeps a minimal inline fallback with the
-# same default.
+# allow-list) is opt-in via VNX_ENFORCE_WORKER_PERMISSIONS=1 (ADR-012) or the
+# legacy VNX_WORKER_SCOPED=1. Imported defensively; if unavailable the detached
+# branch keeps a minimal inline fallback with the same default.
 try:
     from worker_permissions import (  # noqa: E402
         EMPTY_MCP_CONFIG,
         worker_scoped_enabled,
+        worker_permission_enforcement_enabled,
         build_claude_scope_args as _wp_build_claude_scope_args,
         resolve_worker_profile as _wp_resolve_worker_profile,
     )
@@ -62,6 +63,14 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
 
     def worker_scoped_enabled() -> bool:  # type: ignore[misc]
         return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
+        return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
             "1",
             "true",
             "yes",
@@ -259,9 +268,10 @@ def _default_launch_command(
         # Detached/autonomous run (no TTY to answer prompts). Default: the
         # blanket skip-permissions flag — the spawn runs in an isolated
         # per-dispatch worktree, so scoping only stalls autonomous builds on
-        # prompts for un-allow-listed ops. VNX_WORKER_SCOPED=1 opts into the
-        # scoped posture (role allow-list + optional empty-MCP) instead.
-        if worker_scoped_enabled():
+        # prompts for un-allow-listed ops. VNX_ENFORCE_WORKER_PERMISSIONS=1
+        # (or legacy VNX_WORKER_SCOPED=1) opts into the scoped posture
+        # (role allow-list + optional empty-MCP) instead.
+        if worker_scoped_enabled() or worker_permission_enforcement_enabled():
             profile = _wp_resolve_worker_profile(role)
             scope_args = _wp_build_claude_scope_args(
                 profile,
@@ -718,6 +728,10 @@ class TmuxInteractiveDispatch:
                 "model": model,
                 "lane": "tmux_interactive",
             }
+            # Audit marker for the ADR-012 worker-permission enforcement mode.
+            # Only emitted when the flag is ON so flag-off receipts are byte-identical.
+            if worker_permission_enforcement_enabled():
+                receipt_dict["permission_enforcement"] = "enforced"
             json_str = json.dumps(receipt_dict)
             # Escape inner double-quotes for the shell double-quoted argument.
             escaped = json_str.replace('"', '\\"')
@@ -1613,15 +1627,19 @@ class TmuxInteractiveDispatch:
         # every non-scoped path — attached, blanket skip-permissions, or
         # VNX_WORKER_SCOPED unset/falsey — so an unscoped working-tree-only
         # worker can never silently reach git commit/push.
-        if working_tree_only and not (skip_permissions and worker_scoped_enabled()):
+        if working_tree_only and not (
+            skip_permissions
+            and (worker_scoped_enabled() or worker_permission_enforcement_enabled())
+        ):
             return InteractiveDispatchResult(
                 success=False,
                 dispatch_id=dispatch_id,
                 failure_reason=(
                     "working_tree_only requires a scoped detached spawn "
-                    "(skip_permissions + explicit VNX_WORKER_SCOPED=1; scoped is "
-                    "opt-in now that blanket skip-permissions is the default); "
-                    "refusing unscoped dispatch where the commit/push deny would not bind"
+                    "(skip_permissions + explicit VNX_ENFORCE_WORKER_PERMISSIONS=1 "
+                    "or VNX_WORKER_SCOPED=1; scoped is opt-in now that blanket "
+                    "skip-permissions is the default); refusing unscoped dispatch "
+                    "where the commit/push deny would not bind"
                 ),
             )
 

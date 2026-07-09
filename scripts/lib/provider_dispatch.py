@@ -32,6 +32,24 @@ logger = logging.getLogger(__name__)
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
+# ADR-012 worker-permission enforcement flag (default OFF). Imported defensively
+# so provider_dispatch remains importable even if worker_permissions is missing.
+try:
+    from worker_permissions import (
+        worker_permission_enforcement_enabled,
+        worker_scoped_enabled,
+    )
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
+        return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
+    def worker_scoped_enabled() -> bool:  # type: ignore[misc]
+        return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
 # Providers whose spawn handlers exist.
 _IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "glm-harness", "local-gemma"}
 
@@ -559,6 +577,9 @@ def _emit_governance(
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,
+                permission_enforcement=(
+                    "enforced" if worker_permission_enforcement_enabled() else None
+                ),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
@@ -886,6 +907,12 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
 
     start_time = datetime.now(timezone.utc)
     try:
+        # ADR-012: benchmark worker permission mode follows the feature flag.
+        # Default OFF keeps the historical skip-permissions posture; ON opts into
+        # role-scoped --allowedTools/--permission-mode via subprocess_adapter.
+        skip_permissions = not (
+            worker_permission_enforcement_enabled() or worker_scoped_enabled()
+        )
         result = spawn_claude(
             prompt=instruction,
             model=args.model,
@@ -893,7 +920,7 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
             role=role,
-            skip_permissions=True,  # benchmark: no human to answer tool-permission prompts
+            skip_permissions=skip_permissions,
             event_writer=event_store.append if event_store is not None else None,
             total_deadline=total_deadline,
             requires_mcp=getattr(args, "requires_mcp", False),
