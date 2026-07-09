@@ -42,6 +42,33 @@ import tracks as tracks_lib  # noqa: E402
 PROJECT_ID = "test-recon-proj"
 
 
+@pytest.fixture(autouse=True)
+def _clear_schema_preflight_hooks():
+    """Isolate schema_migration._PREFLIGHT_HOOKS between tests.
+
+    test_w1b_0031_reconcile.py imports migrate_future_system, which registers
+    manifest-backed pre-flight hooks for migrations 0022/0024/0027-0030. Those
+    hooks are stored in the module-level ``schema_migration._PREFLIGHT_HOOKS``
+    dict and persist across test modules. This test manually bootstraps a
+    partial schema (0022 + 0024 + 0027 + 0028 + 0030, skipping 0029) and the
+    v30 pre-hook then rejects the DB as missing the v29 ``track_type`` column.
+    Clearing the registry around each test keeps the count order-independent.
+    """
+    import importlib
+
+    sm = None
+    try:
+        sm = importlib.import_module("schema_migration")
+        saved = {k: list(v) for k, v in sm._PREFLIGHT_HOOKS.items()}
+        sm._PREFLIGHT_HOOKS.clear()
+    except (ImportError, AttributeError):
+        saved = None
+    yield
+    if saved is not None and sm is not None:
+        sm._PREFLIGHT_HOOKS.clear()
+        sm._PREFLIGHT_HOOKS.update(saved)
+
+
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
