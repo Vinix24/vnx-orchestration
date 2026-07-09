@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-import os
-import tempfile
 
 from vnx_cli import _engine
 
@@ -184,8 +185,10 @@ def vnx_attest(args) -> int:
         return vnx_attest_verify_pr(args)
     elif subcommand == "override":
         return vnx_attest_override(args)
+    elif subcommand == "mandate":
+        return vnx_attest_mandate(args)
     else:
-        print("  Usage: vnx attest {write,verify,verify-pr,override}", file=sys.stderr)
+        print("  Usage: vnx attest {write,verify,verify-pr,override,mandate}", file=sys.stderr)
         return 1
 
 
@@ -300,7 +303,7 @@ def vnx_attest_override(args) -> int:
         if used >= budget:
             print(
                 f"  REFUSED: override budget exhausted "
-                f"({used}/{budget} used in the last {_ao.OVERRIDE_WINDOW_DAYS} days). "
+                f"({used}/{budget} used in last {_ao.OVERRIDE_WINDOW_DAYS} days). "
                 "Wait for the window to roll or raise VNX_ATTEST_OVERRIDE_BUDGET.",
                 file=sys.stderr,
             )
@@ -367,4 +370,120 @@ def vnx_attest_override(args) -> int:
             return 1
 
     print(f"  committed:     {'SSH-signed' if git_signed else 'unsigned'}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Signed delegation mandate (vnx attest mandate issue|revoke)
+# ---------------------------------------------------------------------------
+
+def vnx_attest_mandate(args) -> int:
+    """Dispatch ``vnx attest mandate {issue,revoke}``."""
+    subcommand = getattr(args, "mandate_subcommand", None)
+    if subcommand == "issue":
+        return vnx_attest_mandate_issue(args)
+    if subcommand == "revoke":
+        return vnx_attest_mandate_revoke(args)
+    print("  Usage: vnx attest mandate {issue,revoke}", file=sys.stderr)
+    return 1
+
+
+def vnx_attest_mandate_issue(args) -> int:
+    """Issue a signed delegation mandate and append it to the ledger."""
+    repo_root = Path(getattr(args, "project_dir", ".")).resolve()
+    key_path_str = getattr(args, "key", None)
+    if not key_path_str:
+        print("  Error: --key is required to sign a mandate", file=sys.stderr)
+        return 1
+    key_path = Path(key_path_str)
+    if not key_path.exists():
+        print(f"  Error: key not found: {key_path}", file=sys.stderr)
+        return 1
+
+    signer_identity = getattr(args, "signer", "vnx@local")
+    mandate_id = getattr(args, "mandate_id", None) or f"mandate-{uuid.uuid4().hex[:12]}"
+    project_id = getattr(args, "project_id", None) or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    expires_at = getattr(args, "expires_at", None)
+    if not expires_at:
+        print("  Error: --expires-at is required (mandates MUST expire)", file=sys.stderr)
+        return 1
+
+    scope: dict[str, object] = {}
+    if getattr(args, "session_id", None):
+        scope["session_id"] = args.session_id
+    if getattr(args, "task_class", None):
+        scope["allowed_task_classes"] = [tc.strip() for tc in args.task_class.split(",") if tc.strip()]
+    if getattr(args, "dispatch_id_glob", None):
+        scope["dispatch_id_glob"] = args.dispatch_id_glob
+    if not scope:
+        print(
+            "  Error: at least one scope constraint is required "
+            "(--session-id, --task-class, or --dispatch-id-glob)",
+            file=sys.stderr,
+        )
+        return 1
+
+    _engine.ensure_engine_on_path()
+    import delegation_mandate as _dm
+
+    manifest = _dm.mandate_manifest(
+        mandate_id=mandate_id,
+        project_id=project_id,
+        scope=scope,
+        issued_at=_utc_now(),
+        expires_at=expires_at,
+        signer_identity=signer_identity,
+    )
+    try:
+        rec = _dm.emit_mandate(manifest, key_path, repo_root=repo_root)
+    except RuntimeError as e:
+        print(f"  mandate issue failed: {e}", file=sys.stderr)
+        return 1
+
+    print(f"  mandate-id:  {rec.mandate_id}")
+    print(f"  project:     {rec.project_id}")
+    print(f"  scope:       {rec.scope}")
+    print(f"  expires:     {rec.expires_at}")
+    print(f"  ledger:      {rec.ledger_path}")
+    print(f"  ** MANDATE ISSUED — append-only ledger updated **")
+    return 0
+
+
+def vnx_attest_mandate_revoke(args) -> int:
+    """Sign and append a revocation record for a mandate."""
+    repo_root = Path(getattr(args, "project_dir", ".")).resolve()
+    key_path_str = getattr(args, "key", None)
+    if not key_path_str:
+        print("  Error: --key is required to sign a revocation", file=sys.stderr)
+        return 1
+    key_path = Path(key_path_str)
+    if not key_path.exists():
+        print(f"  Error: key not found: {key_path}", file=sys.stderr)
+        return 1
+
+    mandate_id = getattr(args, "mandate_id", None)
+    if not mandate_id:
+        print("  Error: --mandate-id is required", file=sys.stderr)
+        return 1
+
+    signer_identity = getattr(args, "signer", "vnx@local")
+
+    _engine.ensure_engine_on_path()
+    import delegation_mandate as _dm
+
+    try:
+        signed = _dm.emit_mandate_revocation(
+            mandate_id=mandate_id,
+            signer_identity=signer_identity,
+            timestamp=_utc_now(),
+            key_path=key_path,
+            repo_root=repo_root,
+        )
+    except RuntimeError as e:
+        print(f"  mandate revoke failed: {e}", file=sys.stderr)
+        return 1
+
+    print(f"  mandate-id:  {mandate_id}")
+    print(f"  revoked-at:  {signed['revoked_at']}")
+    print(f"  ** MANDATE REVOKED — append-only ledger updated **")
     return 0

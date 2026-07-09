@@ -104,6 +104,7 @@ def _write_receipt(
     sub_provider: str | None = None,
     model: str | None = None,
     lane: str | None = None,
+    mandate_id: str | None = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -130,6 +131,7 @@ def _write_receipt(
         sub_provider=sub_provider,
         model=model,
         lane=lane,
+        mandate_id=mandate_id,
     )
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
 
@@ -156,6 +158,7 @@ def _build_receipt_payload(
     sub_provider: str | None = None,
     model: str | None = None,
     lane: str | None = None,
+    mandate_id: str | None = None,
 ) -> dict:
     """Assemble the receipt dict from the named fields."""
     receipt = {
@@ -177,6 +180,8 @@ def _build_receipt_payload(
         receipt["model"] = model
     if lane is not None:
         receipt["lane"] = lane
+    if mandate_id:
+        receipt["mandate_id"] = mandate_id
     if commit_hash_before:
         receipt["commit_hash_before"] = commit_hash_before
     if commit_hash_after:

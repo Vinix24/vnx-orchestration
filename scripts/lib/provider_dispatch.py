@@ -580,6 +580,7 @@ def _emit_governance(
                 permission_enforcement=(
                     "enforced" if worker_permission_enforcement_enabled() else None
                 ),
+                mandate_id=getattr(args, "mandate_id", None),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
@@ -863,6 +864,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-repo-map", action="store_true", dest="no_repo_map",
         help="Skip repo map injection (mirrors --no-repo-map in subprocess_dispatch).",
+    )
+    parser.add_argument(
+        "--approval-id", default=None,
+        help="Per-dispatch operator approval token (required when VNX_SIGNED_DELEGATION is off).",
+    )
+    parser.add_argument(
+        "--mandate-id", default=None,
+        help="Signed delegation mandate ID (used when VNX_SIGNED_DELEGATION=1).",
+    )
+    parser.add_argument(
+        "--session-id", default=None,
+        help="Session identifier for mandate scope matching.",
+    )
+    parser.add_argument(
+        "--task-class", default="",
+        help="Task class for mandate scope matching (mirrors --task-class in subprocess_dispatch).",
     )
     return parser
 
@@ -1940,6 +1957,48 @@ def main(argv: list[str] | None = None) -> int:
         _emit_constraint_failure_receipt(args, provider, model, failure_reason)
         print(f"provider_dispatch: constraint violation - {exc}", file=sys.stderr)
         return 1
+
+    # Signed-delegation mandate gate (VNX_SIGNED_DELEGATION, default OFF).
+    # When the flag is off this block is skipped entirely.
+    try:
+        import delegation_mandate as _dm  # noqa: PLC0415
+    except ImportError:
+        _dm = None  # type: ignore[assignment]
+    if _dm is not None and _dm.is_signed_delegation_enabled():
+        _repo_root = Path(os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
+        _allowed_signers = _dm.resolve_allowed_signers_for_runtime(_repo_root)
+        if _allowed_signers is None:
+            print(
+                "[provider_dispatch] REJECT: VNX_SIGNED_DELEGATION=1 but no "
+                ".vnx-attest/allowed_signers trust anchor found.",
+                file=sys.stderr,
+            )
+            return 1
+        _ctx = _dm.DispatchContext(
+            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+            session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+            task_class=getattr(args, "task_class", None) or None,
+            dispatch_id=args.dispatch_id,
+        )
+        _ok, _recorded_mandate, _reason = _dm.resolve_signed_delegation(
+            _ctx,
+            getattr(args, "approval_id", None),
+            getattr(args, "mandate_id", None),
+            allowed_signers=_allowed_signers,
+            repo_root=_repo_root,
+        )
+        if not _ok:
+            print(
+                f"[provider_dispatch] REJECT: signed-delegation gate failed: {_reason}",
+                file=sys.stderr,
+            )
+            return 1
+        if _recorded_mandate:
+            args.mandate_id = _recorded_mandate
+            logger.info(
+                "signed-delegation: dispatch=%s covered by mandate=%s",
+                args.dispatch_id, _recorded_mandate,
+            )
 
     if provider == "claude":
         # Benchmark exemption: the measurement harness is exempt from the single-entry

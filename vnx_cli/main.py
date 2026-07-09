@@ -798,6 +798,43 @@ def _register_attest_subparser(subparsers: argparse.Action) -> None:
     aov.add_argument("--project-dir", default=".", metavar="DIR",
                      help="repository root (default: current directory)")
 
+    # Signed delegation mandate (issue / revoke)
+    am = attest_subs.add_parser(
+        "mandate",
+        help="issue or revoke a signed delegation mandate for governed dispatches",
+    )
+    am_subs = am.add_subparsers(dest="mandate_subcommand", metavar="SUBCOMMAND")
+
+    ami = am_subs.add_parser("issue", help="sign and issue a delegation mandate")
+    ami.add_argument("--key", required=True, metavar="KEY_PATH",
+                     help="SSH private key for signing the mandate")
+    ami.add_argument("--signer", default="vnx@local", metavar="IDENTITY",
+                     help="signer identity (must match an allowed_signers entry)")
+    ami.add_argument("--mandate-id", dest="mandate_id", default=None, metavar="ID",
+                     help="stable mandate ID (default: generated)")
+    ami.add_argument("--project-id", dest="project_id", default=None, metavar="ID",
+                     help="project the mandate is bound to (default: VNX_PROJECT_ID)")
+    ami.add_argument("--expires-at", dest="expires_at", required=True, metavar="ISO8601",
+                     help="mandatory expiry timestamp, e.g. 2026-07-10T12:00:00Z")
+    ami.add_argument("--session-id", dest="session_id", default=None, metavar="ID",
+                     help="scope: exact session identifier")
+    ami.add_argument("--task-class", dest="task_class", default=None, metavar="CLASS",
+                     help="scope: comma-separated allowed task classes")
+    ami.add_argument("--dispatch-id-glob", dest="dispatch_id_glob", default=None, metavar="GLOB",
+                     help="scope: shell glob matching dispatch IDs")
+    ami.add_argument("--project-dir", default=".", metavar="DIR",
+                     help="repository root (default: current directory)")
+
+    amr = am_subs.add_parser("revoke", help="revoke a previously issued mandate")
+    amr.add_argument("--key", required=True, metavar="KEY_PATH",
+                     help="SSH private key for signing the revocation")
+    amr.add_argument("--signer", default="vnx@local", metavar="IDENTITY",
+                     help="signer identity (must match an allowed_signers entry)")
+    amr.add_argument("--mandate-id", dest="mandate_id", required=True, metavar="ID",
+                     help="mandate ID to revoke")
+    amr.add_argument("--project-dir", default=".", metavar="DIR",
+                     help="repository root (default: current directory)")
+
 
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":

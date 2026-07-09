@@ -142,6 +142,7 @@ def _handle_success(
     lease_generation: "int | None",
     model: "str | None" = None,
     pr_id: "str | None" = None,
+    mandate_id: "str | None" = None,
 ) -> None:
     """Run the success branch: write receipt, feedback, outcome capture, cleanup."""
     import subprocess_dispatch as _sd
@@ -201,6 +202,7 @@ def _handle_success(
         sub_provider="anthropic",
         model=model,
         lane="subprocess",
+        mandate_id=mandate_id,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "success", quality_db)
@@ -440,6 +442,7 @@ def deliver_with_recovery(
     gate: str = "",
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
+    mandate_id: "str | None" = None,
 ) -> bool:
     """Deliver with automatic retry; success -> "done" receipt, final fail -> "failed".
 
@@ -489,6 +492,7 @@ def deliver_with_recovery(
                 lease_generation=lease_generation,
                 model=model,
                 pr_id=pr_id,
+                mandate_id=mandate_id,
             )
             return True
         _backoff_or_fail(
