@@ -15,7 +15,7 @@ Master-rule (see `role-orchestrator.md`): project files describe the project; th
 Tracks, objectives, receipts, and coordination state live in the **central** store, never repo-local.
 
 - Central store: `~/.vnx-data/<project_id>/state/` (resolved by the vnx runtime, not hardcoded).
-- Never pin `VNX_STATE_DIR=.vnx-data/state` in a role or script — a repo-local pin forks state from central = split-brain.
+- Never pin `VNX_STATE_DIR` to a repo-local `.vnx-data/state` path in a role or script — a repo-local pin forks state from central = split-brain.
 - Resolution helpers: Python `scripts/lib/project_root.py`; Bash `scripts/lib/vnx_resolve_root.sh`.
 - `project_id` never silently defaults to `vnx-dev` (ADR-007) — it resolves from `VNX_PROJECT_ID` / `.vnx-project-id` / git remote, else it rejects.
 
