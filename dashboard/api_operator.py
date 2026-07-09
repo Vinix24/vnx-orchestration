@@ -707,7 +707,7 @@ def _list_tmux_sessions(now: datetime) -> "tuple[list[dict], list[str]]":
     If tmux is absent or its commands fail, returns ([], []) — never raises.
     """
     if shutil.which("tmux") is None:
-        return [], []
+        return [], ["tmux binary not found on PATH"]
 
     sessions_result = subprocess.run(
         ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}"],
@@ -716,7 +716,9 @@ def _list_tmux_sessions(now: datetime) -> "tuple[list[dict], list[str]]":
         timeout=5,
     )
     if sessions_result.returncode != 0:
-        return [], []
+        reason = f"tmux list-sessions failed (rc={sessions_result.returncode})"
+        _logger.warning("session observability: %s", reason)
+        return [], [reason]
 
     # Collect per-session pane commands in one tmux call so busy/idle is cheap.
     pane_commands: dict[str, list[str]] = defaultdict(list)
@@ -763,7 +765,8 @@ def _load_session_store_entries() -> "dict[str, dict]":
     try:
         from session_store import SessionStore
         return SessionStore().all_entries()
-    except Exception:
+    except Exception as exc:
+        _logger.warning("session observability: session_store read failed, returning no persisted entries: %s", exc)
         return {}
 
 
