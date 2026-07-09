@@ -382,7 +382,9 @@ def test_litellm_dispatch_cost_usd_in_receipt(tmp_path, monkeypatch):
 
 
 def test_warning_logged_when_extraction_fails(caplog):
-    """_extract_token_usage logs a warning when token_usage is None."""
+    """_extract_token_usage logs a warning and marks the result unavailable (not 0/0)
+    when token_usage is None — a bare 0/0 would be indistinguishable from a real zero.
+    """
     import logging
 
     class _NullResult:
@@ -390,8 +392,18 @@ def test_warning_logged_when_extraction_fails(caplog):
 
     with caplog.at_level(logging.WARNING, logger="provider_dispatch"):
         usage = provider_dispatch._extract_token_usage(_NullResult(), "litellm:deepseek")
-    assert usage == {"input": 0, "output": 0, "cache_hit": 0}
-    assert any("token_usage extraction returned 0" in r.message for r in caplog.records)
+    assert usage == {"input": 0, "output": 0, "cache_hit": 0, "unavailable": True}
+    assert any("token_usage unavailable" in r.message for r in caplog.records)
+
+
+def test_unavailable_token_usage_is_not_billable():
+    """_compute_cost must treat an unavailable-marked usage as not-billable, not $0-confirmed."""
+    usage = provider_dispatch._extract_token_usage(
+        type("_NullResult", (), {"token_usage": None})(), "kimi"
+    )
+    assert usage["unavailable"] is True
+    cost = provider_dispatch._compute_cost("kimi", "kimi-default", usage)
+    assert cost is None
 
 
 # ---------------------------------------------------------------------------

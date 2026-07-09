@@ -166,7 +166,7 @@ def _extract_response_text(result: Any) -> str:
     return (getattr(result, "completion_text", None) or "")
 
 
-def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
+def _extract_token_usage(result: Any, provider: str) -> Dict[str, Any]:
     """Normalize token_usage from any spawn result to {input, output, cache_hit}.
 
     Each provider emits usage under different field names:
@@ -175,13 +175,20 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
     - gemini     — input_tokens / output_tokens / cache_read_tokens
     - claude     — input_tokens / output_tokens / cache_read_input_tokens (from result event)
     - kimi       — input_tokens / output_tokens (same as codex/gemini)
+
+    When the provider reports no token counts at all (e.g. kimi-cli stream-json,
+    which carries no usage event), the result carries an explicit
+    ``unavailable: True`` marker alongside the 0 placeholders — so a receipt
+    consumer can tell "no data reported" apart from "confirmed zero tokens",
+    and cost computation treats it as not-billable rather than zero-cost-confirmed.
     """
-    usage = {"input": 0, "output": 0, "cache_hit": 0}
+    usage: Dict[str, Any] = {"input": 0, "output": 0, "cache_hit": 0}
     raw = getattr(result, "token_usage", None)
     if not isinstance(raw, dict):
         logger.warning(
-            "token_usage extraction returned 0 for provider=%s; check spawn_result shape", provider
+            "token_usage unavailable for provider=%s; recording explicit marker (not 0/0)", provider
         )
+        usage["unavailable"] = True
         return usage
 
     if provider.startswith("litellm:"):
@@ -216,8 +223,9 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
 
     if usage["input"] == 0 and usage["output"] == 0:
         logger.warning(
-            "token_usage extraction returned 0 for provider=%s; check spawn_result shape", provider
+            "token_usage unavailable for provider=%s; recording explicit marker (not 0/0)", provider
         )
+        usage["unavailable"] = True
     return usage
 
 
@@ -276,9 +284,11 @@ def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str,
         return None
 
 
-def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, int]) -> Optional[float]:
+def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Optional[float]:
     """Compute cost via wave7_models.yaml kimi_cli section for kimi provider."""
-    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+    if not token_usage or token_usage.get("unavailable") or (
+        token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0
+    ):
         return None
     try:
         from providers import provider_registry as _reg
@@ -298,9 +308,11 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, int]) -> Opt
         return None
 
 
-def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
-    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
-    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+def _compute_cost(provider: str, model: str, token_usage: Dict[str, Any]) -> Optional[float]:
+    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss or unavailable usage."""
+    if not token_usage or token_usage.get("unavailable") or (
+        token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0
+    ):
         return None
     if provider == "kimi":
         return _compute_kimi_cost(model, token_usage)

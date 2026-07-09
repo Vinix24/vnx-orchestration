@@ -1,6 +1,3 @@
 watchdog>=6.0.0
-opentelemetry-api>=1.20
-opentelemetry-sdk>=1.20
-opentelemetry-exporter-otlp-proto-http>=1.20
 jinja2>=3.0
 pyyaml>=6.0

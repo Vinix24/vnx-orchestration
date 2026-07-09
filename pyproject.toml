@@ -25,9 +25,6 @@ license = {text = "MIT"}
 authors = [{name = "Vincent van Deth", email = "advies@vincentvandeth.nl"}]
 dependencies = [
     "watchdog>=4.0",
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp>=1.20",
     "jinja2>=3.0",
     "pyyaml>=6.0",
     "jsonschema>=4.20",   # governed report schema validation (governance_emit → unified_report_schema)
