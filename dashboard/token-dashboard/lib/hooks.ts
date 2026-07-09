@@ -17,6 +17,7 @@ import {
   fetchReports,
   fetchReportContent,
   fetchAgents,
+  fetchLiveSessions,
   fetchIntelligencePatterns,
   fetchIntelligenceInjections,
   fetchIntelligenceClassifications,
@@ -37,6 +38,7 @@ import type {
   GateConfigResponse, GovernanceDigestEnvelope, SystemHealthEnvelope, PlanningEnvelope,
   ConfigEnvelope, ConfigAuditEnvelope, ObservabilityEnvelope,
   ReportsEnvelope, AgentsEnvelope,
+  LiveSessionsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
   ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
   LearningProposalsResponse,
@@ -244,6 +246,14 @@ export function useAgents() {
     'operator-agents',
     fetchAgents,
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useLiveSessions() {
+  return useSWR<LiveSessionsEnvelope>(
+    'operator-live-sessions',
+    fetchLiveSessions,
+    { refreshInterval: 15000, revalidateOnFocus: true, dedupingInterval: 8000 }
   );
 }
 

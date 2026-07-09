@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,6 +41,11 @@ DB_PATH = CANONICAL_STATE_DIR / "quality_intelligence.db"
 GATE_CONFIG_PATH = VNX_DIR / "configs" / "governance_gates.yaml"
 TERMINAL_TRACK_MAP = {"T1": "A", "T2": "B", "T3": "C"}
 VALID_TERMINALS = frozenset({"T0", "T1", "T2", "T3"})
+
+_UTC = timezone.utc
+
+# Pane current_command values that indicate an idle shell (not actively running a tool).
+_IDLE_SHELL_COMMANDS = frozenset({"bash", "zsh", "sh", "-bash", "-zsh", "-sh"})
 
 _gate_config_lock = threading.Lock()
 
@@ -673,6 +679,177 @@ def _operator_get_terminal(terminal_id: str) -> dict:
         return envelope.to_dict()
     except Exception as exc:
         return {"view": "TerminalView", "degraded": True, "degraded_reasons": [str(exc)], "data": {"terminal_id": terminal_id}}
+
+
+def _session_name_to_project(session_name: str) -> "str | None":
+    """Best-effort project name from a tmux session name."""
+    if session_name.startswith("vnx-"):
+        return session_name[4:] or None
+    if session_name.startswith("t0-"):
+        return "system"
+    return session_name
+
+
+def _parse_iso_or_none(value: "str | None") -> "datetime | None":
+    """Parse an ISO-8601 timestamp; return None on any failure."""
+    if not value:
+        return None
+    try:
+        ts = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+
+def _list_tmux_sessions(now: datetime) -> "tuple[list[dict], list[str]]":
+    """Return (sessions, degraded_reasons) from tmux list-sessions/list-panes.
+
+    If tmux is absent or its commands fail, returns ([], []) — never raises.
+    """
+    if shutil.which("tmux") is None:
+        return [], []
+
+    sessions_result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if sessions_result.returncode != 0:
+        return [], []
+
+    # Collect per-session pane commands in one tmux call so busy/idle is cheap.
+    pane_commands: dict[str, list[str]] = defaultdict(list)
+    panes_result = subprocess.run(
+        ["tmux", "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if panes_result.returncode == 0:
+        for line in panes_result.stdout.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                pane_commands[parts[0]].append(parts[1])
+
+    sessions: list[dict] = []
+    for line in sessions_result.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        name, activity_str = parts
+        try:
+            activity_epoch = int(activity_str)
+        except ValueError:
+            continue
+        last_activity_dt = datetime.fromtimestamp(activity_epoch, tz=_UTC)
+        last_activity = last_activity_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        age_seconds = max(0, int((now - last_activity_dt).total_seconds()))
+        commands = pane_commands.get(name, [])
+        status = "busy" if any(cmd not in _IDLE_SHELL_COMMANDS for cmd in commands) else "idle"
+        sessions.append({
+            "name": name,
+            "project": _session_name_to_project(name),
+            "status": status,
+            "last_activity": last_activity,
+            "age_seconds": age_seconds,
+        })
+
+    return sessions, []
+
+
+def _load_session_store_entries() -> "dict[str, dict]":
+    """Read persisted per-terminal session entries without mutating state."""
+    try:
+        from session_store import SessionStore
+        return SessionStore().all_entries()
+    except Exception:
+        return {}
+
+
+def _operator_get_sessions() -> dict:
+    """GET /api/operator/sessions -- read-only live session observability tile.
+
+    Composes tmux session liveness (name, project, idle/busy, activity age) with
+    the persistent session-store state (provider session_id, last dispatch_id).
+    No control actions are exposed here; Part B restart panel is out of scope.
+    """
+    now = datetime.now(_UTC)
+    degraded = False
+    degraded_reasons: list[str] = []
+    sessions_by_name: dict[str, dict] = {}
+
+    try:
+        tmux_sessions, tmux_reasons = _list_tmux_sessions(now)
+        degraded_reasons.extend(tmux_reasons)
+    except Exception as exc:
+        tmux_sessions = []
+        degraded = True
+        degraded_reasons.append(f"tmux enumeration failed: {exc}")
+
+    for s in tmux_sessions:
+        sessions_by_name[s["name"]] = {
+            "name": s["name"],
+            "project": s["project"],
+            "status": s["status"],
+            "last_activity": s["last_activity"],
+            "age_seconds": s["age_seconds"],
+            "session_id": None,
+            "dispatch_id": None,
+            "remote_control_url": None,
+        }
+
+    try:
+        store_entries = _load_session_store_entries()
+    except Exception as exc:
+        store_entries = {}
+        degraded = True
+        degraded_reasons.append(f"session store read failed: {exc}")
+
+    for terminal_id, entry in store_entries.items():
+        name = terminal_id
+        session_id = entry.get("session_id") or None
+        dispatch_id = entry.get("dispatch_id") or None
+        updated_at = entry.get("updated_at")
+        updated_dt = _parse_iso_or_none(updated_at)
+
+        if name in sessions_by_name:
+            existing = sessions_by_name[name]
+            existing["session_id"] = existing["session_id"] or session_id
+            existing["dispatch_id"] = existing["dispatch_id"] or dispatch_id
+            # The session-store update time can be more recent than tmux activity;
+            # surface the freshest timestamp we have.
+            if updated_dt is not None:
+                existing_dt = _parse_iso_or_none(existing.get("last_activity"))
+                if existing_dt is None or updated_dt > existing_dt:
+                    existing["last_activity"] = updated_at
+                    existing["age_seconds"] = max(0, int((now - updated_dt).total_seconds()))
+        else:
+            last_activity = updated_at if updated_dt is not None else None
+            age_seconds = max(0, int((now - updated_dt).total_seconds())) if updated_dt is not None else None
+            sessions_by_name[name] = {
+                "name": name,
+                "project": _session_name_to_project(name),
+                "status": "idle",
+                "last_activity": last_activity,
+                "age_seconds": age_seconds,
+                "session_id": session_id,
+                "dispatch_id": dispatch_id,
+                "remote_control_url": None,
+            }
+
+    data = sorted(
+        sessions_by_name.values(),
+        key=lambda s: ((s["project"] or ""), s["name"]),
+    )
+
+    return {
+        "view": "live-sessions",
+        "queried_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "degraded": degraded,
+        "degraded_reasons": degraded_reasons,
+        "data": data,
+    }
 
 
 def _operator_get_open_items(params: dict) -> dict:
