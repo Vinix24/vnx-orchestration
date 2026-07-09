@@ -53,6 +53,39 @@ def load_routing_policy(path: Path) -> dict:
     return data
 
 
+def load_lane_safety(policy_path: Optional[Path] = None) -> dict:
+    """Load the `lane_safety` block from routing_policy.yaml.
+
+    Returns the block as a plain dict (empty dict when the block is absent).
+    Raises the same errors as load_routing_policy on missing/malformed yaml.
+    """
+    if policy_path is None:
+        policy_path = _DEFAULT_POLICY_PATH
+    policy = load_routing_policy(policy_path)
+    lane_safety = policy.get("lane_safety") or {}
+    if not isinstance(lane_safety, dict):
+        raise ValueError(f"lane_safety block must be a mapping, got {type(lane_safety).__name__}")
+    return lane_safety
+
+
+def is_claude_headless_blocked(lane_safety: dict, env: Optional[Dict[str, str]] = None) -> bool:
+    """Return True when the claude_headless lane must be refused, per lane_safety + env.
+
+    Reads the `headless_block` rule (OI-223 claude-headless-lane-block fold-in) from the
+    loaded lane_safety block instead of a hardcoded env check, so routing_policy.yaml stays
+    the single source of truth. Fail-closed: a missing `headless_block` entry, or a missing
+    `enabled` key within it, still blocks. The override escape hatch is the env var named by
+    `headless_block.override_env` (default VNX_OVERRIDE_CLAUDE_HEADLESS) set to "1".
+    """
+    if env is None:
+        env = dict(os.environ)
+    block = lane_safety.get("headless_block") or {}
+    if not block.get("enabled", True):
+        return False
+    override_env = block.get("override_env") or "VNX_OVERRIDE_CLAUDE_HEADLESS"
+    return env.get(override_env) != "1"
+
+
 def decide_lane(
     task_class: str,
     complexity: str = "medium",

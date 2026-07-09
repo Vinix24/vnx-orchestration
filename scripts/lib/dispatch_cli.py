@@ -692,10 +692,19 @@ def _execute_claude_headless(
 
     Delegates all permit verification, TOCTOU check, and GOVERN to
     run_envelope_headless_plan — same security contract as the provider lane.
+
+    Fail-closed last gate before spawn: consults lane_safety.headless_block from
+    routing_policy.yaml (OI-223) instead of a hardcoded env check, so the yaml stays
+    the single source of truth for the block and its override var name.
     """
-    if os.environ.get("VNX_OVERRIDE_CLAUDE_HEADLESS") != "1":
+    from routing_policy import is_claude_headless_blocked, load_lane_safety  # noqa: PLC0415
+    lane_safety = load_lane_safety()
+    if is_claude_headless_blocked(lane_safety):
+        override_env = (lane_safety.get("headless_block") or {}).get(
+            "override_env", "VNX_OVERRIDE_CLAUDE_HEADLESS"
+        )
         raise PermissionError(
-            "claude_headless lane blocked by default; set VNX_OVERRIDE_CLAUDE_HEADLESS=1 to opt in"
+            f"claude_headless lane blocked by default; set {override_env}=1 to opt in"
         )
     result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role)
     return result.returncode
