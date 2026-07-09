@@ -89,11 +89,18 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
     scoped posture — the blanket default ignores it.
     """
     # New enforcement flag OR legacy scoped flag opts into scoped args.
-    # If worker_permissions is unavailable, fall through to the scoped fallback
-    # below (fail-closed — never silently re-open skip-permissions).
     scoped = False
     if worker_scoped_enabled is not None and worker_permission_enforcement_enabled is not None:
         scoped = worker_scoped_enabled() or worker_permission_enforcement_enabled()
+    else:
+        # worker_permissions import failed: read the flags DIRECTLY so an enforcement
+        # request still fails CLOSED into the scoped fallback below, never silently
+        # re-opening --dangerously-skip-permissions.
+        _falsey = ("", "0", "false", "False", "no", "off")
+        scoped = (
+            os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "") not in _falsey
+            or os.environ.get("VNX_WORKER_SCOPED", "") not in _falsey
+        )
     if not scoped:
         return [_LEGACY_SKIP_FLAG]
     if resolve_worker_profile is not None and build_claude_scope_args is not None:
