@@ -1092,8 +1092,14 @@ def _migrate_v27(conn: sqlite3.Connection) -> None:
                 f"ON {table} ({col_list})"
             )
             log('INFO', f'composite-keys: created UNIQUE INDEX {index_name} ON {table}({col_list}) (ADR-007)')
+        except sqlite3.IntegrityError as exc:
+            # Expected: this store has duplicate (project_id, key) rows. Skip + surface so a
+            # dedup can be done before the index is added — never abort, never delete.
+            log('WARNING', f'composite-keys: skipped {table} — duplicate rows for {col_list}, dedup needed ({exc})')
         except sqlite3.Error as exc:
-            log('WARNING', f'composite-keys: skipped {table} — {exc}')
+            # Unexpected (migration bug / bad column) — must NOT be swallowed as a data-violation
+            # skip. Surface at ERROR level so it is investigated; still do not abort the run.
+            log('ERROR', f'composite-keys: UNEXPECTED error on {table} — index NOT created; investigate ({exc})')
 
 
 def _migrate_v27_down(conn: sqlite3.Connection) -> None:

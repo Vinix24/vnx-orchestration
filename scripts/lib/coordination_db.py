@@ -285,8 +285,21 @@ def _migrate_v11_composite_keys(conn: sqlite3.Connection) -> None:
                 "composite-keys: created UNIQUE INDEX %s ON %s(%s) (ADR-007)",
                 index_name, table, col_list
             )
+        except sqlite3.IntegrityError as exc:
+            # Expected: this store has duplicate (project_id, key) rows. Skip + surface
+            # so a dedup can be done before the index is added — never abort, never delete.
+            logger.warning(
+                "composite-keys: skipped %s — duplicate rows for %s, dedup needed (%s)",
+                table, col_list, exc,
+            )
         except sqlite3.Error as exc:
-            logger.warning("composite-keys: skipped %s — %s", table, exc)
+            # Unexpected (e.g. a migration bug / bad column) — must NOT be swallowed as a
+            # data-violation skip. Surface at ERROR level so it is investigated; still do
+            # not abort the whole migration run.
+            logger.error(
+                "composite-keys: UNEXPECTED error on %s — index NOT created; investigate (%s)",
+                table, exc,
+            )
 
 
 def _migrate_v11_composite_keys_down(conn: sqlite3.Connection) -> None:
