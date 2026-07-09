@@ -4,6 +4,7 @@
 import argparse
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -15,6 +16,7 @@ from vnx_cli.commands.doctor import (
     _check_overrides,
     _check_schema_versions,
     _check_skill_coverage,
+    _check_tools,
     vnx_doctor,
 )
 
@@ -291,6 +293,61 @@ class TestSchemaVersions:
         coord_check = next(r for r in results if "runtime_coordination" in r.name)
         assert coord_check.status == PASS
         assert "12" in coord_check.detail
+
+
+# ---------------------------------------------------------------------------
+# Test: worker-CLI probe (audit-dx-doctor-worker-cli, audit high #7)
+# ---------------------------------------------------------------------------
+
+class TestWorkerCliProbe:
+    def test_no_worker_cli_warns(self):
+        """No claude/codex/gemini/kimi on PATH -> tool:worker-cli is WARN, not FAIL."""
+        worker_clis = {"claude", "codex", "gemini", "kimi"}
+
+        def fake_which(tool):
+            if tool in worker_clis:
+                return None
+            return "/usr/bin/" + tool
+
+        with patch("shutil.which", side_effect=fake_which):
+            results = _check_tools()
+
+        worker_check = next(r for r in results if r.name == "tool:worker-cli")
+        assert worker_check.status == WARN
+        assert "no worker CLI" in worker_check.detail
+        assert "dispatch-agent" in worker_check.detail
+
+    def test_claude_present_passes(self):
+        """claude on PATH (even with other worker CLIs absent) -> tool:worker-cli PASS."""
+        def fake_which(tool):
+            if tool == "claude":
+                return "/usr/local/bin/claude"
+            if tool in ("codex", "gemini", "kimi"):
+                return None
+            return "/usr/bin/" + tool
+
+        with patch("shutil.which", side_effect=fake_which):
+            results = _check_tools()
+
+        worker_check = next(r for r in results if r.name == "tool:worker-cli")
+        assert worker_check.status == PASS
+        assert "claude" in worker_check.detail
+
+    def test_missing_worker_cli_does_not_fail_doctor(self, tmp_path, monkeypatch):
+        """A missing worker CLI is a WARN, so it must not push non-strict `vnx doctor` to exit 1."""
+        project = _make_project(tmp_path)
+        _make_coordination_db(project / ".vnx-data" / "state", schema_version=10)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        def fake_which(tool):
+            if tool in ("claude", "codex", "gemini", "kimi"):
+                return None
+            return "/usr/bin/" + tool
+
+        with patch("shutil.which", side_effect=fake_which):
+            exit_code = vnx_doctor(_make_args(str(project), strict=False))
+
+        assert exit_code == 0
 
 
 # ---------------------------------------------------------------------------
