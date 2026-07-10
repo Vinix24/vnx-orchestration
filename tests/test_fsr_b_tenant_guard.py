@@ -222,6 +222,27 @@ def test_reader_absent_db_is_healthy_empty(
 
 
 # ---------------------------------------------------------------------------
+# Builder-layer guard: _resolve_tracks_store must never escape to the real
+# central store during a pinned-isolation test run (audit #13 regression).
+# ---------------------------------------------------------------------------
+
+def test_resolve_tracks_store_stays_on_tmp_store_under_pinned_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the isolation guard applied, _resolve_tracks_store must resolve to
+    the tmp state_dir, not silently fall through to resolve_central_data_dir
+    and read the real production ~/.vnx-data/<project>/state (audit #13 — the
+    canary otherwise reads production tracks instead of the seeded tmp DB).
+    """
+    state_dir = _pin_isolation(tmp_path, monkeypatch)
+    _make_v24_db(state_dir)
+
+    resolved = bts._resolve_tracks_store(state_dir, _TENANT_A)
+
+    assert resolved == state_dir
+
+
+# ---------------------------------------------------------------------------
 # Through build_t0_state: wiring + output flag (acceptance a & b)
 # ---------------------------------------------------------------------------
 
