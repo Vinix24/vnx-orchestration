@@ -285,10 +285,10 @@ def test_verify_chain_partial_chain_is_broken(tmp_path):
 
 
 def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
-    """LOAD-BEARING guard case (kimi-gate PR #840 F1): first entry has no
-    prev_hash (allowed by the first-entry branch), later entries hash-link
-    correctly to their predecessor. The verify loop produces zero violations
-    here — only the chained_count < total guard catches the partial chain."""
+    """ADR-029 naive-flip guard: first entry has no prev_hash, a later entry
+    hash-links correctly to its predecessor, but there is NO chain_epoch_start
+    marker. This is exactly the 'flipped VNX_CHAIN_RECEIPTS without running the
+    seal' footgun — it must be broken, not silently accepted as segmented."""
     p = tmp_path / "first-unchained.ndjson"
     first = {"seq": 0, "id": "plain-0"}
     with p.open("a") as f:
@@ -301,7 +301,7 @@ def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
     ok, violations, status = verify_chain(p)
     assert ok is False
     assert status == "broken"
-    assert any("partial chain" in str(v) for v in violations)
+    assert any("marker" in str(v) or "naive flip" in str(v) for v in violations)
 
 
 def test_verify_chain_missing_file_is_unchained(tmp_path):
@@ -312,3 +312,75 @@ def test_verify_chain_missing_file_is_unchained(tmp_path):
     assert ok is True
     assert violations == []
     assert status == "unchained"
+
+
+# ---------------------------------------------------------------------------
+# ADR-029: epoch-rotation (verified-segmented, chain_epoch_start marker)
+# ---------------------------------------------------------------------------
+from ndjson_hash_chain import append_epoch_marker, epoch_state, EPOCH_MARKER_TYPE
+
+
+def test_adr029_a_unchained_prefix_plus_epoch_is_verified_segmented(tmp_path):
+    """(a) Unchained epoch-0 prefix + one intact chained epoch -> verified-segmented."""
+    p = tmp_path / "seg.ndjson"
+    # epoch-0 unchained history (immutable, pre-adoption)
+    for i in range(3):
+        with p.open("a") as f:
+            f.write(json.dumps({"seq": i, "old": True}) + "\n")
+    append_epoch_marker(p, 1)          # seal: opens epoch 1
+    append_chained_entry(p, {"seq": 3})  # chains within epoch 1
+    append_chained_entry(p, {"seq": 4})
+    ok, violations, status = verify_chain(p)
+    assert ok is True and status == "verified-segmented" and violations == []
+
+
+def test_adr029_b_within_epoch_tamper_is_broken(tmp_path):
+    p = tmp_path / "tamper.ndjson"
+    append_epoch_marker(p, 1)
+    append_chained_entry(p, {"seq": 1})
+    append_chained_entry(p, {"seq": 2})
+    lines = p.read_text().splitlines()
+    e = json.loads(lines[1]); e["seq"] = 99; lines[1] = json.dumps(e)
+    p.write_text("\n".join(lines) + "\n")
+    ok, _v, status = verify_chain(p)
+    assert ok is False and status == "broken"
+
+
+def test_adr029_c_unchained_after_marker_is_broken(tmp_path):
+    p = tmp_path / "gap.ndjson"
+    append_epoch_marker(p, 1)
+    append_chained_entry(p, {"seq": 1})
+    with p.open("a") as f:               # an unchained entry INSIDE the epoch
+        f.write(json.dumps({"seq": 2, "plain": True}) + "\n")
+    ok, _v, status = verify_chain(p)
+    assert ok is False and status == "broken"
+
+
+def test_adr029_e_marker_non_genesis_is_broken(tmp_path):
+    p = tmp_path / "badmarker.ndjson"
+    with p.open("a") as f:
+        f.write(json.dumps({"type": EPOCH_MARKER_TYPE, "epoch": 1, "prev_hash": "a" * 64}) + "\n")
+    ok, _v, status = verify_chain(p)
+    assert ok is False and status == "broken"
+
+
+def test_adr029_multi_epoch_verified_segmented(tmp_path):
+    """A second epoch (re-seal) chains cleanly -> still verified-segmented."""
+    p = tmp_path / "multi.ndjson"
+    append_epoch_marker(p, 1)
+    append_chained_entry(p, {"seq": 1})
+    append_epoch_marker(p, 2)          # epoch 2 opens with GENESIS again
+    append_chained_entry(p, {"seq": 2})
+    ok, _v, status = verify_chain(p)
+    assert ok is True and status == "verified-segmented"
+
+
+def test_epoch_state_reports_max_epoch_and_active(tmp_path):
+    p = tmp_path / "state.ndjson"
+    for i in range(2):
+        with p.open("a") as f:
+            f.write(json.dumps({"seq": i}) + "\n")
+    assert epoch_state(p) == (0, False)   # unchained prefix, not chaining
+    append_epoch_marker(p, 1)
+    max_epoch, active = epoch_state(p)
+    assert max_epoch == 1 and active is True   # last entry is the marker -> chaining
