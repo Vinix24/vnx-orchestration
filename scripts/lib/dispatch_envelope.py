@@ -436,13 +436,29 @@ def _govern(
                 f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
             )
 
-    logger.info(
-        "envelope._govern: dispatch=%s status=%s report=%s receipt=%s",
-        spec.dispatch_id,
-        adapter_result.status,
-        report_path,
-        receipt_path,
-    )
+    if adapter_result.status != "success":
+        # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
+        # dispatch_cli returns only an integer exit code for the provider lane, so this
+        # log line is often the only place the raw error surfaces — print it in full.
+        logger.error(
+            "envelope._govern: dispatch=%s provider=%s status=%s report=%s receipt=%s "
+            "completion_len=%d error=%s",
+            spec.dispatch_id,
+            spec.provider,
+            adapter_result.status,
+            report_path,
+            receipt_path,
+            len(adapter_result.completion_text or ""),
+            adapter_result.error or "(no error captured)",
+        )
+    else:
+        logger.info(
+            "envelope._govern: dispatch=%s status=%s report=%s receipt=%s",
+            spec.dispatch_id,
+            adapter_result.status,
+            report_path,
+            receipt_path,
+        )
     # P0.2: inline phantom-guard (provider lanes — the kimi/glm/deepseek text-only fabrication
     # vector). A delivery worker that reports success with no worktree/branch diff is rejected via
     # a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
@@ -531,6 +547,42 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
 # ---------------------------------------------------------------------------
 
 
+def _fail_loud_on_empty_success(
+    status: str,
+    returncode: int,
+    completion_text: str,
+    provider_str: str,
+    raw_result: Any,
+) -> tuple:
+    """Refuse to report a "success" with a blank completion — surface it instead.
+
+    A provider spawn can return returncode=0 with an empty completion_text when
+    its own CLI/output-format changed underneath it (the exact silent-empty-
+    completion vector this guard exists to catch — see dispatch instruction
+    20260710-211102-envelope-provider-lane-empty-completion). Not every spawn_*
+    does its own empty-extraction check (kimi_spawn does; the harness/litellm/
+    codex/gemini spawns do not), so this backstop lives once, centrally, here —
+    the ONE place every provider-lane result passes through before GOVERN.
+
+    Returns (status, returncode, error) — unchanged unless status=="success"
+    and completion_text is blank, in which case status is downgraded to
+    "failure", returncode is forced non-zero, and error carries the raw spawn
+    result (repr'd) so the failure is diagnosable instead of a silent blank
+    report + receipt.
+    """
+    if status == "success" and not (completion_text or "").strip():
+        return (
+            "failure",
+            returncode or 1,
+            (
+                f"provider={provider_str} returned an empty completion with "
+                f"returncode={returncode} — refusing to report a silent empty "
+                f"success (raw spawn result: {raw_result!r})"
+            ),
+        )
+    return status, returncode, None
+
+
 def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
     """Map codex/kimi/gemini/litellm:* spawn result to _AdapterResult.
 
@@ -562,12 +614,17 @@ def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
             timed_out=True,
             event_writer_failures=ewf,
         )
+    completion_text = result.completion_text or ""
     status = "success" if result.returncode == 0 else "failure"
+    status, returncode, guard_error = _fail_loud_on_empty_success(
+        status, result.returncode, completion_text, provider_str, result
+    )
     return _AdapterResult(
-        returncode=result.returncode,
-        completion_text=(result.completion_text or ""),
+        returncode=returncode,
+        completion_text=completion_text,
         status=status,
         token_usage=token_usage,
+        error=guard_error,
         event_writer_failures=ewf,
     )
 
@@ -763,12 +820,17 @@ class ProviderAdapter:
                     status="success",
                     token_usage=token_usage,
                 )
+            _dh_text = result.completion_text or ""
             status = "success" if result.returncode == 0 else "failure"
+            status, _dh_rc, _dh_err = _fail_loud_on_empty_success(
+                status, result.returncode, _dh_text, pv.value, result
+            )
             return _AdapterResult(
-                returncode=result.returncode,
-                completion_text=(result.completion_text or ""),
+                returncode=_dh_rc,
+                completion_text=_dh_text,
                 status=status,
                 token_usage=token_usage,
+                error=_dh_err,
             )
 
         # ---- glm-harness ---- (codex flip-PR F2: the door normalizes GLM -> glm-harness, so the
@@ -821,12 +883,17 @@ class ProviderAdapter:
                     status="success",
                     token_usage=token_usage,
                 )
+            _gh_text = result.completion_text or ""
             status = "success" if result.returncode == 0 else "failure"
+            status, _gh_rc, _gh_err = _fail_loud_on_empty_success(
+                status, result.returncode, _gh_text, pv.value, result
+            )
             return _AdapterResult(
-                returncode=result.returncode,
-                completion_text=(result.completion_text or ""),
+                returncode=_gh_rc,
+                completion_text=_gh_text,
                 status=status,
                 token_usage=token_usage,
+                error=_gh_err,
             )
 
         # ---- local-gemma ----
@@ -862,12 +929,17 @@ class ProviderAdapter:
                     token_usage=token_usage,
                     timed_out=True,
                 )
+            _lg_text = result.completion_text or ""
             status = "success" if result.returncode == 0 else "failure"
+            status, _lg_rc, _lg_err = _fail_loud_on_empty_success(
+                status, result.returncode, _lg_text, pv.value, result
+            )
             return _AdapterResult(
-                returncode=result.returncode,
-                completion_text=(result.completion_text or ""),
+                returncode=_lg_rc,
+                completion_text=_lg_text,
                 status=status,
                 token_usage=token_usage,
+                error=_lg_err,
             )
 
         # Provider.CLAUDE, Provider.AUTO, or any unexpected value — programming error
