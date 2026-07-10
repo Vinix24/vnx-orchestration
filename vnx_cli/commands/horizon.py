@@ -27,6 +27,7 @@ command refuses with exit code 2 instead of silently defaulting.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -92,6 +93,28 @@ def _default_repo_root(args: Any) -> None:
         args.repo_root = str(Path(args.project_dir).resolve())
 
 
+def _default_roadmap(args: Any) -> None:
+    """Default ``--roadmap`` to the project_dir-anchored ROADMAP.yaml when unset.
+
+    The sibling of ``_default_repo_root`` for the one verb that reads the ROADMAP
+    directly (``sync``). Without it, ``planning_cli._resolve_roadmap_path`` falls
+    through to ``resolve_paths()["PROJECT_ROOT"]``, which collapses onto the
+    central install's OWN code tree (``~/.vnx-system/versions/<v>``) when the
+    ``.vnx-install-mode`` marker is absent — so a consumer project's sync reads
+    the shipped illustrative ``ROADMAP.yaml`` template (one ``example-feature``),
+    tries to create it, and flags every real track as an orphan.
+
+    The pip CLI always knows the project via ``--project-dir``; anchor on it, the
+    same way ``resolve_state_dir`` anchors the store. An explicit ``--roadmap`` or
+    a ``VNX_ROADMAP_PATH`` override still wins (precedence: flag > env > project).
+    """
+    if getattr(args, "roadmap", None):
+        return
+    if os.environ.get("VNX_ROADMAP_PATH"):
+        return
+    args.roadmap = str(Path(args.project_dir).resolve() / "ROADMAP.yaml")
+
+
 # ---------------------------------------------------------------------------
 # objective-domain verbs
 # ---------------------------------------------------------------------------
@@ -117,6 +140,7 @@ def _cmd_show(args: Any) -> int:
 def _cmd_sync(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
+    _default_roadmap(args)
     return pc.cmd_objective_sync(args)
 
 
