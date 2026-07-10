@@ -384,7 +384,45 @@ class DecisionRouter:
         except Exception as exc:
             logger.warning("Failed to log decision: %s", exc)
 
+        # ADR-028 Phase 2 shadow (VNX_DECISION_JUDGE_SHADOW=1, default OFF): a judge writes an
+        # ADVISORY decision T0 does NOT act on, and a comparator logs divergence vs `result`.
+        # Fail-open — never affects the returned decision. `result` above is authoritative.
+        try:
+            from decision_shadow import (  # noqa: PLC0415
+                shadow_enabled,
+                record_advisory,
+                compare_and_log,
+            )
+
+            if shadow_enabled():
+                did = str(
+                    context.get("dispatch_id")
+                    or context.get("decision_id")
+                    or f"{question}:{result.backend_used}"
+                )
+                sd = self.data_dir / "state"
+                advisory = record_advisory(
+                    did, context, question, judge=self._shadow_judge(), state_dir=sd
+                )
+                compare_and_log(did, result.action, advisory, state_dir=sd)
+        except Exception as exc:  # noqa: BLE001 — shadow must never break the real decision
+            logger.debug("decision shadow skipped: %s", exc)
+
         return result
+
+    def _shadow_judge(self):
+        """Judge callable for Phase-2 shadow — a DISTINCT second opinion from this router's
+        own backend. Defaults to the deterministic rule-based decision (zero cost); set
+        ``VNX_DECISION_JUDGE_BACKEND=ollama|claude-cli`` to shadow an LLM judge. Calls the
+        backend function DIRECTLY (never ``decide()``) so shadow can't recurse into itself."""
+        backend = os.environ.get("VNX_DECISION_JUDGE_BACKEND")
+        if backend == "ollama":
+            return lambda ctx, q: _decide_ollama(
+                ctx, q, model=self.ollama_model, host=self.ollama_host, timeout=self.timeout
+            )
+        if backend == "claude-cli":
+            return lambda ctx, q: _decide_claude_cli(ctx, q, timeout=self.timeout)
+        return _rule_based_decision
 
 
 # ---------------------------------------------------------------------------
