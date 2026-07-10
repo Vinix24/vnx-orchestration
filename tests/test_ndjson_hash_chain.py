@@ -312,3 +312,94 @@ def test_verify_chain_missing_file_is_unchained(tmp_path):
     assert ok is True
     assert violations == []
     assert status == "unchained"
+
+
+# ---------------------------------------------------------------------------
+# Origin pinning: prefix-strip / prefix-deletion attack regression
+# ---------------------------------------------------------------------------
+
+
+def test_verify_chain_prefix_deletion_reanchor_attack_is_broken(tmp_path):
+    """PR #1085 bypass regression: attacker deletes a prefix and re-anchors.
+
+    A fully-chained ledger pins its origin at line 1. An attacker holding a
+    valid ledger can delete the first k+1 entries and rewrite the new first
+    entry to use GENESIS_HASH; the suffix still links correctly because
+    canonical_json excludes prev_hash. Without origin pinning this verifies
+    as "verified"; with pinning the recorded origin hash no longer matches
+    the observed first chained entry and the ledger is "broken".
+    """
+    p = tmp_path / "attack.ndjson"
+    for i in range(5):
+        append_chained_entry(p, {"seq": i, "event": "dispatch", "id": f"e{i}"})
+
+    # Sanity: intact chain verifies.
+    ok, violations, status = verify_chain(p)
+    assert ok is True
+    assert status == "verified"
+
+    lines = p.read_text().splitlines()
+    # Delete the prefix entries 0 and 1.
+    del lines[0:2]
+    # Re-anchor the new first entry (originally entry 2) to GENESIS_HASH.
+    reanchored = json.loads(lines[0])
+    reanchored["prev_hash"] = GENESIS_HASH
+    lines[0] = json.dumps(reanchored)
+    p.write_text("\n".join(lines) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is False
+    assert status == "broken"
+    assert any("origin" in str(v).lower() for v in violations)
+
+
+def test_verify_chain_stripped_prefix_with_reanchor_is_broken(tmp_path):
+    """Variant: prev_hash is stripped from a prefix but the lines remain.
+
+    The recorded origin is at line 1. Stripping prev_hash from entries 0..k
+    moves the observed switch point to line k+2. verify_chain detects the
+    origin line mismatch.
+    """
+    p = tmp_path / "strip-attack.ndjson"
+    for i in range(5):
+        append_chained_entry(p, {"seq": i, "event": "dispatch", "id": f"e{i}"})
+
+    lines = p.read_text().splitlines()
+    # Strip prev_hash from entries 0 and 1.
+    for i in range(2):
+        stripped = json.loads(lines[i])
+        stripped.pop("prev_hash", None)
+        lines[i] = json.dumps(stripped)
+    # Re-anchor entry 2 (now the switch point) to GENESIS.
+    reanchored = json.loads(lines[2])
+    reanchored["prev_hash"] = GENESIS_HASH
+    lines[2] = json.dumps(reanchored)
+    p.write_text("\n".join(lines) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is False
+    assert status == "broken"
+    assert any("origin" in str(v).lower() for v in violations)
+
+
+def test_verify_chain_mid_ledger_adoption_is_verified(tmp_path):
+    """Approach B preserves genuine mid-ledger adoption.
+
+    A legacy unchained prefix (chaining never adopted before line N) is valid
+    when the chain origin was recorded at the adoption point: entries before
+    the origin are tolerated, entries from the origin onward must chain.
+    """
+    p = tmp_path / "mid-adopt.ndjson"
+    # Legacy unchained prefix.
+    for i in range(3):
+        with p.open("a") as f:
+            f.write(json.dumps({"seq": i, "event": "legacy"}) + "\n")
+
+    # First chained entry starts a new epoch.
+    append_chained_entry(p, {"seq": 3, "event": "dispatch"})
+    append_chained_entry(p, {"seq": 4, "event": "dispatch"})
+
+    ok, violations, status = verify_chain(p)
+    assert ok is True
+    assert status == "verified"
+    assert violations == []

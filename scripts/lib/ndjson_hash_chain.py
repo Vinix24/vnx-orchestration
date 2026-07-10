@@ -11,16 +11,31 @@ Event-type conventions per session-handoff:
 
 Per ADR-005: NDJSON-first principle preserved. Hash-chain is ADDITIVE metadata,
 not a replacement.
+
+Security note (origin pinning, PR #1085 fix):
+- The first chained entry in a ledger is the chain origin. Its file line number
+  and canonical hash are recorded in the project's trusted
+  `runtime_coordination.db` when chaining is first adopted.
+- `verify_chain` reads that record and rejects any ledger whose observed chain
+  origin is later than (or different from) the recorded origin. This closes the
+  prefix-strip / prefix-deletion + re-anchor bypass where an attacker removes
+  entries from the start of the ledger and rewinds the chain to GENESIS_HASH.
+- When no origin record exists the verifier falls back to strict mode: a chained
+  ledger must start at line 1 with a GENESIS-anchored entry and every entry must
+  carry `prev_hash`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 
 GENESIS_HASH = "0" * 64  # Sentinel for first entry in chain
+_ORIGIN_TABLE = "vnx_chain_origin"
 
 
 def canonical_json(obj: dict) -> str:
@@ -38,6 +53,86 @@ def compute_entry_hash(entry: dict) -> str:
     return hashlib.sha256(canonical_json(entry).encode("utf-8")).hexdigest()
 
 
+def _origin_store_path(ledger_path: Path) -> Path:
+    """Trusted SQLite store for the chain origin of this ledger."""
+    return ledger_path.parent / "runtime_coordination.db"
+
+
+def _init_origin_store(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_ORIGIN_TABLE} (
+            ledger_path TEXT PRIMARY KEY,
+            line_number INTEGER NOT NULL,
+            entry_hash TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def _record_chain_origin(
+    origin_db: Path,
+    ledger_path: Path,
+    line_number: int,
+    entry_hash: str,
+) -> None:
+    """Persist the chain origin for a ledger in the trusted SQLite store."""
+    origin_db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(origin_db)) as conn:
+        _init_origin_store(conn)
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO {_ORIGIN_TABLE}
+                (ledger_path, line_number, entry_hash, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(ledger_path.resolve()),
+                line_number,
+                entry_hash,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+
+
+def _read_chain_origin(origin_db: Path, ledger_path: Path) -> dict | None:
+    """Return the recorded origin for a ledger, or None if not recorded."""
+    if not origin_db.exists():
+        return None
+    with sqlite3.connect(str(origin_db)) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT line_number, entry_hash FROM {_ORIGIN_TABLE}
+            WHERE ledger_path = ?
+            """,
+            (str(ledger_path.resolve()),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"line_number": row[0], "entry_hash": row[1]}
+
+
+def _has_chained_entries(path: Path) -> bool:
+    """True if the ledger already contains at least one entry with prev_hash."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if "prev_hash" in json.loads(line):
+                    return True
+            except json.JSONDecodeError:
+                continue
+    return False
+
+
 def append_chained_entry(
     path: Path,
     entry: dict,
@@ -48,7 +143,10 @@ def append_chained_entry(
 
     Returns the hash of the newly-appended entry.
 
-    If file is empty/missing: uses GENESIS_HASH as prev_hash.
+    If the ledger has no chained entries yet (empty, missing, or only plain
+    NDJSON lines), the new entry becomes the chain origin: its prev_hash is
+    GENESIS_HASH and its line number + canonical hash are recorded in the
+    project's trusted origin store (`runtime_coordination.db`).
 
     Event-type conventions:
     - None: regular entry (default)
@@ -57,10 +155,15 @@ def append_chained_entry(
     - 'redaction': must include 'redacts_hash' field; body should be opaque
     - 'tombstone': must include 'tombstones_hash' field
     """
+    already_chained = _has_chained_entries(path)
+
     if event_type == "backfill":
         prev_hash = GENESIS_HASH
+    elif already_chained:
+        prev_hash = _read_last_hash(path)
     else:
-        prev_hash = _read_last_hash(path) or GENESIS_HASH
+        # First chained entry in this ledger — starts a new epoch at GENESIS.
+        prev_hash = GENESIS_HASH
 
     chained = {**entry, "prev_hash": prev_hash}
     if event_type:
@@ -74,10 +177,22 @@ def append_chained_entry(
         raise ValueError("tombstone event requires 'tombstones_hash' field")
 
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Determine the line number this entry will occupy after append.
+    next_line = 1
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            next_line = sum(1 for _ in f) + 1
+
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(chained) + "\n")
 
-    return compute_entry_hash(chained)
+    new_hash = compute_entry_hash(chained)
+
+    if not already_chained:
+        _record_chain_origin(_origin_store_path(path), path, next_line, new_hash)
+
+    return new_hash
 
 
 def _read_last_hash(path: Path) -> str | None:
@@ -114,15 +229,23 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
     - "unchained": no entry in the file carries a prev_hash field; chaining
       was never enabled (VNX_CHAIN_RECEIPTS is off by default).  Integrity
       cannot be verified — this is NOT an error.  is_valid is True.
-    - "verified": every entry carries prev_hash and the chain is intact.
-      is_valid is True.
+    - "verified": the chain from the recorded origin onward is intact.
+      is_valid is True.  A ledger with an unchained prefix before the recorded
+      origin is also reported "verified" (segmented ledger / mid-ledger
+      adoption).
     - "broken": chain is present but has integrity violations (tampered,
-      inserted, or partially chained — some entries carry prev_hash while
-      others do not).  is_valid is False.
+      inserted, partially chained, or the observed origin differs from the
+      recorded origin).  is_valid is False.
 
-    A partially-chained ledger (some entries with prev_hash, some without)
-    is classified as "broken", not "unchained".  A ledger must be either
-    fully unchained or fully chained to be considered healthy.
+    When a chain origin has been recorded in the trusted origin store
+    (`runtime_coordination.db`) the verifier tolerates an unchained prefix
+    before that origin, but the entry at the recorded origin line MUST match
+    the recorded hash and anchor to GENESIS_HASH.  Every entry after the
+    origin MUST carry prev_hash == expected_prev_hash.
+
+    When no origin record exists the verifier uses strict mode: a chained
+    ledger must start at line 1 with a GENESIS-anchored entry and every entry
+    must carry prev_hash.
 
     violations_list contains dicts with: line_number, expected_prev_hash,
     actual_prev_hash (and optionally 'error' or 'note').
@@ -166,11 +289,110 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
         return (True, [], "unchained")
 
     # At least one entry has prev_hash (or there are parse errors mixed in).
-    # Enforce full-chain integrity.  A partially-chained ledger (some entries
-    # lack prev_hash while others have it) is a real violation — broken.
     violations: list[dict] = list(parse_errors)
-    expected_prev = GENESIS_HASH
+    origin = _read_chain_origin(_origin_store_path(path), path)
 
+    if origin is not None:
+        # Origin-aware mode: tolerate an unchained prefix before the recorded
+        # origin, but pin the origin itself and verify the suffix.
+        _verify_with_origin(path, entries, origin, violations)
+    else:
+        # Strict mode: no unchained prefix allowed for a chained ledger.
+        _verify_strict(entries, chained_count, total, violations)
+
+    if violations:
+        return (False, violations, "broken")
+
+    return (True, [], "verified")
+
+
+def _verify_with_origin(
+    path: Path,
+    entries: list[tuple[int, dict]],
+    origin: dict,
+    violations: list[dict],
+) -> None:
+    """Verify entries from the recorded origin onward.
+
+    Mutates ``violations`` in place. Entries before the recorded origin are
+    tolerated as a legitimate unchained prefix.
+    """
+    origin_line = origin["line_number"]
+    origin_hash = origin["entry_hash"]
+
+    origin_entry = None
+    for line_no, entry in entries:
+        if line_no == origin_line:
+            origin_entry = entry
+            break
+
+    if origin_entry is None:
+        violations.append({
+            "line_number": origin_line,
+            "note": "recorded chain origin line not found in ledger (prefix stripped?)",
+        })
+        return
+
+    if origin_entry.get("prev_hash") != GENESIS_HASH:
+        violations.append({
+            "line_number": origin_line,
+            "expected_prev_hash": GENESIS_HASH,
+            "actual_prev_hash": origin_entry.get("prev_hash"),
+            "note": "recorded chain origin must anchor to GENESIS_HASH",
+        })
+
+    actual_hash = compute_entry_hash(origin_entry)
+    if actual_hash != origin_hash:
+        violations.append({
+            "line_number": origin_line,
+            "expected_entry_hash": origin_hash,
+            "actual_entry_hash": actual_hash,
+            "note": "recorded chain origin hash mismatch (prefix re-anchored?)",
+        })
+
+    expected_prev = GENESIS_HASH
+    found_origin = False
+    for line_no, entry in entries:
+        if line_no < origin_line:
+            continue
+        if line_no == origin_line:
+            found_origin = True
+            expected_prev = compute_entry_hash(entry)
+            continue
+        if not found_origin:
+            continue
+        actual_prev = entry.get("prev_hash")
+        if actual_prev != expected_prev:
+            violations.append({
+                "line_number": line_no,
+                "expected_prev_hash": expected_prev,
+                "actual_prev_hash": actual_prev,
+            })
+        expected_prev = compute_entry_hash(entry)
+
+
+def _verify_strict(
+    entries: list[tuple[int, dict]],
+    chained_count: int,
+    total: int,
+    violations: list[dict],
+) -> None:
+    """Strict verification for ledgers with no recorded origin.
+
+    A chained ledger must start at line 1 with a GENESIS-anchored entry and
+    every entry must carry prev_hash.
+    """
+    if chained_count > 0:
+        first_line_no, first_entry = entries[0]
+        if first_entry.get("prev_hash") != GENESIS_HASH:
+            violations.append({
+                "line_number": first_line_no,
+                "expected_prev_hash": GENESIS_HASH,
+                "actual_prev_hash": first_entry.get("prev_hash"),
+                "note": "chained ledger must start with GENESIS-anchored entry (origin not recorded)",
+            })
+
+    expected_prev = GENESIS_HASH
     for line_no, entry in entries:
         actual_prev = entry.get("prev_hash")
 
@@ -193,24 +415,18 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
 
         expected_prev = compute_entry_hash(entry)
 
-    if violations:
-        return (False, violations, "broken")
-
-    # All parseable entries chained and intact.
     if chained_count < total:
         # Partial chain detected even with no hash mismatches.  This guard is
         # LOAD-BEARING for the edge case where the FIRST entry carries no
         # prev_hash (allowed by the first-entry branch) while later entries
         # hash-link correctly to their predecessor — the loop produces zero
         # violations there; only this count check catches the partial chain.
-        return (False, [{
+        violations.append({
             "note": (
                 f"partial chain: {chained_count}/{total} entries carry prev_hash; "
                 "ledger must be fully unchained or fully chained"
             )
-        }], "broken")
-
-    return (True, [], "verified")
+        })
 
 
 def walk_chain(path: Path) -> Iterator[tuple[int, dict, str]]:
