@@ -86,6 +86,11 @@ vnx horizon plan-gate ...           # multi-model panel reviews a plan before an
 - **`vnx start --help` runs start:** it spawns the daemon set (footgun); SIGKILL the supervisor root if triggered.
 - **Central-mode paths:** embedded-layout path assumptions can break central-mode resolution (fleet burn-in) — resolve via the helpers, never hardcode `.vnx-data/` literals.
 
+### Known issues (tracked, active)
+
+- **Provider dispatches through the door return empty (`envelope-provider-lane-empty-completion`):** `bin/vnx dispatch <id>` for a provider lane (kimi/glm/deepseek — and codex/gemini *gates*) routes via `run_envelope_plan` → `ProviderAdapter` and lands an empty completion + silent failure receipt. The kimi CLI, `spawn_kimi`, and `provider_dispatch.py` main all work standalone — only the door's envelope path is broken. Interim: run provider gates/dispatches via `provider_dispatch.py` directly (side-door), or use the claude/sonnet tmux lane through the door (which works). Do NOT re-diagnose as a kimi-CLI/adapter break.
+- **Plan-gate panel scores 2/5 seats (`plan-gate-panel-seat-robustness`):** in `plan_gate_panel.py` (NOT the `/panel` skill) the opus seat NO-VERDICTs on a `data_dir=None` report-resolution miss (#1102 class) and the codex + glm seats abstain on unparseable verdict JSON. A PASS may rest on only kimi + deepseek — confirm real seat count before trusting a plan-gate verdict.
+
 ## Where the source of truth lives
 
 - Dispatch mechanics, lanes, failure modes: `docs/core/DISPATCH_RULES.md`

@@ -4,6 +4,42 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.2.0] — 2026-07-10
+
+The second minor since 1.0.0. Headlines: the **central-store authority root-cause fix** (one coherent project_id/data_dir authority, fleet-deployed), **ADR-028 decision phases 1–4** (agent-folder fusion + shadow → fast-path → binding judge, all default-off), the **`/panel` multi-provider deliberation skill**, and a batch of governance hardening (evidence-bound merge gate, signed delegation mandate, ADR-029 hash-chain epoch-rotation, ADR-007 composite indexes). See `git log v1.1.0..HEAD` for the full commit-level detail.
+
+### Added — ADR-028 decision layer (default-off)
+
+- **Agent-folder fusion Phase 1 (#1079)** — config extension + resolver, backward-compatible.
+- **Decision-judge Phase 2 shadow (#1096, #1098)** — `DecisionRouter.decide` wired to an advisory judge on a separate ledger; comparator logs divergence. `VNX_DECISION_JUDGE_SHADOW=1`; `VNX_DECISION_JUDGE_BACKEND` makes the judge an LLM. Report: `scripts/decision_shadow_report.py`.
+- **Phase 3 fast-path (#1099)** — short-circuits trivial no-ops, conservative.
+- **Phase 4 binding (#1100)** — `SENSITIVE_ACTIONS` always require `operator_approval`; the human gate is unconditional.
+
+### Added — `/panel` deliberation skill
+
+- **Multi-provider deliberation panel (#1101, #1102)** — `python3 scripts/panel.py <mode> "<question>"`: diverge (5 providers, one lens each) → contrarian red-team → adversarial verify → cited synthesis, across the provider fleet. Modes: `sweep` / `research` / `architecture` / `strategy`.
+
+### Fixed — central-store authority (the week's bug class, root-caused)
+
+- **project_id resolution (#1091)** — resolve from the target project, not a hardcoded `vnx-dev`.
+- **Door authority (#1093)** — the door takes the physical staged-bundle location as the project_id authority; stray `.vnx-project-id` clone-markers stripped in install/update.
+- **Migration FK/integrity pre-flight (#1094)** — advisory; `VNX_MIGRATE_STRICT_FK=1` aborts.
+- **W1 tenant-stamp re-enabled (#1095)** — dedups dual-seed legacy rows before the restamp.
+- **Child-FK widening + `pool_config` dedupe (#1083)**, **`VNX_DATA_DIR_GUARD` startup guard (#1084)**.
+
+### Added — governance hardening
+
+- **ADR-029 hash-chain epoch-rotation (#1090)** — verify + seal + audit.
+- **Evidence-bound merge gate (#1080)** — verifies requirement-completion (test/gate receipts), not just provenance.
+- **Signed batch-delegation mandate (#1081, default off)**, **feature-flagged worker-permission enforcement (#1078, default-off, both lanes)**, **ADR-007 composite `UNIQUE` indexes over `project_id` (#1082, non-destructive)**.
+
+### Changed — reconcile / fabric / CLI
+
+- **Auto-close ON by default in the SessionStart tick (#1097)** — done-tracks close on session start; opt out with `VNX_AUTO_CLOSE=0`. NOTE: wired in the fabric source repo; consumer projects need `vnx init`/`update` to wire the same hook.
+- **`vnx version` reads the resolved-engine VERSION (#1088)**, not stale pip dist-info.
+- **Fleet-wide dev-worker library resolvable from any project (#1089)**; **`quality_intelligence` backup rotation (#1087, `VNX_DB_BACKUP_KEEP=3`)**.
+- **Test hardening (#1103)** — deterministic audit #13 tenant-guard regression (fails before the isolation guard, passes after).
+
 ## [1.1.0] — 2026-07-08
 
 The first minor since 1.0.0. Headlines: the **Horizon planning module** (`vnx horizon`), **signed attestation enforcement** (ADR-027), **track-linkage + git-grounded backward closure** (the future-state fabric now closes itself against merged PRs), **`vnx fabric-audit`** (ADR-028 Phase-0 store-hygiene), and an **operator-gated self-learning proposal tier**. The 1.0.1 future-state reconciliation batch is folded in below — it landed on `main` but was never tagged separately.
