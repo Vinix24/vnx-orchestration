@@ -9,8 +9,21 @@ from pathlib import Path
 
 
 def _read_version_file() -> str:
-    # Single source of truth: vnx_cli.__version__ (package metadata in an
-    # installed wheel, root VERSION file in a dev checkout).
+    # Read the version from the RESOLVED engine's VERSION file, not the pip
+    # dist-info metadata. The editable finder can map ``vnx_cli`` to a version
+    # dir whose name differs from the dist-info (e.g. finder -> versions/edge
+    # =1.1.0 while the dist-info is still ...-1.0.0); the metadata then lies.
+    # The engine's VERSION file is authoritative for the code that actually
+    # loads. Fall back to package metadata only if VERSION is unreadable.
+    try:
+        from vnx_cli import _engine
+        version_file = _engine.engine_root() / "VERSION"
+        if version_file.is_file():
+            v = version_file.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    except Exception:
+        pass
     from vnx_cli import __version__
     return __version__
 

@@ -44,6 +44,31 @@ def test_read_version_file_matches_repo_version():
         assert _read_version_file() == expected
 
 
+def test_read_version_file_prefers_engine_version_over_dist_info(tmp_path, monkeypatch):
+    """The RESOLVED engine's VERSION wins over stale pip dist-info metadata.
+
+    Reproduces the 'vnx version lies' bug: the editable finder points at a
+    version dir (e.g. versions/edge=1.1.0) whose VERSION differs from the
+    dist-info name (...-1.0.0). vnx version must report the engine's VERSION.
+    """
+    import vnx_cli._engine as _engine
+    fake_engine = tmp_path / "engine"
+    fake_engine.mkdir()
+    (fake_engine / "VERSION").write_text("9.9.9\n")
+    monkeypatch.setattr(_engine, "engine_root", lambda: fake_engine)
+    assert _read_version_file() == "9.9.9"
+
+
+def test_read_version_file_falls_back_when_no_version_file(tmp_path, monkeypatch):
+    """No VERSION file in the engine -> fall back to package __version__."""
+    import vnx_cli._engine as _engine
+    from vnx_cli import __version__
+    empty = tmp_path / "no_version"
+    empty.mkdir()
+    monkeypatch.setattr(_engine, "engine_root", lambda: empty)
+    assert _read_version_file() == __version__
+
+
 # ---------------------------------------------------------------------------
 # _read_pin
 # ---------------------------------------------------------------------------
