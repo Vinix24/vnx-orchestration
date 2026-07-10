@@ -79,6 +79,17 @@ class TestDegradation:
         # the other seats + later stages still ran
         assert res.synthesis == "ok"
 
+    def test_synthesis_falls_back_when_first_seat_errors(self):
+        # synthesis prefers claude; make claude error and claude's error must NOT be the
+        # final synthesis — a later seat produces the real report (no unconsolidated report).
+        def flaky(provider, model, prompt, did):
+            if provider == "claude":
+                return "[dispatch error claude: boom]"
+            return f"ok-{provider}"
+        res = dp.run_deliberation("architecture", "q", dispatcher=flaky, roster=ROSTER, max_workers=3)
+        assert not res.synthesis.startswith("[dispatch error")
+        assert res.synthesis.startswith("ok-")  # a fallback seat produced it
+
 
 class TestModesAndReport:
     def test_unknown_mode_raises(self):
