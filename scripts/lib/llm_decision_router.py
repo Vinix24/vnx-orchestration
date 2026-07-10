@@ -367,7 +367,25 @@ class DecisionRouter:
         Returns:
             DecisionResult with action, reasoning, confidence, backend_used, latency_ms.
         """
-        if self.backend == Backend.OLLAMA:
+        # ADR-028 Phase 3 fast-path (VNX_DECISION_FAST_PATH=1, default OFF): a deterministic
+        # classifier short-circuits TRIVIAL, unambiguous decisions (a clean receipt = no-op)
+        # so they never spend a judge/LLM call; non-trivial cases fall through to the backend.
+        # Fail-open: any error routes to the backend. Default OFF -> `fast` is always None ->
+        # the exact same backend branch runs and the decision is unchanged (the only added
+        # work is a swallowed flag check).
+        fast = None
+        try:
+            from decision_fast_path import fast_path_enabled, classify  # noqa: PLC0415
+
+            if fast_path_enabled():
+                fast = classify(context, question)
+        except Exception as exc:  # noqa: BLE001 — fast-path must never break the decision
+            logger.debug("decision fast-path skipped: %s", exc)
+            fast = None
+
+        if fast is not None:
+            result = fast
+        elif self.backend == Backend.OLLAMA:
             result = _decide_ollama(
                 context, question,
                 model=self.ollama_model,
