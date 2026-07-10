@@ -13,11 +13,13 @@
 # access, so this is the reliable context. Session-start is also the moment a
 # synced horizon matters most (kickoff).
 #
-# SAFETY — self-disabling trust gate: only runs `--apply` (writes phase) when
-# `reconcile-streak` reports flip_criterion_met=true. If that trust is ever lost
-# (a false-candidate review resets the streak) it silently drops back to CHECK
-# mode (advisory, zero writes). reconcile itself only closes tracks whose linked
-# PRs are verified MERGED on GitHub.
+# SAFETY — auto-close is ON BY DEFAULT (operator directive 2026-07-10). reconcile
+# only ever closes tracks whose linked PRs are verified MERGED on GitHub (provenance
+# chain), so applying by default keeps the horizon in sync with git reality without
+# waiting for the trust streak. Opt out with VNX_AUTO_CLOSE=0 → advisory CHECK (zero
+# writes). The reconcile-streak is still computed + logged for observability, but no
+# longer gates the flip. reconcile's own two-stage close (CONFIRMED → stale_candidate
+# → closed) remains the conservative safeguard against a single mis-verify.
 #
 # Scoped to the interactive session: fires ONLY when VNX_DISPATCH_ID is UNSET.
 # A tmux-spawn worker (VNX_DISPATCH_ID set) drains stdin and exits 0 — no-op.
@@ -49,17 +51,28 @@ mkdir -p "$LOG_DIR" 2>/dev/null || true
     PID_ARGS=()
     [ -n "$PID" ] && PID_ARGS=(--project-id "$PID")
 
-    # Decide apply vs check from the trust gate.
-    MODE="check"
+    # Auto-close ON BY DEFAULT (operator directive 2026-07-10): apply unless the operator
+    # opts out with VNX_AUTO_CLOSE=0. reconcile only closes tracks whose PRs are verified
+    # MERGED, so this keeps the horizon in sync with git without waiting for the trust streak.
+    if [ "${VNX_AUTO_CLOSE:-1}" = "0" ]; then
+        MODE="check"
+    else
+        MODE="apply"
+    fi
+
+    # Streak is still computed + logged for observability (no longer gates the flip).
+    STREAK_MET="?"
     if python3 "$CLI" objective reconcile-streak "${PID_ARGS[@]}" --json 2>/dev/null \
         | python3 -c 'import sys,json;
 d=json.load(sys.stdin);
 sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null; then
-        MODE="apply"
+        STREAK_MET="yes"
+    else
+        STREAK_MET="no"
     fi
 
     STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "[$STAMP] session-reconcile tick: mode=$MODE" >>"$LOG" 2>&1
+    echo "[$STAMP] session-reconcile tick: mode=$MODE streak_met=$STREAK_MET" >>"$LOG" 2>&1
 
     if [ "$MODE" = "apply" ]; then
         python3 "$CLI" objective reconcile "${PID_ARGS[@]}" --apply --repo-root "$ROOT" >>"$LOG" 2>&1
