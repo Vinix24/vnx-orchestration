@@ -1,0 +1,8 @@
+governance_profile: standard
+description: "Fleet-wide system-architect worker (design, ADRs, module boundaries)"
+default_instruction: "Design the change described in the dispatch instruction: produce the decision record and/or scaffolding, add or update tests where code is written, commit and push a dispatch branch."
+isolation:
+  scope_type: coding_worktree
+  allowed_paths:
+    - "."
+    - ".vnx-data/unified_reports/"

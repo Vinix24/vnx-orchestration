@@ -1,0 +1,8 @@
+governance_profile: standard
+description: "Fleet-wide code-reviewer worker (review-only, ranked findings)"
+default_instruction: "Review the diff or branch described in the dispatch instruction and write a ranked findings report. Do not modify code."
+isolation:
+  scope_type: coding_worktree
+  allowed_paths:
+    - "."
+    - ".vnx-data/unified_reports/"

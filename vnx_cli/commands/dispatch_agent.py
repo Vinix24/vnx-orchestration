@@ -10,10 +10,19 @@ from vnx_cli import _engine
 
 
 def _resolve_agent_path(project_dir: Path, agent: str) -> Path | None:
-    """Resolve an agent CLAUDE.md from project agents/, examples/, or packaged examples."""
+    """Resolve an agent CLAUDE.md.
+
+    Order: project ``agents/`` and ``examples/`` (project-local wins), then the
+    engine's ``agents/`` (the FLEET-WIDE shared library — backend-developer,
+    frontend-developer, system-architect, quality-engineer, security-engineer,
+    code-reviewer, and the content agents), then the engine's ``examples/``
+    (packaged demos). The engine ``agents/`` fallback is what lets any project
+    dispatch a generic dev-worker without keeping its own per-project copy.
+    """
     candidates = [
         project_dir / "agents" / agent / "CLAUDE.md",
         project_dir / "examples" / agent / "CLAUDE.md",
+        _engine.engine_root() / "agents" / agent / "CLAUDE.md",
         _engine.engine_root() / "examples" / agent / "CLAUDE.md",
     ]
     for candidate in candidates:

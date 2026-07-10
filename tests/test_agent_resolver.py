@@ -41,6 +41,25 @@ class TestResolveAgentPrecedence:
         cfg = resolve_agent("packaged-agent", project_dir, engine_root=engine_root)
         assert cfg is not None and cfg.claude_md == agent_dir / "CLAUDE.md"
 
+    def test_falls_back_to_engine_root_agents_fleet_wide(self, tmp_path):
+        """A fleet-wide dev-worker in engine/agents/ resolves from any project."""
+        engine_root = tmp_path / "engine"
+        agent_dir = _make_agent(engine_root, "backend-developer", rel="agents")
+        project_dir = tmp_path / "empty-project"
+        project_dir.mkdir()  # no local agents/ or examples/
+        cfg = resolve_agent("backend-developer", project_dir, engine_root=engine_root)
+        assert cfg is not None and cfg.claude_md == agent_dir / "CLAUDE.md"
+
+    def test_engine_agents_beats_engine_examples(self, tmp_path):
+        """The engine's agents/ (real fleet lib) wins over its examples/ (demo)."""
+        engine_root = tmp_path / "engine"
+        _make_agent(engine_root, "backend-developer", rel="examples", config="provider: demo\n")
+        fleet_dir = _make_agent(engine_root, "backend-developer", rel="agents", config="provider: fleet\n")
+        project_dir = tmp_path / "empty-project"
+        project_dir.mkdir()
+        cfg = resolve_agent("backend-developer", project_dir, engine_root=engine_root)
+        assert cfg is not None and cfg.claude_md == fleet_dir / "CLAUDE.md" and cfg.provider == "fleet"
+
     def test_project_beats_engine_root(self, tmp_path):
         engine_root = tmp_path / "engine"
         _make_agent(engine_root, "shared", rel="examples", config="provider: engine\n")

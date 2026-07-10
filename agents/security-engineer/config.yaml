@@ -1,0 +1,8 @@
+governance_profile: standard
+description: "Fleet-wide security-engineer worker (remediation, hardening)"
+default_instruction: "Remediate the security weakness described in the dispatch instruction: fix it, add a regression test that proves the fix, commit and push a dispatch branch."
+isolation:
+  scope_type: coding_worktree
+  allowed_paths:
+    - "."
+    - ".vnx-data/unified_reports/"

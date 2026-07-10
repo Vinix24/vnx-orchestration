@@ -1,0 +1,8 @@
+governance_profile: standard
+description: "Fleet-wide quality-engineer worker (tests, edge cases, coverage)"
+default_instruction: "Improve test quality for the area described in the dispatch instruction: add coverage and edge cases, commit and push a dispatch branch."
+isolation:
+  scope_type: coding_worktree
+  allowed_paths:
+    - "."
+    - ".vnx-data/unified_reports/"
