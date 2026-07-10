@@ -98,6 +98,9 @@ ALLOWLISTED_FILES: frozenset[str] = frozenset({
     "scripts/lib/migration_linter.py",
     # project_id_migration.py docstring mentions the pattern for documentation.
     "scripts/lib/project_id_migration.py",
+    # vnx_tagger.py creates tagging_events with DEFAULT 'vnx-dev'; pre-existing
+    # miss from the W-init allowlist sweep (file landed after 2026-06-21).
+    "scripts/lib/vnx_tagger.py",
 })
 
 

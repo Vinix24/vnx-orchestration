@@ -36,6 +36,7 @@ from coordination_db import (  # noqa: F401
     get_lease,
     init_schema,
     project_terminal_state,
+    _migrate_v11_composite_keys,
 )
 
 # Re-exports from runtime_state_machine

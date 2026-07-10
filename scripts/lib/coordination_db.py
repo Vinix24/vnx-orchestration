@@ -239,6 +239,96 @@ def _needs_initial_migration(conn: sqlite3.Connection) -> bool:
 # Schema initialization
 # ---------------------------------------------------------------------------
 
+# ADR-007: composite UNIQUE indexes over project_id for RC tables that historically
+# carried only a single-column PK/UNIQUE. Each entry is (table, [columns]).
+_RC_COMPOSITE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("coordination_events", ("project_id", "id")),
+    ("incident_log", ("project_id", "id")),
+    ("intelligence_injections", ("project_id", "id")),
+    ("worker_pool_membership", ("project_id", "id")),
+)
+
+
+def _migrate_v11_composite_keys(conn: sqlite3.Connection) -> None:
+    """V11: ADR-007 composite UNIQUE indexes over project_id (non-destructive).
+
+    Creates ``CREATE UNIQUE INDEX IF NOT EXISTS ux_<table>_pid`` for each table
+    listed in ``_RC_COMPOSITE_KEYS``. Each index creation is wrapped in its own
+    try/except: a missing column or existing duplicate rows in a given table only
+    skips that one table and logs a clear warning. The migration never aborts,
+    never deletes rows, and never rewrites data.
+    """
+    for table, cols in _RC_COMPOSITE_KEYS:
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            logger.warning("composite-keys: skipped %s — table does not exist", table)
+            continue
+
+        actual_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        missing = [c for c in cols if c not in actual_cols]
+        if missing:
+            logger.warning(
+                "composite-keys: skipped %s — missing column(s): %s",
+                table, ", ".join(missing)
+            )
+            continue
+
+        index_name = f"ux_{table}_pid"
+        col_list = ", ".join(cols)
+        try:
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table} ({col_list})"
+            )
+            logger.info(
+                "composite-keys: created UNIQUE INDEX %s ON %s(%s) (ADR-007)",
+                index_name, table, col_list
+            )
+        except sqlite3.IntegrityError as exc:
+            # Expected: this store has duplicate (project_id, key) rows. Skip + surface
+            # so a dedup can be done before the index is added — never abort, never delete.
+            logger.warning(
+                "composite-keys: skipped %s — duplicate rows for %s, dedup needed (%s)",
+                table, col_list, exc,
+            )
+        except sqlite3.Error as exc:
+            # Unexpected (e.g. a migration bug / bad column) — must NOT be swallowed as a
+            # data-violation skip. Surface at ERROR level so it is investigated; still do
+            # not abort the whole migration run.
+            logger.error(
+                "composite-keys: UNEXPECTED error on %s — index NOT created; investigate (%s)",
+                table, exc,
+            )
+
+
+def _migrate_v11_composite_keys_down(conn: sqlite3.Connection) -> None:
+    """Down migration for V11: drop the ADR-007 composite UNIQUE indexes.
+
+    Idempotent — ``DROP INDEX IF EXISTS`` is a no-op when the index is absent.
+    """
+    for table, _ in _RC_COMPOSITE_KEYS:
+        index_name = f"ux_{table}_pid"
+        try:
+            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+            logger.info("composite-keys: dropped %s (V11 down)", index_name)
+        except sqlite3.Error as exc:
+            logger.warning("composite-keys: failed to drop %s — %s", index_name, exc)
+
+
+def _rc_project_id_present(conn: sqlite3.Connection) -> bool:
+    """Return True if at least one ADR-007 target table exists and has project_id."""
+    for table, _ in _RC_COMPOSITE_KEYS:
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            continue
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "project_id" in cols:
+            return True
+    return False
+
+
 def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -> None:
     """Initialize (or migrate) the runtime coordination database. Idempotent.
 
@@ -273,6 +363,13 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
             migration_sql = migration_path.read_text(encoding="utf-8")
             schema_migration.apply_script_if_below(conn, v, migration_sql)
             v += 1
+
+        # V11: ADR-007 composite UNIQUE indexes over project_id. Only schedule when
+        # project_id is already present (migration 0010 runs after init_schema in the
+        # normal vnx migrate flow). If project_id is absent here, run_runtime_coordination_migration
+        # will apply V11 after adding the column.
+        if _rc_project_id_present(conn):
+            schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
 
 
 # ---------------------------------------------------------------------------
