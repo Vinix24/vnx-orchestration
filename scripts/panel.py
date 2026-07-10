@@ -51,7 +51,13 @@ def main(argv: "list[str] | None" = None) -> int:
             return 2
 
     from plan_gate_panel import _make_default_dispatcher  # noqa: PLC0415
-    dispatcher = _make_default_dispatcher(None, args.timeout)
+    # Pass a REAL data_dir: the claude/tmux lane writes each report to
+    # <data_dir>/unified_reports/<id>.md and _read_report falls back to that path. With
+    # data_dir=None the claude-lane reports (fan-out + synthesis) are written but never found
+    # → no cited synthesis (sales-copilot T0, 2026-07-10). unified_reports_dir().parent IS
+    # that data_dir, so the write-path and read-path agree.
+    data_dir = str(_resolve_reports_dir().parent)
+    dispatcher = _make_default_dispatcher(data_dir, args.timeout)
 
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     result = run_deliberation(args.mode, args.question, dispatcher=dispatcher, context=context)

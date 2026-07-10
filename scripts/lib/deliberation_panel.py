@@ -194,7 +194,6 @@ def run_deliberation(
     digest = _digest(result.fan_out)
 
     # ── Stage 2: CONTRARIAN (one red-team seat — the strongest reasoner) ──────
-    contra_provider, contra_model = _pick(roster, prefer=("codex", "deepseek-harness", "claude"))
     contra_prompt = (
         f"You are the RED TEAM on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
@@ -203,11 +202,12 @@ def run_deliberation(
         "Name what everyone MISSED, steelman the dissent, and flag any claim stated as fact "
         "without evidence. Do not be agreeable. Terse, concrete."
     )
-    result.contrarian = _safe(dispatcher, contra_provider, contra_model, contra_prompt,
-                              f"panel-{mode}-contrarian-{uuid.uuid4().hex[:6]}")
+    result.contrarian = _first_ok(
+        dispatcher, _ordered_seats(roster, ("codex", "deepseek-harness", "claude")),
+        contra_prompt, f"panel-{mode}-contrarian",
+    )
 
     # ── Stage 3: VERIFY (adversarial factcheck of the top claims) ────────────
-    verify_provider, verify_model = _pick(roster, prefer=("codex", "kimi", "claude"))
     verify_prompt = (
         f"You are the VERIFY pass on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
@@ -216,11 +216,12 @@ def run_deliberation(
         f"{spec.verify_target}. Mark each: CONFIRMED / REFUTED / UNVERIFIABLE, with the specific "
         "evidence (file:line or source). Default to REFUTED/UNVERIFIABLE when evidence is thin."
     )
-    result.factcheck = _safe(dispatcher, verify_provider, verify_model, verify_prompt,
-                             f"panel-{mode}-verify-{uuid.uuid4().hex[:6]}")
+    result.factcheck = _first_ok(
+        dispatcher, _ordered_seats(roster, ("codex", "kimi", "claude")),
+        verify_prompt, f"panel-{mode}-verify",
+    )
 
     # ── Stage 4: SYNTHESIS (one cited report) ────────────────────────────────
-    synth_provider, synth_model = _pick(roster, prefer=("claude", "codex", "kimi"))
     synth_prompt = (
         f"You are the SYNTHESISER on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
@@ -230,26 +231,55 @@ def run_deliberation(
         "dissent), VERIFIED CLAIMS (ranked, with evidence), OPEN QUESTIONS. Dedupe. Cite "
         "file:line / sources. Do not invent agreement that isn't there."
     )
-    result.synthesis = _safe(dispatcher, synth_provider, synth_model, synth_prompt,
-                             f"panel-{mode}-synth-{uuid.uuid4().hex[:6]}")
+    result.synthesis = _first_ok(
+        dispatcher, _ordered_seats(roster, ("claude", "codex", "kimi")),
+        synth_prompt, f"panel-{mode}-synth",
+    )
 
     return result
 
 
-def _pick(roster: List[Tuple[str, str]], prefer: Tuple[str, ...]) -> Tuple[str, str]:
-    """Pick the first preferred provider present in the roster, else the first roster seat."""
+def _ordered_seats(
+    roster: List[Tuple[str, str]], prefer: Tuple[str, ...]
+) -> List[Tuple[str, str]]:
+    """Preferred seats present in the roster (in preference order), then the rest — so a
+    stage can fall back to the next provider when one fails."""
     have = {p: m for p, m in roster}
-    for p in prefer:
-        if p in have:
-            return p, have[p]
-    return roster[0]
+    seats = [(p, have[p]) for p in prefer if p in have]
+    seats += [(p, m) for p, m in roster if p not in prefer]
+    return seats or list(roster)
 
 
-def _safe(dispatcher: DispatcherFn, provider: str, model: str, prompt: str, did: str) -> str:
-    try:
-        return dispatcher(provider, model, prompt, did) or "[empty]"
-    except Exception as exc:  # noqa: BLE001 — a stage failure degrades the report, never crashes
-        return f"[dispatch error {provider}: {exc!r}]"
+def _pick(roster: List[Tuple[str, str]], prefer: Tuple[str, ...]) -> Tuple[str, str]:
+    """First preferred provider present in the roster, else the first roster seat."""
+    return _ordered_seats(roster, prefer)[0]
+
+
+def _is_error(text: str) -> bool:
+    t = (text or "").strip()
+    return (not t) or t.startswith("[dispatch error") or t == "[empty]"
+
+
+def _first_ok(
+    dispatcher: DispatcherFn,
+    seats: List[Tuple[str, str]],
+    prompt: str,
+    did_prefix: str,
+) -> str:
+    """Try each seat in order until one returns a real (non-error) report. This keeps the
+    critical sequential stages (contrarian / verify / synthesis) from collapsing the whole
+    panel when the first-choice provider is down (sales-copilot T0, 2026-07-10)."""
+    last = "[empty]"
+    for provider, model in seats:
+        try:
+            out = dispatcher(provider, model, prompt, f"{did_prefix}-{provider}-{uuid.uuid4().hex[:6]}")
+        except Exception as exc:  # noqa: BLE001
+            last = f"[dispatch error {provider}: {exc!r}]"
+            continue
+        if not _is_error(out):
+            return out
+        last = out or "[empty]"
+    return last
 
 
 __all__ = ["MODES", "DEFAULT_ROSTER", "ModeSpec", "DeliberationResult", "run_deliberation"]
