@@ -93,6 +93,20 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
     # existing marker / VNX_PROJECT_ID / the data-path anchor (no split-tenant store).
     _reconcile_tenant_or_fail(data_root, project_id)
 
+    # Advisory pre-flight integrity check (Tier F, task #30): surface dangling FK edges
+    # (the mission-control 22-dangling track_dependencies class) as a clear report BEFORE
+    # the migration mutates, instead of a cryptic mid-migration constraint failure. Placed
+    # right after the tenant gate and before ANY write (marker or DB), so strict mode aborts
+    # before the store is touched at all. Advisory by default; VNX_MIGRATE_STRICT_FK=1 aborts
+    # a violating store (the fleet sweep then skips it and continues). Fail-open: never block
+    # a migration on the check itself.
+    try:
+        from store_integrity import preflight_or_report  # noqa: PLC0415
+
+        preflight_or_report(data_root / "state" / "runtime_coordination.db", label=project_id)
+    except ImportError:
+        pass  # advisory tooling absent — never blocks the migration
+
     # Anchor the tenant on disk (not via a global env mutation that would leak across
     # a fleet sweep or a shared test process): write the canonical .vnx-project-id
     # marker in the data root when absent, so the fail-closed resolver in the runner
