@@ -489,15 +489,29 @@ def _rebuild_table_phase1(
     conn: sqlite3.Connection,
     table: str,
     non_composite_uniques: list[dict],
-) -> None:
+    widened_keys: set[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
     """Rebuild ``table`` to add project_id to each non-composite UNIQUE/PK.
 
     Phase 1 keeps project_id NULLABLE — we only widen the uniqueness key.
     Uses the copy-and-rename pattern (SQLite cannot ALTER CONSTRAINT).
 
+    When ``widened_keys`` is provided, any single-column FK on this table that
+    references a parent key recorded in ``widened_keys`` is widened to a
+    composite FK including project_id.  This keeps child tables consistent
+    with parents whose UNIQUE/PK was widened to (old_col, project_id).
+
     FK-off must already be active on this connection (caller's responsibility).
+
+    Returns the list of (table, old_col) parent keys that were widened to
+    composite by this rebuild.
     """
+    if widened_keys is None:
+        widened_keys = set()
+
     cols = _get_table_columns(conn, table)
+    widened_here: list[tuple[str, str]] = []
+    has_project_id = any(c["name"] == "project_id" for c in cols)
     col_defs = []
     pk_cols = [c for c in cols if c["pk"] > 0]
     pk_col_names = {c["name"] for c in pk_cols}
@@ -560,6 +574,9 @@ def _rebuild_table_phase1(
             extra_pk_cols = [c["name"] for c in pk_col_list]
             composite_pk = ", ".join(_safe_ident(n) for n in extra_pk_cols + ["project_id"])
             col_defs.append(f"  PRIMARY KEY ({composite_pk})")
+            # Record the widened single-column PK so child FKs can follow.
+            if len(pk_col_list) == 1:
+                widened_here.append((table, pk_col_list[0]["name"]))
         else:
             existing_pk = ", ".join(_safe_ident(c["name"]) for c in pk_col_list)
             col_defs.append(f"  PRIMARY KEY ({existing_pk})")
@@ -583,6 +600,10 @@ def _rebuild_table_phase1(
         existing_cols = uidx["cols"]
         if "project_id" not in existing_cols:
             extended = existing_cols + ["project_id"]
+            # Record single-column declared UNIQUEs that were widened so child
+            # FKs referencing the old key can be widened to match.
+            if len(existing_cols) == 1:
+                widened_here.append((table, existing_cols[0]))
         else:
             extended = existing_cols  # already composite — re-emit verbatim
         uc_list = ", ".join(_safe_ident(c) for c in extended)
@@ -597,13 +618,32 @@ def _rebuild_table_phase1(
             fk_by_id[fk_id] = []
         fk_by_id[fk_id].append(row)
     for fk_id, fk_group in sorted(fk_by_id.items()):
-        from_cols = ", ".join(_safe_ident(r[3]) for r in sorted(fk_group, key=lambda r: r[1]))
         ref_table = fk_group[0][2]
-        to_cols = ", ".join(_safe_ident(r[4]) for r in sorted(fk_group, key=lambda r: r[1]))
+        old_from_cols = [r[3] for r in sorted(fk_group, key=lambda r: r[1])]
+        old_to_cols = [r[4] for r in sorted(fk_group, key=lambda r: r[1])]
         on_update = fk_group[0][5]
         on_delete = fk_group[0][6]
+
+        # Widen this child FK if it references a parent key that Phase 1 has
+        # widened to a composite (old_col, project_id).  The parent key was
+        # single-column before widening; we mirror that by appending project_id
+        # to both the child FK columns and the referenced parent columns.
+        if (
+            len(old_to_cols) == 1
+            and (ref_table, old_to_cols[0]) in widened_keys
+            and "project_id" not in old_from_cols
+            and has_project_id
+        ):
+            new_from_cols = old_from_cols + ["project_id"]
+            new_to_cols = old_to_cols + ["project_id"]
+        else:
+            new_from_cols = old_from_cols
+            new_to_cols = old_to_cols
+
+        from_cols_sql = ", ".join(_safe_ident(c) for c in new_from_cols)
+        to_cols_sql = ", ".join(_safe_ident(c) for c in new_to_cols)
         col_defs.append(
-            f"  FOREIGN KEY ({from_cols}) REFERENCES {_safe_ident(ref_table)} ({to_cols})"
+            f"  FOREIGN KEY ({from_cols_sql}) REFERENCES {_safe_ident(ref_table)} ({to_cols_sql})"
             f" ON UPDATE {on_update} ON DELETE {on_delete}"
         )
 
@@ -683,6 +723,8 @@ def _rebuild_table_phase1(
     for _, idx_sql in secondary_indexes:
         conn.execute(idx_sql)
 
+    return widened_here
+
 
 def run_phase1_ddl(
     conn: sqlite3.Connection,
@@ -695,10 +737,15 @@ def run_phase1_ddl(
     ``tables`` must already be in topological (parent-before-child) order.
     Returns the list of tables that were actually rebuilt.
 
+    Child FKs that reference a widened single-column parent key are discovered
+    and rebuilt automatically, so foreign_key_check passes after Phase 1 even
+    when a parent UNIQUE/PK becomes composite (e.g. recommendations ->
+    recommendation_outcomes).
+
     This function manages its own FK-off + BEGIN EXCLUSIVE transaction.
     """
-    rebuilt: list[str] = []
-    tables_needing_rebuild: list[tuple[str, list[dict]]] = []
+    need_rebuild: set[str] = set()
+    table_non_composite: dict[str, list[dict]] = {}
 
     for table in tables:
         non_composite = _get_unique_indexes(conn, table)
@@ -723,9 +770,10 @@ def run_phase1_ddl(
             and not (len(pk_cols) == 1 and pk_cols[0]["type"].upper() == "INTEGER")
         )
         if non_composite_declared or pk_lacks_pid:
-            tables_needing_rebuild.append((table, non_composite))
+            need_rebuild.add(table)
+            table_non_composite[table] = non_composite
 
-    if not tables_needing_rebuild:
+    if not need_rebuild:
         return []
 
     original_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
@@ -735,9 +783,47 @@ def run_phase1_ddl(
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("BEGIN EXCLUSIVE")
         try:
-            for table, non_composite in tables_needing_rebuild:
-                _rebuild_table_phase1(conn, table, non_composite)
-                rebuilt.append(table)
+            rebuilt: list[str] = []
+            rebuilt_set: set[str] = set()
+            widened_keys: set[tuple[str, str]] = set()
+
+            # Iteratively rebuild tables and discover child FKs that must also be
+            # widened.  Each loop processes all tables in topological order; newly
+            # discovered children are handled in subsequent loops, which also covers
+            # chained FK dependencies.
+            changed = True
+            while changed:
+                changed = False
+                for table in tables:
+                    if table not in need_rebuild or table in rebuilt_set:
+                        continue
+                    non_composite = table_non_composite.get(table, _get_unique_indexes(conn, table))
+                    new_widened = _rebuild_table_phase1(
+                        conn, table, non_composite, widened_keys=widened_keys
+                    )
+                    rebuilt.append(table)
+                    rebuilt_set.add(table)
+                    for key in new_widened:
+                        if key not in widened_keys:
+                            widened_keys.add(key)
+                            changed = True
+
+                # After rebuilding everything currently queued, scan for child tables
+                # whose FKs still reference the old single-column parent key.
+                for table in tables:
+                    if table in rebuilt_set:
+                        continue
+                    fk_rows = conn.execute(
+                        f"PRAGMA foreign_key_list({_safe_ident(table)[1:-1]})"
+                    ).fetchall()
+                    for row in fk_rows:
+                        ref_table = row[2]
+                        to_col = row[4]
+                        if (ref_table, to_col) in widened_keys:
+                            need_rebuild.add(table)
+                            changed = True
+                            break
+
             # B3(a) fix: run integrity checks before committing Phase 1 DDL.
             # A rebuild that silently damages the schema is caught here and
             # rolled back, never committed.
