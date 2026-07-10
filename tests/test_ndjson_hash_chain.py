@@ -19,6 +19,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import sqlite3
+
 from ndjson_hash_chain import (
     GENESIS_HASH,
     append_chained_entry,
@@ -26,6 +28,9 @@ from ndjson_hash_chain import (
     compute_entry_hash,
     verify_chain,
     walk_chain,
+    _origin_store_path,
+    _read_chain_origin,
+    _record_chain_origin,
 )
 
 
@@ -403,3 +408,48 @@ def test_verify_chain_mid_ledger_adoption_is_verified(tmp_path):
     assert ok is True
     assert status == "verified"
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# Origin-store hardening (PR #1086 fix: write-once anchor + missing-table)
+# ---------------------------------------------------------------------------
+def test_origin_is_write_once_forged_rerecord_ignored(tmp_path):
+    """A recorded chain origin is immutable: a later re-record is ignored.
+
+    Closes the mutable-origin bypass — an attacker who strips the prefix and
+    appends a new 'first' chained entry must NOT be able to overwrite the pinned
+    origin. The first-recorded origin wins forever.
+    """
+    p = tmp_path / "ledger.ndjson"
+    for i in range(4):
+        append_chained_entry(p, {"seq": i})
+    origin_db = _origin_store_path(p)
+    original = _read_chain_origin(origin_db, p)
+    assert original is not None
+
+    # Attacker tries to move the pinned origin forward with a forged hash.
+    _record_chain_origin(origin_db, p, line_number=3, entry_hash="deadbeef" * 8)
+
+    after = _read_chain_origin(origin_db, p)
+    assert after == original, "origin must be write-once (forged re-record ignored)"
+
+
+def test_missing_origin_table_falls_back_to_strict_no_crash(tmp_path):
+    """A coordination DB without the origin table must not crash verify_chain.
+
+    Pre-existing runtime_coordination.db files predate the origin table; the
+    verifier must treat a missing table as 'no origin recorded' and fall back to
+    strict mode instead of raising sqlite3.OperationalError.
+    """
+    p = tmp_path / "ledger.ndjson"
+    for i in range(3):
+        append_chained_entry(p, {"seq": i})
+    origin_db = _origin_store_path(p)
+    # Simulate a coordination DB that exists but has no origin table.
+    with sqlite3.connect(str(origin_db)) as conn:
+        conn.execute("DROP TABLE IF EXISTS vnx_chain_origin")
+        conn.commit()
+
+    # Must not raise; a genesis-anchored full chain passes strict mode.
+    ok, violations, status = verify_chain(p)
+    assert ok is True, f"strict fallback should verify a genesis chain: {status} {violations}"

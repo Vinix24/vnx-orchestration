@@ -23,6 +23,21 @@ Security note (origin pinning, PR #1085 fix):
 - When no origin record exists the verifier falls back to strict mode: a chained
   ledger must start at line 1 with a GENESIS-anchored entry and every entry must
   carry `prev_hash`.
+- The origin record is WRITE-ONCE (`ON CONFLICT DO NOTHING`): once pinned it can
+  never be overwritten, so an attacker cannot re-record a forged origin after
+  stripping the prefix (PR #1086 fix).
+
+Threat model + residual limit (honest scope):
+- This detects ACCIDENTAL corruption and NAIVE tampering (prefix strip/delete +
+  re-anchor, forged-origin overwrite) against a ledger whose trusted origin row
+  is intact.
+- It does NOT fully defend a local attacker who both DELETES the origin row from
+  `runtime_coordination.db` AND re-chains the entire remaining ledger from a new
+  GENESIS: strict-mode then accepts the re-chained file. True tamper-EVIDENCE
+  against a local attacker with write access to both the ledger and the origin
+  store requires an EXTERNAL append-only / signed anchor (periodic head-hash
+  seal), tracked as ADR-029 (`chain_epoch_seal`), out of scope for this fix.
+  The flag stays default-off (`VNX_RECEIPT_HASH_CHAIN`) until that anchor lands.
 """
 from __future__ import annotations
 
@@ -82,11 +97,20 @@ def _record_chain_origin(
     origin_db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(origin_db)) as conn:
         _init_origin_store(conn)
+        # WRITE-ONCE: the chain origin is immutable history — the first chained
+        # entry of a ledger. INSERT OR REPLACE would let a later append overwrite
+        # the pinned origin, which defeats the pin (an attacker could strip the
+        # prefix, append a new "first" chained entry, and re-record the origin).
+        # ON CONFLICT DO NOTHING keeps the first-recorded origin forever; a
+        # re-record attempt is silently ignored so verify_chain still checks the
+        # ledger against the ORIGINAL origin. A genuine new epoch uses a new
+        # ledger file (new path = new row), so this never blocks legitimate use.
         conn.execute(
             f"""
-            INSERT OR REPLACE INTO {_ORIGIN_TABLE}
+            INSERT INTO {_ORIGIN_TABLE}
                 (ledger_path, line_number, entry_hash, recorded_at)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(ledger_path) DO NOTHING
             """,
             (
                 str(ledger_path.resolve()),
@@ -103,14 +127,21 @@ def _read_chain_origin(origin_db: Path, ledger_path: Path) -> dict | None:
     if not origin_db.exists():
         return None
     with sqlite3.connect(str(origin_db)) as conn:
-        cur = conn.execute(
-            f"""
-            SELECT line_number, entry_hash FROM {_ORIGIN_TABLE}
-            WHERE ledger_path = ?
-            """,
-            (str(ledger_path.resolve()),),
-        )
-        row = cur.fetchone()
+        try:
+            cur = conn.execute(
+                f"""
+                SELECT line_number, entry_hash FROM {_ORIGIN_TABLE}
+                WHERE ledger_path = ?
+                """,
+                (str(ledger_path.resolve()),),
+            )
+            row = cur.fetchone()
+        except sqlite3.OperationalError:
+            # The origin table has never been created in this coordination DB
+            # (e.g. a pre-existing runtime_coordination.db that predates chaining,
+            # or no ledger has recorded an origin yet). Treat as "no origin
+            # recorded" -> verify_chain uses strict mode; never crash the verify.
+            return None
         if row is None:
             return None
         return {"line_number": row[0], "entry_hash": row[1]}
