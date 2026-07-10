@@ -1,0 +1,8 @@
+governance_profile: standard
+description: "Fleet-wide backend-developer worker (APIs, data layer, reliability)"
+default_instruction: "Implement the backend change described in the dispatch instruction: make the code change, add or update tests, commit and push a dispatch branch."
+isolation:
+  scope_type: coding_worktree
+  allowed_paths:
+    - "."
+    - ".vnx-data/unified_reports/"

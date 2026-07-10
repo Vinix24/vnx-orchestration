@@ -54,7 +54,15 @@ def _resolve_agent_claude_md(
     project_dir: Path,
     engine_root: Path | None = None,
 ) -> Path | None:
-    """Find ``<name>/CLAUDE.md`` using project agents/, examples/, then engine examples/."""
+    """Find ``<name>/CLAUDE.md`` using project agents/, examples/, then the
+    engine's ``agents/`` (fleet-wide shared library), then engine ``examples/``.
+
+    The engine ``agents/`` fallback lets any project resolve a generic
+    dev-worker (backend-developer, frontend-developer, system-architect,
+    quality-engineer, security-engineer, code-reviewer, content agents) without
+    keeping a per-project copy. Project-local always wins so a project can
+    override a fleet agent.
+    """
     if not _is_safe_agent_name(name):
         return None
     candidates = [
@@ -62,6 +70,7 @@ def _resolve_agent_claude_md(
         project_dir / "examples" / name / "CLAUDE.md",
     ]
     if engine_root is not None:
+        candidates.append(engine_root / "agents" / name / "CLAUDE.md")
         candidates.append(engine_root / "examples" / name / "CLAUDE.md")
     for candidate in candidates:
         if candidate.exists():
