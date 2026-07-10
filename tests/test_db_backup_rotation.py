@@ -167,23 +167,32 @@ def test_backup_rotation_no_op_when_under_limit(tmp_path, monkeypatch):
         assert pb.exists()
 
 
-def test_rotate_helper_prunes_by_mtime_not_by_name_lexicography():
-    """Rotation uses mtime, not lexical filename order."""
+def test_rotate_helper_uses_filename_timestamp_not_mtime():
+    """Rotation ranks backups by the filename timestamp, not mtime.
+
+    shutil.copy2 preserves the *source* DB's mtime, so a newer backup can have
+    an OLDER mtime than an older one. Here the mtime order is deliberately the
+    inverse of the filename-timestamp order: the filename-newest backup
+    (2026-07-04) is given the OLDEST mtime, and the filename-oldest (2026-06-01)
+    the newest mtime. Correct rotation must keep the filename-newest; an
+    mtime-based sort would wrongly keep the stale one and could even delete the
+    just-created backup.
+    """
     state_dir = Path(__file__).resolve().parent / "_rotate_helper_tmp"
     state_dir.mkdir(exist_ok=True)
     try:
-        # Create backups with deliberately inverted lexical-vs-temporal order.
-        old_by_name = state_dir / "quality_intelligence.db.backup_99999999_999999"
-        new_by_name = state_dir / "quality_intelligence.db.backup_00000000_000000"
-        old_by_name.write_text("old")
-        new_by_name.write_text("new")
-        os.utime(old_by_name, (1_000_000_000, 1_000_000_000))
-        os.utime(new_by_name, (2_000_000_000, 2_000_000_000))
+        newest_by_name = state_dir / "quality_intelligence.db.backup_20260704_020001"
+        oldest_by_name = state_dir / "quality_intelligence.db.backup_20260601_020001"
+        newest_by_name.write_text("newest backup")
+        oldest_by_name.write_text("oldest backup")
+        # Inverted mtimes: filename-newest gets the OLDEST mtime.
+        os.utime(newest_by_name, (1_000_000_000, 1_000_000_000))
+        os.utime(oldest_by_name, (2_000_000_000, 2_000_000_000))
 
         qd._rotate_quality_db_backups(state_dir, keep=1)
 
-        assert not old_by_name.exists()
-        assert new_by_name.exists()
+        assert newest_by_name.exists(), "filename-newest backup must be kept"
+        assert not oldest_by_name.exists(), "filename-oldest backup must be pruned"
     finally:
         for p in state_dir.glob(f"{qd._BACKUP_PREFIX}*"):
             p.unlink(missing_ok=True)

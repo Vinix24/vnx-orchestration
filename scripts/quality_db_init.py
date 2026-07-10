@@ -107,7 +107,13 @@ def _rotate_quality_db_backups(state_dir: Path, keep: int) -> None:
         p for p in state_dir.glob(f"{_BACKUP_PREFIX}*")
         if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
     ]
-    backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # Sort by the backup timestamp encoded in the filename
+    # (quality_intelligence.db.backup_<YYYYMMDD_HHMMSS>), NOT by mtime:
+    # shutil.copy2 preserves the *source* DB's mtime, so every backup inherits
+    # the live DB's mtime rather than its own creation time. The filename
+    # timestamp is the true, monotonic backup time; the zero-padded
+    # YYYYMMDD_HHMMSS suffix sorts lexicographically in chronological order.
+    backups.sort(key=lambda p: p.name, reverse=True)
 
     kept = backups[:keep]
     pruned = backups[keep:]
