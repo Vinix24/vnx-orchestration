@@ -7,7 +7,9 @@ Purpose: Initialize SQLite Quality Intelligence Database from schema
 
 from __future__ import annotations  # PEP 563: lazy annotation evaluation — Python 3.9 compat
 
+import os
 import sqlite3
+import shutil
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -74,6 +76,59 @@ def check_prerequisites() -> bool:
 
     return True
 
+_BACKUP_PREFIX = "quality_intelligence.db.backup_"
+
+
+def _parse_backup_keep(raw: str | None, default: int = 3) -> int:
+    """Return a sane keep count from VNX_DB_BACKUP_KEEP.
+
+    Falls back to ``default`` when the value is unset, invalid, or < 1.
+    Never returns 0 so we never delete the just-made backup.
+    """
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except (ValueError, AttributeError):
+        return default
+    return value if value >= 1 else default
+
+
+def _rotate_quality_db_backups(state_dir: Path, keep: int) -> None:
+    """Keep only the newest ``keep`` quality_intelligence.db.backup_* files.
+
+    Prunes the backup database files plus any matching ``-wal`` / ``-shm``
+    sidecars. Errors are logged but not raised: rotation is best-effort.
+    """
+    keep = _parse_backup_keep(str(keep) if keep is not None else None)
+
+    # Only consider the actual DB backups; sidecars are handled per-backup.
+    backups = [
+        p for p in state_dir.glob(f"{_BACKUP_PREFIX}*")
+        if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
+    ]
+    backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    kept = backups[:keep]
+    pruned = backups[keep:]
+
+    if not pruned:
+        log('INFO', f'No old quality_intelligence backups to prune (kept {len(kept)})')
+        return
+
+    for old in pruned:
+        try:
+            old.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm"):
+                sidecar = state_dir / f"{old.name}{suffix}"
+                sidecar.unlink(missing_ok=True)
+            log('INFO', f'Pruned old backup: {old.name}')
+        except Exception as e:
+            log('WARNING', f'Failed to prune {old.name}: {e}')
+
+    log('INFO', f'Kept {len(kept)} quality_intelligence backup(s): {", ".join(b.name for b in kept)}')
+
+
 def backup_existing_db() -> bool:
     """Backup existing database if it exists"""
     if not DB_PATH.exists():
@@ -87,8 +142,14 @@ def backup_existing_db() -> bool:
         log('INFO', f'Backing up existing database to: {backup_path}')
 
         # Copy file
-        import shutil
         shutil.copy2(DB_PATH, backup_path)
+
+        # Rotate older backups best-effort; never let cleanup abort the migration.
+        try:
+            keep = _parse_backup_keep(os.environ.get("VNX_DB_BACKUP_KEEP"))
+            _rotate_quality_db_backups(STATE_DIR, keep)
+        except Exception as e:
+            log('WARNING', f'Backup rotation failed (backup itself succeeded): {e}')
 
         log('SUCCESS', f'Database backed up successfully')
         return True
