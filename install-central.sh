@@ -109,6 +109,22 @@ write_install_marker() {
   mv -f "$tmp" "$marker"
 }
 
+# strip_tenant_marker — the installed engine tree must be TENANT-NEUTRAL. The repo
+# tracks its own `.vnx-project-id = vnx-dev`, which the clone drags into the shared
+# version dir. In central-install mode the door's CWD is this tree; a stray marker
+# there makes CWD-based project_id resolution return `vnx-dev` for EVERY consumer
+# (the fleet-wide misroute/hard-reject class). Remove it after clone.
+strip_tenant_marker() {
+  local version_dir="$1"
+  local marker="${version_dir}/.vnx-project-id"
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "  [dry-run] strip stray tenant marker -> ${marker}"
+    return 0
+  fi
+  [ -f "$marker" ] && rm -f "$marker" && info "Stripped stray tenant marker: ${marker}"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # check_prereqs — fail-fast on missing dependencies
 # ---------------------------------------------------------------------------
@@ -160,6 +176,7 @@ clone_version() {
     # Idempotent: ensure the marker exists even on a pre-existing version dir
     # (e.g. cloned before this installer learned to write it).
     write_install_marker "$version_dir"
+    strip_tenant_marker "$version_dir"
     return 0
   fi
 
@@ -182,6 +199,7 @@ clone_version() {
   fi
 
   write_install_marker "$version_dir"
+  strip_tenant_marker "$version_dir"
   success "Cloned ${VERSION} to ${version_dir}"
 }
 

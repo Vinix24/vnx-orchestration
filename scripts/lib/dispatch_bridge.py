@@ -87,10 +87,16 @@ def _canonical_provider(raw: Optional[str]) -> Provider:
     return Provider(canonical)
 
 
-def _data_dir() -> Path:
-    """Resolve the data root EXACTLY as the door does (no divergence)."""
+def _data_dir(project_id: "Optional[str]" = None) -> Path:
+    """Resolve the data root EXACTLY as the door does (no divergence).
+
+    ``project_id`` (when given) is the authoritative tenant, so the bundle stages into
+    THAT project's central store instead of the ambient ``vnx-dev`` default. This keeps
+    the physical staging location coherent with the spec's declared ``project_id`` — the
+    invariant the door's ADR-007 guard now validates against.
+    """
     from dispatch_cli import _resolve_data_dir  # noqa: PLC0415
-    return _resolve_data_dir()
+    return _resolve_data_dir(project_id)
 
 
 def _project_id() -> str:
@@ -133,8 +139,16 @@ def stage_spec_bundle(
         )
     staging_id = dispatch_id
 
-    # 2. resolve the data root the SAME way the door does.
-    root = (data_dir or _data_dir()).resolve()
+    # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
+    # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
+    # (vnx-dev in a central install) while stamping the spec with the real project_id is
+    # exactly what caused the fleet-wide hard-reject: the door derives the tenant from the
+    # bundle's physical location, so a bundle staged into vnx-dev but declaring
+    # sales-copilot fails validation.
+    effective_project_id = project_id or _project_id()
+
+    # 2. resolve the data root the SAME way the door does — anchored on the tenant.
+    root = (data_dir or _data_dir(effective_project_id)).resolve()
     pending = root / "dispatches" / "pending"
 
     # 3. anchor the pending root BEFORE writing (defense-in-depth vs symlink escape).
@@ -164,7 +178,7 @@ def stage_spec_bundle(
     norm_reason = (headless_reason or "").strip() or None
     spec_payload = {
         "schema_version": 1,
-        "project_id": project_id or _project_id(),
+        "project_id": effective_project_id,
         "dispatch_id": dispatch_id,
         "staging_id": staging_id,
         "instruction_file": str(instruction_file.resolve()),

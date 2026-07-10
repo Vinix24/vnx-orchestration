@@ -10,7 +10,6 @@ ADR-007: not triggered here — no new table, pure in-process types only.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -122,10 +121,6 @@ _BLOCKED_FIRST_COMPONENTS = frozenset({".git", ".vnx-data"})
 _VALID_TARGET_SLOTS = frozenset({"T0", "T1", "T2", "T3"})
 
 
-def _resolve_project_id() -> str:
-    return os.environ.get("VNX_PROJECT_ID", "vnx-dev")
-
-
 def _validate_dispatch_path(dp: DispatchPath) -> Optional[str]:
     """Return an error string if the DispatchPath is invalid, else None."""
     raw = str(dp.path)
@@ -174,12 +169,17 @@ def validate(
     if spec.schema_version != 1:
         return Reject("bad-schema", f"schema_version must be 1, got {spec.schema_version!r}")
 
-    # Rule 2 — project_id must match the caller's resolved project_id
-    resolved = _resolve_project_id()
-    if spec.project_id != resolved:
+    # Rule 2 — project_id must match the AUTHORITATIVE project_id the caller
+    # (run_dispatch) derived from the PHYSICAL staged-bundle store — never from
+    # ambient CWD/env. A bundle physically living in project X's store may not
+    # declare a different project_id (ADR-007 anti-redirect). The old code re-
+    # resolved from env with a hardcoded 'vnx-dev' default, which in a central
+    # install (CWD = shared engine tree with a stray .vnx-project-id) rejected
+    # every legitimate non-vnx-dev consumer dispatch as a "project-mismatch".
+    if spec.project_id != project_id:
         return Reject(
             "project-mismatch",
-            f"spec.project_id={spec.project_id!r} != resolved project_id={resolved!r}; "
+            f"spec.project_id={spec.project_id!r} != authoritative project_id={project_id!r}; "
             "caller cannot redirect state to another project",
         )
 

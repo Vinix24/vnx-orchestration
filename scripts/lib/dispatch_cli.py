@@ -61,8 +61,14 @@ class _InvariantViolation(Exception):
 # Path resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_data_dir() -> Path:
+def _resolve_data_dir(project_id: "str | None" = None) -> Path:
     """Resolve VNX data directory. Mirrors provider_dispatch._resolve_data_dir.
+
+    ``project_id`` (when given) is the authoritative tenant — used to derive the
+    central store ``~/.vnx-data/<project_id>`` so a caller that already knows the
+    target project (e.g. the staged-bundle authority in ``run_dispatch``) does not
+    fall back to the ambient ``VNX_PROJECT_ID``/``vnx-dev`` default.
+
 
     PR-4d trust boundary: the resolved data root is OPERATOR config, not attacker
     input. The threat model is our own agents, not an external adversary — and an
@@ -76,8 +82,8 @@ def _resolve_data_dir() -> Path:
     explicit_val = os.environ.get("VNX_DATA_DIR", "")
     if explicit_flag and explicit_val:
         return Path(explicit_val).resolve()
-    project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
-    return Path.home() / ".vnx-data" / project_id
+    pid = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    return Path.home() / ".vnx-data" / pid
 
 
 def _resolve_project_id() -> str:
@@ -101,6 +107,36 @@ def _resolve_project_id() -> str:
 def _resolve_repo_root() -> Path:
     """scripts/lib/dispatch_cli.py -> repo root (parents[2])."""
     return Path(__file__).resolve().parents[2]
+
+
+def _authority_from_spec_path(spec_file: Path) -> "tuple[str | None, Path | None]":
+    """Derive (project_id, data_dir) from a staged bundle's PHYSICAL location.
+
+    Bundle layout (stage_spec_bundle): ``<data_dir>/dispatches/pending/<id>/dispatch-spec.json``.
+    The store the bundle physically lives in IS the dispatch's tenant authority — NOT the
+    ambient CWD. In a central install the door's CWD is the shared engine tree, whose stray
+    ``.vnx-project-id`` would mis-resolve every consumer to ``vnx-dev`` (misroute pre-#1091,
+    hard-reject post-#1091). Deriving from the bundle location fixes the whole class and keeps
+    the ADR-007 anti-redirect guard meaningful: a spec that declares a project_id different from
+    the store it was staged into still fails validation.
+
+    Returns ``(None, None)`` when ``spec_file`` is not under that layout (ad-hoc/test specs), so
+    the caller falls back to ambient resolution.
+    """
+    try:
+        p = Path(spec_file).resolve()
+        if p.name != "dispatch-spec.json":
+            return None, None
+        if p.parents[1].name != "pending" or p.parents[2].name != "dispatches":
+            return None, None
+        data_dir = p.parents[3]
+        from vnx_paths import project_id_from_state_dir  # noqa: PLC0415
+        pid = project_id_from_state_dir(data_dir / "state")
+        if not pid:
+            return None, None
+        return pid, data_dir
+    except Exception:  # noqa: BLE001 — resolution is best-effort; fall back to ambient
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -734,9 +770,47 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
     Returns 0 on success, 1 on any reject or execution failure.
     When dry_run=True, prints plan + permit fingerprint and spawns nothing.
     """
-    project_id = _resolve_project_id()
+    # Authority = where the bundle is PHYSICALLY staged, not ambient CWD/env. In a
+    # central install the door's CWD is the shared engine tree (its stray
+    # .vnx-project-id would mis-resolve every consumer to vnx-dev). Fall back to
+    # ambient resolution only when the spec isn't under the staged-bundle layout
+    # (ad-hoc/test specs).
+    derived_pid, derived_data_dir = _authority_from_spec_path(spec_file)
+
+    # ADR-007 independent-authority cross-check (codex gate PR #1093): when the OPERATOR
+    # explicitly pins the tenant / data root (VNX_PROJECT_ID / VNX_DATA_DIR_EXPLICIT), the
+    # staged-bundle authority MUST agree. This restores the anti-redirect guard whenever an
+    # independent authority exists — a bundle physically staged under a different project's
+    # store than the pinned one is a cross-project redirect and is rejected. Without an
+    # explicit pin (the common central-install case) the store's filesystem write-access is
+    # the trust boundary, per the PR-4d model ("resolved data root is OPERATOR config; the
+    # threat model is our own agents, not an external adversary").
+    if derived_pid:
+        env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip()
+        if env_pid and env_pid != derived_pid:
+            _emit_reject(Reject(
+                "project-mismatch",
+                f"staged-bundle project_id={derived_pid!r} != pinned VNX_PROJECT_ID={env_pid!r}; "
+                "caller cannot redirect state to another project",
+            ))
+            return 1
+        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+            explicit = (os.environ.get("VNX_DATA_DIR") or "").strip()
+            if (
+                explicit
+                and derived_data_dir is not None
+                and Path(explicit).resolve() != derived_data_dir.resolve()
+            ):
+                _emit_reject(Reject(
+                    "project-mismatch",
+                    f"staged-bundle data_dir={derived_data_dir} != pinned VNX_DATA_DIR={explicit}; "
+                    "refusing to write state outside the operator-pinned data root",
+                ))
+                return 1
+
+    project_id = derived_pid or _resolve_project_id()
     repo_root = _resolve_repo_root()
-    data_dir = _resolve_data_dir()
+    data_dir = derived_data_dir or _resolve_data_dir(derived_pid)
     state_dir = data_dir / "state"
 
     try:
