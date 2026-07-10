@@ -222,6 +222,47 @@ def test_reader_absent_db_is_healthy_empty(
 
 
 # ---------------------------------------------------------------------------
+# Builder-layer guard: _resolve_tracks_store must never escape to the real
+# central store during a pinned-isolation test run (audit #13 regression).
+# ---------------------------------------------------------------------------
+
+def test_resolve_tracks_store_escape_is_neutralized_by_pinned_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit #13: prove BOTH halves so the test can actually fail.
+
+    ``_resolve_tracks_store`` returns the central store only when
+    ``resolve_central_data_dir`` is not None AND that store has a
+    ``runtime_coordination.db``. A test that just calls ``_pin_isolation``
+    (which sets ``resolve_central_data_dir`` to None) is a tautology — it passes
+    regardless of the guard. So first demonstrate a *live* escape path against a
+    fake central store, then assert the pinned isolation neutralizes it.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+
+    # A fake central store WITH a runtime_coordination.db — the escape target.
+    fake_central = tmp_path / "central"
+    fake_central_state = fake_central / "state"
+    fake_central_state.mkdir(parents=True)
+    (fake_central_state / "runtime_coordination.db").write_text("")
+
+    # 1) Escape path is REAL: when central resolves to a populated store,
+    #    _resolve_tracks_store prefers it over state_dir. If this ever stops
+    #    holding, the guard-half below would pass vacuously — hence assert it.
+    monkeypatch.setattr(
+        bts, "resolve_central_data_dir", lambda pid: fake_central, raising=False
+    )
+    assert bts._resolve_tracks_store(state_dir, _TENANT_A) == fake_central_state
+
+    # 2) Pinned isolation NEUTRALIZES the escape: _pin_isolation sets
+    #    resolve_central_data_dir to None, so the resolver stays on the tmp
+    #    state_dir even though a populated central store exists on disk.
+    pinned_state = _pin_isolation(tmp_path, monkeypatch)
+    assert bts._resolve_tracks_store(pinned_state, _TENANT_A) == pinned_state
+
+
+# ---------------------------------------------------------------------------
 # Through build_t0_state: wiring + output flag (acceptance a & b)
 # ---------------------------------------------------------------------------
 
