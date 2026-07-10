@@ -125,8 +125,8 @@ The single-entry-door rollout ships behind transition flags. They are retired in
 | `VNX_SINGLE_ENTRY_DISPATCH` | REMOVE — the door becomes the only path; the flag becomes a no-op, then deleted |
 | `VNX_DISPATCH_LEGACY` | REMOVE — the legacy lane is deleted after one stable release on the door |
 | `VNX_AUTO_ROUTE` | REMOVE — legacy-only smart-route; the door's compile_plan owns routing. `dispatch-agent.sh`'s `--auto-route` path is inert under the door and is removed with it |
-| `VNX_USE_CENTRAL_DB` | REVIEW — the central store is the default; confirm no dual-write path remains before removing |
-| `VNX_STATE_DUAL_WRITE_LEGACY` | REMOVE — a one-time migration aid |
+| `VNX_USE_CENTRAL_DB` | CUTOVER VERIFIED 2026-07-10 — every consumer resolves state to central; the dual-write mirror is a proven no-op (`primary == central`). `vnx fabric-audit` GREEN. Flag + `dual_writer.py` scaffolding retained as the Phase-6-P6 rollback net; delete after Phase-0 burn-in |
+| `VNX_STATE_DUAL_WRITE_LEGACY` | ROLLBACK NET — the `VNX_DISPATCH_LEGACY=1` + dual-write-back lever for Phase-0 (ADR-028); remove with P6, not before |
 | `VNX_OVERRIDE_CLAUDE_HEADLESS` | KEEP — a real account-safety override, not transition scaffolding |
 | `VNX_OVERRIDE_WORKER_PUSH_MAIN` | KEEP — a real governance override |
 | `VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY` | KEEP — the benchmark baseline escape for `glm-via-harness-only` |
