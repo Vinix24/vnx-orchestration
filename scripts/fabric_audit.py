@@ -270,6 +270,7 @@ def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> Check
         return CheckResult("C", "Receipt hash-chain integrity", "SKIP", "no registered projects")
     broken = []
     verified = 0
+    segmented = 0
     unchained = 0
     checked = 0
     for pid, _path in projects:
@@ -284,6 +285,10 @@ def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> Check
             continue
         if status == "verified":
             verified += 1
+        elif status == "verified-segmented":
+            # ADR-029: an unchained epoch-0 prefix + intact chained epoch(s) is
+            # a healthy sealed ledger mid-adoption, not a break.
+            segmented += 1
         elif status == "unchained":
             unchained += 1
         else:  # broken
@@ -292,14 +297,14 @@ def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> Check
         names = ", ".join(b["project"] for b in broken)
         return CheckResult(
             "C", "Receipt hash-chain integrity", "RED",
-            f"broken chain in: {names} (verified={verified}, unchained={unchained})",
+            f"broken chain in: {names} (verified={verified}, segmented={segmented}, unchained={unchained})",
             broken,
         )
     if checked == 0:
         return CheckResult("C", "Receipt hash-chain integrity", "SKIP", "no t0_receipts.ndjson found")
     return CheckResult(
         "C", "Receipt hash-chain integrity", "GREEN",
-        f"{checked} ledgers ok (verified={verified}, unchained={unchained} — ADR-023 partial, not an error)",
+        f"{checked} ledgers ok (verified={verified}, segmented={segmented}, unchained={unchained} — ADR-023/029)",
     )
 
 

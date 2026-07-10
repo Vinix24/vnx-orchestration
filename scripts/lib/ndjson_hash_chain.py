@@ -16,11 +16,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 
 GENESIS_HASH = "0" * 64  # Sentinel for first entry in chain
+
+# ADR-029: a chain epoch begins with a dedicated marker entry whose prev_hash is
+# GENESIS. The immutable pre-adoption entries form epoch 0 (legitimately
+# unchained); every entry from a marker forward chains within its epoch. This
+# lets chaining be adopted on an existing ledger without rewriting history
+# (ADR-005 append-only preserved) and without flipping the fleet-wide integrity
+# check RED on the first post-flip receipt.
+EPOCH_MARKER_TYPE = "chain_epoch_start"
 
 
 def canonical_json(obj: dict) -> str:
@@ -80,6 +89,63 @@ def append_chained_entry(
     return compute_entry_hash(chained)
 
 
+def _iter_parsed(path: Path) -> Iterator[tuple[int, dict]]:
+    """Yield (line_number, entry) for each parseable non-blank NDJSON line."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield line_no, json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def epoch_state(path: Path) -> tuple[int, bool]:
+    """Inspect a ledger's epoch state for the ADR-029 seal migration.
+
+    Returns ``(max_epoch, chaining_active)``:
+    - ``max_epoch``: highest ``epoch`` on any ``chain_epoch_start`` marker (0 if none).
+    - ``chaining_active``: True when the LAST non-blank entry carries ``prev_hash``
+      (a marker or a chained entry), so a newly-appended receipt would chain into
+      the current epoch rather than land in an unchained prefix. When True the
+      seal is a no-op — this is what makes ``chain_epoch_seal`` idempotent.
+    """
+    max_epoch = 0
+    last_has_prev = False
+    for _, entry in _iter_parsed(path):
+        if entry.get("type") == EPOCH_MARKER_TYPE:
+            try:
+                max_epoch = max(max_epoch, int(entry.get("epoch", 0)))
+            except (TypeError, ValueError):
+                pass
+            last_has_prev = True
+        else:
+            last_has_prev = "prev_hash" in entry
+    return max_epoch, last_has_prev
+
+
+def append_epoch_marker(path: Path, epoch: int) -> str:
+    """Append a ``chain_epoch_start`` marker (``prev_hash == GENESIS``) opening ``epoch``.
+
+    Append-only: never rewrites a historical line (ADR-005 preserved). Returns
+    the marker entry's hash so the next appended receipt links to it.
+    """
+    marker = {
+        "type": EPOCH_MARKER_TYPE,
+        "epoch": epoch,
+        "epoch_ts": datetime.now(timezone.utc).isoformat(),
+        "prev_hash": GENESIS_HASH,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(marker) + "\n")
+    return compute_entry_hash(marker)
+
+
 def _read_last_hash(path: Path) -> str | None:
     """Return hash of last entry in file, or None if file empty/missing."""
     if not path.exists() or path.stat().st_size == 0:
@@ -107,32 +173,43 @@ def _read_last_hash(path: Path) -> str | None:
 
 
 def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
-    """Verify the hash-chain integrity for an NDJSON file.
+    """Verify the hash-chain integrity of an NDJSON ledger (ADR-029 epoch-aware).
 
     Returns (is_valid, violations_list, status) where status is one of:
 
-    - "unchained": no entry in the file carries a prev_hash field; chaining
-      was never enabled (VNX_CHAIN_RECEIPTS is off by default).  Integrity
-      cannot be verified — this is NOT an error.  is_valid is True.
-    - "verified": every entry carries prev_hash and the chain is intact.
-      is_valid is True.
-    - "broken": chain is present but has integrity violations (tampered,
-      inserted, or partially chained — some entries carry prev_hash while
-      others do not).  is_valid is False.
+    - "unchained": no entry carries prev_hash and there is no chain_epoch_start
+      marker — chaining was never enabled (VNX_CHAIN_RECEIPTS default off).
+      Integrity cannot be verified; NOT an error. is_valid=True.
+    - "verified": the ledger chains from a single GENESIS with no unchained
+      prefix and no explicit epoch marker. is_valid=True.
+    - "verified-segmented": a legitimate ADR-029 layout — an immutable unchained
+      epoch-0 prefix and/or one or more explicit chain_epoch_start epochs, each
+      chained intact. is_valid=True.
+    - "broken": a within-epoch prev_hash mismatch, an unchained entry INSIDE a
+      chained epoch, a chained entry with no preceding epoch marker after an
+      unchained prefix (a naive VNX_CHAIN_RECEIPTS flip that skipped the seal),
+      an epoch marker whose prev_hash != GENESIS, or unparseable lines.
+      is_valid=False.
 
-    A partially-chained ledger (some entries with prev_hash, some without)
-    is classified as "broken", not "unchained".  A ledger must be either
-    fully unchained or fully chained to be considered healthy.
+    Threat-model note (ADR-029, accepted residual): epoch-0 history and the
+    relocation of an epoch boundary are NOT defended here. A local actor with
+    write access to the ledger can strip a prefix, insert a fresh
+    chain_epoch_start marker, and re-chain the remainder — this verifies. A
+    ledger is only as trustworthy as its first sealed epoch onward; full
+    tamper-evidence against a local attacker needs an EXTERNAL append-only
+    anchor (out of scope for ADR-029 — a future epoch-seal-anchor ADR). This
+    check detects accidental corruption and within-epoch tampering, the
+    governance value ADR-023/ADR-029 target. Flag stays default-off until the
+    fleet-wide seal migration lands.
 
-    violations_list contains dicts with: line_number, expected_prev_hash,
-    actual_prev_hash (and optionally 'error' or 'note').
+    violations_list contains dicts with: line_number and one of
+    expected_prev_hash/actual_prev_hash, 'error', or 'note'.
     """
     entries: list[tuple[int, dict]] = []
+    parse_errors: list[dict] = []
 
     if not path.exists() or path.stat().st_size == 0:
         return (True, [], "unchained")
-
-    parse_errors: list[dict] = []
 
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -140,76 +217,83 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
             if not line:
                 continue
             try:
-                entry = json.loads(line)
+                entries.append((line_no, json.loads(line)))
             except json.JSONDecodeError as e:
-                parse_errors.append({
-                    "line_number": line_no,
-                    "error": f"invalid JSON: {e}",
-                })
-                continue
-            entries.append((line_no, entry))
+                parse_errors.append({"line_number": line_no, "error": f"invalid JSON: {e}"})
 
-    # Unparseable lines are always a violation regardless of chain status.
     if parse_errors and not entries:
         return (False, parse_errors, "broken")
-
     if not entries:
         return (True, [], "unchained")
 
-    # Determine whether any entry carries prev_hash.
-    chained_count = sum(1 for _, e in entries if "prev_hash" in e)
-    total = len(entries)
-
-    if chained_count == 0 and not parse_errors:
-        # No entry has prev_hash — ledger is fully unchained.  Chaining was
-        # not enabled (VNX_CHAIN_RECEIPTS default off).  Not an error.
-        return (True, [], "unchained")
-
-    # At least one entry has prev_hash (or there are parse errors mixed in).
-    # Enforce full-chain integrity.  A partially-chained ledger (some entries
-    # lack prev_hash while others have it) is a real violation — broken.
     violations: list[dict] = list(parse_errors)
+    in_chain = False    # currently inside a chained epoch
+    saw_chain = False   # any chained content at all (marker or chained entry)
+    saw_prefix = False  # an unchained epoch-0 prefix entry
+    saw_marker = False  # an explicit chain_epoch_start marker
     expected_prev = GENESIS_HASH
 
     for line_no, entry in entries:
+        is_marker = entry.get("type") == EPOCH_MARKER_TYPE
+        has_prev = "prev_hash" in entry
         actual_prev = entry.get("prev_hash")
 
-        if line_no == entries[0][0]:
-            # First entry in the file.
-            if actual_prev is not None and actual_prev != GENESIS_HASH:
+        if is_marker:
+            saw_chain = True
+            saw_marker = True
+            if actual_prev != GENESIS_HASH:
                 violations.append({
                     "line_number": line_no,
                     "expected_prev_hash": GENESIS_HASH,
                     "actual_prev_hash": actual_prev,
-                    "note": "first entry: prev_hash must be GENESIS or absent",
+                    "note": "chain_epoch_start marker must anchor to GENESIS",
                 })
+            in_chain = True
+            expected_prev = compute_entry_hash(entry)
+            continue
+
+        if not in_chain:
+            # Leading region: the epoch-0 unchained prefix, or the first chained
+            # entry of a marker-less GENESIS chain.
+            if has_prev:
+                saw_chain = True
+                if actual_prev == GENESIS_HASH and not saw_prefix:
+                    # Chained from the first line — a marker-less "verified" chain.
+                    in_chain = True
+                    expected_prev = compute_entry_hash(entry)
+                else:
+                    # Chained entry after an unchained prefix, or anchored to a
+                    # non-GENESIS hash, with no chain_epoch_start marker: the
+                    # naive-flip / unsealed case.
+                    violations.append({
+                        "line_number": line_no,
+                        "note": "chained entry without a preceding chain_epoch_start marker (unsealed / naive flip)",
+                    })
+                    in_chain = True
+                    expected_prev = compute_entry_hash(entry)
+            else:
+                saw_prefix = True
         else:
-            if actual_prev != expected_prev:
+            # Inside a chained epoch.
+            if not has_prev:
+                violations.append({
+                    "line_number": line_no,
+                    "note": "unchained entry inside a chained epoch",
+                })
+            elif actual_prev != expected_prev:
                 violations.append({
                     "line_number": line_no,
                     "expected_prev_hash": expected_prev,
                     "actual_prev_hash": actual_prev,
                 })
-
-        expected_prev = compute_entry_hash(entry)
+            expected_prev = compute_entry_hash(entry)
 
     if violations:
         return (False, violations, "broken")
-
-    # All parseable entries chained and intact.
-    if chained_count < total:
-        # Partial chain detected even with no hash mismatches.  This guard is
-        # LOAD-BEARING for the edge case where the FIRST entry carries no
-        # prev_hash (allowed by the first-entry branch) while later entries
-        # hash-link correctly to their predecessor — the loop produces zero
-        # violations there; only this count check catches the partial chain.
-        return (False, [{
-            "note": (
-                f"partial chain: {chained_count}/{total} entries carry prev_hash; "
-                "ledger must be fully unchained or fully chained"
-            )
-        }], "broken")
-
+    if not saw_chain:
+        return (True, [], "unchained")
+    if saw_prefix or saw_marker:
+        return (True, [], "verified-segmented")
     return (True, [], "verified")
 
 
