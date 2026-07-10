@@ -342,36 +342,74 @@ def _emit_bootstrap_event(data_root: Path, status: str, error: str = "") -> None
 def _seed_default_pool_config(db_path: Path, project_id: str) -> None:
     """Seed default pool_config + worker_pools rows for project_id. Idempotent.
 
-    ADR-007: UNIQUE(project_id, pool_id) is the natural guard; INSERT OR IGNORE
-    is safe to re-run on every migrate call without duplicating the row.
-    pool_config must be inserted before worker_pools (FK dependency).
+    ADR-007: UNIQUE(project_id, pool_id) is the natural guard.  Migration 0020
+    seeds a ('vnx-dev', 'default') row; this function upgrades that legacy row
+    to ``project_id`` instead of inserting a second row.  This prevents the W1
+    Phase-2 vnx-dev->pid restamp from colliding on the composite UNIQUE.
+
+    pool_config must be updated/inserted before worker_pools (FK dependency).
     """
     import sqlite3 as _sqlite3
     conn = _sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO pool_config
-                (project_id, pool_id, min_workers, max_workers, target_workers,
-                 role_mix_json, provider_mix_json, scale_policy, cooldown_seconds)
-            VALUES (?, 'default', 0, 4, 1,
-                    '["backend-developer"]',
-                    '["claude"]',
-                    'queue_depth_v1', 120)
-            """,
-            (project_id,),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO worker_pools
-                (project_id, pool_id, state, current_size, target_size)
-            VALUES (?, 'default', 'idle', 0, 0)
-            """,
-            (project_id,),
-        )
+        # FKs are suspended during the seed upgrade: migration 0020 creates a
+        # (pool_config='vnx-dev', worker_pools='vnx-dev') pair linked by FK.  When
+        # we upgrade both rows to project_id we must avoid a transient FK violation
+        # between the two UPDATEs.  The final state is consistent, so re-enabling
+        # FKs after COMMIT is safe.
+        conn.execute("PRAGMA foreign_keys = OFF")
+
+        # pool_config: ensure exactly one default row for project_id.
+        existing = conn.execute(
+            "SELECT project_id FROM pool_config WHERE pool_id = ?",
+            ("default",),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO pool_config
+                    (project_id, pool_id, min_workers, max_workers, target_workers,
+                     role_mix_json, provider_mix_json, scale_policy, cooldown_seconds)
+                VALUES (?, 'default', 0, 4, 1,
+                        '["backend-developer"]',
+                        '["claude"]',
+                        'queue_depth_v1', 120)
+                """,
+                (project_id,),
+            )
+        elif existing[0] == "vnx-dev" and project_id != "vnx-dev":
+            conn.execute(
+                "UPDATE pool_config SET project_id = ? WHERE pool_id = ? AND project_id = ?",
+                (project_id, "default", "vnx-dev"),
+            )
+        # else: already seeded for project_id (or vnx-dev -> vnx-dev); leave untouched.
+
+        # worker_pools: mirror the same idempotent upgrade so the FK target and
+        # the runtime state row stay one-to-one with pool_config.
+        existing_wp = conn.execute(
+            "SELECT project_id FROM worker_pools WHERE pool_id = ?",
+            ("default",),
+        ).fetchone()
+        if existing_wp is None:
+            conn.execute(
+                """
+                INSERT INTO worker_pools
+                    (project_id, pool_id, state, current_size, target_size)
+                VALUES (?, 'default', 'idle', 0, 0)
+                """,
+                (project_id,),
+            )
+        elif existing_wp[0] == "vnx-dev" and project_id != "vnx-dev":
+            conn.execute(
+                "UPDATE worker_pools SET project_id = ? WHERE pool_id = ? AND project_id = ?",
+                (project_id, "default", "vnx-dev"),
+            )
+
         conn.commit()
+        # Re-enable FK enforcement now the consistent (project_id, default) pair
+        # is in place.
+        conn.execute("PRAGMA foreign_keys = ON")
     finally:
         conn.close()
 

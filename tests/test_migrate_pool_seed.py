@@ -374,3 +374,66 @@ class TestResolverAlignment:
         finally:
             conn.close()
         assert len(rows) == 1, "runtime_schema_version table must exist after bootstrap"
+
+
+    def test_pool_config_no_duplicate_after_vnx_dev_seed(self, tmp_path, monkeypatch):
+        """Migration 0020's ('vnx-dev','default') row is upgraded, not duplicated.
+
+        The bootstrap path applies migration 0020 (which seeds 'vnx-dev') and then
+        calls _seed_default_pool_config with the CLI-derived project_id.  The seed
+        must UPDATE the legacy row instead of INSERTing a second one, so a later
+        W1 Phase-2 vnx-dev->pid restamp cannot collide on UNIQUE(project_id, pool_id).
+        """
+        data_root = tmp_path / "data"
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+        _bootstrap_runtime_dbs(data_root, project_id="myproject")
+
+        import sqlite3
+        db = data_root / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            for tbl in ("pool_config", "worker_pools"):
+                rows = conn.execute(
+                    f"SELECT project_id FROM {tbl} WHERE pool_id = 'default'"
+                ).fetchall()
+                assert len(rows) == 1, (
+                    f"{tbl} must have exactly one default row; got {rows}"
+                )
+                assert rows[0][0] == "myproject", (
+                    f"{tbl} default row must be 'myproject'; got {rows[0][0]!r}"
+                )
+        finally:
+            conn.close()
+
+    def test_pool_config_seed_idempotent_across_vnx_dev_upgrade(self, tmp_path, monkeypatch):
+        """Re-running bootstrap after the vnx-dev->myproject upgrade is a no-op."""
+        data_root = tmp_path / "data"
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+        _bootstrap_runtime_dbs(data_root, project_id="myproject")
+        _bootstrap_runtime_dbs(data_root, project_id="myproject")
+
+        import sqlite3
+        db = data_root / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            for tbl in ("pool_config", "worker_pools"):
+                count = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE pool_id = 'default'"
+                ).fetchone()[0]
+                assert count == 1, (
+                    f"Idempotent bootstrap must not duplicate {tbl} default row; got {count}"
+                )
+        finally:
+            conn.close()

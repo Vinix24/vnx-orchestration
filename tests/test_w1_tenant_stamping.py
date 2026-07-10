@@ -144,6 +144,139 @@ def _make_parent_child_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _make_recommendation_like_tables(conn: sqlite3.Connection) -> None:
+    """Create parent UNIQUE(recommendation_id) + child FK (the reported W1 bug)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS recommendations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            title TEXT NOT NULL,
+            UNIQUE (recommendation_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            metric_name TEXT NOT NULL,
+            FOREIGN KEY (recommendation_id) REFERENCES recommendations(recommendation_id)
+        )
+    """)
+    conn.commit()
+
+
+def _make_legacy_store(conn: sqlite3.Connection) -> None:
+    """Fixture legacy store for full W1 3-phase run.
+
+    Mixes tables whose single-column UNIQUE/PK must be widened with already-
+    composite keys (pool_config), plus a child FK that references a widened
+    parent key.
+    """
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'queued',
+            UNIQUE (dispatch_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS terminal_leases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            terminal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'idle',
+            UNIQUE (terminal_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS worker_states (
+            terminal_id TEXT NOT NULL,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'initializing',
+            state_entered_at TEXT NOT NULL,
+            PRIMARY KEY (terminal_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pool_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            pool_id TEXT NOT NULL DEFAULT 'default',
+            min_workers INTEGER NOT NULL DEFAULT 1,
+            max_workers INTEGER NOT NULL DEFAULT 6,
+            target_workers INTEGER NOT NULL DEFAULT 3,
+            role_mix_json TEXT NOT NULL DEFAULT '["backend-developer"]',
+            provider_mix_json TEXT NOT NULL DEFAULT '["claude"]',
+            scale_policy TEXT NOT NULL DEFAULT 'queue_depth_v1',
+            cooldown_seconds INTEGER NOT NULL DEFAULT 120,
+            UNIQUE (project_id, pool_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS worker_pools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            pool_id TEXT NOT NULL DEFAULT 'default',
+            state TEXT NOT NULL DEFAULT 'idle',
+            current_size INTEGER NOT NULL DEFAULT 0,
+            target_size INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (project_id, pool_id),
+            FOREIGN KEY (project_id, pool_id) REFERENCES pool_config(project_id, pool_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS recommendations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            title TEXT NOT NULL,
+            UNIQUE (recommendation_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            metric_name TEXT NOT NULL,
+            FOREIGN KEY (recommendation_id) REFERENCES recommendations(recommendation_id)
+        )
+    """)
+    conn.commit()
+
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id) VALUES ('d1', 'vnx-dev')"
+    )
+    conn.execute(
+        "INSERT INTO terminal_leases (terminal_id, project_id) VALUES ('T1', 'vnx-dev')"
+    )
+    conn.execute(
+        "INSERT INTO worker_states (terminal_id, dispatch_id, project_id, state_entered_at) "
+        "VALUES ('T1', 'd1', 'vnx-dev', '2024-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO pool_config (project_id, pool_id) VALUES ('vnx-dev', 'default')"
+    )
+    conn.execute(
+        "INSERT INTO worker_pools (project_id, pool_id) VALUES ('vnx-dev', 'default')"
+    )
+    conn.execute(
+        "INSERT INTO recommendations (recommendation_id, title, project_id) "
+        "VALUES ('rec1', 'title', 'vnx-dev')"
+    )
+    conn.execute(
+        "INSERT INTO recommendation_outcomes (recommendation_id, metric_name, project_id) "
+        "VALUES ('rec1', 'm', 'vnx-dev')"
+    )
+    conn.commit()
+
+
 def _db(tmp_path: Path, name: str = "test.db") -> Path:
     p = tmp_path / name
     return p
@@ -1378,15 +1511,13 @@ class TestB2SingleColTextPK:
         assert "project_id" in pk_cols, "project_id must be in the composite PK"
         assert project_id_val == "new-tenant"
 
-    def test_fk_to_text_pk_catches_damage_and_restores_original(self, tmp_path: Path) -> None:
-        """B3 spec: FK-to-single-col-PK → Phase 1 integrity check catches damage + restores ORIGINAL.
+    def test_fk_to_text_pk_is_widened_with_parent(self, tmp_path: Path) -> None:
+        """A child FK to a single-col TEXT PK is widened when the parent PK becomes composite.
 
-        When a parent table has TEXT PRIMARY KEY and a child FK references that single-col key,
-        Phase 1 rebuilds the parent to a composite PK (code, project_id). The child's FK
-        (cat_code) REFERENCES categories(code) now has a "foreign key mismatch" because 'code'
-        is no longer the full PK. The B3(a) integrity check fires before COMMIT and forces
-        ROLLBACK, and the B3(b) pre-migration restore brings the DB back to the original state
-        (before Phase 1 DDL ran). This is the exact scenario the spec describes.
+        Previously this caused a foreign key mismatch and Phase 1 would roll back.
+        The W1 fix automatically widens the child FK to (cat_code, project_id) so it
+        references the parent's new composite PK (code, project_id).  The full 3-phase
+        migration succeeds, all rows are preserved, and foreign_key_check is clean.
         """
         db = _db(tmp_path)
         conn = _open(db)
@@ -1410,31 +1541,38 @@ class TestB2SingleColTextPK:
         conn.execute("INSERT INTO categories (code, label) VALUES ('A', 'Alpha')")
         conn.execute("INSERT INTO items (cat_code, project_id) VALUES ('A', 'vnx-dev')")
         conn.commit()
-
-        # Capture the original schema before migration.
-        cat_pk_before = [r[1] for r in conn.execute("PRAGMA table_info(categories)").fetchall() if r[5] > 0]
-        item_count_before = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         conn.close()
 
-        # Phase 1 rebuild of 'categories' makes the child FK a mismatch.
-        # B3(a): foreign_key_check detects this and forces ROLLBACK before COMMIT.
-        # B3(b): the pre-migration restore brings the DB back to original state.
-        with pytest.raises(RuntimeError, match="(?i)(foreign key mismatch|Phase 1.*failed)"):
-            ts.run_three_phase_migration_on_db(db, "tenant-x", db_label="TEST")
+        # Full migration should now succeed because the child FK is widened automatically.
+        result = ts.run_three_phase_migration_on_db(db, "tenant-x", db_label="TEST")
+        assert result["ok"] is True
 
-        # The DB must be restored to its pre-migration state (B3(b)).
         conn = sqlite3.connect(str(db))
-        cat_pk_after = [r[1] for r in conn.execute("PRAGMA table_info(categories)").fetchall() if r[5] > 0]
-        item_count_after = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-        conn.close()
+        try:
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            assert not fk_violations, f"foreign_key_check violations: {fk_violations}"
 
-        # Schema must be back to original (Phase 1 DDL rolled back).
-        assert cat_pk_after == cat_pk_before, (
-            f"Schema not restored after Phase 1 failure. "
-            f"Before: {cat_pk_before}, After: {cat_pk_after}"
-        )
-        # Data must be intact.
-        assert item_count_after == item_count_before
+            # Parent PK is composite.
+            cat_pk = [r[1] for r in conn.execute("PRAGMA table_info(categories)").fetchall() if r[5] > 0]
+            assert "code" in cat_pk and "project_id" in cat_pk
+
+            # Child FK is now composite (cat_code, project_id) -> (code, project_id).
+            fks = conn.execute("PRAGMA foreign_key_list(items)").fetchall()
+            child_fk_cols = [(row[3], row[4]) for row in fks if row[2] == "categories"]
+            assert ("cat_code", "code") in child_fk_cols
+            assert ("project_id", "project_id") in child_fk_cols
+
+            # Data preserved and restamped.
+            assert conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT project_id FROM categories WHERE code='A'"
+            ).fetchone()[0] == "tenant-x"
+            assert conn.execute(
+                "SELECT project_id FROM items WHERE cat_code='A'"
+            ).fetchone()[0] == "tenant-x"
+        finally:
+            conn.close()
 
 
 # ===========================================================================
@@ -2588,3 +2726,96 @@ class TestFtsShadowExclusion:
         ic = conn.execute("PRAGMA integrity_check").fetchall()
         assert ic == [("ok",)], f"integrity_check failed: {ic}"
         conn.close()
+
+
+# ===========================================================================
+# 24. Child-FK widening when parent UNIQUE/PK becomes composite
+# ===========================================================================
+
+class TestChildFkwidening:
+    """W1 fix: child FKs that referenced a single-column parent key are widened."""
+
+    def test_phase1_widens_child_fk_when_parent_unique_becomes_composite(
+        self, tmp_path: Path
+    ) -> None:
+        """recommendations UNIQUE(recommendation_id) widens; child FK follows."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        _make_recommendation_like_tables(conn)
+        conn.execute(
+            "INSERT INTO recommendations (recommendation_id, title, project_id) "
+            "VALUES ('rec1', 'title', 'vnx-dev')"
+        )
+        conn.execute(
+            "INSERT INTO recommendation_outcomes (recommendation_id, metric_name, project_id) "
+            "VALUES ('rec1', 'm', 'vnx-dev')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = ts.run_three_phase_migration_on_db(db, "myproject", db_label="TEST")
+        assert result["ok"] is True
+
+        conn = sqlite3.connect(str(db))
+        try:
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            assert not fk_violations, f"FK violations: {fk_violations}"
+
+            rec_rows = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+            out_rows = conn.execute("SELECT COUNT(*) FROM recommendation_outcomes").fetchone()[0]
+            assert rec_rows == 1, f"recommendations lost rows: {rec_rows}"
+            assert out_rows == 1, f"recommendation_outcomes lost rows: {out_rows}"
+
+            # Child FK is now composite (recommendation_id, project_id).
+            fks = conn.execute("PRAGMA foreign_key_list(recommendation_outcomes)").fetchall()
+            child_fk_cols = [(row[3], row[4]) for row in fks if row[2] == "recommendations"]
+            assert ("recommendation_id", "recommendation_id") in child_fk_cols
+            assert ("project_id", "project_id") in child_fk_cols
+        finally:
+            conn.close()
+
+
+# ===========================================================================
+# 25. Full W1 3-phase run on a synthetic legacy fixture store
+# ===========================================================================
+
+class TestFullW1Fixture:
+    """Run all 3 W1 phases on a synthetic legacy store and verify a clean result."""
+
+    def test_full_three_phase_on_legacy_fixture(self, tmp_path: Path) -> None:
+        """Legacy fixture with mixed widened/already-composite keys + child FKs."""
+        db = _db(tmp_path)
+        conn = _open(db)
+        _make_legacy_store(conn)
+        conn.close()
+
+        result = ts.run_three_phase_migration_on_db(db, "myproject", db_label="TEST")
+        assert result["ok"] is True
+
+        conn = sqlite3.connect(str(db))
+        try:
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            assert not fk_violations, f"FK violations after full W1: {fk_violations}"
+
+            tables = [
+                "dispatches",
+                "terminal_leases",
+                "worker_states",
+                "pool_config",
+                "worker_pools",
+                "recommendations",
+                "recommendation_outcomes",
+            ]
+            for tbl in tables:
+                count = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                assert count > 0, f"{tbl} unexpectedly has zero rows"
+                vals = {r[0] for r in conn.execute(f"SELECT DISTINCT project_id FROM {tbl}").fetchall()}
+                assert vals == {"myproject"}, f"{tbl} has wrong project_ids: {vals}"
+
+            for tbl in tables:
+                cols = {r[1]: r for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()}
+                assert cols["project_id"][3] == 1, (
+                    f"{tbl}.project_id must be NOT NULL after Phase 3"
+                )
+        finally:
+            conn.close()
