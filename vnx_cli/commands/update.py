@@ -120,7 +120,24 @@ def _fetch_version(root: Path, target: str, dry_run: bool) -> Path:
             check=True,
         )
 
+    # The installed engine tree must be TENANT-NEUTRAL. The repo tracks its own
+    # `.vnx-project-id = vnx-dev`, so a clone/pull drags that marker into the shared
+    # version dir. In central-install mode the door's CWD is this tree; a stray marker
+    # there makes CWD-based project_id resolution return `vnx-dev` for EVERY consumer
+    # (the fleet-wide misroute/hard-reject class). Strip it after every fetch.
+    _strip_tenant_marker(target_dir)
     return target_dir
+
+
+def _strip_tenant_marker(version_dir: Path) -> None:
+    """Remove `.vnx-project-id` from an installed engine version dir (tenant-neutral)."""
+    marker = version_dir / ".vnx-project-id"
+    try:
+        if marker.is_file():
+            marker.unlink()
+            print(f"Stripped stray tenant marker: {marker}")
+    except OSError as exc:
+        print(f"[warn] could not strip tenant marker {marker}: {exc}")
 
 
 def _atomic_symlink_flip(

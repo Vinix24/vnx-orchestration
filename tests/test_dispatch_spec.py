@@ -110,11 +110,24 @@ class TestRule2ProjectMismatch:
     def test_rejects_wrong_project_id(self, tmp_path, monkeypatch):
         ifile = _write_instruction(tmp_path)
         spec = _valid_spec(ifile, project_id="other-project")
-        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
-        result = validate(spec, project_id="other-project", repo_root=Path("/fake"))
-        # validate() resolves from env, spec.project_id=other-project != env vnx-dev
+        # The authoritative project_id is what run_dispatch derives from the PHYSICAL
+        # staged-bundle store; a spec declaring a DIFFERENT project_id is an ADR-007
+        # cross-project redirect and must reject. Ambient env must NOT override the
+        # authority (that env-based re-resolve was the fleet-wide hard-reject bug).
+        monkeypatch.setenv("VNX_PROJECT_ID", "other-project")  # matches the spec, but is NOT authority
+        result = validate(spec, project_id="vnx-dev", repo_root=Path("/fake"))
         assert isinstance(result, Reject)
         assert result.code == "project-mismatch"
+
+    def test_validate_uses_authoritative_param_not_env(self, tmp_path, monkeypatch):
+        # Regression for the central-install hard-reject: a legitimate non-vnx-dev
+        # consumer dispatch (spec.project_id == authority) must VALIDATE even when the
+        # ambient env resolves to a different tenant (the stray engine-tree marker).
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, project_id="sales-copilot")
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")  # stray/ambient — must be ignored
+        result = validate(spec, project_id="sales-copilot", repo_root=Path("/fake"))
+        assert isinstance(result, ValidatedSpec)
 
     def test_accepts_matching_project_id(self, tmp_path, monkeypatch):
         ifile = _write_instruction(tmp_path)
