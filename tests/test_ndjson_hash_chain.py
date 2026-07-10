@@ -263,20 +263,37 @@ def test_verify_chain_tampered_chained_is_broken(tmp_path):
     assert len(violations) >= 1
 
 
-def test_verify_chain_partial_chain_is_broken(tmp_path):
-    """Partial chain — some entries have prev_hash, some do not — is 'broken'.
-
-    A partially-chained ledger is NOT 'unchained'.  The presence of any
-    prev_hash field means chaining was attempted; missing ones are violations.
-    """
-    p = tmp_path / "partial.ndjson"
-    # First two entries: plain NDJSON, no prev_hash
+def test_verify_chain_transition_prefix_then_genesis_is_verified(tmp_path):
+    """An unchained historical prefix followed by a chained suffix that starts
+    with GENESIS_HASH is the safe transition (no history rewrite)."""
+    p = tmp_path / "transition.ndjson"
+    # Historical entries: plain NDJSON, no prev_hash
     with p.open("a") as f:
         f.write(json.dumps({"seq": 0, "id": "plain-0"}) + "\n")
         f.write(json.dumps({"seq": 1, "id": "plain-1"}) + "\n")
-    # Third entry: manually inject a prev_hash to simulate partial chaining
+    # Switch point: first chained entry anchors to GENESIS
     with p.open("a") as f:
         f.write(json.dumps({"seq": 2, "id": "chained-2", "prev_hash": GENESIS_HASH}) + "\n")
+
+    ok, violations, status = verify_chain(p)
+    assert ok is True
+    assert status == "verified"
+    assert violations == []
+
+
+def test_verify_chain_chained_suffix_with_gap_is_broken(tmp_path):
+    """Once chaining has started, an unchained entry inside the suffix is a gap
+    and makes the ledger 'broken'."""
+    p = tmp_path / "gap.ndjson"
+    # Historical prefix
+    with p.open("a") as f:
+        f.write(json.dumps({"seq": 0, "id": "plain-0"}) + "\n")
+    # Chained suffix starts at GENESIS
+    with p.open("a") as f:
+        f.write(json.dumps({"seq": 1, "id": "chained-1", "prev_hash": GENESIS_HASH}) + "\n")
+    # Gap: unchained entry inside the suffix
+    with p.open("a") as f:
+        f.write(json.dumps({"seq": 2, "id": "plain-2"}) + "\n")
 
     ok, violations, status = verify_chain(p)
     assert ok is False
@@ -284,16 +301,15 @@ def test_verify_chain_partial_chain_is_broken(tmp_path):
     assert len(violations) >= 1
 
 
-def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
-    """LOAD-BEARING guard case (kimi-gate PR #840 F1): first entry has no
-    prev_hash (allowed by the first-entry branch), later entries hash-link
-    correctly to their predecessor. The verify loop produces zero violations
-    here — only the chained_count < total guard catches the partial chain."""
+def test_verify_chain_first_chained_not_genesis_is_broken(tmp_path):
+    """A chained suffix must start with GENESIS_HASH at the switch point;
+    linking the first chained entry to a historical unchained predecessor is a
+    violation (the safe transition is a fresh chain, not a retroactive link)."""
     p = tmp_path / "first-unchained.ndjson"
     first = {"seq": 0, "id": "plain-0"}
     with p.open("a") as f:
         f.write(json.dumps(first, sort_keys=True, separators=(",", ":")) + "\n")
-    # Second entry links CORRECTLY to the first entry's computed hash.
+    # Second entry links to the first entry's computed hash instead of GENESIS.
     second = {"seq": 1, "id": "chained-1", "prev_hash": compute_entry_hash(first)}
     with p.open("a") as f:
         f.write(json.dumps(second, sort_keys=True, separators=(",", ":")) + "\n")
@@ -301,7 +317,8 @@ def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
     ok, violations, status = verify_chain(p)
     assert ok is False
     assert status == "broken"
-    assert any("partial chain" in str(v) for v in violations)
+    assert any(v.get("line_number") == 2 for v in violations)
+    assert any(GENESIS_HASH in str(v.get("expected_prev_hash", "")) for v in violations)
 
 
 def test_verify_chain_missing_file_is_unchained(tmp_path):

@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 GENESIS_HASH = "0" * 64  # Sentinel for first entry in chain
@@ -43,12 +43,19 @@ def append_chained_entry(
     entry: dict,
     *,
     event_type: str | None = None,
+    prev_hash: str | None = None,
+    separators: tuple[str, str] | None = None,
 ) -> str:
     """Append a new entry with prev_hash linking to last entry in file.
 
     Returns the hash of the newly-appended entry.
 
     If file is empty/missing: uses GENESIS_HASH as prev_hash.
+
+    When ``prev_hash`` is supplied it is used verbatim (the caller is responsible
+    for holding the append lock and for choosing GENESIS at an epoch boundary).
+    When ``separators`` is supplied it is forwarded to ``json.dumps`` so callers
+    can keep a compact line shape consistent with legacy emitters.
 
     Event-type conventions:
     - None: regular entry (default)
@@ -57,10 +64,11 @@ def append_chained_entry(
     - 'redaction': must include 'redacts_hash' field; body should be opaque
     - 'tombstone': must include 'tombstones_hash' field
     """
-    if event_type == "backfill":
-        prev_hash = GENESIS_HASH
-    else:
-        prev_hash = _read_last_hash(path) or GENESIS_HASH
+    if prev_hash is None:
+        if event_type == "backfill":
+            prev_hash = GENESIS_HASH
+        else:
+            prev_hash = _read_last_hash(path) or GENESIS_HASH
 
     chained = {**entry, "prev_hash": prev_hash}
     if event_type:
@@ -73,9 +81,13 @@ def append_chained_entry(
     if event_type == "tombstone" and "tombstones_hash" not in chained:
         raise ValueError("tombstone event requires 'tombstones_hash' field")
 
+    dumps_kwargs: dict[str, Any] = {}
+    if separators is not None:
+        dumps_kwargs["separators"] = separators
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(chained) + "\n")
+        f.write(json.dumps(chained, **dumps_kwargs) + "\n")
 
     return compute_entry_hash(chained)
 
@@ -112,17 +124,20 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
     Returns (is_valid, violations_list, status) where status is one of:
 
     - "unchained": no entry in the file carries a prev_hash field; chaining
-      was never enabled (VNX_CHAIN_RECEIPTS is off by default).  Integrity
-      cannot be verified — this is NOT an error.  is_valid is True.
-    - "verified": every entry carries prev_hash and the chain is intact.
+      was never enabled (VNX_CHAIN_RECEIPTS / VNX_RECEIPT_HASH_CHAIN is off by
+      default).  Integrity cannot be verified — this is NOT an error.
       is_valid is True.
+    - "verified": the chained suffix is intact.  This includes a fully-chained
+      ledger as well as a ledger with an unchained prefix followed by a chained
+      suffix whose first chained entry uses GENESIS_HASH (the safe transition
+      when enabling chaining on an existing ledger).  is_valid is True.
     - "broken": chain is present but has integrity violations (tampered,
-      inserted, or partially chained — some entries carry prev_hash while
-      others do not).  is_valid is False.
+      inserted, partially chained, or the first chained entry does not use
+      GENESIS_HASH).  is_valid is False.
 
-    A partially-chained ledger (some entries with prev_hash, some without)
-    is classified as "broken", not "unchained".  A ledger must be either
-    fully unchained or fully chained to be considered healthy.
+    A mixed ledger is valid only as an unchained prefix followed immediately by
+    a fully-chained suffix starting with GENESIS_HASH.  Any gap in the chained
+    suffix (an unchained entry after chaining has started) is a violation.
 
     violations_list contains dicts with: line_number, expected_prev_hash,
     actual_prev_hash (and optionally 'error' or 'note').
@@ -156,32 +171,48 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
     if not entries:
         return (True, [], "unchained")
 
-    # Determine whether any entry carries prev_hash.
-    chained_count = sum(1 for _, e in entries if "prev_hash" in e)
-    total = len(entries)
+    # Locate the switch point: the first entry that carries prev_hash.
+    # Everything before it is an unchained historical prefix (tolerated).
+    # Everything from this index onward must be chained and contiguous.
+    switch_index: int | None = None
+    for idx, (line_no, entry) in enumerate(entries):
+        if "prev_hash" in entry:
+            switch_index = idx
+            break
 
-    if chained_count == 0 and not parse_errors:
-        # No entry has prev_hash — ledger is fully unchained.  Chaining was
-        # not enabled (VNX_CHAIN_RECEIPTS default off).  Not an error.
+    if switch_index is None and not parse_errors:
+        # No entry has prev_hash — ledger is fully unchained.
         return (True, [], "unchained")
 
-    # At least one entry has prev_hash (or there are parse errors mixed in).
-    # Enforce full-chain integrity.  A partially-chained ledger (some entries
-    # lack prev_hash while others have it) is a real violation — broken.
     violations: list[dict] = list(parse_errors)
-    expected_prev = GENESIS_HASH
 
-    for line_no, entry in entries:
+    if switch_index is not None:
+        # Validate that every entry from the switch point onward is chained.
+        for idx in range(switch_index, len(entries)):
+            line_no, entry = entries[idx]
+            if "prev_hash" not in entry:
+                violations.append({
+                    "line_number": line_no,
+                    "expected_prev_hash": "<present>",
+                    "actual_prev_hash": "<missing>",
+                    "note": "chained suffix contains an entry without prev_hash",
+                })
+
+    # Validate the chain itself starting at the switch point.
+    # The first chained entry must anchor to GENESIS_HASH; subsequent entries
+    # must link to the canonical hash of their predecessor.
+    expected_prev = GENESIS_HASH
+    for idx in range(switch_index if switch_index is not None else 0, len(entries)):
+        line_no, entry = entries[idx]
         actual_prev = entry.get("prev_hash")
 
-        if line_no == entries[0][0]:
-            # First entry in the file.
-            if actual_prev is not None and actual_prev != GENESIS_HASH:
+        if idx == switch_index:
+            if actual_prev != GENESIS_HASH:
                 violations.append({
                     "line_number": line_no,
                     "expected_prev_hash": GENESIS_HASH,
                     "actual_prev_hash": actual_prev,
-                    "note": "first entry: prev_hash must be GENESIS or absent",
+                    "note": "first chained entry must anchor to GENESIS_HASH",
                 })
         else:
             if actual_prev != expected_prev:
@@ -195,20 +226,6 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
 
     if violations:
         return (False, violations, "broken")
-
-    # All parseable entries chained and intact.
-    if chained_count < total:
-        # Partial chain detected even with no hash mismatches.  This guard is
-        # LOAD-BEARING for the edge case where the FIRST entry carries no
-        # prev_hash (allowed by the first-entry branch) while later entries
-        # hash-link correctly to their predecessor — the loop produces zero
-        # violations there; only this count check catches the partial chain.
-        return (False, [{
-            "note": (
-                f"partial chain: {chained_count}/{total} entries carry prev_hash; "
-                "ledger must be fully unchained or fully chained"
-            )
-        }], "broken")
 
     return (True, [], "verified")
 

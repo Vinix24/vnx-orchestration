@@ -7,6 +7,7 @@ and all public function contracts.
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import os
 import sys
 import threading
@@ -20,6 +21,11 @@ from governance_emit import (
     _validate_provider,
     emit_dispatch_receipt,
     emit_unified_report,
+)
+from ndjson_hash_chain import (
+    GENESIS_HASH,
+    compute_entry_hash,
+    verify_chain,
 )
 
 
@@ -363,3 +369,189 @@ def test_unified_report_includes_findings(tmp_data):
     path = emit_unified_report(**kwargs)
     assert "Something smells" in path.read_text()
     assert "WARNING" in path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Hash-chain receipt flag (VNX_RECEIPT_HASH_CHAIN)
+# ---------------------------------------------------------------------------
+
+
+def _emit_worker(state_dir_str: str, worker_id: int) -> None:
+    """Subprocess body: enable receipt chaining and append one receipt."""
+    import os as _os
+    import sys as _sys
+
+    _os.environ["VNX_RECEIPT_HASH_CHAIN"] = "1"
+    scripts_lib = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
+    if scripts_lib not in _sys.path:
+        _sys.path.insert(0, scripts_lib)
+    from governance_emit import emit_dispatch_receipt
+
+    state_dir = Path(state_dir_str)
+    emit_dispatch_receipt(
+        dispatch_id=f"worker-{worker_id:03d}",
+        terminal_id="T1",
+        provider="claude",
+        model="claude-sonnet-4-6",
+        pr_id=None,
+        status="success",
+        completion_pct=100,
+        risk=0.0,
+        findings=[],
+        duration_seconds=1.0,
+        token_usage={"input": 10, "output": 5},
+        cost_usd=None,
+        state_dir=state_dir,
+    )
+
+
+def _read_receipt_entries(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_hash_chain_flag_off_no_prev_hash(tmp_state, monkeypatch):
+    """Default OFF: emit must not add prev_hash and must remain byte-identical
+    to the pre-feature output shape."""
+    monkeypatch.delenv("VNX_RECEIPT_HASH_CHAIN", raising=False)
+    emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
+
+    receipt_path = tmp_state / "t0_receipts.ndjson"
+    content = receipt_path.read_text()
+    entry = json.loads(content.strip())
+    assert "prev_hash" not in entry
+    # Re-serializing the parsed entry with the same compact separators must
+    # reproduce the written bytes exactly.
+    assert content == json.dumps(entry, separators=(",", ":")) + "\n"
+
+
+def test_hash_chain_flag_off_explicit_false(tmp_state, monkeypatch):
+    monkeypatch.setenv("VNX_RECEIPT_HASH_CHAIN", "0")
+    emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
+    entry = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert "prev_hash" not in entry
+
+
+def test_hash_chain_flag_on_links_and_verifies(tmp_state, monkeypatch):
+    """Flag ON: each receipt carries prev_hash; the ledger verifies intact."""
+    monkeypatch.setenv("VNX_RECEIPT_HASH_CHAIN", "1")
+    receipt_path = tmp_state / "t0_receipts.ndjson"
+
+    for i in range(6):
+        kwargs = _base_receipt_kwargs(tmp_state)
+        kwargs["dispatch_id"] = f"chain-{i:03d}"
+        emit_dispatch_receipt(**kwargs)
+
+    entries = _read_receipt_entries(receipt_path)
+    assert len(entries) == 6
+    assert entries[0]["prev_hash"] == GENESIS_HASH
+    for idx in range(1, len(entries)):
+        assert entries[idx]["prev_hash"] == compute_entry_hash(entries[idx - 1])
+
+    is_valid, violations, status = verify_chain(receipt_path)
+    assert is_valid, f"chain should verify, violations: {violations}"
+    assert status == "verified"
+
+
+def test_hash_chain_transition_tolerates_unchained_prefix(tmp_state, monkeypatch):
+    """Enabling chaining on an existing unchained ledger must not rewrite
+    history; it starts a fresh chain from GENESIS at the switch point."""
+    receipt_path = tmp_state / "t0_receipts.ndjson"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy = {
+        "dispatch_id": "legacy-dispatch",
+        "terminal_id": "T1",
+        "provider": "claude",
+        "model": "claude-sonnet-4-6",
+        "status": "success",
+        "completion_pct": 100,
+        "risk": 0.0,
+        "duration_seconds": 2.0,
+        "token_usage": {"input": 1, "output": 1},
+        "cost_usd": None,
+        "findings": [],
+        "pr_id": None,
+        "report_path": None,
+        "events_path": None,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "recorded_at": "2026-01-01T00:00:00Z",
+    }
+    with receipt_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(legacy, separators=(",", ":")) + "\n")
+
+    monkeypatch.setenv("VNX_RECEIPT_HASH_CHAIN", "1")
+    kwargs = _base_receipt_kwargs(tmp_state)
+    kwargs["dispatch_id"] = "chained-after-legacy"
+    emit_dispatch_receipt(**kwargs)
+
+    entries = _read_receipt_entries(receipt_path)
+    assert len(entries) == 2
+    assert "prev_hash" not in entries[0], "existing receipts must not be rewritten"
+    assert entries[1]["prev_hash"] == GENESIS_HASH
+
+    is_valid, violations, status = verify_chain(receipt_path)
+    assert is_valid, f"transition ledger should verify: {violations}"
+    assert status == "verified"
+
+
+def test_hash_chain_flag_on_detects_tamper(tmp_state, monkeypatch):
+    """A tampered chained receipt must cause verify_chain to fail."""
+    monkeypatch.setenv("VNX_RECEIPT_HASH_CHAIN", "1")
+    for i in range(2):
+        kwargs = _base_receipt_kwargs(tmp_state)
+        kwargs["dispatch_id"] = f"tamper-{i}"
+        emit_dispatch_receipt(**kwargs)
+
+    receipt_path = tmp_state / "t0_receipts.ndjson"
+    lines = receipt_path.read_text().splitlines()
+    first = json.loads(lines[0])
+    first["status"] = "tampered"
+    lines[0] = json.dumps(first, separators=(",", ":"))
+    receipt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    is_valid, violations, status = verify_chain(receipt_path)
+    assert is_valid is False
+    assert status == "broken"
+    assert len(violations) >= 1
+    assert any(v.get("line_number") == 2 for v in violations)
+
+
+@pytest.mark.parametrize("n_workers", [8, 16])
+def test_hash_chain_concurrent_appends_no_fork(tmp_state, n_workers):
+    """Concurrent writers with chaining ON must serialize read-tail + stamp +
+    append under the one exclusive lock and produce a single unbroken chain."""
+    receipt_path = tmp_state / "t0_receipts.ndjson"
+
+    ctx = mp.get_context("spawn")
+    procs = [
+        ctx.Process(target=_emit_worker, args=(str(tmp_state), wid))
+        for wid in range(n_workers)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"worker exited non-zero: {p.exitcode}"
+
+    entries = _read_receipt_entries(receipt_path)
+    assert len(entries) == n_workers, "every worker must append exactly once"
+
+    is_valid, violations, status = verify_chain(receipt_path)
+    assert is_valid, f"CHAIN FORKED under concurrency: {violations}"
+    assert status == "verified"
+
+    # Exactly one GENESIS_HASH, on line 1.
+    assert entries[0]["prev_hash"] == GENESIS_HASH
+    genesis_count = sum(1 for e in entries if e.get("prev_hash") == GENESIS_HASH)
+    assert genesis_count == 1, "fork: GENESIS_HASH appears more than once"
+
+    # No duplicate prev_hash (a fork would share a parent).
+    prev_hashes = [e["prev_hash"] for e in entries]
+    assert len(prev_hashes) == len(set(prev_hashes)), "fork: duplicate prev_hash"
+
+    # Each prev_hash matches the prior entry's canonical body hash.
+    for idx in range(1, len(entries)):
+        assert entries[idx]["prev_hash"] == compute_entry_hash(entries[idx - 1])

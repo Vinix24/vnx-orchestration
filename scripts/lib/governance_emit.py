@@ -32,11 +32,64 @@ if _LIB_DIR not in sys.path:
 
 from ndjson_io import fsync_fileno
 
+from ndjson_hash_chain import (
+    GENESIS_HASH,
+    append_chained_entry,
+    compute_entry_hash,
+)
+
 logger = logging.getLogger(__name__)
 
 _PROVIDER_RE = re.compile(
     r"^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_.-]*)?)?|local-gemma)$"
 )
+
+
+def _receipt_hash_chain_enabled() -> bool:
+    """Return True when VNX_RECEIPT_HASH_CHAIN opts the governed dispatch-receipt
+    emit path into hash-chaining. Default OFF. Recognised truthy values: 1, true,
+    yes, on (case-insensitive).
+    """
+    value = os.environ.get("VNX_RECEIPT_HASH_CHAIN", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _prev_hash_for_next_receipt(receipt_path: Path) -> str:
+    """Choose the prev_hash for the next chained receipt.
+
+    - Empty/missing ledger: GENESIS_HASH.
+    - Tail entry already carries prev_hash: link to its canonical hash.
+    - Tail entry has no prev_hash (legacy unchained prefix): start a fresh
+      chain with GENESIS_HASH at the switch point.
+
+    MUST be called while holding the append lock; it reads the current tail
+    and the read-tail + stamp + append sequence must remain atomic.
+    """
+    if not receipt_path.exists() or receipt_path.stat().st_size == 0:
+        return GENESIS_HASH
+
+    last_line = None
+    with receipt_path.open("rb") as f:
+        try:
+            f.seek(-2, 2)
+            while f.read(1) != b"\n":
+                f.seek(-2, 1)
+        except OSError:
+            # File smaller than 2 bytes — read whole thing.
+            f.seek(0)
+        last_line = f.readline().decode("utf-8").strip()
+
+    if not last_line:
+        return GENESIS_HASH
+
+    try:
+        entry = json.loads(last_line)
+    except json.JSONDecodeError:
+        return GENESIS_HASH
+
+    if "prev_hash" in entry:
+        return compute_entry_hash(entry)
+    return GENESIS_HASH
 
 
 def _validate_provider(provider: str) -> None:
@@ -120,13 +173,29 @@ def emit_dispatch_receipt(
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(receipt, separators=(",", ":")) + "\n"
 
     try:
         with open(receipt_path, "a", encoding="utf-8") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             try:
-                fh.write(line)
+                if _receipt_hash_chain_enabled():
+                    # Hash-chain path (opt-in). The read-tail + stamp + append
+                    # sequence is performed INSIDE the existing LOCK_EX so two
+                    # concurrent writers cannot read the same tail hash and fork
+                    # the chain. We deliberately start a fresh chain
+                    # (GENESIS_HASH) when the current tail is unchained, rather
+                    # than rewriting history to migrate it.
+                    prev_hash = _prev_hash_for_next_receipt(receipt_path)
+                    append_chained_entry(
+                        receipt_path,
+                        receipt,
+                        prev_hash=prev_hash,
+                        separators=(",", ":"),
+                    )
+                else:
+                    # Default-OFF: byte-identical to the pre-feature shape.
+                    line = json.dumps(receipt, separators=(",", ":")) + "\n"
+                    fh.write(line)
                 fh.flush()
                 # Durability: force the appended record to stable storage before
                 # the lock releases, so a crash after this point cannot lose the
