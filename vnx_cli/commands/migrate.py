@@ -120,15 +120,19 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
             pass  # advisory — central stores still resolve via the DB-path anchor
 
     # data_dir is threaded explicitly (D4 threading trap); no env mutation needed.
-    # run_tenant_stamp=False: W1 tenant-stamping is disabled for vnx migrate because it
-    # is currently broken for the stores this targets (pool_config UNIQUE collision on
-    # every bootstrapped store + a legacy recommendation_outcomes child-FK gap) and
-    # would only churn the store on a self-restoring failure. The schema fix that adds
-    # tracks.horizon (the actual gap) is delivered by the walk regardless. See run().
+    # run_tenant_stamp=True (RE-ENABLED 2026-07-10): W1 tenant-stamping was disabled because
+    # a normally-bootstrapped non-vnx-dev store carries a legacy ('vnx-dev', key) row AND an
+    # authoritative (<pid>, key) row on a composite UNIQUE(project_id, key) (e.g.
+    # execution_targets, pool_config), so Phase 2's 'vnx-dev'->pid restamp tripped the UNIQUE.
+    # tenant_stamping._dedup_legacy_collisions now drops the stale legacy duplicate (the pid
+    # row wins; children repoint via their own restamp) BEFORE the restamp. Verified on copies
+    # of all 4 live central stores: W1 succeeds, foreign_key_check clean, only stale dual-seed
+    # duplicates removed (no legitimate-data loss). tenant_stamp_fatal=False keeps a W1 failure
+    # non-fatal (WARNING after the committed schema walk) as belt-and-suspenders.
     migrate_future_system.run(
         data_dir=data_root,
         tenant_stamp_fatal=False,
-        run_tenant_stamp=False,
+        run_tenant_stamp=True,
         backup=True,
     )
 
