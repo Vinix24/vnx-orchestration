@@ -24,6 +24,8 @@ if _lib not in _sys.path:
 # Single source of truth — do not redefine; import from vnx_ids.
 from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
+import data_dir_guard
+
 log = logging.getLogger(__name__)
 
 
@@ -349,7 +351,9 @@ def resolve_data_root(project_root) -> Path:
     """
     project_root = Path(project_root).expanduser().resolve()
     pid = _resolve_state_project_id(project_root)
-    return _resolve_state_root(pid, project_root)
+    data_dir = _resolve_state_root(pid, project_root)
+    data_dir_guard.check_data_dir_project_id_guard(data_dir, pid)
+    return data_dir
 
 
 def resolve_paths() -> Dict[str, str]:
@@ -372,6 +376,7 @@ def resolve_paths() -> Dict[str, str]:
         )
     _state_project_id = _resolve_state_project_id(project_root)
     vnx_data_dir = _resolve_state_root(_state_project_id, project_root)
+    data_dir_guard.check_data_dir_project_id_guard(vnx_data_dir, _state_project_id)
 
     paths = {
         "VNX_HOME": str(vnx_home),

@@ -28,6 +28,9 @@ import pytest
 _CONFTEST_ISOLATION_TMP = tempfile.mkdtemp(prefix="vnx_conftest_")
 os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
 os.environ["VNX_DATA_DIR"] = _CONFTEST_ISOLATION_TMP
+# Keep the new data-dir guard from emitting warnings during normal tests.
+# Tests that exercise the guard override this explicitly.
+os.environ.setdefault("VNX_DATA_DIR_GUARD", "off")
 
 # Make scripts/lib importable for all tests
 _LIB_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lib"
