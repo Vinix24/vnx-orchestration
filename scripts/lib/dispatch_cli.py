@@ -81,7 +81,21 @@ def _resolve_data_dir() -> Path:
 
 
 def _resolve_project_id() -> str:
-    return os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    """Authoritative project_id for the door's ADR-007 guard.
+
+    Delegates to the canonical resolver: VNX_PROJECT_ID env, then the nearest
+    ``.vnx-project-id`` marker walking up from CWD. The old ``return
+    os.environ.get("VNX_PROJECT_ID", "vnx-dev")`` HARDCODED ``vnx-dev`` as the
+    fallback, so EVERY consumer dispatch that did not export VNX_PROJECT_ID
+    resolved to ``vnx-dev`` — the guard then either mis-routed the entire
+    governance state (receipt, report, spec, events, log) into the vnx-dev store
+    or rejected the correct project_id as a "cross-project redirect". This hit
+    every consumer (sales-copilot, mission-control, seocrawler). Resolving from
+    the marker fixes the fleet; an unresolvable project fails closed (raises)
+    rather than silently landing in vnx-dev.
+    """
+    from project_root import resolve_project_id  # noqa: PLC0415
+    return resolve_project_id()
 
 
 def _resolve_repo_root() -> Path:

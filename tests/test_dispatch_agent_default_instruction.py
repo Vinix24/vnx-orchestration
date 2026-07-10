@@ -158,6 +158,34 @@ class TestDispatchAgentDefaultInstruction:
         captured = capsys.readouterr()
         assert "--instruction" in captured.err
 
+    def test_derives_project_id_from_project_dir_and_passes_to_door(self, tmp_path):
+        """The dispatch project_id must come from the TARGET --project-dir's
+        .vnx-project-id and be threaded to the door — NOT resolved from the
+        engine/cwd. Without it a consumer dispatch mis-routes its entire
+        governance state into the wrong store (sales-copilot -> vnx-dev)."""
+        self._make_agent(tmp_path, "greeter", "Say hi")
+        (tmp_path / ".vnx-project-id").write_text("my-target\n")
+
+        captured = {}
+
+        def fake_door(legacy, **kwargs):
+            captured.update(kwargs)
+            return True
+
+        from vnx_cli import _engine
+        with patch.object(_engine, "engine_root", return_value=tmp_path), \
+             patch("vnx_cli.commands.dispatch_agent._engine.ensure_engine_on_path"), \
+             patch.dict("sys.modules", {
+                 "subprocess_dispatch": MagicMock(deliver_with_recovery=lambda **k: True),
+                 "dispatch_bridge": MagicMock(deliver_via_door=fake_door),
+             }):
+            from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
+            args = Namespace(agent="greeter", instruction="build it", model="sonnet", project_dir=str(tmp_path))
+            rc = vnx_dispatch_agent(args)
+
+        assert rc == 0
+        assert captured.get("project_id") == "my-target"
+
     def test_explicit_instruction_overrides_default(self, tmp_path):
         """Explicit --instruction takes precedence over default_instruction."""
         self._make_agent(tmp_path, "hello-world", "Default instruction")

@@ -151,7 +151,15 @@ def vnx_dispatch_agent(args) -> int:
             file=sys.stderr,
         )
 
-    print(f"Dispatching to agent '{agent}' (dispatch_id={dispatch_id}) ...")
+    # Derive the project_id from the TARGET project (--project-dir), not the
+    # CLI/engine cwd. Without this the door falls back to _resolve_project_id()
+    # which reads the engine location (vnx-dev), so a consumer dispatch lands its
+    # entire governance state — receipt, report, spec, events, log — in the WRONG
+    # store (cross-project audit contamination; sales-copilot -> vnx-dev). The
+    # door accepts project_id and prefers it when the caller knows it.
+    project_id = _engine.derive_project_id(project_dir)
+
+    print(f"Dispatching to agent '{agent}' (dispatch_id={dispatch_id}, project_id={project_id}) ...")
 
     # Route through the single-entry door (gated by VNX_SINGLE_ENTRY_DISPATCH / VNX_DISPATCH_LEGACY);
     # the legacy subprocess lane runs only when the door is off. codex flip-PR F3: the shipped
@@ -169,6 +177,7 @@ def vnx_dispatch_agent(args) -> int:
         target_slot="T1",
         role=agent,
         model=model,
+        project_id=project_id,
     )
 
     status = "done" if success else "failed"
