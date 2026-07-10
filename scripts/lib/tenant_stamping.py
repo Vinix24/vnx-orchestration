@@ -882,6 +882,72 @@ def _resolve_legacy_guard(
                 )
 
 
+def _unique_keys_including_pid(conn: sqlite3.Connection, table: str) -> list[list[str]]:
+    """Natural-key column lists for every UNIQUE index/PK on ``table`` that includes
+    ``project_id`` (any origin — declared UNIQUE, composite PK auto-index, or standalone
+    UNIQUE index). Each returned list is the key columns OTHER than project_id, i.e. the
+    natural key a legacy row and a pid row can collide on during the Phase-2 restamp.
+    Expression indexes (index_info column name is NULL) are skipped."""
+    keys: list[list[str]] = []
+    seen: set[tuple] = set()
+    for idx in conn.execute(f"PRAGMA index_list({_safe_ident(table)[1:-1]})").fetchall():
+        if not idx[2]:  # not unique
+            continue
+        # Skip PARTIAL unique indexes (index_list col 4 = 'partial'): they only enforce
+        # uniqueness on rows matching their WHERE predicate, so a (pid, key) row need not
+        # collide with a legacy (vnx-dev, key) row — deduping on one risks a false positive.
+        if len(idx) > 4 and idx[4]:
+            continue
+        cols = [
+            r[2]
+            for r in conn.execute(
+                f"PRAGMA index_info({_safe_ident(idx[1])[1:-1]})"
+            ).fetchall()
+        ]
+        if any(c is None for c in cols) or "project_id" not in cols:
+            continue
+        other = tuple(c for c in cols if c != "project_id")
+        if other and other not in seen:
+            seen.add(other)
+            keys.append(list(other))
+    return keys
+
+
+def _dedup_legacy_collisions(conn: sqlite3.Connection, table: str, pid: str) -> int:
+    """Delete legacy (NULL/''/'vnx-dev') rows whose Phase-2 restamp target ``(pid, key)``
+    ALREADY exists — the pid row is authoritative; the legacy row is a stale mis-tenanted
+    duplicate (the normally-bootstrapped-store dual-seed: e.g. a ``('vnx-dev','default')``
+    and a ``(<pid>,'default')`` pool_config/execution_targets row). Without this the
+    ``'vnx-dev'``→``<pid>`` restamp trips the composite ``UNIQUE(project_id, …)`` constraint
+    and W1 aborts (the reason ``vnx migrate`` shipped ``run_tenant_stamp=False``).
+
+    Runs inside the caller's ``foreign_keys=OFF`` Phase-2 transaction; any child rows that
+    referenced the deleted legacy parent repoint to the surviving pid parent via their own
+    restamp, so ``foreign_key_check`` passes at COMMIT. No-op for a vnx-dev store (no
+    restamp happens there). Returns rows deleted."""
+    if pid == "vnx-dev":
+        return 0
+    t = _safe_ident(table)
+    deleted = 0
+    for key_cols in _unique_keys_including_pid(conn, table):
+        # Use `=` (NOT `IS`): a SQLite UNIQUE collision requires every key column non-NULL
+        # AND equal — two NULLs do NOT collide (SQLite allows duplicate NULLs in a UNIQUE
+        # index). `keep.col = t.col` is NULL/false when either side is NULL, so a legacy row
+        # with a NULL key column is left for the restamp instead of being wrongly deleted.
+        pred = " AND ".join(
+            f"keep.{_safe_ident(c)} = {t}.{_safe_ident(c)}" for c in key_cols
+        )
+        cur = conn.execute(
+            f"DELETE FROM {t} "
+            f"WHERE ({t}.project_id IS NULL OR {t}.project_id IN ('vnx-dev', '')) "
+            f"AND EXISTS (SELECT 1 FROM {t} AS keep "
+            f"WHERE keep.project_id = ? AND {pred})",
+            (pid,),
+        )
+        deleted += cur.rowcount
+    return deleted
+
+
 def _restamp_table(conn: sqlite3.Connection, table: str, pid: str) -> int:
     """Re-stamp legacy project_id values in ``table`` to ``pid``.
 
@@ -934,6 +1000,9 @@ def run_phase2_restamp(
         conn.execute("BEGIN EXCLUSIVE")
         try:
             for table in tables:
+                # Dedup the dual-seed legacy duplicates BEFORE restamping so the
+                # 'vnx-dev'->pid UPDATE cannot trip the composite UNIQUE(project_id, …).
+                _dedup_legacy_collisions(conn, table, pid)
                 n = _restamp_table(conn, table, pid)
                 updated[table] = n
 
