@@ -65,3 +65,59 @@ def test_unmeasured_tokens_mapping_is_none():
     assert pg._extract_token_usage({"token_usage": {"input": 0, "output": 0}}) is None
     assert pg._extract_token_usage({"token_usage": 42}) == 42
     assert pg._extract_token_usage({}) is None
+
+
+def test_review_task_class_is_never_phantom():
+    # a review keyed by task_class (not a REVIEW_ROLES role string) with real tokens spent and an
+    # empty diff — the genuine read-only review case this PR fixes.
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=987,
+                         role="backend-developer", task_class="review")
+    assert not v.is_phantom
+    assert "task_class" in v.reason
+
+
+def test_review_task_class_variants_are_exempt():
+    for tc in ("code-review", "code_review", "plan-review", "plan_review",
+               "security-review", "security_review", "REVIEW", " review "):
+        v = pg.phantom_guard(status="done", worktree_diff="", token_usage=None,
+                             role="backend-developer", task_class=tc)
+        assert not v.is_phantom, f"task_class={tc!r} should be exempt"
+
+
+def test_unrelated_task_class_is_still_phantom():
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=None,
+                         role="backend-developer", task_class="implementation")
+    assert v.is_phantom
+
+
+def test_read_only_flag_is_never_phantom():
+    # explicit read_only=True exempts regardless of role/task_class — the escape hatch for a
+    # review dispatch that isn't captured by either known-role or known-task_class matching.
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=555,
+                         role="backend-developer", task_class=None, read_only=True)
+    assert not v.is_phantom
+    assert "read_only" in v.reason
+
+
+def test_read_only_false_does_not_exempt():
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=None,
+                         role="backend-developer", read_only=False)
+    assert v.is_phantom
+
+
+def test_guard_receipt_extracts_task_class_and_read_only():
+    # task_class-keyed review: real tokens, empty diff, delivery-shaped role -> not phantom
+    receipt = {"status": "done", "role": "backend-developer", "task_class": "review",
+               "token_usage": {"input": 100, "output": 50}}
+    v = pg.guard_receipt(receipt, worktree_diff="")
+    assert not v.is_phantom
+
+    # read_only flag on the receipt itself, no recognized role/task_class
+    receipt2 = {"status": "done", "role": "backend-developer", "read_only": True}
+    v2 = pg.guard_receipt(receipt2, worktree_diff="")
+    assert not v2.is_phantom
+
+    # neither signal present, empty diff, delivery role -> still phantom
+    receipt3 = {"status": "done", "role": "backend-developer"}
+    v3 = pg.guard_receipt(receipt3, worktree_diff="")
+    assert v3.is_phantom
