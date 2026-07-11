@@ -55,12 +55,15 @@ _maybe_auto_seed_tracks() {
         >> "$log_file" 2>&1 || true
 }
 
-# _maybe_objective_reconcile — throttled advisory-first git-grounded reconcile tick (D4).
+# _maybe_objective_reconcile — throttled git-grounded reconcile tick (D4).
 # Invokes `objective reconcile` at most once per VNX_OBJECTIVE_RECONCILE_INTERVAL seconds
-# when VNX_SUPERVISOR_MODE=unified. Default CHECK mode only; --apply added when
-# VNX_AUTO_CLOSE=1 (operator must set this after `objective reconcile-streak` confirms the
-# flip criterion). Best-effort (|| true); logged to objective_reconcile.log.
-# Default (unset/legacy) = no behaviour change.
+# when VNX_SUPERVISOR_MODE=unified. Auto-close is ON BY DEFAULT (operator directive
+# 2026-07-10, matching the SessionStart hook): --apply is added unless the operator opts
+# out with VNX_AUTO_CLOSE=0 → advisory CHECK (zero writes). reconcile only closes tracks
+# whose linked PRs are verified MERGED and whose blockers are resolved, so applying by
+# default keeps the horizon in sync with git reality; the streak is still computed for
+# observability but no longer gates the flip. Best-effort (|| true); logged to
+# objective_reconcile.log. Default (unset/legacy VNX_SUPERVISOR_MODE) = no behaviour change.
 _maybe_objective_reconcile() {
     [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
     local interval="${VNX_OBJECTIVE_RECONCILE_INTERVAL:-900}"
@@ -83,7 +86,7 @@ _maybe_objective_reconcile() {
         --project-id "$VNX_PROJECT_ID"
         --state-dir "$STATE_DIR"
     )
-    if [[ "${VNX_AUTO_CLOSE:-0}" == "1" ]]; then
+    if [[ "${VNX_AUTO_CLOSE:-1}" != "0" ]]; then
         cmd+=(--apply)
     fi
     "${cmd[@]}" >> "$log_file" 2>&1 || true
