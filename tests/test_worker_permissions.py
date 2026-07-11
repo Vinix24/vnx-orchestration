@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -12,12 +13,15 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 from worker_permissions import (
+    EMPTY_MCP_CONFIG,
     PermissionProfile,
+    build_claude_scope_args,
     generate_claude_settings,
     generate_permission_preamble,
     load_permissions,
     match_bash_deny,
     match_file_write_scope,
+    resolve_role_mcp_config,
     validate_dispatch_permissions,
 )
 
@@ -47,6 +51,8 @@ SAMPLE_YAML = textwrap.dedent("""\
           - "scripts/**"
           - "tests/**"
           - "dashboard/**"
+        mcp_servers:
+          - "notion"
 
       test-engineer:
         allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
@@ -107,6 +113,7 @@ def test_load_backend_profile(yaml_file: Path) -> None:
     assert "rm -rf*" in profile.bash_deny_patterns
     assert "pytest*" in profile.bash_allow_patterns
     assert "scripts/**" in profile.file_write_scope
+    assert profile.mcp_servers == ["notion"]
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +129,8 @@ def test_load_test_engineer_profile(yaml_file: Path) -> None:
     assert "tests/**" in profile.file_write_scope
     # test-engineer cannot push
     assert any("git push" in p for p in profile.bash_deny_patterns)
+    # no mcp_servers declared for this role -> empty allowlist, not fabricated
+    assert profile.mcp_servers == []
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +261,7 @@ def test_missing_role_returns_empty_profile(yaml_file: Path) -> None:
     assert profile.allowed_tools == []
     assert profile.denied_tools == []
     assert profile.bash_deny_patterns == []
+    assert profile.mcp_servers == []
 
 
 # ---------------------------------------------------------------------------
@@ -261,3 +271,81 @@ def test_missing_role_returns_empty_profile(yaml_file: Path) -> None:
 def test_empty_metadata_produces_no_warnings(yaml_file: Path) -> None:
     warnings = validate_dispatch_permissions({}, yaml_path=yaml_file)
     assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# resolve_role_mcp_config / build_claude_scope_args — mcp_servers allowlist
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def global_mcp_config(tmp_path: Path) -> Path:
+    """A fake ambient global config (~/.claude.json shape) with two servers."""
+    p = tmp_path / "global.claude.json"
+    p.write_text(json.dumps({
+        "mcpServers": {
+            "notion": {"command": "npx", "args": ["-y", "notion-mcp"]},
+            "gmail": {"command": "npx", "args": ["-y", "gmail-mcp"]},
+        }
+    }))
+    return p
+
+
+class TestResolveRoleMcpConfig:
+    def test_empty_allowlist_yields_empty_mcp_servers(self, global_mcp_config: Path) -> None:
+        profile = PermissionProfile(role="r")
+        assert resolve_role_mcp_config(profile, global_mcp_config) == {"mcpServers": {}}
+
+    def test_allowlisted_server_included_with_its_definition(self, global_mcp_config: Path) -> None:
+        profile = PermissionProfile(role="r", mcp_servers=["notion"])
+        result = resolve_role_mcp_config(profile, global_mcp_config)
+        assert result == {"mcpServers": {"notion": {"command": "npx", "args": ["-y", "notion-mcp"]}}}
+        # gmail exists in the ambient config but was not allowlisted -> excluded
+        assert "gmail" not in result["mcpServers"]
+
+    def test_allowlisted_name_not_in_ambient_config_is_skipped_not_fabricated(
+        self, global_mcp_config: Path
+    ) -> None:
+        profile = PermissionProfile(role="r", mcp_servers=["notion", "does-not-exist"])
+        result = resolve_role_mcp_config(profile, global_mcp_config)
+        assert set(result["mcpServers"].keys()) == {"notion"}
+
+    def test_missing_global_config_file_yields_empty_scoped_set(self, tmp_path: Path) -> None:
+        profile = PermissionProfile(role="r", mcp_servers=["notion"])
+        result = resolve_role_mcp_config(profile, tmp_path / "does-not-exist.json")
+        assert result == {"mcpServers": {}}
+
+    def test_malformed_global_config_does_not_crash(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not valid json")
+        profile = PermissionProfile(role="r", mcp_servers=["notion"])
+        result = resolve_role_mcp_config(profile, bad)
+        assert result == {"mcpServers": {}}
+
+
+class TestBuildClaudeScopeArgsMcpServers:
+    def test_no_allowlist_keeps_empty_mcp_config(self, global_mcp_config: Path) -> None:
+        # Backward compat: a profile without mcp_servers is byte-identical to
+        # the pre-existing EMPTY_MCP_CONFIG behavior.
+        profile = PermissionProfile(role="r", allowed_tools=["Read"])
+        args = build_claude_scope_args(profile, global_mcp_config_path=global_mcp_config)
+        idx = args.index("--mcp-config")
+        assert args[idx + 1] == EMPTY_MCP_CONFIG
+
+    def test_allowlist_narrows_mcp_config_to_named_servers(self, global_mcp_config: Path) -> None:
+        profile = PermissionProfile(role="r", allowed_tools=["Read"], mcp_servers=["notion"])
+        args = build_claude_scope_args(profile, global_mcp_config_path=global_mcp_config)
+        assert "--strict-mcp-config" in args
+        idx = args.index("--mcp-config")
+        assert json.loads(args[idx + 1]) == {
+            "mcpServers": {"notion": {"command": "npx", "args": ["-y", "notion-mcp"]}}
+        }
+
+    def test_requires_mcp_true_ignores_allowlist_entirely(self, global_mcp_config: Path) -> None:
+        # requires_mcp=True keeps the dispatch's full ambient config — the
+        # allowlist reconciliation is explicit follow-up work (Open Items).
+        profile = PermissionProfile(role="r", allowed_tools=["Read"], mcp_servers=["notion"])
+        args = build_claude_scope_args(
+            profile, requires_mcp=True, global_mcp_config_path=global_mcp_config
+        )
+        assert "--strict-mcp-config" not in args
+        assert "--mcp-config" not in args
