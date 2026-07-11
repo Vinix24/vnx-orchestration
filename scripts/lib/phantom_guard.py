@@ -14,13 +14,22 @@ token_usage is only CORROBORATING: providers that report it (codex/claude) spend
 an LLM ran; kimi-cli never reports tokens, so its absence/0 is not evidence of a phantom. Reviewers
 legitimately produce no diff, so REVIEW_ROLES are exempt.
 
+A read-only review can also arrive WITHOUT a REVIEW_ROLES-matching ``role`` string — e.g. a dispatch
+routed through ``task_class="research_structured"`` (the fabric's review/analysis bucket, see
+dispatch_router.py ROLE_TO_TASK_CLASS) or one that carries an explicit ``read_only=True`` flag on the
+dispatch spec. Both are exempt the same way a REVIEW_ROLES role is: a verdict with real tokens and an
+empty diff is expected, not evidence of fabrication.
+
 Decision rule (a delivery worker is a phantom when):
     role NOT in REVIEW_ROLES
+    AND task_class NOT in REVIEW_TASK_CLASSES
+    AND read_only is not truthy
     AND status claims completion (done/success)
     AND the worktree diff is empty
 token_usage is corroborating DETAIL only — token>0 does NOT exempt (it means an LLM thought, not
 that a deliverable was produced; a delivery task that changed nothing is a phantom even if tokens
-were spent). Reviews are exempt; a legitimate no-op delivery uses VNX_OVERRIDE_PHANTOM_GUARD.
+were spent). Reviews/analysis and explicit read-only dispatches are exempt; a legitimate no-op
+delivery uses VNX_OVERRIDE_PHANTOM_GUARD.
 """
 from __future__ import annotations
 
@@ -35,6 +44,16 @@ _LOG = logging.getLogger(__name__)
 # SSOT for review roles — kept in sync with the kimi-routing predicate (item C). A reviewer's
 # job is a verdict, not a diff, so it is never a phantom for "no changes".
 REVIEW_ROLES = frozenset({"plan-reviewer", "code-reviewer", "security-reviewer", "reviewer"})
+
+# SSOT for review/analysis task_class values — a second key onto the same exemption for callers
+# that route by task_class rather than a REVIEW_ROLES-matching role string. "research_structured"
+# is the fabric's canonical bucket for reviewer/architect/planner/security-engineer/data-analyst
+# work (dispatch_router.py ROLE_TO_TASK_CLASS); "02_code_review" is smart_router.py's cost-routing
+# classifier bucket for review/audit/lint instructions. "review"/"analysis"/"code_review" are plain
+# literal fallbacks for callers that tag task_class without going through either taxonomy.
+REVIEW_TASK_CLASSES = frozenset({
+    "research_structured", "02_code_review", "code_review", "review", "analysis",
+})
 
 # Receipt status values that assert the work completed.
 COMPLETION_STATUSES = frozenset({"done", "success", "complete", "completed"})
@@ -53,17 +72,36 @@ def _ok(reason: str) -> PhantomVerdict:
     return PhantomVerdict(is_phantom=False, reason=reason)
 
 
+def _read_only_exemption_reason(
+    role: Optional[str], task_class: Optional[str], read_only: Optional[bool]
+) -> Optional[str]:
+    """Shared predicate for the role/task_class/read_only exemption — used by both the pure
+    decision (``phantom_guard``) and the govern-time short-circuit (``guard_at_govern``, which
+    uses it to skip diff resolution entirely for an exempt dispatch). Returns None when not
+    exempt so callers can tell "not exempt" apart from an empty-string reason."""
+    if read_only:
+        return "read_only dispatch — no diff is expected"
+    if role is not None and role.strip().lower() in REVIEW_ROLES:
+        return f"review role {role!r} — a verdict, not a diff, is expected"
+    if task_class is not None and task_class.strip().lower() in REVIEW_TASK_CLASSES:
+        return f"review/analysis task_class {task_class!r} — a verdict, not a diff, is expected"
+    return None
+
+
 def phantom_guard(
     *,
     status: Optional[str],
     worktree_diff: Optional[str],
     token_usage: Optional[int] = None,
     role: Optional[str] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
     """Pure decision. See module docstring for the rule. worktree_diff is the REAL diff of the
     worker's worktree/branch (caller-computed), NOT the receipt's main-repo provenance."""
-    if role is not None and role.strip().lower() in REVIEW_ROLES:
-        return _ok(f"review role {role!r} — a verdict, not a diff, is expected")
+    exemption = _read_only_exemption_reason(role, task_class, read_only)
+    if exemption is not None:
+        return _ok(exemption)
     if (status or "").strip().lower() not in COMPLETION_STATUSES:
         return _ok(f"status {status!r} is not a completion claim — nothing to falsify")
     if (worktree_diff or "").strip():
@@ -154,6 +192,8 @@ def guard_receipt(
         worktree_diff=worktree_diff,
         token_usage=_extract_token_usage(receipt),
         role=receipt.get("role") or receipt.get("agent"),
+        task_class=receipt.get("task_class"),
+        read_only=bool(receipt.get("read_only")) if "read_only" in receipt else None,
     )
 
 
@@ -166,6 +206,8 @@ def guard_at_govern(
     worktree_path: Optional[Path] = None,
     base_sha: Optional[str] = None,
     worktree_diff: Optional[str] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
     """Inline govern-time phantom check for BOTH lanes (claude tmux via dispatch_govern.govern,
     providers via dispatch_envelope._govern — the kimi/glm/deepseek fabrication vector).
@@ -179,14 +221,21 @@ def guard_at_govern(
       2. else the dispatch's own branch ``dispatch/<sanitized id>`` (still-present isolated branch),
       3. else ABSTAIN — return ok (an unresolvable/torn-down ref must never read as "empty diff").
 
-    Honors ``VNX_OVERRIDE_PHANTOM_GUARD=1`` (operator escape for a legitimate no-op delivery). This
-    function performs NO receipt I/O — the caller appends the corrective ``failed`` receipt on a
-    phantom verdict (keeps phantom_guard free of the append_receipt dependency).
+    Honors ``VNX_OVERRIDE_PHANTOM_GUARD=1`` (operator escape for a legitimate no-op delivery). A
+    ``role``/``task_class``/``read_only`` exemption (see module docstring) short-circuits BEFORE
+    diff resolution — a review/analysis dispatch never pays for the git subprocess calls, and never
+    risks an unresolvable-ref ABSTAIN being mistaken for a real phantom signal.
+
+    This function performs NO receipt I/O — the caller appends the corrective ``failed`` receipt on
+    a phantom verdict (keeps phantom_guard free of the append_receipt dependency).
     """
     import os  # noqa: PLC0415
 
     if os.environ.get("VNX_OVERRIDE_PHANTOM_GUARD") == "1":
         return _ok("phantom-guard overridden (VNX_OVERRIDE_PHANTOM_GUARD=1)")
+    exemption = _read_only_exemption_reason(role, task_class, read_only)
+    if exemption is not None:
+        return _ok(exemption)
     base = (base_sha or "").strip() or "origin/main"
     if worktree_diff is not None:
         diff = worktree_diff
@@ -200,7 +249,10 @@ def guard_at_govern(
                 diff = compute_branch_diff(branch, base_ref=base)
         except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
             return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
-    return phantom_guard(status=status, worktree_diff=diff, token_usage=token_usage, role=role)
+    return phantom_guard(
+        status=status, worktree_diff=diff, token_usage=token_usage, role=role,
+        task_class=task_class, read_only=read_only,
+    )
 
 
 def record_phantom_if_any(
@@ -214,6 +266,8 @@ def record_phantom_if_any(
     worktree_diff: Optional[str] = None,
     receipts_file: Optional[str] = None,
     state_dir: Optional[Path] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
@@ -233,6 +287,7 @@ def record_phantom_if_any(
     verdict = guard_at_govern(
         dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
         worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
+        task_class=task_class, read_only=read_only,
     )
     if verdict.is_phantom and state_dir:
         try:
@@ -338,6 +393,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--receipt-json", help="Receipt as a JSON string (or use --status/--role).")
     p.add_argument("--status", help="Receipt status (when not passing --receipt-json).")
     p.add_argument("--role", default=None)
+    p.add_argument("--task-class", default=None, help="e.g. research_structured — review/analysis exemption key.")
+    p.add_argument("--read-only", action="store_true", help="Explicit read-only-dispatch exemption.")
     p.add_argument("--token-usage", type=int, default=None)
     src = p.add_mutually_exclusive_group()
     src.add_argument("--worktree", help="Path to the worker's worktree (diff it vs --base).")
@@ -362,6 +419,7 @@ def main(argv: Optional[list] = None) -> int:
         verdict = phantom_guard(
             status=args.status, worktree_diff=diff,
             token_usage=args.token_usage, role=args.role,
+            task_class=args.task_class, read_only=args.read_only or None,
         )
 
     print(verdict.reason, file=sys.stderr)

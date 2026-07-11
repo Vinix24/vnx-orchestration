@@ -65,3 +65,77 @@ def test_unmeasured_tokens_mapping_is_none():
     assert pg._extract_token_usage({"token_usage": {"input": 0, "output": 0}}) is None
     assert pg._extract_token_usage({"token_usage": 42}) == 42
     assert pg._extract_token_usage({}) is None
+
+
+# ---------------------------------------------------------------------------
+# post10-phantom-review-role: task_class / read_only exemption keys
+# ---------------------------------------------------------------------------
+
+def test_review_task_class_empty_diff_is_not_phantom():
+    # exempt case: a review/analysis dispatch with real tokens and no diff is expected, not phantom
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=4321,
+                         role="architect", task_class="research_structured")
+    assert not v.is_phantom
+    assert "research_structured" in v.reason
+
+
+def test_code_review_task_class_variants_are_exempt():
+    for tc in ("02_code_review", "code_review", "review", "analysis"):
+        v = pg.phantom_guard(status="done", worktree_diff="", token_usage=100,
+                             role="backend-developer", task_class=tc)
+        assert not v.is_phantom, f"task_class={tc!r} should be exempt"
+
+
+def test_task_class_is_case_and_whitespace_insensitive():
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=100,
+                         role=None, task_class="  Research_Structured  ")
+    assert not v.is_phantom
+
+
+def test_read_only_flag_empty_diff_is_not_phantom():
+    # exempt case: an explicit read_only=True on the dispatch spec exempts regardless of role
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=999,
+                         role="backend-developer", read_only=True)
+    assert not v.is_phantom
+    assert "read_only" in v.reason
+
+
+def test_read_only_false_does_not_exempt_a_delivery():
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=999,
+                         role="backend-developer", read_only=False)
+    assert v.is_phantom
+
+
+def test_delivery_task_class_empty_diff_is_still_phantom():
+    # non-exempt case: a delivery task_class with an empty diff is rejected as before
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=1234,
+                         role="backend-developer", task_class="coding_interactive")
+    assert v.is_phantom
+    assert "PHANTOM" in v.reason
+
+
+def test_unrelated_task_class_does_not_exempt():
+    v = pg.phantom_guard(status="done", worktree_diff="", token_usage=None,
+                         role="backend-developer", task_class="docs_synthesis")
+    assert v.is_phantom
+
+
+def test_guard_receipt_exempts_on_task_class():
+    receipt = {"status": "done", "role": "architect", "task_class": "research_structured",
+               "token_usage": {"input": 500, "output": 200}}
+    v = pg.guard_receipt(receipt, worktree_diff="")
+    assert not v.is_phantom
+
+
+def test_guard_receipt_exempts_on_read_only_flag():
+    receipt = {"status": "done", "role": "backend-developer", "read_only": True,
+               "token_usage": 42}
+    v = pg.guard_receipt(receipt, worktree_diff="")
+    assert not v.is_phantom
+
+
+def test_guard_receipt_delivery_with_task_class_still_phantom():
+    # non-exempt: task_class present but NOT a review/analysis bucket -> delivery rule applies
+    receipt = {"status": "done", "role": "backend-developer", "task_class": "coding_interactive"}
+    v = pg.guard_receipt(receipt, worktree_diff="")
+    assert v.is_phantom

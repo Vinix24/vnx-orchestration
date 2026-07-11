@@ -131,6 +131,31 @@ def test_record_phantom_bridge_failure_is_non_fatal(monkeypatch, tmp_path):
     assert v.is_phantom  # verdict unaffected by a bridge failure
 
 
+def test_guard_at_govern_task_class_exempt_skips_diff_resolution(monkeypatch):
+    # exempt case: a research_structured (review/analysis) dispatch never even tries to resolve a
+    # diff — an unresolvable dispatch_id would otherwise ABSTAIN, not exempt-pass; assert the
+    # exemption reason (not "ABSTAIN") so the short-circuit is actually proven, not accidental.
+    v = pg.guard_at_govern(dispatch_id="no-such-dispatch-xyz", role=None, status="done",
+                           token_usage=777, task_class="research_structured")
+    assert not v.is_phantom
+    assert "research_structured" in v.reason
+    assert "ABSTAIN" not in v.reason
+
+
+def test_guard_at_govern_read_only_exempt_with_precaptured_empty_diff():
+    # exempt case: read_only=True wins even with an authoritative pre-captured empty diff
+    v = pg.guard_at_govern(dispatch_id="d1", role="backend-developer", status="done",
+                           token_usage=0, worktree_diff="", read_only=True)
+    assert not v.is_phantom
+
+
+def test_guard_at_govern_delivery_task_class_precaptured_empty_diff_is_phantom():
+    # non-exempt case: a delivery task_class with an authoritative empty diff is still rejected
+    v = pg.guard_at_govern(dispatch_id="d1", role="backend-developer", status="done",
+                           token_usage=0, worktree_diff="", task_class="coding_interactive")
+    assert v.is_phantom
+
+
 def test_record_phantom_no_bridge_call_without_state_dir(monkeypatch, tmp_path):
     """state_dir omitted (older/unaware caller) -> the bridge is never touched."""
     monkeypatch.setattr(pg, "guard_at_govern",
