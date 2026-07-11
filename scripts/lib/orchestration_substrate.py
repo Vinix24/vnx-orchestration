@@ -12,7 +12,6 @@ Components:
   WorkerProtocol        — stable seam for domain-specific worker implementations
   CodingManagerAdapter  — maps WorkerStateManager → ManagerProtocol (coding domain)
   coding_lifecycle_spec — returns the coding domain's transition spec
-  validate_transition   — stateless helper usable by any domain
 
 Design invariants:
   - Substrate has no database dependency. All persistence is in domain adapters.
@@ -248,17 +247,3 @@ class CodingManagerAdapter:
             current_state=result.state,
             task_id=result.dispatch_id,
         )
-
-
-# ---------------------------------------------------------------------------
-# Stateless transition helper (usable without a spec instance)
-# ---------------------------------------------------------------------------
-
-def validate_transition(
-    from_state: str,
-    to_state: str,
-    *,
-    spec: StateTransitionSpec,
-) -> None:
-    """Stateless helper for one-off transition validation against a spec."""
-    spec.validate_transition(from_state, to_state)

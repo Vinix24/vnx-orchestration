@@ -43,7 +43,6 @@ from orchestration_substrate import (
     StateTransitionSpec,
     WorkerHandle,
     coding_lifecycle_spec,
-    validate_transition,
 )
 
 
@@ -132,13 +131,13 @@ class TestCodingCompatibility:
     def test_coding_lifecycle_valid_transitions(self) -> None:
         spec = coding_lifecycle_spec()
         # validate_transition raises on invalid; None on success
-        validate_transition("initializing", "working", spec=spec)
-        validate_transition("working", "exited_clean", spec=spec)
+        spec.validate_transition("initializing", "working")
+        spec.validate_transition("working", "exited_clean")
 
     def test_coding_lifecycle_invalid_transitions_rejected(self) -> None:
         spec = coding_lifecycle_spec()
         with pytest.raises(ValueError):
-            validate_transition("exited_clean", "working", spec=spec)
+            spec.validate_transition("exited_clean", "working")
 
     def test_coding_profile_is_authoritative(self) -> None:
         profile = coding_authoritative_profile()

@@ -71,11 +71,10 @@ _RAW_CLAUDE_PATTERNS = [
 ]
 
 # Audited NON-delivery raw-claude callers: haiku/deepseek classifiers, weekly digest, headless
-# T0 orchestration, conversation analysis, benchmark/replay harnesses, and the auth probe. A
-# scanned file outside this set that spawns `claude -p` is a NEW receipt-bypass side door and
-# fails the gate until audited here (or routed via a governed lane).
+# T0 orchestration, conversation analysis, benchmark/replay harnesses. A scanned file outside
+# this set that spawns `claude -p` is a NEW receipt-bypass side door and fails the gate until
+# audited here (or routed via a governed lane).
 KNOWN_RAW_CLAUDE_CALLERS = frozenset({
-    "scripts/claude_auth_check_v2.sh",             # auth probe (claude --print "echo test")
     "scripts/conversation_analyzer/deep_analyzer.py",
     "scripts/f39/replay_harness/single_replay.py",
     "scripts/headless_trigger.py",

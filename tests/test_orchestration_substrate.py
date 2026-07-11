@@ -30,7 +30,6 @@ from orchestration_substrate import (
     WorkerHandle,
     WorkerProtocol,
     coding_lifecycle_spec,
-    validate_transition,
 )
 
 
@@ -94,15 +93,6 @@ class TestStateTransitionSpec:
     def test_domain_name_preserved(self) -> None:
         spec = self._minimal_spec()
         assert spec.domain == "test"
-
-    def test_validate_transition_helper(self) -> None:
-        spec = self._minimal_spec()
-        validate_transition("idle", "running", spec=spec)  # no exception
-
-    def test_validate_transition_helper_raises(self) -> None:
-        spec = self._minimal_spec()
-        with pytest.raises(ValueError):
-            validate_transition("done", "idle", spec=spec)
 
 
 # ---------------------------------------------------------------------------
