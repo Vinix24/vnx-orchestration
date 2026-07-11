@@ -8,6 +8,7 @@ For each result file in results/:
 
 Usage:
     python3 scripts/benchmark/judge_quality.py [--results-dir PATH] [--model opus]
+    python3 scripts/benchmark/judge_quality.py --tasks-dir /path/to/my/prompts  # bring-your-own-tasks
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -141,12 +143,19 @@ def judge_result_file(result_path: Path, prompts_dir: Path, model: str, timeout:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Judge benchmark responses via Claude Opus")
     parser.add_argument("--results-dir", default=None, help="Path to results directory")
+    parser.add_argument(
+        "--tasks-dir",
+        default=os.environ.get("VNX_BENCH_TASKS_DIR", ""),
+        help="Directory of *.txt task prompts to look up original task text (bring-your-own-tasks). "
+             "Default: bundled scripts/benchmark/prompts/",
+    )
     parser.add_argument("--model", default="opus", help="Claude model to use as judge")
     parser.add_argument("--timeout", type=int, default=120, help="Per-call timeout in seconds")
     parser.add_argument("--skip-judged", action="store_true", help="Skip files already containing judge_scores")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir) if args.results_dir else RESULTS_DIR
+    prompts_dir = Path(args.tasks_dir) if args.tasks_dir else PROMPTS_DIR
     if not results_dir.exists():
         print(f"Results directory not found: {results_dir}")
         return 1
@@ -168,7 +177,7 @@ def main() -> int:
 
         print(f"  [{i}/{len(result_files)}] {path.name}...")
         try:
-            score = judge_result_file(path, PROMPTS_DIR, args.model, args.timeout)
+            score = judge_result_file(path, prompts_dir, args.model, args.timeout)
             q = score["quality_score"]
             c = "correct" if score["correctness"] else "incorrect"
             comp = score["completeness_score"]
