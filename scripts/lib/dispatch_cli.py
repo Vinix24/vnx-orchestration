@@ -470,7 +470,7 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
                 # DB race between the phase read and here; already fail-open above.
                 pg_state = _pge.UNSUPPORTED
             if pg_state == _pge.UNRESOLVED:
-                run_cmd = f"vnx plan-gate run {track_id} --doc <plan-doc>"
+                run_cmd = f"vnx horizon plan-gate run {track_id} --doc <plan-doc>"
                 if mode == "required" and not _pge.override_active():
                     return ConstraintVerdict(
                         code="plan-gate-unresolved",
@@ -478,7 +478,7 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
                         message=(
                             f"track_id={track_id!r} has not passed its plan-first gate "
                             f"(OI-PLAN-{track_id} unresolved). Plan before work: run "
-                            f"`{run_cmd}` (or `vnx plan-gate attest {track_id}`), or "
+                            f"`{run_cmd}` (or `vnx horizon plan-gate attest {track_id}`), or "
                             f"operator-override with VNX_OVERRIDE_PLAN_GATE=1."
                         ),
                     )
