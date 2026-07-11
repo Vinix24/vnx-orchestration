@@ -31,6 +31,30 @@ python3 scripts/benchmark/field-tests/runners/skill_smoke.py --lane kimi-k2-6
 ```
 The smoke dispatches a neutral review assignment (never says "security") with a planted SQL injection, hardcoded credential, and off-by-one. PASS = the worker surfaces the security vocabulary AND a planted vuln (presence-based, not strict ordering — see the module docstring); the skill's mandatory activation line is reported as extra evidence. It is a dev smoke, not a governed gate. Last verified 2026-06-07: 5/5 reachable lanes PASS (kimi blocked on quota) — see ADR-022 Validation.
 
+## Lane calibration (routing field-test)
+
+Separate from the model-quality matrix above: `runners/lane_calibration.py` checks
+whether the production smart router (`providers.smart_router.cost_tier` +
+`.tier_routing`) picks the RIGHT lane for a set of realistic field-tests tasks —
+not whether a model does the work well, but whether the dispatch would even be
+routed to an appropriately-sized lane (tier-zero local model vs. tier-high opus)
+before any tokens are spent.
+
+```bash
+python3 scripts/benchmark/field-tests/runners/lane_calibration.py            # table, exit 1 on mismatch
+python3 scripts/benchmark/field-tests/runners/lane_calibration.py --json     # machine-readable
+pytest tests/test_lane_calibration_field_test.py -v                          # pytest wrapper
+```
+
+Self-contained: it feeds each case's real `instruction.md` + `target_loc` through
+`classify_dispatch()` / `resolve_tier_route()` directly — no subprocess dispatch,
+no network call, no model spawn, no external credits. Expected outcomes are
+documented per-case in `lane_calibration.yaml`, captured against the classifier's
+actual current behavior (a regression fixture, not an aspirational spec) — some
+cases carry a `note:` flagging a known keyword-heuristic miscalibration (e.g.
+"refactor" in a task title over-triggering the arch-keyword tier-high path) that
+is out of scope for this field-test to fix.
+
 ## What this measures
 
 For each (lane, task, replication) cell:
