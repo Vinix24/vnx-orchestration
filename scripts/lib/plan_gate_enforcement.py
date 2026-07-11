@@ -47,9 +47,21 @@ def plan_blocker_oi(track_id: str) -> str:
 def enforce_mode() -> str:
     """Resolve ``VNX_PLAN_GATE_ENFORCE`` to off/advisory/required (default advisory).
 
-    An unknown value fails safe to ``off`` — enforcement never turns on by accident.
+    Precedence: the process env var (an explicit per-session override) wins; then the
+    persisted config-plane value (``project_config`` via ``config_runtime`` — the same
+    surface ``/operator/config`` flips, audited + revertible); then the ``advisory``
+    default. An unknown value fails safe to ``off`` — enforcement never turns on by
+    accident. The config lookup is best-effort (fail-soft): a missing store leaves the
+    env/default behaviour unchanged.
     """
-    raw = (os.environ.get("VNX_PLAN_GATE_ENFORCE") or "advisory").strip().lower()
+    raw = os.environ.get("VNX_PLAN_GATE_ENFORCE")
+    if not raw:
+        try:
+            import config_runtime  # noqa: PLC0415
+            raw = config_runtime.get("VNX_PLAN_GATE_ENFORCE")
+        except Exception:
+            raw = None
+    raw = (raw or "advisory").strip().lower()
     return raw if raw in _ENFORCE_MODES else "off"
 
 

@@ -95,6 +95,30 @@ class TestEnforceMode:
         monkeypatch.setenv("VNX_OVERRIDE_PLAN_GATE", val)
         assert pge.override_active() is expected
 
+    def test_config_plane_honored_when_env_unset(self, monkeypatch):
+        """A persisted project_config value flips the mode when the env var is unset."""
+        monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get",
+                            lambda k: "required" if k == "VNX_PLAN_GATE_ENFORCE" else None)
+        assert pge.enforce_mode() == "required"
+
+    def test_env_overrides_config_plane(self, monkeypatch):
+        """The process env var wins over the persisted config value."""
+        monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", "off")
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get", lambda k: "required")
+        assert pge.enforce_mode() == "off"
+
+    def test_config_lookup_failure_falls_back_to_advisory(self, monkeypatch):
+        """A raising config layer must not break enforce_mode (fail-soft → advisory)."""
+        monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
+        import config_runtime
+        def _boom(k):
+            raise RuntimeError("no store")
+        monkeypatch.setattr(config_runtime, "get", _boom)
+        assert pge.enforce_mode() == "advisory"
+
 
 # --------------------------------------------------------------------- plan_gate_state
 class TestPlanGateState:
