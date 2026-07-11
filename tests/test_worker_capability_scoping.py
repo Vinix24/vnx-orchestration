@@ -350,6 +350,74 @@ class TestRequiresMcpScoping:
 
 
 # ---------------------------------------------------------------------------
+# 8b. mcp_servers allowlist — role config read + SubprocessAdapter materialization
+# ---------------------------------------------------------------------------
+
+class TestMcpServersAllowlistAdapterWiring:
+    """End-to-end: role's mcp_servers in worker_permissions.yaml -> scoped
+    --mcp-config in the actual SubprocessAdapter.deliver() spawn argv.
+
+    This is the "wired into one adapter's materialization" slice: the
+    subprocess lane already calls the real (non-fallback) build_claude_scope_args,
+    so a role-declared allowlist must reach the spawned argv unmodified.
+    """
+
+    @pytest.fixture
+    def project_with_mcp_role(self, tmp_path, monkeypatch):
+        vnx_dir = tmp_path / ".vnx"
+        vnx_dir.mkdir()
+        (vnx_dir / "worker_permissions.yaml").write_text(
+            "version: 1\n"
+            "profiles:\n"
+            "  mcp-role:\n"
+            "    allowed_tools: [Read, Bash]\n"
+            "    denied_tools: []\n"
+            "    mcp_servers: [notion]\n"
+        )
+        global_config = tmp_path / "global.claude.json"
+        global_config.write_text(json.dumps({
+            "mcpServers": {
+                "notion": {"command": "npx", "args": ["-y", "notion-mcp"]},
+                "gmail": {"command": "npx", "args": ["-y", "gmail-mcp"]},
+            }
+        }))
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_GLOBAL_MCP_CONFIG_PATH", str(global_config))
+        return tmp_path
+
+    def test_role_mcp_servers_narrows_adapter_mcp_config(self, project_with_mcp_role):
+        adapter = SubprocessAdapter()
+        proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            adapter.deliver(
+                "T1", "dispatch-mcp-role-1", instruction="do work", role="mcp-role"
+            )
+        cmd = mock_popen.call_args[0][0]
+        assert "--strict-mcp-config" in cmd
+        idx = cmd.index("--mcp-config")
+        mcp_config = json.loads(cmd[idx + 1])
+        assert mcp_config == {
+            "mcpServers": {"notion": {"command": "npx", "args": ["-y", "notion-mcp"]}}
+        }
+        # gmail is defined ambiently but not allowlisted for this role -> excluded
+        assert "gmail" not in mcp_config["mcpServers"]
+
+    def test_role_without_mcp_servers_still_gets_empty_config(self, project_with_mcp_role):
+        # A role with no mcp_servers key (falls back to default code-worker
+        # profile, which declares none) keeps the pre-existing zero-MCP posture.
+        adapter = SubprocessAdapter()
+        proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            adapter.deliver(
+                "T1", "dispatch-mcp-role-2", instruction="do work", role="unknown-role"
+            )
+        cmd = mock_popen.call_args[0][0]
+        idx = cmd.index("--mcp-config")
+        assert json.loads(cmd[idx + 1]) == {"mcpServers": {}}
+
+
+# ---------------------------------------------------------------------------
 # 9. FIX 3: role forwarded into SubprocessAdapter.deliver on claude_spawn path
 # ---------------------------------------------------------------------------
 

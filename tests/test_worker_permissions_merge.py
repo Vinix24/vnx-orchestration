@@ -76,6 +76,8 @@ VNX_TEMPLATE: dict[str, Any] = yaml.safe_load(textwrap.dedent("""\
           - "scripts/**"
           - "tests/**"
           - "dashboard/**"
+        mcp_servers:
+          - "notion"
 
       test-engineer:
         allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
@@ -225,6 +227,23 @@ class TestVnxManagedFieldsUnion:
         assert "rm -rf*" in deny
         assert "git push --force*" in deny  # from template
         assert "my-custom-deny*" in deny    # project extra preserved
+
+    def test_mcp_servers_union(self) -> None:
+        project = {
+            "profiles": {"backend-developer": {"mcp_servers": ["project-custom-mcp"]}},
+            "terminal_assignments": {},
+        }
+        result = merge_permissions(project, VNX_TEMPLATE)
+        servers = result["profiles"]["backend-developer"]["mcp_servers"]
+        assert "notion" in servers          # from template
+        assert "project-custom-mcp" in servers  # project extra preserved
+
+    def test_mcp_servers_defaults_to_template_when_project_silent(self) -> None:
+        # Project declares the role but says nothing about mcp_servers -> the
+        # VNX template baseline still reaches the merged output (it is a
+        # vnx_baseline key, not project-owned like file_write_scope).
+        result = merge_permissions(PROJECT_WITH_SRC_SCOPE, VNX_TEMPLATE)
+        assert result["profiles"]["backend-developer"]["mcp_servers"] == ["notion"]
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +399,19 @@ class TestValidation:
         }
         issues = validate_permissions(bad)
         assert any("file_write_scope" in i for i in issues)
+
+    def test_invalid_mcp_servers_not_list(self) -> None:
+        bad = {
+            "profiles": {
+                "backend-developer": {
+                    "allowed_tools": [],
+                    "mcp_servers": "notion",
+                }
+            },
+            "terminal_assignments": {},
+        }
+        issues = validate_permissions(bad)
+        assert any("mcp_servers" in i for i in issues)
 
 
 # ---------------------------------------------------------------------------

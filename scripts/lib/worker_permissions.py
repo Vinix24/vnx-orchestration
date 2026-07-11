@@ -16,6 +16,13 @@ In central-install mode the shipped template (VNX_HOME) is immutable and may
 not contain project-specific file_write_scope paths.  Priority 1/2 ensures the
 project copy wins; priority 3/4 are fallback-only.
 
+Each role profile may also declare ``mcp_servers`` — a per-role allowlist of
+named MCP servers. Materialized by :func:`build_claude_scope_args` /
+:func:`resolve_role_mcp_config` into a scoped ``--mcp-config`` limited to just
+those names (definitions read from the ambient global config, see
+``VNX_GLOBAL_MCP_CONFIG_PATH`` / ``_resolve_global_mcp_config_path``). An empty
+allowlist (the default) keeps the existing zero-MCP posture.
+
 BILLING SAFETY: No Anthropic SDK. No api.anthropic.com calls.
 """
 
@@ -84,6 +91,7 @@ class PermissionProfile:
     bash_allow_patterns: list[str] = field(default_factory=list)
     bash_deny_patterns: list[str] = field(default_factory=list)
     file_write_scope: list[str] = field(default_factory=list)
+    mcp_servers: list[str] = field(default_factory=list)
 
 
 def _load_yaml(path: Path) -> dict:
@@ -122,6 +130,7 @@ def load_permissions(role: str, yaml_path: Path | None = None) -> PermissionProf
         bash_allow_patterns=raw.get("bash_allow_patterns", []),
         bash_deny_patterns=raw.get("bash_deny_patterns", []),
         file_write_scope=raw.get("file_write_scope", []),
+        mcp_servers=raw.get("mcp_servers", []),
     )
 
 
@@ -135,6 +144,64 @@ def generate_claude_settings(profile: PermissionProfile) -> dict:
     return {
         "allowedTools": allowed,
     }
+
+
+def _resolve_global_mcp_config_path() -> Path:
+    """Resolve the ambient MCP server source file.
+
+    Priority: ``VNX_GLOBAL_MCP_CONFIG_PATH`` override (tests/operators) then the
+    Claude Code global config (``~/.claude.json``) — the same source
+    ``scripts/vnx_init.py:_generate_mcp_configs`` reads for interactive T0-T3
+    ``.mcp.json`` generation.
+    """
+    override = os.environ.get("VNX_GLOBAL_MCP_CONFIG_PATH")
+    if override:
+        return Path(override)
+    return Path.home() / ".claude.json"
+
+
+def _load_global_mcp_servers(config_path: Path) -> dict:
+    """Read the ``mcpServers`` block from *config_path*. Returns {} on any failure."""
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("worker_permissions: failed to load %s: %s", config_path, exc)
+        return {}
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return servers if isinstance(servers, dict) else {}
+
+
+def resolve_role_mcp_config(
+    profile: PermissionProfile,
+    global_config_path: Path | None = None,
+) -> dict:
+    """Build a ``{"mcpServers": {...}}`` config scoped to *profile*'s allowlist.
+
+    The allowlist can only narrow the ambient MCP servers already defined in
+    the global config — it never fabricates a server definition. A name in
+    ``profile.mcp_servers`` that has no matching entry in the ambient config is
+    skipped and logged, never silently invented.
+
+    Returns ``{"mcpServers": {}}`` when the profile declares no allowlist.
+    """
+    if not profile.mcp_servers:
+        return {"mcpServers": {}}
+    if global_config_path is None:
+        global_config_path = _resolve_global_mcp_config_path()
+    available = _load_global_mcp_servers(global_config_path)
+    scoped: dict = {}
+    for name in profile.mcp_servers:
+        if name in available:
+            scoped[name] = available[name]
+        else:
+            logger.warning(
+                "worker_permissions: role '%s' allowlists mcp_servers entry '%s' "
+                "but it is not defined in %s — skipping",
+                profile.role, name, global_config_path,
+            )
+    return {"mcpServers": scoped}
 
 
 def worker_scoped_enabled() -> bool:
@@ -212,6 +279,7 @@ def build_claude_scope_args(
     permission_mode: str = "acceptEdits",
     requires_mcp: bool = False,
     working_tree_only: bool = False,
+    global_mcp_config_path: Path | None = None,
 ) -> list[str]:
     """Materialize a PermissionProfile into scoping CLI args for a headless ``claude``.
 
@@ -220,21 +288,35 @@ def build_claude_scope_args(
 
       - ``--permission-mode <mode>`` — ``acceptEdits`` auto-approves edits so a
         no-TTY worker proceeds without prompts, while Bash/MCP stay gated.
-      - ``--strict-mcp-config --mcp-config {"mcpServers":{}}`` — ignore every
-        ambient MCP source; the default worker reaches ZERO MCP servers.
-        Skipped when ``requires_mcp=True`` so the dispatch can use the project's
-        normal MCP config (e.g. Supabase, n8n) without being force-emptied.
+      - ``--strict-mcp-config --mcp-config <config>`` — ignore ambient MCP
+        sources beyond the role's ``mcp_servers`` allowlist:
+          * ``profile.mcp_servers`` empty (default) — ``{"mcpServers":{}}``,
+            the worker reaches ZERO MCP servers.
+          * ``profile.mcp_servers`` non-empty — scoped to just those named
+            servers via :func:`resolve_role_mcp_config` (their definitions are
+            read from the ambient global config; a name with no matching
+            definition is skipped, never fabricated).
+        Skipped entirely when ``requires_mcp=True`` so the dispatch can use the
+        project's full normal MCP config (e.g. Supabase, n8n) instead — the
+        allowlist does not apply in that case (Open Item: reconcile the two).
       - ``--allowedTools`` / ``--disallowedTools`` — the profile's tool allow/deny
         lists (the previously-dead :func:`generate_claude_settings`, now live).
 
-    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
+    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config`` pair
     is omitted so the worker's normal ambient MCP config is used instead.
     """
     settings = generate_claude_settings(profile)
     allowed = settings.get("allowedTools", [])
     args: list[str] = ["--permission-mode", permission_mode]
     if not requires_mcp:
-        args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
+        if profile.mcp_servers:
+            mcp_config = json.dumps(
+                resolve_role_mcp_config(profile, global_mcp_config_path),
+                separators=(",", ":"),
+            )
+        else:
+            mcp_config = EMPTY_MCP_CONFIG
+        args += ["--strict-mcp-config", "--mcp-config", mcp_config]
     if allowed:
         args += ["--allowedTools", ",".join(allowed)]
     disallowed = list(profile.denied_tools)

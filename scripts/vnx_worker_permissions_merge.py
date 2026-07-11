@@ -57,6 +57,7 @@ VNX_MANAGED_PROFILE_KEYS = {
     "denied_tools",
     "bash_allow_patterns",
     "bash_deny_patterns",
+    "mcp_servers",
 }
 # file_write_scope is intentionally NOT in this set — it is project-owned.
 # VNX provides defaults; projects extend with their own source paths.
@@ -129,7 +130,7 @@ def merge_role(template_role: dict, project_role: dict) -> dict:
     """
     result: dict[str, Any] = {}
 
-    for key in ("allowed_tools", "denied_tools", "bash_allow_patterns", "bash_deny_patterns"):
+    for key in ("allowed_tools", "denied_tools", "bash_allow_patterns", "bash_deny_patterns", "mcp_servers"):
         base = template_role.get(key) or []
         proj = project_role.get(key) or []
         result[key] = union_list(base, proj)
@@ -221,6 +222,7 @@ def _default_vnx_meta() -> dict:
             "profiles.<role>.denied_tools (vnx_baseline)",
             "profiles.<role>.bash_allow_patterns (vnx_baseline)",
             "profiles.<role>.bash_deny_patterns (vnx_baseline)",
+            "profiles.<role>.mcp_servers (vnx_baseline)",
             "terminal_assignments (vnx_baseline; project overrides win)",
         ],
         "project_owned_keys": [
@@ -266,7 +268,7 @@ def validate_permissions(data: dict) -> list[str]:
                 issues.append(f"profiles.{role}: must be a mapping")
                 continue
             for list_key in ("allowed_tools", "denied_tools", "bash_allow_patterns",
-                             "bash_deny_patterns", "file_write_scope"):
+                             "bash_deny_patterns", "file_write_scope", "mcp_servers"):
                 v = body.get(list_key)
                 if v is not None and not isinstance(v, list):
                     issues.append(f"profiles.{role}.{list_key}: must be a list")

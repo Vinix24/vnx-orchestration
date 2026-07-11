@@ -11,6 +11,7 @@ _vnx_meta:
     - "profiles.<role>.denied_tools (vnx_baseline)"
     - "profiles.<role>.bash_allow_patterns (vnx_baseline)"
     - "profiles.<role>.bash_deny_patterns (vnx_baseline)"
+    - "profiles.<role>.mcp_servers (vnx_baseline)"
     - "terminal_assignments (vnx_baseline; project overrides win)"
   project_owned_keys:
     - "profiles.<role>.file_write_scope"
