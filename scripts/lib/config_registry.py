@@ -83,6 +83,12 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Evidence-bound merge gate mode: off | advisory | required. "
         "Advisory logs missing/invalid evidence but never blocks; required enforces evidence before merge. "
         "Default is advisory for D3 bootstrap.", approval=True),
+    "VNX_PLAN_GATE_ENFORCE": _e(
+        "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
+        "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
+        "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
+        "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
+        approval=True),
     "VNX_USE_CENTRAL_DB": _e(
         "VNX_USE_CENTRAL_DB", "enum", "", "dispatch",
         "Central-DB read mode (''=per-project | '1'=central | 'shadow'). Process-start routing — "
