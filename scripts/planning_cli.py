@@ -1866,6 +1866,30 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
         {"reason": reason, "approval_id": approval_id, "track_id": track_id},
     )
 
+    # ADR-030 merge-gate primitive: a repo-committed, hash-chained plan_gate_pass
+    # record so the pass is verifiable at PR/merge time (the front link of the
+    # requirements-traceability chain). Best-effort, unsigned bootstrap — the
+    # runtime event above stays the authoritative audit; this never blocks attest.
+    try:
+        import subprocess as _sp  # noqa: PLC0415
+        import plan_gate_evidence  # noqa: PLC0415
+        _repo_root = getattr(args, "repo_root", None)
+        if not _repo_root:
+            try:
+                _repo_root = _sp.check_output(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, stderr=_sp.DEVNULL,
+                ).strip() or str(Path.cwd())
+            except Exception:  # noqa: BLE001
+                _repo_root = str(Path.cwd())
+        plan_gate_evidence.emit_plan_gate_pass(
+            repo_root=_repo_root, track_id=track_id, project_id=project_id,
+            resolver="attest", timestamp=_now_utc(),
+            approval_id=approval_id, reason=reason,
+        )
+    except Exception:  # vnx-silent-except: evidence emission must never break attest
+        pass
+
     post = tracks_lib.get_track(state_dir, track_id, project_id)
     derived = post.get("derived_status") if isinstance(post, dict) else None
     payload["action"] = "attested"
