@@ -34,8 +34,10 @@ from ndjson_io import fsync_fileno
 
 logger = logging.getLogger(__name__)
 
+# The third (model-alias) segment allows "/" — the openrouter-arbitrary lane passes
+# raw OpenRouter "vendor/model" paths as the alias (e.g. litellm:openrouter:openai/gpt-4o-mini).
 _PROVIDER_RE = re.compile(
-    r"^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_.-]*)?)?|local-gemma)$"
+    r"^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_./-]*)?)?|local-gemma)$"
 )
 
 
@@ -44,7 +46,7 @@ def _validate_provider(provider: str) -> None:
     if not _PROVIDER_RE.match(provider or ""):
         raise ValueError(
             f"Invalid provider {provider!r}. "
-            "Must match ^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_.-]*)?)?|local-gemma)$"
+            "Must match ^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_./-]*)?)?|local-gemma)$"
         )
 
 

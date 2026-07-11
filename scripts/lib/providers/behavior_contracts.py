@@ -114,6 +114,21 @@ CONTRACTS: Dict[str, BehaviorContract] = {
         max_context_tokens=200_000,
         max_output_tokens=8192,
     ),
+    "litellm:openrouter:gpt-4o-mini-default": BehaviorContract(
+        # openrouter-arbitrary lane (PR-1 skeleton): the one OpenAI-compat model
+        # proven end-to-end. Any other model routed via
+        # --provider litellm:openrouter:<vendor>/<model> proceeds uncontracted
+        # (no KeyError — see provider_dispatch._dispatch_litellm).
+        provider="litellm",
+        sub_provider="openrouter",
+        supports_streaming=True,
+        supports_tool_calls=True,
+        tool_call_shape="openai_tools",
+        cache_control_supported=False,
+        audit_shape="canonical_event",
+        max_context_tokens=128_000,
+        max_output_tokens=16_384,
+    ),
     "litellm:zai:glm-5.1-default": BehaviorContract(
         provider="litellm",
         sub_provider="zai",

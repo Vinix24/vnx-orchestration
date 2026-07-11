@@ -64,6 +64,9 @@ _PROVIDER_RATES: dict[tuple[str, str], tuple[float, float, bool]] = {
     ("litellm:moonshot", "kimi-k2-0905-preview"):  (0.0, 0.0,  True),
     ("litellm:zai", "glm-5.1-default"):        (0.07,  0.14,  False),
     ("litellm:ollama", "llama3"):              (0.0,   0.0,   True),
+    # openrouter-arbitrary lane (PR-1 skeleton) — the one proven model
+    # (openrouter/openai/gpt-4o-mini); OpenRouter pass-through pricing.
+    ("litellm:openrouter", "gpt-4o-mini"):     (0.15,  0.60,  False),
 }
 
 
