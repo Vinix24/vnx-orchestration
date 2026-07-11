@@ -47,6 +47,11 @@ class CellScore:
     input_tokens: int = 0
     output_tokens: int = 0
     tokens_per_second: float = 0.0   # output_tokens / wallclock (effective throughput)
+    # This row's own dispatch_id (bench-<lane>-<task>-r<rep>-<ts>). Lets
+    # --retry-from match a row against ITS OWN report file instead of any
+    # historical report for the same (lane, task, rep) — see F5 in
+    # run_field_tests._load_dnf_cells_from_csv. Empty for pre-fix raw.csv.
+    dispatch_id: str = ""
 
 
 def _load_verify_module(task_folder: Path):
@@ -316,6 +321,7 @@ def score_cell(
             judge_reasoning="skipped (dispatch failed)",
             cost_usd=0.0,
             wallclock_seconds=dispatch_result.wallclock_seconds,
+            dispatch_id=dispatch_result.dispatch_id,
         )
 
     # Verify in the checkout the worker actually wrote to. Headless/provider
@@ -380,4 +386,5 @@ def score_cell(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         tokens_per_second=tokens_per_second,
+        dispatch_id=dispatch_result.dispatch_id,
     )
