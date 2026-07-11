@@ -32,9 +32,15 @@ I built this for my own work, across 3,000+ hours of Claude Code and 15,000+ tes
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
+## What's new in 1.2
+
+- **Plan-first-gate enforcement.** A track is born plan-gated, but until now that gate bound only closure bookkeeping — work could be built and merged without the plan gate ever passing. It is now enforced at the dispatch door (advisory-first, `VNX_PLAN_GATE_ENFORCE`), with the merge gate as the second chokepoint: plan before work, structurally. [ADR-030](docs/governance/decisions/ADR-030-plan-first-gate-enforcement.md). The full track lifecycle — plan-gate → dispatch → merge → reconcile → close → auto-close — is documented in [HORIZON_LIFECYCLE.md](docs/core/HORIZON_LIFECYCLE.md).
+- **Auto-close on by default.** The git-grounded reconcile closes merged tracks without a manual sweep; the trust-streak is now observability-only, with close-time revalidation the durable safeguard.
+- **ADR-028 orchestration-target Phases 1–4** (agent-folder fusion + a decision-judge that shadows, fast-paths, then binds — all default-off), **ADR-029 hash-chain epoch-rotation**, the **central-store `project_id` authority** fix, the **`/panel` multi-provider deliberation skill**, and the **evidence-bound merge gate**. Full detail in the [CHANGELOG](CHANGELOG.md).
+
 ## What's new in 1.1
 
-- **Horizon planning module.** `vnx horizon` is the named command surface for the future-state layer: `list / show / add / sync / drift / reconcile / close / reopen / plan-gate`. Tracks project from `ROADMAP.yaml`, and a git-grounded reconcile closes them against merged PRs. See the [State Fabric](docs/core/STATE_FABRIC.md).
+- **Horizon planning module.** `vnx horizon` is the named command surface for the future-state layer: `list / show / add / sync / drift / reconcile / close / reopen / plan-gate`. Tracks project from `ROADMAP.yaml`, and a git-grounded reconcile closes them against merged PRs. See [Horizon planning](docs/core/HORIZON_PLANNING.md) and its [lifecycle](docs/core/HORIZON_LIFECYCLE.md).
 - **Signed attestation enforcement.** SSH-key-signed, content-keyed, diff-bound attest records with a server-side verify gate and a signed, budgeted, audited override (a recorded deviation, never silent). [ADR-027](docs/governance/decisions/ADR-027-signed-attestation-enforcement.md).
 - **Track-linkage + git-grounded backward closure.** `track_id` is validated at the dispatch door and auto-propagated to `track.pr_ref` on merge; a reconcile loop verifies PR merge state via `gh` and closes done tracks under a system actor. No manual bookkeeping.
 - **`vnx fabric-audit`.** A Phase-0 store-hygiene check over split-brain stores, per-project ledgers, and receipt hash-chain integrity. [ADR-028](docs/governance/decisions/ADR-028-orchestration-target-architecture.md).
@@ -147,7 +153,7 @@ The point is not that the AI remembers. The point is that what it remembers is g
 
 ## Architecture decisions
 
-The decisions behind VNX are written down, not implied. There are 26 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+The decisions behind VNX are written down, not implied. There are 30 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
@@ -156,6 +162,7 @@ The decisions behind VNX are written down, not implied. There are 26 Architectur
 - [ADR-012](docs/governance/decisions/ADR-012-hybrid-interactive-headless.md): hybrid interactive and headless execution, no retire-interactive
 - [ADR-014](docs/governance/decisions/ADR-014-autonomous-chain-dispatch.md): autonomous mode is pre-approved chain dispatch, never gate bypass
 - [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md): one structured plain-text skill prompt for every provider lane, no per-CLI mechanisms
+- [ADR-030](docs/governance/decisions/ADR-030-plan-first-gate-enforcement.md): the plan-first gate enforced at the dispatch door and the merge gate, advisory-first — plan before work, structurally
 
 For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/manifesto/EVOLUTION_TIMELINE.md) reconstructs the technical evolution over roughly six months, including the private incubation provenance. The public repository is the extraction, hardening, and packaging of work that started inside a private product.
 
@@ -188,7 +195,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-1.1 (July 2026): `VERSION` is `1.1.0` — the first minor since the 1.0.0 PyPI launch (2026-07-02, `pip install vnx-orchestration`, tagged `v1.0.0`). 1.1 adds the Horizon planning module (`vnx horizon`), signed attestation enforcement (ADR-027), track-linkage + git-grounded backward closure, `vnx fabric-audit`, and an operator-gated self-learning proposal tier — see [CHANGELOG.md](CHANGELOG.md). The `v1.1.0` tag and PyPI publish follow this cut. The single-entry dispatch door is merged and default-ON (ADR-024, 2026-06-24), the Mission Control central-store cutover completed (2026-06-23), and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+1.2 (July 2026): `VERSION` is `1.2.0`. 1.2 adds plan-first-gate enforcement at the dispatch door (ADR-030, advisory-first), ADR-028 orchestration-target Phases 1–4, ADR-029 hash-chain epoch-rotation, the central-store `project_id` authority fix, the `/panel` deliberation skill, and the evidence-bound merge gate — see [CHANGELOG.md](CHANGELOG.md). The `v1.2.0` tag is cut; the PyPI publish follows. It builds on 1.1 (the Horizon planning module `vnx horizon`, signed attestation enforcement (ADR-027), track-linkage + git-grounded backward closure, `vnx fabric-audit`), the first minor since the 1.0.0 PyPI launch (2026-07-02, `pip install vnx-orchestration`, tagged `v1.0.0`). The single-entry dispatch door is default-ON (ADR-024, 2026-06-24), the Mission Control central-store cutover completed (2026-06-23), and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
