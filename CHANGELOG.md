@@ -4,6 +4,57 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.2.0] — 2026-07-11
+
+The second minor. Headlines: **ADR-028 orchestration-target Phases 1–4** (agent-folder fusion + a decision-judge that shadows, fast-paths, then binds — all default-off, human-on-the-last-set), a **central-store project_id authority** fix that closes a week of multi-tenant store bugs at the root, **ADR-029 hash-chain epoch-rotation**, a **multi-provider deliberation panel** (`/panel`), an **evidence-bound merge gate**, and the **canonical provider-agnostic orchestrator role** with `vnx role sync`. All new decision/enforcement machinery ships default-off behind operator knobs.
+
+### Added — Orchestration target (ADR-028)
+
+- **Agent-folder fusion, Phase 1 (#1079)** — config extension + resolver for folder-per-agent, provider-agnostic, backward-compatible.
+- **Decision-judge, Phases 2–4 (#1096, #1098, #1099, #1100)** — shadow mode (safety valve, default-off) → wired `DecisionRouter.decide` → conservative fast-path → Phase-4 judge-binding policy (human-on-the-last-set). Every phase default-off; nothing auto-activates.
+- **ADR-028 P5 cutover verified-complete + hash-chain done (#1092, docs).**
+
+### Added — Governance & audit
+
+- **ADR-029 hash-chain epoch-rotation (#1090)** — verify + seal + audit across chain epochs.
+- **Evidence-bound merge gate, D3 bootstrap (#1080)** — the merge gate verifies requirement-completion (test/gate receipts), not just provenance.
+- **Signed batch-delegation mandate (#1081)** — one-time batch mandate instead of Touch ID per dispatch, default off.
+- **ADR-007 composite UNIQUE indexes over project_id (#1082)** — non-destructive, defensive multi-tenant isolation.
+- **Blocking gate findings become track_open_items (#1054)** — ppb #1039 gap closed.
+- **`headless_block` wired live in the routing-policy loader (#1068)** and **worker-permission enforcement, feature-flagged default-OFF, both lanes (#1078).**
+
+### Added — Panel, skills, role
+
+- **Multi-provider deliberation panel skill `/panel` (#1101, #1102)** — 4-stage deliberation across the provider fleet; real data_dir + synthesis provider-fallback.
+- **Canonical orchestrator role + `vnx role sync` (#1056, #1057, #1061)** — fleet-identical, provider-agnostic role; dual-CLI gap + project resolution fixed; file-layout master-rule codified.
+- **Directory-based skills sync + `fabric-reference` runbook skill (#1062, #1070)** — registers `horizon` & `fabric-reference`; skills-manifest gap 1 closed.
+- **Fleet-wide dev-worker agent library resolvable from any project (#1089)** + **packaged backend-developer example agent (#1067).**
+
+### Added — Dashboard, intelligence, durability
+
+- **Live-sessions observability tile (#1076)** and **self-learning proposals surfaced on operator/improvements (#1071).**
+- **Scout-effectiveness measurement harness (#1072)** — observational A/B on receipts.
+- **Whole-repo advisory backlog scanner (#1075)** and **advisory pre-flight FK/integrity check before each store migration (#1094).**
+- **quality_intelligence backup rotation, keep last N (#1087, `VNX_DB_BACKUP_KEEP=3`).**
+
+### Changed
+
+- **Auto-close ON by default in the SessionStart tick (#1055, #1097)** — the future-state fabric closes merged tracks without a manual sweep.
+- **Horizon `list` hides done tracks by default (#1060)** — `--all` to show them.
+- **Retired dead OTel wiring + fixed kimi silent-zero token usage (#1069).**
+- **Thinned the injected CLAUDE snippet to a pointer, WP1 (#1064).**
+- **`VNX_DATA_DIR_GUARD` startup guard, warn by default (#1084).**
+
+### Fixed
+
+- **Central-store project_id authority (#1091, #1093)** — resolve project_id from the target project (not a hardcoded `vnx-dev`); door authority = physical staged-bundle location. Root cause behind a week of multi-tenant store bugs.
+- **Tenant-stamping (#1083, #1095)** — widen child FKs, dedupe the dual-seed `pool_config`, re-enable W1 in `vnx migrate`.
+- **`objective sync` roadmap anchor (#1108)** — anchor on `--project-dir`, not the central example-template.
+- **`vnx version` reads the resolved-engine VERSION (#1088)**, not a stale pip dist-info.
+- **Billing classifier (#1063)** — kimi=subscription, local-gemma=local.
+- **GLM constraint text reconciled to GLM-5.2 SSOT (#1059).**
+- **Security (#1065)** — close CGNAT bypass + DNS-rebind TOCTOU in `url_policy`.
+
 ## [1.1.0] — 2026-07-08
 
 The first minor since 1.0.0. Headlines: the **Horizon planning module** (`vnx horizon`), **signed attestation enforcement** (ADR-027), **track-linkage + git-grounded backward closure** (the future-state fabric now closes itself against merged PRs), **`vnx fabric-audit`** (ADR-028 Phase-0 store-hygiene), and an **operator-gated self-learning proposal tier**. The 1.0.1 future-state reconciliation batch is folded in below — it landed on `main` but was never tagged separately.
