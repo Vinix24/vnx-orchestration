@@ -1,0 +1,85 @@
+# lane_calibration.yaml — documented expected outcome for the lane-calibration field-test
+#
+# Each case feeds a REAL field-tests task (its actual instruction.md text + the
+# target_loc from tasks.yaml) through the production smart-router pipeline
+# (providers.smart_router.cost_tier.classify_dispatch -> tier_routing.resolve_tier_route)
+# and asserts the tier/provider/lane it selects. This is a regression fixture, not
+# an aspirational spec: expected_* values are the classifier's ACTUAL current
+# output on this corpus, captured 2026-07-11 against smart_router as of #1121.
+#
+# n_files is the count of files listed under the task's "## Files you may
+# create/modify" heading in instruction.md (required files only; optional
+# extras excluded) - hand-counted once per task, not re-derived at runtime.
+#
+# A run of runners/lane_calibration.py that diverges from this table means the
+# router's routing behavior drifted for these realistic tasks - update the
+# table deliberately after confirming the new behavior is intended.
+
+version: 1
+
+cases:
+  - task_id: "01_yaml_config_refactor"
+    tier: t1_trivial
+    n_files: 2
+    expected_tier: tier-high
+    expected_provider: claude
+    expected_lane: tmux_interactive
+    note: >
+      Known miscalibration: single-file 60-LOC config refactor gets tier-high
+      because the instruction text contains the word "refactor", which matches
+      the arch-keyword pattern intended for architectural rewrites. Flagged as
+      a follow-up (keyword over-triggers on task-title vocabulary), not fixed
+      by this field-test.
+
+  - task_id: "02_rls_policy"
+    tier: t1_trivial
+    n_files: 1
+    expected_tier: tier-mid
+    expected_provider: claude
+    expected_lane: tmux_interactive
+    note: >
+      Known miscalibration: this is a Postgres Row Level Security policy
+      (security-sensitive by construction) but the instruction never spells
+      out "security"/"auth"/etc. literally - only "RLS" - so the security
+      keyword filter misses it. Falls through to the schema/migration keyword
+      match (tier-mid) instead of tier-high.
+
+  - task_id: "03_dotenv_script"
+    tier: t1_trivial
+    n_files: 1
+    expected_tier: tier-zero
+    expected_provider: local-gemma
+    expected_lane: mlx
+
+  - task_id: "04_scorer_task"
+    tier: t2_medium
+    n_files: 5
+    expected_tier: tier-high
+    expected_provider: claude
+    expected_lane: tmux_interactive
+
+  - task_id: "05_extractor_subclass"
+    tier: t2_medium
+    n_files: 3
+    expected_tier: tier-mid
+    expected_provider: claude
+    expected_lane: tmux_interactive
+
+  - task_id: "06_flaky_mock_fix"
+    tier: t2_medium
+    n_files: 1
+    expected_tier: tier-mid
+    expected_provider: claude
+    expected_lane: tmux_interactive
+    note: >
+      Known miscalibration: single-file 80-LOC mock fix gets tier-mid because
+      the instruction describes a chained `.table().select()...` mock API and
+      "table" matches the schema keyword list (intended for database-schema
+      work, not a Supabase mock method name).
+
+  - task_id: "08_ssrf_async_fetch"
+    tier: t3_complex
+    n_files: 2
+    expected_tier: tier-high
+    expected_provider: claude
+    expected_lane: tmux_interactive
