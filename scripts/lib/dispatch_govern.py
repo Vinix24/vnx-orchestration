@@ -362,6 +362,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     dispatch_id = spec.dispatch_id
     reports_dir = Path(spec.data_dir) / "unified_reports"
     worker_report_path = reports_dir / f"{dispatch_id}.md"
+    # Legacy subprocess-lane worker convention (receipt_writer._ensure_unified_report)
+    # instructs workers to write "<dispatch_id>_report.md" — a naming divergence from
+    # the "<dispatch_id>.md" convention govern() and the tmux lane use. Checked as a
+    # fallback so authored-report detection works for the subprocess lane too, without
+    # requiring every existing worker template to be renamed in this same PR.
+    legacy_report_path = reports_dir / f"{dispatch_id}_report.md"
 
     # Determine enforcement mode: tmux=shadow, subprocess=enforce (when flag on).
     contract_validate = os.environ.get("VNX_CONTRACT_VALIDATE", "shadow").strip().lower()
@@ -371,9 +377,13 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     body: Optional[str] = None
     contract_status = "synthesized"
 
-    if worker_report_path.exists():
+    candidate_path = (
+        worker_report_path if worker_report_path.exists()
+        else (legacy_report_path if legacy_report_path.exists() else None)
+    )
+    if candidate_path is not None:
         try:
-            candidate = worker_report_path.read_text(encoding="utf-8")
+            candidate = candidate_path.read_text(encoding="utf-8")
             # plan-reviewer role: the worker writes a free-form review that ends with
             # a vnx-plan-verdict fence.  It intentionally lacks ## Changes / ## Verification
             # / ## Open Items — applying standard contract validation would always fail and

@@ -102,6 +102,57 @@ def test_govern_authored_uses_worker_report(tmp_data, tmp_state, monkeypatch):
     assert outcome.report_path is not None
 
 
+def test_govern_authored_finds_legacy_report_suffix_filename(tmp_data, tmp_state, monkeypatch):
+    """A worker report at the legacy "<id>_report.md" filename (subprocess-lane
+    convention, receipt_writer._ensure_unified_report) is detected as authored
+    even though govern()'s primary lookup is "<id>.md" (tmux-lane convention).
+    """
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    legacy_report_file = reports_dir / "test-govern-001_report.md"
+    legacy_report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="subprocess")
+
+    assert outcome.contract_status == "authored"
+    # The canonical "<id>.md" path is what govern() writes/stamps to, regardless
+    # of which filename the authored candidate was read from.
+    canonical_path = reports_dir / "test-govern-001.md"
+    assert outcome.report_path == canonical_path
+    content = canonical_path.read_text(encoding="utf-8")
+    assert content.startswith("---\n")
+    assert "Implemented the feature correctly" in content
+
+
+def test_govern_prefers_canonical_filename_over_legacy(tmp_data, tmp_state, monkeypatch):
+    """When both "<id>.md" and "<id>_report.md" exist, the canonical name wins."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    canonical_body = _valid_body().replace(
+        "Implemented the feature correctly", "CANONICAL body marker"
+    )
+    (reports_dir / "test-govern-001.md").write_text(canonical_body, encoding="utf-8")
+    legacy_body = _valid_body().replace(
+        "Implemented the feature correctly", "LEGACY body marker"
+    )
+    (reports_dir / "test-govern-001_report.md").write_text(legacy_body, encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="subprocess")
+
+    assert outcome.contract_status == "authored"
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert "CANONICAL body marker" in content
+    assert "LEGACY body marker" not in content
+
+
 def test_govern_authored_stamps_frontmatter_on_worker_report(tmp_data, tmp_state, monkeypatch):
     """After govern(), a frontmatter-less worker report has a YAML frontmatter block stamped."""
     monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
