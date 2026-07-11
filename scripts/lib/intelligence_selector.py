@@ -566,6 +566,25 @@ def select_intelligence(
         selector.close()
 
 
+def _emit_and_record(
+    selector: "IntelligenceSelector",
+    result: InjectionResult,
+    *,
+    dispatch_id: str,
+    coord_state_dir,
+    log_suffix: str = "",
+) -> None:
+    """Emit the audit event + record the injection, logging (not raising) on either failure."""
+    try:
+        selector.emit_event(result, coord_state_dir=coord_state_dir)
+    except Exception as exc:
+        logger.debug("build_intelligence_context: emit_event%s failed for %s: %s", log_suffix, dispatch_id, exc)
+    try:
+        selector.record_injection(result, coord_state_dir=coord_state_dir)
+    except Exception as exc:
+        logger.debug("build_intelligence_context: record_injection%s failed for %s: %s", log_suffix, dispatch_id, exc)
+
+
 def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_paths=None, quality_db_path=None, coord_state_dir=None) -> Optional[IntelligenceContext]:
     """Build an IntelligenceContext for adapter prompt assembly.
 
@@ -591,25 +610,11 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
                 dispatch_id=dispatch_id,
                 ab_arm="control",
             )
-            try:
-                selector.emit_event(result, coord_state_dir=coord_state_dir)
-            except Exception as exc:
-                logger.debug("build_intelligence_context: emit_event (control) failed for %s: %s", dispatch_id, exc)
-            try:
-                selector.record_injection(result, coord_state_dir=coord_state_dir)
-            except Exception as exc:
-                logger.debug("build_intelligence_context: record_injection (control) failed for %s: %s", dispatch_id, exc)
+            _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (control)")
             return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         result = selector.select(dispatch_id=dispatch_id, injection_point="dispatch_create", skill_name=role or "", dispatch_paths=dispatch_paths or [], pr_id=pr_id)
         result.ab_arm = "treatment"
-        try:
-            selector.emit_event(result, coord_state_dir=coord_state_dir)
-        except Exception as exc:
-            logger.debug("build_intelligence_context: emit_event failed for %s: %s", dispatch_id, exc)
-        try:
-            selector.record_injection(result, coord_state_dir=coord_state_dir)
-        except Exception as exc:
-            logger.debug("build_intelligence_context: record_injection failed for %s: %s", dispatch_id, exc)
+        _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir)
         return IntelligenceContext(result=result, dispatch_id=dispatch_id)
     finally:
         selector.close()

@@ -292,7 +292,10 @@ def scout_prepass_enabled() -> bool:
 
 
 def _scout_provider_name() -> str:
-    name = (os.environ.get("VNX_SCOUT_PROVIDER") or "deepseek").strip().lower()
+    """Resolved through config_runtime, same as scout_prepass_enabled(), so an operator's
+    dashboard toggle is honoured; absent a UI value this is exactly the env/default."""
+    import config_runtime
+    name = (config_runtime.get("VNX_SCOUT_PROVIDER") or "deepseek").strip().lower()
     if name not in _ALLOWED_SCOUT_PROVIDERS:
         # Default-deny: anything not a sanctioned key-auth lane (incl. the
         # subscription 'haiku') falls back to the key-auth default.

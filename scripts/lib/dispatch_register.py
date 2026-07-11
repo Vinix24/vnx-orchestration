@@ -15,7 +15,6 @@ import fcntl
 import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -23,6 +22,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 import state_writer
+from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 try:
     import shadow_verifier as _shadow_verifier
@@ -52,8 +52,6 @@ except ImportError:
 
 # SQL template identifier used in shadow comparisons (no actual SQL — NDJSON source)
 _REGISTER_NDJSON_TEMPLATE = "dispatch_register.ndjson"
-
-_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

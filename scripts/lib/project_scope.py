@@ -29,15 +29,13 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from pathlib import Path
+
+from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 DEFAULT_PROJECT = "vnx-dev"
 ENV_VAR = "VNX_PROJECT_ID"
 FILTER_ENV_VAR = "VNX_PROJECT_FILTER"
-
-# Migration plan §3.2 — strict allowlist for project_id values.
-_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 # Truthy/falsy parsing for VNX_PROJECT_FILTER. Default ON (filter applied)
 # so that selectors do not bleed cross-tenant data without explicit opt-out.
