@@ -64,6 +64,10 @@ _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "zai": "openrouter/z-ai/glm-5",
     "ollama": "ollama/llama3",
     "anthropic": "anthropic/claude-sonnet-4-6",
+    # openrouter-arbitrary lane (PR-1 skeleton): the ONE OpenAI-compat model this
+    # slice proves out end-to-end. Any other OpenRouter model path can be dispatched
+    # via --provider litellm:openrouter:<vendor>/<model> — see _resolve_openrouter_model.
+    "openrouter": "openrouter/openai/gpt-4o-mini",
 }
 
 # Env vars required per sub-provider (fast-fail before subprocess spawn)
@@ -71,6 +75,7 @@ _SUB_PROVIDER_KEY_REQS: dict = {
     "deepseek": "DEEPSEEK_API_KEY",
     "moonshot": "MOONSHOT_API_KEY",
     "zai": "OPENROUTER_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 # GLM model names that are LEGACY — rejected on zai dispatch (PR-7.3)
@@ -81,6 +86,7 @@ _SUB_PROVIDER_DEFAULT_ALIAS: dict = {
     "deepseek": "deepseek-v4-pro",
     "moonshot": "kimi-k2-0905-default",
     "zai": "glm-5.1-default",
+    "openrouter": "gpt-4o-mini-default",
 }
 
 
@@ -716,6 +722,11 @@ def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) 
     if not (provider.startswith("litellm:") or provider == "litellm"):
         return True
     base_sub, model_alias = _litellm_parts(provider)
+    if base_sub == "openrouter":
+        # Arbitrary-model lane by design — not curated against the wave7 provider
+        # registry (see _resolve_openrouter_model). OPENROUTER_API_KEY
+        # (_SUB_PROVIDER_KEY_REQS) is the real pre-flight gate for this lane.
+        return False
     if os.environ.get("VNX_LITELLM_MODEL", "") or model_alias:
         return True
     if getattr(args, "model", None) and args.model != "sonnet":
@@ -839,7 +850,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Provider to use for dispatch. "
             "Accepted values: claude, codex, gemini, kimi, litellm:<model>. "
-            "Example: --provider claude, --provider kimi, --provider litellm:deepseek-v4-pro"
+            "Example: --provider claude, --provider kimi, --provider litellm:deepseek-v4-pro, "
+            "--provider litellm:openrouter (proxy-gated OpenAI-compat lane; optional "
+            "arbitrary model via litellm:openrouter:<vendor>/<model>, requires OPENROUTER_API_KEY)"
         ),
     )
     # Forward all existing subprocess_dispatch.py flags verbatim.
@@ -1384,6 +1397,26 @@ def _resolve_zai_model(model_alias: "str | None" = None) -> str:
     return next(iter(cfg.models.values())).litellm_name
 
 
+def _resolve_openrouter_model(model_alias: "str | None" = None) -> str:
+    """Resolve the litellm model path for the openrouter-arbitrary lane.
+
+    Unlike deepseek/moonshot/zai, this sub-provider is deliberately NOT curated
+    against the wave7 provider registry — that is the "arbitrary" in
+    openrouter-arbitrary. ``model_alias`` (from ``--provider
+    litellm:openrouter:<alias>``) is treated as a raw OpenRouter model path and
+    passed straight through, prefixed with "openrouter/" when the caller omitted
+    it. The one sentinel alias ``_SUB_PROVIDER_DEFAULT_ALIAS["openrouter"]``
+    (and an absent alias) resolve to the single model this skeleton PR proves out
+    end-to-end (_LITELLM_SUB_PROVIDER_DEFAULTS["openrouter"]).
+    """
+    alias = (model_alias or "").strip()
+    if not alias or alias == _SUB_PROVIDER_DEFAULT_ALIAS["openrouter"]:
+        return _LITELLM_SUB_PROVIDER_DEFAULTS["openrouter"]
+    if alias.startswith("openrouter/"):
+        return alias
+    return f"openrouter/{alias}"
+
+
 def _dispatch_litellm(args: argparse.Namespace) -> int:
     """Route to spawn_litellm for litellm-provider dispatches (PR-4.6.5).
 
@@ -1432,6 +1465,8 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         if model_alias:
             _validate_zai_model_not_legacy(model_alias)
         model = env_model or _resolve_zai_model(model_alias)
+    elif base_sub == "openrouter":
+        model = env_model or _resolve_openrouter_model(model_alias)
     elif env_model:
         model = env_model
     elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:

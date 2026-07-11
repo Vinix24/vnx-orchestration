@@ -56,9 +56,13 @@ class TestAllKnownLanesHaveContracts:
         assert missing == [], f"Lanes in routing_policy.yaml missing contracts: {missing}"
 
     def test_ten_contracts_registered(self):
-        """Registry has exactly 10 contracts (all current lanes)."""
-        assert len(CONTRACTS) == 10, (
-            f"Expected 10 contracts, got {len(CONTRACTS)}. "
+        """Registry has exactly 11 contracts (all current lanes).
+
+        Bumped from 10 -> 11 for the openrouter-arbitrary lane skeleton
+        (litellm:openrouter:gpt-4o-mini-default — the one proven model).
+        """
+        assert len(CONTRACTS) == 11, (
+            f"Expected 11 contracts, got {len(CONTRACTS)}. "
             f"Keys: {sorted(CONTRACTS.keys())}"
         )
 
