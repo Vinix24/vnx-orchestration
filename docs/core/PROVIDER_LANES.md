@@ -140,11 +140,28 @@ report body is what the worker actually wrote. `govern()` always runs as a
 backstop: if the worker did not produce a usable report, it emits an honest
 minimal body marked `contract_status="synthesized"` rather than leaving a gap.
 
+**claude-subprocess lane: `govern()` wiring is opt-in (`VNX_SHARED_GOVERN=1`,
+default off).** `dispatch_govern.py`'s own module docstring names both the tmux
+and subprocess lanes as intended callers, but only tmux was wired end to end.
+Behind the flag, `deliver_with_recovery` routes both the success and the
+budget-exhausted-failure path through the same `govern()` used by tmux — including
+git-diff synthesis (`base_sha` = the pre-dispatch commit SHA) and schema-complete
+frontmatter — instead of the legacy stub-only `_ensure_unified_report` (success) or
+no report at all (final failure). `govern()`'s authored-report lookup also checks
+the legacy subprocess worker filename (`<dispatch_id>_report.md`, from
+`receipt_writer._ensure_unified_report`'s docstring convention) as a fallback
+alongside the canonical `<dispatch_id>.md`. Receipt writing (`_write_receipt`) is
+unchanged in both flag states. Flag default is off pending a burn-in period;
+flipping it on is a follow-up, not part of this slice.
+
 **provider_dispatch lanes (codex, gemini, kimi, deepseek-harness, litellm): the
 report is synthesized.** These lanes do not author a report. `_emit_governance`
 builds the unified report from the captured `completion_text` of the spawn
 result. The report body is a synthesis of what the process printed, not a
-document the worker chose to write.
+document the worker chose to write. This lane (and the `claude_headless` lane
+in `dispatch_envelope.py`, which still has its own local `_prepare()`/`_govern()`
+rather than the shared `dispatch_prepare`/`dispatch_govern` modules) remain
+un-migrated — tracked as follow-up slices of the same Option B parity work.
 
 **The known gap.** An analysis-only dispatch on a provider_dispatch lane (review,
 audit, no commit) can yield an empty report body. The synthesized report is

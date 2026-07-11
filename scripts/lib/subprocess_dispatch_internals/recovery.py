@@ -7,6 +7,7 @@ that ``unittest.mock.patch("subprocess_dispatch.X")`` intercepts the call.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -18,6 +19,90 @@ from subprocess_dispatch_internals.runtime_overrides import apply_runtime_overri
 from provider_dispatch import _extract_token_usage, _compute_cost
 
 logger = logging.getLogger(__name__)
+
+
+def _shared_govern_enabled() -> bool:
+    """VNX_SHARED_GOVERN gate for the subprocess lane (default off — safe ship).
+
+    dispatch_govern.py's own docstring names tmux AND subprocess as its intended
+    callers; the tmux lane already routes through govern() unconditionally. This
+    flag lets the subprocess lane opt in the same way VNX_SHARED_PREPARE gated its
+    PREPARE-side adoption before tmux made it unconditional.
+    """
+    return os.environ.get("VNX_SHARED_GOVERN", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _govern_report(
+    *,
+    dispatch_id: str,
+    terminal_id: str,
+    instruction: str,
+    status: str,
+    dispatch_start_ts: str,
+    pre_sha: str,
+    model: "str | None",
+    role: "str | None",
+    pr_id: "str | None",
+    token_usage: "dict | None",
+    cost_usd: "float | None",
+) -> None:
+    """Emit the unified report via the shared dispatch_govern.govern() step.
+
+    Mirrors the tmux lane's GOVERN wiring. govern() checks unified_reports/ for a
+    worker-authored report (including the legacy "<id>_report.md" subprocess-lane
+    filename) and falls back to a git-diff synthesis (base_sha=pre_sha) with
+    schema-complete frontmatter and contract validation — a strict upgrade over the
+    prior stub-only ``_ensure_unified_report`` (success path) / no report at all
+    (failure path).
+
+    Receipt writing is untouched: ``_write_receipt`` still runs unconditionally
+    after this call. Passing a non-None ``GovernRaw.receipt`` makes govern()'s
+    ``ensure_receipt`` fallback a no-op, so there is no double-receipt-append.
+
+    govern() is documented to never raise; only the import is defended here.
+    """
+    import subprocess_dispatch as _sd
+    try:
+        from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
+    except ImportError as exc:
+        logger.error(
+            "deliver_with_recovery: dispatch_govern import failed for dispatch=%s: %s",
+            dispatch_id, exc,
+        )
+        return
+
+    state_dir = _sd._default_state_dir()
+    repo_cwd = Path(__file__).resolve().parents[3]
+    try:
+        started = datetime.fromisoformat(dispatch_start_ts)
+        duration_seconds = (datetime.now(timezone.utc) - started).total_seconds()
+    except ValueError:
+        duration_seconds = 0.0
+
+    spec = GovernSpec(
+        dispatch_id=dispatch_id,
+        terminal_id=terminal_id,
+        instruction=instruction,
+        data_dir=state_dir.parent,
+        state_dir=state_dir,
+        pr_id=pr_id,
+        base_sha=pre_sha,
+        worktree_path=repo_cwd,
+        model=model,
+        role=role,
+    )
+    raw = GovernRaw(
+        receipt={
+            "status": status,
+            "model": model,
+            "token_usage": token_usage,
+            "cost_usd": cost_usd,
+        },
+        duration_seconds=duration_seconds,
+    )
+    govern(spec, raw, lane="subprocess")
 
 
 
@@ -143,6 +228,8 @@ def _handle_success(
     model: "str | None" = None,
     pr_id: "str | None" = None,
     mandate_id: "str | None" = None,
+    instruction: str = "",
+    role: "str | None" = None,
 ) -> None:
     """Run the success branch: write receipt, feedback, outcome capture, cleanup."""
     import subprocess_dispatch as _sd
@@ -183,7 +270,15 @@ def _handle_success(
         project_id=_cost_pid,
     )
 
-    _sd._ensure_unified_report(dispatch_id, terminal_id, "done")
+    if _shared_govern_enabled():
+        _govern_report(
+            dispatch_id=dispatch_id, terminal_id=terminal_id, instruction=instruction,
+            status="done", dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
+            model=model, role=role, pr_id=pr_id,
+            token_usage=token_usage, cost_usd=cost_usd,
+        )
+    else:
+        _sd._ensure_unified_report(dispatch_id, terminal_id, "done")
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
         event_count=sub_result.event_count,
@@ -243,6 +338,8 @@ def _handle_final_failure(
     lease_generation: "int | None",
     model: "str | None" = None,
     pr_id: "str | None" = None,
+    instruction: str = "",
+    role: "str | None" = None,
 ) -> None:
     """Run the budget-exhausted failure branch: stash, receipt, decay, cleanup."""
     import subprocess_dispatch as _sd
@@ -255,6 +352,17 @@ def _handle_final_failure(
             manifest_paths=manifest_paths,
         )
     token_usage, cost_usd = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
+    if _shared_govern_enabled():
+        # Genuinely new coverage: pre-wiring, the subprocess lane emitted no unified
+        # report at all on the budget-exhausted failure path (only _write_receipt ran).
+        # govern() gives failed dispatches the same honest synthesized body the tmux
+        # lane always produces, instead of an audit-trail gap.
+        _govern_report(
+            dispatch_id=dispatch_id, terminal_id=terminal_id, instruction=instruction,
+            status="failed", dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
+            model=model, role=role, pr_id=pr_id,
+            token_usage=token_usage, cost_usd=cost_usd,
+        )
     _sd._write_receipt(
         dispatch_id, terminal_id, "failed",
         event_count=sub_result.event_count,
@@ -398,6 +506,8 @@ def _backoff_or_fail(
     lease_generation: "int | None",
     model: "str | None" = None,
     pr_id: "str | None" = None,
+    instruction: str = "",
+    role: "str | None" = None,
 ) -> None:
     """Sleep with exponential backoff, or run the final-failure branch when exhausted."""
     if attempt < max_retries:
@@ -421,6 +531,8 @@ def _backoff_or_fail(
             lease_generation=lease_generation,
             model=model,
             pr_id=pr_id,
+            instruction=instruction,
+            role=role,
         )
 
 
@@ -493,6 +605,8 @@ def deliver_with_recovery(
                 model=model,
                 pr_id=pr_id,
                 mandate_id=mandate_id,
+                instruction=instruction,
+                role=role,
             )
             return True
         _backoff_or_fail(
@@ -506,6 +620,8 @@ def deliver_with_recovery(
             lease_generation=lease_generation,
             model=model,
             pr_id=pr_id,
+            instruction=instruction,
+            role=role,
         )
 
     return False
