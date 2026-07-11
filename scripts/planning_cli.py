@@ -1887,7 +1887,7 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
             resolver="attest", timestamp=_now_utc(),
             approval_id=approval_id, reason=reason,
         )
-    except Exception:  # noqa: BLE001 — evidence emission must never break attest
+    except Exception:  # vnx-silent-except: evidence emission must never break attest
         pass
 
     post = tracks_lib.get_track(state_dir, track_id, project_id)

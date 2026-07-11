@@ -122,6 +122,6 @@ def verify_plan_gate_pass(
             manifest = {k: v for k, v in latest.items() if k != "prev_hash"}
             if verify_attestation(manifest, allowed_signers):
                 return (VERIFIED, latest)
-        except Exception:  # noqa: BLE001
+        except Exception:  # vnx-silent-except: signature verify is best-effort; fall through to PRESENT
             pass
     return (PRESENT_UNSIGNED, latest)
