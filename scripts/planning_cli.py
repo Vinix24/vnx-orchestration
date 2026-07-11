@@ -1849,7 +1849,7 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(payload, indent=2, default=str))
         else:
-            print(f"\nvnx plan-gate attest — {track_id} (project '{project_id}')\n")
+            print(f"\nvnx horizon plan-gate attest — {track_id} (project '{project_id}')\n")
             print(
                 "  no unresolved plan blocker found (gate not seeded, or already "
                 "passed). No change made.\n"
@@ -1876,7 +1876,7 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(payload, indent=2, default=str))
         else:
-            print(f"\nvnx plan-gate attest — {track_id} (project '{project_id}')\n")
+            print(f"\nvnx horizon plan-gate attest — {track_id} (project '{project_id}')\n")
             print(f"  attested: {reason} (approval={approval_id})")
             print(
                 f"  plan blocker resolved={resolved}, but track {track_id} is STILL "
@@ -1888,7 +1888,7 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
     else:
-        print(f"\nvnx plan-gate attest — {track_id} (project '{project_id}')\n")
+        print(f"\nvnx horizon plan-gate attest — {track_id} (project '{project_id}')\n")
         print(f"  attested: {reason} (approval={approval_id})")
         print(f"  plan gate cleared. derived_status={derived}.\n")
     return 0

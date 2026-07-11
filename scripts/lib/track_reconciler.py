@@ -485,8 +485,8 @@ def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
             lines.append(
                 f"blocked by open-item {oi_id}{suffix} -- this is the plan-first "
                 f"gate; resolve with EITHER: re-run the panel: "
-                f"vnx plan-gate run {plan_track} --doc <plan-doc>  OR operator "
-                f'override: vnx plan-gate attest {plan_track} --reason '
+                f"vnx horizon plan-gate run {plan_track} --doc <plan-doc>  OR operator "
+                f'override: vnx horizon plan-gate attest {plan_track} --reason '
                 f'"<why this is already done>" --approval-id <token>'
             )
         else:
