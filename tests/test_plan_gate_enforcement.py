@@ -119,6 +119,19 @@ class TestEnforceMode:
         monkeypatch.setattr(config_runtime, "get", _boom)
         assert pge.enforce_mode() == "advisory"
 
+    def test_flag_registered_in_config_registry(self):
+        """The flag must be a registered, writable, approval-gated enum so the audited
+        set_config path (project_config) can flip it — otherwise config_runtime.get can
+        never see an operator flip."""
+        import config_registry
+        entry = config_registry.CONFIG_REGISTRY.get("VNX_PLAN_GATE_ENFORCE")
+        assert entry is not None, "VNX_PLAN_GATE_ENFORCE not registered"
+        assert entry.type == "enum"
+        assert entry.default == "advisory"
+        assert entry.category == "gate"
+        assert entry.writable_from_ui is True
+        assert entry.requires_approval is True
+
 
 # --------------------------------------------------------------------- plan_gate_state
 class TestPlanGateState:
