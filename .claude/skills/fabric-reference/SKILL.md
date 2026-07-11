@@ -86,6 +86,11 @@ vnx horizon plan-gate ...           # multi-model panel reviews a plan before an
 - **`vnx start --help` runs start:** it spawns the daemon set (footgun); SIGKILL the supervisor root if triggered.
 - **Central-mode paths:** embedded-layout path assumptions can break central-mode resolution (fleet burn-in) — resolve via the helpers, never hardcode `.vnx-data/` literals.
 
+### Known issues (tracked, active)
+
+- **An empty provider completion is usually a TRANSIENT lane issue, not a structural door bug:** if `bin/vnx dispatch <id>` for a provider lane (kimi/glm/deepseek) lands an empty completion, check the lane's health FIRST — kimi OAuth/quota, glm proxy on `:4141` — not the envelope. The door's provider path works end-to-end; a blank completion is now downgraded to a loud `failure` (embedding the raw spawn result) for ALL provider spawns as of #1107, and the door surfaces `EnvelopeResult.error` instead of a bare exit code, so the real cause is visible.
+- **The plan-gate panel can score on fewer than 5 seats (`plan-gate-panel-seat-robustness`):** in `plan_gate_panel.py` (NOT the `/panel` skill) the **opus seat NO-VERDICTs reliably** on a `data_dir=None` report-resolution miss (#1102 class: `staging_validator: unstaged dispatch override`), and the codex + glm seats can **intermittently** abstain on unparseable verdict JSON (codex abstained in one round, scored the next). A verdict may rest on as few as 2 seats (kimi + deepseek) or as many as 4 — **confirm the real scoring-seat count in the log before trusting a plan-gate PASS/REVISE**.
+
 ## Where the source of truth lives
 
 - Dispatch mechanics, lanes, failure modes: `docs/core/DISPATCH_RULES.md`
