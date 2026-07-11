@@ -426,8 +426,11 @@ def test_glm_uses_zai_provider():
     models = run_benchmark.load_models()
     glm = next((m for m in models if m["id"] == "glm-5-1"), None)
     assert glm is not None, "glm-5-1 not found in models.yaml"
-    assert glm["provider"] == "litellm:zai", f"Expected litellm:zai, got {glm['provider']}"
-    assert glm["model_arg"] == "glm-5", f"Expected glm-5, got {glm['model_arg']}"
+    # glm-5-1 was corrected in models.yaml to map to the REAL GLM-5.1 (litellm:zai:glm-5.1 /
+    # model_arg glm-5.1), not the base glm-5 alias. The zai sub-provider prefix is what satisfies
+    # zai-via-openrouter-only; the :glm-5.1 suffix selects the real model.
+    assert glm["provider"].startswith("litellm:zai"), f"Expected litellm:zai*, got {glm['provider']}"
+    assert glm["model_arg"] == "glm-5.1", f"Expected glm-5.1, got {glm['model_arg']}"
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +472,115 @@ def test_analyze_warns_on_unreadable_file(tmp_path: Path, capsys):
 
     assert len(records) == 1
     assert "WARNING" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# OI-225: --tasks-dir / --models-file CLI + VNX_BENCH_* env fallback
+# (bring-your-own-tasks generalization seam — decouples the runner from the
+# bundled repo-specific prompts/models.yaml without packaging the harness)
+# ---------------------------------------------------------------------------
+
+def test_dry_run_uses_custom_tasks_dir_and_models_file(
+    tmp_prompts: Path, tmp_models_yaml: Path, monkeypatch, capsys,
+):
+    monkeypatch.setattr(sys, "argv", [
+        "run_benchmark.py", "--dry-run",
+        "--tasks-dir", str(tmp_prompts),
+        "--models-file", str(tmp_models_yaml),
+    ])
+    rc = run_benchmark.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "claude-sonnet-4-6 x 01_alpha" in out
+    assert "deepseek-v4-pro x 02_beta" in out
+    # bundled repo seeds must not leak in when a custom source is given
+    assert "01_code_generation" not in out
+    assert "claude-opus-4-8" not in out
+
+
+def test_dry_run_env_var_fallback_for_tasks_and_models(
+    tmp_prompts: Path, tmp_models_yaml: Path, monkeypatch, capsys,
+):
+    monkeypatch.setenv("VNX_BENCH_TASKS_DIR", str(tmp_prompts))
+    monkeypatch.setenv("VNX_BENCH_MODELS_FILE", str(tmp_models_yaml))
+    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--dry-run"])
+
+    rc = run_benchmark.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "claude-sonnet-4-6 x 01_alpha" in out
+
+
+def test_dry_run_cli_flag_overrides_env_var(
+    tmp_prompts: Path, tmp_models_yaml: Path, tmp_path: Path, monkeypatch, capsys,
+):
+    # A second, distinct task source set via env — the explicit CLI flag must win.
+    other_prompts = tmp_path / "other_prompts"
+    other_prompts.mkdir()
+    (other_prompts / "99_gamma.txt").write_text("Do task gamma.")
+
+    monkeypatch.setenv("VNX_BENCH_TASKS_DIR", str(other_prompts))
+    monkeypatch.setattr(sys, "argv", [
+        "run_benchmark.py", "--dry-run",
+        "--tasks-dir", str(tmp_prompts),
+        "--models-file", str(tmp_models_yaml),
+    ])
+
+    rc = run_benchmark.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "01_alpha" in out
+    assert "99_gamma" not in out
+
+
+def test_dry_run_defaults_to_bundled_seeds_when_unset(monkeypatch, capsys):
+    monkeypatch.delenv("VNX_BENCH_TASKS_DIR", raising=False)
+    monkeypatch.delenv("VNX_BENCH_MODELS_FILE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--dry-run"])
+
+    rc = run_benchmark.main()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # bundled prompt/model still reachable when no override is given (backward-compat)
+    assert "01_code_generation" in out
+    assert "claude-opus-4-8" in out
+
+
+def test_judge_quality_tasks_dir_cli_overrides_bundled_prompts(
+    tmp_path: Path, monkeypatch,
+):
+    custom_prompts = tmp_path / "prompts"
+    custom_prompts.mkdir()
+    (custom_prompts / "01_alpha.txt").write_text("Custom bring-your-own task alpha.")
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    record = {
+        "model_id": "claude-sonnet-4-6",
+        "task_id": "01_alpha",
+        "response": "some response",
+    }
+    (results_dir / "claude-sonnet-4-6__01_alpha.json").write_text(json.dumps(record))
+
+    captured_prompts = []
+
+    def fake_call_judge(prompt, model, timeout):
+        captured_prompts.append(prompt)
+        return '{"quality_score": 5, "correctness": true, "completeness_score": 5, "notable_issues": ""}'
+
+    monkeypatch.setattr(sys, "argv", [
+        "judge_quality.py",
+        "--results-dir", str(results_dir),
+        "--tasks-dir", str(custom_prompts),
+    ])
+
+    with patch.object(judge_quality, "_call_judge", side_effect=fake_call_judge):
+        rc = judge_quality.main()
+
+    assert rc == 0
+    assert len(captured_prompts) == 1
+    assert "Custom bring-your-own task alpha." in captured_prompts[0]

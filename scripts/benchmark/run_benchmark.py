@@ -5,6 +5,13 @@ Usage:
     python3 scripts/benchmark/run_benchmark.py [--models MODEL_IDS] [--tasks TASK_IDS] [--output PATH]
     python3 scripts/benchmark/run_benchmark.py --dry-run
 
+Bring-your-own-tasks / bring-your-own-models (decoupled from the bundled seeds):
+    python3 scripts/benchmark/run_benchmark.py --tasks-dir /path/to/my/prompts --models-file /path/to/my/models.yaml --dry-run
+    VNX_BENCH_TASKS_DIR=/path/to/my/prompts VNX_BENCH_MODELS_FILE=/path/to/my/models.yaml python3 scripts/benchmark/run_benchmark.py --dry-run
+
+--tasks-dir/--models-file (or their VNX_BENCH_TASKS_DIR/VNX_BENCH_MODELS_FILE env equivalents) default to
+the repo-bundled scripts/benchmark/prompts/ and models.yaml when unset, so existing invocations are unchanged.
+
 For each (model, task):
   - Dispatch via provider_dispatch.py
   - Wait for completion
@@ -179,10 +186,20 @@ def _filter_tasks(tasks: List[Dict], selector: str) -> List[Dict]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="VNX benchmark runner — 9 models x 7 tasks")
+    parser = argparse.ArgumentParser(description="VNX benchmark runner — N models x M tasks")
     parser.add_argument("--models", default="all", help="Comma-separated model IDs or 'all'")
     parser.add_argument("--tasks", default="all", help="Comma-separated task IDs or 'all'")
     parser.add_argument("--output", default=None, help="Override output directory")
+    parser.add_argument(
+        "--tasks-dir",
+        default=os.environ.get("VNX_BENCH_TASKS_DIR", ""),
+        help="Directory of *.txt task prompts (bring-your-own-tasks). Default: bundled scripts/benchmark/prompts/",
+    )
+    parser.add_argument(
+        "--models-file",
+        default=os.environ.get("VNX_BENCH_MODELS_FILE", ""),
+        help="Path to a models.yaml (bring-your-own model roster). Default: bundled scripts/benchmark/models.yaml",
+    )
     parser.add_argument("--terminal-id", default="BENCH", help="Terminal ID for governance state (default: BENCH)")
     parser.add_argument("--dry-run", action="store_true", help="List dispatches without executing")
     parser.add_argument("--run", action="store_true", help="Actually execute benchmarks")
@@ -196,8 +213,11 @@ def main() -> int:
     output_dir = Path(args.output) if args.output else RESULTS_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    models = _filter_models(load_models(), args.models)
-    tasks = _filter_tasks(load_tasks(), args.tasks)
+    tasks_dir = Path(args.tasks_dir) if args.tasks_dir else None
+    models_file = Path(args.models_file) if args.models_file else None
+
+    models = _filter_models(load_models(models_file), args.models)
+    tasks = _filter_tasks(load_tasks(tasks_dir), args.tasks)
 
     total = len(models) * len(tasks)
     print(f"Benchmark plan: {len(models)} models x {len(tasks)} tasks = {total} dispatches")
