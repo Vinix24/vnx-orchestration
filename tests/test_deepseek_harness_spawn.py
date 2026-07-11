@@ -69,6 +69,12 @@ class TestHarnessHelpers:
         # Must NOT smuggle in an anthropic api key or OAuth marker.
         assert "ANTHROPIC_API_KEY" not in env
 
+    def test_harness_scrub_keys_cover_both_credential_forms(self):
+        """Audit S3: the scrub set must cover both the API key AND the OAuth session
+        token — an inherited CLAUDE_CODE_OAUTH_TOKEN would otherwise sit next to the
+        key-auth ANTHROPIC_AUTH_TOKEN override and reintroduce auth ambiguity."""
+        assert dh._HARNESS_SCRUB_KEYS == frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
+
     def test_mcp_fully_off_cli_args(self):
         # --mcp-config is variadic; JSON value first, boolean terminator last so
         # the positional prompt is not slurped into the config list.
@@ -330,6 +336,55 @@ class TestFinalPopenEnvScrub:
             "ANTHROPIC_AUTH_TOKEN (DeepSeek own key) must be present"
         )
         assert env.get("ANTHROPIC_BASE_URL") == DEEPSEEK_ANTHROPIC_BASE_URL
+
+    def test_claude_code_oauth_token_absent_from_final_popen_env(self):
+        """Audit S3: a cached CLAUDE_CODE_OAUTH_TOKEN must not survive into the
+        redirected CLI either — only ANTHROPIC_API_KEY was scrubbed before this fix."""
+        import subprocess_adapter as sa
+
+        captured = {}
+
+        class _FakeProc:
+            pid = 9999
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def _fake_popen(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            proc = _FakeProc()
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            return proc
+
+        def _empty_events(self_adapter, terminal_id, **kw):
+            return iter([])
+
+        with patch.dict(
+            "os.environ",
+            {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-real-production-session-token", "DEEPSEEK_API_KEY": _FAKE_KEY},
+        ), patch.object(sa.subprocess, "Popen", _fake_popen), \
+                patch("subprocess_adapter.os.setsid", lambda: None), \
+                patch.object(sa.SubprocessAdapter, "read_events_with_timeout", _empty_events):
+            spawn_deepseek_harness(
+                prompt="Reply OK.",
+                model=None,
+                dispatch_id="d-scrub-oauth-test",
+                terminal_id="T1",
+                api_key=_FAKE_KEY,
+            )
+
+        env = captured.get("env")
+        assert env is not None
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env, (
+            "CLAUDE_CODE_OAUTH_TOKEN must be scrubbed from the final Popen env "
+            "(present in os.environ but must not reach the DeepSeek child process)"
+        )
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == _FAKE_KEY
 
 
 if __name__ == "__main__":

@@ -36,7 +36,15 @@ Exit codes:
   2 — other error (import failure, service unavailable, bad input, etc.)
 
 SECURITY: all tool paths resolve INSIDE cwd; traversal escapes are refused.
-run_command executes in cwd with a bounded timeout.
+run_command executes in cwd with a bounded timeout. run_command is intentionally
+shell=True with NO command allowlist/sandbox (audit S1) — restricting it would
+defeat the tool's purpose (running arbitrary tests/build commands). Its blast
+radius is bounded two ways instead: it runs inside an isolated worker cwd, and
+its own process env is credential-scrubbed by the spawn layer (litellm_spawn.py
+_scrubbed_env, audit S2) — an external/untrusted model driving this loop cannot
+read the Anthropic account's own API key or OAuth token through run_command,
+even though the shell itself remains unrestricted. A full command sandbox
+(seccomp/container) is a larger architecture change tracked separately.
 
 BILLING SAFETY: No Anthropic SDK imports. Uses the litellm library only.
 """

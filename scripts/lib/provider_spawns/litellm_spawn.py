@@ -13,6 +13,11 @@ Callers handle: lease/manifest/receipt/event-archive/retry.
 BILLING SAFETY: only subprocess.Popen([sys.executable, "-u", runner_path]) is
 invoked. No Anthropic SDK, no direct API calls. LiteLLM is isolated to
 _litellm_runner.py subprocess.
+
+CREDENTIAL SAFETY (audit S2): every Popen env for these subprocesses is built via
+_scrubbed_env(), which strips ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN after
+merging the parent env — an external/untrusted model driven through the agentic
+runner's run_command tool cannot read the Anthropic account's own credentials.
 """
 
 from __future__ import annotations
@@ -40,6 +45,24 @@ logger = logging.getLogger(__name__)
 _RUNNER_PATH = Path(__file__).resolve().parents[1] / "adapters" / "_litellm_runner.py"
 
 _TIER_STREAMING = 1
+
+# Audit S2: these lanes exclusively drive non-Anthropic models (DeepSeek, OpenRouter, GLM,
+# etc. via litellm) in a subprocess the external model itself can direct — the one-shot
+# runner via completion(), the agentic runner via its run_command tool (shell=True, no
+# allowlist; audit S1). Full os.environ inheritance would hand the Anthropic account's own
+# credentials to that subprocess, readable/exfiltratable by an external/untrusted model
+# through run_command. Neither key is ever needed by a litellm-routed child, so both are
+# scrubbed from every Popen env unconditionally (not caller-optional — there is no legitimate
+# case where a litellm child needs them).
+_CREDENTIAL_SCRUB_KEYS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def _scrubbed_env(extra_env: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """Merge extra_env over the parent env, then strip Anthropic-account credentials."""
+    env = {**os.environ, **(extra_env or {})}
+    for _key in _CREDENTIAL_SCRUB_KEYS:
+        env.pop(_key, None)
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +239,7 @@ def _start_litellm_subprocess(
     All subprocess-boundary errors convert to structured results; none are re-raised.
     """
     cmd = _build_litellm_cmd(runner_path)
-    env = {**os.environ, **(extra_env or {})}
+    env = _scrubbed_env(extra_env)
     cwd_str = str(cwd) if cwd is not None else None
 
     try:
@@ -560,7 +583,7 @@ def spawn_litellm_agentic(
     # (We can't reuse _start_litellm_subprocess: it pre-writes AND closes stdin, which
     # makes a later communicate() raise "flush of closed file".)
     cmd = _build_litellm_cmd(_runner)
-    env = {**os.environ, **(extra_env or {})}
+    env = _scrubbed_env(extra_env)
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
