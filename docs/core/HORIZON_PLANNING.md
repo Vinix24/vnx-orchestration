@@ -113,6 +113,7 @@ DB, delegating the actual mutations to `vnx horizon`.
 
 ## Related
 
+- `docs/core/HORIZON_LIFECYCLE.md` — the narrative: a track from born-planned to closed (plan-gate → work → reconcile → close → auto-close), the ADR-030 enforcement, and the build-before-plan failure mode.
 - `docs/core/DISPATCH_RULES.md` — how gated work leaves Horizon and runs.
 - `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md` — the project-id rule.
 - `docs/governance/decisions/ADR-026-per-project-store-with-governance-federation.md` — where the tracks DB lives.
