@@ -1,6 +1,6 @@
 # ADR-028 — Target orchestration architecture: folder-per-agent + two-tier ephemeral judge
 
-**Status:** Accepted (target architecture adopted; migration gated per-phase — see Ratification)
+**Status:** Superseded by ADR-031 (2026-07-11). Same target architecture, restated as a human-ratified record. ADR-028's `Accepted` was self-declared inside an autonomous session, which is not a ratification under ADR-006; ADR-031 is the honest, operator-ratified record. Content below is retained for provenance.
 **Date:** 2026-07-07
 **Decided by:** Operator (Vincent van Deth), ratified in an autonomous session under an explicit overnight operator mandate. Informed by a deep-research pass (110 agents, 27 sources, 21/25 claims confirmed) and a two-round provider panel. **Three usable panelists — deepseek (design), codex (repo-grounding/corrections), kimi-r2 (implementation-grade detail) — converge on the same core architecture (high confidence); glm flaked empty both rounds.**
 **Resolves / Cross-refs:** Extends ADR-022 (provider-agnostic skill injection), ADR-011 (manager–worker hierarchy), ADR-012 (hybrid interactive + headless). Reuses the primitives of ADR-005 (NDJSON ledger), ADR-006 (staging→promote human gate), ADR-023 (receipt hash-chain, currently PARTIAL), ADR-026 (per-project store). Supersedes `claudedocs/20260707-ADR-DRAFT-orchestration-target-architecture.md`.
