@@ -77,11 +77,22 @@ def test_review_task_class_is_never_phantom():
 
 
 def test_review_task_class_variants_are_exempt():
-    for tc in ("code-review", "code_review", "plan-review", "plan_review",
-               "security-review", "security_review", "REVIEW", " review "):
+    # The real fabric review/analysis task_class buckets (dispatch_router.py ROLE_TO_TASK_CLASS +
+    # smart_router.py), plus case/whitespace-normalized forms.
+    for tc in ("research_structured", "02_code_review", "code_review", "review", "analysis",
+               "REVIEW", " review "):
         v = pg.phantom_guard(status="done", worktree_diff="", token_usage=None,
                              role="backend-developer", task_class=tc)
         assert not v.is_phantom, f"task_class={tc!r} should be exempt"
+
+
+def test_hyphenated_task_class_is_not_exempt():
+    # Hyphenated variants were never emitted by any real dispatch path (only a docstring example),
+    # so they are NOT in the exemption set — an empty-diff delivery claiming one is still a phantom.
+    for tc in ("code-review", "plan-review", "security-review"):
+        v = pg.phantom_guard(status="done", worktree_diff="", token_usage=None,
+                             role="backend-developer", task_class=tc)
+        assert v.is_phantom, f"task_class={tc!r} is not a real review bucket and must not exempt"
 
 
 def test_unrelated_task_class_is_still_phantom():

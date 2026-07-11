@@ -12,11 +12,13 @@ worktree / pushed branch and passes it in; T0's rule is "verify the pushed branc
 
 token_usage is only CORROBORATING: providers that report it (codex/claude) spending >0 tokens proves
 an LLM ran; kimi-cli never reports tokens, so its absence/0 is not evidence of a phantom. Reviewers
-legitimately produce no diff, so REVIEW_ROLES are exempt — and since not every review dispatch is
-routed by a recognized `role` string (some are keyed by `task_class`, e.g. task_class="review" /
-"code-review"), the same exemption applies via REVIEW_TASK_CLASSES, and a caller can assert it
-directly with an explicit `read_only=True` flag (e.g. a receipt/manifest field) when neither role
-nor task_class is a reliable signal.
+legitimately produce no diff, so REVIEW_ROLES are exempt.
+
+A read-only review can also arrive WITHOUT a REVIEW_ROLES-matching ``role`` string — e.g. a dispatch
+routed through ``task_class="research_structured"`` (the fabric's review/analysis bucket, see
+dispatch_router.py ROLE_TO_TASK_CLASS) or one that carries an explicit ``read_only=True`` flag on the
+dispatch spec. Both are exempt the same way a REVIEW_ROLES role is: a verdict with real tokens and an
+empty diff is expected, not evidence of fabrication.
 
 Decision rule (a delivery worker is a phantom when):
     read_only is not truthy
@@ -42,15 +44,16 @@ _LOG = logging.getLogger(__name__)
 # job is a verdict, not a diff, so it is never a phantom for "no changes".
 REVIEW_ROLES = frozenset({"plan-reviewer", "code-reviewer", "security-reviewer", "reviewer"})
 
-# Same exemption, keyed on task_class for dispatches routed/labeled by class rather than by a
-# REVIEW_ROLES role string (the "02_code_review"-style receipts.task_class convention used
-# elsewhere in the fabric — see evidence_bound_gate._task_class_for_manifest and the
-# task_class="review" receipts in outcome_signals). A genuine read-only review keyed only by
-# task_class was previously falling through to the delivery phantom check on an empty diff.
+# SSOT for review/analysis task_class values — a second key onto the same exemption for callers
+# that route by task_class rather than a REVIEW_ROLES-matching role string. "research_structured"
+# is the fabric's canonical bucket for reviewer/architect/planner/security-engineer/data-analyst
+# work (dispatch_router.py ROLE_TO_TASK_CLASS); "02_code_review" is smart_router.py's cost-routing
+# classifier bucket for review/audit/lint instructions. "review"/"analysis"/"code_review" are plain
+# literal fallbacks for callers that tag task_class without going through either taxonomy. The
+# hyphenated variants ("code-review"/"plan-review") were dropped: they are not emitted by any real
+# dispatch path (only ever a docstring example), so they widened the exemption for nothing.
 REVIEW_TASK_CLASSES = frozenset({
-    "review", "code-review", "code_review",
-    "plan-review", "plan_review",
-    "security-review", "security_review",
+    "research_structured", "02_code_review", "code_review", "review", "analysis",
 })
 
 # Receipt status values that assert the work completed.
