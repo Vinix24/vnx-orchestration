@@ -497,6 +497,51 @@ class TmuxInteractiveDispatch:
         import report_body_contract as _rbc  # noqa: PLC0415
         return body + "\n\n" + _rbc.build_directive(dispatch_id or "", pr_id=pr_id)
 
+    def _record_final_prompt_integrity(
+        self,
+        *,
+        dispatch_id: str,
+        final_prompt: str,
+        raw_instruction: str,
+    ):
+        """Persist the assembled final prompt + verify raw+injections reconstruct it.
+
+        ``final_prompt`` is the enriched body (skill + intelligence + instruction +
+        report-contract directive) BEFORE this lane's deterministic delivery wrappers
+        (completion protocol, scope guard, trailer). The integrity fields are baked
+        into the worker's completion-protocol receipt so the audit chain closes at the
+        input side.
+
+        Best-effort: the strict (fail-closed) reconstruction raise propagates so an
+        opted-in operator gets fail-closed delivery; every other error is swallowed so
+        the audit-closure step can never itself break a dispatch. Returns the
+        FinalPromptIntegrity or None.
+        """
+        try:
+            from final_prompt_integrity import (  # noqa: PLC0415
+                InjectionReconstructError,
+                record_final_prompt_integrity,
+            )
+        except ImportError:
+            return None
+        try:
+            return record_final_prompt_integrity(
+                dispatch_id=dispatch_id,
+                final_prompt=final_prompt,
+                raw_instruction=raw_instruction,
+                data_dir=self._state_dir.parent,
+                state_dir=self._state_dir,
+            )
+        except InjectionReconstructError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — audit closure must never break a dispatch
+            logger.error(
+                "interactive: final-prompt integrity failed (non-fatal) dispatch=%s: %s",
+                dispatch_id,
+                exc,
+            )
+            return None
+
     def _stamp_dispatch_metadata(
         self,
         dispatch_id: str,
@@ -676,7 +721,7 @@ class TmuxInteractiveDispatch:
         return {"input": inp, "output": out, "cache_read": 0}
 
     def _build_completion_protocol(
-        self, dispatch_id: str, label: str, model: str = "unknown"
+        self, dispatch_id: str, label: str, model: str = "unknown", *, integrity=None
     ) -> str:
         """Footer instructing the worker to emit a clean receipt directly.
 
@@ -732,6 +777,16 @@ class TmuxInteractiveDispatch:
             # Only emitted when the flag is ON so flag-off receipts are byte-identical.
             if worker_permission_enforcement_enabled():
                 receipt_dict["permission_enforcement"] = "enforced"
+            # Input-side audit closure (final_prompt_integrity). Only baked in when
+            # integrity was computed so the receipt shape stays byte-identical
+            # otherwise. The worker echoes these back verbatim in its receipt.
+            if integrity is not None:
+                if getattr(integrity, "final_prompt_path", None) is not None:
+                    receipt_dict["final_prompt_path"] = integrity.final_prompt_path
+                receipt_dict["final_prompt_sha256"] = integrity.final_prompt_sha256
+                receipt_dict["injection_reconstructs"] = bool(
+                    integrity.injection_reconstructs
+                )
             json_str = json.dumps(receipt_dict)
             # Escape inner double-quotes for the shell double-quoted argument.
             escaped = json_str.replace('"', '\\"')
@@ -2011,6 +2066,16 @@ class TmuxInteractiveDispatch:
                 instruction=instruction,
                 dispatch_paths=dispatch_paths,
             )
+            # 6b. Input-side audit closure: persist the enriched final prompt (the
+            # body BEFORE the lane's deterministic delivery wrappers) + verify the
+            # raw instruction and recorded intelligence injections reconstruct it.
+            # The result is baked into the worker's completion-protocol receipt.
+            _integrity = self._record_final_prompt_integrity(
+                dispatch_id=dispatch_id,
+                final_prompt=_context_body,
+                raw_instruction=instruction,
+            )
+
             if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
                 body = _context_body
             elif os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
@@ -2024,7 +2089,9 @@ class TmuxInteractiveDispatch:
                     _TRAILER = "<!-- VNX-END-OF-INSTRUCTION -->"
                 body = (
                     _context_body
-                    + self._build_completion_protocol(dispatch_id, label, model=model)
+                    + self._build_completion_protocol(
+                        dispatch_id, label, model=model, integrity=_integrity
+                    )
                     + f"\n\n{_TRAILER}\n"
                 )
             else:
@@ -2032,7 +2099,9 @@ class TmuxInteractiveDispatch:
                 body = (
                     _context_body
                     + self._scope_note(dispatch_paths)
-                    + self._build_completion_protocol(dispatch_id, label, model=model)
+                    + self._build_completion_protocol(
+                        dispatch_id, label, model=model, integrity=_integrity
+                    )
                 )
 
             # 7. Deliver instruction

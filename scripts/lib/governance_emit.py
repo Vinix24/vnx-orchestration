@@ -66,6 +66,9 @@ def emit_dispatch_receipt(
     events_path: Optional[str] = None,
     permission_enforcement: Optional[str] = None,
     mandate_id: Optional[str] = None,
+    final_prompt_path: Optional[str] = None,
+    final_prompt_sha256: Optional[str] = None,
+    injection_reconstructs: Optional[bool] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson. fcntl.flock for concurrent safety.
 
@@ -85,6 +88,14 @@ def emit_dispatch_receipt(
     receipt with the ADR-012 worker-permission enforcement mode. Only set when
     ``VNX_ENFORCE_WORKER_PERMISSIONS`` is active so flag-off receipts remain
     byte-identical to the pre-feature shape.
+
+    ``final_prompt_path`` / ``final_prompt_sha256`` / ``injection_reconstructs``:
+    the input-side audit pointer (final_prompt_integrity). ``final_prompt_path``
+    points at the persisted assembled prompt, ``final_prompt_sha256`` pins its
+    bytes, and ``injection_reconstructs`` records whether the raw instruction +
+    recorded intelligence injections literally reconstruct that body. Each is only
+    stamped when provided so lanes that do not yet compute integrity keep a
+    byte-identical receipt shape.
 
     Raises:
         ValueError: provider field doesn't match required pattern
@@ -117,6 +128,12 @@ def emit_dispatch_receipt(
         receipt["permission_enforcement"] = permission_enforcement
     if mandate_id:
         receipt["mandate_id"] = mandate_id
+    if final_prompt_path is not None:
+        receipt["final_prompt_path"] = final_prompt_path
+    if final_prompt_sha256 is not None:
+        receipt["final_prompt_sha256"] = final_prompt_sha256
+    if injection_reconstructs is not None:
+        receipt["injection_reconstructs"] = injection_reconstructs
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
