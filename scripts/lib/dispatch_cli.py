@@ -455,6 +455,45 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
                 severity="blocking",
                 message=f"track_id={track_id!r} references a track already in phase='done'",
             )
+
+        # Plan-first-gate enforcement (advisory-first). A live track whose OI-PLAN
+        # plan-first gate is unresolved must not be dispatched: building before
+        # planning is exactly what the gate exists to prevent, yet the gate used to
+        # bind only closure bookkeeping. Shared read-only check lives in
+        # plan_gate_enforcement so the merge gate applies the same rule.
+        import plan_gate_enforcement as _pge  # noqa: PLC0415
+        mode = _pge.enforce_mode()
+        if mode != "off":
+            try:
+                pg_state = _pge.plan_gate_state(db_path, track_id, spec.project_id)
+            except Exception:
+                # DB race between the phase read and here; already fail-open above.
+                pg_state = _pge.UNSUPPORTED
+            if pg_state == _pge.UNRESOLVED:
+                run_cmd = f"vnx plan-gate run {track_id} --doc <plan-doc>"
+                if mode == "required" and not _pge.override_active():
+                    return ConstraintVerdict(
+                        code="plan-gate-unresolved",
+                        severity="blocking",
+                        message=(
+                            f"track_id={track_id!r} has not passed its plan-first gate "
+                            f"(OI-PLAN-{track_id} unresolved). Plan before work: run "
+                            f"`{run_cmd}` (or `vnx plan-gate attest {track_id}`), or "
+                            f"operator-override with VNX_OVERRIDE_PLAN_GATE=1."
+                        ),
+                    )
+                overridden = mode == "required" and _pge.override_active()
+                return ConstraintVerdict(
+                    code="plan-gate-unresolved",
+                    severity="warn",
+                    message=(
+                        f"track_id={track_id!r} plan-first gate unresolved "
+                        f"(VNX_PLAN_GATE_ENFORCE={mode}"
+                        + (", operator override applied" if overridden else "")
+                        + f"); advisory. Run `{run_cmd}` before dispatching."
+                    ),
+                    override_applied=overridden,
+                )
         return None
 
     import config_runtime
