@@ -14,8 +14,16 @@ token_usage is only CORROBORATING: providers that report it (codex/claude) spend
 an LLM ran; kimi-cli never reports tokens, so its absence/0 is not evidence of a phantom. Reviewers
 legitimately produce no diff, so REVIEW_ROLES are exempt.
 
+A read-only review can also arrive WITHOUT a REVIEW_ROLES-matching ``role`` string — e.g. a dispatch
+routed through ``task_class="research_structured"`` (the fabric's review/analysis bucket, see
+dispatch_router.py ROLE_TO_TASK_CLASS) or one that carries an explicit ``read_only=True`` flag on the
+dispatch spec. Both are exempt the same way a REVIEW_ROLES role is: a verdict with real tokens and an
+empty diff is expected, not evidence of fabrication.
+
 Decision rule (a delivery worker is a phantom when):
-    role NOT in REVIEW_ROLES
+    read_only is not truthy
+    AND role NOT in REVIEW_ROLES
+    AND task_class NOT in REVIEW_TASK_CLASSES
     AND status claims completion (done/success)
     AND the worktree diff is empty
 token_usage is corroborating DETAIL only — token>0 does NOT exempt (it means an LLM thought, not
@@ -35,6 +43,18 @@ _LOG = logging.getLogger(__name__)
 # SSOT for review roles — kept in sync with the kimi-routing predicate (item C). A reviewer's
 # job is a verdict, not a diff, so it is never a phantom for "no changes".
 REVIEW_ROLES = frozenset({"plan-reviewer", "code-reviewer", "security-reviewer", "reviewer"})
+
+# SSOT for review/analysis task_class values — a second key onto the same exemption for callers
+# that route by task_class rather than a REVIEW_ROLES-matching role string. "research_structured"
+# is the fabric's canonical bucket for reviewer/architect/planner/security-engineer/data-analyst
+# work (dispatch_router.py ROLE_TO_TASK_CLASS); "02_code_review" is smart_router.py's cost-routing
+# classifier bucket for review/audit/lint instructions. "review"/"analysis"/"code_review" are plain
+# literal fallbacks for callers that tag task_class without going through either taxonomy. The
+# hyphenated variants ("code-review"/"plan-review") were dropped: they are not emitted by any real
+# dispatch path (only ever a docstring example), so they widened the exemption for nothing.
+REVIEW_TASK_CLASSES = frozenset({
+    "research_structured", "02_code_review", "code_review", "review", "analysis",
+})
 
 # Receipt status values that assert the work completed.
 COMPLETION_STATUSES = frozenset({"done", "success", "complete", "completed"})
@@ -59,11 +79,17 @@ def phantom_guard(
     worktree_diff: Optional[str],
     token_usage: Optional[int] = None,
     role: Optional[str] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
     """Pure decision. See module docstring for the rule. worktree_diff is the REAL diff of the
     worker's worktree/branch (caller-computed), NOT the receipt's main-repo provenance."""
+    if read_only:
+        return _ok("read_only=True — a verdict, not a diff, is expected")
     if role is not None and role.strip().lower() in REVIEW_ROLES:
         return _ok(f"review role {role!r} — a verdict, not a diff, is expected")
+    if task_class is not None and task_class.strip().lower() in REVIEW_TASK_CLASSES:
+        return _ok(f"review task_class {task_class!r} — a verdict, not a diff, is expected")
     if (status or "").strip().lower() not in COMPLETION_STATUSES:
         return _ok(f"status {status!r} is not a completion claim — nothing to falsify")
     if (worktree_diff or "").strip():
@@ -154,6 +180,8 @@ def guard_receipt(
         worktree_diff=worktree_diff,
         token_usage=_extract_token_usage(receipt),
         role=receipt.get("role") or receipt.get("agent"),
+        task_class=receipt.get("task_class"),
+        read_only=bool(receipt.get("read_only")),
     )
 
 
@@ -166,6 +194,8 @@ def guard_at_govern(
     worktree_path: Optional[Path] = None,
     base_sha: Optional[str] = None,
     worktree_diff: Optional[str] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
     """Inline govern-time phantom check for BOTH lanes (claude tmux via dispatch_govern.govern,
     providers via dispatch_envelope._govern — the kimi/glm/deepseek fabrication vector).
@@ -200,7 +230,10 @@ def guard_at_govern(
                 diff = compute_branch_diff(branch, base_ref=base)
         except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
             return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
-    return phantom_guard(status=status, worktree_diff=diff, token_usage=token_usage, role=role)
+    return phantom_guard(
+        status=status, worktree_diff=diff, token_usage=token_usage, role=role,
+        task_class=task_class, read_only=read_only,
+    )
 
 
 def record_phantom_if_any(
@@ -214,6 +247,8 @@ def record_phantom_if_any(
     worktree_diff: Optional[str] = None,
     receipts_file: Optional[str] = None,
     state_dir: Optional[Path] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
@@ -233,6 +268,7 @@ def record_phantom_if_any(
     verdict = guard_at_govern(
         dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
         worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
+        task_class=task_class, read_only=read_only,
     )
     if verdict.is_phantom and state_dir:
         try:
@@ -338,6 +374,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--receipt-json", help="Receipt as a JSON string (or use --status/--role).")
     p.add_argument("--status", help="Receipt status (when not passing --receipt-json).")
     p.add_argument("--role", default=None)
+    p.add_argument("--task-class", default=None)
+    p.add_argument("--read-only", action="store_true")
     p.add_argument("--token-usage", type=int, default=None)
     src = p.add_mutually_exclusive_group()
     src.add_argument("--worktree", help="Path to the worker's worktree (diff it vs --base).")
@@ -362,6 +400,7 @@ def main(argv: Optional[list] = None) -> int:
         verdict = phantom_guard(
             status=args.status, worktree_diff=diff,
             token_usage=args.token_usage, role=args.role,
+            task_class=args.task_class, read_only=args.read_only,
         )
 
     print(verdict.reason, file=sys.stderr)

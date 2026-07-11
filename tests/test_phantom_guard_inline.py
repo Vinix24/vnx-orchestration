@@ -59,6 +59,39 @@ def test_precaptured_worktree_diff_bypasses_resolution():
     assert not v2.is_phantom
 
 
+def test_guard_at_govern_exempts_review_task_class_with_precaptured_empty_diff():
+    # a read-only review keyed by task_class (not a REVIEW_ROLES role string), real tokens spent,
+    # empty pre-captured diff -> must not be phantom-rejected.
+    v = pg.guard_at_govern(dispatch_id="d1", role="backend-developer", status="done",
+                           token_usage=987, worktree_diff="", task_class="review")
+    assert not v.is_phantom
+
+
+def test_guard_at_govern_exempts_read_only_flag_with_precaptured_empty_diff():
+    v = pg.guard_at_govern(dispatch_id="d1", role="backend-developer", status="done",
+                           token_usage=987, worktree_diff="", read_only=True)
+    assert not v.is_phantom
+
+
+def test_record_phantom_threads_task_class_and_read_only(monkeypatch, tmp_path):
+    # record_phantom_if_any must forward task_class/read_only to guard_at_govern so the receipt
+    # entry point exempts a genuine empty-diff review the same way the pure decision does.
+    captured = {}
+
+    def _fake_guard_at_govern(**kw):
+        captured.update(kw)
+        return pg.PhantomVerdict(False, "ok")
+
+    monkeypatch.setattr(pg, "guard_at_govern", _fake_guard_at_govern)
+    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+                                 token_usage=987, worktree_diff="",
+                                 receipts_file=str(tmp_path / "r.ndjson"),
+                                 task_class="review", read_only=None)
+    assert not v.is_phantom
+    assert captured["task_class"] == "review"
+    assert captured["read_only"] is None
+
+
 def test_dedup_phantom_rejected_wins_over_worker_done():
     import dispatch_govern as dg
     worker = {"dispatch_id": "d1", "status": "done", "timestamp": "2026-06-23T10:00:00Z"}
