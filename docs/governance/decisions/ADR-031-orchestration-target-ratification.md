@@ -1,0 +1,81 @@
+# ADR-031 — Orchestration target architecture: operator-facing ratification of folder-per-agent + two-tier ephemeral judge
+
+**Status:** Proposed (awaiting operator ratification)
+**Date:** 2026-07-11
+**Decided by:** Proposed by an autonomous session; awaiting operator ratification — Vincent van Deth
+**Resolves / Cross-refs:** Supersedes ADR-028 (same target architecture, but ADR-028 was marked `Accepted` inside an autonomous overnight session, which is not a human ratification under ADR-006). Incorporates ADR-029 (hash-chain epoch rotation, the Phase-0 integrity fix) and ADR-030 (plan-first-gate enforcement, landed since ADR-028). Extends ADR-022 (provider-agnostic skill injection), ADR-011 (manager-worker hierarchy), ADR-012 (hybrid interactive + headless). Reuses ADR-005 (NDJSON ledger), ADR-006 (staging to promote human gate), ADR-023 (receipt hash-chain, PARTIAL), ADR-026 (per-project store). Restates and brings current `claudedocs/20260707-ADR-DRAFT-orchestration-target-architecture.md`.
+
+## Context
+
+VNX runs a fixed T0-T3 tmux terminal topology. The target is a **folder-per-agent, provider-agnostic** fabric coordinated by a **two-tier orchestration**: a thin persistent supervisor plus ephemeral, stateless, per-receipt judges. This decision was first recorded in ADR-028 on 2026-07-07, grounded in a deep-research pass and a two-round provider panel (deepseek, codex, kimi-r2 converged; glm flaked empty both rounds). The research established four things: the model has real prior art (ESAA event-sourcing single-author pattern); tamper-evident AUDIT is VNX's differentiator (the field ships no tamper-evidence, VNX's hash-chain does); central coordination dampens error propagation (17.2x to 4.4x); and the fusion of folder-per-agent with cross-vendor provider-agnostic delivery exists nowhere else. The migration mechanics have zero external evidence, so the path is reasoned, not battle-tested.
+
+**Why re-issue as a Proposed ADR.** ADR-028 records the same architecture but carries **Status: Accepted**, ratified "in an autonomous session under an explicit overnight operator mandate." An overnight mandate to work is not the same as an operator sitting with the finished decision and ratifying it. ADR-006 puts the human on the final action boundary; a self-authored "Accepted" by the same autonomous run that wrote the ADR is exactly the class of protected action that stays with the operator. ADR-031 therefore restates the identical technical decision honestly as **Proposed (awaiting operator ratification)**, and brings the record current with what has actually landed since 2026-07-07 (ADR-029, ADR-030, and the default-off decision-path code). Ratifying ADR-031 supersedes ADR-028; see Open Questions for the alternative of correcting ADR-028's status in place instead.
+
+## Decision (target architecture)
+
+### 1. Folder-per-agent (the fusion)
+Each agent is `agents/<name>/` with a `CLAUDE.md` (role) and a `config.yaml` (provider binding + scoped permissions). This builds on the existing `agents/` tree, which already holds `orchestrator`, `research-analyst`, `linkedin-writer`, `blog-writer`, and the reviewer/engineer roles, each with a `config.yaml` (`scripts/lib/agent_resolver.py`, self-labelled "ADR-028 Phase 1", resolves a name from the local `agents/` tree behind `VNX_AGENT_FOLDERS`). It reuses the skill-frontmatter permission primitive and the business-folder isolation code (allowed/denied paths + scope + runtime guard), promoted from pilot to the registry contract. Delivery stays ADR-022 injection (provider-agnostic), plus a LiteLLM-style `provider` field the door reads at dispatch. **No parallel dispatch path:** the existing door (`compile_plan` in `scripts/lib/dispatch_plan.py` returning an `ExecutionPlan`, the `ExecutionPermit` un-evadable in-process gate in `scripts/lib/dispatch_internal.py`, then the lane) is EXTENDED to read agent definitions and emit decision-receipts.
+
+`config.yaml` schema (concrete): `agent_id`, `name`, `role`, `governance_profile`, `provider`, `model`, `isolation` (scope_type + allowed/denied_paths), `permissions` (allowed/denied_tools + bash_allow/deny_patterns), `skills[]`. Non-claude CLIs (codex/kimi/glm) honour no Claude permission blocks, so permissions are enforced as a plain-text guard plus a `PreToolUse` hook enforcing `denied_tools` / `bash_deny_patterns`.
+
+### 2. Two-tier orchestration
+- **Thin persistent Opus supervisor** — interactive (auto-loads `CLAUDE.md`, hence lean and canonical). Registers work and escalates only on exception.
+- **Ephemeral stateless judges** — opus-tmux-spawn / codex / kimi (NEVER `claude -p`, per the provider-lane rule). Spawn per receipt, read the fabric, decide APPROVE / REJECT / DISPATCH-NEXT / REWORK, write a hash-chained decision-receipt (`decided_by`, `receipt_under_review`, `verdict`, `evidence`), then die. The router is `scripts/lib/llm_decision_router.py`.
+- **Cheap DETERMINISTIC fast-path** — risk <= 0.3 and no blockers means no judge spawn (multi-agent runs roughly 15x tokens; a one-liner does not warrant a judge). Implemented in `scripts/lib/decision_fast_path.py` behind `VNX_DECISION_FAST_PATH` (default OFF). Opt-in resume token for continuity threads.
+- **Governance reconciliation (critical):** the fast-path and the judges are GOVERNED LOCAL DECISIONS with human-in-the-loop at the final ACTION boundary (the ADR-006 promote gate stays), NOT an autonomous execution bypass. Hard constraints stay deterministic and pre-LLM; LLM judges make only soft choices AFTER a fresh snapshot.
+
+### 3. Fleet-addressable agents
+A central registry `~/.vnx-data/agent-registry/agents.json` (logical name to physical home dir + binding) plus a `vnx agent register` command and dispatch-into-home (cross-project: vnx-dev to business-os for a linkedin-writer). The terminal/pool worker-registry stays for execution slots; the agent-registry is additive. This structurally fixes the "skill not invocable from another project" gap. **Not yet built:** as of 2026-07-11 there is no `agents.json`, no `vnx agent register`, and `agent_resolver.py` resolves only the local `agents/` tree and packaged examples, not a cross-project registry. This is the primary un-landed piece of the target (Phase 5).
+
+### 4. Reliability
+SQLite stays a PROJECTION under the NDJSON ledger, NOT the SSOT. "Fabric 100% reliable" means a narrow synchronous decision-write transaction plus a ledger append, with read-your-writes on the decision path (a Jepsen stale-read is the primary threat). Idempotency uses `receipt_under_review` as the dedup key; the hash-chain (`scripts/lib/ndjson_hash_chain.py`) detects lost / double / out-of-order entries. **Make an "unknown" identity INVALID on the decision path** (quarantine legacy/ghost events), otherwise a judge could decide under an unknown identity. This last item is the remaining open Phase-0 correctness fix.
+
+### 5. Audit
+Every decision is a first-class receipt via the canonical append facade `append_receipt_payload` (`scripts/lib/append_receipt_internals/payload.py`), hash-chained UNIFORMLY. This closes decision-diffusion (`decided_by`), evidence-fragmentation (a full fabric read per spawn), and responsibility-ambiguity (a hash-chain over depth > 1). ADR-023's hash-chain is currently PARTIAL; the target requires completing it, which means judge decisions must chain exclusively via `append_chained_entry` rather than `emit_dispatch_receipt`, which does not chain (`scripts/lib/governance_emit.py`). ADR-029 landed the epoch-rotation mechanism that makes the default-on flip safe fleet-wide.
+
+### 6. Migration (6 phases, each feature-flagged and reversible, ADR-012-compliant)
+- **Phase 0 — fabric hardening (PREREQUISITE):** retire the orphaned shared `~/.vnx-data/state/` (to `.pre-retirement`, 30-day hold), cut over the dual-write paths so every consumer reads central via `resolve_state_dir` (`scripts/lib/vnx_paths.py`; the `scripts/lib/dual_writer.py` module stays as the rollback net until Phase 0 burns in), enforce the data-dir guard plus a startup check that aborts when the resolved data-dir does not match `.vnx-project-id`, complete the hash-chain (ADR-029 epoch rotation + `scripts/chain_epoch_seal.py`, with judge decisions chaining exclusively via `append_chained_entry`), and make unknown-identity invalid. The `vnx fabric-audit` command (`vnx_cli/commands/fabric_audit.py`, engine `scripts/fabric_audit.py`) checks: no shared-store rows, all ledgers per-project, hash-chain integrity, no projection contradictions; it must run green before every T0 session. This is a correctness bug NOW, not just a future blocker. Rollback: `VNX_DISPATCH_LEGACY=1` plus dual-write back.
+- **Phase 1 — agent-folder fusion (backward-compatible):** extend `config.yaml` with provider/model/permissions/skills; old configs keep working with defaults. `agent_resolver.py` reads the local `agents/` tree or the registry. Role canonicalization is step 1 here. Rollback: `VNX_AGENT_FOLDERS=0`.
+- **Phase 2 — decision-judge SHADOW mode (the safety valve):** `VNX_DECISION_JUDGE_SHADOW=1` spawns a judge that writes its decision as a `decision_advisory` entry to `decision_advisory.ndjson` (`scripts/lib/decision_shadow.py`); T0 reads it but does NOT act on it and decides itself. A comparator logs divergence, validating the judge against the human at zero risk. Rollback: flag off, advisories ignored.
+- **Phase 3 — judge fast-path:** a deterministic classifier handles trivial receipts; non-trivial ones go to the judge (`scripts/lib/decision_fast_path.py`). Rollback: `VNX_DECISION_FAST_PATH=0`, all to T0.
+- **Phase 4 — human-on-the-last-set:** `VNX_DECISION_JUDGE_ENABLED=1` makes judge decisions binding for routine work (`scripts/lib/decision_binding.py`); T0 reviews exceptions; an explicit `operator_approval` receipt gates sensitive actions (merge, close track, override). Rollback: flag off, T0 resumes full decision authority.
+- **Phase 5 — fleet-addressable agents:** the central registry and cross-project dispatch come on. Rollback: `VNX_AGENT_REGISTRY_ENABLED=0`, local only. Not yet built (see §3).
+- No phase retires interactive tmux (ADR-012).
+
+### 7. Adopt / Avoid (per framework, against VNX constraints)
+- **ADOPT (patterns, not products):** the Claude Code subagent-folder convention (constrained), the OpenAI Agents SDK + LiteLLM ROUTING pattern (not the SDK), the ESAA read-model/projection pattern, AgentOrchestra external-plan-state.
+- **AVOID:** LangGraph (in-memory SSOT), AutoGen (SDK-coupled, conflicts ADR-003), CrewAI (weak audit), managed-agents-as-substrate (cloud state, conflicts local-first), "everything via subagents" (depth-1, no receipts).
+
+## Worked example (marketing-manager)
+Orchestrator decides blog-vs-LinkedIn, dispatches research-analyst (cross-project, reads Supabase business data), a judge approves the research, then a parallel fan-out to linkedin-writer + blog-writer (business folder, dispatch-into-home), judges approve both, orchestrator closes the track. Six hash-chained receipts, fully auditable. Business data lives in the cloud (read), governance decisions stay local (write). The two-tier data split works here exactly. This flow depends on Phase 5 (cross-project dispatch), which is not yet built.
+
+## Implementation status (as of 2026-07-11)
+This ADR is a proposal, but much of the mechanism already exists default-off, so the operator ratifies against reality rather than a 2026-07-07 snapshot:
+- **Phase 0 — largely landed.** `vnx fabric-audit` shipped and is GREEN; the orphaned shared state is retired; the dual-write runtime cutover is verified complete (`resolve_state_dir` goes central for every consumer). Hash-chain: ADR-029 mechanism landed, `VNX_CHAIN_RECEIPTS` stays default-OFF pending burn-in and the per-ledger seal. Remaining: unknown-identity invalidation and the exclusive-`append_chained_entry` change.
+- **Phase 1 — landed.** Agent folders + `config.yaml` + `agent_resolver.py` exist behind `VNX_AGENT_FOLDERS`.
+- **Phases 2-4 — code landed, default-OFF.** `decision_shadow.py`, `decision_fast_path.py`, `decision_binding.py`, `llm_decision_router.py` all ship with their flags default-OFF. Activation is a per-phase operator go/no-go.
+- **Phase 5 — not built.** No central agent-registry, no `vnx agent register`, no cross-project dispatch.
+
+## Consequences
+- VNX becomes the first system to fuse folder-per-agent AND cross-vendor provider-agnostic delivery, with tamper-evident audit the field leaves open. That is a data-sovereignty differentiator down to the evidence layer.
+- Cost: hierarchy overhead plus per-spawn state reconstruction. The deterministic fast-path is not optional but economically necessary.
+- Risk: early adopter of a single-author pattern (ESAA); the migration is reasoned, not battle-tested. Hence phased, reversible, and shadow-validated.
+- Governance clarity: re-issuing as Proposed removes a live inconsistency where a target architecture that touches the decision path carried a self-authored "Accepted" status. The record now matches the ADR-006 human-gate discipline it depends on.
+
+## Rollout
+Adoption is gated per phase. Each phase ships behind its own feature flag with a rollback, and Phases 2 to 4 (which touch the decision path) each require an explicit operator go/no-go at the transition. Nothing here authorizes an autonomous execution bypass. Phase 0 is a correctness fix independent of the future architecture and proceeds regardless. The default-off code already on `main` (Phases 1-4) changes no behaviour until an operator flips a flag; ratifying this ADR does not itself activate anything.
+
+## Related
+- **ADR-028** (orchestration target architecture) — the prior record of this same decision, marked `Accepted` in an autonomous session. ADR-031 supersedes it on operator ratification.
+- **ADR-029** (hash-chain epoch rotation) — the Phase-0 integrity fix that makes the `VNX_CHAIN_RECEIPTS` default-on flip safe fleet-wide.
+- **ADR-030** (plan-first-gate enforcement) — the dispatch-door + merge-gate enforcement that landed since ADR-028; complements the governed-decision-path principle here.
+- **ADR-022** (provider-agnostic skill injection), **ADR-011** (manager-worker hierarchy), **ADR-012** (hybrid interactive + headless) — extended by this architecture.
+- **ADR-005** (NDJSON ledger), **ADR-006** (staging to promote human gate), **ADR-023** (receipt hash-chain, PARTIAL), **ADR-026** (per-project store) — primitives reused.
+- `claudedocs/20260707-ADR-DRAFT-orchestration-target-architecture.md` — the original draft, restated and brought current here.
+
+## Open Questions (for the operator)
+1. **ADR-028 vs ADR-031 duplication.** These two ADRs hold near-identical technical content. Two clean resolutions: (a) ratify ADR-031 and mark ADR-028 `Superseded by ADR-031`; or (b) reject ADR-031, keep ADR-028 as the single record, and correct ADR-028's status in place to `Proposed` (or a genuine operator `Accepted`). Option (a) preserves the ADR-immutability convention (supersede, do not edit); option (b) avoids two records for one decision. The operator's call.
+2. **Where do operator-policies A1-E6 live — canonical role vs project-local?** ADR-028's ratification chose canonical `role-orchestrator.md` with an optional project-local supplement imported after it. That choice was flagged for morning review and is not operator-confirmed. Carried forward here as an open question.
+3. **Pinned-daemon structural friction.** Recorded as a follow-up ADR candidate (memory `dispatch-structure-not-consolidated-friction`); kept out of scope here to preserve focus. Confirm splitting vs folding in.
+4. **Phase-0 completion order.** Unknown-identity invalidation and the exclusive-`append_chained_entry` change are the last Phase-0 items. Confirm they land before the `VNX_CHAIN_RECEIPTS` default-on flip, since a judge deciding under an unknown identity would poison the very chain the flip is meant to protect.
+5. **Migration mechanics have no external prior art.** The phase sequence is reasoned from the panel, not battle-tested. The shadow phase (Phase 2) is the deliberate validation step; confirm the shadow-divergence threshold that would gate the Phase 2 to Phase 4 progression.
