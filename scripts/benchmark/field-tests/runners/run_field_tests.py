@@ -196,26 +196,38 @@ def _load_dnf_cells_from_csv(
                 continue
 
             # Soft signal: report-missing for any cell with wallclock < 5s.
-            # Check filesystem for both report-naming conventions in both candidate dirs.
-            # KNOWN LIMITATION (F5, PR #831, deferred 1.0.1): the prefix match
-            # below has a per-cell timestamp suffix, so ANY historical report
-            # for this lane/task/rep counts as "present" — a short failed cell
-            # whose only report is from an earlier run is wrongly excluded from
-            # retry. Fix is to match the row's own dispatch_id; deferred.
+            # FIXED (F5, PR #831): match this row's OWN dispatch_id exactly
+            # (dispatch_id is a raw.csv column since the dispatch_id field
+            # landed on CellScore) instead of a bare (lane, task, rep) prefix.
+            # The prefix alone matches ANY historical report for that cell —
+            # including one left over from an earlier attempt with a
+            # different timestamp — which wrongly counted a genuinely-failed
+            # row as "report present" and excluded it from retry.
             if wall < 5.0:
-                prefix = f"bench-{row['lane_id']}-{row['task_id']}-r{row['replication']}-"
+                dispatch_id = (row.get("dispatch_id") or "").strip()
                 found = False
-                for d in REPORT_DIR_CANDIDATES:
-                    if not d.exists():
-                        continue
-                    for p in d.iterdir():
-                        if p.name.startswith(prefix) and (
-                            p.name.endswith(".md") or p.name.endswith("_report.md")
-                        ):
+                if dispatch_id:
+                    for d in REPORT_DIR_CANDIDATES:
+                        if (d / f"{dispatch_id}.md").exists() or (
+                            d / f"{dispatch_id}_report.md"
+                        ).exists():
                             found = True
                             break
-                    if found:
-                        break
+                else:
+                    # Legacy raw.csv predating the dispatch_id column: fall back
+                    # to the coarse prefix heuristic (may under-count DNFs).
+                    prefix = f"bench-{row['lane_id']}-{row['task_id']}-r{row['replication']}-"
+                    for d in REPORT_DIR_CANDIDATES:
+                        if not d.exists():
+                            continue
+                        for p in d.iterdir():
+                            if p.name.startswith(prefix) and (
+                                p.name.endswith(".md") or p.name.endswith("_report.md")
+                            ):
+                                found = True
+                                break
+                        if found:
+                            break
                 if not found:
                     dnf.add((row["lane_id"], row["task_id"], int(row["replication"])))
     return dnf
@@ -254,6 +266,7 @@ def _load_prior_scores(
                 judge_reasoning=row.get("judge_reasoning", ""),
                 cost_usd=float(row["cost_usd"]),
                 wallclock_seconds=float(row["wallclock_seconds"]),
+                dispatch_id=row.get("dispatch_id", ""),
             ))
     return prior
 
