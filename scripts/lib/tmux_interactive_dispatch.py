@@ -720,6 +720,83 @@ class TmuxInteractiveDispatch:
             return None
         return {"input": inp, "output": out, "cache_read": 0}
 
+    def _fail_loud_on_empty_extraction(
+        self,
+        *,
+        dispatch_id: str,
+        receipt: "dict | None",
+        role: "str | None",
+        worktree_path: "Path | None",
+        base_sha: "str | None",
+        pane_tokens: "dict | None" = None,
+    ) -> "dict | None":
+        """Reject a worker's self-reported completion BEFORE govern() synthesizes a
+        report from it, when the worktree shows no evidence of work.
+
+        The tmux-lane twin of dispatch_envelope._fail_loud_on_empty_success — that
+        guard catches an empty PROVIDER completion at EXECUTE time, before GOVERN
+        ever sees it. Until this hook, the tmux lane's equivalent check
+        (phantom_guard) ran only INSIDE govern(), AFTER the unified report was
+        already synthesized and emitted with status="done" — the correction landed
+        as a second, later receipt (audit-honest, per phantom_guard's design), but
+        the report FILE itself kept claiming success. Running the identical
+        rejection here, before _govern_report(), means the report synthesized from
+        this receipt already reflects "failed" — no "done" report is ever emitted
+        for an empty extraction (dispatch 20260711-164747-provider-hardening).
+
+        Delegates to phantom_guard.record_phantom_if_any for BOTH the decision and
+        the corrective-receipt append (the same ndjson-visible signal the govern()
+        -time backstop produces), so the two chokepoints share one implementation
+        and never diverge. By the time govern()'s own post-hoc check runs, the
+        receipt it sees already carries status="failed" — its guard_at_govern
+        short-circuits on the non-completion status, so no second corrective
+        receipt is appended.
+
+        Never raises: on any internal error the receipt is returned unchanged
+        (fail-open, matching the guard's own abstain contract).
+        """
+        if receipt is None:
+            return receipt
+        try:
+            from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+            _tok = pane_tokens or {}
+            verdict = record_phantom_if_any(
+                dispatch_id=dispatch_id,
+                role=role,
+                status=receipt.get("status"),
+                token_usage=(
+                    int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)
+                ) or None,
+                worktree_path=worktree_path,
+                base_sha=base_sha,
+                receipts_file=str(self._receipts_file),
+                state_dir=self._state_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — never block a real completion on a guard error
+            logger.error(
+                "interactive: fail-loud-on-empty-extraction guard errored dispatch=%s: %s",
+                dispatch_id, exc,
+            )
+            return receipt
+        if not verdict.is_phantom:
+            return receipt
+        logger.warning(
+            "interactive: fail-loud-on-empty-extraction REJECTED dispatch=%s — %s",
+            dispatch_id, verdict.reason,
+        )
+        self._emit_event(
+            "interactive_empty_extraction",
+            dispatch_id=dispatch_id,
+            label=str(receipt.get("terminal") or receipt.get("terminal_id") or ""),
+            reason=verdict.reason,
+            metadata={"original_status": receipt.get("status")},
+        )
+        downgraded = dict(receipt)
+        downgraded["status"] = "failed"
+        downgraded["phantom_rejected"] = True
+        downgraded["phantom_reason"] = verdict.reason
+        return downgraded
+
     def _build_completion_protocol(
         self, dispatch_id: str, label: str, model: str = "unknown", *, integrity=None
     ) -> str:
@@ -2275,14 +2352,24 @@ class TmuxInteractiveDispatch:
                 reason=f"receipt status={receipt.get('status')}",
                 metadata={"session": session, "status": receipt.get("status")},
             )
+            # Best-effort token usage parsed from the pane TUI counter (no usage API on
+            # the subscription lane) — used as a frontmatter fallback AND as
+            # corroborating detail for the fail-loud check below.
+            _pane_tokens = self._parse_token_usage_from_log(_raw_log[0])
+            # P0.3: fail loud on an empty extraction BEFORE trusting the worker's own
+            # "done" claim — see _fail_loud_on_empty_extraction docstring.
+            receipt = self._fail_loud_on_empty_extraction(
+                dispatch_id=dispatch_id,
+                receipt=receipt,
+                role=role,
+                worktree_path=worktree_handle.path if worktree_handle else None,
+                base_sha=worktree_handle.base_sha if worktree_handle else None,
+                pane_tokens=_pane_tokens,
+            )
             worker_succeeded = receipt is not None and receipt.get("status") not in (
                 "failed",
                 "blocked",
             )
-            # Best-effort token usage parsed from the pane TUI counter (no usage API on
-            # the subscription lane) — used only as a frontmatter fallback when the
-            # worker receipt carries none.
-            _pane_tokens = self._parse_token_usage_from_log(_raw_log[0])
             emitted_report = self._govern_report(
                 dispatch_id=dispatch_id,
                 terminal_id=label,
