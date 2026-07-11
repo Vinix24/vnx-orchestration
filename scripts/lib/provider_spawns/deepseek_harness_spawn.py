@@ -67,10 +67,14 @@ MCP_OFF_CONFIG = '{"mcpServers":{}}'
 # Environment variable that holds the operator's own DeepSeek API key.
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
-# Keys that must be absent from the final child env — specifically the production
-# Anthropic API key which would authenticate against api.anthropic.com and risk
-# account ban (constraint: deepseek-harness-subscription-blocked).
-_HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY"})
+# Keys that must be absent from the final child env — the production Anthropic API key
+# AND the cached OAuth session token, either of which would authenticate the redirected
+# CLI against api.anthropic.com and risk account ban (constraint:
+# deepseek-harness-subscription-blocked). CLAUDE_CODE_OAUTH_TOKEN is scrubbed alongside
+# ANTHROPIC_API_KEY (audit S3) — an inherited OAuth token sitting next to the key-auth
+# ANTHROPIC_AUTH_TOKEN override is exactly the ambiguity the measured-safe key-auth
+# recipe is meant to eliminate.
+_HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 
 
 def resolve_harness_model(model: Optional[str] = None) -> str:

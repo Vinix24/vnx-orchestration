@@ -43,7 +43,10 @@ DEFAULT_GLM_PROXY_URL = "http://localhost:4141"
 DEFAULT_GLM_PROXY_KEY = "sk-glm-harness-local"
 DEFAULT_GLM_HARNESS_MODEL = "glm-5.2"
 MCP_OFF_CONFIG = '{"mcpServers":{}}'
-_HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY"})
+# CLAUDE_CODE_OAUTH_TOKEN scrubbed alongside ANTHROPIC_API_KEY (audit S3) — mirrors
+# deepseek_harness_spawn's _HARNESS_SCRUB_KEYS: an inherited OAuth token must not survive
+# into this redirected CLI either.
+_HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 
 
 def resolve_harness_model(model: Optional[str] = None) -> str:
