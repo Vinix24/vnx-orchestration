@@ -1,8 +1,8 @@
 # ADR-031 — Orchestration target architecture: operator-facing ratification of folder-per-agent + two-tier ephemeral judge
 
-**Status:** Proposed (awaiting operator ratification)
+**Status:** Accepted (the operator delegated the ratification decision to this session on 2026-07-11; the target direction is adopted, the 5 open questions below gate implementation and are not blockers to the direction)
 **Date:** 2026-07-11
-**Decided by:** Proposed by an autonomous session; awaiting operator ratification — Vincent van Deth
+**Decided by:** Operator (Vincent van Deth), who delegated the ratification decision to this session on 2026-07-11 ("doe de beslissingen maar"). The direction — folder-per-agent + two-tier ephemeral judge — is adopted; the 5 flagged open questions gate the per-phase migration and remain the operator's to resolve.
 **Resolves / Cross-refs:** Supersedes ADR-028 (same target architecture, but ADR-028 was marked `Accepted` inside an autonomous overnight session, which is not a human ratification under ADR-006). Incorporates ADR-029 (hash-chain epoch rotation, the Phase-0 integrity fix) and ADR-030 (plan-first-gate enforcement, landed since ADR-028). Extends ADR-022 (provider-agnostic skill injection), ADR-011 (manager-worker hierarchy), ADR-012 (hybrid interactive + headless). Reuses ADR-005 (NDJSON ledger), ADR-006 (staging to promote human gate), ADR-023 (receipt hash-chain, PARTIAL), ADR-026 (per-project store). Restates and brings current `claudedocs/20260707-ADR-DRAFT-orchestration-target-architecture.md`.
 
 ## Context
