@@ -163,25 +163,133 @@ def build_plan_review_instruction_fileref(
     )
 
 
-def parse_verdict(report_text: str) -> Dict[str, Any]:
-    """Extract the LAST ``vnx-plan-verdict`` block from a panelist report.
+_CONTRACT_FENCE_RE = re.compile(r"```" + re.escape(VERDICT_FENCE) + r"\s*\n(.*?)```", re.DOTALL)
+# Any code fence (```json ...```, ``` ...```, ```JSON5 ...```) — the degraded-recovery channel
+# for a panelist that wrapped its verdict in the wrong fence (the codex/glm verdict-JSON flake).
+_CODE_FENCE_RE = re.compile(r"```[A-Za-z0-9_.+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
 
-    Fail-safe by design: anything unparseable becomes ``revise`` with
-    ``parse_error=True`` so a missing/garbled verdict can never silently PASS.
-    """
-    empty = {"verdict": "revise", "blocking_findings": [], "rationale": "", "parse_error": True}
-    if not report_text:
-        return {**empty, "rationale": "empty report"}
-    pattern = re.compile(r"```" + re.escape(VERDICT_FENCE) + r"\s*\n(.*?)```", re.DOTALL)
-    matches = pattern.findall(report_text)
-    if not matches:
-        return {**empty, "rationale": "no verdict block found"}
+
+def _loads_json(candidate: str) -> Any:
+    """``json.loads`` with ONE conservative repair pass (strip trailing commas before a
+    closing brace/bracket — the single most common LLM JSON tic). Returns the parsed value
+    or ``None`` when it still will not parse. The repair only removes a dangling comma; it can
+    never quote an unquoted key or invent a value, so genuine garbage (``{verdict: pass,,,}``)
+    stays garbage and still abstains."""
     try:
-        data = json.loads(matches[-1].strip())
+        return json.loads(candidate)
     except (json.JSONDecodeError, ValueError):
-        return {**empty, "rationale": "verdict block is not valid JSON"}
-    if not isinstance(data, dict):
-        return {**empty, "rationale": "verdict block is not a JSON object"}
+        pass
+    repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+    if repaired != candidate:
+        try:
+            return json.loads(repaired)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None
+
+
+def _find_balanced_objects(text: str) -> List[str]:
+    """Every balanced ``{...}`` substring in ``text``, in order of appearance.
+
+    String- and escape-aware, so braces inside JSON string values do not skew the depth
+    count. Used to recover a verdict object embedded in prose or wrapped in a non-contract
+    code fence — the ``glm``/``codex`` case where the model emits the right JSON but not the
+    exact ``vnx-plan-verdict`` fence."""
+    out: List[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth, in_str, esc, j = 0, False, False, i
+        while j < n:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append(text[i:j + 1])
+                    break
+            j += 1
+        i = j + 1 if j < n else n
+    return out
+
+
+def _verdict_obj_in(chunk: str) -> Optional[Dict[str, Any]]:
+    """The verdict OBJECT (a dict carrying a ``verdict`` key) inside ``chunk``, whether the
+    chunk is clean JSON, JSON wrapped in prose, or JSON in a nested code fence. ``None`` if
+    the chunk carries no such object. Validity of the verdict VALUE is checked by the caller."""
+    chunk = chunk.strip()
+    if not chunk:
+        return None
+    data = _loads_json(chunk)
+    if isinstance(data, dict) and "verdict" in data:
+        return data
+    for block in reversed(_CODE_FENCE_RE.findall(chunk)):
+        data = _loads_json(block.strip())
+        if isinstance(data, dict) and "verdict" in data:
+            return data
+    for cand in reversed(_find_balanced_objects(chunk)):
+        data = _loads_json(cand)
+        if isinstance(data, dict) and "verdict" in data:
+            return data
+    return None
+
+
+def _locate_verdict_object(report_text: str) -> Optional[Dict[str, Any]]:
+    """Locate the panelist's verdict object across three channels, most-trusted first.
+
+    1. CONTRACT — the ``vnx-plan-verdict`` fence. When present it is AUTHORITATIVE and its
+       LAST occurrence is the only one consulted (a doc's own fence is neutralized upstream by
+       ``_sanitize_doc``, so this channel cannot be spoofed). If that fence carries no JSON
+       object at all we abstain rather than fall through — the same fail-safe as before.
+    2. CODE-FENCE — only when NO contract fence exists: a verdict wrapped in a ```json
+       block (the codex/glm flake). Last valid object wins.
+    3. PROSE — last resort: a balanced JSON object with a ``verdict`` key sitting in prose.
+
+    Returns a dict that has a ``verdict`` key (its VALUE may still be invalid — the caller
+    validates), or ``None`` when no verdict object can be recovered anywhere."""
+    contract = _CONTRACT_FENCE_RE.findall(report_text)
+    if contract:
+        return _verdict_obj_in(contract[-1])
+    for block in reversed(_CODE_FENCE_RE.findall(report_text)):
+        obj = _verdict_obj_in(block)
+        if obj is not None:
+            return obj
+    for cand in reversed(_find_balanced_objects(report_text)):
+        data = _loads_json(cand)
+        if isinstance(data, dict) and "verdict" in data:
+            return data
+    return None
+
+
+def parse_verdict(report_text: str) -> Dict[str, Any]:
+    """Extract the panelist's ``vnx-plan-verdict`` from a report.
+
+    Robust by design (2026-07-11): the contract fence is honoured first, but a verdict wrapped
+    in a ```json fence or embedded in prose is still recovered instead of abstaining — the
+    codex/glm verdict-JSON flake that dropped those seats to non-scoring. See
+    ``_locate_verdict_object`` for the channel precedence.
+
+    Fail-safe is preserved: a genuinely empty or garbage output (no recoverable verdict object,
+    or an object whose ``verdict`` value is not pass/revise/block) becomes ``revise`` with
+    ``parse_error=True`` so a missing/garbled verdict can never silently PASS."""
+    empty = {"verdict": "revise", "blocking_findings": [], "rationale": "", "parse_error": True}
+    if not report_text or not report_text.strip():
+        return {**empty, "rationale": "empty report"}
+    data = _locate_verdict_object(report_text)
+    if data is None:
+        return {**empty, "rationale": "no verdict block found"}
     verdict = str(data.get("verdict", "")).strip().lower()
     if verdict not in _VALID_VERDICTS:
         return {**empty, "rationale": f"unknown verdict {verdict!r}"}
@@ -300,6 +408,22 @@ def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optiona
     return None
 
 
+def _resolve_data_dir() -> str:
+    """Resolve a real VNX data_dir for the claude/tmux lane's report round-trip.
+
+    The claude lane writes its verdict report to ``<data_dir>/unified_reports/<id>.md`` but,
+    unlike ``provider_dispatch``, prints NO ``Report:`` stderr line, so ``_read_report`` can
+    only find it through the ``base`` fallback. When ``base`` is None the opus seat's report is
+    written but never read back -> NO-VERDICT (rc1) — the #1102-class failure that drops opus
+    from the panel. Resolving a real data_dir here keeps the write-path and read-path in
+    agreement for EVERY caller (mirrors panel.py's ``_resolve_reports_dir().parent``, #1102)."""
+    try:
+        from vnx_paths import resolve_state_dir  # noqa: PLC0415
+        return str(resolve_state_dir().parent)
+    except Exception:
+        return str(Path(os.environ.get("VNX_DATA_DIR") or (HERE.parent.parent / ".vnx-data")))
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
 ) -> DispatcherFn:
@@ -315,7 +439,12 @@ def _make_default_dispatcher(
                            (bills API credits post-cutover).
       kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
     """
-    base = Path(data_dir) if data_dir else None
+    # A REAL base is required for the claude/tmux lane: it writes its report to
+    # <base>/unified_reports/<id>.md and _read_report reads it back from exactly there (the tmux
+    # lane prints no `Report:` line to key off). With base=None the opus seat's report is written
+    # but never found -> NO-VERDICT (rc1). Resolve a real data_dir so no caller can pass None and
+    # silently drop the claude seat — the #1102-class fix, now guaranteed at the module level.
+    base = Path(data_dir) if data_dir else Path(_resolve_data_dir())
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
         env = dict(os.environ)
@@ -329,17 +458,9 @@ def _make_default_dispatcher(
                 #
                 # We write the original inline instruction to a temp file so the worker can
                 # read the plan + rubric + verdict contract from a stable on-disk path.
-                # The expected report path is derived from data_dir so the file-ref instruction
-                # can tell the worker exactly where to write its verdict report.
-                report_path_str: str
-                if base is not None:
-                    report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
-                else:
-                    # Fallback: derive from VNX_DATA_DIR or a tmp path
-                    report_path_str = str(
-                        Path(os.environ.get("VNX_DATA_DIR", tempfile.gettempdir()))
-                        / "unified_reports" / f"{dispatch_id}.md"
-                    )
+                # The expected report path is derived from `base` (a real data_dir, resolved
+                # above) so the write-path here and _read_report's read-path always agree.
+                report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
 
                 # Write the full inline instruction (plan + rubric + contract) to a temp file.
                 # The worker reads this file; the short file-ref instruction points to it.

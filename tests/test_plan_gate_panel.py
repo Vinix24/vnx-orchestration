@@ -912,3 +912,150 @@ def test_govern_spec_role_plan_reviewer_fenceless_report_becomes_synthesized(tmp
     assert pgp.parse_verdict(result_body)["parse_error"] is True, (
         "synthesized body unexpectedly contains a parseable verdict fence"
     )
+
+
+# --------------------------------------------------------------------------
+# seat-robustness (2026-07-11): parse_verdict recovers a verdict wrapped in a
+# ```json fence or embedded in prose (the codex/glm verdict-JSON flake that made
+# those seats abstain), while genuine garbage still abstains.
+# --------------------------------------------------------------------------
+
+def test_parse_verdict_json_code_fence_scores():
+    # codex/glm flake: the verdict lands in a ```json fence, NOT the vnx-plan-verdict fence.
+    text = (
+        "# Plan Review\n\nLooks mostly sound.\n\n"
+        '```json\n{"verdict": "pass", "blocking_findings": [], "rationale": "ok"}\n```\n'
+    )
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "pass"
+    assert out["parse_error"] is False
+
+
+def test_parse_verdict_bare_json_in_prose_scores():
+    # No fence at all — the verdict object sits inline in prose.
+    text = 'My verdict is {"verdict": "revise", "blocking_findings": ["thin risks"]} — fix that.\n'
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "revise"
+    assert out["parse_error"] is False
+    assert out["blocking_findings"] == ["thin risks"]
+
+
+def test_parse_verdict_contract_fence_with_prose_wrapper_scores():
+    # The contract fence exists but the model wrapped the JSON in prose inside it.
+    text = (
+        f"```{pgp.VERDICT_FENCE}\n"
+        'Here is my verdict:\n{"verdict": "block", "rationale": "unsafe"}\nthanks\n'
+        "```\n"
+    )
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "block"
+    assert out["parse_error"] is False
+
+
+def test_parse_verdict_trailing_comma_is_repaired():
+    # A single dangling comma (the most common LLM JSON tic) is repaired, not abstained.
+    text = _report('{"verdict": "pass", "blocking_findings": [],}')
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "pass"
+    assert out["parse_error"] is False
+
+
+def test_parse_verdict_braces_in_string_do_not_break_extraction():
+    # Braces inside a JSON string value must not skew the balanced-object scan.
+    text = 'note {"rationale": "use {placeholder} here", "verdict": "pass"} done\n'
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "pass"
+    assert out["parse_error"] is False
+
+
+def test_parse_verdict_true_garbage_still_abstains():
+    # Prose with no JSON object at all -> abstain (fail-safe preserved).
+    out = pgp.parse_verdict("# review\n\nThe plan is fine, ship it. No structured verdict.\n")
+    assert out["verdict"] == "revise"
+    assert out["parse_error"] is True
+
+
+def test_parse_verdict_unquoted_key_garbage_still_abstains():
+    # Unquoted keys/values are NOT recoverable by the conservative repair -> abstain.
+    # This guard keeps the robustness from becoming a phantom-pass hole.
+    for blob in ("{verdict: pass,,,}", "{'verdict': 'pass'}", "{verdict pass}"):
+        out = pgp.parse_verdict(f"```json\n{blob}\n```\n")
+        assert out["parse_error"] is True, f"garbage recovered as a verdict: {blob!r}"
+
+
+def test_parse_verdict_prose_object_without_verdict_key_abstains():
+    # A balanced JSON object with NO verdict key must not be mistaken for a verdict.
+    out = pgp.parse_verdict('some notes {"note": "looks ok", "score": 5} end\n')
+    assert out["parse_error"] is True
+
+
+def test_parse_verdict_contract_fence_wins_over_stray_json_fence():
+    # Anti-spoof: when the authoritative contract fence is present, a stray ```json block
+    # (e.g. echoed from the plan doc) does NOT override it.
+    text = (
+        '```json\n{"verdict": "pass"}\n```\n\n'
+        f"```{pgp.VERDICT_FENCE}\n" + '{"verdict": "block", "rationale": "real"}\n```\n'
+    )
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "block", "stray ```json overrode the contract fence"
+    assert out["parse_error"] is False
+
+
+# --------------------------------------------------------------------------
+# seat-robustness (2026-07-11): the opus/claude seat must SCORE even when
+# run_panel is called with data_dir=None (the #1102-class NO-VERDICT root cause).
+# --------------------------------------------------------------------------
+
+def test_resolve_data_dir_falls_back_to_env(monkeypatch):
+    # When vnx_paths is unavailable, _resolve_data_dir honours VNX_DATA_DIR — never returns
+    # an empty/None value the claude lane could not write to.
+    monkeypatch.setenv("VNX_DATA_DIR", "/tmp/vnx-data-test-xyz")
+    monkeypatch.setitem(sys.modules, "vnx_paths", None)  # force the ImportError fallback
+    assert pgp._resolve_data_dir() == "/tmp/vnx-data-test-xyz"
+
+
+def test_opus_seat_scores_when_data_dir_none(tmp_path, monkeypatch):
+    """The opus/claude seat must SCORE when run_panel is called with data_dir=None.
+
+    The claude/tmux lane prints no `Report:` stderr line, so _read_report can only find the
+    worker's report through the resolved data_dir base. Pre-fix, data_dir=None left base=None
+    and the opus report was written but never read -> NO-VERDICT (rc1), dropping opus from the
+    panel. This proves _make_default_dispatcher now resolves a real data_dir so the seat scores.
+    """
+    import subprocess as _sp
+    import unittest.mock as mock
+
+    # Resolve to a controlled tmp data_dir (mirrors what vnx_paths gives in production).
+    monkeypatch.setattr(pgp, "_resolve_data_dir", lambda: str(tmp_path))
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        # Simulate the claude/tmux worker: write the verdict report to
+        # <data_dir>/unified_reports/<dispatch_id>.md and print NOTHING to stderr — the tmux
+        # lane, unlike provider_dispatch, emits no `Report:` line for _read_report to key off.
+        did = cmd[cmd.index("--dispatch-id") + 1]
+        rp = tmp_path / "unified_reports" / f"{did}.md"
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_text(
+            f"# Plan Review\n\n```{pgp.VERDICT_FENCE}\n"
+            '{"verdict": "pass", "blocking_findings": [], "rationale": "ok"}\n```\n',
+            encoding="utf-8",
+        )
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        out = pgp.run_panel(
+            doc,
+            track_id="feat-opus-null-dd",
+            project_id="p1",
+            panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+            data_dir=None,  # <-- the bug trigger
+        )
+
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["dispatched"] is True, "opus seat did not score with data_dir=None (NO-VERDICT)"
+    assert opus["parse_error"] is False
+    assert opus["verdict"] == "pass"
+    assert out["decision"] == "PASS"
