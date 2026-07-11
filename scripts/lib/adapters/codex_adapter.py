@@ -38,7 +38,7 @@ from vertex_ai_runner import collect_file_contents
 
 logger = logging.getLogger(__name__)
 
-# Model: empty string = use codex CLI config.toml default (currently gpt-5.3-codex).
+# Model: empty string = use codex CLI config.toml default (currently gpt-5.5).
 # 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
 # ChatGPT-account auth rejects older explicit model flags.
 _DEFAULT_MODEL = ""
