@@ -254,3 +254,77 @@ class TestFromLegacy:
         assert ev.observability_tier == 2
         assert ev.dispatch_id == ""
         assert ev.terminal_id == ""
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2 regression — kimi-deepfix-major2
+#
+# canonical_event.py used to carry its own full copy of Kimi event parsing
+# (_from_kimi_event) that never received the #763 1.44.0 content-block fix:
+# no role/content[] handling, no quota/auth detection. Any caller reaching
+# kimi events through CanonicalEvent.from_provider_event("kimi", ...) instead
+# of provider_spawns.kimi_spawn.normalize_kimi_event() directly would hit the
+# original info-bug (1.44.0 content-block messages silently mapped to "info",
+# losing all answer text) even after #763 shipped. _from_kimi_event now
+# delegates to normalize_kimi_event as the single source of truth; these
+# tests lock that in so the two entry points can never drift apart again.
+# ---------------------------------------------------------------------------
+
+class TestFromProviderEventKimiDelegatesToNormalizeKimiEvent:
+    def test_144_content_block_extracts_text_via_from_provider_event(self):
+        raw = {
+            "role": "assistant",
+            "content": [
+                {"type": "think", "think": "reasoning"},
+                {"type": "text", "text": "the answer"},
+            ],
+        }
+        ev = CanonicalEvent.from_provider_event("kimi", raw, "d-001", "T1")
+        assert ev.event_type == "text"
+        assert ev.data["text"] == "the answer"
+        assert ev.provider == "kimi"
+
+    def test_144_tool_role_maps_to_tool_result_via_from_provider_event(self):
+        raw = {
+            "role": "tool",
+            "content": [{"type": "text", "text": "tool output"}],
+            "tool_call_id": "tc-1",
+        }
+        ev = CanonicalEvent.from_provider_event("kimi", raw, "d-001", "T1")
+        assert ev.event_type == "tool_result"
+        assert ev.data["content"] == "tool output"
+
+    def test_echoed_user_role_not_extracted_as_text_via_from_provider_event(self):
+        """The role-gate deep-fix must apply through this entry point too."""
+        raw = {"role": "user", "content": [{"type": "text", "text": "echoed prompt"}]}
+        ev = CanonicalEvent.from_provider_event("kimi", raw, "d-001", "T1")
+        assert ev.event_type == "info"
+        assert "text" not in ev.data
+
+    def test_quota_error_detected_via_from_provider_event(self):
+        raw = {"status": 403, "message": "quota exceeded"}
+        ev = CanonicalEvent.from_provider_event("kimi", raw, "d-001", "T1")
+        assert ev.event_type == "error"
+        assert ev.data["reason"] == "quota_or_auth"
+
+    def test_legacy_event_type_still_works_via_from_provider_event(self):
+        raw = {"event_type": "assistant_text", "content": "legacy string"}
+        ev = CanonicalEvent.from_provider_event("kimi", raw, "d-001", "T1")
+        assert ev.event_type == "text"
+        assert ev.data["text"] == "legacy string"
+
+    def test_matches_normalize_kimi_event_directly(self):
+        """Same raw event through both entry points must produce identical data."""
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        lib_dir = str(_Path(__file__).resolve().parent.parent / "scripts" / "lib")
+        if lib_dir not in _sys.path:
+            _sys.path.insert(0, lib_dir)
+        from provider_spawns.kimi_spawn import normalize_kimi_event
+
+        raw = {"role": "assistant", "content": [{"type": "text", "text": "parity check"}]}
+        direct = normalize_kimi_event(raw, "T1", "d-001")
+        via_dispatch = CanonicalEvent.from_provider_event("kimi", raw, "d-001", "T1")
+        assert direct.event_type == via_dispatch.event_type
+        assert direct.data == via_dispatch.data

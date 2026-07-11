@@ -135,6 +135,9 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
        "tool_calls": [...]}                 -> text (+ reasoning, tool_calls)
       {"role": "tool", "content": [{"type": "text", "text": "..."}],
        "tool_call_id": "..."}               -> tool_result
+      {"role": "user"|"system"|other, "content": [...]}  -> info (non-fatal;
+       NEVER extracted as answer text — guards against an echoed prompt/
+       transcript turn being concatenated into completion_text)
 
     Below: legacy ``event_type`` shapes, retained for backward compatibility.
 
@@ -190,23 +193,42 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
     role = raw.get("role")
     content = raw.get("content")
     if not event_type and isinstance(content, list) and isinstance(role, str):
-        text, reasoning = _extract_content_blocks(content)
         if role == "tool":
+            text, reasoning = _extract_content_blocks(content)
             return make("tool_result", {
                 "tool_use_id": str(raw.get("tool_call_id", "")),
                 "content": text or reasoning,
             })
-        # assistant (and any other agent role): the answer text is the payload;
-        # reasoning + tool_calls ride along for observability but never become
-        # completion text. Intermediate tool-call turns legitimately carry an
-        # empty text block — only the final assistant message contributes text.
-        data: Dict[str, Any] = {"text": text}
-        if reasoning:
-            data["reasoning"] = reasoning
-        tool_calls = raw.get("tool_calls")
-        if tool_calls:
-            data["tool_calls"] = tool_calls
-        return make("text", data)
+        if role == "assistant":
+            # The answer text is the payload; reasoning + tool_calls ride along
+            # for observability but never become completion text. Intermediate
+            # tool-call turns legitimately carry an empty text block — only the
+            # final assistant message contributes text.
+            text, reasoning = _extract_content_blocks(content)
+            data: Dict[str, Any] = {"text": text}
+            if reasoning:
+                data["reasoning"] = reasoning
+            tool_calls = raw.get("tool_calls")
+            if tool_calls:
+                data["tool_calls"] = tool_calls
+            return make("text", data)
+        # Any other role (e.g. "user" — an echoed prompt/transcript turn, or
+        # "system") must NEVER be extracted as answer text. Deep-fix for the
+        # #763 info-bug follow-up: the original content-block detection keyed
+        # only on "isinstance(role, str)" and treated every non-"tool" role as
+        # assistant output, so a CLI that echoes the user's own turn back into
+        # the stream (common for transcript/session-resume modes) would have
+        # its prompt silently concatenated into completion_text. Route to
+        # "info" instead: non-fatal, does not corrupt completion_text, and
+        # still counts toward saw_stream_output so fail-loud still fires if no
+        # real assistant text ever arrives.
+        logger.debug(
+            "kimi_spawn: content-block role=%r is not assistant/tool — mapping to info", role
+        )
+        return make("info", {
+            "raw_type": f"role:{role}",
+            "raw": str(raw)[:300],
+        })
 
     if event_type in ("assistant_text", "text"):
         return make("text", {"text": str(raw.get("content", ""))})
