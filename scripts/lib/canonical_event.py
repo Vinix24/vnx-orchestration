@@ -387,80 +387,19 @@ def _from_kimi_event(
     dispatch_id: str,
     terminal_id: str,
 ) -> CanonicalEvent:
-    """Map a raw Kimi CLI stream-json event dict to a CanonicalEvent (Tier-1)."""
-    def make(et: str, d: Dict[str, Any]) -> CanonicalEvent:
-        return CanonicalEvent(
-            dispatch_id=dispatch_id, terminal_id=terminal_id,
-            provider="kimi", event_type=et, data=d, observability_tier=1,
-        )
+    """Map a raw Kimi CLI stream-json event dict to a CanonicalEvent (Tier-1).
 
-    event_type = (raw.get("event_type") or raw.get("type") or "")
-
-    if event_type in ("assistant_text", "text"):
-        return make("text", {"text": str(raw.get("content", ""))})
-    if event_type == "tool_call":
-        return make("tool_use", {
-            "name": str(raw.get("name", "")),
-            "input": raw.get("input", {}),
-            "id": str(raw.get("id", "")),
-        })
-    if event_type == "tool_result":
-        return make("tool_result", {
-            "tool_use_id": str(raw.get("tool_call_id", "")),
-            "content": str(raw.get("output", "")),
-        })
-    if event_type == "usage_complete":
-        usage = raw.get("usage") or {}
-        token_count = {
-            "input_tokens": int((usage.get("prompt_tokens") or 0)),
-            "output_tokens": int((usage.get("completion_tokens") or 0)),
-            "cache_creation_tokens": 0,
-            "cache_read_tokens": 0,
-        }
-        return make("text", {"text": "", "token_count": token_count})
-    if event_type == "complete":
-        return make("complete", {})
-    if event_type == "error":
-        msg = raw.get("message") or raw.get("error") or ""
-        return make("error", {"message": str(msg) if msg else str(raw)[:200]})
-
-    # Kimi CLI Wire Protocol v1.26+ camelCase event types
-    if event_type == "TurnBegin":
-        return make("text", {"text": ""})
-
-    if event_type == "StepBegin":
-        return make("text", {"text": ""})
-
-    if event_type == "ContentPart":
-        return make("text", {"text": str(raw.get("content") or raw.get("text") or "")})
-
-    if event_type == "ThinkPart":
-        return make("thinking", {"text": str(raw.get("content") or raw.get("text") or "")})
-
-    if event_type == "TextPart":
-        return make("text", {"text": str(raw.get("text") or raw.get("content") or "")})
-
-    if event_type == "StatusUpdate":
-        tc_raw = raw.get("token_count") or raw.get("usage") or {}
-        token_count = {
-            "input_tokens": int(tc_raw.get("input_tokens") or tc_raw.get("prompt_tokens") or 0),
-            "output_tokens": int(tc_raw.get("output_tokens") or tc_raw.get("completion_tokens") or 0),
-            "cache_creation_tokens": int(tc_raw.get("cache_creation_tokens") or 0),
-            "cache_read_tokens": int(tc_raw.get("cache_read_tokens") or 0),
-        }
-        return make("text", {"text": "", "token_count": token_count})
-
-    if event_type == "TurnEnd":
-        return make("complete", {})
-
-    # Unknown event type — map to "info" (non-fatal passthrough).
-    # An unrecognized informational event must not flip the dispatch status to
-    # failure: returning "info" lets the consumer log it and move on without
-    # adding it to errors_captured or setting result.error.
-    return make("info", {
-        "raw_type": event_type,
-        "raw": str(raw)[:300],
-    })
+    Delegates to provider_spawns.kimi_spawn.normalize_kimi_event, the single
+    source of truth for Kimi event parsing. This function used to carry its
+    own full copy of the parsing logic; that copy silently missed the #763
+    1.44.0 content-block fix (no role/content[] handling, no quota/auth
+    detection) because nothing kept the two in sync. Delegating removes the
+    duplicate so a future kimi-cli format change only needs one fix, not two.
+    Import is deferred (not module-level) to avoid a circular import with
+    kimi_spawn.py, which imports CanonicalEvent from this module.
+    """
+    from provider_spawns.kimi_spawn import normalize_kimi_event
+    return normalize_kimi_event(raw, terminal_id, dispatch_id)
 
 
 def _from_ollama_event(

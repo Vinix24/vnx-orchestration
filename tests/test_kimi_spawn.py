@@ -256,6 +256,148 @@ class TestNormalizeKimiEvent(unittest.TestCase):
         self.assertEqual(event.observability_tier, 1)
 
 
+# ---------------------------------------------------------------------------
+# MAJOR-2 regression suite — kimi-deepfix-major2
+#
+# #763 fixed the immediate fail-loud gap (unknown event_type -> "info" ->
+# silently-empty completion_text reported as success). These tests cover the
+# deeper content-block edge cases #763 did not: a role != "assistant"/"tool"
+# content-block message (e.g. an echoed "user" turn) must never be extracted
+# as answer text, and malformed content[] entries must degrade gracefully
+# instead of crashing or corrupting completion_text.
+# ---------------------------------------------------------------------------
+
+class TestKimiDeepfixMajor2ContentBlockRoleGate(unittest.TestCase):
+    """Unit-level: normalize_kimi_event must gate text extraction on role=='assistant'.
+
+    Bug: the pre-fix content-block branch treated ANY string role that wasn't
+    "tool" as an assistant turn ("assistant (and any other agent role)"), so a
+    kimi-cli stream that echoes the user's own prompt back as a
+    {"role": "user", "content": [...]} line — common in transcript/session-
+    resume output — would have that echoed prompt silently concatenated into
+    completion_text alongside (or instead of) the real answer.
+    """
+
+    def test_user_role_content_block_is_not_extracted_as_text(self):
+        raw = {
+            "role": "user",
+            "content": [{"type": "text", "text": "please review this PR"}],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "info")
+        self.assertNotIn("text", event.data)
+
+    def test_system_role_content_block_is_not_extracted_as_text(self):
+        raw = {
+            "role": "system",
+            "content": [{"type": "text", "text": "you are a helpful assistant"}],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "info")
+        self.assertNotIn("text", event.data)
+
+    def test_unrecognized_role_content_block_maps_to_info_not_text(self):
+        raw = {"role": "developer", "content": [{"type": "text", "text": "hint"}]}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "info")
+
+    def test_assistant_role_still_extracts_text(self):
+        """Control: the fix must not regress the actual assistant path."""
+        raw = {"role": "assistant", "content": [{"type": "text", "text": "the answer"}]}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "the answer")
+
+    def test_tool_role_still_maps_to_tool_result(self):
+        """Control: the fix must not regress the tool-role path."""
+        raw = {
+            "role": "tool",
+            "content": [{"type": "text", "text": "tool output"}],
+            "tool_call_id": "tc-1",
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "tool_result")
+        self.assertEqual(event.data["content"], "tool output")
+
+    # --- defensive reads on malformed content-block shapes -----------------
+
+    def test_content_none_on_assistant_message_does_not_crash_or_fabricate_text(self):
+        raw = {"role": "assistant", "content": None}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        # Falls through to the unknown-event-type fallback: non-fatal, no
+        # crash, and critically no fabricated text.
+        self.assertEqual(event.event_type, "info")
+
+    def test_content_list_with_non_dict_entries_ignored_not_crashed(self):
+        raw = {
+            "role": "assistant",
+            "content": ["a bare string block", 42, None, {"type": "text", "text": "real answer"}],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "real answer")
+
+    def test_content_block_missing_type_key_ignored(self):
+        raw = {
+            "role": "assistant",
+            "content": [{"text": "no type field"}, {"type": "text", "text": "kept"}],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.data["text"], "kept")
+
+
+class TestKimiDeepfixMajor2EndToEnd(unittest.TestCase):
+    """Integration-level: an echoed user turn in the stream must never leak into
+    completion_text, even when it arrives alongside a real assistant answer.
+    """
+
+    def _run_with_events(self, events: list, returncode: int = 0) -> KimiSpawnResult:
+        data = b"".join((json.dumps(e) + "\n").encode() for e in events)
+        read_fd, write_fd = os.pipe()
+
+        def _writer():
+            try:
+                os.write(write_fd, data)
+            finally:
+                os.close(write_fd)
+
+        writer_thread = threading.Thread(target=_writer, daemon=True)
+        writer_thread.start()
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = returncode
+        fake_proc.poll.return_value = returncode
+        fake_proc.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        fake_proc.stderr = io.BytesIO(b"")
+        fake_proc.wait = MagicMock(return_value=returncode)
+        fake_proc.kill = MagicMock()
+
+        try:
+            with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start:
+                mock_start.return_value = (fake_proc, None)
+                result = spawn_kimi("prompt", dispatch_id="d1", terminal_id="T1")
+        finally:
+            writer_thread.join(timeout=5)
+        return result
+
+    def test_echoed_user_turn_does_not_leak_into_completion_text(self):
+        events = [
+            {"role": "user", "content": [{"type": "text", "text": "please review this PR"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "think", "think": "reviewing now"},
+                    {"type": "text", "text": "VERDICT: approve"},
+                ],
+            },
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNone(result.error, f"unexpected error: {result.error!r}")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.completion_text, "VERDICT: approve")
+        self.assertNotIn("please review this PR", result.completion_text)
+
+
 class TestSpawnKimiSubprocess(unittest.TestCase):
     def test_returns_127_when_cli_missing(self):
         with patch("subprocess.Popen", side_effect=FileNotFoundError("kimi not found")):
