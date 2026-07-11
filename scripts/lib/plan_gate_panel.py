@@ -66,6 +66,7 @@ DEFAULT_PANEL: List[Dict[str, str]] = [
 ]
 
 VERDICT_FENCE = "vnx-plan-verdict"
+_OPEN_FENCE = "```" + VERDICT_FENCE
 _VALID_VERDICTS = {"pass", "revise", "block"}
 
 # A dispatcher takes (provider, model_arg, instruction, dispatch_id) and returns the
@@ -163,22 +164,71 @@ def build_plan_review_instruction_fileref(
     )
 
 
+def _strip_trailing_commas(text: str) -> str:
+    """Remove a trailing comma immediately before a closing ``}``/``]`` (a recurring
+    codex/glm flake: ``{"a": 1,}``)."""
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def _extract_braced_object(text: str) -> Optional[str]:
+    """Slice from the first ``{`` to the last ``}`` in ``text``.
+
+    Strips prose bleed around the object (a panelist prefacing/trailing the JSON with
+    commentary) and, as a side effect, strips a nested ` ```json ` code fence wrapped around
+    the object too — the fence markers fall outside the first-``{``/last-``}`` window.
+    """
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return text[start:end + 1]
+
+
+def _parse_json_loose(body: str) -> Optional[Any]:
+    """Best-effort repair of a near-miss verdict JSON body before giving up.
+
+    Tries, in order: the body as-is; the body with a braced-object extraction (drops prose
+    bleed and any nested ```json fence); each of those with trailing commas stripped. Returns
+    the parsed value, or ``None`` if nothing repairs into valid JSON.
+    """
+    candidates = [body.strip()]
+    braced = _extract_braced_object(body)
+    if braced is not None:
+        candidates.append(braced)
+    candidates.extend([_strip_trailing_commas(c) for c in list(candidates)])
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
+
+
 def parse_verdict(report_text: str) -> Dict[str, Any]:
     """Extract the LAST ``vnx-plan-verdict`` block from a panelist report.
 
-    Fail-safe by design: anything unparseable becomes ``revise`` with
+    Tolerant of common near-miss formatting via ``_parse_json_loose`` — a trailing comma, prose
+    bleeding in around the JSON object, or a nested ` ```json ` code fence wrapping the object —
+    so a slightly-malformed body no longer forces a spurious abstain (the codex/glm verdict-JSON
+    flake). The exact ``vnx-plan-verdict`` fence label is still required verbatim: that is the
+    same marker ``_sanitize_doc`` neutralizes in untrusted plan-doc input, so this deliberately
+    does NOT fall back to a bare/relabeled ```json fence — doing so would reopen the verdict-
+    spoofing hole (kimi finding 4) via a doc that gets echoed into a panelist's own report.
+
+    Fail-safe by design: anything still unparseable after repair becomes ``revise`` with
     ``parse_error=True`` so a missing/garbled verdict can never silently PASS.
     """
     empty = {"verdict": "revise", "blocking_findings": [], "rationale": "", "parse_error": True}
     if not report_text:
         return {**empty, "rationale": "empty report"}
-    pattern = re.compile(r"```" + re.escape(VERDICT_FENCE) + r"\s*\n(.*?)```", re.DOTALL)
-    matches = pattern.findall(report_text)
-    if not matches:
+    idx = report_text.rfind(_OPEN_FENCE)
+    if idx == -1:
         return {**empty, "rationale": "no verdict block found"}
-    try:
-        data = json.loads(matches[-1].strip())
-    except (json.JSONDecodeError, ValueError):
+    body = report_text[idx + len(_OPEN_FENCE):]
+    close_idx = body.rfind("```")
+    if close_idx != -1:
+        body = body[:close_idx]
+    data = _parse_json_loose(body)
+    if data is None:
         return {**empty, "rationale": "verdict block is not valid JSON"}
     if not isinstance(data, dict):
         return {**empty, "rationale": "verdict block is not a JSON object"}
@@ -300,6 +350,31 @@ def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optiona
     return None
 
 
+def _resolve_data_dir(data_dir: Optional[str]) -> Path:
+    """Resolve the data_dir the claude/tmux-lane report is written under and read back from.
+
+    A caller-supplied ``data_dir`` wins. When omitted, resolve via the SAME helper the
+    dispatch door itself uses (``project_root.resolve_data_dir``, invoked by
+    ``tmux_interactive_dispatch.py``'s ``_resolve_state_dir`` as
+    ``resolve_state_dir(caller_file=__file__).parent``) instead of degrading to ``None``.
+
+    A ``None`` base means ``_read_report``'s base-fallback path can never resolve the
+    claude/tmux-lane report: unlike ``provider_dispatch``, that lane prints no ``Report:``
+    stderr line, so the opus seat's authored report is never found -> NO-VERDICT rc=1
+    "staging_validator: unstaged dispatch override" (#1102 class bug).
+    """
+    if data_dir:
+        return Path(data_dir)
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    try:
+        from project_root import resolve_data_dir  # noqa: PLC0415
+        return resolve_data_dir(caller_file=__file__)
+    except Exception:
+        # Not a git repo and no VNX_CANONICAL_ROOT — last-resort fallback, same as before.
+        return Path(os.environ.get("VNX_DATA_DIR") or tempfile.gettempdir())
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
 ) -> DispatcherFn:
@@ -315,7 +390,7 @@ def _make_default_dispatcher(
                            (bills API credits post-cutover).
       kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
     """
-    base = Path(data_dir) if data_dir else None
+    base = _resolve_data_dir(data_dir)
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
         env = dict(os.environ)
@@ -329,17 +404,10 @@ def _make_default_dispatcher(
                 #
                 # We write the original inline instruction to a temp file so the worker can
                 # read the plan + rubric + verdict contract from a stable on-disk path.
-                # The expected report path is derived from data_dir so the file-ref instruction
-                # can tell the worker exactly where to write its verdict report.
-                report_path_str: str
-                if base is not None:
-                    report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
-                else:
-                    # Fallback: derive from VNX_DATA_DIR or a tmp path
-                    report_path_str = str(
-                        Path(os.environ.get("VNX_DATA_DIR", tempfile.gettempdir()))
-                        / "unified_reports" / f"{dispatch_id}.md"
-                    )
+                # The expected report path is derived from data_dir (resolved above, never
+                # None) so the file-ref instruction's write path and _read_report's read path
+                # agree.
+                report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
 
                 # Write the full inline instruction (plan + rubric + contract) to a temp file.
                 # The worker reads this file; the short file-ref instruction points to it.
