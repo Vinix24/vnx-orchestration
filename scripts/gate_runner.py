@@ -309,7 +309,7 @@ class GateRunner:
             cli_args = ["--model", model] + cli_args
         elif gate == "codex_gate":
             # Model selection: only override if explicitly requested via env/payload.
-            # Default path: let codex use ~/.codex/config.toml (currently gpt-5.3-codex).
+            # Default path: let codex use ~/.codex/config.toml (currently gpt-5.5).
             # 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
             # ChatGPT-account auth rejects older explicit model flags, causing gate
             # failures with "model not supported when using Codex with a ChatGPT account".
