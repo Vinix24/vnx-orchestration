@@ -321,6 +321,50 @@ def _prepare(spec: EnvelopeSpec) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Final-prompt integrity (input-side audit closure)
+# ---------------------------------------------------------------------------
+
+
+def _record_integrity(
+    spec: EnvelopeSpec,
+    enriched_instruction: str,
+    raw_instruction: str,
+    *,
+    bundle_dir: Optional[Path] = None,
+):
+    """Persist the enriched final prompt + verify raw+injections reconstruct it.
+
+    Returns a FinalPromptIntegrity (stamped onto the receipt by _govern) or None
+    when the integrity module is unavailable / persistence failed. The strict
+    (fail-closed) reconstruction raise propagates; every other error is swallowed so
+    the audit-closure step can never itself break a dispatch.
+    """
+    try:
+        from final_prompt_integrity import record_final_prompt_integrity  # noqa: PLC0415
+        from final_prompt_integrity import InjectionReconstructError  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        return record_final_prompt_integrity(
+            dispatch_id=spec.dispatch_id,
+            final_prompt=enriched_instruction,
+            raw_instruction=raw_instruction,
+            data_dir=spec.data_dir,
+            state_dir=spec.state_dir,
+            bundle_dir=bundle_dir,
+        )
+    except InjectionReconstructError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — audit closure must never break a dispatch
+        logger.error(
+            "envelope: final-prompt integrity failed (non-fatal) dispatch=%s: %s",
+            spec.dispatch_id,
+            exc,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # GOVERN
 # ---------------------------------------------------------------------------
 
@@ -357,6 +401,7 @@ def _govern(
     start_time: datetime,
     end_time: datetime,
     phantom_diff: Optional[str] = None,
+    integrity: Optional[Any] = None,
 ) -> tuple:
     """Emit unified_report then dispatch receipt. Returns (report_path, receipt_path).
 
@@ -419,6 +464,13 @@ def _govern(
                 cost_usd=None,
                 state_dir=spec.state_dir,
                 report_path=str(report_path) if report_path else None,
+                final_prompt_path=getattr(integrity, "final_prompt_path", None),
+                final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
+                injection_reconstructs=(
+                    getattr(integrity, "injection_reconstructs", None)
+                    if integrity is not None
+                    else None
+                ),
             )
         except Exception as exc:
             raise EnvelopeGovernError(
@@ -523,13 +575,18 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         data_dir=spec.data_dir,
     )
 
+    # INTEGRITY — persist the enriched final prompt + verify raw+injections reconstruct it
+    integrity = _record_integrity(enriched_spec, enriched_instruction, spec.instruction)
+
     # EXECUTE
     start_time = datetime.now(timezone.utc)
     adapter_result = adapter.run(enriched_spec)
     end_time = datetime.now(timezone.utc)
 
     # GOVERN (fail-closed on receipt)
-    report_path, receipt_path = _govern(enriched_spec, adapter_result, start_time, end_time)
+    report_path, receipt_path = _govern(
+        enriched_spec, adapter_result, start_time, end_time, integrity=integrity
+    )
 
     returncode = 0 if adapter_result.status == "success" else 1
     return EnvelopeResult(
@@ -1036,6 +1093,14 @@ def run_envelope_plan(
         data_dir=spec.data_dir,
     )
 
+    # INTEGRITY — the bundle dir is the pending/<id>/ that hosts instruction.md.
+    integrity = _record_integrity(
+        enriched_spec,
+        enriched_instruction,
+        instruction,
+        bundle_dir=Path(plan.instruction_file).parent,
+    )
+
     from dispatch_worktree_isolation import (  # noqa: PLC0415
         create_dispatch_worktree,
         remove_dispatch_worktree,
@@ -1057,7 +1122,9 @@ def run_envelope_plan(
             error=_isolation_error,
         )
         _fail_start = _fail_end = datetime.now(timezone.utc)
-        report_path, receipt_path = _govern(enriched_spec, _fail_result, _fail_start, _fail_end)
+        report_path, receipt_path = _govern(
+            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
+        )
         return EnvelopeResult(
             status="failure",
             returncode=1,
@@ -1086,7 +1153,9 @@ def run_envelope_plan(
     finally:
         remove_dispatch_worktree(plan.dispatch_id)
 
-    report_path, receipt_path = _govern(enriched_spec, result, start, end, phantom_diff=_phantom_diff)
+    report_path, receipt_path = _govern(
+        enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity
+    )
 
     return EnvelopeResult(
         status=result.status,
@@ -1182,11 +1251,19 @@ def run_envelope_headless_plan(
         data_dir=spec.data_dir,
     )
 
+    # INTEGRITY — persist the enriched final prompt + verify reconstruction
+    integrity = _record_integrity(
+        enriched_spec,
+        enriched_instruction,
+        instruction,
+        bundle_dir=Path(plan.instruction_file).parent,
+    )
+
     start = datetime.now(timezone.utc)
     result = ClaudeSubprocessAdapter().run(enriched_spec)
     end = datetime.now(timezone.utc)
 
-    report_path, receipt_path = _govern(enriched_spec, result, start, end)
+    report_path, receipt_path = _govern(enriched_spec, result, start, end, integrity=integrity)
 
     return EnvelopeResult(
         status=result.status,
