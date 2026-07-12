@@ -19,6 +19,8 @@ import type {
   ConfigAuditEnvelope,
   ObservabilityEnvelope,
   SubsystemsEnvelope,
+  HealthBeaconEnvelope,
+  EffectivenessProbeEnvelope,
   LiveSessionsEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
@@ -155,6 +157,10 @@ export function fetchSubsystems(): Promise<SubsystemsEnvelope> {
   return get(`${BASE}/subsystems`);
 }
 
+export function fetchHealthBeacons(): Promise<HealthBeaconEnvelope> {
+  return get(`${BASE}/health`);
+}
+
 export function fetchLiveSessions(): Promise<LiveSessionsEnvelope> {
   return get(`${BASE}/sessions`);
 }
@@ -211,6 +217,12 @@ export function fetchIntelligenceClassifications(limit = 100): Promise<Classific
 
 export function fetchIntelligenceDispatchOutcomes(limit = 200): Promise<DispatchOutcomesResponse> {
   return get('/api/intelligence/dispatch-outcomes', { limit: String(limit) });
+}
+
+// Point-in-time injection-effectiveness gauge (PR-18) — current ignore_rate +
+// pending_proposals from the latest beacon. Not a time-series.
+export function fetchIntelligenceEffectiveness(): Promise<EffectivenessProbeEnvelope> {
+  return get('/api/operator/intelligence/effectiveness');
 }
 
 // ===== Self-Improvement API =====

@@ -538,6 +538,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, _intelligence_get_effectiveness_probe())
             return
 
+        # PR-18: point-in-time dashboard gauge (same read-only probe signal as
+        # the PR-17 gate-signal route above, exposed under /api/operator/*).
+        if path == "/api/operator/intelligence/effectiveness":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_effectiveness_probe())
+            return
+
         if path == "/api/intelligence/behavioral":
             payload, status_int = _intelligence_get_behavioral_summary()
             _json_response(self, HTTPStatus(status_int), payload)

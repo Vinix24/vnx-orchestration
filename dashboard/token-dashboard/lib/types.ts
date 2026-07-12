@@ -416,6 +416,41 @@ export interface SubsystemsEnvelope {
   error?: string;
 }
 
+// ===== Subsystem Effectiveness (Health page, PR-18) =====
+// Mirrors api_health.py's _subsystem_effectiveness_summary(): every known
+// cockpit subsystem joined against its beacon-derived health, defaulting to
+// "unknown" when no probe has ever written a beacon for it.
+
+export interface SubsystemEffectivenessRow {
+  subsystem: string;
+  health: string; // ok | stale | fail | corrupt | unknown
+  status: string;
+  last_signal: string;
+  detail: Record<string, unknown>;
+}
+
+export interface HealthBeaconEnvelope {
+  queried_at: string;
+  data_dir: string;
+  overall: string; // ok | stale | fail
+  counts: Record<string, number>;
+  beacons: Record<string, unknown>;
+  subsystems: SubsystemEffectivenessRow[];
+  error?: string;
+}
+
+// ===== Intelligence Effectiveness Gauge (PR-18) =====
+// Point-in-time signal from the injection-effectiveness probe (PR-6): the same
+// probe that gates the self-learning loop's activation (PR-17). No time-series —
+// no ignore_rate history store exists yet.
+
+export interface EffectivenessProbeEnvelope {
+  probe_health: string; // ok | degraded | produces_crap | unknown
+  ignore_rate: number | null;
+  pending_proposals: number;
+  signal: string;
+}
+
 // ===== Kanban Board Types =====
 
 export interface KanbanCard {

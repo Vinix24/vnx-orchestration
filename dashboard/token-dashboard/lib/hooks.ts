@@ -15,6 +15,7 @@ import {
   fetchConfigAudit,
   fetchObservability,
   fetchSubsystems,
+  fetchHealthBeacons,
   fetchReports,
   fetchReportContent,
   fetchAgents,
@@ -23,6 +24,7 @@ import {
   fetchIntelligenceInjections,
   fetchIntelligenceClassifications,
   fetchIntelligenceDispatchOutcomes,
+  fetchIntelligenceEffectiveness,
   fetchProposals,
   fetchLearningProposals,
   fetchConfidenceTrends,
@@ -38,6 +40,7 @@ import type {
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope, SystemHealthEnvelope, PlanningEnvelope,
   ConfigEnvelope, ConfigAuditEnvelope, ObservabilityEnvelope, SubsystemsEnvelope,
+  HealthBeaconEnvelope, EffectivenessProbeEnvelope,
   ReportsEnvelope, AgentsEnvelope,
   LiveSessionsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
@@ -224,6 +227,17 @@ export function useSubsystems() {
   );
 }
 
+// Per-subsystem effectiveness summary backing the health page's subsystem
+// cards (PR-18) — beacon-derived health for every known cockpit subsystem,
+// including those with no probe yet (reported "unknown").
+export function useHealthBeacons() {
+  return useSWR<HealthBeaconEnvelope>(
+    'operator-health-beacons',
+    fetchHealthBeacons,
+    { refreshInterval: 20000, revalidateOnFocus: true, dedupingInterval: 8000 }
+  );
+}
+
 export function useConfigAudit(key?: string) {
   return useSWR<ConfigAuditEnvelope>(
     key ? `operator-config-audit:${key}` : 'operator-config-audit',
@@ -301,6 +315,16 @@ export function useIntelligenceDispatchOutcomes() {
   return useSWR<DispatchOutcomesResponse>(
     'intelligence-dispatch-outcomes',
     () => fetchIntelligenceDispatchOutcomes(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+// Point-in-time injection-effectiveness gauge (PR-18) — current ignore_rate +
+// pending_proposals from the latest beacon. Not a time-series.
+export function useIntelligenceEffectiveness() {
+  return useSWR<EffectivenessProbeEnvelope>(
+    'intelligence-effectiveness',
+    () => fetchIntelligenceEffectiveness(),
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
   );
 }
