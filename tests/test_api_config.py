@@ -113,6 +113,22 @@ def test_get_config_inventory_shape(db):
     assert row["requires_approval"] is True
 
 
+def test_get_config_includes_pr2_subsystem_flags(db):
+    # framework-status-audit-and-cockpit PR-2: net-new display-metadata flags must surface here.
+    out, status = ac.operator_get_config({}, project_id=PID)
+    assert status == 200
+    keys = {row["key"] for row in out["config"]}
+    for key in (
+        "VNX_GOVERNANCE_ENFORCED", "VNX_LEARNING_LOOP_ENABLED", "VNX_DREAM_SCHEDULER_ENABLED",
+        "VNX_INJECTION_FEEDBACK_ENABLED", "VNX_PLAN_GATE_COMPLEX_ONLY", "VNX_HASH_CHAIN_REQUIRED",
+        "VNX_ATTESTATION_REQUIRED", "VNX_MIGRATION_SYSTEM",
+    ):
+        assert key in keys, f"{key} missing from /api/operator/config"
+    migration_row = next(r for r in out["config"] if r["key"] == "VNX_MIGRATION_SYSTEM")
+    assert migration_row["default"] == "manifest"
+    assert migration_row["writable_from_ui"] is False
+
+
 def test_get_config_reflects_db_value(db):
     # write via the DAO, then the inventory (through the wired resolver) must show it as non-default
     ac.operator_post_config_set(

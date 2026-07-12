@@ -12,6 +12,16 @@ const CATEGORY_LABEL: Record<string, string> = {
   gate: 'Gates',
 };
 
+// Cockpit subsystem status (framework-status-audit-and-cockpit) — display metadata only.
+const STATUS_COLOR: Record<string, string> = {
+  LIVE: 'var(--color-success, #50fa7b)',
+  ACTIVATE: 'var(--color-accent, #f97316)',
+  SCOPE: 'var(--color-warning, #facc15)',
+  PARK: 'var(--color-muted)',
+  CUT: 'var(--color-danger, #ff5555)',
+  COCKPIT: 'var(--color-accent, #f97316)',
+};
+
 const PANEL = 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)';
 
 function isOn(row: ConfigEntryRow): boolean {
@@ -71,8 +81,26 @@ function ConfigRow({
               planned
             </span>
           )}
+          {row.status && (
+            <span
+              data-testid={`config-status-${row.key}`}
+              style={{
+                fontSize: 9,
+                fontWeight: 700,
+                color: STATUS_COLOR[row.status] ?? 'var(--color-muted)',
+                border: `1px solid ${STATUS_COLOR[row.status] ?? 'rgba(255,255,255,0.2)'}`,
+                borderRadius: 5,
+                padding: '1px 5px',
+              }}
+            >
+              {row.status}
+            </span>
+          )}
         </div>
-        <span style={{ fontSize: 11, color: 'var(--color-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.description}</span>
+        <span style={{ fontSize: 11, color: 'var(--color-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {row.description}
+          {row.subsystem ? ` · ${row.subsystem}` : ''}
+        </span>
       </div>
 
       <div style={{ flexShrink: 0 }}>
