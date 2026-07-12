@@ -7,13 +7,14 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
-jest.mock('@/lib/hooks', () => ({ useObservability: jest.fn() }));
+jest.mock('@/lib/hooks', () => ({ useObservability: jest.fn(), useSubsystems: jest.fn() }));
 
-import { useObservability } from '@/lib/hooks';
+import { useObservability, useSubsystems } from '@/lib/hooks';
 import ObservabilityPage from '@/app/operator/observability/page';
-import type { ObservabilityEnvelope } from '@/lib/types';
+import type { ObservabilityEnvelope, SubsystemsEnvelope } from '@/lib/types';
 
 const mockUse = useObservability as jest.MockedFunction<typeof useObservability>;
+const mockUseSub = useSubsystems as jest.MockedFunction<typeof useSubsystems>;
 
 function envelope(over: Partial<ObservabilityEnvelope> = {}): ObservabilityEnvelope {
   return {
@@ -45,8 +46,20 @@ function envelope(over: Partial<ObservabilityEnvelope> = {}): ObservabilityEnvel
   };
 }
 
+function subsystemsEnvelope(): SubsystemsEnvelope {
+  return {
+    project_id: 'vnx-dev',
+    queried_at: '2026-07-12T10:00:00Z',
+    subsystems: [
+      { subsystem: 'governance-enforcement-stack', what: 'Receipt hash-chain + signed attestation + evidence-bound merge gate.', flag: 'VNX_GOVERNANCE_ENFORCED', status: 'PARK', effective_value: '0', health: 'unknown', last_signal: '' },
+      { subsystem: 'phantom_guard', what: 'Receipt deduplication and replay protection.', flag: null, status: 'LIVE', effective_value: null, health: 'ok', last_signal: '2026-07-12T09:00:00Z' },
+    ],
+  };
+}
+
 function renderWith(data: ObservabilityEnvelope | undefined, opts: { isLoading?: boolean; error?: Error } = {}) {
   mockUse.mockReturnValue({ data, isLoading: opts.isLoading ?? false, error: opts.error, mutate: jest.fn(), isValidating: false } as ReturnType<typeof useObservability>);
+  mockUseSub.mockReturnValue({ data: subsystemsEnvelope(), isLoading: false, error: undefined, mutate: jest.fn(), isValidating: false } as ReturnType<typeof useSubsystems>);
   return render(<ObservabilityPage />);
 }
 
@@ -69,6 +82,24 @@ describe('ObservabilityPage', () => {
     expect(screen.getByTestId('obs-rework-edge')).toHaveTextContent('debugger');
     expect(screen.getByTestId('obs-daemons')).toHaveTextContent('1 daemon');
     expect(screen.getByTestId('obs-cron-row')).toHaveTextContent('nightly_intelligence_pipeline');
+    // Subsystem cockpit tile (framework-status-audit-and-cockpit PR-4)
+    expect(screen.getByTestId('subsystem-cockpit-tile')).toBeInTheDocument();
+    expect(screen.getByTestId('subsystem-row-governance-enforcement-stack')).toHaveTextContent('governance-enforcement-stack');
+    expect(screen.getByTestId('subsystem-status-governance-enforcement-stack')).toHaveTextContent('PARK');
+    expect(screen.getByTestId('subsystem-health-governance-enforcement-stack')).toHaveTextContent('unknown');
+    expect(screen.getByTestId('subsystem-row-phantom_guard')).toHaveTextContent('phantom_guard');
+    expect(screen.getByTestId('subsystem-health-phantom_guard')).toHaveTextContent('ok');
+  });
+
+  test('subsystem cockpit tile shows its own loading/error state', () => {
+    mockUse.mockReturnValue({ data: envelope(), isLoading: false, error: undefined, mutate: jest.fn(), isValidating: false } as ReturnType<typeof useObservability>);
+    mockUseSub.mockReturnValue({ data: undefined, isLoading: true, error: undefined, mutate: jest.fn(), isValidating: false } as ReturnType<typeof useSubsystems>);
+    const { rerender } = render(<ObservabilityPage />);
+    expect(screen.getByTestId('subsystem-cockpit-loading')).toBeInTheDocument();
+
+    mockUseSub.mockReturnValue({ data: undefined, isLoading: false, error: new Error('x'), mutate: jest.fn(), isValidating: false } as ReturnType<typeof useSubsystems>);
+    rerender(<ObservabilityPage />);
+    expect(screen.getByTestId('subsystem-cockpit-error')).toBeInTheDocument();
   });
 
   test('shows degraded flag + empty states', () => {

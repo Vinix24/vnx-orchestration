@@ -175,6 +175,8 @@ from api_config import (  # noqa: E402
 
 from api_observability import operator_get_observability  # noqa: E402
 
+from api_subsystems import operator_get_subsystems  # noqa: E402
+
 from api_intelligence import (  # noqa: E402
     _intelligence_get_patterns,
     _intelligence_get_injections,
@@ -435,6 +437,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/observability":
             result, status_int = operator_get_observability(params)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if path == "/api/operator/subsystems":
+            result, status_int = operator_get_subsystems(params)
             _json_response(self, HTTPStatus(status_int), result)
             return
 

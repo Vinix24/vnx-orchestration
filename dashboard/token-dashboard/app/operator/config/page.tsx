@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useConfig, useConfigAudit } from '@/lib/hooks';
+import { mutate as globalMutate } from 'swr';
+import { useConfig, useConfigAudit, SUBSYSTEMS_SWR_KEY } from '@/lib/hooks';
 import { postConfigSet } from '@/lib/operator-api';
 import type { ConfigEntryRow, ConfigSetRequest } from '@/lib/types';
 
@@ -169,6 +170,8 @@ export default function ConfigPage() {
         setMsg({ kind: 'ok', text: `${row.key} → ${res.new_value}` });
         mutate();
         auditQuery.mutate();
+        // Revalidate the subsystem cockpit tile (a toggled flag's effective_value changed).
+        globalMutate(SUBSYSTEMS_SWR_KEY);
       } else {
         setMsg({ kind: 'err', text: res.message || 'change rejected' });
       }

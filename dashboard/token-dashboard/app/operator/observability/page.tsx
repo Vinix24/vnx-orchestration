@@ -1,10 +1,75 @@
 'use client';
 
 import React from 'react';
-import { useObservability } from '@/lib/hooks';
-import type { ObservabilityEnvelope } from '@/lib/types';
+import { useObservability, useSubsystems } from '@/lib/hooks';
+import type { ObservabilityEnvelope, SubsystemRow } from '@/lib/types';
 
 const PANEL = 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)';
+
+// Cockpit subsystem status (framework-status-audit-and-cockpit) — mirrors /operator/config's palette.
+const SUBSYSTEM_STATUS_COLOR: Record<string, string> = {
+  LIVE: 'var(--color-success, #50fa7b)',
+  ACTIVATE: 'var(--color-accent, #f97316)',
+  SCOPE: 'var(--color-warning, #facc15)',
+  PARK: 'var(--color-muted)',
+  CUT: 'var(--color-danger, #ff5555)',
+  COCKPIT: 'var(--color-accent, #f97316)',
+};
+
+// Health vocabulary (health_beacon.py: ok | stale | fail | corrupt | unknown).
+const SUBSYSTEM_HEALTH_COLOR: Record<string, string> = {
+  ok: 'var(--color-success, #50fa7b)',
+  stale: 'var(--color-warning, #facc15)',
+  fail: 'var(--color-danger, #ff5555)',
+  corrupt: 'var(--color-danger, #ff5555)',
+  unknown: 'var(--color-muted)',
+};
+
+function SubsystemRowView({ row }: { row: SubsystemRow }) {
+  const statusColor = SUBSYSTEM_STATUS_COLOR[row.status] ?? 'var(--color-muted)';
+  const healthColor = SUBSYSTEM_HEALTH_COLOR[row.health] ?? SUBSYSTEM_HEALTH_COLOR.unknown;
+  return (
+    <div data-testid={`subsystem-row-${row.subsystem}`} style={_row}>
+      <span style={{ fontWeight: 700, minWidth: 220 }}>{row.subsystem}</span>
+      <span
+        data-testid={`subsystem-status-${row.subsystem}`}
+        style={{ fontSize: 10, fontWeight: 700, color: statusColor, border: `1px solid ${statusColor}`, borderRadius: 5, padding: '1px 7px' }}
+      >
+        {row.status}
+      </span>
+      <span
+        data-testid={`subsystem-health-${row.subsystem}`}
+        style={{ fontSize: 10, fontWeight: 700, color: healthColor, border: `1px solid ${healthColor}`, borderRadius: 5, padding: '1px 7px' }}
+      >
+        {row.health}
+      </span>
+      <code style={{ color: 'var(--color-muted)' }}>{row.flag ?? '—'}</code>
+      <span style={{ color: 'var(--color-muted)' }}>{row.effective_value ?? '—'}</span>
+    </div>
+  );
+}
+
+function SubsystemCockpitTile() {
+  const { data, isLoading, error } = useSubsystems();
+  return (
+    <section
+      data-testid="subsystem-cockpit-tile"
+      style={{ borderRadius: 10, padding: 14, background: PANEL, border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 8, gridColumn: '1 / -1' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <h2 style={{ fontSize: 13, fontWeight: 700, margin: 0, color: 'var(--color-foreground)' }}>Subsystem cockpit</h2>
+        {data && <span style={{ fontSize: 11, color: 'var(--color-muted)' }}>({data.subsystems.length})</span>}
+      </div>
+      {isLoading && (
+        <div data-testid="subsystem-cockpit-loading" style={_muted}>Loading subsystems…</div>
+      )}
+      {!isLoading && (error || !data) && (
+        <div data-testid="subsystem-cockpit-error" style={{ fontSize: 11, color: 'var(--color-danger, #ff5555)' }}>Failed to load subsystem cockpit.</div>
+      )}
+      {data && data.subsystems.map((row) => <SubsystemRowView key={row.subsystem} row={row} />)}
+    </section>
+  );
+}
 
 function Section({ title, count, degraded, children }: {
   title: string; count?: number; degraded?: boolean; children: React.ReactNode;
@@ -59,6 +124,8 @@ function Body({ data }: { data: ObservabilityEnvelope }) {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16, alignItems: 'start' }}>
+        <SubsystemCockpitTile />
+
         {/* Self-learning loop */}
         <Section title="Self-learning" count={sl.events.length} degraded={sl.degraded}>
           <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{sl.proposals} pending rule proposal(s)</div>

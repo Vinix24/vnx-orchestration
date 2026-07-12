@@ -18,6 +18,7 @@ import type {
   ConfigSetResponse,
   ConfigAuditEnvelope,
   ObservabilityEnvelope,
+  SubsystemsEnvelope,
   LiveSessionsEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
@@ -148,6 +149,10 @@ export function fetchConfig(): Promise<ConfigEnvelope> {
 
 export function fetchObservability(): Promise<ObservabilityEnvelope> {
   return get(`${BASE}/observability`);
+}
+
+export function fetchSubsystems(): Promise<SubsystemsEnvelope> {
+  return get(`${BASE}/subsystems`);
 }
 
 export function fetchLiveSessions(): Promise<LiveSessionsEnvelope> {
