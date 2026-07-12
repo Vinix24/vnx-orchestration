@@ -600,6 +600,55 @@ def _register_deliverable_subparser(subparsers: argparse.Action) -> None:
     _register_deliverable_verbs(deliverable_subs)
 
 
+def _register_handoff_subparser(subparsers: argparse.Action) -> None:
+    handoff_parser = subparsers.add_parser(
+        "handoff",
+        help="read/ack the T0 context-rotation handoff (show/mark-ready)",
+    )
+    handoff_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    handoff_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="PROJECT_ID",
+        help="project_id (default: resolved from VNX_PROJECT_ID / .vnx-project-id / git remote)",
+    )
+    handoff_subs = handoff_parser.add_subparsers(dest="handoff_subcommand", metavar="SUBCOMMAND")
+
+    show_parser = handoff_subs.add_parser("show", help="print the resume briefing parsed from handoff.md")
+    show_parser.add_argument(
+        "--logdir",
+        default=None,
+        metavar="DIR",
+        help="directory containing handoff.md (default: the project_id+terminal-scoped rotation dir)",
+    )
+    show_parser.add_argument("--terminal", default="T0", metavar="TERMINAL")
+    show_parser.add_argument(
+        "--mark-ready",
+        action="store_true",
+        dest="mark_ready",
+        help="also write the .ready signal after printing (requires --rotation-id)",
+    )
+    show_parser.add_argument("--rotation-id", default=None, metavar="ROTATION_ID")
+    # SUPPRESS (not "." / None): the subparsers action parses each subcommand
+    # into a FRESH namespace and then copies every attribute from it back
+    # onto the parent namespace — including untouched defaults. Without
+    # SUPPRESS, that copy silently clobbers a --project-dir/--project-id
+    # already set at the parent `handoff` level (e.g. `vnx handoff
+    # --project-id foo show`) back to this subparser's own default. SUPPRESS
+    # means "don't set this attribute at all unless the user passed it here",
+    # so an unset flag on the subcommand never overwrites a value the parent
+    # already resolved.
+    show_parser.add_argument("--project-dir", default=argparse.SUPPRESS, metavar="DIR")
+    show_parser.add_argument("--project-id", default=argparse.SUPPRESS, metavar="PROJECT_ID")
+
+    mark_ready_parser = handoff_subs.add_parser("mark-ready", help="write the rotation_id-stamped .ready signal")
+    mark_ready_parser.add_argument("--rotation-id", required=True, metavar="ROTATION_ID")
+    mark_ready_parser.add_argument("--terminal", default="T0", metavar="TERMINAL")
+    # See the show_parser comment above — same duplicate-dest clobber risk.
+    mark_ready_parser.add_argument("--project-dir", default=argparse.SUPPRESS, metavar="DIR")
+    mark_ready_parser.add_argument("--project-id", default=argparse.SUPPRESS, metavar="PROJECT_ID")
+
+
 def _register_migrate_subparser(subparsers: argparse.Action) -> None:
     migrate_parser = subparsers.add_parser(
         "migrate",
@@ -915,6 +964,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.track import vnx_track
         sys.exit(vnx_track(args))
 
+    elif args.command == "handoff":
+        from vnx_cli.commands.handoff import vnx_handoff
+        sys.exit(vnx_handoff(args))
+
     elif args.command == "learning":
         from vnx_cli.commands.learning import vnx_learning
         sys.exit(vnx_learning(args))
@@ -970,6 +1023,7 @@ def main() -> None:
     _register_update_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
     _register_track_subparser(subparsers)
+    _register_handoff_subparser(subparsers)
     _register_learning_subparser(subparsers)
     _register_dream_subparser(subparsers)
     _register_migrate_subparser(subparsers)

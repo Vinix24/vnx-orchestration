@@ -17,6 +17,7 @@
 - Multi-model guide: `MULTI_MODEL_GUIDE.md`
 - Autonomous production guide: `AUTONOMOUS_PRODUCTION_GUIDE.md`
 - Transcript backup & archive: `TRANSCRIPT_BACKUP_ARCHIVE.md`
+- T0 context rotation (default OFF): `CONTEXT_ROTATION.md`
 
 > **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available
 > via the dashboard server (`dashboard/serve_dashboard.py`) at `/api/health`.

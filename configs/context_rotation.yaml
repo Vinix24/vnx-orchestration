@@ -1,0 +1,45 @@
+# VNX T0 context-rotation policy (default OFF).
+#
+# See docs/operations/CONTEXT_ROTATION.md for the full contract. This file is
+# the yaml half of RotationPolicy.load() (scripts/lib/context_rotation.py);
+# every field here can be overridden per-process by the matching
+# VNX_T0_ROTATION* env var (env always wins — see the doc for the table).
+#
+# Native Claude Code compaction remains the baseline. This policy only
+# controls the OPTIONAL T0-initiated handoff+respawn control-plane on top of
+# it; it never disables compaction.
+
+# Master switch. False (or absent) => checkpoint()/decide_rotation() are a
+# guaranteed no-op regardless of every other field below. Mirrors env
+# VNX_T0_ROTATION (set to "1" to enable).
+enabled: false
+
+# Only "governance_boundary" is implemented. Interactive T0 has no reliable
+# live context-percentage signal (verified round 1 of the design panel), so
+# there is no "pct" trigger mode — pct_ceiling below is a backstop on top of
+# the boundary trigger, not a trigger of its own.
+trigger: governance_boundary
+
+# Durable boundary COUNTER gate (not a timestamp/cooldown): a rotation is
+# only allowed once at least this many governance boundaries have passed
+# since the last CONFIRMED rotation. Persisted per-project per-terminal in
+# <central_data_dir>/state/rotation/<terminal>_durable.json.
+min_boundaries_between_rotations: 3
+
+# Optional safety-valve: when set, a rotation is allowed even if the boundary
+# counter hasn't cleared min_boundaries_between_rotations, provided the
+# caller-supplied context_pct is at/above this ceiling AND the call is still
+# at a governance boundary (rotation is never mid-action). Leave null to run
+# on the boundary counter alone (observability-only pct reporting).
+pct_ceiling: null
+
+# "tmux_new_session" | "off". Off means checkpoint() still writes the
+# handoff + advances debounce state on a decided rotation, but never spawns
+# a successor session — useful for dry-running the handoff pipeline. The
+# T0-initiated non-destructive tmux respawn only fires when this is
+# "tmux_new_session" AND enabled is true.
+respawn: off
+
+# Reserved for future handoff.md template variants. Only "default" exists
+# today (scripts/lib/context_rotation.write_t0_handoff).
+handoff_template: default
