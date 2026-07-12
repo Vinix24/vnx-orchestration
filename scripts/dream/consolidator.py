@@ -51,6 +51,22 @@ def _resolve_data_root(data_root: "Path | None") -> Path:
     return Path(_vnx_paths.resolve_paths()["VNX_DATA_DIR"])
 
 
+def _injection_probe_health(state_dir: Path) -> str:
+    """Run the injection-effectiveness probe (PR-6) and return its health status.
+
+    This is the PR-17 activation gate for the dream-cycle executor: read-only,
+    never raises — a probe/import failure degrades to ``"unknown"`` (gated,
+    same as a genuinely unhealthy probe) rather than crashing the cycle.
+    """
+    try:
+        from injection_effectiveness_probe import InjectionEffectivenessProbe
+
+        return InjectionEffectivenessProbe(state_dir=state_dir).run().status
+    except Exception as exc:
+        print(f"dream run: injection-effectiveness probe unavailable ({exc}) -> unknown", flush=True)
+        return "unknown"
+
+
 def _check_receipt_completeness(
     data_root: Path, max_age_hours: int = 48
 ) -> tuple[bool, str]:
@@ -219,6 +235,49 @@ def run_dream_cycle(
     # ADR-007: must NOT use resolve_project_root(__file__)/.vnx-data — that path
     # is the VNX source repo and breaks on central installs.
     _data_root = _resolve_data_root(data_root)
+
+    # PR-17 activation gate: VNX_DREAM_SCHEDULER_ENABLED is the arm-switch, the
+    # injection-effectiveness probe (PR-6) health is the gate. scheduler.py only
+    # installs the LaunchAgent/crontab — it never runs the cycle — so the gate
+    # lives here to hold for both the scheduled and manual (`vnx dream run`) paths.
+    if os.environ.get("VNX_DREAM_SCHEDULER_ENABLED", "0") != "1":
+        _emit_dream_event(
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": cycle_id,
+                "project_id": project_id,
+                "reason": "scheduler_disabled",
+                "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            _data_root,
+        )
+        return {
+            "status": "skipped",
+            "cycle_id": cycle_id,
+            "reason": "scheduler_disabled",
+            "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
+        }
+
+    probe_health = _injection_probe_health(db_path.parent)
+    if probe_health != "ok":
+        _emit_dream_event(
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": cycle_id,
+                "project_id": project_id,
+                "reason": "probe_not_ok",
+                "detail": f"injection-effectiveness probe health={probe_health}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            _data_root,
+        )
+        return {
+            "status": "skipped",
+            "cycle_id": cycle_id,
+            "reason": "probe_not_ok",
+            "probe_health": probe_health,
+        }
 
     # GAP-7: receipt-completeness preflight — skip cycle on empty/stale data
     complete, detail = _check_receipt_completeness(_data_root)

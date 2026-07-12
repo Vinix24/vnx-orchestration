@@ -190,6 +190,7 @@ from api_intelligence import (  # noqa: E402
     _intelligence_get_weekly_digest,
     _intelligence_generate_weekly_digest,
     _intelligence_get_learning_summary,
+    _intelligence_get_effectiveness_probe,
     _governance_get_enforcement,
     _governance_get_overrides,
     _governance_get_audit,
@@ -524,6 +525,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/intelligence/learning-summary":
             payload, status_int = _intelligence_get_learning_summary()
             _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        if path == "/api/intelligence/effectiveness-probe":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_effectiveness_probe())
             return
 
         if path == "/api/intelligence/behavioral":
