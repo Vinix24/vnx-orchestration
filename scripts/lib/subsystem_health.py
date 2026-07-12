@@ -38,6 +38,7 @@ from health_beacon import HealthBeacon  # noqa: E402
 # registered probe regardless of which entrypoint (CLI, test, dashboard)
 # triggers the first import of this module.
 import governance_effectiveness_probe  # noqa: E402,F401
+import injection_effectiveness_probe  # noqa: E402,F401
 import migration_effectiveness_probe  # noqa: E402,F401
 import plan_gate_effectiveness_probe  # noqa: E402,F401
 
