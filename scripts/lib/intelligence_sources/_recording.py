@@ -122,7 +122,8 @@ def record_pattern_usage(
                 pattern_id    TEXT NOT NULL,
                 pattern_title TEXT NOT NULL,
                 offered_at    TEXT NOT NULL,
-                PRIMARY KEY (dispatch_id, pattern_id)
+                project_id    TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (dispatch_id, pattern_id, project_id)
             )"""
         )
         dpo_has_project = has_column_fn("dispatch_pattern_offered", "project_id")
@@ -166,7 +167,7 @@ def _upsert_pattern_usage(db, item, now, project_id, has_project):
                  ignored_count, success_count, failure_count,
                  last_offered, confidence, created_at, updated_at, project_id)
                VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?)
-               ON CONFLICT(pattern_id) DO UPDATE SET
+               ON CONFLICT(pattern_id, project_id) DO UPDATE SET
                 pattern_title = excluded.pattern_title,
                 pattern_hash  = excluded.pattern_hash,
                 last_offered  = excluded.last_offered,
@@ -195,7 +196,7 @@ def _upsert_dispatch_pattern_offered(db, item, dispatch_id, now, project_id, has
             """INSERT INTO dispatch_pattern_offered
                 (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
+               ON CONFLICT(dispatch_id, pattern_id, project_id) DO UPDATE SET
                 offered_at = excluded.offered_at""",
             (dispatch_id, item.item_id, item.title[:255], now, project_id),
         )
