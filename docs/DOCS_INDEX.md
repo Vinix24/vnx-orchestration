@@ -29,9 +29,8 @@
 | Event Streams | `docs/operations/EVENT_STREAMS.md` | Per-terminal NDJSON ring-buffer lifecycle and archive layout |
 | Runtime Rollback | `docs/operations/RUNTIME_CORE_ROLLBACK.md` | Rollback path for runtime-core cutovers |
 | Intelligence | `docs/intelligence/` | Public intelligence references |
-| Comparisons | `docs/comparisons/` | Positioning and tradeoff docs |
 | Examples | `docs/examples/` | Example orchestration flows |
-| Archive | `docs/_archive/` | Historical docs kept for traceability |
+| Archive | `docs/_archive/` | Historical docs kept for traceability; see `ARCHIVED_MANIFEST.md` for the archival rule and per-file provenance |
 
 ## Internal
 

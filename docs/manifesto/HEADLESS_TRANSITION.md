@@ -233,7 +233,7 @@ A 27-PR chain (like the v0.10.0 chain) landed over two days with the operator ma
 
 ## See Also
 
-- [docs/comparisons/headless_vs_interactive.md](../comparisons/headless_vs_interactive.md) — detailed side-by-side comparison
+- [docs/_archive/comparisons/headless_vs_interactive.md](../_archive/comparisons/headless_vs_interactive.md) — detailed side-by-side comparison (archived; positioning content, PR-11)
 - [docs/operations/SUBPROCESS_ADAPTER_FEATURE_FLAG.md](../operations/SUBPROCESS_ADAPTER_FEATURE_FLAG.md) — env var reference for all terminals
 - [docs/operations/EVENT_STREAMS.md](../operations/EVENT_STREAMS.md) — per-terminal NDJSON structure
 - [README.md §"Adapter mode matrix"](../../README.md) — quick-start matrix in the project overview
