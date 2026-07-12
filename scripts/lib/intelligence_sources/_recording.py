@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
 from ._common import (
     IntelligenceItem,
@@ -103,6 +103,13 @@ def record_injection_audit(
         logger.warning("Failed to record injection audit: %s", e)
 
 
+_PATTERN_USAGE_CONFLICT_PREFERRED: Tuple[str, ...] = ("pattern_id", "project_id")
+_PATTERN_USAGE_CONFLICT_FALLBACK: Tuple[str, ...] = ("pattern_id",)
+
+_DPO_CONFLICT_PREFERRED: Tuple[str, ...] = ("dispatch_id", "pattern_id", "project_id")
+_DPO_CONFLICT_FALLBACK: Tuple[str, ...] = ("dispatch_id", "pattern_id")
+
+
 def record_pattern_usage(
     result: "InjectionResult",
     db: sqlite3.Connection,
@@ -127,13 +134,103 @@ def record_pattern_usage(
             )"""
         )
         dpo_has_project = has_column_fn("dispatch_pattern_offered", "project_id")
+
+        pu_conflict_target = _resolve_conflict_target(
+            db, "pattern_usage", _PATTERN_USAGE_CONFLICT_PREFERRED, _PATTERN_USAGE_CONFLICT_FALLBACK,
+        )
+        if pu_conflict_target is None:
+            logger.warning(
+                "pattern_usage: no UNIQUE/PRIMARY KEY constraint matches ON CONFLICT target "
+                "%s or %s; skipping pattern_usage upserts for this batch",
+                _PATTERN_USAGE_CONFLICT_PREFERRED, _PATTERN_USAGE_CONFLICT_FALLBACK,
+            )
+
+        dpo_conflict_target = _resolve_conflict_target(
+            db, "dispatch_pattern_offered", _DPO_CONFLICT_PREFERRED, _DPO_CONFLICT_FALLBACK,
+        )
+        if dpo_conflict_target is None:
+            logger.warning(
+                "dispatch_pattern_offered: no UNIQUE/PRIMARY KEY constraint matches ON CONFLICT "
+                "target %s or %s; skipping dispatch_pattern_offered upserts for this batch",
+                _DPO_CONFLICT_PREFERRED, _DPO_CONFLICT_FALLBACK,
+            )
+
         for item in result.items:
-            _upsert_pattern_usage(db, item, now, project_id, pu_has_project)
-            _upsert_dispatch_pattern_offered(db, item, result.dispatch_id, now, project_id, dpo_has_project)
+            if pu_conflict_target is not None:
+                _upsert_pattern_usage(db, item, now, project_id, pu_has_project, pu_conflict_target)
+            if dpo_conflict_target is not None:
+                _upsert_dispatch_pattern_offered(
+                    db, item, result.dispatch_id, now, project_id, dpo_has_project, dpo_conflict_target,
+                )
             _stamp_source_dispatch_id(db, item, result.dispatch_id)
         db.commit()
     except sqlite3.Error as e:
         logger.warning("Failed to record pattern usage: %s", e)
+
+
+def _unique_constraint_column_sets(db: sqlite3.Connection, table: str) -> List[Tuple[str, ...]]:
+    """Return every UNIQUE-constraint column set actually defined on ``table``:
+    the PRIMARY KEY (single- or multi-column) plus any ``CREATE UNIQUE INDEX``.
+    Callers must compare as sets — SQLite's ON CONFLICT matches a constraint
+    regardless of the column order used to declare it."""
+    column_sets: List[Tuple[str, ...]] = []
+    try:
+        table_info = db.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return column_sets
+    pk_cols: List[Tuple[int, str]] = []
+    for row in table_info:
+        name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        pk_order = row["pk"] if isinstance(row, sqlite3.Row) else row[5]
+        if pk_order:
+            pk_cols.append((pk_order, name))
+    if pk_cols:
+        pk_cols.sort(key=lambda pair: pair[0])
+        column_sets.append(tuple(name for _, name in pk_cols))
+    try:
+        index_list = db.execute(f"PRAGMA index_list({table})").fetchall()
+    except sqlite3.Error:
+        index_list = []
+    for idx_row in index_list:
+        idx_name = idx_row["name"] if isinstance(idx_row, sqlite3.Row) else idx_row[1]
+        is_unique = idx_row["unique"] if isinstance(idx_row, sqlite3.Row) else idx_row[2]
+        if not is_unique:
+            continue
+        try:
+            idx_info = db.execute(f"PRAGMA index_info({idx_name})").fetchall()
+        except sqlite3.Error:
+            continue
+        seq_cols: List[Tuple[int, str]] = []
+        for info_row in idx_info:
+            seqno = info_row["seqno"] if isinstance(info_row, sqlite3.Row) else info_row[0]
+            col_name = info_row["name"] if isinstance(info_row, sqlite3.Row) else info_row[2]
+            if col_name is not None:
+                seq_cols.append((seqno, col_name))
+        if not seq_cols:
+            continue
+        seq_cols.sort(key=lambda pair: pair[0])
+        column_sets.append(tuple(name for _, name in seq_cols))
+    return column_sets
+
+
+def _resolve_conflict_target(
+    db: sqlite3.Connection,
+    table: str,
+    preferred: Tuple[str, ...],
+    fallback: Tuple[str, ...],
+) -> Optional[Tuple[str, ...]]:
+    """Pick an ON CONFLICT column tuple that matches an ACTUAL unique constraint
+    on ``table`` (PRIMARY KEY or UNIQUE index) rather than mere column presence.
+    Prefers the project-scoped composite, falls back to the legacy single-store
+    target, and returns None if neither constraint exists — SQLite rejects an
+    ON CONFLICT clause with no matching constraint, so callers must skip rather
+    than emit it."""
+    constraint_sets = {frozenset(cols) for cols in _unique_constraint_column_sets(db, table)}
+    if frozenset(preferred) in constraint_sets:
+        return preferred
+    if frozenset(fallback) in constraint_sets:
+        return fallback
+    return None
 
 
 def stamp_source_dispatch_ids(
@@ -158,16 +255,17 @@ def stamp_source_dispatch_ids(
     return stamped
 
 
-def _upsert_pattern_usage(db, item, now, project_id, has_project):
+def _upsert_pattern_usage(db, item, now, project_id, has_project, conflict_target: Tuple[str, ...]):
     pattern_hash = _item_hash(item.item_id)
+    conflict_clause = ", ".join(conflict_target)
     if has_project:
         db.execute(
-            """INSERT INTO pattern_usage
+            f"""INSERT INTO pattern_usage
                 (pattern_id, pattern_title, pattern_hash, used_count,
                  ignored_count, success_count, failure_count,
                  last_offered, confidence, created_at, updated_at, project_id)
                VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?)
-               ON CONFLICT(pattern_id, project_id) DO UPDATE SET
+               ON CONFLICT({conflict_clause}) DO UPDATE SET
                 pattern_title = excluded.pattern_title,
                 pattern_hash  = excluded.pattern_hash,
                 last_offered  = excluded.last_offered,
@@ -176,12 +274,12 @@ def _upsert_pattern_usage(db, item, now, project_id, has_project):
         )
     else:
         db.execute(
-            """INSERT INTO pattern_usage
+            f"""INSERT INTO pattern_usage
                 (pattern_id, pattern_title, pattern_hash, used_count,
                  ignored_count, success_count, failure_count,
                  last_offered, confidence, created_at, updated_at)
                VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
-               ON CONFLICT(pattern_id) DO UPDATE SET
+               ON CONFLICT({conflict_clause}) DO UPDATE SET
                 pattern_title = excluded.pattern_title,
                 pattern_hash  = excluded.pattern_hash,
                 last_offered  = excluded.last_offered,
@@ -190,22 +288,23 @@ def _upsert_pattern_usage(db, item, now, project_id, has_project):
         )
 
 
-def _upsert_dispatch_pattern_offered(db, item, dispatch_id, now, project_id, has_project):
+def _upsert_dispatch_pattern_offered(db, item, dispatch_id, now, project_id, has_project, conflict_target: Tuple[str, ...]):
+    conflict_clause = ", ".join(conflict_target)
     if has_project:
         db.execute(
-            """INSERT INTO dispatch_pattern_offered
+            f"""INSERT INTO dispatch_pattern_offered
                 (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(dispatch_id, pattern_id, project_id) DO UPDATE SET
+               ON CONFLICT({conflict_clause}) DO UPDATE SET
                 offered_at = excluded.offered_at""",
             (dispatch_id, item.item_id, item.title[:255], now, project_id),
         )
     else:
         db.execute(
-            """INSERT INTO dispatch_pattern_offered
+            f"""INSERT INTO dispatch_pattern_offered
                 (dispatch_id, pattern_id, pattern_title, offered_at)
                VALUES (?, ?, ?, ?)
-               ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
+               ON CONFLICT({conflict_clause}) DO UPDATE SET
                 offered_at = excluded.offered_at""",
             (dispatch_id, item.item_id, item.title[:255], now),
         )

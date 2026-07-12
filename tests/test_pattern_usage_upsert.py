@@ -86,6 +86,64 @@ CREATE TABLE dispatch_pattern_offered (
 );
 """
 
+# project_id COLUMN present (has_column_fn -> True) but NO composite unique
+# constraint backs it — e.g. a V27 bootstrap that skipped the ADR-007 index
+# because of pre-existing duplicate rows. The has_project INSERT-column
+# decision and the ON CONFLICT target must be decoupled: INSERT still writes
+# project_id, but the conflict target must fall back to the single-column PK.
+_PROJECT_COLUMN_NO_COMPOSITE_INDEX_SCHEMA = """
+CREATE TABLE pattern_usage (
+    pattern_id TEXT PRIMARY KEY,
+    pattern_title TEXT,
+    pattern_hash TEXT,
+    used_count INTEGER DEFAULT 0,
+    ignored_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failure_count INTEGER DEFAULT 0,
+    last_offered TEXT,
+    confidence REAL DEFAULT 0.0,
+    created_at TEXT,
+    updated_at TEXT,
+    project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+);
+
+CREATE TABLE dispatch_pattern_offered (
+    dispatch_id TEXT NOT NULL,
+    pattern_id TEXT NOT NULL,
+    pattern_title TEXT,
+    offered_at TEXT,
+    project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+    PRIMARY KEY (dispatch_id, pattern_id)
+);
+"""
+
+# No PRIMARY KEY and no UNIQUE index at all on either table — the pathological
+# case where neither the preferred nor the fallback conflict target exists.
+_NO_UNIQUE_CONSTRAINT_SCHEMA = """
+CREATE TABLE pattern_usage (
+    pattern_id TEXT,
+    pattern_title TEXT,
+    pattern_hash TEXT,
+    used_count INTEGER DEFAULT 0,
+    ignored_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failure_count INTEGER DEFAULT 0,
+    last_offered TEXT,
+    confidence REAL DEFAULT 0.0,
+    created_at TEXT,
+    updated_at TEXT,
+    project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+);
+
+CREATE TABLE dispatch_pattern_offered (
+    dispatch_id TEXT NOT NULL,
+    pattern_id TEXT NOT NULL,
+    pattern_title TEXT,
+    offered_at TEXT,
+    project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+);
+"""
+
 
 def _make_db(schema_sql: str) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
@@ -237,3 +295,69 @@ class TestPatternUsageUpsertLegacySchema:
         assert _count(conn, "pattern_usage") == 1
         assert _count(conn, "dispatch_pattern_offered") == 1
         _assert_no_swallowed_warning(caplog)
+
+
+class TestPatternUsageUpsertConstraintAware:
+    """The actual [P1] fix: the ON CONFLICT target must be chosen from the real
+    UNIQUE/PRIMARY KEY constraints on the table, not from column presence."""
+
+    def test_project_column_without_composite_index_falls_back_to_pattern_id(self, caplog):
+        """project_id COLUMN exists (has_project=True) but the only constraint is
+        PRIMARY KEY(pattern_id) — no composite unique index. Before the fix this
+        selected ON CONFLICT(pattern_id, project_id), which matches no constraint
+        and raises; SQLite swallows it as a warning and the row never lands."""
+        caplog.set_level(logging.WARNING, logger="intelligence_sources._recording")
+        conn = _make_db(_PROJECT_COLUMN_NO_COMPOSITE_INDEX_SCHEMA)
+        item = _make_item(item_id="pu-no-composite")
+
+        record_pattern_usage(_make_result([item], dispatch_id="dispatch-a"), conn, _has_column_fn(conn))
+        record_pattern_usage(_make_result([item], dispatch_id="dispatch-b"), conn, _has_column_fn(conn))
+
+        assert _count(conn, "pattern_usage") == 1, "must UPSERT via (pattern_id), not fail silently"
+        row = conn.execute(
+            "SELECT project_id FROM pattern_usage WHERE pattern_id = ?", (item.item_id,)
+        ).fetchone()
+        assert row is not None and row[0] == "vnx-dev", "project_id column is still written on INSERT"
+        _assert_no_swallowed_warning(caplog)
+
+    def test_dpo_project_column_without_composite_index_falls_back(self, caplog):
+        """Same decoupling for dispatch_pattern_offered: project_id column present,
+        but only PRIMARY KEY(dispatch_id, pattern_id) — no project-scoped constraint."""
+        caplog.set_level(logging.WARNING, logger="intelligence_sources._recording")
+        conn = _make_db(_PROJECT_COLUMN_NO_COMPOSITE_INDEX_SCHEMA)
+        item = _make_item(item_id="dpo-no-composite")
+        result = _make_result([item], dispatch_id="dispatch-no-composite")
+
+        record_pattern_usage(result, conn, _has_column_fn(conn))
+        record_pattern_usage(result, conn, _has_column_fn(conn))  # idempotent re-run
+
+        assert _count(conn, "dispatch_pattern_offered") == 1
+        row = conn.execute(
+            "SELECT project_id FROM dispatch_pattern_offered WHERE dispatch_id = ? AND pattern_id = ?",
+            (result.dispatch_id, item.item_id),
+        ).fetchone()
+        assert row is not None and row[0] == "vnx-dev"
+        _assert_no_swallowed_warning(caplog)
+
+    def test_no_usable_unique_constraint_warns_once_and_skips_without_crash(self, caplog):
+        """Neither the preferred nor the fallback conflict target exists on either
+        table. The helper must not raise mid-transaction; it logs one clear warning
+        naming the table and skips the row, leaving the rest of the batch intact."""
+        caplog.set_level(logging.WARNING, logger="intelligence_sources._recording")
+        conn = _make_db(_NO_UNIQUE_CONSTRAINT_SCHEMA)
+        item = _make_item(item_id="no-constraint-pattern")
+        result = _make_result([item], dispatch_id="dispatch-no-constraint")
+
+        record_pattern_usage(result, conn, _has_column_fn(conn))
+
+        assert _count(conn, "pattern_usage") == 0
+        assert _count(conn, "dispatch_pattern_offered") == 0
+        _assert_no_swallowed_warning(caplog)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("pattern_usage" in m and "ON CONFLICT" in m for m in messages), (
+            "expected one clear warning naming pattern_usage, got: %r" % messages
+        )
+        assert any("dispatch_pattern_offered" in m and "ON CONFLICT" in m for m in messages), (
+            "expected one clear warning naming dispatch_pattern_offered, got: %r" % messages
+        )
