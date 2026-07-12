@@ -395,6 +395,27 @@ export interface ReworkEdge {
   dispatched_at: string | null;
 }
 
+// ===== Subsystem Cockpit Types =====
+// Mirrors api_subsystems.py's rowset: config_registry (CONFIG_REGISTRY +
+// CONFIG_REGISTRY_SUBSYSTEMS) union'd with health_beacon health.
+
+export interface SubsystemRow {
+  subsystem: string;
+  what: string;
+  flag: string | null;
+  status: string; // LIVE | PARK | CUT | ACTIVATE | SCOPE | COCKPIT
+  effective_value: string | null;
+  health: string; // ok | stale | fail | corrupt | unknown
+  last_signal: string;
+}
+
+export interface SubsystemsEnvelope {
+  project_id: string;
+  subsystems: SubsystemRow[];
+  queried_at: string;
+  error?: string;
+}
+
 // ===== Kanban Board Types =====
 
 export interface KanbanCard {

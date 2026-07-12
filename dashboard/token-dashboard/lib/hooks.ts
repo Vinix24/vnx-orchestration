@@ -14,6 +14,7 @@ import {
   fetchConfig,
   fetchConfigAudit,
   fetchObservability,
+  fetchSubsystems,
   fetchReports,
   fetchReportContent,
   fetchAgents,
@@ -36,7 +37,7 @@ import type {
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope, SystemHealthEnvelope, PlanningEnvelope,
-  ConfigEnvelope, ConfigAuditEnvelope, ObservabilityEnvelope,
+  ConfigEnvelope, ConfigAuditEnvelope, ObservabilityEnvelope, SubsystemsEnvelope,
   ReportsEnvelope, AgentsEnvelope,
   LiveSessionsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
@@ -206,6 +207,19 @@ export function useObservability() {
   return useSWR<ObservabilityEnvelope>(
     'operator-observability',
     fetchObservability,
+    { refreshInterval: 20000, revalidateOnFocus: true, dedupingInterval: 8000 }
+  );
+}
+
+// SWR key for useSubsystems() — exported so other pages (e.g. /operator/config, after a
+// postConfigSet toggle) can call the global `mutate()` from 'swr' to revalidate the cockpit tile
+// without importing this hook.
+export const SUBSYSTEMS_SWR_KEY = 'operator-subsystems';
+
+export function useSubsystems() {
+  return useSWR<SubsystemsEnvelope>(
+    SUBSYSTEMS_SWR_KEY,
+    fetchSubsystems,
     { refreshInterval: 20000, revalidateOnFocus: true, dedupingInterval: 8000 }
   );
 }
