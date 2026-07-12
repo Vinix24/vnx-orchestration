@@ -157,7 +157,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
         "Restrict the plan-gate panel to complex features (display metadata only; "
         "the scope-skip read-site is deferred to review-floor-enforcer).",
-        subsystem="plan-gate-panel", status="SCOPE"),
+        # subsystem matches the docs/core/SUBSYSTEMS.md seed row
+        # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
+        # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the
+        # cockpit generator has exactly one canonical flag per ledger row.
+        subsystem="plan-gate-task-class-scope", status="SCOPE"),
     "VNX_HASH_CHAIN_REQUIRED": _e(
         "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
         "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",

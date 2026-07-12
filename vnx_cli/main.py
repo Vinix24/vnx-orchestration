@@ -96,6 +96,40 @@ def _register_status_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_subsystems_subparser(subparsers: argparse.Action) -> None:
+    subsystems_parser = subparsers.add_parser(
+        "subsystems",
+        help="render the live subsystem cockpit SSOT (MAP + ON/OFF + HEALTH)",
+    )
+    subsystems_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit results as JSON",
+    )
+    subsystems_parser.add_argument(
+        "--md",
+        action="store_true",
+        help="emit the docs/core/SUBSYSTEMS.md ledger table verbatim",
+    )
+    subsystems_parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="run registered effectiveness probes for live health (unknown for unregistered subsystems)",
+    )
+    subsystems_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="PROJECT_ID",
+        help="project_id to resolve flag values for (default: registry default / env)",
+    )
+    subsystems_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to resolve the data root from (default: current directory)",
+    )
+
+
 def _register_init_subparser(subparsers: argparse.Action) -> None:
     init_parser = subparsers.add_parser(
         "init",
@@ -853,6 +887,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.status import vnx_status
         sys.exit(vnx_status(args))
 
+    elif args.command == "subsystems":
+        from vnx_cli.commands.subsystems import vnx_subsystems
+        sys.exit(vnx_subsystems(args))
+
     elif args.command == "dispatch-agent":
         from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
         sys.exit(vnx_dispatch_agent(args))
@@ -925,6 +963,7 @@ def main() -> None:
     _register_fabric_audit_subparser(subparsers)
     _register_version_subparser(subparsers)
     _register_status_subparser(subparsers)
+    _register_subsystems_subparser(subparsers)
     _register_init_subparser(subparsers)
     _register_pool_subparser(subparsers)
     _register_role_subparser(subparsers)

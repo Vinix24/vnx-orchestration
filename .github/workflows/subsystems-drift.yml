@@ -1,0 +1,23 @@
+name: Subsystems Ledger Drift Check
+
+on:
+  push:
+    branches: ["main", "baseline/**"]
+  pull_request:
+
+jobs:
+  subsystems-drift:
+    name: docs/core/SUBSYSTEMS.md matches the live registry
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check ledger drift (deterministic columns only)
+        run: make subsystems-check
