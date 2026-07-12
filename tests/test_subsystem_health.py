@@ -115,5 +115,33 @@ def test_aggregate_default_subsystems_covers_the_known_universe(monkeypatch, tmp
     assert results["governance-enforcement-stack"]["signal"] == "no probe registered"
 
 
+def test_injection_effectiveness_probe_is_registered_under_intelligence_self_learning_loop():
+    """PR-6: importing the concrete probe module registers it (decorator side
+    effect); the aggregator must pick it up under the real subsystem name
+    instead of reporting `unknown`."""
+    import injection_effectiveness_probe  # noqa: F401  (registers via decorator)
+
+    assert "intelligence-self-learning-loop" in EFFECTIVENESS_PROBES
+    assert (
+        EFFECTIVENESS_PROBES["intelligence-self-learning-loop"]
+        is injection_effectiveness_probe.InjectionEffectivenessProbe
+    )
+
+
+def test_aggregate_runs_injection_effectiveness_probe_end_to_end(tmp_path):
+    """No pattern_usage data yet in a fresh state dir -> unknown, not a crash,
+    and the aggregator writes no beacon for it (unknown has no PROBE_TO_BEACON
+    entry)."""
+    import injection_effectiveness_probe  # noqa: F401  (registers via decorator)
+
+    results = subsystem_health.aggregate(
+        state_dir=tmp_path, subsystems=["intelligence-self-learning-loop"]
+    )
+
+    assert results["intelligence-self-learning-loop"]["status"] == "unknown"
+    beacon_path = tmp_path / "health" / "intelligence-self-learning-loop.json"
+    assert not beacon_path.exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
