@@ -48,7 +48,8 @@ def _resolve_logdir(args: Any, project_id: str) -> Path:
     _engine.ensure_engine_on_path()
     from context_rotation import rotation_handoff_dir
     terminal = getattr(args, "terminal", "T0") or "T0"
-    return rotation_handoff_dir(project_id, terminal)
+    project_root = Path(getattr(args, "project_dir", ".")).resolve()
+    return rotation_handoff_dir(project_id, terminal, project_root)
 
 
 def _mark_ready(args: Any, project_id: str) -> int:
@@ -57,18 +58,27 @@ def _mark_ready(args: Any, project_id: str) -> int:
         print("Error: --rotation-id is required to mark ready", file=sys.stderr)
         return 2
     terminal = getattr(args, "terminal", "T0") or "T0"
+    project_root = Path(getattr(args, "project_dir", ".")).resolve()
 
     _engine.ensure_engine_on_path()
     from context_rotation import write_ready_signal
 
-    ready_path = write_ready_signal(project_id, terminal, rotation_id)
+    ready_path = write_ready_signal(project_id, terminal, rotation_id, project_root=project_root)
     print(f"ready: terminal={terminal} rotation_id={rotation_id} -> {ready_path}")
     return 0
 
 
 def _show(args: Any) -> int:
-    project_id = _resolve_project_id(args)
-    logdir = _resolve_logdir(args, project_id)
+    logdir_arg = getattr(args, "logdir", None)
+    mark_ready = getattr(args, "mark_ready", False)
+
+    # Defer project-id resolution: an explicit --logdir needs no project
+    # context to read a handoff.md (it may point outside any VNX project
+    # entirely, e.g. an archived handoff). Only resolve when falling back to
+    # the default project_id+terminal-scoped logdir, or when --mark-ready
+    # needs a project_id afterwards.
+    project_id = _resolve_project_id(args) if (not logdir_arg or mark_ready) else None
+    logdir = Path(logdir_arg) if logdir_arg else _resolve_logdir(args, project_id)
 
     _engine.ensure_engine_on_path()
     from handoff_reader import read_handoff, format_briefing
@@ -81,7 +91,7 @@ def _show(args: Any) -> int:
 
     print(format_briefing(briefing))
 
-    if getattr(args, "mark_ready", False):
+    if mark_ready:
         return _mark_ready(args, project_id)
     return 0
 

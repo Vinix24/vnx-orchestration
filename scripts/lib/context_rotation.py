@@ -65,7 +65,7 @@ for _p in (str(_LIB_DIR), str(_SCRIPTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from vnx_paths import resolve_central_data_dir  # noqa: E402
+from vnx_paths import resolve_central_data_dir, _resolve_state_root  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -94,35 +94,64 @@ def _validate_terminal(terminal: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Path helpers (all project_id-scoped via resolve_central_data_dir — ADR-007 /
-# round-3 finding #8: shared central installs must never collide across
-# projects). `terminal` is validated via _validate_terminal() in every helper
-# below — it is the single choke point untrusted --terminal input passes
-# through before becoming a path component.
+# Path helpers (all project_id-scoped, resolved via the SAME canonical
+# resolver every other VNX surface uses — vnx_paths._resolve_state_root —
+# anchored on `project_root`. This deliberately does NOT hardcode
+# ~/.vnx-data/<project_id>: that central path is only used when this project
+# ALREADY resolves there (existing central install). For a project that
+# currently lives in project-local or XDG state, forcing the central path
+# would create ~/.vnx-data/<project_id> as a side effect of the FIRST
+# rotation call — after which vnx_paths' existence-gated central branch
+# would prefer that now-existing (but empty) dir over the project's real
+# store for every subsequent `vnx track`/`vnx horizon`/`status` call: a
+# state-store split-brain (ADR-026 / central-store class). `terminal` is
+# validated via _validate_terminal() in every helper below — it is the
+# single choke point untrusted --terminal input passes through before
+# becoming a path component.
 # ---------------------------------------------------------------------------
 
-def rotation_state_dir(project_id: str) -> Path:
-    return resolve_central_data_dir(project_id).joinpath(*_STATE_SUBDIR)
+def _project_data_root(project_id: str, project_root: Optional[Path] = None) -> Path:
+    """Resolve the data root THIS project already uses (central, project-local,
+    or XDG) — never forces ~/.vnx-data/<project_id> into existence when the
+    project doesn't already resolve there. `project_root` defaults to the
+    current working directory (matching checkpoint()'s own default) when not
+    supplied.
+    """
+    resolve_central_data_dir(project_id)  # validate project_id shape (ADR-007); raises ValueError on malformed input
+    root = Path(project_root) if project_root is not None else Path.cwd()
+    return _resolve_state_root(project_id, root)
 
 
-def rotation_handoff_dir(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+def rotation_state_dir(project_id: str, project_root: Optional[Path] = None) -> Path:
+    return _project_data_root(project_id, project_root).joinpath(*_STATE_SUBDIR)
+
+
+def rotation_handoff_dir(
+    project_id: str, terminal: str = DEFAULT_TERMINAL, project_root: Optional[Path] = None
+) -> Path:
     terminal = _validate_terminal(terminal)
-    return resolve_central_data_dir(project_id).joinpath(*_ROTATION_SUBDIR, terminal)
+    return _project_data_root(project_id, project_root).joinpath(*_ROTATION_SUBDIR, terminal)
 
 
-def durable_state_path(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+def durable_state_path(
+    project_id: str, terminal: str = DEFAULT_TERMINAL, project_root: Optional[Path] = None
+) -> Path:
     terminal = _validate_terminal(terminal)
-    return rotation_state_dir(project_id) / f"{terminal}_durable.json"
+    return rotation_state_dir(project_id, project_root) / f"{terminal}_durable.json"
 
 
-def request_marker_path(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+def request_marker_path(
+    project_id: str, terminal: str = DEFAULT_TERMINAL, project_root: Optional[Path] = None
+) -> Path:
     terminal = _validate_terminal(terminal)
-    return rotation_state_dir(project_id) / f"{terminal}_request.json"
+    return rotation_state_dir(project_id, project_root) / f"{terminal}_request.json"
 
 
-def ready_signal_path(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+def ready_signal_path(
+    project_id: str, terminal: str = DEFAULT_TERMINAL, project_root: Optional[Path] = None
+) -> Path:
     terminal = _validate_terminal(terminal)
-    return rotation_state_dir(project_id) / f"{terminal}.ready"
+    return rotation_state_dir(project_id, project_root) / f"{terminal}.ready"
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +352,7 @@ def _git_snapshot(project_root: Path) -> Dict[str, Any]:
     return {"branch": branch, "status_lines": status_lines, "commits": commits}
 
 
-def _horizon_snapshot(project_id: str) -> Dict[str, Any]:
+def _horizon_snapshot(project_id: str, project_root: Optional[Path] = None) -> Dict[str, Any]:
     """Best-effort NOW/NEXT tracks + their unresolved open items.
 
     Fail-soft: any failure (missing DB, schema mismatch, import error)
@@ -338,7 +367,7 @@ def _horizon_snapshot(project_id: str) -> Dict[str, Any]:
         empty["error"] = str(exc)
         return empty
 
-    state_dir = resolve_central_data_dir(project_id) / "state"
+    state_dir = _project_data_root(project_id, project_root) / "state"
     try:
         rows = _tracks.list_tracks(state_dir, project_id)
     except Exception as exc:  # noqa: BLE001
@@ -385,7 +414,7 @@ def write_t0_handoff(*, logdir: Path, project_root: Path, project_id: str) -> Pa
         git = {"branch": "unknown", "status_lines": [], "commits": []}
 
     try:
-        horizon = _horizon_snapshot(project_id)
+        horizon = _horizon_snapshot(project_id, project_root)
     except Exception as exc:  # noqa: BLE001
         log.warning("context_rotation: horizon snapshot failed: %s", exc)
         horizon = {"now": [], "next": [], "open_items": [], "error": str(exc)}
@@ -562,14 +591,16 @@ def _check_ready(ready_path: Path, rotation_id: str) -> bool:
     return data.get("rotation_id") == rotation_id
 
 
-def write_ready_signal(project_id: str, terminal: str, rotation_id: str) -> Path:
+def write_ready_signal(
+    project_id: str, terminal: str, rotation_id: str, project_root: Optional[Path] = None
+) -> Path:
     """Write the rotation_id-stamped `.ready` signal a waiting respawn() call
     checks for. Called by the successor session (`vnx handoff mark-ready` /
     `vnx handoff show --mark-ready`) once it has resumed — round-3 finding
     #6: the rotation_id is what lets the waiter reject a stale `.ready` left
     over from a previous rotation.
     """
-    ready_path = ready_signal_path(project_id, terminal)
+    ready_path = ready_signal_path(project_id, terminal, project_root)
     _write_json_atomic(ready_path, {
         "rotation_id": rotation_id,
         "terminal": terminal,
@@ -608,7 +639,7 @@ def respawn(
     kill = tmux_kill_fn or _default_tmux_kill
     rotation_id = rotation_id or uuid.uuid4().hex[:12]
 
-    ready_path = ready_signal_path(project_id, terminal)
+    ready_path = ready_signal_path(project_id, terminal, project_root)
     ready_path.parent.mkdir(parents=True, exist_ok=True)
 
     session_name = f"vnx-t0-rotation-{terminal.lower()}-{rotation_id[:8]}"
@@ -745,13 +776,13 @@ def checkpoint(
         return RotationOutcome(rotated=False, reason="disabled")
 
     resolved_project_root = Path(project_root) if project_root else Path.cwd()
-    state_dir = rotation_state_dir(project_id)
+    state_dir = rotation_state_dir(project_id, resolved_project_root)
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    durable_path = durable_state_path(project_id, terminal)
+    durable_path = durable_state_path(project_id, terminal, resolved_project_root)
     durable = _load_durable(durable_path)
 
-    request_path = request_marker_path(project_id, terminal)
+    request_path = request_marker_path(project_id, terminal, resolved_project_root)
     now = now_fn()
     in_flight = _load_json_safe(request_path)
     if in_flight and in_flight.get("status") == "in_progress":
@@ -781,7 +812,7 @@ def checkpoint(
         "rotation_id": rotation_id, "status": "in_progress", "created_at": _iso(now),
     })
 
-    handoff_dir = rotation_handoff_dir(project_id, terminal)
+    handoff_dir = rotation_handoff_dir(project_id, terminal, resolved_project_root)
     try:
         handoff_path = write_t0_handoff(
             logdir=handoff_dir, project_root=resolved_project_root, project_id=project_id,

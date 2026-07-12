@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import context_rotation as cr  # noqa: E402
 import handoff_reader as hr  # noqa: E402
+import vnx_paths  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent
 HOOK_PATH = REPO_ROOT / "scripts" / "hooks" / "session_stop_rotation.py"
@@ -382,6 +383,101 @@ class TestCheckpoint:
 
 
 # ---------------------------------------------------------------------------
+# 3b. P1 regression: rotation must use the canonical data root, never
+# first-create a competing ~/.vnx-data/<project_id> central store.
+# ---------------------------------------------------------------------------
+
+class TestRotationUsesCanonicalDataRoot:
+    """A prior version hardcoded resolve_central_data_dir(project_id) in the
+    rotation path helpers. For a project that doesn't already have a central
+    ~/.vnx-data/<project_id> (i.e. it resolves to project-local or XDG
+    state), the FIRST checkpoint() call would nonetheless CREATE
+    ~/.vnx-data/<project_id> as a side effect (via state_dir.mkdir()) —
+    after which vnx_paths._resolve_state_root's existence-gated central
+    branch prefers that now-existing (but empty) dir over the project's
+    real store for every subsequent `vnx track`/`vnx horizon`/`status` call:
+    a state-store split-brain. checkpoint() must resolve (and only ever
+    write under) whatever store this project's project_root ALREADY
+    resolves to via the same canonical resolver the rest of VNX uses.
+    """
+
+    def test_checkpoint_never_creates_competing_central_dir(
+        self, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Opt out of the autouse VNX_DATA_DIR_EXPLICIT override (see the
+        # comment in test_project_id_scoped_across_two_projects above) — this
+        # test exercises the default central/local/XDG resolution, which the
+        # explicit override would otherwise short-circuit.
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+        # The (separate, pre-existing) Phase-6-P3 receipt dual-write mirror
+        # legitimately writes a cross-project shadow copy of every appended
+        # receipt under resolve_central_data_dir(receipt["project_id"]) —
+        # that subsystem is out of scope here and NOT what this regression
+        # guards. Stub it out so this test only observes context_rotation's
+        # OWN rotation-file path resolution (durable/marker/handoff).
+        monkeypatch.setattr(cr, "_emit_continuation_receipt", lambda **kw: None)
+
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        project_id = "xdg-only-project"
+
+        central_dir = Path.home() / ".vnx-data" / project_id
+        assert not central_dir.exists()
+
+        expected_root = vnx_paths._resolve_state_root(project_id, repo)
+        # Sanity check on the fixture: with no existing central/local store,
+        # the canonical resolver itself lands on the XDG default, not central.
+        assert not str(expected_root).startswith(str(Path.home() / ".vnx-data"))
+
+        policy = _enabled_policy(min_boundaries_between_rotations=0, respawn="off")
+        out = cr.checkpoint(project_id=project_id, policy=policy, project_root=str(repo))
+        assert out.rotated is True
+
+        # Rotation files landed under the SAME root the rest of VNX resolves
+        # to for this project — not a hardcoded central path.
+        assert str(out.handoff_path.resolve()).startswith(str(expected_root.resolve()))
+        assert str(out.marker_path.resolve()).startswith(str(expected_root.resolve()))
+
+        # The P1 bug: checkpoint() must NEVER create a competing
+        # ~/.vnx-data/<project_id> rotation/state tree as a side effect when
+        # the project doesn't already resolve there.
+        assert not central_dir.exists()
+
+        # The store the rest of VNX sees for this project is unchanged
+        # before/after the rotation call.
+        assert vnx_paths._resolve_state_root(project_id, repo) == expected_root
+
+    def test_horizon_snapshot_reads_from_the_same_resolved_root(
+        self, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The handoff's horizon section must read tracks from the SAME
+        store checkpoint()/write_t0_handoff() resolves to — not a
+        hardcoded central dir the project never actually uses (the exact
+        failure mode described in the P1 finding: the handoff missed the
+        real NOW/NEXT tracks because it read from the wrong, freshly-created
+        empty central store)."""
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        project_id = "xdg-horizon-project"
+
+        resolved_root = vnx_paths._resolve_state_root(project_id, repo)
+        assert not resolved_root.exists()
+
+        logdir = tmp_path / "handoff_out"
+        handoff_path = cr.write_t0_handoff(logdir=logdir, project_root=repo, project_id=project_id)
+
+        # write_t0_handoff must have looked for tracks under resolved_root
+        # (which it just created via mkdir-on-demand inside tracks setup, or
+        # left absent if tracks lazily no-ops) — never under a central dir
+        # this project doesn't use.
+        assert not (Path.home() / ".vnx-data" / project_id).exists()
+        assert handoff_path.is_file()
+
+
+# ---------------------------------------------------------------------------
 # 4. respawn()
 # ---------------------------------------------------------------------------
 
@@ -565,15 +661,15 @@ class TestTerminalValidation:
 
     @pytest.mark.parametrize("bad_terminal", TRAVERSAL_INPUTS)
     def test_traversal_never_escapes_central_dir(self, isolated_home: Path, bad_terminal: str) -> None:
-        central = cr.resolve_central_data_dir(PROJECT_ID)
+        base = cr._project_data_root(PROJECT_ID)
         for helper in self.PATH_HELPERS:
             try:
                 produced = helper(PROJECT_ID, bad_terminal)
             except ValueError:
                 continue  # rejected outright — cannot have escaped anything
             # If a helper somehow didn't raise, the produced path must still
-            # resolve inside the central dir.
-            assert str(produced.resolve()).startswith(str(central.resolve()))
+            # resolve inside the project's resolved data root.
+            assert str(produced.resolve()).startswith(str(base.resolve()))
 
     def test_checkpoint_rejects_malicious_terminal(self, isolated_home: Path) -> None:
         policy = _enabled_policy(min_boundaries_between_rotations=0, respawn="off")
@@ -585,10 +681,10 @@ class TestTerminalValidation:
 
     @pytest.mark.parametrize("good_terminal", ["T0", "T1", "T2", "T3", "my-term_1", "ABC123"])
     def test_valid_terminal_names_still_work(self, isolated_home: Path, good_terminal: str) -> None:
-        central = cr.resolve_central_data_dir(PROJECT_ID)
+        base = cr._project_data_root(PROJECT_ID)
         for helper in self.PATH_HELPERS:
             produced = helper(PROJECT_ID, good_terminal)
-            assert str(produced.resolve()).startswith(str(central.resolve()))
+            assert str(produced.resolve()).startswith(str(base.resolve()))
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +711,18 @@ class TestWriteT0Handoff:
         assert "## State" in text
         assert "## Next steps" in text
 
-    def test_project_id_scoped_across_two_projects(self, isolated_home: Path, tmp_path: Path) -> None:
+    def test_project_id_scoped_across_two_projects(
+        self, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The autouse _vnx_data_dir_isolation conftest fixture pins
+        # VNX_DATA_DIR_EXPLICIT=1 for every test (a safety net against ever
+        # touching the real ~/.vnx-data). That explicit override is, by
+        # design, project_id-independent (it collapses every project onto
+        # one operator-chosen dir) — this test needs the *default*, no
+        # override resolution to exercise project_id-scoping, so it opts
+        # out via the documented escape hatch.
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
         repo = tmp_path / "repo"
         _make_git_repo(repo)
 
