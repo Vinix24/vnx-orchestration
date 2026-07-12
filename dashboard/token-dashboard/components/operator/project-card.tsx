@@ -235,7 +235,7 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
                     width: 7,
                     height: 7,
                     borderRadius: '50%',
-                    backgroundColor: enabled ? 'var(--color-success)' : 'rgba(244,244,249,0.25)',
+                    backgroundColor: enabled ? 'var(--color-success)' : 'var(--color-text-faint)',
                     transition: 'background-color 0.2s ease',
                     ...(enabled && { boxShadow: '0 0 5px var(--color-success)' }),
                   }}
@@ -260,7 +260,7 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
                   borderRadius: 9,
                   background: enabled
                     ? 'rgba(80, 250, 123, 0.6)'
-                    : 'rgba(255,255,255,0.12)',
+                    : '#d1d5db',
                   border: 'none',
                   cursor: isToggling ? 'not-allowed' : 'pointer',
                   opacity: isToggling ? 0.5 : 1,
@@ -278,8 +278,8 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
                     width: 14,
                     height: 14,
                     borderRadius: '50%',
-                    background: '#fff',
-                    transition: 'left 0.18s ease',
+                    background: enabled ? '#fff' : 'var(--color-muted)',
+                    transition: 'left 0.18s ease, background-color 0.2s ease',
                     display: 'block',
                     boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
                   }}

@@ -67,7 +67,7 @@ function TrackCard({ card }: { card: PlanningCard }) {
       </div>
 
       {deps.length > 0 && (
-        <div style={{ fontSize: 10, color: 'rgba(244,244,249,0.45)' }}>
+        <div style={{ fontSize: 10, color: 'var(--color-text-faint)' }}>
           depends on: {deps.map((d) => d.to_track_id).join(', ')}
         </div>
       )}
@@ -135,7 +135,7 @@ export default function PlanningPage() {
                 {label} <span style={{ color: 'var(--color-muted)', fontWeight: 400 }}>({cards.length})</span>
               </div>
               {cards.length === 0 ? (
-                <div data-testid={`horizon-empty-${key}`} style={{ padding: '24px 12px', textAlign: 'center', color: 'rgba(244,244,249,0.3)', fontSize: 12, border: '1px dashed rgba(255,255,255,0.06)', borderRadius: 10 }}>
+                <div data-testid={`horizon-empty-${key}`} style={{ padding: '24px 12px', textAlign: 'center', color: 'var(--color-text-faint)', fontSize: 12, border: '1px dashed rgba(255,255,255,0.06)', borderRadius: 10 }}>
                   No tracks
                 </div>
               ) : (

@@ -65,7 +65,7 @@ function EmptyColumn({ stage }: { stage: string }) {
       style={{
         padding: '28px 16px',
         textAlign: 'center',
-        color: 'rgba(244,244,249,0.3)',
+        color: 'var(--color-text-faint)',
         fontSize: 12,
         border: '1px dashed rgba(255,255,255,0.06)',
         borderRadius: 10,
@@ -216,7 +216,7 @@ function DispatchCard({ card }: { card: KanbanCard }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span
             data-testid="card-duration"
-            style={{ fontSize: 10, color: 'rgba(244,244,249,0.45)' }}
+            style={{ fontSize: 10, color: 'var(--color-text-faint)' }}
           >
             {card.duration_label || '—'}
           </span>
@@ -237,7 +237,7 @@ function DispatchCard({ card }: { card: KanbanCard }) {
             style={{
               fontSize: 10,
               fontWeight: 600,
-              color: card.promoted ? 'var(--color-success)' : 'rgba(244,244,249,0.55)',
+              color: card.promoted ? 'var(--color-success)' : 'var(--color-muted)',
             }}
           >
             {card.output_kind && card.output_kind !== '—' ? `${card.output_kind} · ` : ''}
@@ -310,7 +310,7 @@ function KanbanColumn({
             style={{
               fontSize: 11,
               fontWeight: 600,
-              color: cards.length > 0 ? accentColor : 'rgba(244,244,249,0.25)',
+              color: cards.length > 0 ? accentColor : 'var(--color-text-faint)',
               background: 'var(--color-sidebar)',
               padding: '1px 7px',
               borderRadius: 10,

@@ -111,7 +111,7 @@ function SubsystemCard({ row }: { row: SubsystemEffectivenessRow }) {
       ) : (
         <>
           {row.last_signal && (
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>last signal {row.last_signal}</span>
+            <span style={{ fontSize: 10, color: 'var(--color-text-faint)' }}>last signal {row.last_signal}</span>
           )}
           {detailKeys.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>

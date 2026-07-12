@@ -310,7 +310,7 @@ export default function OpenItemsPage() {
                         padding: '0 3px',
                         borderRadius: 6,
                         background: isActive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.06)',
-                        color: isActive ? cfg.activeColor : 'rgba(244,244,249,0.5)',
+                        color: isActive ? cfg.activeColor : 'var(--color-muted)',
                       }}
                     >
                       {count}
@@ -332,7 +332,7 @@ export default function OpenItemsPage() {
                   padding: '4px 6px',
                   borderRadius: 6,
                   textDecoration: 'underline',
-                  textDecorationColor: 'rgba(244,244,249,0.3)',
+                  textDecorationColor: 'var(--color-text-faint)',
                 }}
               >
                 Clear

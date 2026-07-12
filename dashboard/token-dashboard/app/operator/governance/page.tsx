@@ -393,7 +393,7 @@ function RecommendationCard({ rec }: { rec: DigestRecommendation }) {
               fontWeight: 700,
               letterSpacing: '0.07em',
               textTransform: 'uppercase',
-              color: 'rgba(244,244,249,0.35)',
+              color: 'var(--color-text-faint)',
               marginBottom: 6,
             }}
           >
@@ -510,7 +510,7 @@ function SignalTimelineChart({
               />
               <XAxis
                 type="number"
-                tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
+                tick={{ fill: 'var(--color-text-faint)', fontSize: 11 }}
                 stroke="rgba(255,255,255,0.06)"
                 axisLine={false}
                 tickLine={false}
@@ -520,7 +520,7 @@ function SignalTimelineChart({
                 type="category"
                 dataKey="name"
                 width={140}
-                tick={{ fill: 'rgba(244,244,249,0.55)', fontSize: 11 }}
+                tick={{ fill: 'var(--color-muted)', fontSize: 11 }}
                 stroke="rgba(255,255,255,0.06)"
                 axisLine={false}
                 tickLine={false}
