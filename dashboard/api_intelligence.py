@@ -1103,6 +1103,38 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
 
 
 # ---------------------------------------------------------------------------
+# /api/intelligence/effectiveness-probe — PR-17 gate signal exposure
+# ---------------------------------------------------------------------------
+
+
+def _intelligence_get_effectiveness_probe() -> dict:
+    """Expose the injection-effectiveness probe (PR-6) signal for the dashboard —
+    the SAME probe that gates the learning loop's activation (PR-17). Read-only:
+    this never reads or flips VNX_LEARNING_LOOP_ENABLED / VNX_INJECTION_FEEDBACK_ENABLED.
+    """
+    sd = _sd()
+    state_dir = sd.DB_PATH.parent
+    try:
+        from injection_effectiveness_probe import InjectionEffectivenessProbe
+
+        result = InjectionEffectivenessProbe(state_dir=state_dir).run()
+    except Exception as e:
+        _logger.debug("injection-effectiveness probe unavailable: %s", e)
+        return {
+            "probe_health": "unknown",
+            "ignore_rate": None,
+            "pending_proposals": 0,
+            "signal": "probe unavailable",
+        }
+    return {
+        "probe_health": result.status,
+        "ignore_rate": result.detail.get("ignore_rate"),
+        "pending_proposals": result.detail.get("pending_proposals", 0),
+        "signal": result.signal,
+    }
+
+
+# ---------------------------------------------------------------------------
 # /api/governance/* — Governance audit trail endpoints
 # ---------------------------------------------------------------------------
 

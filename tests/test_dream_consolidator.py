@@ -8,6 +8,9 @@ Coverage:
 - test_run_dream_cycle_happy_path: full cycle with mocked kimi
 - GAP-7 receipt-completeness preflight: stale/empty → skip with warning event
 - TestCentralDataRootRespected: file I/O uses data_root param, not source-repo .vnx-data
+- TestActivationGate: PR-17 gate — VNX_DREAM_SCHEDULER_ENABLED + injection-effectiveness
+  probe health (PR-6) must both pass before the executor runs; scheduler.py is not
+  involved (it only installs the LaunchAgent/crontab)
 """
 from __future__ import annotations
 
@@ -27,6 +30,21 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "dream"))
 
 import consolidator
+
+# Captured before the autouse fixture below monkeypatches consolidator._injection_probe_health,
+# so the real-probe-integration tests in TestActivationGate can exercise the genuine function.
+_REAL_INJECTION_PROBE_HEALTH = consolidator._injection_probe_health
+
+
+@pytest.fixture(autouse=True)
+def _dream_activation_gate_open(monkeypatch):
+    """PR-17 added an activation gate that defaults closed. Open it for every test
+    in this file so the consolidation-mechanics tests keep exercising the same code
+    paths they did before the gate existed. The gate's own closed-state behavior is
+    covered by TestActivationGate below (which overrides these as needed).
+    """
+    monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+    monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
 
 
 # ---------------------------------------------------------------------------
@@ -781,3 +799,135 @@ class TestCentralDataRootRespected:
         explicit = tmp_path / "my-override"
         result = consolidator._resolve_data_root(explicit)
         assert result == explicit
+
+
+class TestActivationGate:
+    """PR-17: VNX_DREAM_SCHEDULER_ENABLED (arm-switch) + injection-effectiveness
+    probe health (PR-6, gate) must both pass before the executor runs a cycle.
+    scheduler.py never enters this path — it only installs the LaunchAgent/crontab.
+    """
+
+    def test_scheduler_disabled_skips_without_kimi(self, tmp_path, monkeypatch):
+        """VNX_DREAM_SCHEDULER_ENABLED unset (default 0) -> skip, kimi never invoked."""
+        monkeypatch.delenv("VNX_DREAM_SCHEDULER_ENABLED", raising=False)
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch("consolidator._dispatch_kimi_consolidation") as mock_kimi:
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "scheduler_disabled"
+        mock_kimi.assert_not_called()
+
+    def test_scheduler_disabled_emits_skipped_event(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_DREAM_SCHEDULER_ENABLED", raising=False)
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        event_files = list((data_root / "events" / "dream").glob("*.ndjson"))
+        events = [json.loads(line) for line in event_files[0].read_text().strip().splitlines()]
+        assert any(
+            e["event_type"] == "dream_cycle_skipped" and e["reason"] == "scheduler_disabled"
+            for e in events
+        )
+
+    @pytest.mark.parametrize("probe_health", ["unknown", "degraded", "produces_crap"])
+    def test_probe_not_ok_skips_without_kimi(self, tmp_path, monkeypatch, probe_health):
+        """Scheduler armed but probe health != 'ok' -> skip, kimi never invoked.
+
+        Covers all three non-'ok' probe states — only a clean 'ok' may activate.
+        """
+        monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+        monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: probe_health)
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch("consolidator._dispatch_kimi_consolidation") as mock_kimi:
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "probe_not_ok"
+        assert result["probe_health"] == probe_health
+        mock_kimi.assert_not_called()
+
+    def test_probe_not_ok_emits_skipped_event(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+        monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "degraded")
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        event_files = list((data_root / "events" / "dream").glob("*.ndjson"))
+        events = [json.loads(line) for line in event_files[0].read_text().strip().splitlines()]
+        assert any(
+            e["event_type"] == "dream_cycle_skipped" and e["reason"] == "probe_not_ok"
+            for e in events
+        )
+
+    def test_probe_ok_proceeds_past_gate(self, tmp_path, monkeypatch):
+        """Scheduler armed + probe 'ok' -> gate passes, cycle proceeds to kimi."""
+        monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+        monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation", return_value=_FAKE_CONSOLIDATION
+        ) as mock_kimi:
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        mock_kimi.assert_called_once()
+        assert result.get("reason") not in ("scheduler_disabled", "probe_not_ok")
+
+    def test_injection_probe_health_reads_real_probe(self, tmp_path):
+        """_injection_probe_health wires the real PR-6 probe end-to-end (not mocked):
+        a pattern_usage table with a low ignore_rate reports 'ok'."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        db_path = state_dir / "quality_intelligence.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT NOT NULL,
+                pattern_hash TEXT NOT NULL,
+                used_count INTEGER DEFAULT 0,
+                ignored_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO pattern_usage (pattern_id, pattern_title, pattern_hash, "
+            "used_count, ignored_count) VALUES ('p1', 'Pattern 1', 'hash1', 95, 5)"
+        )
+        conn.commit()
+        conn.close()
+
+        assert _REAL_INJECTION_PROBE_HEALTH(state_dir) == "ok"
+
+    def test_injection_probe_health_reads_real_probe_unhealthy(self, tmp_path):
+        """A pattern_usage table with a high ignore_rate reports 'produces_crap',
+        not 'ok' — proving the real probe integration is wired, not stubbed."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        db_path = state_dir / "quality_intelligence.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT NOT NULL,
+                pattern_hash TEXT NOT NULL,
+                used_count INTEGER DEFAULT 0,
+                ignored_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO pattern_usage (pattern_id, pattern_title, pattern_hash, "
+            "used_count, ignored_count) VALUES ('p1', 'Pattern 1', 'hash1', 2, 98)"
+        )
+        conn.commit()
+        conn.close()
+
+        assert _REAL_INJECTION_PROBE_HEALTH(state_dir) == "produces_crap"

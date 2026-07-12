@@ -14,7 +14,7 @@ import time
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from collections import defaultdict
 import re
@@ -69,6 +69,57 @@ def _parse_receipt_timestamp(value) -> Optional[datetime]:
             return _to_aware_utc(datetime.fromisoformat(raw[:10]))
         except ValueError:
             return None
+
+
+class LearningLoopMisconfigured(RuntimeError):
+    """Raised when VNX_LEARNING_LOOP_ENABLED=1 but VNX_INJECTION_FEEDBACK_ENABLED=0.
+
+    The injection-effectiveness probe (PR-6) is the thing that gates the loop;
+    arming the loop without the probe that gates it is a hard misconfiguration,
+    not a degraded-but-tolerable state (framework-status-audit-and-cockpit PR-17).
+    """
+
+
+def evaluate_activation_gate(state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """The PR-17 activation gate: four explicit, non-overlapping paths.
+
+    1. ``VNX_LEARNING_LOOP_ENABLED=0`` (default)            -> dormant no-op.
+    2. ``=1`` and ``VNX_INJECTION_FEEDBACK_ENABLED=0``        -> raises
+       ``LearningLoopMisconfigured`` (cannot activate learning without the
+       effectiveness probe that gates it).
+    3. Both enabled, probe health is anything other than ``"ok"`` (``unknown``,
+       ``degraded``, ``produces_crap``)                       -> degraded, no
+       pattern updates. ``degraded`` is deliberately gated here alongside
+       ``unknown``/``produces_crap`` — it is NOT healthy enough to activate.
+    4. Both enabled and probe health ``"ok"``                 -> run.
+
+    The activation gate is the probe health, not a flag: the two env flags are
+    only the arm-switch: they decide whether the probe is even consulted.
+
+    Returns ``{"action": "dormant"|"degraded"|"run", "probe_health": str|None,
+    "detail": str}``.
+    """
+    learning_enabled = os.environ.get("VNX_LEARNING_LOOP_ENABLED", "0") == "1"
+    feedback_enabled = os.environ.get("VNX_INJECTION_FEEDBACK_ENABLED", "0") == "1"
+
+    if not learning_enabled:
+        return {"action": "dormant", "probe_health": None, "detail": "VNX_LEARNING_LOOP_ENABLED=0"}
+
+    if not feedback_enabled:
+        raise LearningLoopMisconfigured(
+            "VNX_LEARNING_LOOP_ENABLED=1 requires VNX_INJECTION_FEEDBACK_ENABLED=1 — "
+            "the injection-effectiveness probe (PR-6) gates the learning loop; "
+            "cannot activate learning without it."
+        )
+
+    from injection_effectiveness_probe import InjectionEffectivenessProbe
+
+    result = InjectionEffectivenessProbe(state_dir=state_dir).run()
+
+    if result.status != "ok":
+        return {"action": "degraded", "probe_health": result.status, "detail": result.signal}
+
+    return {"action": "run", "probe_health": result.status, "detail": result.signal}
 
 
 @dataclass
@@ -995,6 +1046,38 @@ class LearningLoop:
                 instead of the default 24-hour window. Use for the first run against
                 a historical trail (``vnx learning run --from-history``).
         """
+        gate = evaluate_activation_gate(state_dir=self.db_path.parent)
+
+        if gate["action"] == "dormant":
+            print("💤 Learning loop dormant (VNX_LEARNING_LOOP_ENABLED=0) — no-op, no beacon")
+            return {"status": "dormant", "gate": gate, "statistics": {}}
+
+        if gate["action"] == "degraded":
+            print(
+                f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
+                f"({gate['detail']}) — skipping pattern updates"
+            )
+            try:
+                from health_beacon import HealthBeacon
+                from vnx_paths import ensure_env as _hb_ensure_env
+                _hb_paths = _hb_ensure_env()
+                HealthBeacon(
+                    Path(_hb_paths["VNX_DATA_DIR"]),
+                    "learning_loop",
+                    expected_interval_seconds=86400,
+                ).heartbeat(
+                    status="degraded",
+                    details={"probe_health": gate["probe_health"], "reason": gate["detail"]},
+                )
+            except (ImportError, OSError, KeyError) as e:
+                log.debug("HealthBeacon degraded heartbeat skipped: %s", e)
+            return {
+                "status": "degraded",
+                "probe_health": gate["probe_health"],
+                "gate": gate,
+                "statistics": {},
+            }
+
         mode = "FULL HISTORY" if from_history else "DAILY (24h)"
         print(f"\n🔄 Starting Learning Cycle [{mode}] at {datetime.now().isoformat()}")
         print("=" * 60)
