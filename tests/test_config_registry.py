@@ -220,7 +220,12 @@ def test_pr2_new_flags_have_correct_subsystem_and_status():
         "VNX_LEARNING_LOOP_ENABLED": ("intelligence-self-learning-loop", "ACTIVATE"),
         "VNX_DREAM_SCHEDULER_ENABLED": ("dream-consolidation", "ACTIVATE"),
         "VNX_INJECTION_FEEDBACK_ENABLED": ("injection-effectiveness-eval-loop", "ACTIVATE"),
-        "VNX_PLAN_GATE_COMPLEX_ONLY": ("plan-gate-panel", "SCOPE"),
+        # "plan-gate-task-class-scope" — matches the docs/core/SUBSYSTEMS.md
+        # seed row (§5 of the PRD), distinct from "plan-gate-panel"
+        # (VNX_PLAN_GATE_ENFORCE) below. Fixed in
+        # framework-status-audit-and-cockpit PR-3 so the cockpit generator has
+        # exactly one canonical flag per ledger row.
+        "VNX_PLAN_GATE_COMPLEX_ONLY": ("plan-gate-task-class-scope", "SCOPE"),
         "VNX_HASH_CHAIN_REQUIRED": ("receipt-hash-chain", "PARK"),
         "VNX_ATTESTATION_REQUIRED": ("signed-attestation", "PARK"),
         "VNX_MIGRATION_SYSTEM": ("migration-mechanisms", "PARK"),
