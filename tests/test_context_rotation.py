@@ -459,6 +459,41 @@ class TestRespawn:
         assert result.reason.startswith("spawn_failed")
         assert killed == []
 
+    def test_new_session_ok_then_send_keys_raises_reaps_partial_session(
+        self, isolated_home: Path,
+    ) -> None:
+        """Codex P2: `tmux new-session` succeeds but a later `send-keys`
+        raises. The session that WAS created must be reaped — not left as
+        an orphan/duplicate T0 — and the call must return a clean failure."""
+        killed: List[str] = []
+        calls: List[List[str]] = []
+
+        def flaky_run(cmd: List[str], *args: Any, **kwargs: Any) -> Any:
+            calls.append(list(cmd))
+            if cmd[:2] == ["tmux", "new-session"]:
+                return subprocess.CompletedProcess(cmd, 0)
+            if cmd[:2] == ["tmux", "send-keys"]:
+                raise subprocess.CalledProcessError(1, cmd)
+            raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+        import unittest.mock as mock
+        with mock.patch("context_rotation.subprocess.run", side_effect=flaky_run), \
+             mock.patch("context_rotation.time.sleep", lambda *_: None):
+            result = cr.respawn(
+                handoff_path=Path("handoff.md"), terminal="T0", project_id=PROJECT_ID,
+                project_root=REPO_ROOT, rotation_id="rot-partial",
+                tmux_spawn_fn=cr._default_tmux_spawn,
+                tmux_kill_fn=lambda name: killed.append(name),
+                timeout_seconds=1, poll_interval_seconds=0.01,
+            )
+
+        assert result.success is False
+        assert result.reason.startswith("spawn_partial_failure")
+        # The session that new-session actually created is the ONE reaped —
+        # no orphan left behind, and no duplicate/zero T0.
+        assert killed == [result.session_name]
+        assert any(c[:2] == ["tmux", "new-session"] for c in calls)
+
     def test_never_calls_a_destructive_or_kill_path_on_success(self, isolated_home: Path) -> None:
         """Assert the whole respawn() call graph, when it succeeds, contains
         zero destructive verbs anywhere (no kill-session, no `vnx start`)."""
@@ -491,6 +526,69 @@ class TestRespawn:
         for cmd in calls:
             assert "kill-session" not in cmd
             assert not any("vnx" == c or c.endswith("/vnx") for c in cmd)
+
+
+# ---------------------------------------------------------------------------
+# 4b. Terminal-name path-traversal validation
+# ---------------------------------------------------------------------------
+
+class TestTerminalValidation:
+    """Codex P2: `--terminal` is untrusted CLI input and becomes a path
+    component in every terminal-scoped path helper. A value like
+    "../../../../.ssh/x" must never let a caller escape the central data
+    dir."""
+
+    TRAVERSAL_INPUTS = [
+        "../../../../.ssh/x",
+        "../evil",
+        "T0/../../etc",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "",
+        "/etc/passwd",
+    ]
+
+    PATH_HELPERS = [
+        cr.rotation_handoff_dir,
+        cr.durable_state_path,
+        cr.request_marker_path,
+        cr.ready_signal_path,
+    ]
+
+    @pytest.mark.parametrize("bad_terminal", TRAVERSAL_INPUTS)
+    def test_path_helpers_reject_traversal(self, isolated_home: Path, bad_terminal: str) -> None:
+        for helper in self.PATH_HELPERS:
+            with pytest.raises(ValueError):
+                helper(PROJECT_ID, bad_terminal)
+
+    @pytest.mark.parametrize("bad_terminal", TRAVERSAL_INPUTS)
+    def test_traversal_never_escapes_central_dir(self, isolated_home: Path, bad_terminal: str) -> None:
+        central = cr.resolve_central_data_dir(PROJECT_ID)
+        for helper in self.PATH_HELPERS:
+            try:
+                produced = helper(PROJECT_ID, bad_terminal)
+            except ValueError:
+                continue  # rejected outright — cannot have escaped anything
+            # If a helper somehow didn't raise, the produced path must still
+            # resolve inside the central dir.
+            assert str(produced.resolve()).startswith(str(central.resolve()))
+
+    def test_checkpoint_rejects_malicious_terminal(self, isolated_home: Path) -> None:
+        policy = _enabled_policy(min_boundaries_between_rotations=0, respawn="off")
+        with pytest.raises(ValueError):
+            cr.checkpoint(
+                project_id=PROJECT_ID, policy=policy, project_root=str(REPO_ROOT),
+                terminal="../../../../.ssh/x",
+            )
+
+    @pytest.mark.parametrize("good_terminal", ["T0", "T1", "T2", "T3", "my-term_1", "ABC123"])
+    def test_valid_terminal_names_still_work(self, isolated_home: Path, good_terminal: str) -> None:
+        central = cr.resolve_central_data_dir(PROJECT_ID)
+        for helper in self.PATH_HELPERS:
+            produced = helper(PROJECT_ID, good_terminal)
+            assert str(produced.resolve()).startswith(str(central.resolve()))
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +718,71 @@ class TestSessionStopHook:
         (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
 
         env = {**__import__("os").environ, "HOME": str(isolated_home), "VNX_T0_ROTATION": "1"}
+
+        result = self._run_hook(repo, env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "{}"
+        assert cr.rotation_handoff_dir(PROJECT_ID, "T0").joinpath(cr.HANDOFF_FILENAME).is_file()
+
+    def _seed_t0_handoff_sentinel(self, tmp_path: Path) -> Path:
+        """Pre-existing T0 handoff (simulating a prior real rotation) that a
+        stopping worker's Stop hook must never clobber."""
+        handoff_dir = cr.rotation_handoff_dir(PROJECT_ID, "T0")
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        sentinel = handoff_dir / cr.HANDOFF_FILENAME
+        sentinel.write_text("SENTINEL-DO-NOT-OVERWRITE\n", encoding="utf-8")
+        return sentinel
+
+    def test_noop_for_non_t0_terminal_env(self, isolated_home: Path, tmp_path: Path) -> None:
+        """Codex P2: the empty-matcher Stop hook fires for every session.
+        A stopping T1 (VNX_TERMINAL=T1) must not write/overwrite the T0
+        handoff."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+        sentinel = self._seed_t0_handoff_sentinel(tmp_path)
+
+        env = {
+            **__import__("os").environ, "HOME": str(isolated_home),
+            "VNX_T0_ROTATION": "1", "VNX_TERMINAL": "T1",
+        }
+
+        result = self._run_hook(repo, env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "{}"
+        assert sentinel.read_text(encoding="utf-8") == "SENTINEL-DO-NOT-OVERWRITE\n"
+
+    def test_noop_for_worker_terminal_cwd(self, isolated_home: Path, tmp_path: Path) -> None:
+        """Same as above but detected purely from cwd (no env var set) —
+        mirrors how a real T1/T2/T3 worker session's cwd looks."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+        sentinel = self._seed_t0_handoff_sentinel(tmp_path)
+
+        worker_cwd = repo / ".claude" / "terminals" / "T2"
+        worker_cwd.mkdir(parents=True, exist_ok=True)
+
+        env = {**__import__("os").environ, "HOME": str(isolated_home), "VNX_T0_ROTATION": "1"}
+        env.pop("VNX_TERMINAL", None)
+        env.pop("VNX_TERMINAL_ID", None)
+
+        result = self._run_hook(worker_cwd, env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "{}"
+        assert sentinel.read_text(encoding="utf-8") == "SENTINEL-DO-NOT-OVERWRITE\n"
+
+    def test_t0_terminal_env_still_writes(self, isolated_home: Path, tmp_path: Path) -> None:
+        """Control case: an explicit VNX_TERMINAL=T0 must still write —
+        scoping must not turn into a blanket no-op."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+
+        env = {
+            **__import__("os").environ, "HOME": str(isolated_home),
+            "VNX_T0_ROTATION": "1", "VNX_TERMINAL": "T0",
+        }
 
         result = self._run_hook(repo, env)
         assert result.returncode == 0

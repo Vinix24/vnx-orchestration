@@ -629,14 +629,24 @@ def _register_handoff_subparser(subparsers: argparse.Action) -> None:
         help="also write the .ready signal after printing (requires --rotation-id)",
     )
     show_parser.add_argument("--rotation-id", default=None, metavar="ROTATION_ID")
-    show_parser.add_argument("--project-dir", default=".", metavar="DIR")
-    show_parser.add_argument("--project-id", default=None, metavar="PROJECT_ID")
+    # SUPPRESS (not "." / None): the subparsers action parses each subcommand
+    # into a FRESH namespace and then copies every attribute from it back
+    # onto the parent namespace — including untouched defaults. Without
+    # SUPPRESS, that copy silently clobbers a --project-dir/--project-id
+    # already set at the parent `handoff` level (e.g. `vnx handoff
+    # --project-id foo show`) back to this subparser's own default. SUPPRESS
+    # means "don't set this attribute at all unless the user passed it here",
+    # so an unset flag on the subcommand never overwrites a value the parent
+    # already resolved.
+    show_parser.add_argument("--project-dir", default=argparse.SUPPRESS, metavar="DIR")
+    show_parser.add_argument("--project-id", default=argparse.SUPPRESS, metavar="PROJECT_ID")
 
     mark_ready_parser = handoff_subs.add_parser("mark-ready", help="write the rotation_id-stamped .ready signal")
     mark_ready_parser.add_argument("--rotation-id", required=True, metavar="ROTATION_ID")
     mark_ready_parser.add_argument("--terminal", default="T0", metavar="TERMINAL")
-    mark_ready_parser.add_argument("--project-dir", default=".", metavar="DIR")
-    mark_ready_parser.add_argument("--project-id", default=None, metavar="PROJECT_ID")
+    # See the show_parser comment above — same duplicate-dest clobber risk.
+    mark_ready_parser.add_argument("--project-dir", default=argparse.SUPPRESS, metavar="DIR")
+    mark_ready_parser.add_argument("--project-id", default=argparse.SUPPRESS, metavar="PROJECT_ID")
 
 
 def _register_migrate_subparser(subparsers: argparse.Action) -> None:

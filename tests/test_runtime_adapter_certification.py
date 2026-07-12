@@ -242,8 +242,11 @@ class TestDirectCouplingFreeze:
         # (operator-approved): the leaseless tmux-spawn lane is now first-class,
         # so the door/spawn/governance modules below legitimately couple to tmux.
         # The set guards against NEW, unexpected coupling outside this lane.
+        # context_rotation.py — T0-initiated non-destructive rotation respawn
+        # (default-OFF); first-class tmux use, added 2026-07-12.
         known_preexisting = {
             "cleanup_worker_exit.py",
+            "context_rotation.py",
             "dashboard_actions.py",
             "dispatch_govern.py",
             "dispatch_prepare.py",
@@ -268,8 +271,11 @@ class TestDirectCouplingFreeze:
         """Direct-tmux-coupling file set must not grow beyond the approved baseline."""
         # Refreshed 2026-06-27 (operator-approved) — see the note in
         # test_no_direct_tmux_subprocess_in_protected_modules. Kept in sync with it.
+        # context_rotation.py — T0-initiated non-destructive rotation respawn
+        # (default-OFF); first-class tmux use, added 2026-07-12.
         known_files = {
             "cleanup_worker_exit.py",
+            "context_rotation.py",
             "dashboard_actions.py",
             "dispatch_govern.py",
             "dispatch_prepare.py",

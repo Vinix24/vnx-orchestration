@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -74,11 +75,30 @@ _ROTATION_SUBDIR = ("rotation_handovers",)
 _STATE_SUBDIR = ("state", "rotation")
 _CONFIG_RELATIVE_PATH = Path("configs") / "context_rotation.yaml"
 
+# Terminal names flow into path components below (rotation_handoff_dir,
+# durable_state_path, request_marker_path, ready_signal_path). The CLI
+# `--terminal` flag (vnx handoff show/mark-ready) is untrusted input — a
+# value like "../../../../.ssh/x" would otherwise let a caller write files
+# outside the central data dir (path traversal). Only a bare identifier is
+# accepted; no separators, no "..".
+_TERMINAL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_terminal(terminal: str) -> str:
+    """Reject any terminal value that isn't a safe, bare path component."""
+    if not isinstance(terminal, str) or not _TERMINAL_NAME_RE.match(terminal):
+        raise ValueError(
+            f"invalid terminal name {terminal!r}: must match {_TERMINAL_NAME_RE.pattern!r}"
+        )
+    return terminal
+
 
 # ---------------------------------------------------------------------------
 # Path helpers (all project_id-scoped via resolve_central_data_dir — ADR-007 /
 # round-3 finding #8: shared central installs must never collide across
-# projects).
+# projects). `terminal` is validated via _validate_terminal() in every helper
+# below — it is the single choke point untrusted --terminal input passes
+# through before becoming a path component.
 # ---------------------------------------------------------------------------
 
 def rotation_state_dir(project_id: str) -> Path:
@@ -86,18 +106,22 @@ def rotation_state_dir(project_id: str) -> Path:
 
 
 def rotation_handoff_dir(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+    terminal = _validate_terminal(terminal)
     return resolve_central_data_dir(project_id).joinpath(*_ROTATION_SUBDIR, terminal)
 
 
 def durable_state_path(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+    terminal = _validate_terminal(terminal)
     return rotation_state_dir(project_id) / f"{terminal}_durable.json"
 
 
 def request_marker_path(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+    terminal = _validate_terminal(terminal)
     return rotation_state_dir(project_id) / f"{terminal}_request.json"
 
 
 def ready_signal_path(project_id: str, terminal: str = DEFAULT_TERMINAL) -> Path:
+    terminal = _validate_terminal(terminal)
     return rotation_state_dir(project_id) / f"{terminal}.ready"
 
 
@@ -467,6 +491,19 @@ def _build_resume_prompt(*, terminal: str, rotation_id: str, project_id: str, ha
     )
 
 
+class SpawnPartialFailure(RuntimeError):
+    """Raised by a tmux_spawn_fn when the tmux session was already created
+    before a LATER step (send-keys, etc.) failed. Distinct from a spawn that
+    raises before anything was created — this tells respawn() the session
+    may exist and is worth reaping (round-3-follow-up finding: an exception
+    after `tmux new-session` succeeds must not leave an orphan session)."""
+
+    def __init__(self, session_name: str, cause: BaseException) -> None:
+        super().__init__(f"partial spawn failure for session {session_name!r}: {cause}")
+        self.session_name = session_name
+        self.cause = cause
+
+
 def _default_tmux_spawn(
     session_name: str,
     project_root: str,
@@ -489,18 +526,26 @@ def _default_tmux_spawn(
     (not as a literal Bash-tool-call string the guard inspects), so the guard
     is not even in the invocation path — this structure is defense-in-depth
     on top of that.
+
+    If `tmux new-session` itself fails, the session was never created and the
+    exception propagates as-is (nothing to reap). If any LATER step fails,
+    the session already exists — that failure is wrapped in
+    SpawnPartialFailure so respawn() knows to kill it before returning.
     """
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", session_name, "-c", project_root],
         check=True,
         timeout=10,
     )
-    subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "claude"], check=True, timeout=10)
-    subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], check=True, timeout=10)
-    if boot_delay_seconds > 0:
-        time.sleep(boot_delay_seconds)
-    subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", resume_prompt], check=True, timeout=10)
-    subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], check=True, timeout=10)
+    try:
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "claude"], check=True, timeout=10)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], check=True, timeout=10)
+        if boot_delay_seconds > 0:
+            time.sleep(boot_delay_seconds)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", resume_prompt], check=True, timeout=10)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], check=True, timeout=10)
+    except Exception as exc:  # noqa: BLE001 - re-raised wrapped, not swallowed
+        raise SpawnPartialFailure(session_name, exc) from exc
 
 
 def _default_tmux_kill(session_name: str) -> None:
@@ -554,7 +599,10 @@ def respawn(
     existing session. On timeout, ABORTs: reaps the orphan session THIS call
     spawned (round-3 finding #4) and returns success=False; the caller is
     responsible for leaving all other state (handoff, durable counter) intact
-    so the next boundary can retry (round-3 finding #3).
+    so the next boundary can retry (round-3 finding #3). A spawn that fails
+    AFTER the tmux session was already created (SpawnPartialFailure) is
+    reaped the same way — a raw spawn failure before anything existed is not
+    (there is nothing to reap).
     """
     spawn = tmux_spawn_fn or _default_tmux_spawn
     kill = tmux_kill_fn or _default_tmux_kill
@@ -570,6 +618,20 @@ def respawn(
 
     try:
         spawn(session_name, str(project_root), resume_prompt)
+    except SpawnPartialFailure as exc:
+        log.error(
+            "context_rotation: respawn spawn partially failed for %s (session may exist): %s "
+            "— reaping to avoid an orphan T0",
+            session_name, exc,
+        )
+        try:
+            kill(session_name)
+        except Exception as kill_exc:  # noqa: BLE001
+            log.error("context_rotation: failed to reap partially-spawned session %s: %s", session_name, kill_exc)
+        return RespawnResult(
+            success=False, reason=f"spawn_partial_failure:{exc.cause}",
+            session_name=session_name, rotation_id=rotation_id,
+        )
     except Exception as exc:  # noqa: BLE001
         log.error("context_rotation: respawn spawn failed for %s: %s", session_name, exc)
         return RespawnResult(success=False, reason=f"spawn_failed:{exc}", session_name=session_name, rotation_id=rotation_id)

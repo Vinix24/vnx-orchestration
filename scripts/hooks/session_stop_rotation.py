@@ -10,6 +10,13 @@ spawn a successor T0 — the respawn is strictly T0-INITIATED
 (context_rotation.checkpoint() -> respawn()), never hook-initiated (rev-3
 plan §"Rev-3 decision", point 3).
 
+The Stop hook's settings.json matcher is empty ("") — it fires for EVERY
+session, T0 or worker. Since the handoff it writes is always the T0 one,
+this module verifies it IS a T0 session (env identity, falling back to the
+same cwd-based .claude/terminals/T{1,2,3} heuristic stop_report_hook.sh
+already uses to detect workers) before writing anything, so a stopping
+T1/T2/T3 can never clobber the T0 rotation handoff with worker state.
+
 Claude Code Stop hook contract: JSON on stdin ({session_id, transcript_path,
 cwd, ...}), JSON decision on stdout, exit 0 always (never block session
 stop).
@@ -19,12 +26,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
+
+# Matches .claude/terminals/T1, T2, or T3 anywhere in a cwd — mirrors the
+# case statement in scripts/hooks/stop_report_hook.sh's cwd-based terminal
+# detection. T0 has no such segment (it runs at the project root), so its
+# absence is the T0 signal.
+_WORKER_TERMINAL_CWD_RE = re.compile(r"(?:^|/)\.claude/terminals/(T[1-3])(?:/|$)")
+
+
+def _is_t0_session(cwd: str, env: dict) -> bool:
+    """Best-effort, in-script T0 identity check (portable — does not rely on
+    harness-level hook-matcher scoping). An explicit VNX_TERMINAL /
+    VNX_TERMINAL_ID env var wins when set; otherwise falls back to the cwd
+    heuristic. No T1/T2/T3 signal at all -> assume T0 (matches the existing
+    default: T0 runs at the project root, not under terminals/T{n})."""
+    terminal_env = env.get("VNX_TERMINAL") or env.get("VNX_TERMINAL_ID")
+    if terminal_env:
+        return terminal_env.strip().upper() == "T0"
+    return _WORKER_TERMINAL_CWD_RE.search((cwd or "").replace("\\", "/")) is None
 
 
 def main() -> int:
@@ -41,6 +67,11 @@ def main() -> int:
         payload = {}
 
     cwd = payload.get("cwd") or os.getcwd()
+
+    if not _is_t0_session(cwd, os.environ):
+        sys.stdout.write("{}\n")
+        return 0
+
     project_root = Path(cwd)
 
     try:
