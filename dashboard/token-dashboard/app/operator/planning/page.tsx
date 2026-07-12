@@ -38,8 +38,9 @@ function TrackCard({ card }: { card: PlanningCard }) {
       style={{
         borderRadius: 10,
         padding: '12px 14px',
-        background: 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)',
-        border: '1px solid rgba(255,255,255,0.08)',
+        background: 'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)',
+        border: '1px solid var(--color-card-border)',
+        boxShadow: 'var(--shadow-md)',
         marginBottom: 8,
         display: 'flex',
         flexDirection: 'column',

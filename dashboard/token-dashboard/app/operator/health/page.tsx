@@ -33,8 +33,9 @@ function ComponentCard({ name, comp }: { name: string; comp: SystemHealthCompone
       style={{
         borderRadius: 10,
         padding: '12px 14px',
-        background: 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)',
-        border: '1px solid rgba(255,255,255,0.08)',
+        background: 'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)',
+        border: '1px solid var(--color-card-border)',
+        boxShadow: 'var(--shadow-md)',
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
@@ -79,7 +80,7 @@ function SubsystemCard({ row }: { row: SubsystemEffectivenessRow }) {
       style={{
         borderRadius: 10,
         padding: '12px 14px',
-        background: 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)',
+        background: 'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)',
         border: `1px solid ${isUnknown ? 'rgba(255,255,255,0.08)' : `${beaconHealthColor(row.health)}33`}`,
         display: 'flex',
         flexDirection: 'column',
@@ -157,7 +158,7 @@ export default function SystemHealthPage() {
           score {scorePct}%
         </span>
         {data.queried_at && (
-          <span style={{ fontSize: 11, color: 'rgba(244,244,249,0.4)' }}>· {data.queried_at}</span>
+          <span style={{ fontSize: 11, color: 'var(--color-text-faint)' }}>· {data.queried_at}</span>
         )}
       </div>
 

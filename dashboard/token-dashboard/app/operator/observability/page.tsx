@@ -4,7 +4,7 @@ import React from 'react';
 import { useObservability, useSubsystems } from '@/lib/hooks';
 import type { ObservabilityEnvelope, SubsystemRow } from '@/lib/types';
 
-const PANEL = 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)';
+const PANEL = 'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)';
 
 // Cockpit subsystem status (framework-status-audit-and-cockpit) — mirrors /operator/config's palette.
 const SUBSYSTEM_STATUS_COLOR: Record<string, string> = {
@@ -54,7 +54,7 @@ function SubsystemCockpitTile() {
   return (
     <section
       data-testid="subsystem-cockpit-tile"
-      style={{ borderRadius: 10, padding: 14, background: PANEL, border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 8, gridColumn: '1 / -1' }}
+      style={{ borderRadius: 10, padding: 14, background: PANEL, border: '1px solid var(--color-card-border)', boxShadow: 'var(--shadow-md)', display: 'flex', flexDirection: 'column', gap: 8, gridColumn: '1 / -1' }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
         <h2 style={{ fontSize: 13, fontWeight: 700, margin: 0, color: 'var(--color-foreground)' }}>Subsystem cockpit</h2>
@@ -77,7 +77,7 @@ function Section({ title, count, degraded, children }: {
   return (
     <section
       data-testid={`obs-section-${title.toLowerCase().replace(/\s+/g, '-')}`}
-      style={{ borderRadius: 10, padding: 14, background: PANEL, border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 8 }}
+      style={{ borderRadius: 10, padding: 14, background: PANEL, border: '1px solid var(--color-card-border)', boxShadow: 'var(--shadow-md)', display: 'flex', flexDirection: 'column', gap: 8 }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
         <h2 style={{ fontSize: 13, fontWeight: 700, margin: 0, color: 'var(--color-foreground)' }}>{title}</h2>
@@ -93,8 +93,8 @@ function Section({ title, count, degraded, children }: {
   );
 }
 
-const _muted: React.CSSProperties = { fontSize: 11, color: 'rgba(244,244,249,0.4)', padding: '6px 0' };
-const _row: React.CSSProperties = { fontSize: 11, borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 4, display: 'flex', gap: 8, flexWrap: 'wrap' };
+const _muted: React.CSSProperties = { fontSize: 11, color: 'var(--color-text-faint)', padding: '6px 0' };
+const _row: React.CSSProperties = { fontSize: 11, borderBottom: '1px solid var(--color-border)', paddingBottom: 4, display: 'flex', gap: 8, flexWrap: 'wrap' };
 
 function chainColor(status: string): string {
   switch (status) {
@@ -183,7 +183,7 @@ function Body({ data }: { data: ObservabilityEnvelope }) {
           <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>
             First-pass success by role — governed only
             {rw.benchmark_excluded > 0 && (
-              <span data-testid="obs-rework-benchmark-note" style={{ color: 'rgba(244,244,249,0.4)' }}>
+              <span data-testid="obs-rework-benchmark-note" style={{ color: 'var(--color-text-faint)' }}>
                 {' '}· {rw.benchmark_excluded} benchmark rows excluded
               </span>
             )}
@@ -236,7 +236,7 @@ function Body({ data }: { data: ObservabilityEnvelope }) {
             <div key={i} data-testid="obs-cron-row" style={_row}>
               <code style={{ fontWeight: 700 }}>{c.schedule}</code>
               <span style={{ color: 'var(--color-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }} title={c.command}>{c.command.slice(0, 64)}</span>
-              <span style={{ color: c.last_run ? 'var(--color-success, #50fa7b)' : 'rgba(244,244,249,0.4)' }}>{c.last_run ? `last ${c.last_run.slice(0, 16)}` : 'never run'}</span>
+              <span style={{ color: c.last_run ? 'var(--color-success, #50fa7b)' : 'var(--color-text-faint)' }}>{c.last_run ? `last ${c.last_run.slice(0, 16)}` : 'never run'}</span>
             </div>
           ))}
         </Section>

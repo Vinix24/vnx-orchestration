@@ -88,7 +88,8 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
       style={{
         padding: '22px 24px',
         borderTop: `3px solid ${attn.border}`,
-        background: `linear-gradient(135deg, ${attn.glow} 0%, transparent 60%), linear-gradient(135deg, rgba(10, 20, 48, 0.85) 0%, rgba(10, 20, 48, 0.65) 100%)`,
+        background: `linear-gradient(135deg, ${attn.glow} 0%, transparent 60%), linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)`,
+        boxShadow: 'var(--shadow-md)',
       }}
     >
       {/* Header */}
@@ -128,8 +129,8 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
             borderRadius: 20,
             background: project.session_active
               ? 'rgba(80, 250, 123, 0.12)'
-              : 'rgba(255,255,255,0.05)',
-            border: `1px solid ${project.session_active ? 'rgba(80, 250, 123, 0.3)' : 'rgba(255,255,255,0.08)'}`,
+              : 'var(--color-sidebar)',
+            border: `1px solid ${project.session_active ? 'rgba(39, 174, 96, 0.4)' : 'var(--color-border)'}`,
             flexShrink: 0,
           }}
         >
@@ -208,14 +209,14 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
           marginBottom: 16,
           padding: '10px 12px',
           borderRadius: 10,
-          background: 'rgba(255,255,255,0.02)',
-          border: '1px solid rgba(255,255,255,0.06)',
+          background: 'var(--color-sidebar)',
+          border: '1px solid var(--color-border)',
           display: 'flex',
           flexDirection: 'column',
           gap: 8,
         }}
       >
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: 'rgba(244,244,249,0.4)', textTransform: 'uppercase' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: 'var(--color-text-faint)', textTransform: 'uppercase' }}>
           Gates
         </span>
         {GATE_DEFS.map(({ key, label }) => {
@@ -376,7 +377,7 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
             gap: 6,
             padding: '7px 12px',
             borderRadius: 8,
-            background: 'rgba(255,255,255,0.05)',
+            background: 'var(--color-sidebar)',
             border: '1px solid rgba(255,255,255,0.1)',
             cursor: pending ? 'not-allowed' : 'pointer',
             opacity: pending ? 0.6 : 1,
