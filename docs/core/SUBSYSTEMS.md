@@ -11,7 +11,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | zero-llm-injection | No prompt injection via environment or receipts; strict input boundaries. | — | LIVE | works — red-team tests pass |
 | dispatch-plan | Single-entry dispatch door, dispatch-plan reconciliation. | — | LIVE | works — dispatch tests pass |
 | test-suite | Pytest + integration coverage for kernel and cockpit. | — | LIVE | works — CI green |
-| migration-mechanisms | Schema-evolution surfaces (42 SQL files + 6 appliers). Consolidation PARKed pending inventory-lock. | `VNX_MIGRATION_SYSTEM` | PARK-with-trigger | degraded — 42 SQL files + 6 appliers; collapse deferred to a verified track |
+| migration-mechanisms | Schema-evolution surfaces (42 SQL files + 6 appliers). Consolidation PARKed pending inventory-lock. | `VNX_MIGRATION_SYSTEM` | PARK-with-trigger | degraded — 42 SQL files + 6 appliers; consolidation PARKed pending inventory-lock (`scripts/lib/migration_inventory.py`, PR-8) |
 | within-db-tenancy | Composite `(project_id, id)` keys inside per-project DBs. Removal PARKed pending per-table central-DB safety proof. | — | PARK-with-trigger | degraded — keys present; drop deferred (central-store/dual-write/ADR-026 interaction) |
 | docs-bloat | Comparisons, stale archive, marketing docs inflating `docs/` count. | — | CUT | degraded — ~288 markdown files, large `_archive/` |
 | governance-enforcement-stack | Receipt hash-chain + signed attestation + evidence-bound merge gate. SURFACED here; enforcement wiring deferred. | `VNX_GOVERNANCE_ENFORCED` | PARK-with-trigger | produces-crap — 15,577 receipts, 0 `prev_hash` |
