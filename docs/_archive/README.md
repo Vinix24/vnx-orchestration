@@ -7,6 +7,15 @@ Rules:
 - Historical evidence and retired specs may stay here when they still add context.
 - Private strategy, business plans, and maintainer-only notes belong in the external BUSINESS workspace, not in this repository.
 
+The archival rule and the full per-file provenance ledger (this sweep plus every prior sweep) live in [`ARCHIVED_MANIFEST.md`](ARCHIVED_MANIFEST.md).
+
+## Docs bloat cleanup sweep (archived 2026-07-12)
+
+Moved as part of the framework-status-audit-and-cockpit track, PR-11 (`docs bloat cleanup by rule, not volume`).
+
+- `comparisons/headless_vs_interactive.md`, `comparisons/vnx_vs_claude_code.md`, `comparisons/vnx_vs_frameworks.md` — positioning/marketing comparisons content. Archived by the PRD's named rule (docs/marketing bloat is cut on sight, independent of reachability or staleness), not the generic unreachable+stale rule. `docs/comparisons/` is now empty and removed.
+- The generic rule (unreachable from `docs/DOCS_INDEX.md`/`README.md` AND untouched in git for more than 12 months) found **zero** additional candidates this sweep — every other doc outside `docs/_archive/` is either linked or was touched within the last 12 months. See `ARCHIVED_MANIFEST.md` for the exact methodology and threshold date.
+
 ## Wave 1-3 era (archived 2026-05-17)
 
 Moved during the Wave 5/6/7/8 docs overhaul. These docs date from 2026-03-29 to 2026-03-31 and describe pre-v0.10.0 certification contracts that have been superseded by the ADR-based governance model (ADR-003 through ADR-018).
