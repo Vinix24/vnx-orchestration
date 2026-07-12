@@ -23,7 +23,7 @@ const STATUS_COLOR: Record<string, string> = {
   COCKPIT: 'var(--color-accent, #f97316)',
 };
 
-const PANEL = 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)';
+const PANEL = 'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)';
 
 function isOn(row: ConfigEntryRow): boolean {
   return row.value === '1';
@@ -57,7 +57,8 @@ function ConfigRow({
         padding: '10px 12px',
         borderRadius: 8,
         background: PANEL,
-        border: '1px solid rgba(255,255,255,0.08)',
+        border: '1px solid var(--color-card-border)',
+        boxShadow: 'var(--shadow-md)',
       }}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
@@ -253,14 +254,14 @@ export default function ConfigPage() {
         {auditOpen && (
           <aside
             data-testid="config-audit-drawer"
-            style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 10, background: PANEL, border: '1px solid rgba(255,255,255,0.08)' }}
+            style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 10, background: PANEL, border: '1px solid var(--color-card-border)', boxShadow: 'var(--shadow-md)' }}
           >
             <div style={{ fontSize: 12, fontWeight: 700 }}>Recent changes</div>
             {auditRows.length === 0 ? (
               <div data-testid="config-audit-empty" style={{ fontSize: 11, color: 'var(--color-muted)' }}>No changes recorded.</div>
             ) : (
               auditRows.map((a) => (
-                <div key={a.event_id} data-testid={`config-audit-row-${a.event_id}`} style={{ fontSize: 11, borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 6 }}>
+                <div key={a.event_id} data-testid={`config-audit-row-${a.event_id}`} style={{ fontSize: 11, borderBottom: '1px solid var(--color-border)', paddingBottom: 6 }}>
                   <code style={{ fontWeight: 700 }}>{a.config_key}</code>
                   <span style={{ color: 'var(--color-muted)' }}> {a.old_value ?? '∅'} → {a.new_value}</span>
                   <div style={{ color: 'var(--color-muted)' }}>{a.changed_by}{a.approval_id ? ` · ${a.approval_id}` : ''} · {a.changed_at}</div>
@@ -276,7 +277,7 @@ export default function ConfigPage() {
           data-testid="config-approval-modal"
           style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
         >
-          <div style={{ width: 380, padding: 20, borderRadius: 12, background: 'rgba(10,20,48,0.98)', border: '1px solid rgba(255,255,255,0.12)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ width: 380, padding: 20, borderRadius: 12, background: '#ffffff', border: '1px solid var(--color-card-border)', boxShadow: 'var(--shadow-md)', display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontSize: 14, fontWeight: 700 }}>Approval required</div>
             <div style={{ fontSize: 12, color: 'var(--color-muted)' }}>
               <code style={{ color: 'var(--color-foreground)' }}>{pending.row.key}</code> → <strong>{pending.value}</strong>. This flag changes governed behaviour; enter an approval reference to proceed.

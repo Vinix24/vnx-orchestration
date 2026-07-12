@@ -65,7 +65,7 @@ function EmptyColumn({ stage }: { stage: string }) {
       style={{
         padding: '28px 16px',
         textAlign: 'center',
-        color: 'rgba(244,244,249,0.3)',
+        color: 'var(--color-text-faint)',
         fontSize: 12,
         border: '1px dashed rgba(255,255,255,0.06)',
         borderRadius: 10,
@@ -91,8 +91,9 @@ function DispatchCard({ card }: { card: KanbanCard }) {
       style={{
         borderRadius: 10,
         padding: '12px 14px',
-        background: 'linear-gradient(135deg, rgba(10,20,48,0.9) 0%, rgba(10,20,48,0.7) 100%)',
-        border: '1px solid rgba(255,255,255,0.08)',
+        background: 'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)',
+        border: '1px solid var(--color-card-border)',
+        boxShadow: 'var(--shadow-md)',
         marginBottom: 8,
         display: 'flex',
         flexDirection: 'column',
@@ -215,7 +216,7 @@ function DispatchCard({ card }: { card: KanbanCard }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span
             data-testid="card-duration"
-            style={{ fontSize: 10, color: 'rgba(244,244,249,0.45)' }}
+            style={{ fontSize: 10, color: 'var(--color-text-faint)' }}
           >
             {card.duration_label || '—'}
           </span>
@@ -236,7 +237,7 @@ function DispatchCard({ card }: { card: KanbanCard }) {
             style={{
               fontSize: 10,
               fontWeight: 600,
-              color: card.promoted ? 'var(--color-success)' : 'rgba(244,244,249,0.55)',
+              color: card.promoted ? 'var(--color-success)' : 'var(--color-muted)',
             }}
           >
             {card.output_kind && card.output_kind !== '—' ? `${card.output_kind} · ` : ''}
@@ -309,8 +310,8 @@ function KanbanColumn({
             style={{
               fontSize: 11,
               fontWeight: 600,
-              color: cards.length > 0 ? accentColor : 'rgba(244,244,249,0.25)',
-              background: 'rgba(255,255,255,0.05)',
+              color: cards.length > 0 ? accentColor : 'var(--color-text-faint)',
+              background: 'var(--color-sidebar)',
               padding: '1px 7px',
               borderRadius: 10,
             }}
@@ -412,7 +413,7 @@ function KanbanContent() {
             gap: 6,
             padding: '7px 14px',
             borderRadius: 8,
-            background: 'rgba(255,255,255,0.05)',
+            background: 'var(--color-sidebar)',
             border: '1px solid rgba(255,255,255,0.1)',
             cursor: 'pointer',
             fontSize: 12,

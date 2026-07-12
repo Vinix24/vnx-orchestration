@@ -98,7 +98,7 @@ function EmptySection({ label }: { label: string }) {
         textAlign: 'center',
         color: 'var(--color-muted)',
         fontSize: 12,
-        background: 'rgba(255,255,255,0.02)',
+        background: 'var(--color-sidebar)',
         borderRadius: 10,
         border: '1px dashed rgba(255,255,255,0.07)',
       }}
@@ -136,7 +136,7 @@ function RecurrenceTable({
             style={{
               fontSize: 11,
               color: 'var(--color-muted)',
-              background: 'rgba(255,255,255,0.05)',
+              background: 'var(--color-sidebar)',
               borderRadius: 20,
               padding: '1px 8px',
             }}
@@ -175,8 +175,8 @@ function RecurrenceTable({
                       fontWeight: 700,
                       letterSpacing: '0.07em',
                       textTransform: 'uppercase',
-                      color: 'rgba(244,244,249,0.4)',
-                      borderBottom: '1px solid rgba(255,255,255,0.06)',
+                      color: 'var(--color-text-faint)',
+                      borderBottom: '1px solid var(--color-border)',
                       whiteSpace: 'nowrap',
                     }}
                   >
@@ -393,7 +393,7 @@ function RecommendationCard({ rec }: { rec: DigestRecommendation }) {
               fontWeight: 700,
               letterSpacing: '0.07em',
               textTransform: 'uppercase',
-              color: 'rgba(244,244,249,0.35)',
+              color: 'var(--color-text-faint)',
               marginBottom: 6,
             }}
           >
@@ -410,8 +410,9 @@ function RecommendationCard({ rec }: { rec: DigestRecommendation }) {
                   fontSize: 10,
                   padding: '2px 8px',
                   borderRadius: 5,
-                  background: 'rgba(255,255,255,0.05)',
-                  border: '1px solid rgba(255,255,255,0.08)',
+                  background: 'var(--color-sidebar)',
+                  border: '1px solid var(--color-card-border)',
+                  boxShadow: 'var(--shadow-md)',
                   color: 'var(--color-muted)',
                   fontFamily: 'monospace',
                 }}
@@ -509,7 +510,7 @@ function SignalTimelineChart({
               />
               <XAxis
                 type="number"
-                tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
+                tick={{ fill: 'var(--color-text-faint)', fontSize: 11 }}
                 stroke="rgba(255,255,255,0.06)"
                 axisLine={false}
                 tickLine={false}
@@ -519,7 +520,7 @@ function SignalTimelineChart({
                 type="category"
                 dataKey="name"
                 width={140}
-                tick={{ fill: 'rgba(244,244,249,0.55)', fontSize: 11 }}
+                tick={{ fill: 'var(--color-muted)', fontSize: 11 }}
                 stroke="rgba(255,255,255,0.06)"
                 axisLine={false}
                 tickLine={false}
@@ -527,7 +528,7 @@ function SignalTimelineChart({
               <Tooltip
                 contentStyle={{
                   background:
-                    'linear-gradient(135deg, rgba(10, 20, 48, 0.95), rgba(10, 20, 48, 0.85))',
+                    'linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%)',
                   backdropFilter: 'blur(16px)',
                   border: '1px solid rgba(255,255,255,0.1)',
                   borderRadius: 12,
@@ -617,7 +618,7 @@ export default function GovernancePage() {
               gap: 6,
               padding: '7px 14px',
               borderRadius: 8,
-              background: 'rgba(255,255,255,0.05)',
+              background: 'var(--color-sidebar)',
               border: '1px solid rgba(255,255,255,0.1)',
               cursor: 'pointer',
               fontSize: 12,
@@ -764,7 +765,7 @@ export default function GovernancePage() {
               style={{
                 fontSize: 11,
                 color: 'var(--color-muted)',
-                background: 'rgba(255,255,255,0.05)',
+                background: 'var(--color-sidebar)',
                 borderRadius: 20,
                 padding: '1px 8px',
               }}
