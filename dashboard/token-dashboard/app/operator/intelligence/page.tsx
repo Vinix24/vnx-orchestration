@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, Brain, CheckCircle2, AlertTriangle, Zap, Activity } from 'lucide-react';
+import { RefreshCw, Brain, CheckCircle2, AlertTriangle, Zap, Activity, Gauge } from 'lucide-react';
 import {
   BarChart,
   Bar,
@@ -21,6 +21,7 @@ import {
   useIntelligenceInjections,
   useIntelligenceClassifications,
   useIntelligenceDispatchOutcomes,
+  useIntelligenceEffectiveness,
 } from '@/lib/hooks';
 import type { SuccessPattern, Antipattern, DispatchOutcome, ClassificationRecord } from '@/lib/types';
 
@@ -61,6 +62,65 @@ function LoadingSpinner() {
   return (
     <div className="flex items-center justify-center py-12">
       <div className="animate-spin w-6 h-6 border-2 rounded-full" style={{ borderColor: 'var(--color-card-border)', borderTopColor: 'var(--color-accent)' }} />
+    </div>
+  );
+}
+
+// Probe status vocabulary (ok | degraded | produces_crap | unknown) — the same
+// gate signal that decides whether the self-learning loop activates (PR-17).
+const PROBE_HEALTH_COLORS: Record<string, string> = {
+  ok: '#50fa7b',
+  degraded: '#facc15',
+  produces_crap: '#ff6b6b',
+  unknown: '#6B6B6B',
+};
+
+function probeHealthColor(status: string): string {
+  return PROBE_HEALTH_COLORS[status] ?? PROBE_HEALTH_COLORS.unknown;
+}
+
+function EffectivenessGauge({
+  probeHealth,
+  ignoreRate,
+  pendingProposals,
+  signal,
+}: {
+  probeHealth: string;
+  ignoreRate: number | null;
+  pendingProposals: number;
+  signal: string;
+}) {
+  const color = probeHealthColor(probeHealth);
+  const pct = ignoreRate === null ? null : Math.round(Math.min(1, Math.max(0, ignoreRate)) * 100);
+  return (
+    <div
+      data-testid="effectiveness-gauge"
+      style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(255,255,255,0.02)', border: `1px solid ${color}33`, display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap' }}
+    >
+      <div>
+        <p style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 4 }}>Probe health</p>
+        <span
+          data-testid="effectiveness-probe-health"
+          style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.04em', padding: '2px 10px', borderRadius: 6, color, border: `1px solid ${color}` }}
+        >
+          {probeHealth}
+        </span>
+      </div>
+      <div>
+        <p style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 4 }}>Ignore rate (point-in-time)</p>
+        <span data-testid="effectiveness-ignore-rate" style={{ fontSize: 20, fontWeight: 700, color }}>
+          {pct === null ? 'no data' : `${pct}%`}
+        </span>
+      </div>
+      <div>
+        <p style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 4 }}>Pending proposals</p>
+        <span data-testid="effectiveness-pending-proposals" style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-foreground)' }}>
+          {pendingProposals}
+        </span>
+      </div>
+      {signal && (
+        <span style={{ fontSize: 11, color: 'var(--color-muted)', flexBasis: '100%' }}>{signal}</span>
+      )}
     </div>
   );
 }
@@ -226,12 +286,14 @@ export default function IntelligencePage() {
   const { data: injectionsData, isLoading: injectionsLoading, mutate: mutateInjections } = useIntelligenceInjections();
   const { data: classificationsData, isLoading: classLoading, mutate: mutateClass } = useIntelligenceClassifications();
   const { data: outcomesData, isLoading: outcomesLoading, mutate: mutateOutcomes } = useIntelligenceDispatchOutcomes();
+  const { data: effectivenessData, isLoading: effectivenessLoading, mutate: mutateEffectiveness } = useIntelligenceEffectiveness();
 
   function handleRefresh() {
     mutatePatterns();
     mutateInjections();
     mutateClass();
     mutateOutcomes();
+    mutateEffectiveness();
   }
 
   const successPatterns = patternsData?.success_patterns ?? [];
@@ -268,6 +330,23 @@ export default function IntelligencePage() {
           <RefreshCw size={13} />
           Refresh
         </button>
+      </div>
+
+      {/* === Section 0: Injection-Effectiveness (point-in-time, PR-18) === */}
+      <div style={{ marginBottom: 40 }}>
+        <SectionHeader icon={Gauge} title="Injection Effectiveness" />
+        {effectivenessLoading ? (
+          <LoadingSpinner />
+        ) : !effectivenessData ? (
+          <EmptyState label="Effectiveness probe unavailable." />
+        ) : (
+          <EffectivenessGauge
+            probeHealth={effectivenessData.probe_health}
+            ignoreRate={effectivenessData.ignore_rate}
+            pendingProposals={effectivenessData.pending_proposals}
+            signal={effectivenessData.signal}
+          />
+        )}
       </div>
 
       {/* === Section 1: Pattern Overview === */}
