@@ -131,6 +131,49 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Cross-project intelligence federation (NOT yet implemented).",
         writable=False, planned=True,
         subsystem="cross-project-federation", status="ACTIVATE"),
+
+    # framework-status-audit-and-cockpit PR-2: net-new subsystem flags, registered as display
+    # metadata only (§2.1 of the plan doc). No read-site consults these; registering them does not
+    # change any gate/enforcement decision. VNX_EVIDENCE_BOUND_GATE and VNX_PLAN_GATE_ENFORCE
+    # already existed before this PR (backfilled with subsystem/status in PR-1) and are NOT re-added.
+    "VNX_GOVERNANCE_ENFORCED": _e(
+        "VNX_GOVERNANCE_ENFORCED", "bool", "0", "gate",
+        "Governance-enforcement-stack master switch (display metadata only; no read-site wired).",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="PARK"),
+    "VNX_LEARNING_LOOP_ENABLED": _e(
+        "VNX_LEARNING_LOOP_ENABLED", "bool", "0", "intelligence",
+        "Daily pattern learning / skill refinement / confidence-update loop.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
+    "VNX_DREAM_SCHEDULER_ENABLED": _e(
+        "VNX_DREAM_SCHEDULER_ENABLED", "bool", "0", "intelligence",
+        "Nightly memory consolidation + pending review dispatch.",
+        subsystem="dream-consolidation", status="ACTIVATE"),
+    "VNX_INJECTION_FEEDBACK_ENABLED": _e(
+        "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
+        "Instrument why intelligence injections are ignored before tuning generation.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
+    "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
+        "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
+        "Restrict the plan-gate panel to complex features (display metadata only; "
+        "the scope-skip read-site is deferred to review-floor-enforcer).",
+        subsystem="plan-gate-panel", status="SCOPE"),
+    "VNX_HASH_CHAIN_REQUIRED": _e(
+        "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
+        "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",
+        approval=True,
+        subsystem="receipt-hash-chain", status="PARK"),
+    "VNX_ATTESTATION_REQUIRED": _e(
+        "VNX_ATTESTATION_REQUIRED", "bool", "0", "gate",
+        "SSH-signed PR attestation requirement (display metadata only; no read-site wired).",
+        approval=True,
+        subsystem="signed-attestation", status="PARK"),
+    "VNX_MIGRATION_SYSTEM": _e(
+        "VNX_MIGRATION_SYSTEM", "enum", "manifest", "dispatch",
+        "Pinned selector recording which migration mechanism is active. Parked pending the "
+        "migration-consolidation-and-tenancy-cut trigger.",
+        writable=False,
+        subsystem="migration-mechanisms", status="PARK"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems

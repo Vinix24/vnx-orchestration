@@ -262,6 +262,8 @@ export interface ConfigEntryRow {
   writable_from_ui: boolean;
   requires_approval: boolean;
   planned: boolean;
+  subsystem?: string | null;
+  status?: string | null; // cockpit status: LIVE | PARK | CUT | ACTIVATE | SCOPE | COCKPIT
 }
 
 export interface ConfigEnvelope {

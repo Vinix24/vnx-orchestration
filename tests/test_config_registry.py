@@ -168,5 +168,87 @@ def test_config_registry_subsystems_have_status_and_description():
         assert meta.get("description"), f"{name} is missing a description"
 
 
+# ---------------------------------------------------------------------------
+# PR-2: net-new subsystem flags (display metadata only)
+# ---------------------------------------------------------------------------
+
+PR2_NEW_FLAGS = (
+    "VNX_GOVERNANCE_ENFORCED",
+    "VNX_LEARNING_LOOP_ENABLED",
+    "VNX_DREAM_SCHEDULER_ENABLED",
+    "VNX_INJECTION_FEEDBACK_ENABLED",
+    "VNX_PLAN_GATE_COMPLEX_ONLY",
+    "VNX_HASH_CHAIN_REQUIRED",
+    "VNX_ATTESTATION_REQUIRED",
+    "VNX_MIGRATION_SYSTEM",
+)
+
+
+def test_pr2_new_flags_exist_default_off():
+    for key in PR2_NEW_FLAGS:
+        entry = cr.CONFIG_REGISTRY[key]
+        if key == "VNX_MIGRATION_SYSTEM":
+            assert entry.default == "manifest"
+            assert entry.type == "enum"
+        else:
+            assert entry.default == "0", f"{key} must default off"
+            assert entry.type == "bool"
+
+
+def test_pr2_approval_flags_require_approval():
+    for key in ("VNX_GOVERNANCE_ENFORCED", "VNX_HASH_CHAIN_REQUIRED", "VNX_ATTESTATION_REQUIRED"):
+        assert cr.CONFIG_REGISTRY[key].requires_approval is True
+
+
+def test_pr2_non_approval_flags_do_not_require_approval():
+    for key in (
+        "VNX_LEARNING_LOOP_ENABLED", "VNX_DREAM_SCHEDULER_ENABLED",
+        "VNX_INJECTION_FEEDBACK_ENABLED", "VNX_PLAN_GATE_COMPLEX_ONLY",
+    ):
+        assert cr.CONFIG_REGISTRY[key].requires_approval is False
+
+
+def test_pr2_migration_system_is_read_only():
+    entry = cr.CONFIG_REGISTRY["VNX_MIGRATION_SYSTEM"]
+    assert entry.writable_from_ui is False
+    assert entry.default == "manifest"
+
+
+def test_pr2_new_flags_have_correct_subsystem_and_status():
+    expected = {
+        "VNX_GOVERNANCE_ENFORCED": ("governance-enforcement-stack", "PARK"),
+        "VNX_LEARNING_LOOP_ENABLED": ("intelligence-self-learning-loop", "ACTIVATE"),
+        "VNX_DREAM_SCHEDULER_ENABLED": ("dream-consolidation", "ACTIVATE"),
+        "VNX_INJECTION_FEEDBACK_ENABLED": ("injection-effectiveness-eval-loop", "ACTIVATE"),
+        "VNX_PLAN_GATE_COMPLEX_ONLY": ("plan-gate-panel", "SCOPE"),
+        "VNX_HASH_CHAIN_REQUIRED": ("receipt-hash-chain", "PARK"),
+        "VNX_ATTESTATION_REQUIRED": ("signed-attestation", "PARK"),
+        "VNX_MIGRATION_SYSTEM": ("migration-mechanisms", "PARK"),
+    }
+    for key, (subsystem, status) in expected.items():
+        entry = cr.CONFIG_REGISTRY[key]
+        assert entry.subsystem == subsystem, key
+        assert entry.status == status, key
+
+
+def test_pr2_does_not_duplicate_already_registered_flags():
+    # VNX_EVIDENCE_BOUND_GATE and VNX_PLAN_GATE_ENFORCE predate PR-2 (PR-1 backfilled their
+    # subsystem/status). PR-2 must not re-register them or alter their existing metadata.
+    assert cr.CONFIG_REGISTRY["VNX_EVIDENCE_BOUND_GATE"].subsystem == "evidence-bound-gate"
+    assert cr.CONFIG_REGISTRY["VNX_EVIDENCE_BOUND_GATE"].status == "PARK"
+    assert cr.CONFIG_REGISTRY["VNX_PLAN_GATE_ENFORCE"].subsystem == "plan-gate-panel"
+    assert cr.CONFIG_REGISTRY["VNX_PLAN_GATE_ENFORCE"].status == "SCOPE"
+    for key in PR2_NEW_FLAGS:
+        assert key not in ("VNX_EVIDENCE_BOUND_GATE", "VNX_PLAN_GATE_ENFORCE")
+
+
+def test_pr2_registering_flags_does_not_change_effective_value_when_unset():
+    # Metadata-only guarantee (§2.1): registering a flag must not change what get()/get_bool()
+    # resolve to when nothing overrides it — no read-site behaviour change.
+    for key in PR2_NEW_FLAGS:
+        entry = cr.CONFIG_REGISTRY[key]
+        assert cr.get(key) == entry.default
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
