@@ -106,6 +106,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); mkdir -p \"$ROOT/.vnx-data/logs\" 2>/dev/null; python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" 2>>\"$ROOT/.vnx-data/logs/session_stop_rotation.err\"; exit 0'",
+            "timeout": 5000
+          }
+        ]
       }
     ]
   }
