@@ -21,12 +21,22 @@ Precedence (highest first), implemented by `get()`:
 
 Until the DB layer lands, ``db_resolver`` is None and step 2 is skipped — so this module is a
 behaviour-preserving overlay on the env-only world.
+
+SUBSYSTEM COCKPIT METADATA. ``subsystem`` and ``status`` are pure display metadata for the
+framework-status cockpit (`docs/core/SUBSYSTEMS.md`): which subsystem a flag belongs to, and that
+subsystem's declared status. They carry no runtime behaviour — no read-site consults them, no
+default changes because of them. ``status`` is one of ``ALLOWED_STATUSES``. Subsystems that have no
+dedicated flag (e.g. ``phantom_guard``, ``dispatch-plan``) are not represented here; they resolve via
+``CONFIG_REGISTRY_SUBSYSTEMS`` instead, so the cockpit's rowset is the union of both.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
+
+# The only status values a cockpit row may declare (dispatch: framework-status-audit-and-cockpit PR-1).
+ALLOWED_STATUSES = frozenset(("LIVE", "PARK", "CUT", "ACTIVATE", "SCOPE", "COCKPIT"))
 
 
 @dataclass(frozen=True)
@@ -39,65 +49,139 @@ class ConfigEntry:
     writable_from_ui: bool
     requires_approval: bool
     planned: bool = False  # exists in the registry/UI but not yet a live runtime flag
+    subsystem: Optional[str] = None  # cockpit MAP grouping — display metadata only
+    status: Optional[str] = None  # one of ALLOWED_STATUSES — display metadata only
 
 
-def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False):
-    return ConfigEntry(key, type_, default, category, description, writable, approval, planned)
+def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False,
+       subsystem=None, status=None):
+    return ConfigEntry(key, type_, default, category, description, writable, approval, planned,
+                        subsystem, status)
 
 
 # The inventory. Defaults verified against the read-sites (codex review finding: defaults must
 # match current code). All feature toggles are off ("0") today; the tagger provider is deepseek.
+#
+# subsystem/status backfill (framework-status-audit-and-cockpit PR-1): every entry below is tagged
+# with the cockpit subsystem it belongs to and that subsystem's declared status. These are the
+# flag-BACKED subsystems; the flag-LESS kernel subsystems (dispatch-plan, phantom_guard, etc.) live
+# in CONFIG_REGISTRY_SUBSYSTEMS below so the two sets never collide on the same subsystem name.
 CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
-        "Cheap-model scout recon pre-pass in the door (fail-open)."),
+        "Cheap-model scout recon pre-pass in the door (fail-open).",
+        subsystem="cheap-recon-scout", status="LIVE"),
     "VNX_TAGGER_ENABLED": _e(
         "VNX_TAGGER_ENABLED", "bool", "0", "intelligence",
-        "Persist-time LLM tagging over the closed VNX vocabulary."),
+        "Persist-time LLM tagging over the closed VNX vocabulary.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
     "VNX_TAGGER_PROVIDER": _e(
         "VNX_TAGGER_PROVIDER", "string", "deepseek", "intelligence",
-        "Provider for the LLM tagger (model-agnostic)."),
+        "Provider for the LLM tagger (model-agnostic).",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
     "VNX_INTEL_RANK_THEN_BUDGET": _e(
         "VNX_INTEL_RANK_THEN_BUDGET", "bool", "0", "intelligence",
-        "Rank intelligence candidates by tag-overlap, then budget."),
+        "Rank intelligence candidates by tag-overlap, then budget.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
     "VNX_OUTCOME_GROUNDING_V2": _e(
         "VNX_OUTCOME_GROUNDING_V2", "bool", "0", "intelligence",
-        "Junction-grounded confidence updates from receipts."),
+        "Junction-grounded confidence updates from receipts.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
     "VNX_HAIKU_CLASSIFY": _e(
         "VNX_HAIKU_CLASSIFY", "bool", "0", "intelligence",
-        "Use Haiku for high-volume receipt classification."),
+        "Use Haiku for high-volume receipt classification.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
     "VNX_ROADMAP_AUTOPILOT": _e(
         "VNX_ROADMAP_AUTOPILOT", "bool", "0", "dispatch",
-        "Autonomous roadmap auto-next loading (starts work).", approval=True),
+        "Autonomous roadmap auto-next loading (starts work).", approval=True,
+        subsystem="horizon-planning", status="LIVE"),
     "VNX_HEADLESS_ROUTING": _e(
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
-        "Headless dispatch routing mode."),
+        "Headless dispatch routing mode.",
+        subsystem="headless-dispatch-routing", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "0", "gate",
-        "Require the CI gate before merge.", approval=True),
+        "Require the CI gate before merge.", approval=True,
+        subsystem="governance-enforcement-stack", status="PARK"),
     "VNX_WIRING_GATE_REQUIRED": _e(
         "VNX_WIRING_GATE_REQUIRED", "bool", "0", "gate",
-        "Require the wiring gate.", approval=True),
+        "Require the wiring gate.", approval=True,
+        subsystem="governance-enforcement-stack", status="PARK"),
     "VNX_EVIDENCE_BOUND_GATE": _e(
         "VNX_EVIDENCE_BOUND_GATE", "enum", "advisory", "gate",
         "Evidence-bound merge gate mode: off | advisory | required. "
         "Advisory logs missing/invalid evidence but never blocks; required enforces evidence before merge. "
-        "Default is advisory for D3 bootstrap.", approval=True),
+        "Default is advisory for D3 bootstrap.", approval=True,
+        subsystem="evidence-bound-gate", status="PARK"),
     "VNX_PLAN_GATE_ENFORCE": _e(
         "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
         "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
         "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
         "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
-        approval=True),
+        approval=True,
+        subsystem="plan-gate-panel", status="SCOPE"),
     "VNX_USE_CENTRAL_DB": _e(
         "VNX_USE_CENTRAL_DB", "enum", "", "dispatch",
         "Central-DB read mode (''=per-project | '1'=central | 'shadow'). Process-start routing — "
         "env-only, surfaced read-only: live-toggling would split reads across DBs mid-process.",
-        writable=False),
+        writable=False,
+        subsystem="central-db-routing", status="LIVE"),
     "VNX_USE_FEDERATION": _e(
         "VNX_USE_FEDERATION", "bool", "0", "intelligence",
         "Cross-project intelligence federation (NOT yet implemented).",
-        writable=False, planned=True),
+        writable=False, planned=True,
+        subsystem="cross-project-federation", status="ACTIVATE"),
+}
+
+# Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
+# with no operator-toggleable flag. Kept disjoint from the subsystem names used in CONFIG_REGISTRY
+# above so a future union view (`vnx subsystems`, PR-3) never double-represents one subsystem.
+CONFIG_REGISTRY_SUBSYSTEMS: Dict[str, dict] = {
+    "provider-routing": {
+        "status": "LIVE",
+        "description": "Model/provider selection, constraint solving, fallback order.",
+    },
+    "git-grounded-reconcile": {
+        "status": "LIVE",
+        "description": "Per-project canonical stores, git-provenance linking, no shared-state fork.",
+    },
+    "phantom_guard": {
+        "status": "LIVE",
+        "description": "Receipt deduplication and replay protection.",
+    },
+    "tmux-operational-scar": {
+        "status": "LIVE",
+        "description": "Terminal/session lifecycle, session handover, F1.1 safe linkage.",
+    },
+    "zero-llm-injection": {
+        "status": "LIVE",
+        "description": "No prompt injection via environment or receipts; strict input boundaries.",
+    },
+    "dispatch-plan": {
+        "status": "LIVE",
+        "description": "Single-entry dispatch door, dispatch-plan reconciliation.",
+    },
+    "test-suite": {
+        "status": "LIVE",
+        "description": "Pytest + integration coverage for kernel and cockpit.",
+    },
+    "within-db-tenancy": {
+        "status": "PARK",
+        "description": "Composite (project_id, id) keys inside per-project DBs. Removal PARKed "
+                        "pending per-table central-DB safety proof.",
+    },
+    "docs-bloat": {
+        "status": "CUT",
+        "description": "Comparisons, stale archive, marketing docs inflating docs/ count.",
+    },
+    "subsystem-cockpit": {
+        "status": "COCKPIT",
+        "description": "SUBSYSTEMS.md + config_registry + vnx subsystems + dashboard tile.",
+    },
+    "effectiveness-probe-framework": {
+        "status": "COCKPIT",
+        "description": "Generic \"does it produce crap?\" probes per subsystem.",
+    },
 }
 
 # A resolver for the per-project DB layer (step 2). Signature: (project_id, key) -> str | None.
@@ -185,5 +269,7 @@ def all_effective(project_id: Optional[str] = None) -> List[dict]:
             "writable_from_ui": entry.writable_from_ui,
             "requires_approval": entry.requires_approval,
             "planned": entry.planned,
+            "subsystem": entry.subsystem,
+            "status": entry.status,
         })
     return out

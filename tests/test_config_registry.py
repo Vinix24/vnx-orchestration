@@ -138,5 +138,35 @@ def test_all_effective_reflects_env(monkeypatch):
     assert rows["VNX_TAGGER_ENABLED"]["is_default"] is False
 
 
+# ---------------------------------------------------------------------------
+# Subsystem cockpit metadata (framework-status-audit-and-cockpit PR-1)
+# ---------------------------------------------------------------------------
+
+def test_every_registry_entry_has_subsystem_and_status():
+    for key, entry in cr.CONFIG_REGISTRY.items():
+        assert entry.subsystem, f"{key} is missing a subsystem"
+        assert entry.status in cr.ALLOWED_STATUSES, f"{key} has invalid status {entry.status!r}"
+
+
+def test_all_effective_includes_subsystem_and_status():
+    for row in cr.all_effective():
+        assert row["subsystem"], f"{row['key']} all_effective() row is missing subsystem"
+        assert row["status"] in cr.ALLOWED_STATUSES, (
+            f"{row['key']} all_effective() row has invalid status {row['status']!r}"
+        )
+
+
+def test_config_registry_subsystems_disjoint_from_flag_backed_subsystems():
+    flag_backed = {entry.subsystem for entry in cr.CONFIG_REGISTRY.values()}
+    flag_less = set(cr.CONFIG_REGISTRY_SUBSYSTEMS)
+    assert not (flag_backed & flag_less), "a subsystem name is represented as both flag-backed and flag-less"
+
+
+def test_config_registry_subsystems_have_status_and_description():
+    for name, meta in cr.CONFIG_REGISTRY_SUBSYSTEMS.items():
+        assert meta.get("status") in cr.ALLOWED_STATUSES, f"{name} has invalid status"
+        assert meta.get("description"), f"{name} is missing a description"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
