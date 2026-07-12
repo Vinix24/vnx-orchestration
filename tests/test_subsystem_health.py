@@ -111,8 +111,25 @@ def test_aggregate_default_subsystems_covers_the_known_universe(monkeypatch, tmp
     results = subsystem_health.aggregate(state_dir=tmp_path)
 
     assert results["probe-ok-subsystem"]["status"] == "ok"
-    assert results["governance-enforcement-stack"]["status"] == "unknown"
-    assert results["governance-enforcement-stack"]["signal"] == "no probe registered"
+    # "docs-bloat" carries no probe by PRD design (PR-11 is pure docs cleanup, no
+    # code/health surface) — it stays the "no probe registered" exemplar even
+    # after PR-7 registers real probes for governance/plan-gate/migration.
+    assert results["docs-bloat"]["status"] == "unknown"
+    assert results["docs-bloat"]["signal"] == "no probe registered"
+
+
+def test_aggregate_wires_governance_plan_gate_and_migration_probes(tmp_path):
+    """PR-7 acceptance criteria: ``vnx subsystems --probe`` (which calls
+    aggregate()) returns real health — not 'no probe registered' — for all
+    three subsystems, using each probe's default (real repo/state) resolution."""
+    results = subsystem_health.aggregate(
+        state_dir=tmp_path,
+        subsystems=["governance-enforcement-stack", "plan-gate-panel", "migration-mechanisms"],
+    )
+
+    for name in ("governance-enforcement-stack", "plan-gate-panel", "migration-mechanisms"):
+        assert results[name]["signal"] != "no probe registered"
+        assert results[name]["status"] in {"ok", "degraded", "produces_crap", "unknown"}
 
 
 if __name__ == "__main__":

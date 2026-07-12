@@ -33,6 +33,14 @@ from effectiveness_probe import (  # noqa: E402
 )
 from health_beacon import HealthBeacon  # noqa: E402
 
+# Concrete probes self-register into EFFECTIVENESS_PROBES via `@register_probe`
+# at import time (PR-7). Importing them here means aggregate() sees every
+# registered probe regardless of which entrypoint (CLI, test, dashboard)
+# triggers the first import of this module.
+import governance_effectiveness_probe  # noqa: E402,F401
+import migration_effectiveness_probe  # noqa: E402,F401
+import plan_gate_effectiveness_probe  # noqa: E402,F401
+
 
 def known_subsystems() -> List[str]:
     """Every cockpit subsystem name: flag-backed entries from ``CONFIG_REGISTRY``,
