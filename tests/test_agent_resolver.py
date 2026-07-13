@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "scripts" / "lib") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
-from agent_resolver import agent_folders_enabled, resolve_agent
+from agent_resolver import agent_folders_enabled, list_available_agents, resolve_agent
 
 
 def _make_agent(base: Path, name: str, rel: str = "agents", config: str | None = None) -> Path:
@@ -143,6 +143,90 @@ class TestRobustness:
         agent_dir = _make_agent(tmp_path, "bad-yaml", config="not yaml: [")
         cfg = resolve_agent("bad-yaml", tmp_path)
         assert cfg is not None and cfg.claude_md == agent_dir / "CLAUDE.md" and cfg.provider == "claude"
+
+
+class TestListAvailableAgents:
+    def test_empty_everywhere_returns_empty_list(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        assert list_available_agents(project_dir) == []
+        engine_root = tmp_path / "engine"
+        engine_root.mkdir()
+        assert list_available_agents(project_dir, engine_root=engine_root) == []
+
+    def test_project_only(self, tmp_path):
+        project_dir = tmp_path / "project"
+        _make_agent(project_dir, "local-agent")
+        agents = list_available_agents(project_dir)
+        assert [a.name for a in agents] == ["local-agent"]
+        assert agents[0].source == "project"
+
+    def test_engine_only_agents_fleet_wide(self, tmp_path):
+        """An engine-fleet-only project (no local agents/) still lists engine agents."""
+        engine_root = tmp_path / "engine"
+        _make_agent(engine_root, "backend-developer", rel="agents")
+        project_dir = tmp_path / "empty-project"
+        project_dir.mkdir()  # no local agents/ or examples/
+        agents = list_available_agents(project_dir, engine_root=engine_root)
+        assert [a.name for a in agents] == ["backend-developer"]
+        assert agents[0].source == "engine"
+
+    def test_examples_included_project_and_engine(self, tmp_path):
+        project_dir = tmp_path / "project"
+        _make_agent(project_dir, "demo-agent", rel="examples")
+        engine_root = tmp_path / "engine"
+        _make_agent(engine_root, "engine-demo", rel="examples")
+        agents = list_available_agents(project_dir, engine_root=engine_root)
+        names = {a.name: a.source for a in agents}
+        assert names == {"demo-agent": "examples", "engine-demo": "examples"}
+
+    def test_union_with_name_clash_project_wins(self, tmp_path):
+        project_dir = tmp_path / "project"
+        engine_root = tmp_path / "engine"
+        _make_agent(project_dir, "shared", rel="agents")
+        _make_agent(engine_root, "shared", rel="agents")
+        agents = list_available_agents(project_dir, engine_root=engine_root)
+        assert len(agents) == 1
+        assert agents[0].name == "shared"
+        assert agents[0].source == "project"
+        assert agents[0].claude_md == project_dir / "agents" / "shared" / "CLAUDE.md"
+
+    def test_union_across_all_four_tiers_dedup_and_count(self, tmp_path):
+        project_dir = tmp_path / "project"
+        engine_root = tmp_path / "engine"
+        _make_agent(project_dir, "proj-agent", rel="agents")
+        _make_agent(project_dir, "proj-example", rel="examples")
+        _make_agent(engine_root, "engine-agent", rel="agents")
+        _make_agent(engine_root, "engine-example", rel="examples")
+        # a clash between project examples and engine agents — project tier wins
+        _make_agent(project_dir, "clashed", rel="examples")
+        _make_agent(engine_root, "clashed", rel="agents")
+
+        agents = list_available_agents(project_dir, engine_root=engine_root)
+        by_name = {a.name: a.source for a in agents}
+        assert by_name == {
+            "proj-agent": "project",
+            "proj-example": "examples",
+            "engine-agent": "engine",
+            "engine-example": "examples",
+            "clashed": "examples",
+        }
+
+    def test_ignores_dirs_without_claude_md(self, tmp_path):
+        project_dir = tmp_path / "project"
+        agents_dir = project_dir / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "not-an-agent").mkdir()
+        assert list_available_agents(project_dir) == []
+
+    def test_rejects_unsafe_names(self, tmp_path):
+        project_dir = tmp_path / "project"
+        _make_agent(project_dir, "valid-agent")
+        unsafe_dir = project_dir / "agents" / ".hidden-agent"
+        unsafe_dir.mkdir(parents=True)
+        (unsafe_dir / "CLAUDE.md").write_text("# hidden")
+        agents = list_available_agents(project_dir)
+        assert [a.name for a in agents] == ["valid-agent"]
 
 
 def test_resolve_agent_rejects_path_traversal(tmp_path):

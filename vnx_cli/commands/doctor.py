@@ -89,29 +89,49 @@ def _check_directories(project_dir: Path, data_root: Path) -> list[Check]:
         else f"runtime data root missing ({data_root}) — run `vnx init`",
     ))
 
-    agents_dir = project_dir / "agents"
-    if agents_dir.is_dir():
-        agent_dirs = [d for d in agents_dir.iterdir() if d.is_dir()]
-        if agent_dirs:
-            results.append(Check(
-                name="agents",
-                status=PASS,
-                detail=f"{len(agent_dirs)} agent dir(s) found",
-            ))
-        else:
-            results.append(Check(
-                name="agents",
-                status=WARN,
-                detail="agents/ exists but contains no subdirectories",
-            ))
-    else:
-        results.append(Check(
-            name="agents",
-            status=WARN,
-            detail="agents/ directory not found",
-        ))
+    results.append(_check_agents(project_dir))
 
     return results
+
+
+def _check_agents(project_dir: Path) -> Check:
+    """Count agents across the FULL resolution chain ``dispatch_agent`` uses.
+
+    A project-local ``agents/`` folder is only one tier of the chain
+    ``_resolve_agent_claude_md`` walks (project agents/, project examples/,
+    engine agents/, engine examples/). Reading only the project-local dir
+    made doctor WARN "agents/ directory not found" for engine-fleet-only
+    projects that dispatch perfectly fine — WARN only when the full chain
+    yields zero agents.
+    """
+    try:
+        _engine.ensure_engine_on_path()
+        from agent_resolver import list_available_agents
+        agents = list_available_agents(project_dir, engine_root=_engine.engine_root())
+    except Exception as exc:
+        logger.warning("doctor: agent enumeration failed: %s", exc)
+        return Check(
+            name="agents",
+            status=WARN,
+            detail=f"could not enumerate agents: {exc}",
+        )
+
+    if not agents:
+        return Check(
+            name="agents",
+            status=WARN,
+            detail="no agents found in project agents/, project examples/, engine agents/, or engine examples/",
+        )
+
+    by_source: dict[str, int] = {}
+    for agent in agents:
+        by_source[agent.source] = by_source.get(agent.source, 0) + 1
+    breakdown = ", ".join(f"{count} {source}" for source, count in sorted(by_source.items()))
+    return Check(
+        name="agents",
+        status=PASS,
+        detail=f"{len(agents)} agent(s) resolvable ({breakdown})",
+    )
 
 
 def _resolve_central_pin(central_path: Path) -> str:

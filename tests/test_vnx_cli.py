@@ -177,10 +177,17 @@ def test_status_empty_project(tmp_path, capsys):
 
 
 def test_status_with_agents(tmp_path, capsys):
-    """Status lists agents from agents/ dir."""
+    """Status lists agents from agents/ dir.
+
+    A subdir only counts as a resolvable agent when it has a CLAUDE.md —
+    matching what dispatch_agent's resolver treats as a valid agent
+    (list_available_agents / _resolve_agent_claude_md), not any bare dir.
+    """
     vnx_init(_init_args(tmp_path))
     (tmp_path / "agents" / "T1").mkdir(parents=True)
+    (tmp_path / "agents" / "T1" / "CLAUDE.md").write_text("# T1\n")
     (tmp_path / "agents" / "T2").mkdir(parents=True)
+    (tmp_path / "agents" / "T2" / "CLAUDE.md").write_text("# T2\n")
 
     rc = vnx_status(_status_args(tmp_path))
 
@@ -194,6 +201,7 @@ def test_status_json_output(tmp_path):
     """Status --json returns valid JSON with expected structure."""
     vnx_init(_init_args(tmp_path))
     (tmp_path / "agents" / "T1").mkdir(parents=True)
+    (tmp_path / "agents" / "T1" / "CLAUDE.md").write_text("# T1\n")
 
     import io
     from contextlib import redirect_stdout

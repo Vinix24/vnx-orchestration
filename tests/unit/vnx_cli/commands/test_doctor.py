@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Unit tests for vnx_cli/commands/doctor.py hook-path probe."""
+"""Unit tests for vnx_cli/commands/doctor.py hook-path probe and agent enumeration."""
 
 import json
 from pathlib import Path
 
 import pytest
 
-from vnx_cli.commands.doctor import _check_hook_paths
+from vnx_cli.commands.doctor import PASS, WARN, _check_agents, _check_hook_paths
+
+
+def _make_agent(base: Path, name: str, rel: str = "agents") -> Path:
+    agent_dir = base / rel / name
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "CLAUDE.md").write_text(f"# {name}")
+    return agent_dir
 
 
 def _write_settings(project_dir: Path, settings: dict) -> Path:
@@ -141,3 +148,60 @@ class TestHookPathResolution:
         result = _check_hook_paths(project)
 
         assert result.status == "PASS"
+
+
+class TestCheckAgents:
+    """The `agents` check must count the FULL resolution chain, not just project-local."""
+
+    def test_project_local_only_passes(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        _make_agent(project_dir, "local-agent", rel="agents")
+        engine_root = tmp_path / "engine"
+        engine_root.mkdir()
+        monkeypatch.setattr("vnx_cli.commands.doctor._engine.engine_root", lambda: engine_root)
+
+        result = _check_agents(project_dir)
+        assert result.status == PASS
+        assert "1 agent(s) resolvable" in result.detail
+        assert "project" in result.detail
+
+    def test_engine_fleet_only_project_no_false_zero(self, tmp_path, monkeypatch):
+        """Project-local agents/ empty, engine populated — must NOT WARN '0 agents'.
+
+        This is the exact defect from the dispatch: dispatch_agent resolves via
+        the full chain (project -> engine fallback), so the doctor readout must
+        agree instead of reporting an empty project-local dir as broken.
+        """
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        engine_root = tmp_path / "engine"
+        _make_agent(engine_root, "backend-developer", rel="agents")
+        monkeypatch.setattr("vnx_cli.commands.doctor._engine.engine_root", lambda: engine_root)
+
+        result = _check_agents(project_dir)
+        assert result.status == PASS
+        assert "1 agent(s) resolvable" in result.detail
+        assert "engine" in result.detail
+
+    def test_examples_tier_counted(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        _make_agent(project_dir, "demo-agent", rel="examples")
+        engine_root = tmp_path / "engine"
+        engine_root.mkdir()
+        monkeypatch.setattr("vnx_cli.commands.doctor._engine.engine_root", lambda: engine_root)
+
+        result = _check_agents(project_dir)
+        assert result.status == PASS
+        assert "1 agent(s) resolvable" in result.detail
+        assert "examples" in result.detail
+
+    def test_empty_everywhere_warns(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        engine_root = tmp_path / "engine"
+        engine_root.mkdir()
+        monkeypatch.setattr("vnx_cli.commands.doctor._engine.engine_root", lambda: engine_root)
+
+        result = _check_agents(project_dir)
+        assert result.status == WARN
+        assert "no agents found" in result.detail.lower()

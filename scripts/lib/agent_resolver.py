@@ -78,6 +78,82 @@ def _resolve_agent_claude_md(
     return None
 
 
+@dataclass(frozen=True)
+class AvailableAgent:
+    """One agent discovered by ``list_available_agents()``, with provenance."""
+
+    name: str
+    source: str  # "project" | "engine" | "examples"
+    claude_md: Path
+
+
+def list_available_agents(
+    project_dir: Path | str,
+    engine_root: Path | str | None = None,
+) -> list[AvailableAgent]:
+    """Enumerate every agent resolvable across the full chain ``dispatch_agent`` walks.
+
+    Unions ``project_dir/agents``, ``project_dir/examples``,
+    ``engine_root/agents``, and ``engine_root/examples`` — the same dirs
+    ``_resolve_agent_claude_md`` checks, in the same precedence order. A
+    subdirectory only counts as an agent when ``_resolve_agent_claude_md``
+    would actually resolve it (i.e. it has a ``CLAUDE.md``), so this stays a
+    single source of truth with the resolver rather than a parallel
+    "looks like a dir" heuristic.
+
+    Dedups by name: on a clash the first tier in resolution order wins
+    (project agents > project examples > engine agents > engine examples),
+    so the listing matches what ``dispatch_agent`` would actually resolve
+    for that name. ``source`` reports which tier won: project-local
+    ``agents/`` is ``"project"``, engine ``agents/`` is ``"engine"``, and
+    either ``examples/`` tier is ``"examples"``.
+    """
+    project_dir = Path(project_dir)
+    engine_root = Path(engine_root) if engine_root is not None else None
+
+    tiers: list[Path] = [project_dir / "agents", project_dir / "examples"]
+    if engine_root is not None:
+        tiers.append(engine_root / "agents")
+        tiers.append(engine_root / "examples")
+
+    candidate_names: dict[str, None] = {}
+    for tier_dir in tiers:
+        if not tier_dir.is_dir():
+            continue
+        try:
+            entries = list(tier_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir() and _is_safe_agent_name(entry.name):
+                candidate_names.setdefault(entry.name, None)
+
+    project_agents_dir = project_dir / "agents"
+    project_examples_dir = project_dir / "examples"
+    engine_agents_dir = engine_root / "agents" if engine_root is not None else None
+    engine_examples_dir = engine_root / "examples" if engine_root is not None else None
+
+    found: list[AvailableAgent] = []
+    for name in sorted(candidate_names):
+        claude_md = _resolve_agent_claude_md(name, project_dir, engine_root)
+        if claude_md is None:
+            continue
+        tier_dir = claude_md.parent.parent
+        if tier_dir == project_agents_dir:
+            source = "project"
+        elif tier_dir == project_examples_dir:
+            source = "examples"
+        elif engine_agents_dir is not None and tier_dir == engine_agents_dir:
+            source = "engine"
+        elif engine_examples_dir is not None and tier_dir == engine_examples_dir:
+            source = "examples"
+        else:
+            source = "engine"
+        found.append(AvailableAgent(name=name, source=source, claude_md=claude_md))
+
+    return found
+
+
 def _coerce_str(value: Any) -> str | None:
     if value is None:
         return None

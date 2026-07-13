@@ -217,13 +217,14 @@ def vnx_status(args) -> int:
 
     recent_completions = [f.name for f in completed_files]
 
-    # Agents
-    agents_dir = project_dir / "agents"
-    agent_names: list[str] = []
-    if agents_dir.is_dir():
-        agent_names = sorted(
-            d.name for d in agents_dir.iterdir() if d.is_dir()
-        )
+    # Agents — full resolution chain (project agents/, project examples/,
+    # engine agents/, engine examples/), matching what dispatch_agent
+    # actually resolves. A project-local-only read undercounted to 0 for
+    # engine-fleet-only projects that dispatch fine.
+    _engine.ensure_engine_on_path()
+    from agent_resolver import list_available_agents
+    available_agents = list_available_agents(project_dir, engine_root=_engine.engine_root())
+    agent_names = sorted(a.name for a in available_agents)
 
     if emit_json:
         output = {
