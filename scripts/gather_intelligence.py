@@ -5,6 +5,7 @@ Provides intelligence services for T0 orchestration including agent validation,
 pattern matching, tag intelligence, and quality context enrichment.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ import re
 import hashlib
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -27,11 +28,172 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from agent_directory_loader import load_agent_directory as _load_agent_directory
+from project_scope import current_project_id
 
 EXIT_OK = 0
 EXIT_VALIDATION = 10
 EXIT_IO = 20
 EXIT_DEPENDENCY = 30
+
+# ---------------------------------------------------------------------------
+# Injection-effectiveness WHY instrumentation (VNX_INJECTION_WHY_ENABLED).
+# Dormant by default — see record_adoption_from_receipt / _record_injection_why.
+# ---------------------------------------------------------------------------
+
+NON_ADOPTION_REASONS = (
+    "wrong-file-affinity",
+    "already-known",
+    "stale",
+    "irrelevant-to-task",
+    "bad-timing",
+    "low-signal",
+)
+
+_CONTENT_USE_THRESHOLD = 0.25   # token-overlap ratio (pattern content vs report) -> used=1
+_ALREADY_KNOWN_THRESHOLD = 0.5  # token-overlap ratio (pattern content vs on-disk file) -> already-known
+_STALE_DAYS = 30.0              # pattern_usage.last_offered age -> stale
+_MAX_FILE_READ_BYTES = 200_000  # cap for the already-known on-disk read
+
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]{3,}")
+_TOKEN_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "this", "that", "from", "into", "have",
+    "has", "was", "were", "are", "not", "but", "you", "your", "will",
+})
+
+
+def _injection_why_enabled() -> bool:
+    """VNX_INJECTION_WHY_ENABLED — off by default; direct env read (no config_registry
+    DB-precedence round-trip on the receipt-processing hot path)."""
+    return os.environ.get("VNX_INJECTION_WHY_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tokenize(text: str) -> set:
+    if not text:
+        return set()
+    return {t.lower() for t in _TOKEN_RE.findall(text) if t.lower() not in _TOKEN_STOPWORDS}
+
+
+def _token_overlap_ratio(source_text: str, target_text: str) -> float:
+    """Fraction of source_text's meaningful tokens also present in target_text.
+
+    Deterministic, provider-free text-overlap heuristic (no LLM call) used to decide
+    whether a delivered report actually reflects an offered pattern's content, rather
+    than merely touching the same-named file.
+    """
+    source_tokens = _tokenize(source_text)
+    if not source_tokens:
+        return 0.0
+    target_tokens = _tokenize(target_text)
+    if not target_tokens:
+        return 0.0
+    return len(source_tokens & target_tokens) / len(source_tokens)
+
+
+def classify_non_adoption_reason(
+    *,
+    file_touched: bool,
+    already_known_overlap: Optional[float] = None,
+    last_offered_age_days: Optional[float] = None,
+    task_overlap: bool = True,
+    pattern_confidence: Optional[float] = None,
+    content_overlap: float = 0.0,
+    offered_at: Optional[datetime] = None,
+    edit_window_end: Optional[datetime] = None,
+) -> Tuple[str, str]:
+    """Deterministically classify WHY an offered pattern was NOT adopted.
+
+    Checked top-down, first match wins. ``low-signal`` is the terminal fallback,
+    so this always returns exactly one of NON_ADOPTION_REASONS — never None.
+    """
+    if not file_touched:
+        return "wrong-file-affinity", "pattern's file_path not among files touched in the report"
+
+    if already_known_overlap is not None and already_known_overlap >= _ALREADY_KNOWN_THRESHOLD:
+        return (
+            "already-known",
+            f"content overlap with on-disk file is {already_known_overlap:.2f} "
+            f"(>= {_ALREADY_KNOWN_THRESHOLD}) — content predates this dispatch",
+        )
+
+    if last_offered_age_days is not None and last_offered_age_days >= _STALE_DAYS:
+        return (
+            "stale",
+            f"pattern last offered {last_offered_age_days:.1f}d ago (>= {_STALE_DAYS}d)",
+        )
+
+    if not task_overlap:
+        return "irrelevant-to-task", "no keyword overlap between pattern content and report text"
+
+    if offered_at is not None and edit_window_end is not None and offered_at > edit_window_end:
+        return (
+            "bad-timing",
+            f"pattern offered at {offered_at.isoformat()} after edit window end "
+            f"{edit_window_end.isoformat()}",
+        )
+
+    conf_str = f"{pattern_confidence:.2f}" if pattern_confidence is not None else "unknown"
+    return (
+        "low-signal",
+        f"content overlap {content_overlap:.2f} below use threshold "
+        f"{_CONTENT_USE_THRESHOLD}; pattern confidence={conf_str}",
+    )
+
+
+def _pattern_injection_outcome_events_path() -> Path:
+    """Resolve .vnx-data/events/pattern_injection_outcome.ndjson.
+
+    Same resolver + events/ subdirectory convention as
+    scripts/lib/provider_costs.py's _resolve_costs_path().
+    """
+    from project_root import resolve_data_dir
+    data_dir = resolve_data_dir(__file__)
+    return data_dir / "events" / "pattern_injection_outcome.ndjson"
+
+
+def _emit_injection_outcome_event(
+    *,
+    dispatch_id: str,
+    pattern_id: str,
+    used: int,
+    reason: Optional[str],
+    project_id: str,
+    timestamp: str,
+) -> None:
+    """ADR-005 audit event for the pattern_injection_outcome DB mutation.
+
+    Written before the SQLite INSERT (ledger-first), mirroring
+    scripts/lib/provider_costs.py's emit_provider_cost() convention:
+    fcntl-locked NDJSON append, sha256 idempotency key, project_id stamp
+    (ADR-007). Raises on write failure — no silent except, matching
+    emit_provider_cost's contract. The caller (_record_injection_why) is
+    only reached under record_adoption_from_receipt's catch-all, so a
+    failure here is non-fatal to the adoption contract without being
+    swallowed silently in this function. Only called when
+    VNX_INJECTION_WHY_ENABLED=1 (the same gate as the row write itself).
+    """
+    record_id = hashlib.sha256(
+        f"{project_id}:{dispatch_id}:{pattern_id}:{timestamp}".encode("utf-8")
+    ).hexdigest()[:32]
+    event = {
+        "record_id": record_id,
+        "event_type": "pattern_injection_outcome",
+        "project_id": project_id,
+        "dispatch_id": dispatch_id,
+        "pattern_id": pattern_id,
+        "used": used,
+        "reason": reason,
+        "timestamp": timestamp,
+    }
+    path = _pattern_injection_outcome_events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(event, separators=(",", ":")) + "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _env_flag(name: str) -> Optional[bool]:
@@ -251,10 +413,12 @@ class T0IntelligenceGatherer:
         return state_dir / "intelligence_usage.ndjson"
 
     def record_pattern_offer(self, pattern_id: str, terminal: str, dispatch_id: str,
-                              file_path: str = "") -> None:
+                              file_path: str = "", title: str = "", content: str = "") -> None:
         """Log a pattern offer event to intelligence_usage.ndjson (G-L7 audit trail).
 
-        Called when patterns are served to any terminal at dispatch time.
+        Called when patterns are served to any terminal at dispatch time. ``title``/
+        ``content`` are additive (VNX_INJECTION_WHY_ENABLED consumers) — older readers
+        that only look at file_path are unaffected.
         """
         event = {
             "timestamp": datetime.now().isoformat(),
@@ -263,6 +427,8 @@ class T0IntelligenceGatherer:
             "terminal": terminal,
             "dispatch_id": dispatch_id or "",
             "file_path": file_path,
+            "title": title,
+            "content": content,
         }
         try:
             with open(self._usage_log_path(), "a", encoding="utf-8") as fh:
@@ -307,6 +473,11 @@ class T0IntelligenceGatherer:
 
         Reads intelligence_usage.ndjson for offer events with this dispatch_id,
         extracts file paths from the report, and records adoptions for matches.
+
+        When VNX_INJECTION_WHY_ENABLED=1, additionally persists a per-offer
+        used/ignored-reason row (see _record_injection_why) using a stronger,
+        content-overlap signal. That path is purely additive: with the flag off
+        this method's reads/writes/return value are unchanged.
         """
         usage_log = self._usage_log_path()
         if not usage_log.exists():
@@ -314,6 +485,8 @@ class T0IntelligenceGatherer:
 
         # Collect offered patterns for this dispatch
         offered: Dict[str, str] = {}  # pattern_id -> file_path
+        offered_titles: Dict[str, str] = {}
+        offered_content: Dict[str, str] = {}
         try:
             with open(usage_log, encoding="utf-8") as fh:
                 for line in fh:
@@ -329,6 +502,8 @@ class T0IntelligenceGatherer:
                         fp = rec.get("file_path", "")
                         if pid:
                             offered[pid] = fp
+                            offered_titles[pid] = rec.get("title", "") or ""
+                            offered_content[pid] = rec.get("content", "") or ""
         except OSError:
             return {"adoptions": 0, "checked": 0}
 
@@ -337,6 +512,7 @@ class T0IntelligenceGatherer:
 
         # Extract file paths mentioned in the report
         report_files: set = set()
+        text = ""
         try:
             text = Path(report_path).read_text(encoding="utf-8", errors="replace")
             import re as _re
@@ -354,7 +530,205 @@ class T0IntelligenceGatherer:
                 self.record_pattern_adoption(pattern_id, terminal, dispatch_id)
                 adoptions += 1
 
+        if _injection_why_enabled():
+            try:
+                self._record_injection_why(
+                    dispatch_id=dispatch_id,
+                    offered_file_paths=offered,
+                    offered_titles=offered_titles,
+                    offered_content=offered_content,
+                    report_files=report_files,
+                    report_text=text,
+                )
+            except Exception as exc:  # instrumentation must never break the adoption contract
+                log.debug("Injection WHY instrumentation skipped for %s: %s", dispatch_id, exc)
+
         return {"adoptions": adoptions, "checked": len(offered)}
+
+    def _record_injection_why(
+        self,
+        *,
+        dispatch_id: str,
+        offered_file_paths: Dict[str, str],
+        offered_titles: Dict[str, str],
+        offered_content: Dict[str, str],
+        report_files: set,
+        report_text: str,
+    ) -> None:
+        """Persist a used/ignored-reason row per offered pattern (VNX_INJECTION_WHY_ENABLED).
+
+        Merges the NDJSON-logged offers (gather_for_dispatch's legacy path) with the
+        dispatch_pattern_offered DB junction (the FP-C intelligence_selector path), so
+        patterns offered via either mechanism get a WHY row. Determines ``used`` via a
+        deterministic content/token-overlap heuristic (stronger than the filename-only
+        signal above) and, when not used, classifies a reason via classify_non_adoption_reason.
+        """
+        if not self.quality_db:
+            return
+
+        merged: Dict[str, Dict[str, str]] = {}
+        for pid, fp in offered_file_paths.items():
+            merged[pid] = {
+                "file_path": fp or "",
+                "title": offered_titles.get(pid, ""),
+                "content": offered_content.get(pid, ""),
+            }
+
+        try:
+            cur = self.quality_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='dispatch_pattern_offered'"
+            )
+            if cur.fetchone():
+                for row in self.quality_db.execute(
+                    "SELECT pattern_id, pattern_title FROM dispatch_pattern_offered WHERE dispatch_id = ?",
+                    (dispatch_id,),
+                ):
+                    pid = row["pattern_id"] if isinstance(row, sqlite3.Row) else row[0]
+                    title = row["pattern_title"] if isinstance(row, sqlite3.Row) else row[1]
+                    if pid and pid not in merged:
+                        merged[pid] = {"file_path": "", "title": title or "", "content": ""}
+        except sqlite3.Error as e:
+            log.debug("dispatch_pattern_offered lookup failed for %s: %s", dispatch_id, e)
+
+        if not merged:
+            return
+
+        project_id = current_project_id()
+        now = datetime.now().isoformat()
+
+        for pattern_id, meta in merged.items():
+            self._record_one_injection_outcome(
+                dispatch_id=dispatch_id,
+                pattern_id=pattern_id,
+                meta=meta,
+                report_files=report_files,
+                report_text=report_text,
+                project_id=project_id,
+                now=now,
+            )
+
+        try:
+            self.quality_db.commit()
+        except sqlite3.Error as e:
+            log.debug("Failed to commit pattern_injection_outcome rows for %s: %s", dispatch_id, e)
+
+    def _record_one_injection_outcome(
+        self,
+        *,
+        dispatch_id: str,
+        pattern_id: str,
+        meta: Dict[str, str],
+        report_files: set,
+        report_text: str,
+        project_id: str,
+        now: str,
+    ) -> None:
+        """Classify, audit-log, and persist one pattern_injection_outcome row.
+
+        Single-pattern unit of _record_injection_why's per-offer loop, extracted
+        to keep that method's merge/loop/commit shape under the executable-line
+        threshold. No behavior change from the inlined version.
+        """
+        fp_lower = meta["file_path"].lower() if meta["file_path"] else ""
+        file_touched = bool(fp_lower) and any(
+            fp_lower.endswith(rf) or rf.endswith(fp_lower.split("/")[-1])
+            for rf in report_files
+        )
+        content_source = meta["content"] or meta["title"]
+        overlap = _token_overlap_ratio(content_source, report_text)
+        used = 1 if overlap >= _CONTENT_USE_THRESHOLD else 0
+
+        reason: Optional[str] = None
+        evidence: Optional[str] = None
+        if not used:
+            already_known_overlap = None
+            if meta["file_path"]:
+                on_disk = self._read_project_file(meta["file_path"])
+                if on_disk:
+                    already_known_overlap = _token_overlap_ratio(content_source, on_disk)
+
+            pu_confidence, last_offered_age_days = self._pattern_usage_signals(pattern_id)
+            task_overlap = (
+                bool(_tokenize(content_source) & _tokenize(report_text))
+                if content_source else True
+            )
+
+            reason, evidence = classify_non_adoption_reason(
+                file_touched=file_touched,
+                already_known_overlap=already_known_overlap,
+                last_offered_age_days=last_offered_age_days,
+                task_overlap=task_overlap,
+                pattern_confidence=pu_confidence,
+                content_overlap=overlap,
+            )
+
+        _emit_injection_outcome_event(
+            dispatch_id=dispatch_id,
+            pattern_id=pattern_id,
+            used=used,
+            reason=reason,
+            project_id=project_id,
+            timestamp=now,
+        )
+
+        try:
+            self.quality_db.execute(
+                """INSERT INTO pattern_injection_outcome
+                    (dispatch_id, pattern_id, pattern_hash, used, reason, evidence, project_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(project_id, dispatch_id, pattern_id) DO UPDATE SET
+                    used = excluded.used,
+                    reason = excluded.reason,
+                    evidence = excluded.evidence,
+                    pattern_hash = excluded.pattern_hash,
+                    created_at = excluded.created_at""",
+                (dispatch_id, pattern_id, pattern_id, used, reason, evidence, project_id, now),
+            )
+        except sqlite3.Error as e:
+            log.debug("Failed to write pattern_injection_outcome for %s/%s: %s",
+                      dispatch_id, pattern_id, e)
+
+    def _read_project_file(self, file_path: str) -> str:
+        """Best-effort read of a project-relative file's current on-disk content.
+
+        Used only for the already-known heuristic; never raises. Rejects paths that
+        resolve outside project_root (e.g. an absolute file_path escaping the join).
+        """
+        try:
+            root = self.project_root.resolve()
+            candidate = (self.project_root / file_path).resolve()
+            if candidate != root and root not in candidate.parents:
+                return ""
+            if not candidate.is_file():
+                return ""
+            return candidate.read_text(encoding="utf-8", errors="replace")[:_MAX_FILE_READ_BYTES]
+        except OSError:
+            return ""
+
+    def _pattern_usage_signals(self, pattern_id: str) -> Tuple[Optional[float], Optional[float]]:
+        """Return (confidence, last_offered_age_days) from pattern_usage for pattern_id."""
+        if not self.quality_db:
+            return None, None
+        try:
+            row = self.quality_db.execute(
+                "SELECT confidence, last_offered FROM pattern_usage "
+                "WHERE pattern_id = ? OR pattern_hash = ? LIMIT 1",
+                (pattern_id, pattern_id),
+            ).fetchone()
+        except sqlite3.Error:
+            return None, None
+        if row is None:
+            return None, None
+        confidence = row["confidence"] if isinstance(row, sqlite3.Row) else row[0]
+        last_offered = row["last_offered"] if isinstance(row, sqlite3.Row) else row[1]
+        age_days = None
+        if last_offered:
+            try:
+                parsed = datetime.fromisoformat(str(last_offered).strip())
+                age_days = (datetime.now() - parsed).total_seconds() / 86400.0
+            except ValueError:
+                age_days = None
+        return (float(confidence) if confidence is not None else None), age_days
 
     def gather_for_dispatch(
         self,
@@ -400,8 +774,12 @@ class T0IntelligenceGatherer:
             for p in suggested_patterns:
                 pid = p.get("pattern_hash", "")
                 if pid:
-                    self.record_pattern_offer(pid, terminal, dispatch_id,
-                                              file_path=str(p.get("file_path", "")))
+                    self.record_pattern_offer(
+                        pid, terminal, dispatch_id,
+                        file_path=str(p.get("file_path", "")),
+                        title=str(p.get("title", ""))[:200],
+                        content=str(p.get("code") or p.get("description") or "")[:500],
+                    )
 
         intelligence = {
             "agent_validated": True,

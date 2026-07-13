@@ -24,7 +24,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | evidence-bound-gate | D3 evidence-bound merge gate. | `VNX_EVIDENCE_BOUND_GATE` | PARK-with-trigger | produces-crap — advisory only, enforces nothing |
 | intelligence-self-learning-loop | Daily pattern learning, skill refinements, confidence updates. | `VNX_LEARNING_LOOP_ENABLED` | ACTIVATE-and-measure | produces-crap — 98% injection ignore rate, 0 dream cycles |
 | dream-consolidation | Nightly memory consolidation + pending review dispatch. | `VNX_DREAM_SCHEDULER_ENABLED` | ACTIVATE-and-measure | unknown — no cycles run |
-| injection-effectiveness-eval-loop | Instrument WHY patterns are ignored before tuning generation. | `VNX_INJECTION_FEEDBACK_ENABLED` | ACTIVATE-and-measure | unknown — probe not built yet |
+| injection-effectiveness-eval-loop | Instrument WHY patterns are ignored before tuning generation. | `VNX_INJECTION_WHY_ENABLED` | ACTIVATE-and-measure | unknown — probe not built yet |
 | cross-project-federation | Cross-project intelligence federation (not yet implemented). | `VNX_USE_FEDERATION` | ACTIVATE-and-measure | unknown — no probe yet |
 | plan-gate-panel | 5-model deliberation panel for plan-first enforcement. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
 | plan-gate-task-class-scope | Restrict panel to complex features; skip trivial tracks. Enforcement deferred to review-floor-enforcer. | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | unknown — read-site deferred |
