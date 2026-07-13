@@ -141,6 +141,51 @@ def _resolve_dispatch_paths(raw: str) -> "list[str] | None":
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+def _record_final_prompt_integrity(
+    *,
+    dispatch_id: str,
+    final_prompt: str,
+    raw_instruction: str,
+):
+    """Persist the assembled final prompt + verify raw+injections reconstruct it.
+
+    Closes the input-side audit gap for the provider lane (final_prompt_integrity
+    module docstring: "provider/envelope: the receipt records only the RAW
+    instruction, not the enriched body"). Mirrors
+    tmux_interactive_dispatch.TmuxInteractiveAdapter._record_final_prompt_integrity.
+
+    Best-effort: a missing module / persistence error is swallowed (logged) so the
+    audit-closure step can never itself break a dispatch. The strict (fail-closed)
+    reconstruction raise (``VNX_INJECTION_RECONSTRUCT_STRICT=1``) propagates so an
+    opted-in operator gets fail-closed delivery. Returns the FinalPromptIntegrity
+    or None.
+    """
+    try:
+        from final_prompt_integrity import (  # noqa: PLC0415
+            InjectionReconstructError,
+            record_final_prompt_integrity,
+        )
+    except ImportError:
+        return None
+    try:
+        return record_final_prompt_integrity(
+            dispatch_id=dispatch_id,
+            final_prompt=final_prompt,
+            raw_instruction=raw_instruction,
+            data_dir=_resolve_data_dir(),
+            state_dir=_resolve_state_dir(),
+        )
+    except InjectionReconstructError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — audit closure must never break a dispatch
+        logger.error(
+            "_enrich_instruction: final-prompt integrity failed (non-fatal) dispatch=%s: %s",
+            dispatch_id,
+            exc,
+        )
+        return None
+
+
 def _enrich_instruction(args: argparse.Namespace) -> str:
     """Prepend intelligence context and repo map to instruction for non-Claude provider paths.
 
@@ -151,6 +196,12 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     Applies two layers (best-effort, each layer falls back silently on failure):
     1. Intelligence injection (existing — ADR context, prior findings, etc.)
     2. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher step)
+
+    Input-side audit closure: once assembled, the enriched body is persisted and
+    checked for containment of the raw instruction + recorded injections
+    (final_prompt_integrity). The result is stashed on ``args._final_prompt_integrity``
+    (not returned — the string contract stays unchanged for existing callers) so
+    ``_emit_governance`` can stamp it onto the receipt.
 
     Returns the original instruction unchanged on any failure.
     """
@@ -181,6 +232,12 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
         )
     except Exception as exc:
         logger.warning("_enrich_instruction: repo map layer failed (%s) — skipping", exc)
+
+    args._final_prompt_integrity = _record_final_prompt_integrity(
+        dispatch_id=args.dispatch_id,
+        final_prompt=enriched,
+        raw_instruction=args.instruction,
+    )
 
     return enriched
 
@@ -565,6 +622,14 @@ def _emit_governance(
     # Best-effort — metadata logging is non-fatal to the dispatch.
     _record_provider_metadata(args, provider, status, report_path, state_dir, model_used=model_used)
 
+    # Input-side audit closure (final_prompt_integrity). Only baked in when
+    # _enrich_instruction computed it, so receipts for lanes/callers that never
+    # enrich (e.g. the claude subprocess-delegate path) stay byte-identical.
+    # vars(args).get(...) (not getattr with a default) so a MagicMock args in
+    # tests that never set this attribute yields a real None, not an
+    # auto-vivified Mock child.
+    _integrity = vars(args).get("_final_prompt_integrity")
+
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
             receipt_path = emit_dispatch_receipt(
@@ -587,6 +652,11 @@ def _emit_governance(
                     "enforced" if worker_permission_enforcement_enabled() else None
                 ),
                 mandate_id=getattr(args, "mandate_id", None),
+                final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
+                final_prompt_sha256=getattr(_integrity, "final_prompt_sha256", None) if _integrity is not None else None,
+                injection_reconstructs=(
+                    getattr(_integrity, "injection_reconstructs", None) if _integrity is not None else None
+                ),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
