@@ -8,6 +8,7 @@ schema into a typed, backward-compatible result.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 VNX_AGENT_FOLDERS_ENV = "VNX_AGENT_FOLDERS"
 
@@ -107,6 +110,12 @@ def list_available_agents(
     for that name. ``source`` reports which tier won: project-local
     ``agents/`` is ``"project"``, engine ``agents/`` is ``"engine"``, and
     either ``examples/`` tier is ``"examples"``.
+
+    A tier directory that does not exist is skipped quietly (nothing to
+    enumerate). A tier directory that exists but raises ``OSError`` on
+    read (e.g. a permissions failure) is logged as a WARNING via this
+    module's logger and skipped — the other tiers are still enumerated,
+    but the gap is never silently dropped.
     """
     project_dir = Path(project_dir)
     engine_root = Path(engine_root) if engine_root is not None else None
@@ -122,7 +131,12 @@ def list_available_agents(
             continue
         try:
             entries = list(tier_dir.iterdir())
-        except OSError:
+        except OSError as exc:
+            logger.warning(
+                "list_available_agents: unreadable tier %s — %s (skipping tier, other tiers still enumerated)",
+                tier_dir,
+                exc,
+            )
             continue
         for entry in entries:
             if entry.is_dir() and _is_safe_agent_name(entry.name):

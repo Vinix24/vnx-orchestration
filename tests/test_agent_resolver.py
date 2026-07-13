@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -227,6 +228,40 @@ class TestListAvailableAgents:
         (unsafe_dir / "CLAUDE.md").write_text("# hidden")
         agents = list_available_agents(project_dir)
         assert [a.name for a in agents] == ["valid-agent"]
+
+    def test_unreadable_tier_is_logged_not_silently_dropped(self, tmp_path, caplog):
+        """An OSError on one tier must be observable (logged), not silently swallowed.
+
+        Regression for a codex finding on PR #1156: `except OSError: continue`
+        with no logging meant doctor/status could silently under-count or
+        report zero agents on a permissions failure. The other (readable)
+        tiers must still be enumerated.
+
+        The unreadable tier is deliberately the *lowest*-precedence one
+        (engine examples/) so resolving the readable agent (found in the
+        highest-precedence project agents/ tier) never probes a path under
+        the unreadable dir — this isolates the enumeration-loop fix from the
+        unrelated, pre-existing gap where ``_resolve_agent_claude_md``'s bare
+        ``Path.exists()`` does not swallow ``PermissionError``.
+        """
+        project_dir = tmp_path / "project"
+        _make_agent(project_dir, "readable-agent", rel="agents")
+        engine_root = tmp_path / "engine"
+        unreadable_dir = engine_root / "examples"
+        unreadable_dir.mkdir(parents=True)
+        unreadable_dir.chmod(0o000)
+
+        try:
+            with caplog.at_level(logging.WARNING, logger="agent_resolver"):
+                agents = list_available_agents(project_dir, engine_root=engine_root)
+        finally:
+            unreadable_dir.chmod(0o755)
+
+        assert [a.name for a in agents] == ["readable-agent"]
+        assert any(
+            "list_available_agents" in rec.message and str(unreadable_dir) in rec.message
+            for rec in caplog.records
+        )
 
 
 def test_resolve_agent_rejects_path_traversal(tmp_path):
