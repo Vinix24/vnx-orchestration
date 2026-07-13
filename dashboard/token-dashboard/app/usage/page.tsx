@@ -382,7 +382,7 @@ export default function UsagePage() {
             {Array.from(modelCosts.entries())
               .sort(([a], [b]) => a.localeCompare(b))
               .map(([model, cost]) => {
-                const color = model === 'claude-opus' ? '#f97316' : '#6B8AE6';
+                const color = model === 'claude-opus' ? '#c2410c' : '#1d4ed8';
                 const pricing = PRICING[model as ModelKey];
                 return (
                   <CostCard
@@ -479,16 +479,16 @@ export default function UsagePage() {
                             {row.terminal}
                           </span>
                         </td>
-                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: '#ff6b6b', textAlign: 'right' }}>
+                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: 'var(--color-error)', textAlign: 'right' }}>
                           {formatTokens(row.input)}
                         </td>
-                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: '#f97316', textAlign: 'right' }}>
+                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: '#c2410c', textAlign: 'right' }}>
                           {formatTokens(row.cacheCreation)}
                         </td>
-                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: '#6B8AE6', textAlign: 'right' }}>
+                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: 'var(--color-info)', textAlign: 'right' }}>
                           {formatTokens(row.cacheRead)}
                         </td>
-                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: '#50fa7b', textAlign: 'right' }}>
+                        <td className="font-mono text-xs" style={{ padding: '10px 16px', color: 'var(--color-success)', textAlign: 'right' }}>
                           {formatTokens(row.output)}
                         </td>
                         <td className="font-mono text-xs" style={{ padding: '10px 16px', color: 'var(--color-foreground)', textAlign: 'right' }}>
@@ -515,16 +515,16 @@ export default function UsagePage() {
                     >
                       Total
                     </td>
-                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: '#ff6b6b', textAlign: 'right' }}>
+                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: 'var(--color-error)', textAlign: 'right' }}>
                       {formatTokens(totals.input)}
                     </td>
-                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: '#f97316', textAlign: 'right' }}>
+                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: '#c2410c', textAlign: 'right' }}>
                       {formatTokens(totals.cacheCreation)}
                     </td>
-                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: '#6B8AE6', textAlign: 'right' }}>
+                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: 'var(--color-info)', textAlign: 'right' }}>
                       {formatTokens(totals.cacheRead)}
                     </td>
-                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: '#50fa7b', textAlign: 'right' }}>
+                    <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: 'var(--color-success)', textAlign: 'right' }}>
                       {formatTokens(totals.output)}
                     </td>
                     <td className="font-mono text-xs font-bold" style={{ padding: '12px 16px', color: 'var(--color-foreground)', textAlign: 'right' }}>

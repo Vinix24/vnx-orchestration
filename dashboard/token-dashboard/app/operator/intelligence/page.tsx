@@ -27,19 +27,20 @@ import type { SuccessPattern, Antipattern, DispatchOutcome, ClassificationRecord
 
 // ---- Helpers ----
 
+// Literal hex (not CSS vars) — these feed the `${color}NN` alpha-suffix trick below.
 const SEVERITY_COLORS: Record<string, string> = {
-  critical: '#ff6b6b',
-  high: '#f97316',
-  medium: '#facc15',
-  low: '#6B8AE6',
+  critical: '#c0392b',
+  high: '#c2410c',
+  medium: '#b45309',
+  low: '#1d4ed8',
 };
 
 const PIE_PALETTE = ['#6B8AE6', '#50fa7b', '#facc15', '#f97316', '#9B6BE6', '#ff6b6b', '#8be9fd'];
 
 const TRACK_COLORS: Record<string, string> = {
-  A: '#50fa7b',
-  B: '#facc15',
-  C: '#9B6BE6',
+  A: 'var(--color-success)',
+  B: 'var(--color-warning)',
+  C: 'var(--color-track-c)',
 };
 
 function SectionHeader({ icon: Icon, title, count }: { icon: React.ElementType; title: string; count?: number }) {
@@ -69,10 +70,10 @@ function LoadingSpinner() {
 // Probe status vocabulary (ok | degraded | produces_crap | unknown) — the same
 // gate signal that decides whether the self-learning loop activates (PR-17).
 const PROBE_HEALTH_COLORS: Record<string, string> = {
-  ok: '#50fa7b',
-  degraded: '#facc15',
-  produces_crap: '#ff6b6b',
-  unknown: '#6B6B6B',
+  ok: '#15803d',
+  degraded: '#b45309',
+  produces_crap: '#c0392b',
+  unknown: '#4a5a7a',
 };
 
 function probeHealthColor(status: string): string {
@@ -150,14 +151,14 @@ function SuccessPatternCard({ pattern }: { pattern: SuccessPattern }) {
     <div style={{ padding: '14px 16px', borderRadius: 10, background: 'rgba(80, 250, 123, 0.06)', border: '1px solid rgba(80, 250, 123, 0.18)' }}>
       <div className="flex items-start justify-between gap-2">
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-foreground)', lineHeight: 1.4 }}>{pattern.title}</span>
-        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: 'rgba(80, 250, 123, 0.12)', border: '1px solid rgba(80, 250, 123, 0.25)', color: '#50fa7b', flexShrink: 0 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: 'rgba(80, 250, 123, 0.12)', border: '1px solid rgba(80, 250, 123, 0.25)', color: 'var(--color-success)', flexShrink: 0 }}>
           {pattern.category || 'general'}
         </span>
       </div>
       <ConfidenceBar value={pattern.confidence} />
       <div className="flex items-center gap-3" style={{ marginTop: 8 }}>
         <span style={{ fontSize: 11, color: 'var(--color-muted)' }}>
-          conf <strong style={{ color: '#50fa7b' }}>{(pattern.confidence * 100).toFixed(0)}%</strong>
+          conf <strong style={{ color: 'var(--color-success)' }}>{(pattern.confidence * 100).toFixed(0)}%</strong>
         </span>
         <span style={{ fontSize: 11, color: 'var(--color-muted)' }}>
           used <strong style={{ color: 'var(--color-foreground)' }}>{pattern.used_count}</strong>×
@@ -361,8 +362,8 @@ export default function IntelligencePage() {
             {/* Success Patterns */}
             <div>
               <div className="flex items-center gap-2" style={{ marginBottom: 12 }}>
-                <CheckCircle2 size={13} style={{ color: '#50fa7b' }} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: '#50fa7b' }}>
+                <CheckCircle2 size={13} style={{ color: 'var(--color-success)' }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-success)' }}>
                   Success Patterns ({successPatterns.length})
                 </span>
               </div>
@@ -377,8 +378,8 @@ export default function IntelligencePage() {
             {/* Antipatterns */}
             <div>
               <div className="flex items-center gap-2" style={{ marginBottom: 12 }}>
-                <AlertTriangle size={13} style={{ color: '#ff6b6b' }} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: '#ff6b6b' }}>
+                <AlertTriangle size={13} style={{ color: 'var(--color-error)' }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-error)' }}>
                   Antipatterns ({antipatterns.length})
                 </span>
               </div>
@@ -489,11 +490,11 @@ export default function IntelligencePage() {
                 <div className="flex items-center gap-8" style={{ marginLeft: 'auto' }}>
                   <span style={{ fontSize: 11 }}>
                     <span style={{ color: 'var(--color-muted)' }}>injected </span>
-                    <strong style={{ color: '#50fa7b' }}>{ev.items_injected}</strong>
+                    <strong style={{ color: 'var(--color-success)' }}>{ev.items_injected}</strong>
                   </span>
                   <span style={{ fontSize: 11 }}>
                     <span style={{ color: 'var(--color-muted)' }}>suppressed </span>
-                    <strong style={{ color: '#facc15' }}>{ev.items_suppressed}</strong>
+                    <strong style={{ color: 'var(--color-warning)' }}>{ev.items_suppressed}</strong>
                   </span>
                 </div>
               </div>
@@ -524,7 +525,7 @@ export default function IntelligencePage() {
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {trackSuccessRates.map(({ track, rate, total }) => {
-                    const color = TRACK_COLORS[track] ?? '#6B8AE6';
+                    const color = TRACK_COLORS[track] ?? 'var(--color-info)';
                     return (
                       <div key={track}>
                         <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>

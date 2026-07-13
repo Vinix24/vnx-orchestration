@@ -289,12 +289,13 @@ function RecurrenceTable({
 
 // ---- Recommendation card ----
 
+// Literal hex (not CSS vars) — these feed the `${catColor}NN` alpha-suffix trick below.
 const CATEGORY_COLORS: Record<string, string> = {
-  operational_defect: '#ff6b6b',
-  prompt_config_tuning: '#6B8AE6',
-  governance_health: '#50fa7b',
-  process: '#facc15',
-  default: 'var(--color-muted)',
+  operational_defect: '#c0392b',
+  prompt_config_tuning: '#1d4ed8',
+  governance_health: '#15803d',
+  process: '#b45309',
+  default: '#4a5a7a',
 };
 
 function categoryColor(cat: string): string {
@@ -347,7 +348,7 @@ function RecommendationCard({ rec }: { rec: DigestRecommendation }) {
               borderRadius: 5,
               background: 'rgba(107, 138, 230, 0.12)',
               border: '1px solid rgba(107, 138, 230, 0.3)',
-              color: '#6B8AE6',
+              color: 'var(--color-info)',
               display: 'flex',
               alignItems: 'center',
               gap: 4,

@@ -9,20 +9,20 @@ import BreadcrumbNav from '@/components/operator/breadcrumb-nav';
 import type { Report } from '@/lib/types';
 
 const TRACK_COLORS: Record<string, { color: string; bg: string; border: string }> = {
-  A: { color: '#50fa7b', bg: 'rgba(80, 250, 123, 0.1)', border: 'rgba(80, 250, 123, 0.3)' },
-  B: { color: '#facc15', bg: 'rgba(250, 204, 21, 0.1)', border: 'rgba(250, 204, 21, 0.3)' },
-  C: { color: '#9B6BE6', bg: 'rgba(155, 107, 230, 0.1)', border: 'rgba(155, 107, 230, 0.3)' },
+  A: { color: 'var(--color-success)', bg: 'rgba(80, 250, 123, 0.1)', border: 'rgba(80, 250, 123, 0.3)' },
+  B: { color: 'var(--color-warning)', bg: 'rgba(250, 204, 21, 0.1)', border: 'rgba(250, 204, 21, 0.3)' },
+  C: { color: 'var(--color-track-c)', bg: 'rgba(155, 107, 230, 0.1)', border: 'rgba(155, 107, 230, 0.3)' },
 };
 
 const STATUS_COLORS: Record<string, { color: string; bg: string; border: string }> = {
-  success: { color: '#50fa7b', bg: 'rgba(80, 250, 123, 0.08)', border: 'rgba(80, 250, 123, 0.25)' },
-  failure: { color: '#ff6b6b', bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.25)' },
-  failed:  { color: '#ff6b6b', bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.25)' },
+  success: { color: 'var(--color-success)', bg: 'rgba(80, 250, 123, 0.08)', border: 'rgba(80, 250, 123, 0.25)' },
+  failure: { color: 'var(--color-error)', bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.25)' },
+  failed:  { color: 'var(--color-error)', bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.25)' },
 };
 
 function TrackBadge({ track }: { track: string | null | undefined }) {
   const safeTrack = (track || 'UNKNOWN').toUpperCase();
-  const cfg = TRACK_COLORS[safeTrack] ?? { color: '#6B6B6B', bg: 'rgba(107,107,107,0.1)', border: 'rgba(107,107,107,0.3)' };
+  const cfg = TRACK_COLORS[safeTrack] ?? { color: 'var(--color-muted)', bg: 'rgba(107,107,107,0.1)', border: 'rgba(107,107,107,0.3)' };
   return (
     <span
       style={{
@@ -271,7 +271,7 @@ function ReportRow({ report }: { report: Report }) {
                 alignItems: 'center',
                 gap: 5,
                 fontSize: 11,
-                color: '#6B8AE6',
+                color: 'var(--color-info)',
                 textDecoration: 'none',
                 padding: '3px 10px',
                 borderRadius: 6,

@@ -34,18 +34,18 @@ export interface SessionDetail {
 export type GroupBy = 'day' | 'week' | 'month';
 
 export const TERMINAL_COLORS: Record<string, string> = {
-  'T-MANAGER': '#f39c12',
+  'T-MANAGER': '#b45309',
   'T0': '#0a2463',
   'T1': '#2e86c1',
-  'T2': '#27ae60',
-  'T3': '#6B8AE6',
-  'unknown': '#8a96ad',
+  'T2': '#15803d',
+  'T3': '#1d4ed8',
+  'unknown': '#4a5a7a',
 };
 
 export const MODEL_COLORS: Record<string, string> = {
   'claude-opus': '#0a2463',
   'claude-sonnet': '#2e86c1',
-  'unknown': '#8a96ad',
+  'unknown': '#4a5a7a',
 };
 
 export type SortOrder = 'DESC' | 'ASC';

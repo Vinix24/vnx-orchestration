@@ -13,7 +13,7 @@ function formatAge(seconds: number | null): string {
 }
 
 function StatusBadge({ status }: { status: LiveSession['status'] }) {
-  const color = status === 'busy' ? '#facc15' : 'var(--color-muted)';
+  const color = status === 'busy' ? 'var(--color-warning)' : 'var(--color-muted)';
   return (
     <span
       style={{
@@ -91,7 +91,7 @@ export default function LiveSessionsPage() {
             borderRadius: 8,
             background: 'rgba(250, 204, 21, 0.08)',
             border: '1px solid rgba(250, 204, 21, 0.3)',
-            color: '#facc15',
+            color: 'var(--color-warning)',
             fontSize: 12,
           }}
         >
