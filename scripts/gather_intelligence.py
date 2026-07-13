@@ -5,6 +5,7 @@ Provides intelligence services for T0 orchestration including agent validation,
 pattern matching, tag intelligence, and quality context enrichment.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -136,6 +137,63 @@ def classify_non_adoption_reason(
         f"content overlap {content_overlap:.2f} below use threshold "
         f"{_CONTENT_USE_THRESHOLD}; pattern confidence={conf_str}",
     )
+
+
+def _pattern_injection_outcome_events_path() -> Path:
+    """Resolve .vnx-data/events/pattern_injection_outcome.ndjson.
+
+    Same resolver + events/ subdirectory convention as
+    scripts/lib/provider_costs.py's _resolve_costs_path().
+    """
+    from project_root import resolve_data_dir
+    data_dir = resolve_data_dir(__file__)
+    return data_dir / "events" / "pattern_injection_outcome.ndjson"
+
+
+def _emit_injection_outcome_event(
+    *,
+    dispatch_id: str,
+    pattern_id: str,
+    used: int,
+    reason: Optional[str],
+    project_id: str,
+    timestamp: str,
+) -> None:
+    """ADR-005 audit event for the pattern_injection_outcome DB mutation.
+
+    Written before the SQLite INSERT (ledger-first), mirroring
+    scripts/lib/provider_costs.py's emit_provider_cost() convention:
+    fcntl-locked NDJSON append, sha256 idempotency key, project_id stamp
+    (ADR-007). Raises on write failure — no silent except, matching
+    emit_provider_cost's contract. The caller (_record_injection_why) is
+    only reached under record_adoption_from_receipt's catch-all, so a
+    failure here is non-fatal to the adoption contract without being
+    swallowed silently in this function. Only called when
+    VNX_INJECTION_WHY_ENABLED=1 (the same gate as the row write itself).
+    """
+    record_id = hashlib.sha256(
+        f"{project_id}:{dispatch_id}:{pattern_id}:{timestamp}".encode("utf-8")
+    ).hexdigest()[:32]
+    event = {
+        "record_id": record_id,
+        "event_type": "pattern_injection_outcome",
+        "project_id": project_id,
+        "dispatch_id": dispatch_id,
+        "pattern_id": pattern_id,
+        "used": used,
+        "reason": reason,
+        "timestamp": timestamp,
+    }
+    path = _pattern_injection_outcome_events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(event, separators=(",", ":")) + "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _env_flag(name: str) -> Optional[bool]:
@@ -539,60 +597,96 @@ class T0IntelligenceGatherer:
         now = datetime.now().isoformat()
 
         for pattern_id, meta in merged.items():
-            fp_lower = meta["file_path"].lower() if meta["file_path"] else ""
-            file_touched = bool(fp_lower) and any(
-                fp_lower.endswith(rf) or rf.endswith(fp_lower.split("/")[-1])
-                for rf in report_files
+            self._record_one_injection_outcome(
+                dispatch_id=dispatch_id,
+                pattern_id=pattern_id,
+                meta=meta,
+                report_files=report_files,
+                report_text=report_text,
+                project_id=project_id,
+                now=now,
             )
-            content_source = meta["content"] or meta["title"]
-            overlap = _token_overlap_ratio(content_source, report_text)
-            used = 1 if overlap >= _CONTENT_USE_THRESHOLD else 0
-
-            reason: Optional[str] = None
-            evidence: Optional[str] = None
-            if not used:
-                already_known_overlap = None
-                if meta["file_path"]:
-                    on_disk = self._read_project_file(meta["file_path"])
-                    if on_disk:
-                        already_known_overlap = _token_overlap_ratio(content_source, on_disk)
-
-                pu_confidence, last_offered_age_days = self._pattern_usage_signals(pattern_id)
-                task_overlap = (
-                    bool(_tokenize(content_source) & _tokenize(report_text))
-                    if content_source else True
-                )
-
-                reason, evidence = classify_non_adoption_reason(
-                    file_touched=file_touched,
-                    already_known_overlap=already_known_overlap,
-                    last_offered_age_days=last_offered_age_days,
-                    task_overlap=task_overlap,
-                    pattern_confidence=pu_confidence,
-                    content_overlap=overlap,
-                )
-
-            try:
-                self.quality_db.execute(
-                    """INSERT INTO pattern_injection_outcome
-                        (dispatch_id, pattern_id, pattern_hash, used, reason, evidence, project_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(project_id, dispatch_id, pattern_id) DO UPDATE SET
-                        used = excluded.used,
-                        reason = excluded.reason,
-                        evidence = excluded.evidence,
-                        pattern_hash = excluded.pattern_hash,
-                        created_at = excluded.created_at""",
-                    (dispatch_id, pattern_id, pattern_id, used, reason, evidence, project_id, now),
-                )
-            except sqlite3.Error as e:
-                log.debug("Failed to write pattern_injection_outcome for %s/%s: %s",
-                          dispatch_id, pattern_id, e)
 
         try:
             self.quality_db.commit()
         except sqlite3.Error as e:
             log.debug("Failed to commit pattern_injection_outcome rows for %s: %s", dispatch_id, e)
+
+    def _record_one_injection_outcome(
+        self,
+        *,
+        dispatch_id: str,
+        pattern_id: str,
+        meta: Dict[str, str],
+        report_files: set,
+        report_text: str,
+        project_id: str,
+        now: str,
+    ) -> None:
+        """Classify, audit-log, and persist one pattern_injection_outcome row.
+
+        Single-pattern unit of _record_injection_why's per-offer loop, extracted
+        to keep that method's merge/loop/commit shape under the executable-line
+        threshold. No behavior change from the inlined version.
+        """
+        fp_lower = meta["file_path"].lower() if meta["file_path"] else ""
+        file_touched = bool(fp_lower) and any(
+            fp_lower.endswith(rf) or rf.endswith(fp_lower.split("/")[-1])
+            for rf in report_files
+        )
+        content_source = meta["content"] or meta["title"]
+        overlap = _token_overlap_ratio(content_source, report_text)
+        used = 1 if overlap >= _CONTENT_USE_THRESHOLD else 0
+
+        reason: Optional[str] = None
+        evidence: Optional[str] = None
+        if not used:
+            already_known_overlap = None
+            if meta["file_path"]:
+                on_disk = self._read_project_file(meta["file_path"])
+                if on_disk:
+                    already_known_overlap = _token_overlap_ratio(content_source, on_disk)
+
+            pu_confidence, last_offered_age_days = self._pattern_usage_signals(pattern_id)
+            task_overlap = (
+                bool(_tokenize(content_source) & _tokenize(report_text))
+                if content_source else True
+            )
+
+            reason, evidence = classify_non_adoption_reason(
+                file_touched=file_touched,
+                already_known_overlap=already_known_overlap,
+                last_offered_age_days=last_offered_age_days,
+                task_overlap=task_overlap,
+                pattern_confidence=pu_confidence,
+                content_overlap=overlap,
+            )
+
+        _emit_injection_outcome_event(
+            dispatch_id=dispatch_id,
+            pattern_id=pattern_id,
+            used=used,
+            reason=reason,
+            project_id=project_id,
+            timestamp=now,
+        )
+
+        try:
+            self.quality_db.execute(
+                """INSERT INTO pattern_injection_outcome
+                    (dispatch_id, pattern_id, pattern_hash, used, reason, evidence, project_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(project_id, dispatch_id, pattern_id) DO UPDATE SET
+                    used = excluded.used,
+                    reason = excluded.reason,
+                    evidence = excluded.evidence,
+                    pattern_hash = excluded.pattern_hash,
+                    created_at = excluded.created_at""",
+                (dispatch_id, pattern_id, pattern_id, used, reason, evidence, project_id, now),
+            )
+        except sqlite3.Error as e:
+            log.debug("Failed to write pattern_injection_outcome for %s/%s: %s",
+                      dispatch_id, pattern_id, e)
 
     def _read_project_file(self, file_path: str) -> str:
         """Best-effort read of a project-relative file's current on-disk content.

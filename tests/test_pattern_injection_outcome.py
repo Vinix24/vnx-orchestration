@@ -387,5 +387,113 @@ class TestFlagGating:
         assert db.execute("SELECT COUNT(*) FROM pattern_injection_outcome").fetchone()[0] == 0
 
 
+# ---------------------------------------------------------------------------
+# 5. Audit event (ADR-005) — pattern_injection_outcome DB mutation is
+#    paired with an append-only NDJSON ledger event, gated by the same flag.
+# ---------------------------------------------------------------------------
+
+class TestAuditEvent:
+    def test_flag_on_emits_ndjson_event_paired_with_the_row(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_INJECTION_WHY_ENABLED", "1")
+        events_path = tmp_path / "events" / "pattern_injection_outcome.ndjson"
+        monkeypatch.setattr(gi, "_pattern_injection_outcome_events_path", lambda: events_path)
+
+        db = _db_with_outcome_table()
+        g = _make_gatherer(tmp_path, db=db)
+        _write_offer(tmp_path, "d-evt", "pat-sse", file_path="scripts/sse_pipeline.py",
+                     title="SSE cleanup", content=_PATTERN_CONTENT)
+        report = tmp_path / "report.md"
+        report.write_text(
+            "## Changes\nUpdated scripts/sse_pipeline.py to add proper cleanup of SSE "
+            "connections with timeout handlers to prevent memory leaks.\n"
+        )
+
+        g.record_adoption_from_receipt("d-evt", "T1", str(report))
+
+        assert events_path.exists()
+        lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        event = json.loads(lines[0])
+        assert event["event_type"] == "pattern_injection_outcome"
+        assert event["dispatch_id"] == "d-evt"
+        assert event["pattern_id"] == "pat-sse"
+        assert event["used"] == 1
+        assert event["reason"] is None
+        assert event["project_id"]
+        assert event["record_id"]
+        assert event["timestamp"]
+
+        row = db.execute(
+            "SELECT used FROM pattern_injection_outcome WHERE dispatch_id = ? AND pattern_id = ?",
+            ("d-evt", "pat-sse"),
+        ).fetchone()
+        assert row is not None
+        assert row["used"] == 1
+
+    def test_flag_on_unused_pattern_event_carries_the_classified_reason(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_INJECTION_WHY_ENABLED", "1")
+        events_path = tmp_path / "events" / "pattern_injection_outcome.ndjson"
+        monkeypatch.setattr(gi, "_pattern_injection_outcome_events_path", lambda: events_path)
+
+        db = _db_with_outcome_table()
+        g = _make_gatherer(tmp_path, db=db)
+        _write_offer(tmp_path, "d-evt-unused", "pat-sse", file_path="scripts/sse_pipeline.py",
+                     title="SSE cleanup", content=_PATTERN_CONTENT)
+        report = tmp_path / "report.md"
+        report.write_text(
+            "## Changes\nFixed a typo in scripts/sse_pipeline.py docstring, no functional "
+            "changes.\n## Summary\nMinor documentation fix only.\n"
+        )
+
+        g.record_adoption_from_receipt("d-evt-unused", "T1", str(report))
+
+        lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        event = json.loads(lines[0])
+        assert event["used"] == 0
+        assert event["reason"] in gi.NON_ADOPTION_REASONS
+
+    def test_flag_off_emits_no_event_and_no_row(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_INJECTION_WHY_ENABLED", raising=False)
+        events_path = tmp_path / "events" / "pattern_injection_outcome.ndjson"
+        monkeypatch.setattr(gi, "_pattern_injection_outcome_events_path", lambda: events_path)
+
+        db = _db_with_outcome_table()
+        g = _make_gatherer(tmp_path, db=db)
+        _write_offer(tmp_path, "d-evt-off", "pat-sse", file_path="scripts/sse_pipeline.py",
+                     title="SSE cleanup", content=_PATTERN_CONTENT)
+        report = tmp_path / "report.md"
+        report.write_text(
+            "## Changes\nUpdated scripts/sse_pipeline.py to add proper cleanup of SSE "
+            "connections with timeout handlers to prevent memory leaks.\n"
+        )
+
+        g.record_adoption_from_receipt("d-evt-off", "T1", str(report))
+
+        assert not events_path.exists()
+        assert db.execute("SELECT COUNT(*) FROM pattern_injection_outcome").fetchone()[0] == 0
+
+    def test_emit_injection_outcome_event_direct_call_writes_expected_shape(self, tmp_path, monkeypatch):
+        events_path = tmp_path / "events" / "pattern_injection_outcome.ndjson"
+        monkeypatch.setattr(gi, "_pattern_injection_outcome_events_path", lambda: events_path)
+
+        gi._emit_injection_outcome_event(
+            dispatch_id="d-direct", pattern_id="pat-direct", used=0,
+            reason="stale", project_id="proj-x", timestamp="2026-07-13T00:00:00",
+        )
+        gi._emit_injection_outcome_event(
+            dispatch_id="d-direct", pattern_id="pat-direct-2", used=1,
+            reason=None, project_id="proj-x", timestamp="2026-07-13T00:00:01",
+        )
+
+        lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        second = json.loads(lines[1])
+        assert first["record_id"] != second["record_id"]
+        assert first["pattern_id"] == "pat-direct"
+        assert second["pattern_id"] == "pat-direct-2"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
