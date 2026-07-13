@@ -1147,12 +1147,34 @@ class LearningLoop:
         except Exception as e:
             print(f"❌ Error reconciling confidence: {e}")
 
+        # 5.8 Reason-aware injection-effectiveness evaluator (injection-effectiveness-eval-loop
+        # PR-B): measure-only tuning proposals from the pattern_injection_outcome reason
+        # distribution. Gated behind its OWN opt-in flags (VNX_INJECTION_WHY_ENABLED AND
+        # VNX_INJECTION_FEEDBACK_ENABLED — the latter already required =1 to have reached this
+        # point via evaluate_activation_gate). No new flag; never auto-applies a tuning change
+        # (G-L1) — proposals land in pending_injection_tuning.json for operator review only.
+        print("\n🔬 Step 5.8: Reason-aware injection tuning proposals...")
+        reason_result = {"ran": False, "proposals_written": 0, "proposals_generated": 0}
+        try:
+            from injection_effectiveness_probe import run_reason_evaluator_and_propose
+            reason_result = run_reason_evaluator_and_propose(state_dir=self.db_path.parent)
+            if reason_result["ran"]:
+                print(
+                    f"  ✓ {reason_result['proposals_written']} new tuning proposal(s) queued "
+                    f"({reason_result['proposals_generated']} generated this run)"
+                )
+            else:
+                print("  Injection-tuning flags off — reason evaluator skipped")
+        except Exception as e:
+            print(f"❌ Error running reason evaluator: {e}")
+
         # 6. Generate report
         print("\n📈 Step 6: Generating learning report...")
         report = self.generate_learning_report()
 
         proposal_count = len(new_rules)
         self.learning_stats["proposal_count"] = proposal_count
+        self.learning_stats["injection_tuning_proposals"] = reason_result.get("proposals_written", 0)
 
         elapsed = time.time() - start_time
         print(f"\n✅ Learning cycle completed in {elapsed:.2f} seconds")
