@@ -24,10 +24,32 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-LOCK_DIR = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state")) / "gate_locks"
+
+def _resolve_state_dir() -> Path:
+    """Resolve VNX_STATE_DIR via canonical vnx_paths, falling back to CWD-relative.
+
+    A bare ``.vnx-data/state`` default resolves relative to CWD, which is only
+    correct when CWD happens to be the project root with a legacy project-local
+    layout; it ignores the central ``~/.vnx-data/<project>/state`` location.
+    """
+    env = os.environ.get("VNX_STATE_DIR")
+    if env:
+        return Path(env)
+    try:
+        repo_root = str(Path(__file__).resolve().parents[2] / "scripts" / "lib")
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_STATE_DIR"])
+    except Exception:
+        return Path(".vnx-data/state")
+
+
+LOCK_DIR = _resolve_state_dir() / "gate_locks"
 
 
 def create_lock(pr_id: str, gate_name: str) -> Path:

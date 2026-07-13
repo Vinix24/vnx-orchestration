@@ -128,12 +128,24 @@ def run_backfill(db_path: Path, *, dry_run: bool = False) -> Dict[str, Dict[str,
 
 
 def _default_db_path() -> Optional[Path]:
-    """Resolve default quality_intelligence.db via VNX_STATE_DIR or project root."""
+    """Resolve default quality_intelligence.db via VNX_STATE_DIR or canonical vnx_paths."""
     state_dir_env = os.environ.get("VNX_STATE_DIR")
     if state_dir_env:
         candidate = Path(state_dir_env) / "quality_intelligence.db"
         if candidate.exists():
             return candidate
+    # _PROJECT_ROOT / ".vnx-data" is repo-local; a central install's DB lives at
+    # ~/.vnx-data/<project>/state instead. Try the canonical resolver first.
+    try:
+        from vnx_paths import resolve_paths
+        candidate = Path(resolve_paths()["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        if candidate.exists():
+            return candidate
+    except Exception:
+        logger.debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     candidate = _PROJECT_ROOT / ".vnx-data" / "state" / "quality_intelligence.db"
     if candidate.exists():
         return candidate

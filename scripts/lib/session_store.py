@@ -18,6 +18,7 @@ import fcntl
 import json
 import logging
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,14 +35,23 @@ def _now_iso() -> str:
 
 
 def _default_state_dir() -> Path:
-    """Resolve VNX state dir from environment, falling back to project-relative path."""
+    """Resolve VNX state dir from environment, falling back to vnx_paths (central-mode aware)."""
     env = os.environ.get("VNX_STATE_DIR", "")
     if env:
         return Path(env)
     data_dir = os.environ.get("VNX_DATA_DIR", "")
     if data_dir:
         return Path(data_dir) / "state"
-    return Path(__file__).resolve().parent.parent.parent / ".vnx-data" / "state"
+    # A raw __file__ two-up walk resolves the KEYSTONE (not the project's
+    # ~/.vnx-data/<project>) in a central install. See #1023.
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_STATE_DIR"])
+    except Exception:
+        return Path(__file__).resolve().parent.parent.parent / ".vnx-data" / "state"
 
 
 class SessionStore:

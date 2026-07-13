@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,8 @@ _DECISION_ID_RE = re.compile(
     r"^(OD|TD)-(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})-(?P<seq>\d{3})$"
 )
 _DEFAULT_RELATIVE_PATH = Path(".vnx-data/strategy/decisions.ndjson")
+# Same suffix, relative to VNX_DATA_DIR (which already IS the ".vnx-data" dir).
+_DATA_DIR_RELATIVE_PATH = _DEFAULT_RELATIVE_PATH.relative_to(".vnx-data")
 
 REQUIRED_FIELDS: tuple[str, ...] = ("decision_id", "scope", "ts", "rationale")
 
@@ -71,6 +75,25 @@ def _git_root_from(start: Path) -> Path | None:
 
 
 def _default_path() -> Path:
+    """Resolve the default decisions.ndjson path via canonical vnx_paths.
+
+    A ``_git_root_from(here)``-first walk (``here`` anchored on ``__file__``)
+    resolves the KEYSTONE's git root — not the project's — in a central
+    install. Try the canonical resolver first; keep the git-root walk only as
+    a last-resort fallback. See #1023.
+    """
+    try:
+        here = Path(__file__).resolve().parent
+        lib_dir = str(here.parent)  # scripts/lib/strategy -> scripts/lib
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"]) / _DATA_DIR_RELATIVE_PATH
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     here = Path(__file__).resolve().parent
     root = _git_root_from(here) or _git_root_from(Path.cwd().resolve())
     if root is None:

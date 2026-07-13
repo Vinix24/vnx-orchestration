@@ -12,8 +12,10 @@ Usage (as library):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,22 @@ def _db_path() -> Path | None:
         p = Path(state_dir) / "quality_intelligence.db"
         if p.exists():
             return p
-    # Fallback: repo-relative
+    # Canonical resolver: a raw __file__ two-up walk resolves the KEYSTONE
+    # (not the project's ~/.vnx-data/<project>) in a central install. See #1023.
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        candidate = Path(resolve_paths()["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        if candidate.exists():
+            return candidate
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
+    # Last-resort fallback: repo-relative
     here = Path(__file__).resolve()
     candidate = here.parent.parent.parent / ".vnx-data" / "state" / "quality_intelligence.db"
     return candidate if candidate.exists() else None

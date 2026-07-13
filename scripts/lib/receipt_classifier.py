@@ -111,7 +111,16 @@ def state_dir() -> Path:
     raw = os.environ.get(ENV_STATE_DIR)
     if raw:
         return Path(raw)
-    return Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
+    # A raw __file__.parents[2] walk resolves the KEYSTONE (not the project's
+    # ~/.vnx-data/<project>) in a central install. See #1023.
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_STATE_DIR"])
+    except Exception:
+        return Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
 
 
 def should_classify(receipt: Dict[str, Any], mode: Optional[str] = None) -> bool:

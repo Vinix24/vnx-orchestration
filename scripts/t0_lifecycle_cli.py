@@ -41,17 +41,37 @@ from aggregator.t0_lifecycle import (
 )
 
 
+def _canonical_paths() -> dict | None:
+    """Resolve VNX_STATE_DIR/VNX_DATA_DIR via canonical vnx_paths (central-mode aware)."""
+    try:
+        lib_dir = str(_SCRIPTS_DIR / "lib")
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return resolve_paths()
+    except Exception:
+        return None
+
+
 def _resolve_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    canonical = _canonical_paths()
+
     if args.coord_db:
         coord_db = Path(args.coord_db).resolve()
     else:
-        state_dir = os.environ.get("VNX_STATE_DIR") or ".vnx-data/state"
+        state_dir = os.environ.get("VNX_STATE_DIR")
+        if not state_dir:
+            # A bare ".vnx-data/state" default resolves relative to CWD, ignoring
+            # the central ~/.vnx-data/<project>/state location. See #1023.
+            state_dir = canonical["VNX_STATE_DIR"] if canonical else ".vnx-data/state"
         coord_db = Path(state_dir).resolve() / "runtime_coordination.db"
 
     if args.vnx_data_dir:
         vnx_data = Path(args.vnx_data_dir).resolve()
     else:
-        vnx_data_env = os.environ.get("VNX_DATA_DIR") or ".vnx-data"
+        vnx_data_env = os.environ.get("VNX_DATA_DIR")
+        if not vnx_data_env:
+            vnx_data_env = canonical["VNX_DATA_DIR"] if canonical else ".vnx-data"
         vnx_data = Path(vnx_data_env).resolve()
 
     return coord_db, vnx_data

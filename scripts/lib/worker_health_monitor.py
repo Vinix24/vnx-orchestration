@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -72,6 +73,18 @@ class WorkerHealth:
         }
 
 
+def _resolve_central_events_dir() -> Path:
+    """Resolve the events dir via canonical vnx_paths (central-mode aware)."""
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"]) / "events"
+    except Exception:
+        return Path(__file__).resolve().parents[2] / ".vnx-data" / "events"
+
+
 class WorkerHealthMonitor:
     """Real-time health tracking for a single headless worker dispatch."""
 
@@ -106,9 +119,9 @@ class WorkerHealthMonitor:
             if data_dir:
                 self._events_dir = Path(data_dir) / "events"
             else:
-                self._events_dir = (
-                    Path(__file__).resolve().parents[2] / ".vnx-data" / "events"
-                )
+                # A raw __file__.parents[2] walk resolves the KEYSTONE (not the
+                # project's ~/.vnx-data/<project>) in a central install. See #1023.
+                self._events_dir = _resolve_central_events_dir()
 
         # Start background writer thread
         self._stop_event = threading.Event()

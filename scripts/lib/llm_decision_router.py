@@ -451,7 +451,16 @@ def _default_data_dir() -> Path:
     env = os.environ.get("VNX_DATA_DIR", "")
     if env:
         return Path(env)
-    return Path(__file__).resolve().parents[2] / ".vnx-data"
+    # A raw __file__.parents[2] walk resolves the KEYSTONE (not the project's
+    # ~/.vnx-data/<project>) in a central install. See #1023.
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"])
+    except Exception:
+        return Path(__file__).resolve().parents[2] / ".vnx-data"
 
 
 # ---------------------------------------------------------------------------
