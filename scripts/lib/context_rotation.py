@@ -19,8 +19,9 @@ T0-INITIATED, NON-DESTRUCTIVE control-plane on top of it:
   - write_t0_handoff(): writes the repo handoff.md contract (frontmatter +
     "Waar we middenin zitten" / "State" / "Next steps"), fail-soft per
     source (git, horizon, open items each independently guarded).
-  - respawn(): NON-DESTRUCTIVE `tmux new-session -d` of a fresh, bare
-    interactive `claude` (never -p/--print/--dangerously-skip-permissions —
+  - respawn(): NON-DESTRUCTIVE `tmux new-session -d` of a fresh, Opus-pinned
+    (`--model opus`, per t0-opus-only) interactive `claude` (never
+    -p/--print/--dangerously-skip-permissions —
     the exact form scripts/hooks/pretooluse_block_raw_claude_spawn.sh's own
     header comment marks "Always allowed"; argv[0] is always `tmux`, never
     `claude`, since `claude` only ever appears as a later positional/typed
@@ -74,6 +75,11 @@ HANDOFF_FILENAME = "handoff.md"
 _ROTATION_SUBDIR = ("rotation_handovers",)
 _STATE_SUBDIR = ("state", "rotation")
 _CONFIG_RELATIVE_PATH = Path("configs") / "context_rotation.yaml"
+
+# t0-opus-only (~/.claude/rules/provider-constraints.md): T0 must always run
+# Opus, no Sonnet/Fable downgrade. A bare `claude` inherits the operator's
+# default model, so the respawned successor must pin it explicitly.
+_SUCCESSOR_MODEL = "opus"
 
 # Terminal names flow into path components below (rotation_handoff_dir,
 # durable_state_path, request_marker_path, ready_signal_path). The CLI
@@ -546,7 +552,9 @@ def _default_tmux_spawn(
     *,
     boot_delay_seconds: float = 3.0,
 ) -> None:
-    """Spawn a fresh, bare interactive `claude` in a new detached tmux session.
+    """Spawn a fresh, Opus-pinned interactive `claude` in a new detached tmux
+    session (t0-opus-only: the successor must never inherit the operator's
+    default model — see `_SUCCESSOR_MODEL`).
 
     The session's cwd is `<project_root>/.claude/terminals/T0`, NOT
     project_root itself (OI-619 finding #1): Claude Code's memory-file
@@ -585,7 +593,11 @@ def _default_tmux_spawn(
         timeout=10,
     )
     try:
-        subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "claude"], check=True, timeout=10)
+        subprocess.run(
+            ["tmux", "send-keys", "-t", session_name, "-l", f"claude --model {_SUCCESSOR_MODEL}"],
+            check=True,
+            timeout=10,
+        )
         subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], check=True, timeout=10)
         if boot_delay_seconds > 0:
             time.sleep(boot_delay_seconds)

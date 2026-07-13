@@ -25,7 +25,8 @@ Covers:
      VNX_T0_ROTATION is unset; writes handoff.md when set.
   8. Guard-safety: the default tmux spawn implementation's argv[0] is always
      "tmux" — "claude" never appears as an invoked executable, only as a
-     literal send-keys payload with no flags.
+     literal send-keys payload (Opus-pinned via `--model opus`, no dangerous
+     flags).
 """
 
 from __future__ import annotations
@@ -974,6 +975,27 @@ class TestGuardSafeSpawnShape:
         dangerous_flags = {"-p", "--print", "--dangerously-skip-permissions"}
         for cmd in calls:
             assert not (dangerous_flags & set(cmd)), f"dangerous flag present in {cmd}"
+
+    def test_default_tmux_spawn_pins_successor_to_opus(self) -> None:
+        """t0-opus-only (~/.claude/rules/provider-constraints.md): the
+        respawned successor must never inherit the operator's default model.
+        A bare `claude` send-keys payload silently boots on whatever model is
+        configured as default (verified live: booted as Fable 5, not Opus) —
+        the launch string must explicitly pin `--model opus`."""
+        calls: List[List[str]] = []
+
+        import unittest.mock as mock
+        with mock.patch("context_rotation.subprocess.run") as run_mock, \
+             mock.patch("context_rotation.time.sleep", lambda *_: None):
+            run_mock.side_effect = lambda cmd, **kw: calls.append(list(cmd))
+            cr._default_tmux_spawn("vnx-t0-rotation-t0-abc123", "/tmp/repo", "resume prompt text", boot_delay_seconds=0)
+
+        send_keys_calls = [c for c in calls if c[:2] == ["tmux", "send-keys"]]
+        launch_calls = [c for c in send_keys_calls if "claude" in " ".join(c)]
+        assert len(launch_calls) == 1, f"expected exactly one claude launch payload, got: {send_keys_calls}"
+        launch_payload = launch_calls[0][-1]
+        assert launch_payload == "claude --model opus"
+        assert cr._SUCCESSOR_MODEL == "opus"
 
 
 # ---------------------------------------------------------------------------
