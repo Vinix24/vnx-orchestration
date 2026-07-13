@@ -142,7 +142,10 @@ def _default_db_path() -> Optional[Path]:
         if candidate.exists():
             return candidate
     except Exception:
-        pass
+        logger.debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     candidate = _PROJECT_ROOT / ".vnx-data" / "state" / "quality_intelligence.db"
     if candidate.exists():
         return candidate

@@ -11,6 +11,7 @@ emitted with a stable layout.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -145,7 +146,10 @@ def _default_path() -> Path:
         from vnx_paths import resolve_paths
         return Path(resolve_paths()["VNX_DATA_DIR"]) / _DATA_DIR_RELATIVE_PATH
     except Exception:
-        pass
+        logging.getLogger(__name__).debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     here = Path(__file__).resolve().parent
     root = _git_root_from(here) or _git_root_from(Path.cwd().resolve())
     if root is None:

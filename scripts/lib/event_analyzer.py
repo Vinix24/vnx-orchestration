@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 from collections import Counter, defaultdict
@@ -407,7 +408,10 @@ def _default_archive_dir() -> Path:
         if candidate.exists():
             return candidate
     except Exception:
-        pass
+        logging.getLogger(__name__).debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     # scripts/lib -> scripts -> repo root — a raw __file__ two-up walk resolves
     # the KEYSTONE (not the project's ~/.vnx-data/<project>) in a central
     # install. Kept only as a last-resort fallback. See #1023.

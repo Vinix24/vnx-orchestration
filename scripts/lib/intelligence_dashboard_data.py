@@ -12,6 +12,7 @@ Usage (as library):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -37,7 +38,10 @@ def _db_path() -> Path | None:
         if candidate.exists():
             return candidate
     except Exception:
-        pass
+        logging.getLogger(__name__).debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     # Last-resort fallback: repo-relative
     here = Path(__file__).resolve()
     candidate = here.parent.parent.parent / ".vnx-data" / "state" / "quality_intelligence.db"

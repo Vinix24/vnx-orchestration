@@ -20,6 +20,7 @@ Design invariants:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -78,7 +79,10 @@ def _skills_dir() -> Path:
         if skills.is_dir():
             return skills
     except Exception:
-        pass
+        logging.getLogger(__name__).debug(
+            "vnx_paths canonical resolver unavailable; using __file__ last-resort path fallback",
+            exc_info=True,
+        )
     # Last-resort fallback: walk up from this file looking for .claude/skills.
     candidate = Path(__file__).resolve()
     for _ in range(6):
