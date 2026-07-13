@@ -1026,6 +1026,20 @@ def test_forbid_route_kimi_is_blocking_in_constraint_engine():
     assert kimi_v.severity == "blocking"
 
 
+def test_kimi_model_under_claude_provider_is_blocking_in_constraint_engine():
+    """dispatch-agent-lane-coercion (20260713-LANECOERCE): the hardcoded kimi-model-substring
+    guard (constraint_enforcer.py ~502-507) is distinct from the litellm:moonshot forbid_route
+    rule above — it must flag ANY non-kimi provider carrying a kimi-branded model string, which
+    is exactly the raw (pre-pin) shape a --model kimi request has under provider=claude."""
+    violations = ConstraintEnforcer().check_constraints(
+        provider="claude",
+        model="kimi",
+    )
+    kimi_v = next((v for v in violations if v.code == "kimi-via-cli-only"), None)
+    assert kimi_v is not None, "Expected kimi-via-cli-only violation for provider=claude, model=kimi"
+    assert kimi_v.severity == "blocking"
+
+
 def test_forbid_route_deprecated_glm_is_blocking_in_constraint_engine():
     """PR-4e: deprecated-glm-models forbid_route must remain BLOCKING severity."""
     violations = ConstraintEnforcer().check_constraints(
@@ -1071,6 +1085,90 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 
     assert rc == 1, "Blocking forbid_route verdict must cause a Reject"
     mock_exec.assert_not_called()
+
+
+def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatch, capsys):
+    """dispatch-agent-lane-coercion (20260713-LANECOERCE), defense-in-depth: a REAL staged spec
+    with provider=claude, model=kimi, target_slot=T1 must be REJECTED by build_runtime_snapshot's
+    raw-model guard, not silently pinned to claude-sonnet-5 (workers-sonnet-pinned) before the
+    kimi-via-cli-only check ever inspects the requested model. Uses the real constraint engine
+    end-to-end (no snapshot mocking) so the fix is exercised exactly as dispatch_cli runs it."""
+    data_dir = tmp_path / "vnx-data"
+    staging_id = "20260713-staging-kimi-coercion"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    inst = bundle_dir / "instruction.md"
+    inst.write_text("# Kimi-labelled dispatch\n\nDo something useful.\n", encoding="utf-8")
+    spec_dict = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260713-test-kimi-coercion",
+        "staging_id": staging_id,
+        "instruction_file": str(inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "model": "kimi",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "provider=claude + model=kimi must be rejected, not silently pinned to sonnet"
+    mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    assert "kimi-via-cli-only" in err
+
+
+def test_raw_opus_model_pin_override_still_proceeds(tmp_path, monkeypatch):
+    """Regression: --model opus pinned to sonnet (workers-sonnet-pinned, a WARN-only verdict)
+    must still PROCEED. The new raw-model guard only rejects a genuine cross-provider model
+    (e.g. kimi); it must not turn every ordinary pin-override into a hard reject."""
+    data_dir = tmp_path / "vnx-data"
+    staging_id = "20260713-staging-opus-pin"
+    bundle_dir = data_dir / "dispatches" / "pending" / staging_id
+    bundle_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    inst = bundle_dir / "instruction.md"
+    inst.write_text("# Opus-requested dispatch\n\nDo something useful.\n", encoding="utf-8")
+    spec_dict = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260713-test-opus-pin",
+        "staging_id": staging_id,
+        "instruction_file": str(inst),
+        "role": "backend-developer",
+        "target_slot": "T1",
+        "gate": "human-promoted",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "model": "opus",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, "requested opus pinned to sonnet for T1 must still proceed (warn only)"
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "claude-sonnet-5"
 
 
 # ---------------------------------------------------------------------------

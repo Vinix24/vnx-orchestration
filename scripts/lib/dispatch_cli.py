@@ -662,6 +662,44 @@ def build_runtime_snapshot(
             message=f"Constraint registry unavailable — fail-closed: {exc}",
         ),)
 
+    # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): a worker-model pin
+    # (workers-sonnet-pinned) replaces spec.model with effective_model BEFORE the check above
+    # ever runs, so a cross-provider requested model (e.g. --model kimi resolved onto the claude
+    # lane) is invisible to the kimi-via-cli-only guard by the time it inspects effective_model
+    # ("claude-sonnet-5"). Re-run the check against the RAW requested model too, so the pin can
+    # never mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
+    # noise (e.g. --model opus pinned to sonnet) is already reported once via D4's own warning.
+    raw_model = spec.model
+    if raw_model and raw_model != effective_model:
+        try:
+            raw_violations = _constraint_check(
+                provider=provider_value,
+                sub_provider=sub_provider,
+                model=raw_model,
+                terminal_id=spec.target_slot,
+                role=spec.role,
+                via=via,
+                env=os.environ,
+                check_registry=False,
+            )
+        except Exception as exc:
+            raw_violations = []
+            constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+                code="registry-unavailable",
+                severity="blocking",
+                message=f"Constraint registry unavailable (raw-model guard) — fail-closed: {exc}",
+            ),)
+        existing_codes = {v.code for v in constraint_verdicts}
+        for v in raw_violations:
+            if v.severity == "blocking" and v.code not in existing_codes:
+                constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+                    code=v.code,
+                    severity=v.severity,
+                    message=f"[raw-model guard] {v.message}",
+                    override_applied=v.override_applied,
+                ),)
+                existing_codes.add(v.code)
+
     # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
     # dispatches/pending that escapes the data root cannot host a promoted bundle
     # (fail-closed) — checked unconditionally so it holds even if existence is faked.
