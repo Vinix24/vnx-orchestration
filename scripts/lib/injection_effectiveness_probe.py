@@ -45,7 +45,10 @@ a flag; the queue they write to is inert until an operator acts on it (G-L1).
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -60,6 +63,8 @@ if _LIB not in sys.path:
 import config_registry  # noqa: E402
 import project_root  # noqa: E402
 from effectiveness_probe import EffectivenessProbe, register_probe  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # r >= this -> produces_crap (owns the 0.90 endpoint).
 PRODUCES_CRAP_THRESHOLD = 0.90
@@ -423,6 +428,101 @@ def generate_tuning_proposals(
     return proposals
 
 
+def _quarantine_corrupt_queue(path: Path, reason: str) -> None:
+    """Preserve an unreadable/corrupt proposal-queue file instead of letting
+    ``write_tuning_proposals`` silently overwrite it.
+
+    Logs a WARNING naming the path and the read/parse error — this codebase's
+    established convention for surfacing a corrupt-state-file instead of
+    silently dropping it (mirrors ``scripts/lib/agent_resolver.py``'s
+    unreadable-tier WARNING) — then renames the corrupt file aside to a
+    UTC-timestamped ``.corrupt.<ts>`` sibling so an operator can inspect or
+    recover any pending proposals it held. Best-effort: if the rename itself
+    fails (e.g. permissions), the WARNING still fires — the corruption is
+    never silent even when the file cannot be relocated.
+    """
+    logger.warning(
+        "write_tuning_proposals: existing queue %s is unreadable/corrupt (%s) — "
+        "quarantining before rewrite; any pending proposals it held are preserved "
+        "in the quarantined copy for operator review, not merged forward",
+        path,
+        reason,
+    )
+    quarantine_path = path.with_name(
+        f"{path.name}.corrupt.{_now_utc().strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    try:
+        os.replace(str(path), str(quarantine_path))
+    except OSError as exc:
+        logger.warning(
+            "write_tuning_proposals: failed to quarantine corrupt queue %s to %s (%s) — left in place",
+            path,
+            quarantine_path,
+            exc,
+        )
+
+
+def _tuning_proposals_events_path() -> Path:
+    """Resolve ``.vnx-data/events/pending_injection_tuning.ndjson``.
+
+    Same resolver + ``events/`` subdirectory convention as
+    ``scripts/lib/provider_costs.py``'s ``_resolve_costs_path()`` and
+    ``scripts/gather_intelligence.py``'s ``_pattern_injection_outcome_events_path()``.
+    """
+    data_dir = project_root.resolve_data_dir(__file__)
+    return data_dir / "events" / "pending_injection_tuning.ndjson"
+
+
+def _emit_tuning_proposals_written_event(
+    *,
+    output_path: Path,
+    proposals_added: int,
+    proposals_total: int,
+    generated_at: str,
+) -> None:
+    """ADR-005 audit event for the ``pending_injection_tuning.json`` write.
+
+    Mirrors ``scripts/lib/provider_costs.py``'s ``emit_provider_cost()``
+    convention (fcntl-locked NDJSON append, sha256 idempotency key,
+    project_id stamp per ADR-007) and ``scripts/gather_intelligence.py``'s
+    sibling ``_emit_injection_outcome_event()``. Raises on write failure — no
+    silent except, matching that convention.
+
+    Reached only from ``write_tuning_proposals``, which in production is only
+    invoked by ``run_reason_evaluator_and_propose`` after the
+    ``VNX_INJECTION_WHY_ENABLED`` + ``VNX_INJECTION_FEEDBACK_ENABLED`` gate —
+    default (flags off) behavior is unchanged, since ``write_tuning_proposals``
+    is never reached when either flag is off.
+    """
+    project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    timestamp = _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+    record_id = hashlib.sha256(
+        f"{project_id}:{output_path}:{generated_at}:{proposals_added}:{proposals_total}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:32]
+    event = {
+        "record_id": record_id,
+        "event_type": "injection_tuning_proposals_written",
+        "project_id": project_id,
+        "path": str(output_path),
+        "proposals_added": proposals_added,
+        "proposals_total": proposals_total,
+        "generated_at": generated_at,
+        "timestamp": timestamp,
+    }
+    path = _tuning_proposals_events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(event, separators=(",", ":")) + "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def write_tuning_proposals(
     proposals: List[Dict[str, Any]],
     output_path: "Path | str",
@@ -435,6 +535,15 @@ def write_tuning_proposals(
     status edit (e.g. approved/rejected) on an already-queued proposal survives
     a later evaluator run instead of being silently reset to "pending". Returns
     the number of NEWLY added proposals (0 if every id already existed).
+
+    A missing ``output_path`` (normal first run) starts ``existing`` at ``[]``
+    quietly. An ``output_path`` that EXISTS but is unreadable/corrupt (bad
+    JSON, I/O error, or a parseable-but-non-object top level) is NEVER
+    silently discarded — it is quarantined (see ``_quarantine_corrupt_queue``)
+    and a WARNING is logged before the fresh queue is written.
+
+    Emits an ADR-005 NDJSON audit event (``_emit_tuning_proposals_written_event``)
+    after the ``os.replace`` that persists the queue.
     """
     output_path = Path(output_path)
     if generated_at is None:
@@ -442,12 +551,17 @@ def write_tuning_proposals(
 
     existing: List[Dict[str, Any]] = []
     if output_path.exists():
+        data: Any = None
         try:
             data = json.loads(output_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                existing = [e for e in data.get("proposals", []) if isinstance(e, dict)]
-        except (json.JSONDecodeError, OSError):
-            existing = []
+        except (json.JSONDecodeError, OSError) as exc:
+            _quarantine_corrupt_queue(output_path, str(exc))
+        if isinstance(data, dict):
+            existing = [e for e in data.get("proposals", []) if isinstance(e, dict)]
+        elif data is not None:
+            _quarantine_corrupt_queue(
+                output_path, f"top-level JSON is {type(data).__name__}, expected an object"
+            )
 
     existing_ids = {e.get("id") for e in existing}
     merged = list(existing)
@@ -461,6 +575,14 @@ def write_tuning_proposals(
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(str(tmp), str(output_path))
+
+    _emit_tuning_proposals_written_event(
+        output_path=output_path,
+        proposals_added=added,
+        proposals_total=len(merged),
+        generated_at=generated_at,
+    )
+
     return added
 
 

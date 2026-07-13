@@ -281,16 +281,88 @@ class TestWriteTuningProposals:
         assert len(data_after["proposals"]) == 1
         assert data_after["proposals"][0]["status"] == "approved"
 
-    def test_corrupt_existing_queue_is_replaced_not_raised(self, tmp_path):
+    def test_corrupt_existing_queue_is_quarantined_not_silently_replaced(self, tmp_path, caplog):
         out = tmp_path / "pending_injection_tuning.json"
-        out.write_text("{not valid json", encoding="utf-8")
+        corrupt_bytes = "{not valid json"
+        out.write_text(corrupt_bytes, encoding="utf-8")
+        proposal = {"id": "injtune-ranking-20260713", "bucket": "ranking", "status": "pending"}
+
+        with caplog.at_level("WARNING"):
+            added = write_tuning_proposals([proposal], out, generated_at=_GENERATED_AT)
+
+        # The write still proceeds (the loop must not seize up on a corrupt
+        # queue) but the fresh file only ever holds the newly generated
+        # proposal — nothing "recovered" from the corrupt bytes.
+        assert added == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert len(data["proposals"]) == 1
+
+        # The corrupt original is preserved for operator inspection, not lost.
+        quarantined = list(tmp_path.glob("pending_injection_tuning.json.corrupt.*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == corrupt_bytes
+
+        assert any(
+            "unreadable/corrupt" in record.message and str(out) in record.message
+            for record in caplog.records
+        )
+
+    def test_non_object_existing_queue_is_quarantined_not_silently_dropped(self, tmp_path, caplog):
+        out = tmp_path / "pending_injection_tuning.json"
+        out.write_text("[]", encoding="utf-8")
+        proposal = {"id": "injtune-ranking-20260713", "bucket": "ranking", "status": "pending"}
+
+        with caplog.at_level("WARNING"):
+            added = write_tuning_proposals([proposal], out, generated_at=_GENERATED_AT)
+
+        assert added == 1
+        quarantined = list(tmp_path.glob("pending_injection_tuning.json.corrupt.*"))
+        assert len(quarantined) == 1
+        assert any("unreadable/corrupt" in record.message for record in caplog.records)
+
+    def test_first_run_no_existing_file_is_quiet(self, tmp_path, caplog):
+        out = tmp_path / "pending_injection_tuning.json"
+        proposal = {"id": "injtune-ranking-20260713", "bucket": "ranking", "status": "pending"}
+
+        with caplog.at_level("WARNING"):
+            added = write_tuning_proposals([proposal], out, generated_at=_GENERATED_AT)
+
+        assert added == 1
+        assert not list(tmp_path.glob("*.corrupt.*"))
+        assert caplog.records == []
+
+    def test_write_emits_adr005_audit_event(self, tmp_path, monkeypatch):
+        events_path = tmp_path / "events" / "pending_injection_tuning.ndjson"
+        monkeypatch.setattr(iep, "_tuning_proposals_events_path", lambda: events_path)
+        out = tmp_path / "pending_injection_tuning.json"
         proposal = {"id": "injtune-ranking-20260713", "bucket": "ranking", "status": "pending"}
 
         added = write_tuning_proposals([proposal], out, generated_at=_GENERATED_AT)
 
         assert added == 1
-        data = json.loads(out.read_text(encoding="utf-8"))
-        assert len(data["proposals"]) == 1
+        assert events_path.exists()
+        lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        event = json.loads(lines[0])
+        assert event["event_type"] == "injection_tuning_proposals_written"
+        assert event["path"] == str(out)
+        assert event["proposals_added"] == 1
+        assert event["proposals_total"] == 1
+        assert event["generated_at"] == _GENERATED_AT
+        assert "record_id" in event and "project_id" in event and "timestamp" in event
+
+    def test_write_emits_one_audit_event_per_call(self, tmp_path, monkeypatch):
+        events_path = tmp_path / "events" / "pending_injection_tuning.ndjson"
+        monkeypatch.setattr(iep, "_tuning_proposals_events_path", lambda: events_path)
+        out = tmp_path / "pending_injection_tuning.json"
+        proposal_a = {"id": "injtune-ranking-a", "bucket": "ranking", "status": "pending"}
+        proposal_b = {"id": "injtune-ranking-b", "bucket": "ranking", "status": "pending"}
+
+        write_tuning_proposals([proposal_a], out, generated_at=_GENERATED_AT)
+        write_tuning_proposals([proposal_b], out, generated_at=_GENERATED_AT)
+
+        lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
 
 
 # ---------------------------------------------------------------------------
