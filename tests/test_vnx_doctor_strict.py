@@ -103,6 +103,7 @@ class TestCentralMode:
         central_scripts.mkdir(parents=True)
         version_file = central / "VERSION"
         version_file.write_text("1.0.0-rc2\n")
+        (central / ".vnx-install-mode").write_text("central\n")
 
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
@@ -117,6 +118,7 @@ class TestCentralMode:
         project = _make_project(tmp_path)
         central = tmp_path / "home" / ".vnx-system" / "current"
         (central / "scripts").mkdir(parents=True)
+        (central / ".vnx-install-mode").write_text("central\n")
 
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
@@ -159,6 +161,42 @@ class TestCentralMode:
             version_file.chmod(0o644)
 
         assert exit_code == 1
+
+    def test_central_mode_missing_marker_warns(self, tmp_path, monkeypatch):
+        """The active `current` resolves to a version dir with no
+        `.vnx-install-mode` marker (the bug this dispatch fixes: `vnx update`
+        never wrote one). The check must surface it, not silently PASS."""
+        project = _make_project(tmp_path)
+        version_dir = tmp_path / "home" / ".vnx-system" / "versions" / "edge"
+        (version_dir / "scripts").mkdir(parents=True)
+        version_file = version_dir / "VERSION"
+        version_file.write_text("edge\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(version_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(project)
+
+        assert result.status == WARN
+        assert "mode: central" in result.detail
+        assert "pin: edge" in result.detail
+        assert "install-mode marker missing" in result.detail
+
+    def test_central_mode_invalid_marker_content_warns(self, tmp_path, monkeypatch):
+        project = _make_project(tmp_path)
+        version_dir = tmp_path / "home" / ".vnx-system" / "versions" / "edge"
+        (version_dir / "scripts").mkdir(parents=True)
+        (version_dir / ".vnx-install-mode").write_text("embedded\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(version_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(project)
+
+        assert result.status == WARN
+        assert "install-mode marker invalid" in result.detail
 
 
 # ---------------------------------------------------------------------------

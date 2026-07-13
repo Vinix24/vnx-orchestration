@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-from vnx_paths import ensure_env
+from vnx_paths import ensure_env, _git_toplevel
 
 # ---------------------------------------------------------------------------
 # Result model
@@ -623,6 +623,22 @@ def check_path_hygiene(paths: Dict[str, str]) -> List[CheckResult]:
         return [CheckResult("hygiene", FAIL, "Path hygiene check failed")]
 
 
+def _looks_like_central_install_location(vnx_home: Path) -> bool:
+    """True when vnx_home sits under ~/.vnx-system/ — the central-install tree —
+    independent of whether the .vnx-install-mode marker is present there.
+
+    Distinguishes "should be a central install but lost/never got its marker"
+    from a legitimate standalone dev checkout: the latter is also frequently a
+    git-toplevel dir (so git-toplevel matching alone is not enough — see
+    check_contamination), but it never lives under ~/.vnx-system/.
+    """
+    try:
+        vnx_home.resolve().relative_to((Path.home() / ".vnx-system").resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def check_contamination(paths: Dict[str, str]) -> List[CheckResult]:
     """Warn (non-fatal) on pre-fix runtime state inside a central install.
 
@@ -640,6 +656,25 @@ def check_contamination(paths: Dict[str, str]) -> List[CheckResult]:
     except OSError:
         is_central = False
     if not is_central:
+        # A git-toplevel VNX_HOME under ~/.vnx-system/ with no (or an invalid)
+        # marker is a central install that has lost/never received its stamp —
+        # surface it instead of silently skipping (masking the condition this
+        # dispatch fixes). A plain git-toplevel match is not enough on its own:
+        # a standalone vnx-orchestration dev checkout is *also* its own git
+        # toplevel and legitimately carries no marker, so the location check
+        # is required to avoid flagging every ordinary dev checkout.
+        if _git_toplevel(vnx_home) == vnx_home and _looks_like_central_install_location(vnx_home):
+            if marker.is_file():
+                detail = (
+                    f"VNX_HOME is a git-toplevel central install with an "
+                    f"invalid .vnx-install-mode marker at {marker}"
+                )
+            else:
+                detail = (
+                    f"VNX_HOME is a git-toplevel central install missing its "
+                    f".vnx-install-mode marker at {marker}"
+                )
+            return [CheckResult("contamination", WARN, detail)]
         return []
 
     script = vnx_home / "scripts" / "vnx_contamination_check.sh"
