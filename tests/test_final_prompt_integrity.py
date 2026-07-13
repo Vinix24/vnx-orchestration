@@ -451,11 +451,19 @@ def _last_receipt(state_dir: Path) -> dict:
     return json.loads(line)
 
 
-def test_provider_lane_persists_final_prompt_and_stamps_receipt():
+def test_provider_lane_persists_final_prompt_and_stamps_receipt(tmp_path, monkeypatch):
     """The legacy provider-lane path (_dispatch_kimi, no envelope flag) must persist
     final_prompt.md + stamp final_prompt_path/sha/injection_reconstructs onto the
-    receipt — the exact gap final_prompt_integrity's own docstring calls out."""
+    receipt — the exact gap final_prompt_integrity's own docstring calls out.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
     dispatch_id = "d-provider-lane-ok"
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: data_dir)
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: state_dir)
     args = _provider_args(dispatch_id=dispatch_id)
     result = _kimi_success_result()
 
@@ -465,28 +473,36 @@ def test_provider_lane_persists_final_prompt_and_stamps_receipt():
 
     assert rc == 0
 
-    bundle = pd._resolve_data_dir() / "dispatches" / "pending" / dispatch_id
+    bundle = data_dir / "dispatches" / "pending" / dispatch_id
     final_prompt_file = bundle / "final_prompt.md"
     assert final_prompt_file.exists()
     final_prompt = final_prompt_file.read_text(encoding="utf-8")
     assert "Build the loader. Return OK." in final_prompt
 
-    receipt = _last_receipt(pd._resolve_state_dir())
+    receipt = _last_receipt(state_dir)
     assert receipt["injection_reconstructs"] is True
     assert receipt["final_prompt_sha256"] == hashlib.sha256(final_prompt.encode("utf-8")).hexdigest()
     assert receipt["final_prompt_path"] == str(final_prompt_file)
 
 
-def test_provider_lane_mismatch_fails_loud_and_stamps_false(caplog):
+def test_provider_lane_mismatch_fails_loud_and_stamps_false(tmp_path, monkeypatch, caplog):
     """A recorded intelligence_injections row whose content never actually reached
     the enriched prompt (the real, unmocked IntelligenceSelector finds nothing
     against a fresh DB, so enriched == raw instruction) must flip
     injection_reconstructs False on the receipt and log an ERROR — the regression
-    this track exists to catch, exercised through the real dispatch entrypoint."""
+    this track exists to catch, exercised through the real dispatch entrypoint.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
     dispatch_id = "d-provider-lane-mismatch"
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: data_dir)
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: state_dir)
     args = _provider_args(dispatch_id=dispatch_id)
     _write_injection_row(
-        pd._resolve_state_dir(), dispatch_id,
+        state_dir, dispatch_id,
         [_item("THIS PATTERN WAS NEVER ACTUALLY INJECTED", item_id="phantom-1")],
     )
     result = _kimi_success_result()
@@ -498,7 +514,7 @@ def test_provider_lane_mismatch_fails_loud_and_stamps_false(caplog):
 
     # the dispatch itself still succeeds — audit closure never blocks a dispatch.
     assert rc == 0
-    receipt = _last_receipt(pd._resolve_state_dir())
+    receipt = _last_receipt(state_dir)
     assert receipt["injection_reconstructs"] is False
     assert any(
         "reconstruction FAILED" in r.message and "phantom-1" in r.getMessage()
@@ -506,16 +522,23 @@ def test_provider_lane_mismatch_fails_loud_and_stamps_false(caplog):
     )
 
 
-def test_provider_lane_strict_mode_raises_and_propagates(monkeypatch):
+def test_provider_lane_strict_mode_raises_and_propagates(tmp_path, monkeypatch):
     """VNX_INJECTION_RECONSTRUCT_STRICT=1 must fail-closed: the raised
     InjectionReconstructError propagates out of _enrich_instruction (and thus out
     of the dispatch handler) instead of being swallowed like every other error in
-    the audit-closure step."""
+    the audit-closure step.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
     monkeypatch.setenv("VNX_INJECTION_RECONSTRUCT_STRICT", "1")
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: state_dir)
     dispatch_id = "d-provider-lane-strict"
     args = _provider_args(dispatch_id=dispatch_id, instruction="Build the loader. Return OK.")
     _write_injection_row(
-        pd._resolve_state_dir(), dispatch_id,
+        state_dir, dispatch_id,
         [_item("NEVER INJECTED", item_id="phantom-strict")],
     )
 
@@ -523,10 +546,16 @@ def test_provider_lane_strict_mode_raises_and_propagates(monkeypatch):
         pd._enrich_instruction(args)
 
 
-def test_provider_lane_records_exactly_once():
+def test_provider_lane_records_exactly_once(tmp_path, monkeypatch):
     """_enrich_instruction must call record_final_prompt_integrity exactly once per
-    dispatch — no double-recording within the legacy provider-lane call chain."""
+    dispatch — no double-recording within the legacy provider-lane call chain.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
     dispatch_id = "d-provider-lane-once"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: tmp_path / "state")
     args = _provider_args(dispatch_id=dispatch_id)
     result = _kimi_success_result()
 

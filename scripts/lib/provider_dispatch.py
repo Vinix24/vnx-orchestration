@@ -166,6 +166,11 @@ def _record_final_prompt_integrity(
             record_final_prompt_integrity,
         )
     except ImportError:
+        logger.warning(
+            "_record_final_prompt_integrity: final_prompt_integrity module unavailable "
+            "(ImportError) — provider dispatch %s proceeds WITHOUT input-side audit fields",
+            dispatch_id,
+        )
         return None
     try:
         return record_final_prompt_integrity(
