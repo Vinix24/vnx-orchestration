@@ -112,7 +112,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); mkdir -p \"$ROOT/.vnx-data/logs\" 2>/dev/null; python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" 2>>\"$ROOT/.vnx-data/logs/session_stop_rotation.err\"; exit 0'",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); if [ \"$VNX_T0_ROTATION\" = \"1\" ]; then mkdir -p \"$ROOT/.vnx-data/logs\" 2>/dev/null; python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" 2>>\"$ROOT/.vnx-data/logs/session_stop_rotation.err\"; else python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" >/dev/null 2>&1; fi; exit 0'",
             "timeout": 5000
           }
         ]

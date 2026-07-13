@@ -825,6 +825,13 @@ class TestSessionStopHook:
         (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
 
         env = {**__import__("os").environ, "HOME": str(isolated_home), "VNX_T0_ROTATION": "1"}
+        # Simulate a genuine interactive T0 session (no dispatch/signal env) —
+        # strip whatever this test process itself may have inherited from
+        # running as a dispatch worker (VNX_DISPATCH_ID/VNX_TMUX_SIGNAL_DIR),
+        # so the test is deterministic regardless of the ambient shell it
+        # runs under.
+        env.pop("VNX_DISPATCH_ID", None)
+        env.pop("VNX_TMUX_SIGNAL_DIR", None)
 
         result = self._run_hook(repo, env)
         assert result.returncode == 0
@@ -879,6 +886,54 @@ class TestSessionStopHook:
         assert result.stdout.strip() == "{}"
         assert sentinel.read_text(encoding="utf-8") == "SENTINEL-DO-NOT-OVERWRITE\n"
 
+    def test_noop_for_dispatch_worker_env(self, isolated_home: Path, tmp_path: Path) -> None:
+        """OI-619 finding #2: a tmux-spawn dispatch worker inherits
+        VNX_T0_ROTATION=1 from the parent T0 environment but is NOT T0 — it
+        has VNX_DISPATCH_ID set, no VNX_TERMINAL, and runs in an isolated
+        dispatch worktree whose cwd does not match .claude/terminals/T{1,2,3}
+        either. Before the fix this fell through to the cwd fallback's
+        "no worker-cwd match -> assume T0" default and could clobber the
+        real T0 handoff on Stop."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+        sentinel = self._seed_t0_handoff_sentinel(tmp_path)
+
+        worker_cwd = tmp_path / ".vnx-data" / "worktrees" / "dispatch-20260713-oi619-worker"
+        worker_cwd.mkdir(parents=True, exist_ok=True)
+        _make_git_repo(worker_cwd)
+        (worker_cwd / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+
+        env = {
+            **__import__("os").environ, "HOME": str(isolated_home),
+            "VNX_T0_ROTATION": "1", "VNX_DISPATCH_ID": "20260713-oi619-worker",
+        }
+        env.pop("VNX_TERMINAL", None)
+        env.pop("VNX_TERMINAL_ID", None)
+
+        result = self._run_hook(worker_cwd, env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "{}"
+        assert sentinel.read_text(encoding="utf-8") == "SENTINEL-DO-NOT-OVERWRITE\n"
+
+    def test_dispatch_env_does_not_override_explicit_t0_terminal(self, isolated_home: Path, tmp_path: Path) -> None:
+        """A real T0 Stop must still write even if VNX_DISPATCH_ID happens to
+        be set in its environment (e.g. T0 itself was launched by a
+        dispatcher) — VNX_TERMINAL=T0 wins over the dispatch/signal check."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo)
+        (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+
+        env = {
+            **__import__("os").environ, "HOME": str(isolated_home),
+            "VNX_T0_ROTATION": "1", "VNX_TERMINAL": "T0", "VNX_DISPATCH_ID": "some-dispatch-id",
+        }
+
+        result = self._run_hook(repo, env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "{}"
+        assert cr.rotation_handoff_dir(PROJECT_ID, "T0").joinpath(cr.HANDOFF_FILENAME).is_file()
+
     def test_t0_terminal_env_still_writes(self, isolated_home: Path, tmp_path: Path) -> None:
         """Control case: an explicit VNX_TERMINAL=T0 must still write —
         scoping must not turn into a blanket no-op."""
@@ -919,3 +974,132 @@ class TestGuardSafeSpawnShape:
         dangerous_flags = {"-p", "--print", "--dangerously-skip-permissions"}
         for cmd in calls:
             assert not (dangerous_flags & set(cmd)), f"dangerous flag present in {cmd}"
+
+
+# ---------------------------------------------------------------------------
+# 9. OI-619 finding #1: respawn launches the successor from the T0 terminal
+#    workdir (so the canonical role + T0-only SessionStart hooks load), and
+#    project_root is threaded to the handoff command explicitly (not via -c)
+# ---------------------------------------------------------------------------
+
+class TestRespawnT0Workdir:
+    def test_default_tmux_spawn_uses_t0_terminal_workdir_not_project_root(self) -> None:
+        """`-c` must point at <project_root>/.claude/terminals/T0, not
+        project_root itself — a bare `-c project_root` launch silently boots
+        the successor into the generic project CLAUDE.md instead of the
+        orchestrator role, because that role and the T0-only SessionStart
+        hooks (matcher "terminals/T0") only load when cwd is under that
+        subdirectory."""
+        calls: List[List[str]] = []
+
+        import unittest.mock as mock
+        with mock.patch("context_rotation.subprocess.run") as run_mock, \
+             mock.patch("context_rotation.time.sleep", lambda *_: None):
+            run_mock.side_effect = lambda cmd, **kw: calls.append(list(cmd))
+            cr._default_tmux_spawn("vnx-t0-rotation-t0-abc123", "/tmp/repo", "resume prompt text", boot_delay_seconds=0)
+
+        new_session_calls = [c for c in calls if c[:2] == ["tmux", "new-session"]]
+        assert len(new_session_calls) == 1
+        cmd = new_session_calls[0]
+        assert "-c" in cmd
+        cwd_arg = cmd[cmd.index("-c") + 1]
+        assert cwd_arg == str(Path("/tmp/repo") / ".claude" / "terminals" / "T0")
+        assert cwd_arg != "/tmp/repo"
+
+    def test_build_resume_prompt_carries_project_dir_explicitly(self) -> None:
+        """Since the successor's cwd is the T0 terminal workdir (not
+        project_root), the resume prompt must explicitly pass --project-dir
+        to `vnx handoff show --mark-ready` rather than relying on cwd."""
+        prompt = cr._build_resume_prompt(
+            terminal="T0", rotation_id="rot-abc", project_id=PROJECT_ID,
+            handoff_path=Path("/tmp/handoff.md"), project_root=Path("/tmp/repo"),
+        )
+        assert "vnx handoff show --mark-ready" in prompt
+        assert "--terminal T0" in prompt
+        assert "--rotation-id rot-abc" in prompt
+        assert f"--project-id {PROJECT_ID}" in prompt
+        assert "--project-dir /tmp/repo" in prompt
+
+    def test_respawn_threads_project_root_into_resume_prompt(self, isolated_home: Path) -> None:
+        """End-to-end through respawn(): the resume_prompt handed to the
+        spawn function contains --project-dir <project_root>."""
+        captured: Dict[str, Any] = {}
+
+        def fake_spawn(session_name: str, project_root: str, resume_prompt: str) -> None:
+            captured["resume_prompt"] = resume_prompt
+            cr.write_ready_signal(PROJECT_ID, "T0", "rot-workdir")
+
+        result = cr.respawn(
+            handoff_path=Path("handoff.md"), terminal="T0", project_id=PROJECT_ID,
+            project_root=REPO_ROOT, rotation_id="rot-workdir", tmux_spawn_fn=fake_spawn,
+            timeout_seconds=5, poll_interval_seconds=0.01,
+        )
+        assert result.success is True
+        assert f"--project-dir {REPO_ROOT}" in captured["resume_prompt"]
+
+
+# ---------------------------------------------------------------------------
+# 10. OI-619 finding #3: the settings.json Stop-hook wrapper around
+#     session_stop_rotation.py has ZERO filesystem side effects (no
+#     .vnx-data/logs dir, no .err file) when VNX_T0_ROTATION is unset.
+# ---------------------------------------------------------------------------
+
+class TestSessionStopSettingsJsonWrapper:
+    def _wrapper_command(self) -> str:
+        settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        for entry in settings["hooks"]["Stop"]:
+            cmd = entry["hooks"][0]["command"]
+            if "session_stop_rotation.py" in cmd:
+                return cmd
+        raise AssertionError("session_stop_rotation.py Stop hook not found in .claude/settings.json")
+
+    def _run_wrapper(self, repo: Path, env: Dict[str, str]) -> subprocess.CompletedProcess:
+        import shlex
+        cmd = self._wrapper_command()
+        assert cmd.startswith("bash -c ")
+        body = shlex.split(cmd)[2]
+        return subprocess.run(
+            ["bash", "-c", body],
+            input=json.dumps({"cwd": str(repo), "session_id": "test-session"}),
+            capture_output=True, text=True, cwd=str(repo), env=env, timeout=15,
+        )
+
+    def _make_repo_with_real_scripts(self, repo: Path) -> None:
+        """The wrapper resolves ROOT via `git rev-parse --show-toplevel`
+        inside the fixture repo, so `$ROOT/scripts/hooks/...` must resolve —
+        symlink in the real scripts/ tree (its own `_LIB_DIR` bootstrap
+        follows `__file__.resolve()` through the symlink to the real
+        scripts/lib) instead of duplicating hook code into the fixture."""
+        _make_git_repo(repo)
+        (repo / ".vnx-project-id").write_text(f"{PROJECT_ID}\n", encoding="utf-8")
+        (repo / "scripts").symlink_to(REPO_ROOT / "scripts")
+
+    def test_disabled_creates_no_logs_dir_or_err_file(self, isolated_home: Path, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        self._make_repo_with_real_scripts(repo)
+
+        env = {**__import__("os").environ, "HOME": str(isolated_home)}
+        env.pop("VNX_T0_ROTATION", None)
+
+        result = self._run_wrapper(repo, env)
+        assert result.returncode == 0
+        logs_dir = repo / ".vnx-data" / "logs"
+        assert not logs_dir.exists(), "disabled feature must create zero filesystem side effects"
+        assert not (logs_dir / "session_stop_rotation.err").exists()
+
+    def test_enabled_still_creates_logs_dir_and_err_file(self, isolated_home: Path, tmp_path: Path) -> None:
+        """Regression: enabling the feature must retain the pre-existing
+        mkdir + stderr-capture + handoff-write behavior."""
+        repo = tmp_path / "repo"
+        self._make_repo_with_real_scripts(repo)
+
+        env = {**__import__("os").environ, "HOME": str(isolated_home), "VNX_T0_ROTATION": "1"}
+        env.pop("VNX_DISPATCH_ID", None)
+        env.pop("VNX_TMUX_SIGNAL_DIR", None)
+
+        result = self._run_wrapper(repo, env)
+        assert result.returncode == 0
+        logs_dir = repo / ".vnx-data" / "logs"
+        assert logs_dir.is_dir()
+        assert (logs_dir / "session_stop_rotation.err").exists()
+        assert cr.rotation_handoff_dir(PROJECT_ID, "T0").joinpath(cr.HANDOFF_FILENAME).is_file()

@@ -46,10 +46,26 @@ def _is_t0_session(cwd: str, env: dict) -> bool:
     harness-level hook-matcher scoping). An explicit VNX_TERMINAL /
     VNX_TERMINAL_ID env var wins when set; otherwise falls back to the cwd
     heuristic. No T1/T2/T3 signal at all -> assume T0 (matches the existing
-    default: T0 runs at the project root, not under terminals/T{n})."""
+    default: T0 runs at the project root, not under terminals/T{n}).
+
+    OI-619 finding #2: a tmux-spawn dispatch worker inherits VNX_T0_ROTATION
+    from the parent T0 environment but is NOT itself T0 — it typically has no
+    VNX_TERMINAL set AND runs in an isolated dispatch worktree
+    (.vnx-data/worktrees/dispatch-*), which does not match the
+    .claude/terminals/T{1,2,3} cwd pattern either. Without a check, such a
+    worker fell through to the "assume T0" default and could overwrite the
+    real T0's handoff on Stop. VNX_DISPATCH_ID / VNX_TMUX_SIGNAL_DIR are the
+    repo-wide markers a dispatched worker always carries (set together by
+    tmux_interactive_dispatch.py before `claude` launches — see
+    hooks/git/pre-push and scripts/hooks/tmux_signal_*.sh for the same
+    convention) — their presence means NON-T0 regardless of cwd, unless
+    VNX_TERMINAL was explicitly set to T0 above.
+    """
     terminal_env = env.get("VNX_TERMINAL") or env.get("VNX_TERMINAL_ID")
     if terminal_env:
         return terminal_env.strip().upper() == "T0"
+    if env.get("VNX_DISPATCH_ID") or env.get("VNX_TMUX_SIGNAL_DIR"):
+        return False
     return _WORKER_TERMINAL_CWD_RE.search((cwd or "").replace("\\", "/")) is None
 
 
