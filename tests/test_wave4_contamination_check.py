@@ -175,5 +175,59 @@ def test_doctor_check_warns_on_contamination(tmp_path):
     assert any(".vnx-data" in d for d in results[0].details)
 
 
+# ── missing-marker parity (central-install-mode-marker-missing dispatch) ─────
+def _git_init(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"], cwd=path, check=True)
+    return path.resolve()
+
+
+def test_doctor_check_warns_on_missing_marker_in_central_location(tmp_path, monkeypatch):
+    """A git-toplevel VNX_HOME living under ~/.vnx-system/ (the exact shape of a
+    `vnx update`-fetched version dir) but with no marker must WARN, not be
+    silently skipped as if it were a non-central layout."""
+    doctor = _load_doctor()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    version_dir = _git_init(tmp_path / "home" / ".vnx-system" / "versions" / "edge")
+    (version_dir / "scripts").mkdir(parents=True)
+
+    results = doctor.check_contamination({"VNX_HOME": str(version_dir)})
+
+    assert len(results) == 1
+    assert results[0].status == doctor.WARN
+    assert "missing" in results[0].message
+    assert ".vnx-install-mode" in results[0].message
+
+
+def test_doctor_check_warns_on_invalid_marker_content_in_central_location(tmp_path, monkeypatch):
+    doctor = _load_doctor()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    version_dir = _git_init(tmp_path / "home" / ".vnx-system" / "versions" / "edge")
+    (version_dir / "scripts").mkdir(parents=True)
+    (version_dir / ".vnx-install-mode").write_text("embedded\n", encoding="utf-8")
+
+    results = doctor.check_contamination({"VNX_HOME": str(version_dir)})
+
+    assert len(results) == 1
+    assert results[0].status == doctor.WARN
+    assert "invalid" in results[0].message
+
+
+def test_doctor_check_skips_dev_checkout_without_marker(tmp_path, monkeypatch):
+    """A standalone dev checkout is also its own git-toplevel and legitimately
+    carries no marker — it must stay silent (not under ~/.vnx-system/)."""
+    doctor = _load_doctor()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    checkout = _git_init(tmp_path / "dev-checkout")
+    (checkout / "scripts").mkdir(parents=True)
+
+    results = doctor.check_contamination({"VNX_HOME": str(checkout)})
+
+    assert results == []
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

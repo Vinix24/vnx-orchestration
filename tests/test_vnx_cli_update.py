@@ -3,6 +3,7 @@
 
 import io
 import json
+import subprocess
 import sys
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -15,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import vnx_cli.commands.update as update_module
 from vnx_cli.commands.update import (
     vnx_update,
     _resolve_root,
@@ -23,8 +25,34 @@ from vnx_cli.commands.update import (
     _prune_old_versions,
     _atomic_symlink_flip,
     _validate_version_name,
+    _fetch_version,
+    _write_install_marker,
+    _ensure_install_marker,
+    _git_toplevel,
+    INSTALL_MODE_MARKER,
+    INSTALL_MODE_VALUE,
     DEFAULT_KEEP_LAST,
 )
+
+
+def _git_repo(path: Path) -> Path:
+    """Init a minimal, committed git repo at ``path`` (no remote)."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"], cwd=path, check=True)
+    return path
+
+
+def _git_origin(tmp_path: Path) -> Path:
+    """A local git repo standing in for VNX_GIT_REMOTE (offline, deterministic)."""
+    origin = _git_repo(tmp_path / "origin")
+    (origin / "README.md").write_text("test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add readme"], cwd=origin, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=origin, check=True)
+    return origin
 
 
 def _update_args(*, to_version=None, keep_last=DEFAULT_KEEP_LAST, dry_run=False, rollback=False):
@@ -391,3 +419,181 @@ def test_git_not_found_no_exception_raised(tmp_path, monkeypatch):
             pytest.fail("FileNotFoundError leaked out of vnx_update — must be caught internally")
 
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# central-install-mode-marker-missing: _git_toplevel / marker helpers
+# ---------------------------------------------------------------------------
+
+def test_git_toplevel_matches_repo_root(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    assert _git_toplevel(repo) == repo.resolve()
+
+
+def test_git_toplevel_none_for_non_repo(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert _git_toplevel(plain) is None
+
+
+def test_write_install_marker_atomic(tmp_path):
+    version_dir = tmp_path / "v1"
+    version_dir.mkdir()
+    _write_install_marker(version_dir)
+    marker = version_dir / INSTALL_MODE_MARKER
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+def test_ensure_install_marker_writes_when_git_toplevel(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    _ensure_install_marker(repo)
+    marker = repo / INSTALL_MODE_MARKER
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+def test_ensure_install_marker_noop_for_non_git_dir(tmp_path):
+    """Guard: never stamp a marker into a tree that isn't its own git toplevel
+    (e.g. a consumer project's own dev checkout) — matches
+    vnx_paths._is_central_install()'s git-toplevel==vnx_home condition."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    _ensure_install_marker(plain)
+    assert not (plain / INSTALL_MODE_MARKER).exists()
+
+
+def test_ensure_install_marker_noop_for_none():
+    _ensure_install_marker(None)  # must not raise
+
+
+def test_ensure_install_marker_idempotent_when_already_valid(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    marker = repo / INSTALL_MODE_MARKER
+    marker.write_text("central\n", encoding="utf-8")
+    mtime_before = marker.stat().st_mtime_ns
+
+    _ensure_install_marker(repo)
+
+    assert marker.stat().st_mtime_ns == mtime_before
+
+
+def test_ensure_install_marker_overwrites_invalid_content(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    marker = repo / INSTALL_MODE_MARKER
+    marker.write_text("embedded\n", encoding="utf-8")
+
+    _ensure_install_marker(repo)
+
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+# ---------------------------------------------------------------------------
+# central-install-mode-marker-missing: _fetch_version writes the marker
+# ---------------------------------------------------------------------------
+
+def test_fetch_version_clone_path_writes_marker(tmp_path, monkeypatch):
+    origin = _git_origin(tmp_path)
+    monkeypatch.setattr(update_module, "VNX_GIT_REMOTE", str(origin))
+    root = tmp_path / "vnx-system"
+
+    target_dir = _fetch_version(root, "edge", dry_run=False)
+
+    marker = target_dir / INSTALL_MODE_MARKER
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+def test_fetch_version_pull_path_backfills_missing_marker(tmp_path, monkeypatch):
+    """Reproduces the reported bug directly: a version dir fetched before this
+    fix (marker stripped/never written) must get it back on the next fetch —
+    the ``vnx update`` pull branch, not just the fresh-clone branch."""
+    origin = _git_origin(tmp_path)
+    monkeypatch.setattr(update_module, "VNX_GIT_REMOTE", str(origin))
+    root = tmp_path / "vnx-system"
+
+    target_dir = _fetch_version(root, "edge", dry_run=False)
+    marker = target_dir / INSTALL_MODE_MARKER
+    assert marker.is_file()
+    marker.unlink()
+    assert not marker.is_file()
+
+    target_dir_again = _fetch_version(root, "edge", dry_run=False)
+
+    assert target_dir_again == target_dir
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+def test_fetch_version_dry_run_writes_no_marker(tmp_path, monkeypatch):
+    origin = _git_origin(tmp_path)
+    monkeypatch.setattr(update_module, "VNX_GIT_REMOTE", str(origin))
+    root = tmp_path / "vnx-system"
+
+    target_dir = _fetch_version(root, "edge", dry_run=True)
+
+    assert not (target_dir / INSTALL_MODE_MARKER).exists()
+
+
+# ---------------------------------------------------------------------------
+# central-install-mode-marker-missing: _atomic_symlink_flip self-heals target
+# ---------------------------------------------------------------------------
+
+def test_symlink_flip_backfills_marker_on_git_toplevel_target(tmp_path):
+    root = tmp_path / "install"
+    root.mkdir()
+    target_dir = _git_repo(root / "versions" / "v1.0.0")
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _atomic_symlink_flip(root, target_dir, dry_run=False, audit_log=audit_log)
+
+    marker = target_dir / INSTALL_MODE_MARKER
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+def test_symlink_flip_skips_marker_on_non_git_target(tmp_path):
+    root = tmp_path / "install"
+    root.mkdir()
+    target_dir = root / "versions" / "v1.0.0"
+    target_dir.mkdir(parents=True)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _atomic_symlink_flip(root, target_dir, dry_run=False, audit_log=audit_log)
+
+    assert not (target_dir / INSTALL_MODE_MARKER).exists()
+
+
+# ---------------------------------------------------------------------------
+# central-install-mode-marker-missing: vnx_update repairs the active install
+# ---------------------------------------------------------------------------
+
+def test_vnx_update_repairs_active_marker_less_install(tmp_path, monkeypatch):
+    """The exact reported bug: `current` already points at a git-toplevel
+    version dir with no marker (fetched by a pre-fix `vnx update`). Any
+    subsequent `vnx update` invocation must repair it, even though the
+    requested target itself (here: re-fetching `edge`, which fails offline
+    with no configured remote) does not succeed."""
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    root = tmp_path
+    active = _git_repo(root / "versions" / "edge")
+    (root / "current").symlink_to(active)
+    marker = active / INSTALL_MODE_MARKER
+    assert not marker.is_file()
+
+    rc = vnx_update(_update_args(to_version="edge"))
+
+    assert rc == 1  # `git pull` fails: no remote configured on the local repo
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
+
+
+def test_vnx_update_dry_run_does_not_repair_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    root = tmp_path
+    active = _git_repo(root / "versions" / "edge")
+    (root / "current").symlink_to(active)
+
+    vnx_update(_update_args(to_version="edge", dry_run=True))
+
+    assert not (active / INSTALL_MODE_MARKER).exists()

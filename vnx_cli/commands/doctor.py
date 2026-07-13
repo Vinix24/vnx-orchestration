@@ -135,6 +135,32 @@ def _resolve_central_pin(central_path: Path) -> str:
     return "unset"
 
 
+def _check_central_install_marker(central_path: Path) -> "str | None":
+    """Return a detail fragment if the resolved central version dir lacks a
+    valid `.vnx-install-mode=central` marker, else None.
+
+    ``central_path`` is the ``~/.vnx-system/current`` symlink; resolving it
+    gives the actual version dir (e.g. ``~/.vnx-system/versions/edge``) that
+    ``_is_central_install()`` in ``scripts/lib/vnx_paths.py`` inspects. A
+    missing/invalid marker there makes that resolver misread the install as a
+    standalone dev checkout and collapse PROJECT_ROOT onto the shared code tree.
+    """
+    try:
+        version_dir = central_path.resolve()
+    except OSError:
+        return "install-mode marker: cannot resolve version dir"
+    marker = version_dir / ".vnx-install-mode"
+    if not marker.is_file():
+        return f"install-mode marker missing at {marker}"
+    try:
+        content = marker.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return f"install-mode marker unreadable ({exc})"
+    if content != "central":
+        return f"install-mode marker invalid (content={content!r}, expected 'central')"
+    return None
+
+
 def _check_install_mode(project_dir: Path) -> Check:
     """Detect embedded vs central VNX install mode and report the active pin."""
     embedded_path = project_dir / ".claude" / "vnx-system"
@@ -150,6 +176,13 @@ def _check_install_mode(project_dir: Path) -> Check:
                 name="install:mode",
                 status=WARN,
                 detail="mode: central, pin: error (cannot read version file — check permissions)",
+            )
+        marker_issue = _check_central_install_marker(central_path)
+        if marker_issue is not None:
+            return Check(
+                name="install:mode",
+                status=WARN,
+                detail=f"mode: central, pin: {pin}, {marker_issue}",
             )
         return Check(
             name="install:mode",
