@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash {{PROJECT_ROOT}}/scripts/hooks/pretooluse_block_raw_claude_spawn.sh",
+            "command": "bash {{VNX_HOME}}/scripts/hooks/pretooluse_block_raw_claude_spawn.sh",
             "timeout": 5000
           }
         ]
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [[ \"$PWD\" == */T0 ]]; then {{PROJECT_ROOT}}/scripts/userpromptsubmit_intelligence_inject.sh; elif [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then {{PROJECT_ROOT}}/scripts/userpromptsubmit_worker_intelligence_inject.sh; else echo '{\"decision\": \"allow\"}'; fi",
+            "command": "if [[ \"$PWD\" == */T0 ]]; then {{VNX_HOME}}/scripts/userpromptsubmit_intelligence_inject.sh; elif [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then {{VNX_HOME}}/scripts/userpromptsubmit_worker_intelligence_inject.sh; else echo '{\"decision\": \"allow\"}'; fi",
             "timeout": 8000
           }
         ]

@@ -39,10 +39,27 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _canonical_data_dir() -> Optional[Path]:
+    """Resolve VNX_DATA_DIR via the canonical vnx_paths resolver (central-mode aware)."""
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"])
+    except Exception:
+        return None
+
+
 def _default_data_dir() -> Path:
     env = os.environ.get("VNX_DATA_DIR", "")
     if env:
         return Path(env)
+    # A raw _repo_root() walk resolves the KEYSTONE (not the project's
+    # ~/.vnx-data/<project>) in a central install. See #1023.
+    canonical = _canonical_data_dir()
+    if canonical is not None:
+        return canonical
     return _repo_root() / ".vnx-data"
 
 

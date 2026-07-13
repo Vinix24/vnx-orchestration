@@ -665,6 +665,63 @@ def _check_hook_paths(project_dir: Path) -> Check:
     )
 
 
+def _check_embedded_path_assumptions() -> Check:
+    """WARN when scripts/lib contains __file__-anchored .vnx-data/ROADMAP.yaml derivations.
+
+    Central-mode-path-correctness (#1023/#1024): a bare ``Path(__file__)….parent…``
+    walk that builds a ``.vnx-data``/``ROADMAP.yaml`` path resolves the KEYSTONE
+    (``~/.vnx-system/versions/<v>/.vnx-data``) instead of the project's
+    ``~/.vnx-data/<project>`` in a central install. Delegates to the AST-based
+    ``scripts/check_no_file_derived_data_paths.py`` detector — which carries a
+    grandfathered allowlist for already-migrated last-resort fallbacks and traces
+    module-level marker constants (e.g. ``_DEFAULT_RELATIVE_PATH = Path(".vnx-data/x")``
+    joined against a file-anchored root elsewhere) — so this stays advisory-accurate
+    with no false positives on doc literals or intentional defensive fallbacks.
+
+    Scans the resolved engine root (VNX_HOME-equivalent: the central symlink
+    target, the embedded project copy, or the dev checkout), NOT project_dir —
+    ``scripts/lib`` is framework code, not project code, and only exists inside
+    the engine tree.
+    """
+    try:
+        engine_root = _engine.ensure_engine_on_path()
+        import check_no_file_derived_data_paths as _checker
+    except Exception as exc:
+        return Check(
+            name="paths:embedded-assumptions",
+            status=WARN,
+            detail=f"could not load central-mode path checker: {exc}",
+        )
+
+    try:
+        violations = _checker.scan_dir(engine_root)
+    except Exception as exc:
+        return Check(
+            name="paths:embedded-assumptions",
+            status=WARN,
+            detail=f"central-mode path checker failed: {exc}",
+        )
+
+    if violations:
+        shown = "; ".join(f"{rel}:{lineno} ({seg})" for rel, lineno, seg in violations[:5])
+        more = f" (+{len(violations) - 5} more)" if len(violations) > 5 else ""
+        return Check(
+            name="paths:embedded-assumptions",
+            status=WARN,
+            detail=(
+                f"{len(violations)} __file__-anchored .vnx-data/ROADMAP.yaml path "
+                f"derivation(s) in scripts/lib — resolves the keystone, not the "
+                f"project, in a central install. Route through vnx_paths.resolve_paths() "
+                f"instead: {shown}{more}"
+            ),
+        )
+    return Check(
+        name="paths:embedded-assumptions",
+        status=PASS,
+        detail="no __file__-anchored .vnx-data/ROADMAP.yaml path derivations in scripts/lib",
+    )
+
+
 def vnx_doctor(args) -> int:
     project_dir = Path(args.project_dir).resolve()
     emit_json = getattr(args, "json", False)
@@ -688,6 +745,7 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_worktree_orphans(project_dir))
     checks.append(_check_active_drain(data_root))
     checks.append(_check_hook_paths(project_dir))
+    checks.append(_check_embedded_path_assumptions())
 
     passed = sum(1 for c in checks if c.status == PASS)
     warned = sum(1 for c in checks if c.status == WARN)

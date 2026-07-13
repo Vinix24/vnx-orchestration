@@ -40,8 +40,17 @@ def _default_db_path() -> Path:
     state_dir = os.environ.get("VNX_STATE_DIR", "")
     if state_dir:
         return Path(state_dir) / "quality_intelligence.db"
-    here = Path(__file__).resolve()
-    return here.parent.parent.parent / ".vnx-data" / "state" / "quality_intelligence.db"
+    # Canonical resolver: a raw __file__ two-up walk resolves the KEYSTONE
+    # (not the project's ~/.vnx-data/<project>) in a central install. See #1023.
+    try:
+        lib_dir = str(Path(__file__).resolve().parent)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_STATE_DIR"]) / "quality_intelligence.db"
+    except Exception:
+        here = Path(__file__).resolve()
+        return here.parent.parent.parent / ".vnx-data" / "state" / "quality_intelligence.db"
 
 
 def _open_db(db_path: Path) -> sqlite3.Connection:

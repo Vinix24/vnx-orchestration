@@ -46,7 +46,28 @@ except ImportError:  # pragma: no cover — audit module optional at import time
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent.parent
 _VNX_DIR = _REPO_ROOT / ".vnx"
-_VNX_DATA_DIR = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
+
+
+def _resolve_vnx_data_dir() -> Path:
+    """Resolve VNX_DATA_DIR via canonical vnx_paths, falling back to repo-relative.
+
+    A raw ``_REPO_ROOT / ".vnx-data"`` default resolves the KEYSTONE (not the
+    project's ``~/.vnx-data/<project>``) in a central install. See #1023.
+    """
+    env = os.environ.get("VNX_DATA_DIR")
+    if env:
+        return Path(env)
+    try:
+        lib_dir = str(_SCRIPT_DIR)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"])
+    except Exception:
+        return _REPO_ROOT / ".vnx-data"
+
+
+_VNX_DATA_DIR = _resolve_vnx_data_dir()
 
 DEFAULT_CONFIG_PATH = _VNX_DIR / "governance_enforcement.yaml"
 GATE_RESULTS_DIR = _VNX_DATA_DIR / "state" / "review_gates" / "results"

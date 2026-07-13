@@ -396,9 +396,21 @@ def get_summary(behaviors: list[DispatchBehavior]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _default_archive_dir() -> Path:
-    """Locate .vnx-data/events/archive relative to repo root."""
+    """Locate the events archive dir via canonical vnx_paths (central-mode aware)."""
     here = Path(__file__).resolve().parent
-    # scripts/lib -> scripts -> repo root
+    try:
+        lib_dir = str(here)
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        candidate = Path(resolve_paths()["VNX_DATA_DIR"]) / "events" / "archive"
+        if candidate.exists():
+            return candidate
+    except Exception:
+        pass
+    # scripts/lib -> scripts -> repo root — a raw __file__ two-up walk resolves
+    # the KEYSTONE (not the project's ~/.vnx-data/<project>) in a central
+    # install. Kept only as a last-resort fallback. See #1023.
     repo_root = here.parent.parent
     candidate = repo_root / ".vnx-data" / "events" / "archive"
     if candidate.exists():

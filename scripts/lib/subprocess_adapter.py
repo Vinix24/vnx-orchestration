@@ -22,6 +22,7 @@ import os
 import select
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -846,13 +847,22 @@ class SubprocessAdapter:
             if vnx_data_env:
                 project_root = str(Path(vnx_data_env).parent)
             else:
-                # Walk up from this file to find .vnx-data
-                search = Path(__file__).resolve()
-                for _ in range(6):
-                    search = search.parent
-                    if (search / ".vnx-data").is_dir():
-                        project_root = str(search)
-                        break
+                # A raw __file__ upward walk for an EXISTING .vnx-data resolves
+                # the KEYSTONE (not the project root) in a central install if the
+                # keystone happens to contain a stray .vnx-data/. See #1023.
+                try:
+                    lib_dir = str(Path(__file__).resolve().parent)
+                    if lib_dir not in sys.path:
+                        sys.path.insert(0, lib_dir)
+                    from vnx_paths import resolve_paths
+                    project_root = resolve_paths()["PROJECT_ROOT"]
+                except Exception:
+                    search = Path(__file__).resolve()
+                    for _ in range(6):
+                        search = search.parent
+                        if (search / ".vnx-data").is_dir():
+                            project_root = str(search)
+                            break
 
         if project_root is None:
             logger.warning(

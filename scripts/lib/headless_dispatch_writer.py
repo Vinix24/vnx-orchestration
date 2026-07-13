@@ -64,7 +64,22 @@ def _dispatch_dir() -> Path:
 
 
 def _skills_dir() -> Path:
-    """Resolve the .claude/skills/ directory."""
+    """Resolve the project's skills directory via canonical vnx_paths.
+
+    A raw __file__ upward walk for ``.claude/skills`` resolves relative to the
+    KEYSTONE (not the project root) in a central install. See #1023.
+    """
+    lib_dir = Path(__file__).resolve().parent
+    if str(lib_dir) not in sys.path:
+        sys.path.insert(0, str(lib_dir))
+    try:
+        from vnx_paths import ensure_env
+        skills = Path(ensure_env()["VNX_SKILLS_DIR"])
+        if skills.is_dir():
+            return skills
+    except Exception:
+        pass
+    # Last-resort fallback: walk up from this file looking for .claude/skills.
     candidate = Path(__file__).resolve()
     for _ in range(6):
         candidate = candidate.parent

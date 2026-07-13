@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ DECISION_STATUSES = ("open", "closed")
 _DECISION_ID_RE = re.compile(r"^(od|td)_\d+$")
 
 _DEFAULT_RELATIVE_PATH = Path(".vnx-data/strategy/roadmap.yaml")
+# Same suffix, relative to VNX_DATA_DIR (which already IS the ".vnx-data" dir).
+_DATA_DIR_RELATIVE_PATH = _DEFAULT_RELATIVE_PATH.relative_to(".vnx-data")
 
 
 class RoadmapValidationError(ValueError):
@@ -127,7 +130,22 @@ def _git_root_from(start: Path) -> Path | None:
 
 
 def _default_path() -> Path:
-    """Resolve the default roadmap.yaml path against the project root."""
+    """Resolve the default roadmap.yaml path via canonical vnx_paths.
+
+    A ``_git_root_from(here)``-first walk (``here`` anchored on ``__file__``)
+    resolves the KEYSTONE's git root — not the project's — in a central
+    install. Try the canonical resolver first; keep the git-root walk only as
+    a last-resort fallback. See #1023.
+    """
+    try:
+        here = Path(__file__).resolve().parent
+        lib_dir = str(here.parent)  # scripts/lib/strategy -> scripts/lib
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"]) / _DATA_DIR_RELATIVE_PATH
+    except Exception:
+        pass
     here = Path(__file__).resolve().parent
     root = _git_root_from(here) or _git_root_from(Path.cwd().resolve())
     if root is None:

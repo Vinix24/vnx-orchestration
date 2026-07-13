@@ -36,9 +36,13 @@ and are out of scope for this gate (tracked separately).
 Grandfathering
 --------------
 The two canonical resolvers are exempt (they are *supposed* to derive from
-``__file__``). Pre-existing library occurrences that this task did not migrate
-are listed in ``GRANDFATHERED`` with a reason. The gate blocks NEW occurrences
-and any change to a grandfathered line, so the bug class cannot silently return.
+``__file__``). Every occurrence listed in ``GRANDFATHERED`` has been migrated
+(central-mode-path-correctness track, centralmode-embedded-sweep dispatch) to
+try the canonical ``vnx_paths.resolve_paths()`` resolver FIRST; the listed
+``__file__``-anchored expression is what remains as a defensive last-resort
+fallback for the rare case where the canonical resolver itself is unavailable
+(e.g. import failure). The gate blocks NEW occurrences and any change to a
+grandfathered line, so the bug class cannot silently return.
 """
 from __future__ import annotations
 
@@ -67,13 +71,14 @@ EXEMPT_FILES = frozenset({"vnx_paths.py", "project_root.py"})
 # NEW occurrences. A change to any listed line drops it from the match and trips
 # the gate — forcing migration rather than silent perpetuation.
 GRANDFATHERED: Dict[str, Set[str]] = {
-    # env-first (VNX_DATA_DIR) with a repo-relative _REPO_ROOT default; only the
-    # default branch is __file__-anchored.
+    # central-mode-embedded-sweep (2026-07-13): migrated to try vnx_paths.resolve_paths()
+    # first; _REPO_ROOT / ".vnx-data" now only fires in the except-Exception
+    # last-resort branch (mirrors the dispatch_register.py pattern below).
     "scripts/lib/governance_audit.py": {
-        'Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))',
+        '_REPO_ROOT / ".vnx-data"',
     },
     "scripts/lib/governance_enforcer.py": {
-        'Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))',
+        '_REPO_ROOT / ".vnx-data"',
     },
     # _REPO_ROOT / _LIB_DIR co-located-layout fallbacks (env checked upstream).
     "scripts/lib/gate_register_emit.py": {
@@ -145,6 +150,16 @@ GRANDFATHERED: Dict[str, Set[str]] = {
         # __file__ branch is the no-arg fallback.
         'root / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"',
     },
+    # centralmode-embedded-sweep (2026-07-13): the marker constant lives in a
+    # module-level _DEFAULT_RELATIVE_PATH, so this join evaded detection until
+    # _marker_named_constants() was added. Migrated to try vnx_paths.resolve_paths()
+    # first; the git-root walk now only fires in the except-Exception last resort.
+    "scripts/lib/strategy/roadmap.py": {
+        'root / _DEFAULT_RELATIVE_PATH',
+    },
+    "scripts/lib/strategy/decisions.py": {
+        'root / _DEFAULT_RELATIVE_PATH',
+    },
 }
 
 
@@ -211,12 +226,60 @@ def _file_anchored_names(tree: ast.AST) -> Set[str]:
     return anchored
 
 
-def _has_data_marker_constant(node: ast.AST) -> bool:
-    """True if the subtree contains a ``.vnx-data`` / ``ROADMAP.yaml`` string constant."""
+def _has_marker_constant_literal(node: ast.AST) -> bool:
+    """True if the subtree contains a literal ``.vnx-data`` / ``ROADMAP.yaml`` string constant."""
     for sub in ast.walk(node):
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
             if any(marker in sub.value for marker in DATA_PATH_MARKERS):
                 return True
+    return False
+
+
+def _marker_named_constants(tree: ast.AST) -> Set[str]:
+    """MODULE-LEVEL names whose assigned value is a marker string literal.
+
+    Catches the indirection where the ``.vnx-data``/``ROADMAP.yaml`` literal lives
+    in its own module constant (e.g. ``_DEFAULT_RELATIVE_PATH = Path(".vnx-data/x.yaml")``)
+    and a LATER expression joins it against a ``__file__``-anchored root
+    (``root / _DEFAULT_RELATIVE_PATH``) — the join node itself carries no inline
+    string constant, so without this the marker is invisible to
+    :func:`_has_data_marker_constant`.
+
+    Deliberately restricted to assignments that are DIRECT children of the
+    module body (not nested in a function). A function-local name like
+    ``state_dir`` is routinely reassigned per-branch with unrelated values
+    across a file; treating it as globally marker-tainted the moment ANY branch
+    assigns it a marker literal produces false positives on every other,
+    unrelated use of that same name. A module-level ``_UPPER_SNAKE``-style
+    constant is assigned once and never rebound, so tainting it is precise.
+    """
+    names: Set[str] = set()
+    if not isinstance(tree, ast.Module):
+        return names
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if value is None or not _has_marker_constant_literal(value):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for tgt in targets:
+                if isinstance(tgt, ast.Name):
+                    names.add(tgt.id)
+    return names
+
+
+def _has_data_marker_constant(node: ast.AST, marker_names: Set[str]) -> bool:
+    """True if the subtree contains a ``.vnx-data``/``ROADMAP.yaml`` marker.
+
+    Either a literal string constant, or a reference to a name previously bound
+    to one (see :func:`_marker_named_constants`).
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            if any(marker in sub.value for marker in DATA_PATH_MARKERS):
+                return True
+        if isinstance(sub, ast.Name) and sub.id in marker_names:
+            return True
     return False
 
 
@@ -236,6 +299,7 @@ def check_source(source: str) -> List[Tuple[int, str]]:
     except SyntaxError:
         return []
     anchored = _file_anchored_names(tree)
+    marker_names = _marker_named_constants(tree)
 
     violations: List[Tuple[int, str]] = []
     seen: Set[Tuple[int, str]] = set()
@@ -249,7 +313,7 @@ def check_source(source: str) -> List[Tuple[int, str]]:
         )
         if not (is_join or is_path_call):
             continue
-        if not _has_data_marker_constant(node):
+        if not _has_data_marker_constant(node, marker_names):
             continue
         if not _references_file_anchor(node, anchored):
             continue

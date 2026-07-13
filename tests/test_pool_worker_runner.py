@@ -220,11 +220,27 @@ class TestStateDirResolution(unittest.TestCase):
             result = _resolve_state_dir()
         self.assertEqual(result, Path("/tmp/mystate"))
 
-    def test_both_absent_returns_default(self):
+    def test_both_absent_uses_canonical_resolver(self):
+        """No env vars set -> resolves via vnx_paths.resolve_paths(), not a repo-relative guess.
+
+        A raw _LIB_DIR.parents[1] / ".vnx-data" / "state" default would resolve the
+        KEYSTONE (not the project's ~/.vnx-data/<project>) in a central install. See #1023.
+        """
         stripped = {k: v for k, v in os.environ.items()
                     if k not in ("VNX_STATE_DIR", "VNX_DATA_DIR")}
         with patch.dict(os.environ, stripped, clear=True):
-            result = _resolve_state_dir()
+            with patch("pool_worker_runner._canonical_data_dir",
+                        return_value=Path("/tmp/canonical-project/.vnx-data")):
+                result = _resolve_state_dir()
+        self.assertEqual(result, Path("/tmp/canonical-project/.vnx-data") / "state")
+
+    def test_both_absent_falls_back_when_canonical_resolver_unavailable(self):
+        """Canonical resolver import/call failure -> last-resort repo-relative fallback."""
+        stripped = {k: v for k, v in os.environ.items()
+                    if k not in ("VNX_STATE_DIR", "VNX_DATA_DIR")}
+        with patch.dict(os.environ, stripped, clear=True):
+            with patch("pool_worker_runner._canonical_data_dir", return_value=None):
+                result = _resolve_state_dir()
         self.assertTrue(str(result).endswith(os.path.join(".vnx-data", "state")))
 
 

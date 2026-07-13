@@ -32,9 +32,12 @@ def _resolve_ledger_path(explicit: str | None = None) -> Path:
     if explicit:
         return Path(explicit)
     try:
-        from project_root import resolve_state_dir
+        # Canonical resolver (VNX_HOME + project-marker aware, central-mode
+        # aware). project_root.resolve_state_dir(__file__) is git-root-only and
+        # resolves the keystone git root in a central install. See #1023.
+        from vnx_paths import resolve_state_dir
 
-        return resolve_state_dir(__file__) / LEDGER_FILENAME
+        return resolve_state_dir() / LEDGER_FILENAME
     except Exception:
         return Path(".vnx-data/state") / LEDGER_FILENAME
 

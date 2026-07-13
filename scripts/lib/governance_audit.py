@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,14 +41,31 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _legacy_warned: bool = False
 
 
+def _data_dir() -> Path:
+    """Resolve VNX_DATA_DIR via canonical vnx_paths, falling back to repo-relative.
+
+    A raw ``_REPO_ROOT / ".vnx-data"`` default resolves the KEYSTONE (not the
+    project's ``~/.vnx-data/<project>``) in a central install. See #1023.
+    """
+    env = os.environ.get("VNX_DATA_DIR")
+    if env:
+        return Path(env)
+    try:
+        lib_dir = str(_REPO_ROOT / "scripts" / "lib")
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_DATA_DIR"])
+    except Exception:
+        return _REPO_ROOT / ".vnx-data"
+
+
 def _audit_path() -> Path:
-    data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
-    return data_dir / "state" / "governance_audit.ndjson"
+    return _data_dir() / "state" / "governance_audit.ndjson"
 
 
 def _legacy_audit_path() -> Path:
-    data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
-    return data_dir / "events" / "governance_audit.ndjson"
+    return _data_dir() / "events" / "governance_audit.ndjson"
 
 
 # ---------------------------------------------------------------------------

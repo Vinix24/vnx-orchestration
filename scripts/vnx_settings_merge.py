@@ -60,8 +60,14 @@ def load_template(vnx_home: str, project_root: str) -> dict:
     with open(template_path, "r") as f:
         raw = f.read()
 
-    # Substitute template variables
-    rendered = raw.replace("{{PROJECT_ROOT}}", project_root)
+    # Substitute template variables. VNX_HOME is where the shared scripts/
+    # tree actually lives (embedded: a hidden dir under the project's .claude/,
+    # central: the shared per-machine install, dev checkout: the repo itself)
+    # — distinct from PROJECT_ROOT, which only equals VNX_HOME in the
+    # dev-checkout case. A hook command that hardcodes {{PROJECT_ROOT}}/scripts/... breaks in
+    # embedded and central installs. See #1023.
+    rendered = raw.replace("{{VNX_HOME}}", vnx_home)
+    rendered = rendered.replace("{{PROJECT_ROOT}}", project_root)
 
     try:
         return json.loads(rendered)
