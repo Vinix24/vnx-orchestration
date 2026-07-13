@@ -48,6 +48,64 @@ def _read_default_instruction(config_path: Path) -> str | None:
     return None
 
 
+def _infer_provider_for_model(model: str) -> str:
+    """Derive the honoring provider for a requested ``--model`` string.
+
+    Reuses dispatch_bridge._canonical_provider for exact provider-name matches
+    (covers the reported case, ``--model kimi`` -> Provider.KIMI) and falls
+    back to the same provider-signature substring convention the
+    kimi-via-cli-only guard (constraint_enforcer.py) already applies to model
+    strings, for provider-specific model ids that aren't themselves a bare
+    provider name (kimi-k2-6, glm-5.1, deepseek-v4-pro, gemini-2.5-pro, ...).
+
+    Raises ValueError when no provider can be honored, so the caller can
+    hard-error before dispatch instead of letting the provider silently
+    default to "claude" (the dispatch-agent-lane-coercion bug).
+    """
+    from dispatch_bridge import _canonical_provider  # type: ignore[import]  # noqa: PLC0415
+    from dispatch_spec import Provider  # type: ignore[import]  # noqa: PLC0415
+
+    normalized = (model or "").strip().lower()
+    if not normalized:
+        return Provider.CLAUDE.value
+
+    # Exact provider-name match (kimi, codex, gemini, claude, glm, zai,
+    # deepseek-harness, glm-harness, local-gemma, auto, ...).
+    try:
+        return _canonical_provider(normalized).value
+    except ValueError:
+        pass
+
+    # Bare claude model tiers/aliases are not provider names themselves.
+    if normalized in {"sonnet", "opus", "haiku"} or normalized.startswith(
+        ("claude-", "opus-", "sonnet-", "haiku-")
+    ):
+        return Provider.CLAUDE.value
+
+    # Provider-specific model-id substrings — the same convention the
+    # kimi-via-cli-only guard already uses ("kimi" in model_norm).
+    for needle, provider in (
+        ("kimi", Provider.KIMI),
+        ("glm", Provider.GLM_HARNESS),
+        ("zai", Provider.GLM_HARNESS),
+        ("deepseek", Provider.DEEPSEEK_HARNESS),
+        ("gemini", Provider.GEMINI),
+        ("gemma", Provider.LOCAL_GEMMA),
+        ("gpt", Provider.CODEX),
+        ("codex", Provider.CODEX),
+    ):
+        if needle in normalized:
+            return provider.value
+
+    raise ValueError(
+        f"--model {model!r} does not map to any honorable provider lane. "
+        "Use a claude model (sonnet/opus/haiku), a kimi model (kimi*), a glm "
+        "model (glm*/zai*), a deepseek model (deepseek*), a gemini model "
+        "(gemini*), or pass a provider name directly "
+        "(claude/codex/gemini/kimi/glm-harness/deepseek-harness/local-gemma)."
+    )
+
+
 def _resolve_agent_config(
     agent: str,
     agent_claude_md: Path,
@@ -84,6 +142,7 @@ def vnx_dispatch_agent(args) -> int:
     agent = args.agent
     instruction = getattr(args, "instruction", None)
     model = getattr(args, "model", None)
+    explicit_model = model  # user's raw --model override, if any (captured before defaulting)
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
 
     # Validate agent CLAUDE.md exists
@@ -126,12 +185,39 @@ def vnx_dispatch_agent(args) -> int:
         else:
             model = "sonnet"
 
+    # Resolve provider (root cause of dispatch-agent-lane-coercion, 20260713-LANECOERCE):
+    # --model kimi previously discarded agent_config["provider"] entirely and deliver_via_door
+    # silently defaulted provider="claude", spawning a claude-subscription worker for a kimi
+    # request with no error and no honored kimi-via-cli-only routing.
+    #   1. An explicit --model override always wins — the user's choice must be honored via the
+    #      matching provider, not silently re-routed to whatever the agent's config declares.
+    #   2. Otherwise trust the agent's own agent_config["provider"] when set (it may legitimately
+    #      declare a provider without also pinning a specific model).
+    #   3. Otherwise infer from the resolved (possibly default "sonnet") model.
+    # A model that maps to no honorable provider hard-errors BEFORE dispatch instead of silently
+    # coercing to claude.
+    if explicit_model:
+        try:
+            provider = _infer_provider_for_model(explicit_model)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    elif agent_config is not None and agent_config.get("provider"):
+        provider = str(agent_config["provider"])
+    else:
+        try:
+            provider = _infer_provider_for_model(model)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
     # Generate a dispatch ID
     dispatch_id = f"D-{uuid.uuid4().hex[:8]}"
 
     try:
         from subprocess_dispatch import deliver_with_recovery  # type: ignore[import]
         from dispatch_bridge import deliver_via_door  # type: ignore[import]
+        from dispatch_flags import single_entry_enabled  # type: ignore[import]
     except ImportError as exc:
         print(
             f"Error: could not import subprocess_dispatch: {exc}\n"
@@ -140,9 +226,26 @@ def vnx_dispatch_agent(args) -> int:
         )
         return 1
 
+    # The legacy fallback lane (deliver_with_recovery / subprocess_dispatch) only ever drives the
+    # `claude` CLI — it has no concept of provider. When the single-entry door is disabled
+    # (VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0) it would silently spawn a claude
+    # worker for a non-claude provider instead of honoring it, reintroducing the exact
+    # dispatch-agent-lane-coercion bug this fix closes on the door path. Hard-error instead.
+    if provider != "claude" and not single_entry_enabled():
+        print(
+            f"Error: --model {model!r} resolves to provider {provider!r}, but the single-entry "
+            "dispatch door is disabled (VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0). "
+            "The legacy dispatch lane only drives the claude CLI and cannot honor a non-claude "
+            "provider. Unset VNX_DISPATCH_LEGACY / VNX_SINGLE_ENTRY_DISPATCH to use the door, "
+            "or request a claude model.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Preflight (audit high #6): the default lane drives an installed, authenticated `claude` CLI as
-    # a subprocess. A missing binary otherwise surfaces only as a bare "status: failed".
-    if shutil.which("claude") is None:
+    # a subprocess. A missing binary otherwise surfaces only as a bare "status: failed". Scoped to
+    # the claude lane — a kimi/codex/gemini/glm dispatch has no dependency on the `claude` binary.
+    if provider == "claude" and shutil.which("claude") is None:
         print(
             "Warning: 'claude' CLI not found on PATH. The default dispatch lane drives an installed, "
             "authenticated `claude` CLI as a subprocess.\n"
@@ -176,6 +279,7 @@ def vnx_dispatch_agent(args) -> int:
         dispatch_id=dispatch_id,
         target_slot="T1",
         role=agent,
+        provider=provider,
         model=model,
         project_id=project_id,
     )
