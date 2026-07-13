@@ -511,11 +511,17 @@ class RespawnResult:
     waited_seconds: float = 0.0
 
 
-def _build_resume_prompt(*, terminal: str, rotation_id: str, project_id: str, handoff_path: Path) -> str:
+def _build_resume_prompt(
+    *, terminal: str, rotation_id: str, project_id: str, handoff_path: Path, project_root: Path,
+) -> str:
+    # --project-dir is passed explicitly (OI-619 finding #1): the successor's
+    # tmux cwd is the T0 terminal workdir, not project_root, so `vnx handoff
+    # show`'s cwd-default resolution can no longer be relied on to find it.
     return (
         "Context rotation resume. Read the handoff, then run: "
         f"vnx handoff show --mark-ready --terminal {terminal} "
-        f"--rotation-id {rotation_id} --project-id {project_id}\n"
+        f"--rotation-id {rotation_id} --project-id {project_id} "
+        f"--project-dir {project_root}\n"
         f"(handoff: {handoff_path})"
     )
 
@@ -542,6 +548,17 @@ def _default_tmux_spawn(
 ) -> None:
     """Spawn a fresh, bare interactive `claude` in a new detached tmux session.
 
+    The session's cwd is `<project_root>/.claude/terminals/T0`, NOT
+    project_root itself (OI-619 finding #1): Claude Code's memory-file
+    discovery and this repo's T0-only SessionStart hooks (matcher
+    "terminals/T0" in .claude/settings.json) only load the canonical
+    orchestrator role when cwd is under that subdirectory — a bare `-c
+    project_root` launch silently booted the successor into the generic
+    project CLAUDE.md instead. Since cwd no longer doubles as the project
+    root, `resume_prompt` carries `--project-dir project_root` explicitly
+    (see _build_resume_prompt) so `vnx handoff show` still resolves the right
+    project.
+
     Guard-safety (round-3 finding #5): every subprocess call here has argv[0]
     == "tmux" — `claude` only ever appears as a later positional argument to
     `tmux send-keys` (a single quoted string), never as the executable being
@@ -561,8 +578,9 @@ def _default_tmux_spawn(
     the session already exists — that failure is wrapped in
     SpawnPartialFailure so respawn() knows to kill it before returning.
     """
+    t0_workdir = str(Path(project_root) / ".claude" / "terminals" / "T0")
     subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session_name, "-c", project_root],
+        ["tmux", "new-session", "-d", "-s", session_name, "-c", t0_workdir],
         check=True,
         timeout=10,
     )
@@ -645,6 +663,7 @@ def respawn(
     session_name = f"vnx-t0-rotation-{terminal.lower()}-{rotation_id[:8]}"
     resume_prompt = _build_resume_prompt(
         terminal=terminal, rotation_id=rotation_id, project_id=project_id, handoff_path=handoff_path,
+        project_root=project_root,
     )
 
     try:
