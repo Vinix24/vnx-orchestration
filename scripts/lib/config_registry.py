@@ -153,6 +153,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
         "Instrument why intelligence injections are ignored before tuning generation.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
+    "VNX_INJECTION_WHY_ENABLED": _e(
+        "VNX_INJECTION_WHY_ENABLED", "bool", "0", "intelligence",
+        "Persist a per-offer used/ignored-reason row (pattern_injection_outcome) at delivery "
+        "time via a deterministic content-overlap check + reason classifier. Off = byte-for-byte "
+        "the current filename-only record_adoption_from_receipt behavior (no new reads/writes). "
+        "Prerequisite instrumentation for the reason-aware evaluator (PR-B); does not itself "
+        "activate the learning loop.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
         "Restrict the plan-gate panel to complex features (display metadata only; "

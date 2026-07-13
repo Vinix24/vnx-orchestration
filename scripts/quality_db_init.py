@@ -27,7 +27,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 27
+HIGHEST_QI_VERSION = 28
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1183,6 +1183,57 @@ def _migrate_v27_down(conn: sqlite3.Connection) -> None:
             log('WARNING', f'composite-keys: failed to drop {index_name} — {exc}')
 
 
+def _migrate_v28(conn: sqlite3.Connection) -> None:
+    """V28: pattern_injection_outcome — per-offer used/ignored-reason record.
+
+    Prerequisite instrumentation for the injection-effectiveness eval loop
+    (dispatch: injection-effectiveness-eval-loop PR-A). Records, per offered
+    pattern per dispatch, whether the pattern was actually reflected in the
+    delivered work (``used``) and — when not — a deterministic classification
+    of WHY (``reason``) plus a short human-readable ``evidence`` string.
+
+    Conceptually keyed off ``dispatch_pattern_offered`` (the per-offer
+    junction created by _migrate_v17): every outcome row corresponds to one
+    offer. Defined with the composite UNIQUE inline at CREATE time (ADR-007)
+    rather than via the _QI_COMPOSITE_KEYS backfill mechanism used for
+    tables that predate ADR-007 — this table is new, so it never has legacy
+    single-column-PK rows to reconcile.
+
+    Purely additive: no existing table is touched. Written only when
+    VNX_INJECTION_WHY_ENABLED=1 (scripts/lib/config_registry.py); this
+    migration itself always runs (schema presence, not schema population,
+    is what "dormant by default" means here).
+    """
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pattern_injection_outcome'"
+    ).fetchone():
+        return
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pattern_injection_outcome (
+            id          INTEGER NOT NULL,
+            dispatch_id TEXT    NOT NULL,
+            pattern_id  TEXT    NOT NULL,
+            pattern_hash TEXT,
+            used        INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
+            reason      TEXT,
+            evidence    TEXT,
+            project_id  TEXT    NOT NULL DEFAULT 'vnx-dev',
+            created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            PRIMARY KEY (id),
+            UNIQUE (project_id, dispatch_id, pattern_id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pio_dispatch_id "
+        "ON pattern_injection_outcome (dispatch_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pio_pattern_id "
+        "ON pattern_injection_outcome (pattern_id)"
+    )
+    log('INFO', 'Migrated: created pattern_injection_outcome table + indexes (ADR-007, v28)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1212,6 +1263,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     25: _migrate_v25,
     26: _migrate_v26,
     27: _migrate_v27,
+    28: _migrate_v28,
 }
 
 
@@ -1317,6 +1369,7 @@ def verify_database_structure() -> bool:
             'adrs',
             'dream_cycles',
             'dream_pattern_archives',
+            'pattern_injection_outcome',
         ]
 
         # Expected views
