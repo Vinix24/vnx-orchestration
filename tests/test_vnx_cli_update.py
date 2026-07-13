@@ -445,9 +445,76 @@ def test_write_install_marker_atomic(tmp_path):
     assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
 
 
-def test_ensure_install_marker_writes_when_git_toplevel(tmp_path):
-    repo = _git_repo(tmp_path / "repo")
-    _ensure_install_marker(repo)
+# ---------------------------------------------------------------------------
+# ADR-005: marker write emits an NDJSON audit event
+# ---------------------------------------------------------------------------
+
+def test_write_install_marker_emits_audit_event(tmp_path):
+    version_dir = tmp_path / "v1"
+    version_dir.mkdir()
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _write_install_marker(version_dir, audit_log=audit_log)
+
+    assert audit_log.exists()
+    lines = audit_log.read_text().strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["event_type"] == "central_install_marker_written"
+    assert record["version_dir"] == str(version_dir)
+    assert "timestamp" in record and record["timestamp"]
+
+
+def test_fetch_version_emits_marker_audit_event(tmp_path, monkeypatch):
+    origin = _git_origin(tmp_path)
+    monkeypatch.setattr(update_module, "VNX_GIT_REMOTE", str(origin))
+    root = tmp_path / "vnx-system"
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    target_dir = _fetch_version(root, "edge", dry_run=False, audit_log=audit_log)
+
+    lines = audit_log.read_text().strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    assert any(
+        e["event_type"] == "central_install_marker_written" and e["version_dir"] == str(target_dir)
+        for e in events
+    )
+
+
+def test_ensure_install_marker_repair_emits_audit_event(tmp_path):
+    root = tmp_path / "vnx-system"
+    repo = _git_repo(root / "versions" / "edge")
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _ensure_install_marker(root, repo, audit_log=audit_log)
+
+    lines = audit_log.read_text().strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    assert any(
+        e["event_type"] == "central_install_marker_written" and e["version_dir"] == str(repo)
+        for e in events
+    )
+
+
+def test_ensure_install_marker_skip_emits_no_audit_event(tmp_path):
+    """The ownership guard's silent skip must not emit an event — nothing was
+    written, so there is nothing to audit."""
+    root = tmp_path / "vnx-system"
+    root.mkdir()
+    dev_checkout = _git_repo(tmp_path / "some-other-repo" / "vnx-orchestration")
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _ensure_install_marker(root, dev_checkout, audit_log=audit_log)
+
+    assert not audit_log.exists()
+
+
+def test_ensure_install_marker_writes_when_under_versions_and_git_toplevel(tmp_path):
+    root = tmp_path / "vnx-system"
+    repo = _git_repo(root / "versions" / "edge")
+
+    _ensure_install_marker(root, repo)
+
     marker = repo / INSTALL_MODE_MARKER
     assert marker.is_file()
     assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
@@ -456,34 +523,57 @@ def test_ensure_install_marker_writes_when_git_toplevel(tmp_path):
 def test_ensure_install_marker_noop_for_non_git_dir(tmp_path):
     """Guard: never stamp a marker into a tree that isn't its own git toplevel
     (e.g. a consumer project's own dev checkout) — matches
-    vnx_paths._is_central_install()'s git-toplevel==vnx_home condition."""
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    _ensure_install_marker(plain)
+    vnx_paths._is_central_install()'s git-toplevel==vnx_home condition.
+    Placed under <root>/versions/ so this isolates the git-toplevel guard
+    specifically, independent of the ownership guard below."""
+    root = tmp_path / "vnx-system"
+    plain = root / "versions" / "plain"
+    plain.mkdir(parents=True)
+
+    _ensure_install_marker(root, plain)
+
     assert not (plain / INSTALL_MODE_MARKER).exists()
 
 
+def test_ensure_install_marker_noop_for_dev_checkout_not_under_versions(tmp_path):
+    """Fix (central-install-mode-marker-missing follow-up): a standalone dev
+    checkout is ALSO its own git toplevel — true of essentially any git repo —
+    so the git-toplevel check alone is not sufficient. Without the ownership
+    guard, a dev checkout that happens to resolve as the active `current` or a
+    flip/rollback target would get falsely stamped `.vnx-install-mode=central`,
+    the inverse of the mis-resolution class this marker exists to prevent."""
+    root = tmp_path / "vnx-system"
+    root.mkdir()
+    dev_checkout = _git_repo(tmp_path / "some-other-repo" / "vnx-orchestration")
+
+    _ensure_install_marker(root, dev_checkout)
+
+    assert not (dev_checkout / INSTALL_MODE_MARKER).exists()
+
+
 def test_ensure_install_marker_noop_for_none():
-    _ensure_install_marker(None)  # must not raise
+    _ensure_install_marker(Path("/tmp/unused-root"), None)  # must not raise
 
 
 def test_ensure_install_marker_idempotent_when_already_valid(tmp_path):
-    repo = _git_repo(tmp_path / "repo")
+    root = tmp_path / "vnx-system"
+    repo = _git_repo(root / "versions" / "edge")
     marker = repo / INSTALL_MODE_MARKER
     marker.write_text("central\n", encoding="utf-8")
     mtime_before = marker.stat().st_mtime_ns
 
-    _ensure_install_marker(repo)
+    _ensure_install_marker(root, repo)
 
     assert marker.stat().st_mtime_ns == mtime_before
 
 
 def test_ensure_install_marker_overwrites_invalid_content(tmp_path):
-    repo = _git_repo(tmp_path / "repo")
+    root = tmp_path / "vnx-system"
+    repo = _git_repo(root / "versions" / "edge")
     marker = repo / INSTALL_MODE_MARKER
     marker.write_text("embedded\n", encoding="utf-8")
 
-    _ensure_install_marker(repo)
+    _ensure_install_marker(root, repo)
 
     assert marker.read_text(encoding="utf-8").strip() == INSTALL_MODE_VALUE
 

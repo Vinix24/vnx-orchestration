@@ -99,7 +99,9 @@ def _current_target(root: Path):
     return None
 
 
-def _fetch_version(root: Path, target: str, dry_run: bool) -> Path:
+def _fetch_version(
+    root: Path, target: str, dry_run: bool, audit_log: "Path | None" = None
+) -> Path:
     # Belt-and-suspenders: validate before every path join regardless of call site
     _validate_version_name(target)
 
@@ -133,7 +135,7 @@ def _fetch_version(root: Path, target: str, dry_run: bool) -> Path:
     # there makes CWD-based project_id resolution return `vnx-dev` for EVERY consumer
     # (the fleet-wide misroute/hard-reject class). Strip it after every fetch.
     _strip_tenant_marker(target_dir)
-    _write_install_marker(target_dir)
+    _write_install_marker(target_dir, audit_log=audit_log)
     return target_dir
 
 
@@ -163,26 +165,56 @@ def _git_toplevel(path: Path) -> "Path | None":
     return Path(output).expanduser().resolve()
 
 
-def _write_install_marker(version_dir: Path) -> None:
+def _write_install_marker(version_dir: Path, audit_log: "Path | None" = None) -> None:
     """Atomically write `.vnx-install-mode` = `central` into version_dir.
 
     Reuses the codebase's shared atomic-write helper (scripts/lib/atomic_io.py)
     instead of a bespoke tmp+os.replace implementation.
+
+    Emits a `central_install_marker_written` NDJSON audit event (ADR-005) —
+    this is an install-state mutation like the symlink flip and prune it
+    accompanies, and must leave the same kind of audit trace.
     """
     from vnx_cli import _engine
     _engine.ensure_engine_on_path()
     from atomic_io import atomic_write_text
 
     atomic_write_text(version_dir / INSTALL_MODE_MARKER, f"{INSTALL_MODE_VALUE}\n")
+    _emit_audit_event(
+        "central_install_marker_written",
+        {"version_dir": str(version_dir)},
+        audit_log=audit_log,
+    )
 
 
-def _ensure_install_marker(version_dir: "Path | None") -> None:
+def _is_under_versions(root: Path, version_dir: Path) -> bool:
+    """True when ``version_dir`` lives directly under ``<root>/versions/`` —
+    the central-install layout install-central.sh lays down
+    (``TARGET_DIR/versions/<version>/``).
+    """
+    try:
+        return version_dir.resolve().parent == (root / "versions").resolve()
+    except OSError:
+        return False
+
+
+def _ensure_install_marker(
+    root: Path, version_dir: "Path | None", audit_log: "Path | None" = None
+) -> None:
     """Self-heal: back-fill the marker on an already-installed, marker-less
     central version dir.
 
-    Guards on the same git-toplevel==version_dir condition
-    `vnx_paths._is_central_install()` uses, so a non-central tree (e.g. a
-    consumer project's own dev checkout) is never mistakenly stamped.
+    Guarded by two conditions:
+
+    1. Ownership: ``version_dir`` must live directly under ``<root>/versions/``
+       (the central-install layout). A standalone dev checkout that happens to
+       resolve as the active `current` target or a rollback/flip target is
+       NOT under ``versions/`` and must never be stamped — every git repo is
+       its own git-toplevel, so relying on that check alone would let a plain
+       dev checkout be mis-stamped `central`, the inverse of the bug this
+       marker exists to prevent.
+    2. Git-toplevel: mirrors the condition `vnx_paths._is_central_install()`
+       uses, kept as an additional guard on top of the ownership check above.
     """
     if version_dir is None or not version_dir.is_dir():
         return
@@ -192,9 +224,11 @@ def _ensure_install_marker(version_dir: "Path | None") -> None:
             return
     except OSError:
         return
+    if not _is_under_versions(root, version_dir):
+        return
     if _git_toplevel(version_dir) != version_dir:
         return
-    _write_install_marker(version_dir)
+    _write_install_marker(version_dir, audit_log=audit_log)
     print(f"Repaired missing install-mode marker: {marker}")
 
 
@@ -210,7 +244,7 @@ def _atomic_symlink_flip(
     # Self-heal: whatever becomes active must carry the marker, even when this
     # flip target was not freshly fetched (e.g. a --rollback to an older
     # version cloned before this fix shipped).
-    _ensure_install_marker(target_dir)
+    _ensure_install_marker(root, target_dir, audit_log=audit_log)
 
     from_version = _current_target(root)
     from_name = from_version.name if from_version else None
@@ -305,7 +339,7 @@ def vnx_update(args) -> int:
         # fetched before this fix shipped) may be active but marker-less. Heal
         # it on this and every subsequent `vnx update` invocation, regardless
         # of what --to/--rollback target is requested below.
-        _ensure_install_marker(_current_target(root))
+        _ensure_install_marker(root, _current_target(root))
 
     if rollback:
         return _do_rollback(root, dry_run=dry_run)
