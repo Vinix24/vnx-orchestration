@@ -10,15 +10,18 @@
   --color-primary:      #0a2463;
   --color-accent:       #2e86c1;
   --color-accent-soft:  #e5f6ff;
-  --color-accent-gold:  #f39c12;
+  --color-accent-gold:  #b45309;
   --color-foreground:   #0a2463;
   --color-muted:        #4a5a7a;
   --color-text-faint:   #8a96ad;
   --color-border:       #e1e8f0;
   --color-border-strong:#c8d4e5;
-  --color-success:      #27ae60;
-  --color-warning:      #f39c12;
+  --color-success:      #15803d;
+  --color-warning:      #b45309;
   --color-error:        #c0392b;
+  --color-danger:       var(--color-error);
+  --color-info:         #1d4ed8;
+  --color-track-c:      #6d28d9;
 
   --color-chart-t-manager: #f39c12;
   --color-chart-t0:        #0a2463;

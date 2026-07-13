@@ -15,7 +15,7 @@ function phaseColor(phase: string): string {
     case 'done': return 'var(--color-success, #50fa7b)';
     case 'active': case 'in_progress': return 'var(--color-accent, #f97316)';
     case 'blocked': case 'failed': return 'var(--color-danger, #ff5555)';
-    case 'queued': case 'proposed': return 'rgba(108,168,255,0.85)';
+    case 'queued': case 'proposed': return 'var(--color-info)';
     default: return 'var(--color-muted, rgba(244,244,249,0.5))';
   }
 }

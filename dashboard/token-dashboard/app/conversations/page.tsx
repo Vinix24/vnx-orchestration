@@ -137,13 +137,14 @@ function SessionDetailPanel({
   onClose: () => void;
   onViewTranscript: () => void;
 }) {
+  // Literal hex (not CSS vars) — feeds the `${color}NN` alpha-suffix trick below.
   const terminalColors: Record<string, string> = {
-    T0: '#6B8AE6',
-    T1: '#50fa7b',
-    T2: '#facc15',
-    T3: '#9B6BE6',
+    T0: '#1d4ed8',
+    T1: '#15803d',
+    T2: '#b45309',
+    T3: '#6d28d9',
   };
-  const color = session.terminal ? terminalColors[session.terminal] ?? '#6B6B6B' : '#6B6B6B';
+  const color = session.terminal ? terminalColors[session.terminal] ?? '#4a5a7a' : '#4a5a7a';
 
   return (
     <div>
@@ -218,7 +219,7 @@ function SessionDetailPanel({
           borderRadius: 8,
           background: 'rgba(107,138,230,0.1)',
           border: '1px solid rgba(107,138,230,0.3)',
-          color: '#6B8AE6',
+          color: 'var(--color-info)',
           fontSize: 13,
           fontWeight: 500,
           cursor: 'pointer',

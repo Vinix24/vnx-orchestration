@@ -19,17 +19,17 @@ import type { Proposal, LearningProposal, WeeklyDigest } from '@/lib/types';
 // ---- Helpers ----
 
 const CATEGORY_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-  pattern: { bg: 'rgba(80, 250, 123, 0.08)', border: 'rgba(80, 250, 123, 0.22)', text: '#50fa7b' },
-  antipattern: { bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.22)', text: '#ff6b6b' },
-  prompt: { bg: 'rgba(107, 138, 230, 0.08)', border: 'rgba(107, 138, 230, 0.22)', text: '#6B8AE6' },
-  workflow: { bg: 'rgba(249, 115, 22, 0.08)', border: 'rgba(249, 115, 22, 0.22)', text: '#f97316' },
+  pattern: { bg: 'rgba(80, 250, 123, 0.08)', border: 'rgba(80, 250, 123, 0.22)', text: 'var(--color-success)' },
+  antipattern: { bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.22)', text: 'var(--color-error)' },
+  prompt: { bg: 'rgba(107, 138, 230, 0.08)', border: 'rgba(107, 138, 230, 0.22)', text: 'var(--color-info)' },
+  workflow: { bg: 'rgba(249, 115, 22, 0.08)', border: 'rgba(249, 115, 22, 0.22)', text: '#c2410c' },
   default: { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.1)', text: 'var(--color-muted)' },
 };
 
 const LEARNING_TYPE_META: Record<string, { icon: typeof Lightbulb; label: string; color: string }> = {
-  skill_refinement: { icon: GraduationCap, label: 'Skill refinement', color: '#6B8AE6' },
-  rule: { icon: Shield, label: 'Prevention rule', color: '#50fa7b' },
-  archival: { icon: Archive, label: 'Archival / supersede', color: '#ff6b6b' },
+  skill_refinement: { icon: GraduationCap, label: 'Skill refinement', color: 'var(--color-info)' },
+  rule: { icon: Shield, label: 'Prevention rule', color: 'var(--color-success)' },
+  archival: { icon: Archive, label: 'Archival / supersede', color: 'var(--color-error)' },
 };
 
 function categoryStyle(cat: string) {
@@ -137,7 +137,7 @@ function ProposalCard({
             conf <strong style={{ color: style.text }}>{(proposal.confidence * 100).toFixed(0)}%</strong>
           </span>
           {!isPending && (
-            <span style={{ fontSize: 10, fontWeight: 600, color: proposal.status === 'accepted' ? '#50fa7b' : '#ff6b6b' }}>
+            <span style={{ fontSize: 10, fontWeight: 600, color: proposal.status === 'accepted' ? 'var(--color-success)' : 'var(--color-error)' }}>
               {proposal.status.toUpperCase()}
             </span>
           )}
@@ -152,7 +152,7 @@ function ProposalCard({
               onClick={handleAccept}
               disabled={busy}
               className="flex items-center gap-1"
-              style={{ padding: '5px 12px', borderRadius: 6, background: 'rgba(80,250,123,0.15)', border: '1px solid rgba(80,250,123,0.35)', color: '#50fa7b', fontSize: 12, fontWeight: 600, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1 }}
+              style={{ padding: '5px 12px', borderRadius: 6, background: 'rgba(80,250,123,0.15)', border: '1px solid rgba(80,250,123,0.35)', color: 'var(--color-success)', fontSize: 12, fontWeight: 600, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1 }}
             >
               <CheckCircle2 size={12} />
               Accept
@@ -161,7 +161,7 @@ function ProposalCard({
               onClick={handleReject}
               disabled={busy}
               className="flex items-center gap-1"
-              style={{ padding: '5px 12px', borderRadius: 6, background: 'rgba(255,107,107,0.12)', border: '1px solid rgba(255,107,107,0.3)', color: '#ff6b6b', fontSize: 12, fontWeight: 600, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1 }}
+              style={{ padding: '5px 12px', borderRadius: 6, background: 'rgba(255,107,107,0.12)', border: '1px solid rgba(255,107,107,0.3)', color: 'var(--color-error)', fontSize: 12, fontWeight: 600, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1 }}
             >
               <XCircle size={12} />
               {rejectOpen ? 'Confirm Reject' : 'Reject'}
@@ -305,7 +305,7 @@ function ProposalsSection() {
             onClick={handleApplyAll}
             disabled={applying}
             className="flex items-center gap-1"
-            style={{ padding: '6px 14px', borderRadius: 7, background: 'rgba(80,250,123,0.12)', border: '1px solid rgba(80,250,123,0.3)', color: '#50fa7b', fontSize: 12, fontWeight: 600, cursor: applying ? 'not-allowed' : 'pointer', opacity: applying ? 0.6 : 1 }}
+            style={{ padding: '6px 14px', borderRadius: 7, background: 'rgba(80,250,123,0.12)', border: '1px solid rgba(80,250,123,0.3)', color: 'var(--color-success)', fontSize: 12, fontWeight: 600, cursor: applying ? 'not-allowed' : 'pointer', opacity: applying ? 0.6 : 1 }}
           >
             <Play size={12} />
             Apply All Accepted ({accepted.length})
@@ -314,7 +314,7 @@ function ProposalsSection() {
       </div>
 
       {applyMsg && (
-        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: applyMsg.startsWith('Error') ? 'rgba(255,107,107,0.1)' : 'rgba(80,250,123,0.1)', border: `1px solid ${applyMsg.startsWith('Error') ? 'rgba(255,107,107,0.25)' : 'rgba(80,250,123,0.25)'}`, fontSize: 12, color: applyMsg.startsWith('Error') ? '#ff6b6b' : '#50fa7b' }}>
+        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: applyMsg.startsWith('Error') ? 'rgba(255,107,107,0.1)' : 'rgba(80,250,123,0.1)', border: `1px solid ${applyMsg.startsWith('Error') ? 'rgba(255,107,107,0.25)' : 'rgba(80,250,123,0.25)'}`, fontSize: 12, color: applyMsg.startsWith('Error') ? 'var(--color-error)' : 'var(--color-success)' }}>
           {applyMsg}
         </div>
       )}
@@ -424,7 +424,7 @@ function WeeklyDigestSection() {
           onClick={handleGenerate}
           disabled={generating}
           className="flex items-center gap-1"
-          style={{ padding: '6px 14px', borderRadius: 7, background: 'rgba(107,138,230,0.12)', border: '1px solid rgba(107,138,230,0.3)', color: '#6B8AE6', fontSize: 12, fontWeight: 600, cursor: generating ? 'not-allowed' : 'pointer', opacity: generating ? 0.6 : 1 }}
+          style={{ padding: '6px 14px', borderRadius: 7, background: 'rgba(107,138,230,0.12)', border: '1px solid rgba(107,138,230,0.3)', color: 'var(--color-info)', fontSize: 12, fontWeight: 600, cursor: generating ? 'not-allowed' : 'pointer', opacity: generating ? 0.6 : 1 }}
         >
           <RefreshCw size={12} className={generating ? 'animate-spin' : ''} />
           {generating ? 'Generating…' : 'Generate Now'}
@@ -432,7 +432,7 @@ function WeeklyDigestSection() {
       </div>
 
       {genError && (
-        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,107,107,0.1)', border: '1px solid rgba(255,107,107,0.25)', fontSize: 12, color: '#ff6b6b' }}>
+        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,107,107,0.1)', border: '1px solid rgba(255,107,107,0.25)', fontSize: 12, color: 'var(--color-error)' }}>
           {genError}
         </div>
       )}

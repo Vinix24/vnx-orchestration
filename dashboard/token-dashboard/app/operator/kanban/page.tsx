@@ -14,17 +14,17 @@ const TRACK_COLORS: Record<string, { bg: string; border: string; text: string }>
   A: {
     bg: 'rgba(80, 250, 123, 0.12)',
     border: 'rgba(80, 250, 123, 0.4)',
-    text: '#50fa7b',
+    text: 'var(--color-success)',
   },
   B: {
     bg: 'rgba(250, 204, 21, 0.12)',
     border: 'rgba(250, 204, 21, 0.4)',
-    text: '#facc15',
+    text: 'var(--color-warning)',
   },
   C: {
     bg: 'rgba(155, 107, 230, 0.12)',
     border: 'rgba(155, 107, 230, 0.4)',
-    text: '#9B6BE6',
+    text: 'var(--color-track-c)',
   },
 };
 
@@ -171,7 +171,7 @@ function DispatchCard({ card }: { card: KanbanCard }) {
               borderRadius: 5,
               background: 'rgba(107,138,230,0.12)',
               border: '1px solid rgba(107,138,230,0.25)',
-              color: '#6B8AE6',
+              color: 'var(--color-info)',
             }}
           >
             {card.terminal}
@@ -224,7 +224,7 @@ function DispatchCard({ card }: { card: KanbanCard }) {
             <span
               data-testid="card-scout"
               title="Scout-verrijkt: deze dispatch heeft een scout pre-pass sidecar"
-              style={{ fontSize: 10, fontWeight: 600, color: 'var(--color-info, #6ca8ff)' }}
+              style={{ fontSize: 10, fontWeight: 600, color: 'var(--color-info)' }}
             >
               🔍 scout
             </span>
@@ -463,7 +463,7 @@ function KanbanContent() {
                 fontWeight: projectFilter === p.name ? 600 : 400,
                 background: projectFilter === p.name ? 'rgba(107, 138, 230, 0.15)' : 'rgba(255,255,255,0.04)',
                 border: `1px solid ${projectFilter === p.name ? 'rgba(107, 138, 230, 0.4)' : 'rgba(255,255,255,0.08)'}`,
-                color: projectFilter === p.name ? '#6B8AE6' : 'var(--color-muted)',
+                color: projectFilter === p.name ? 'var(--color-info)' : 'var(--color-muted)',
                 cursor: 'pointer',
               }}
             >

@@ -4,15 +4,16 @@ import { useAgents } from '@/lib/hooks';
 import type { Agent } from '@/lib/types';
 
 const ADAPTER_COLORS: Record<string, { color: string; bg: string; border: string }> = {
-  subprocess: { color: '#50fa7b', bg: 'rgba(80, 250, 123, 0.1)', border: 'rgba(80, 250, 123, 0.3)' },
-  tmux:       { color: '#6B8AE6', bg: 'rgba(107, 138, 230, 0.1)', border: 'rgba(107, 138, 230, 0.3)' },
+  subprocess: { color: 'var(--color-success)', bg: 'rgba(80, 250, 123, 0.1)', border: 'rgba(80, 250, 123, 0.3)' },
+  tmux:       { color: 'var(--color-info)', bg: 'rgba(107, 138, 230, 0.1)', border: 'rgba(107, 138, 230, 0.3)' },
 };
 
+// Literal hex (not CSS vars) — feeds the `${termColor}NN` alpha-suffix trick below.
 const TERMINAL_COLORS: Record<string, string> = {
-  T0: '#6B8AE6',
-  T1: '#50fa7b',
-  T2: '#facc15',
-  T3: '#9B6BE6',
+  T0: '#1d4ed8',
+  T1: '#15803d',
+  T2: '#b45309',
+  T3: '#6d28d9',
 };
 
 interface AgentSelectorProps {
@@ -27,7 +28,7 @@ function AgentPill({ agent, isSelected, onClick }: {
   isSelected: boolean;
   onClick: () => void;
 }) {
-  const termColor = TERMINAL_COLORS[agent.terminal] ?? '#6B6B6B';
+  const termColor = TERMINAL_COLORS[agent.terminal] ?? '#4a5a7a';
   const adapterCfg = ADAPTER_COLORS[agent.adapter] ?? ADAPTER_COLORS.tmux;
 
   return (
