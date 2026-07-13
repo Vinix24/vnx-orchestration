@@ -13,6 +13,7 @@ Track: final-dispatch-persist-integrity (P1). Proves:
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
@@ -21,7 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -29,6 +30,7 @@ SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
 import final_prompt_integrity as fpi  # noqa: E402
+import provider_dispatch as pd  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -399,3 +401,212 @@ def test_run_envelope_plan_stamps_injection_reconstructs(tmp_path):
     )
     assert receipt["injection_reconstructs"] is True
     assert receipt["final_prompt_sha256"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Provider-lane LEGACY path (kimi/codex/etc — the gap this dispatch closes)
+#
+# PR #1116 wired final_prompt_integrity into the tmux lane only. The provider
+# lane's _enrich_instruction (codex, gemini, litellm, kimi, deepseek-harness,
+# glm-harness) never persisted the enriched body. These tests exercise the
+# REAL _dispatch_kimi entrypoint end-to-end (only the spawn + EventStore are
+# mocked) to prove the wiring, not just the underlying module.
+# ---------------------------------------------------------------------------
+
+def _provider_args(**overrides) -> argparse.Namespace:
+    defaults = {
+        "provider": "kimi",
+        "terminal_id": "T1",
+        "dispatch_id": "d-provider-lane-ok",
+        "instruction": "Build the loader. Return OK.",
+        "model": "default",
+        "max_retries": 3,
+        "no_auto_commit": False,
+        "gate": "",
+        "dispatch_paths": "",
+        "pr_id": None,
+        "role": None,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def _kimi_success_result():
+    from provider_spawns.kimi_spawn import KimiSpawnResult  # noqa: PLC0415
+    return KimiSpawnResult(
+        returncode=0,
+        completion_text="OK",
+        events_written=1,
+        session_id=None,
+        timed_out=False,
+        stopped_early=False,
+        token_usage={"input_tokens": 10, "output_tokens": 5, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+        error=None,
+        event_writer_failures=0,
+    )
+
+
+def _last_receipt(state_dir: Path) -> dict:
+    line = (state_dir / "t0_receipts.ndjson").read_text(encoding="utf-8").strip().splitlines()[-1]
+    return json.loads(line)
+
+
+def test_provider_lane_persists_final_prompt_and_stamps_receipt(tmp_path, monkeypatch):
+    """The legacy provider-lane path (_dispatch_kimi, no envelope flag) must persist
+    final_prompt.md + stamp final_prompt_path/sha/injection_reconstructs onto the
+    receipt — the exact gap final_prompt_integrity's own docstring calls out.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
+    dispatch_id = "d-provider-lane-ok"
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: data_dir)
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: state_dir)
+    args = _provider_args(dispatch_id=dispatch_id)
+    result = _kimi_success_result()
+
+    with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
+         patch("event_store.EventStore", return_value=MagicMock()):
+        rc = pd._dispatch_kimi(args)
+
+    assert rc == 0
+
+    bundle = data_dir / "dispatches" / "pending" / dispatch_id
+    final_prompt_file = bundle / "final_prompt.md"
+    assert final_prompt_file.exists()
+    final_prompt = final_prompt_file.read_text(encoding="utf-8")
+    assert "Build the loader. Return OK." in final_prompt
+
+    receipt = _last_receipt(state_dir)
+    assert receipt["injection_reconstructs"] is True
+    assert receipt["final_prompt_sha256"] == hashlib.sha256(final_prompt.encode("utf-8")).hexdigest()
+    assert receipt["final_prompt_path"] == str(final_prompt_file)
+
+
+def test_provider_lane_mismatch_fails_loud_and_stamps_false(tmp_path, monkeypatch, caplog):
+    """A recorded intelligence_injections row whose content never actually reached
+    the enriched prompt (the real, unmocked IntelligenceSelector finds nothing
+    against a fresh DB, so enriched == raw instruction) must flip
+    injection_reconstructs False on the receipt and log an ERROR — the regression
+    this track exists to catch, exercised through the real dispatch entrypoint.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
+    dispatch_id = "d-provider-lane-mismatch"
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: data_dir)
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: state_dir)
+    args = _provider_args(dispatch_id=dispatch_id)
+    _write_injection_row(
+        state_dir, dispatch_id,
+        [_item("THIS PATTERN WAS NEVER ACTUALLY INJECTED", item_id="phantom-1")],
+    )
+    result = _kimi_success_result()
+
+    with caplog.at_level(logging.ERROR, logger="final_prompt_integrity"):
+        with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
+             patch("event_store.EventStore", return_value=MagicMock()):
+            rc = pd._dispatch_kimi(args)
+
+    # the dispatch itself still succeeds — audit closure never blocks a dispatch.
+    assert rc == 0
+    receipt = _last_receipt(state_dir)
+    assert receipt["injection_reconstructs"] is False
+    assert any(
+        "reconstruction FAILED" in r.message and "phantom-1" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_provider_lane_strict_mode_raises_and_propagates(tmp_path, monkeypatch):
+    """VNX_INJECTION_RECONSTRUCT_STRICT=1 must fail-closed: the raised
+    InjectionReconstructError propagates out of _enrich_instruction (and thus out
+    of the dispatch handler) instead of being swallowed like every other error in
+    the audit-closure step.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
+    monkeypatch.setenv("VNX_INJECTION_RECONSTRUCT_STRICT", "1")
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: state_dir)
+    dispatch_id = "d-provider-lane-strict"
+    args = _provider_args(dispatch_id=dispatch_id, instruction="Build the loader. Return OK.")
+    _write_injection_row(
+        state_dir, dispatch_id,
+        [_item("NEVER INJECTED", item_id="phantom-strict")],
+    )
+
+    with pytest.raises(fpi.InjectionReconstructError):
+        pd._enrich_instruction(args)
+
+
+def test_provider_lane_records_exactly_once(tmp_path, monkeypatch):
+    """_enrich_instruction must call record_final_prompt_integrity exactly once per
+    dispatch — no double-recording within the legacy provider-lane call chain.
+
+    Explicitly monkeypatches _resolve_data_dir/_resolve_state_dir to tmp_path-based
+    dirs rather than relying on ambient env-var isolation, so this test can never
+    write into the operator's real central ~/.vnx-data store."""
+    dispatch_id = "d-provider-lane-once"
+    monkeypatch.setattr(pd, "_resolve_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(pd, "_resolve_state_dir", lambda: tmp_path / "state")
+    args = _provider_args(dispatch_id=dispatch_id)
+    result = _kimi_success_result()
+
+    with patch(
+        "final_prompt_integrity.record_final_prompt_integrity",
+        wraps=fpi.record_final_prompt_integrity,
+    ) as mock_record, \
+         patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
+         patch("event_store.EventStore", return_value=MagicMock()):
+        rc = pd._dispatch_kimi(args)
+
+    assert rc == 0
+    mock_record.assert_called_once()
+    assert mock_record.call_args.kwargs["dispatch_id"] == dispatch_id
+
+
+def test_emit_governance_tolerates_magicmock_args_without_integrity():
+    """Regression guard: _emit_governance must read back _final_prompt_integrity via
+    vars(args).get(...), not getattr(args, ..., None). A bare MagicMock args (as
+    legacy tests widely use) auto-vivifies unset attributes via getattr, which would
+    otherwise smuggle a non-serializable Mock into emit_dispatch_receipt's kwargs
+    for every caller that skips _enrich_instruction (e.g. the claude
+    subprocess-delegate path)."""
+    from dataclasses import dataclass as _dc
+    from datetime import datetime, timezone
+
+    @_dc
+    class _Result:
+        completion_text: str = "OK"
+        token_usage: Optional[dict] = None
+
+    args = MagicMock()
+    args.dispatch_id = "d-magicmock-no-integrity"
+    args.terminal_id = "T1"
+    args.instruction = "irrelevant"
+    args.pr_id = None
+    # NOTE: args._final_prompt_integrity is deliberately never set — this is the
+    # exact condition the vars(args).get(...) fix guards against. governance_emit's
+    # own functions are mocked out here (report YAML frontmatter / mandate_id
+    # serialization are unrelated pre-existing gaps, not this track's concern);
+    # this test isolates exactly the kwargs _emit_governance computes.
+    start = end = datetime.now(timezone.utc)
+
+    with patch("governance_emit.emit_dispatch_receipt") as mock_receipt, \
+         patch("governance_emit.emit_unified_report") as mock_report:
+        mock_receipt.return_value = Path("/tmp/receipt.ndjson")
+        mock_report.return_value = Path("/tmp/report.md")
+        # Must not raise while computing the integrity kwargs.
+        pd._emit_governance(args, "claude", "sonnet", _Result(), start, end, "success")
+
+    call_kwargs = mock_receipt.call_args.kwargs
+    assert call_kwargs["final_prompt_path"] is None
+    assert call_kwargs["final_prompt_sha256"] is None
+    assert call_kwargs["injection_reconstructs"] is None
