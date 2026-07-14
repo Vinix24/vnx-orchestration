@@ -10,6 +10,14 @@ it reads empty even for a real worktree worker (the known Layer-3 gap in provena
 info-severity, diffs the wrong tree, never fires). The caller computes the diff of the actual
 worktree / pushed branch and passes it in; T0's rule is "verify the pushed branch, not the report".
 
+A FIX-FORWARD dispatch (one that targets an existing PR via ``pr_id`` and pushes its commit onto
+that PR's branch instead of its own ``dispatch/<id>`` worktree branch) is the sharpest instance of
+this rule: its own-worktree diff reads empty even though the commit really landed. The pure
+decision function below does not special-case this — it is still "empty diff -> phantom" — the
+caller resolves the pushed branch (``resolve_pr_head_branch`` + ``compute_branch_diff``) and
+supplies THAT as ``worktree_diff`` when the own-worktree diff is empty (see
+``dispatch_envelope._resolve_fix_forward_diff``).
+
 token_usage is only CORROBORATING: providers that report it (codex/claude) spending >0 tokens proves
 an LLM ran; kimi-cli never reports tokens, so its absence/0 is not evidence of a phantom. Reviewers
 legitimately produce no diff, so REVIEW_ROLES are exempt.
@@ -126,6 +134,34 @@ def compute_branch_diff(
         ["git", "diff", f"{merge_base}..{head_ref}"],
         cwd=cwd, capture_output=True, text=True, check=True,
     ).stdout
+
+
+def resolve_pr_head_branch(
+    pr_id: str, *, repo: Optional[Path] = None, timeout: float = 10.0
+) -> Optional[str]:
+    """Resolve a PR number/id to its head branch name via ``gh pr view --json headRefName``.
+
+    Best-effort: returns None on ANY failure (gh unavailable, bad pr_id, no network, PR not
+    found, malformed JSON) — callers must treat None as 'unresolvable', NEVER as evidence of
+    anything (a resolution failure must never manufacture or suppress a phantom verdict).
+    """
+    pr_id = (pr_id or "").strip()
+    if not pr_id:
+        return None
+    cwd = str(repo) if repo else None
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", pr_id, "--json", "headRefName"],
+            cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        import json  # noqa: PLC0415
+        data = json.loads(proc.stdout)
+        branch = data.get("headRefName")
+        return branch.strip() if isinstance(branch, str) and branch.strip() else None
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
 
 
 def compute_worktree_diff(worktree_path: Path, *, base_ref: str = "origin/main") -> str:
