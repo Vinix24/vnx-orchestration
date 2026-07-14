@@ -538,6 +538,67 @@ def _build_tracks_from_db(state_dir: Path, project_id: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Human gate queue — proposed deliverables awaiting operator promote (ADR-007)
+# ---------------------------------------------------------------------------
+#
+# `vnx deliverable add` writes a `dispatches` row with state='proposed'; it
+# stays un-promoted and NOT dispatchable until `vnx deliverable promote` moves
+# it to 'ready' (see planning_cli.py cmd_deliverable_add/cmd_deliverable_promote).
+# Today that row is invisible until an operator thinks to run
+# `vnx deliverable list`. This reader surfaces it at kickoff instead. Only
+# columns present since the v1 base schema are selected (dispatch_id, track,
+# metadata_json, created_at, project_id) so the query never trips on
+# later-migration-only columns (e.g. output_kind/output_ref) on a store that
+# hasn't run the out-of-band migration yet.
+
+_HUMAN_GATE_QUEUE_SQL = (
+    "SELECT dispatch_id, track, metadata_json, created_at "
+    "FROM dispatches WHERE project_id = ? AND state = 'proposed' "
+    "ORDER BY created_at ASC"
+)
+
+
+def _build_human_gate_queue(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
+    """Proposed deliverables/dispatches waiting on an operator promote decision.
+
+    Read-only and additive: never mutates state, never promotes. Degrades to
+    an empty list (never raises) on unavailable identity, a missing/premigration
+    DB, or a locked/malformed DB — this is advisory surfacing, not a gate, so a
+    degraded read must not block SessionStart.
+    """
+    pid = (project_id or "").strip()
+    if not pid:
+        return []
+
+    db_path = state_dir / "runtime_coordination.db"
+    if not db_path.exists():
+        return []
+
+    try:
+        rows = _query_canonical_scoped(db_path, _HUMAN_GATE_QUEUE_SQL, pid)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+        log.debug(
+            "human_gate_queue query failed (%s): %s", _classify_db_error(exc), exc
+        )
+        return []
+
+    queue: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            meta = json.loads(row.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        title = meta.get("title") if isinstance(meta, dict) else None
+        queue.append({
+            "id": row.get("dispatch_id"),
+            "title": title,
+            "track": row.get("track"),
+            "created_at": row.get("created_at"),
+        })
+    return queue
+
+
+# ---------------------------------------------------------------------------
 # Feature state — register-canonical aggregation with FEATURE_PLAN.md fallback
 # ---------------------------------------------------------------------------
 
@@ -1828,6 +1889,7 @@ def build_t0_state(
     queues = _build_queues(dispatch_dir, state_dir)
     tracks = _build_tracks(state_dir)
     canonical_tracks = _build_tracks_from_db(tracks_store, project_id)  # R3.2/ADR-007: tenant-scoped (central SSOT)
+    human_gate_queue = _build_human_gate_queue(tracks_store, project_id)  # proposed deliverables awaiting operator promote
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -1856,6 +1918,7 @@ def build_t0_state(
         "tracks": tracks,
         "track_freshness": track_freshness,
         "canonical_tracks": canonical_tracks,
+        "human_gate_queue": human_gate_queue,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
         "open_items": open_items,
