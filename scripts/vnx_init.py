@@ -32,6 +32,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
+from vnx_skills import is_opted_out, iter_skill_dirs
 
 # ---------------------------------------------------------------------------
 # Result model
@@ -198,8 +199,57 @@ def write_config(paths: Dict[str, str]) -> StepResult:
 # Step: bootstrap skills
 # ---------------------------------------------------------------------------
 
+def _refresh_canon_skills(canon_dirs: List[Path], target: Path) -> "tuple[int, int]":
+    """Refresh each canon skill into target/<name>/ in place.
+
+    ``target`` (.claude/skills and its codex/gemini mirrors) is a MIXED dir:
+    shipped canon skills co-exist with project-authored skills (ADR
+    2026-07-14 skills-in-consumers-ssot §11). Only directory names present in
+    ``canon_dirs`` are touched; anything else under target is project-authored
+    and is left byte-for-byte untouched. A target skill dir carrying the
+    ``.vnx-skip-sync`` marker is preserved even when its name matches canon,
+    so a consumer can pin a local customization of a canon skill.
+
+    Returns (canon_refreshed_count, project_preserved_count).
+    """
+    if target.is_symlink():
+        target.unlink()
+
+    target.mkdir(parents=True, exist_ok=True)
+    use_rsync = shutil.which("rsync") is not None
+
+    canon_names = {skill_dir.name for skill_dir in canon_dirs}
+    refreshed = 0
+    for skill_dir in canon_dirs:
+        dest = target / skill_dir.name
+        if dest.exists() and is_opted_out(dest):
+            continue
+        if use_rsync:
+            subprocess.run(["rsync", "-a", f"{skill_dir}/", f"{dest}/"],
+                           check=True, capture_output=True)
+        else:
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(str(skill_dir), str(dest))
+        refreshed += 1
+
+    preserved = sum(
+        1 for child in target.iterdir()
+        if child.is_dir() and child.name not in canon_names
+    )
+
+    return refreshed, preserved
+
+
 def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
-    """Copy shipped skills to .claude/skills/ (and multi-provider dirs)."""
+    """Refresh shipped canon skills into .claude/skills/ (and multi-provider dirs).
+
+    Per-skill refresh, not dir-level copy-once: each shipped skill under
+    VNX_HOME/skills is re-synced into the target by name every run, so a
+    consumer's canon skills can never freeze/drift from fabric canon. Skill
+    dirs whose name isn't in the shipped set are project-authored and are
+    never touched.
+    """
     project_root = Path(paths["PROJECT_ROOT"])
     vnx_home = Path(paths["VNX_HOME"])
     shipped = vnx_home / "skills"
@@ -208,21 +258,15 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
     if not shipped.is_dir():
         return StepResult("skills", FAIL, f"Missing shipped skills: {shipped}")
 
-    # Remove stale symlink
-    if target.is_symlink():
-        target.unlink()
-    elif target.is_dir():
-        return StepResult("skills", SKIP, "Keeping existing skills dir")
+    canon_dirs = list(iter_skill_dirs(shipped))
+    if not canon_dirs:
+        return StepResult("skills", FAIL, f"No canon skill directories found under: {shipped}")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    if shutil.which("rsync"):
-        subprocess.run(["rsync", "-a", f"{shipped}/", f"{target}/"],
-                       check=True, capture_output=True)
-    else:
-        shutil.copytree(str(shipped), str(target), dirs_exist_ok=True)
-
-    details = []
+    refreshed, preserved = _refresh_canon_skills(canon_dirs, target)
+    details = [
+        f".claude/skills: refreshed {refreshed} canon skill(s), "
+        f"preserved {preserved} project skill(s)"
+    ]
 
     # Multi-provider sync
     for cli, skill_dir in [
@@ -230,15 +274,14 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
         ("gemini", project_root / ".gemini" / "skills"),
     ]:
         if shutil.which(cli):
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            if shutil.which("rsync"):
-                subprocess.run(["rsync", "-a", f"{shipped}/", f"{skill_dir}/"],
-                               check=True, capture_output=True)
-            else:
-                shutil.copytree(str(shipped), str(skill_dir), dirs_exist_ok=True)
-            details.append(f"Synced to {cli}: {skill_dir}")
+            r, p = _refresh_canon_skills(canon_dirs, skill_dir)
+            details.append(
+                f"Synced to {cli} ({skill_dir}): refreshed {r} canon skill(s), "
+                f"preserved {p} project skill(s)"
+            )
 
-    return StepResult("skills", PASS, f"Copied to {target}", details)
+    return StepResult("skills", PASS,
+                      f"Refreshed {refreshed} canon skill(s) in {target}", details)
 
 
 # ---------------------------------------------------------------------------
