@@ -47,8 +47,8 @@ def vnx_env(tmp_path):
 
     # Create VNX_HOME structure
     (vnx_home / "skills").mkdir()
-    (vnx_home / "skills" / "skills.yaml").write_text("skills: []\n")
-    (vnx_home / "skills" / "test-skill.md").write_text("# Test skill\n")
+    (vnx_home / "skills" / "test-skill").mkdir()
+    (vnx_home / "skills" / "test-skill" / "SKILL.md").write_text("# Test skill\n")
     (vnx_home / "templates" / "terminals").mkdir(parents=True)
     for tid in ["T0", "T1", "T2", "T3"]:
         (vnx_home / "templates" / "terminals" / f"{tid}.md").write_text(f"# {tid}\n")
@@ -164,14 +164,48 @@ class TestBootstrapSkills:
 
         skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
         assert skills_dir.is_dir()
-        assert (skills_dir / "skills.yaml").exists()
-        assert (skills_dir / "test-skill.md").exists()
+        assert (skills_dir / "test-skill" / "SKILL.md").exists()
 
-    def test_skips_existing_dir(self, vnx_env):
+    def test_refreshes_stale_canon_skill_and_preserves_project_skill(self, vnx_env):
+        """Pre-existing target dir: canon skill refreshes, project skill is untouched."""
         skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
         skills_dir.mkdir(parents=True)
+
+        # Stale canon skill: shares a name with the shipped skill but drifted content.
+        stale = skills_dir / "test-skill"
+        stale.mkdir()
+        (stale / "SKILL.md").write_text("# STALE drifted content\n")
+
+        # Project-authored skill: name not present in the shipped canon set.
+        project_skill = skills_dir / "my-project-skill"
+        project_skill.mkdir()
+        (project_skill / "SKILL.md").write_text("# My project skill\n")
+        (project_skill / "notes.txt").write_text("keep me\n")
+
         result = bootstrap_skills(vnx_env)
-        assert result.status == SKIP
+        assert result.status == PASS
+
+        shipped_content = (Path(vnx_env["VNX_HOME"]) / "skills" / "test-skill" / "SKILL.md").read_text()
+        refreshed_content = (skills_dir / "test-skill" / "SKILL.md").read_text()
+        assert refreshed_content == shipped_content
+        assert "STALE" not in refreshed_content
+
+        assert (project_skill / "SKILL.md").read_text() == "# My project skill\n"
+        assert (project_skill / "notes.txt").read_text() == "keep me\n"
+
+    def test_honors_skip_sync_marker_on_target(self, vnx_env):
+        """A target skill carrying .vnx-skip-sync is never overwritten, even on a canon name."""
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+
+        pinned = skills_dir / "test-skill"
+        pinned.mkdir()
+        (pinned / "SKILL.md").write_text("# Locally pinned, do not sync\n")
+        (pinned / ".vnx-skip-sync").write_text("")
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+        assert (pinned / "SKILL.md").read_text() == "# Locally pinned, do not sync\n"
 
     def test_removes_stale_symlink(self, vnx_env):
         skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
@@ -180,6 +214,7 @@ class TestBootstrapSkills:
         result = bootstrap_skills(vnx_env)
         assert result.status == PASS
         assert not skills_dir.is_symlink()
+        assert (skills_dir / "test-skill" / "SKILL.md").exists()
 
     def test_fails_on_missing_shipped(self, vnx_env):
         import shutil
@@ -207,7 +242,7 @@ class TestBootstrapSkills:
         result = bootstrap_skills(wt_paths)
 
         assert result.status == PASS
-        assert (worktree_root / ".claude" / "skills" / "skills.yaml").exists()
+        assert (worktree_root / ".claude" / "skills" / "test-skill" / "SKILL.md").exists()
         assert not (canonical_root / ".claude" / "skills").exists()
 
 
@@ -309,7 +344,7 @@ class TestRunInit:
         # Verify key artifacts exist
         project_root = Path(vnx_env["PROJECT_ROOT"])
         assert (project_root / ".vnx" / "config.yml").exists()
-        assert (project_root / ".claude" / "skills" / "skills.yaml").exists()
+        assert (project_root / ".claude" / "skills" / "test-skill" / "SKILL.md").exists()
         assert (project_root / ".claude" / "terminals" / "T0" / "CLAUDE.md").exists()
         assert Path(vnx_env["VNX_STATE_DIR"]).is_dir()
 
