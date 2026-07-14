@@ -54,6 +54,17 @@ import objective_reconcile  # noqa: E402
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
 
+# lane_hint: a descriptive dispatch-routing hint carried on the track record
+# (e.g. "this track is meant to be dispatched governed vs direct") so a
+# cold-start T0 does not have to rediscover that judgment from a prior
+# session. Stored inside tracks.metadata_json rather than a dedicated column —
+# metadata_json is the existing extensibility slot for per-track attributes
+# that have not (yet) earned a first-class column (see
+# seed_tracks_from_roadmap.py's metadata.pr_queue). Descriptive only: it never
+# changes dispatch routing — the door still decides the lane.
+_VALID_LANE_HINTS = frozenset({"governed", "direct", "unset"})
+_LANE_HINT_DEFAULT = "unset"
+
 
 def _resolve_state_dir(explicit: str) -> Path:
     if explicit:
@@ -134,6 +145,68 @@ def _dependencies_for(state_dir: Path, track_id: str, project_id: str) -> list[s
 def _horizon_key(track: dict[str, Any]) -> Optional[str]:
     h = track.get("horizon")
     return h if h in _HORIZON_ORDER else None
+
+
+def _lane_hint_of(track: dict[str, Any]) -> str:
+    """Read the lane_hint carried in tracks.metadata_json.
+
+    Old records (no metadata_json, malformed JSON, or a JSON object missing
+    the key) all resolve to the default 'unset' — no migration, no error.
+    """
+    try:
+        meta = json.loads(track.get("metadata_json") or "{}")
+    except (TypeError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    value = meta.get("lane_hint")
+    return value if value in _VALID_LANE_HINTS else _LANE_HINT_DEFAULT
+
+
+def _metadata_json_with_lane_hint(existing_metadata_json: Optional[str], lane_hint: str) -> str:
+    """Return metadata_json with lane_hint set, preserving any other keys."""
+    try:
+        meta = json.loads(existing_metadata_json or "{}")
+    except (TypeError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["lane_hint"] = lane_hint
+    return json.dumps(meta, sort_keys=True)
+
+
+def _snapshot_lane_hints(state_dir: Path, project_id: str) -> dict[str, str]:
+    """{track_id: lane_hint} for every track with a non-default lane_hint set."""
+    return {
+        t["track_id"]: hint
+        for t in tracks_lib.list_tracks(state_dir, project_id)
+        if (hint := _lane_hint_of(t)) != _LANE_HINT_DEFAULT
+    }
+
+
+def _restore_lane_hints(state_dir: Path, project_id: str, snapshot: dict[str, str]) -> None:
+    """Re-apply lane_hint after `seeder.seed(apply=True)` runs.
+
+    The ROADMAP seeder (seed_tracks_from_roadmap.py) owns milestone/roadmap_status/
+    risk_class/pr_queue inside metadata_json and rebuilds that blob wholesale on
+    every authored-field change; it has no notion of lane_hint (a planning_cli-owned
+    extension of the same column), so syncing a track that also has other authored
+    drift would otherwise silently drop lane_hint back to 'unset'. Restoring it here
+    — the CLI layer that orchestrates the seeder call — keeps the seeder itself
+    unaware of lane_hint, at the cost of the sync report occasionally listing a
+    track as "updated" for a metadata-only round-trip even when no ROADMAP-authored
+    field actually changed.
+    """
+    for track_id, hint in snapshot.items():
+        track = tracks_lib.get_track(state_dir, track_id, project_id)
+        if track is None:
+            continue
+        if _lane_hint_of(track) == hint:
+            continue
+        new_metadata_json = _metadata_json_with_lane_hint(track.get("metadata_json"), hint)
+        tracks_lib.update_authored_fields(
+            state_dir, track_id, project_id, metadata_json=new_metadata_json,
+        )
 
 
 def cmd_objective_list(args: argparse.Namespace) -> int:
@@ -225,6 +298,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
         out = dict(track)
         out["depends_on"] = deps
         out["open_items"] = open_items
+        out["lane_hint"] = _lane_hint_of(track)
         print(json.dumps(out, indent=2, default=str))
         return 0
 
@@ -233,6 +307,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  phase    : {track['phase']}")
     print(f"  horizon  : {track.get('horizon') or '(unscheduled)'}")
     print(f"  priority : {track.get('priority') or '-'}")
+    print(f"  lane_hint: {_lane_hint_of(track)}")
     print(f"  next_up  : {bool(track.get('next_up'))}")
     print(f"  pr_ref   : {track.get('pr_ref') or '-'}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
@@ -263,7 +338,13 @@ def cmd_objective_sync(args: argparse.Namespace) -> int:
         return 1
 
     # Pure reuse: the seeder owns all projection logic. Dry-run writes nothing.
+    # Snapshot/restore lane_hint around the call: the seeder rebuilds
+    # metadata_json wholesale and has no notion of lane_hint (see
+    # _restore_lane_hints for why this lives here rather than in the seeder).
+    lane_hints_before = _snapshot_lane_hints(state_dir, project_id) if args.apply else {}
     report = seeder.seed(state_dir, roadmap_path, project_id, apply=args.apply)
+    if args.apply and lane_hints_before:
+        _restore_lane_hints(state_dir, project_id, lane_hints_before)
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -1472,6 +1553,8 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
     promotes (see cmd_deliverable_promote).
     """
     state_dir = _resolve_state_dir(args.state_dir)
+    lane_hint = getattr(args, "lane_hint", None)
+    metadata_json = json.dumps({"lane_hint": lane_hint}) if lane_hint else None
     try:
         track = tracks_lib.create_track(
             state_dir,
@@ -1482,6 +1565,7 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
             phase="queued",
             horizon=args.horizon,
             priority=args.priority,
+            metadata_json=metadata_json,
         )
     except Exception as exc:  # duplicate id, invalid horizon/priority, etc.
         print(f"objective add failed: {exc}", file=sys.stderr)
@@ -1500,6 +1584,42 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
 
     gate_note = " — plan-gated (blocked until the plan panel passes)" if plan_gated else ""
     print(f"Added objective {tid} (phase=queued, horizon={args.horizon or 'unset'}){gate_note}")
+    return 0
+
+
+def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
+    """Set the lane_hint (governed|direct|unset) on an existing track.
+
+    Descriptive only: this never changes dispatch routing — the door still
+    decides the lane. It exists so a cold-start T0 can read how a track is
+    MEANT to be dispatched without relying on judgment carried over from a
+    prior session. Writes via tracks_lib.update_authored_fields, the existing
+    single-writer path for track-authored fields.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective set-lane-hint: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    new_metadata_json = _metadata_json_with_lane_hint(track.get("metadata_json"), args.lane_hint)
+    try:
+        tracks_lib.update_authored_fields(
+            state_dir, track_id, project_id,
+            metadata_json=new_metadata_json,
+        )
+    except Exception as exc:
+        print(f"objective set-lane-hint failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Set lane_hint={args.lane_hint} on {track_id}")
     return 0
 
 
@@ -2143,7 +2263,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("goal_state", help="what 'done' looks like for this track")
     p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
     p_add.add_argument("--priority", default=None)
+    p_add.add_argument(
+        "--lane-hint", choices=sorted(_VALID_LANE_HINTS), default=None, dest="lane_hint",
+        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
+    )
     p_add.set_defaults(func=cmd_objective_add)
+
+    p_lane_hint = obj_sub.add_parser(
+        "set-lane-hint",
+        help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
+    )
+    _common(p_lane_hint)
+    p_lane_hint.add_argument("track_id")
+    p_lane_hint.add_argument("lane_hint", choices=sorted(_VALID_LANE_HINTS))
+    p_lane_hint.set_defaults(func=cmd_objective_set_lane_hint)
 
     p_rec_review = obj_sub.add_parser(
         "reconcile-review",
