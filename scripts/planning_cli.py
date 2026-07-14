@@ -1192,11 +1192,90 @@ def cmd_objective_reopen(args: argparse.Namespace) -> int:
     return 0
 
 
+class _RoadmapAnchorRefused(Exception):
+    """Raised when the auto-seed roadmap cannot be unambiguously anchored to
+    the current project. Caught by maybe_auto_seed(), which refuses to seed
+    rather than run seed(apply=True) against an unanchored ROADMAP.yaml."""
+
+
+def _looks_like_shipped_example_roadmap(data: Any) -> bool:
+    """True when parsed ROADMAP YAML content is the shipped illustrative
+    template (`launch_state.status: example`) rather than a project's own
+    authored roadmap. See ROADMAP.yaml's own header: "This shipped file is an
+    ILLUSTRATIVE EXAMPLE of the roadmap format."
+    """
+    if not isinstance(data, dict):
+        return False
+    launch_state = data.get("launch_state")
+    return isinstance(launch_state, dict) and launch_state.get("status") == "example"
+
+
+def _resolve_anchored_roadmap_path(
+    explicit: str | None,
+    env: dict,
+    project_root: str | Path | None = None,
+) -> Path:
+    """Resolve ROADMAP.yaml for the auto-seed hook, anchored on PROJECT ROOT.
+
+    Precedence: explicit path > VNX_ROADMAP_PATH env override > a default
+    anchored on the resolved project root. Callers of an explicit path/env
+    override are trusted (same contract as `_resolve_roadmap_path`) and are
+    not passed through the anchor checks below.
+
+    The default branch resolves the project root via the standard resolver
+    (`project_root.resolve_project_root`, CWD-git-root based -- deliberately
+    NOT passed `planning_cli.py`'s own `__file__`, since in a central install
+    that file lives inside the shared VNX_HOME git clone and git-resolving
+    from there would collapse the root onto the keystone code tree instead of
+    the project actually being seeded). Raises _RoadmapAnchorRefused when:
+      - the project root cannot be resolved unambiguously (not a git repo,
+        no VNX_CANONICAL_ROOT fallback);
+      - the resulting roadmap path would fall outside the resolved project
+        root; or
+      - the roadmap content matches the shipped illustrative template.
+    """
+    if explicit:
+        return Path(explicit)
+
+    env_override = env.get("VNX_ROADMAP_PATH", "")
+    if env_override:
+        return Path(env_override)
+
+    if project_root is not None:
+        root = Path(project_root).resolve()
+    else:
+        from project_root import resolve_project_root
+        try:
+            root = resolve_project_root()
+        except RuntimeError as exc:
+            raise _RoadmapAnchorRefused(f"cannot resolve project root: {exc}") from exc
+
+    candidate = (root / "ROADMAP.yaml").resolve()
+    if not candidate.is_relative_to(root):
+        raise _RoadmapAnchorRefused(
+            f"resolved roadmap path escapes project root {root}: {candidate}"
+        )
+
+    if candidate.exists():
+        import yaml
+        try:
+            data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            data = {}
+        if _looks_like_shipped_example_roadmap(data):
+            raise _RoadmapAnchorRefused(
+                f"resolved roadmap is the shipped illustrative example template: {candidate}"
+            )
+
+    return candidate
+
+
 def maybe_auto_seed(
     state_dir: str | Path | None = None,
     roadmap_path: str | Path | None = None,
     project_id: Optional[str] = None,
     env: Optional[dict] = None,
+    project_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Flag-gated prelude hook: idempotent `objective sync --apply` when opted in.
 
@@ -1204,15 +1283,28 @@ def maybe_auto_seed(
     (VNX_AUTO_SEED_TRACKS unset/!=1) is a no-op. When set, projects ROADMAP onto
     tracks idempotently. NEVER writes ROADMAP.yaml; NEVER promotes deliverables.
 
-    Returns a result dict: {"skipped": True, ...} when disabled, else
-    {"skipped": False, "summary": {...}}.
+    The roadmap is resolved anchored on the project root (see
+    `_resolve_anchored_roadmap_path`); when that anchor is ambiguous or would
+    resolve to the shipped example template, the hook REFUSES to seed instead
+    of running `seed(apply=True)` against the wrong roadmap.
+
+    Returns a result dict: {"skipped": True, ...} when disabled or refused,
+    else {"skipped": False, "summary": {...}}.
     """
     env = env if env is not None else os.environ
     if env.get("VNX_AUTO_SEED_TRACKS", "") != "1":
         return {"skipped": True, "reason": "VNX_AUTO_SEED_TRACKS not set"}
 
     s_dir = _resolve_state_dir(str(state_dir) if state_dir else env.get("VNX_STATE_DIR", ""))
-    r_path = _resolve_roadmap_path(str(roadmap_path) if roadmap_path else None)
+    try:
+        r_path = _resolve_anchored_roadmap_path(
+            str(roadmap_path) if roadmap_path else None, env, project_root=project_root,
+        )
+    except _RoadmapAnchorRefused as exc:
+        reason = f"refusing to seed: {exc}"
+        logger.warning("maybe_auto_seed: %s", reason)
+        return {"skipped": True, "reason": reason}
+
     pid = project_id or env.get("VNX_PROJECT_ID", "vnx-dev")
 
     if not Path(r_path).exists():

@@ -219,6 +219,152 @@ def test_auto_seed_enabled_calls_seeder_with_apply_true(empty_state, monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# Part 2b — auto-seed roadmap anchoring (the apply=True landmine)
+# ---------------------------------------------------------------------------
+
+def _seed_spy(monkeypatch, calls):
+    def _spy(s_dir, r_path, project_id, *, apply=False):
+        calls.append({"apply": apply, "project_id": project_id, "r_path": str(r_path)})
+        return {"summary": {"created": 0, "updated": 0, "unchanged": 0,
+                            "phase_drift": 0, "orphan": 0}}
+    monkeypatch.setattr(planning_cli.seeder, "seed", _spy)
+
+
+def test_auto_seed_reaches_apply_when_anchored_on_explicit_project_root(tmp_path):
+    """Correctly-anchored: an explicit project_root pointing at a real,
+    project-authored ROADMAP.yaml still reaches the seed/apply path."""
+    project_root = tmp_path / "my-project"
+    project_root.mkdir()
+    (project_root / "ROADMAP.yaml").write_text(SAMPLE_ROADMAP, encoding="utf-8")
+    state_dir = tmp_path / "state"
+    _init_schema(state_dir)
+
+    result = planning_cli.maybe_auto_seed(
+        state_dir=state_dir, project_id="vnx-dev",
+        env={"VNX_AUTO_SEED_TRACKS": "1"}, project_root=project_root,
+    )
+    assert result["skipped"] is False
+    assert result["summary"]["created"] == 3
+    seeded = {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")}
+    assert seeded == {"feat-a", "feat-b", "feat-c"}
+
+
+def test_auto_seed_refuses_when_project_root_unresolvable(tmp_path, monkeypatch, caplog):
+    """Unanchored: no explicit roadmap/project_root, CWD is not a git repo, and
+    no VNX_CANONICAL_ROOT fallback -- the hook must refuse rather than guess,
+    and must never call seed(apply=True)."""
+    state_dir = tmp_path / "state"
+    _init_schema(state_dir)
+    cwd = tmp_path / "not-a-repo"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("VNX_CANONICAL_ROOT", raising=False)
+
+    calls: list[dict] = []
+    _seed_spy(monkeypatch, calls)
+
+    with caplog.at_level("WARNING"):
+        result = planning_cli.maybe_auto_seed(
+            state_dir=state_dir, project_id="vnx-dev",
+            env={"VNX_AUTO_SEED_TRACKS": "1"},
+        )
+
+    assert result["skipped"] is True
+    assert "cannot resolve project root" in result["reason"]
+    assert calls == []  # seed(apply=True) never invoked
+    assert any("refusing to seed" in rec.message for rec in caplog.records)
+
+
+def test_auto_seed_refuses_on_shipped_example_template(tmp_path, monkeypatch, caplog):
+    """Unanchored: the resolved ROADMAP.yaml is the shipped illustrative
+    example template (launch_state.status: example) -- refuse instead of
+    projecting example-feature onto the tracks DB."""
+    project_root = tmp_path / "central-keystone"
+    project_root.mkdir()
+    (project_root / "ROADMAP.yaml").write_text(
+        "roadmap_id: vnx-roadmap\n"
+        "title: VNX Roadmap (example)\n"
+        "launch_state:\n"
+        "  status: example\n"
+        "features:\n"
+        "  - feature_id: example-feature\n"
+        "    title: Example feature\n"
+        "    status: planned\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    _init_schema(state_dir)
+
+    calls: list[dict] = []
+    _seed_spy(monkeypatch, calls)
+
+    with caplog.at_level("WARNING"):
+        result = planning_cli.maybe_auto_seed(
+            state_dir=state_dir, project_id="vnx-dev",
+            env={"VNX_AUTO_SEED_TRACKS": "1"}, project_root=project_root,
+        )
+
+    assert result["skipped"] is True
+    assert "shipped illustrative example template" in result["reason"]
+    assert calls == []
+    assert any("refusing to seed" in rec.message for rec in caplog.records)
+
+
+def test_auto_seed_refuses_when_roadmap_symlink_escapes_project_root(tmp_path, monkeypatch, caplog):
+    """Unanchored: ROADMAP.yaml inside the resolved project root is a symlink
+    that escapes to a file outside the project -- refuse rather than seed off
+    a roadmap that isn't really the project's own."""
+    outside = tmp_path / "outside" / "ROADMAP.yaml"
+    outside.parent.mkdir()
+    outside.write_text(SAMPLE_ROADMAP, encoding="utf-8")
+
+    project_root = tmp_path / "my-project"
+    project_root.mkdir()
+    (project_root / "ROADMAP.yaml").symlink_to(outside)
+    state_dir = tmp_path / "state"
+    _init_schema(state_dir)
+
+    calls: list[dict] = []
+    _seed_spy(monkeypatch, calls)
+
+    with caplog.at_level("WARNING"):
+        result = planning_cli.maybe_auto_seed(
+            state_dir=state_dir, project_id="vnx-dev",
+            env={"VNX_AUTO_SEED_TRACKS": "1"}, project_root=project_root,
+        )
+
+    assert result["skipped"] is True
+    assert "escapes project root" in result["reason"]
+    assert calls == []
+    assert any("refusing to seed" in rec.message for rec in caplog.records)
+
+
+def test_auto_seed_anchors_via_cwd_git_root_when_no_explicit_project_root(tmp_path, monkeypatch):
+    """Correctly-anchored default path: no explicit roadmap_path/project_root
+    is given, so the hook resolves the project root from CWD's git top-level
+    (the standard project_root.resolve_project_root() resolver) and reaches
+    the seed/apply path against that project's own ROADMAP.yaml."""
+    import subprocess
+
+    project_root = tmp_path / "git-project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / "ROADMAP.yaml").write_text(SAMPLE_ROADMAP, encoding="utf-8")
+    state_dir = tmp_path / "state"
+    _init_schema(state_dir)
+    monkeypatch.chdir(project_root)
+
+    result = planning_cli.maybe_auto_seed(
+        state_dir=state_dir, project_id="vnx-dev",
+        env={"VNX_AUTO_SEED_TRACKS": "1"},
+    )
+    assert result["skipped"] is False
+    assert result["summary"]["created"] == 3
+    seeded = {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")}
+    assert seeded == {"feat-a", "feat-b", "feat-c"}
+
+
+# ---------------------------------------------------------------------------
 # Part 3 — advisory drift-gate
 # ---------------------------------------------------------------------------
 
