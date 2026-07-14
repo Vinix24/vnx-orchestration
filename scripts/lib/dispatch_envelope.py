@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -395,6 +396,61 @@ def _receipt_exists_for_dispatch(receipt_path: Path, dispatch_id: str) -> bool:
     return False
 
 
+def _resolve_fix_forward_diff(
+    spec: EnvelopeSpec,
+    own_diff: Optional[str],
+    *,
+    base_ref: str = "origin/main",
+    repo: Optional[Path] = None,
+) -> Optional[str]:
+    """Fall back to the PUSHED PR branch's diff when the dispatch's own worktree/branch diff
+    reads empty and the dispatch targets an EXISTING PR (``spec.pr_id`` set) — a fix-forward
+    dispatch.
+
+    A fix-forward dispatch pushes its commit onto that PR's branch (per its instruction), not
+    onto its own ``dispatch/<id>`` worktree branch — the own-worktree diff then reads empty even
+    though real work landed and was pushed. T0's rule is "verify the pushed branch, not the
+    report" (phantom_guard module docstring). ``spec.pr_id`` is the dispatch's existing-PR
+    identifier — already carried on EnvelopeSpec, populated from ``--pr-id`` — resolved to its
+    head branch via ``gh pr view``.
+
+    ``repo`` is the git checkout to resolve/fetch/diff against — the orchestrator's own repo
+    root (the ephemeral dispatch worktree is gone or going away by the time GOVERN runs), not
+    the worker's torn-down worktree. Defaults to ``project_root.resolve_project_root``.
+
+    No-op for a normal dispatch: a non-empty ``own_diff`` short-circuits before any gh/git call,
+    so the own-worktree diff stays the sole source there (unchanged behavior). Best-effort: any
+    resolution failure (no gh, bad pr_id, PR not pushed yet) falls back to ``own_diff``
+    unchanged — a genuinely empty dispatch (no own diff, no resolvable/non-empty pushed branch)
+    still reads empty here, so phantom_guard() still catches it.
+    """
+    if (own_diff or "").strip():
+        return own_diff
+    pr_id = (spec.pr_id or "").strip()
+    if not pr_id:
+        return own_diff
+    try:
+        from phantom_guard import compute_branch_diff, resolve_pr_head_branch  # noqa: PLC0415
+        if repo is None:
+            from project_root import resolve_project_root  # noqa: PLC0415
+            repo = resolve_project_root(__file__)
+        branch = resolve_pr_head_branch(pr_id, repo=repo)
+        if not branch:
+            return own_diff
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=str(repo), capture_output=True, text=True, timeout=30, check=False,
+        )
+        pushed_diff = compute_branch_diff(f"origin/{branch}", base_ref=base_ref, repo=repo)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never raise, never false-reject on a resolution error
+        logger.warning(
+            "envelope: fix-forward diff resolution failed dispatch=%s pr_id=%s: %s",
+            spec.dispatch_id, pr_id, exc,
+        )
+        return own_diff
+    return pushed_diff if pushed_diff.strip() else own_diff
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -402,6 +458,7 @@ def _govern(
     end_time: datetime,
     phantom_diff: Optional[str] = None,
     integrity: Optional[Any] = None,
+    base_ref: str = "origin/main",
 ) -> tuple:
     """Emit unified_report then dispatch receipt. Returns (report_path, receipt_path).
 
@@ -518,6 +575,10 @@ def _govern(
     try:
         from phantom_guard import record_phantom_if_any  # noqa: PLC0415
         _tok = adapter_result.token_usage or {}
+        # Fix-forward: an empty own-worktree/dispatch-branch diff is falsely read as phantom when
+        # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
+        # instead — resolve the pushed branch and use its diff when the own diff is empty.
+        _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
         record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
             role=spec.role,
@@ -525,7 +586,7 @@ def _govern(
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
             worktree_path=None,
             base_sha=None,
-            worktree_diff=phantom_diff,  # F1: pre-captured before the worktree teardown
+            worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
             state_dir=spec.state_dir,
         )
@@ -1154,7 +1215,8 @@ def run_envelope_plan(
         remove_dispatch_worktree(plan.dispatch_id)
 
     report_path, receipt_path = _govern(
-        enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity
+        enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
+        base_ref=plan.base_ref or "origin/main",
     )
 
     return EnvelopeResult(
