@@ -203,47 +203,86 @@ def _parse_json_loose(body: str) -> Optional[Any]:
     return None
 
 
+def _iter_fence_bodies(report_text: str) -> List[str]:
+    """Return the body text of every ``vnx-plan-verdict`` fence, in document order.
+
+    Each fence's body is bounded by the START of the NEXT ``_OPEN_FENCE`` occurrence
+    (or end-of-text for the last fence) before the closing-``` search runs — so when a
+    report contains more than one fence, an earlier fence's body slice can never bleed
+    into a later fence (a naive ``rfind`` bound at end-of-text would pick up the LAST
+    fence's closing marker for every earlier fence too).
+    """
+    opens: List[int] = []
+    search_from = 0
+    while True:
+        idx = report_text.find(_OPEN_FENCE, search_from)
+        if idx == -1:
+            break
+        opens.append(idx)
+        search_from = idx + len(_OPEN_FENCE)
+    bodies = []
+    for i, idx in enumerate(opens):
+        bound = opens[i + 1] if i + 1 < len(opens) else len(report_text)
+        chunk = report_text[idx + len(_OPEN_FENCE):bound]
+        close_idx = chunk.rfind("```")
+        if close_idx != -1:
+            chunk = chunk[:close_idx]
+        bodies.append(chunk)
+    return bodies
+
+
 def parse_verdict(report_text: str) -> Dict[str, Any]:
-    """Extract the LAST ``vnx-plan-verdict`` block from a panelist report.
+    """Extract a ``vnx-plan-verdict`` block from a panelist report.
+
+    Scans every ``vnx-plan-verdict`` fence from LAST to FIRST and returns the first one
+    that parses into a valid verdict object. This matters when a panelist's final fence
+    is the ECHOED verdict-contract EXAMPLE (containing the non-JSON union
+    ``"verdict": "pass" | "revise" | "block"``) rather than its actual verdict: that
+    fence is unparseable by construction, so without scanning backward past it a real
+    verdict emitted earlier in the report would be lost to a spurious abstain.
 
     Tolerant of common near-miss formatting via ``_parse_json_loose`` — a trailing comma, prose
     bleeding in around the JSON object, or a nested ` ```json ` code fence wrapping the object —
     so a slightly-malformed body no longer forces a spurious abstain (the codex/glm verdict-JSON
-    flake). The exact ``vnx-plan-verdict`` fence label is still required verbatim: that is the
-    same marker ``_sanitize_doc`` neutralizes in untrusted plan-doc input, so this deliberately
-    does NOT fall back to a bare/relabeled ```json fence — doing so would reopen the verdict-
-    spoofing hole (kimi finding 4) via a doc that gets echoed into a panelist's own report.
+    flake). The exact ``vnx-plan-verdict`` fence label is still required verbatim for EVERY
+    candidate fence: that is the same marker ``_sanitize_doc`` neutralizes in untrusted plan-doc
+    input, so this deliberately never falls back to a bare/relabeled ```json fence — doing so
+    would reopen the verdict-spoofing hole (kimi finding 4) via a doc that gets echoed into a
+    panelist's own report.
 
-    Fail-safe by design: anything still unparseable after repair becomes ``revise`` with
+    Fail-safe by design: if NO fence parses into a valid verdict, the result is ``revise`` with
     ``parse_error=True`` so a missing/garbled verdict can never silently PASS.
     """
     empty = {"verdict": "revise", "blocking_findings": [], "rationale": "", "parse_error": True}
     if not report_text:
         return {**empty, "rationale": "empty report"}
-    idx = report_text.rfind(_OPEN_FENCE)
-    if idx == -1:
+    bodies = _iter_fence_bodies(report_text)
+    if not bodies:
         return {**empty, "rationale": "no verdict block found"}
-    body = report_text[idx + len(_OPEN_FENCE):]
-    close_idx = body.rfind("```")
-    if close_idx != -1:
-        body = body[:close_idx]
-    data = _parse_json_loose(body)
-    if data is None:
-        return {**empty, "rationale": "verdict block is not valid JSON"}
-    if not isinstance(data, dict):
-        return {**empty, "rationale": "verdict block is not a JSON object"}
-    verdict = str(data.get("verdict", "")).strip().lower()
-    if verdict not in _VALID_VERDICTS:
-        return {**empty, "rationale": f"unknown verdict {verdict!r}"}
-    findings = data.get("blocking_findings") or []
-    if not isinstance(findings, list):
-        findings = [str(findings)]
-    return {
-        "verdict": verdict,
-        "blocking_findings": [str(x) for x in findings],
-        "rationale": str(data.get("rationale", "")),
-        "parse_error": False,
-    }
+
+    last_reason = "verdict block is not valid JSON"
+    for body in reversed(bodies):
+        data = _parse_json_loose(body)
+        if data is None:
+            last_reason = "verdict block is not valid JSON"
+            continue
+        if not isinstance(data, dict):
+            last_reason = "verdict block is not a JSON object"
+            continue
+        verdict = str(data.get("verdict", "")).strip().lower()
+        if verdict not in _VALID_VERDICTS:
+            last_reason = f"unknown verdict {verdict!r}"
+            continue
+        findings = data.get("blocking_findings") or []
+        if not isinstance(findings, list):
+            findings = [str(findings)]
+        return {
+            "verdict": verdict,
+            "blocking_findings": [str(x) for x in findings],
+            "rationale": str(data.get("rationale", "")),
+            "parse_error": False,
+        }
+    return {**empty, "rationale": last_reason}
 
 
 @dataclass
@@ -397,6 +436,15 @@ def _make_default_dispatcher(
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _CLAUDE_PROVIDERS:
+                # Scoped-spawn fix (2026-07-14): --working-tree-only's commit/push deny
+                # only binds in the scoped detached spawn; tmux_interactive_dispatch.dispatch()
+                # fails CLOSED otherwise (its D2.2 scoping precondition), refusing the dispatch
+                # before any report is written -> silent NO-VERDICT for this seat. Opt this
+                # subprocess's env into the scoped posture so the --working-tree-only flag this
+                # lane already passes is actually honored. Provider (kimi/glm/deepseek) lanes
+                # below are untouched — this only applies to the claude/tmux branch.
+                env["VNX_WORKER_SCOPED"] = "1"
+
                 # BUG-2 FIX (file-ref): the instruction already has the full plan doc inlined
                 # by run_panel's build_plan_review_instruction call. For the claude/tmux lane
                 # we replace it with a compact file-ref instruction so the ~50k-char body never
@@ -468,9 +516,13 @@ def _make_default_dispatcher(
             )
             report = _read_report(base, dispatch_id, proc.stderr)
             if report is None:
+                # tmux_interactive_dispatch's CLI prints the InteractiveDispatchResult (incl.
+                # the actionable `failure_reason`) as JSON to STDOUT, not stderr -- surfacing
+                # only stderr here previously masked the real cause (e.g. the D2.2 scoping
+                # refusal) behind an unrelated last-stderr-line red herring.
                 raise RuntimeError(
                     f"no report for {dispatch_id} (rc={proc.returncode}): "
-                    f"{(proc.stderr or '')[-400:]}"
+                    f"stdout: {(proc.stdout or '')[-800:]} | stderr: {(proc.stderr or '')[-400:]}"
                 )
             return report
         finally:

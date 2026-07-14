@@ -142,6 +142,43 @@ def test_parse_verdict_genuinely_absent_block_still_failsafe_revise():
     assert out["parse_error"] is True
 
 
+def test_parse_verdict_echoed_contract_example_as_last_fence_falls_back_to_earlier_real_verdict():
+    # A panelist's LAST fence is the echoed verdict-CONTRACT EXAMPLE (the literal union
+    # "pass" | "revise" | "block", not valid JSON) rather than its actual verdict. An
+    # earlier fence in the same report holds the real verdict. The scan must walk
+    # backward past the unparseable echoed fence and recover the earlier real one --
+    # not abstain despite a real verdict having been emitted.
+    real = _report('{"verdict": "pass", "blocking_findings": [], "rationale": "solid plan"}')
+    echoed_contract = (
+        "\n\nFor reference, the contract says:\n\n"
+        f"```{pgp.VERDICT_FENCE}\n"
+        "{\n"
+        '  "verdict": "pass" | "revise" | "block",\n'
+        '  "blocking_findings": ["short concrete issue", "..."],\n'
+        '  "rationale": "one or two sentences"\n'
+        "}\n"
+        "```\n"
+    )
+    out = pgp.parse_verdict(real + echoed_contract)
+    assert out["verdict"] == "pass"
+    assert out["parse_error"] is False
+    assert out["rationale"] == "solid plan"
+
+
+def test_parse_verdict_all_fences_unparseable_still_failsafe_revise():
+    # If EVERY fence (not just the last) fails to parse into a valid verdict, the
+    # fail-safe still applies -- there is no earlier real verdict to fall back to.
+    text = (
+        f"```{pgp.VERDICT_FENCE}\nnot json at all\n```\n"
+        f"```{pgp.VERDICT_FENCE}\n"
+        '{"verdict": "pass" | "revise" | "block"}\n'
+        "```\n"
+    )
+    out = pgp.parse_verdict(text)
+    assert out["verdict"] == "revise"
+    assert out["parse_error"] is True
+
+
 # --------------------------------------------------------------------------
 # apply_panel_rule
 # --------------------------------------------------------------------------
@@ -842,6 +879,141 @@ def test_claude_lane_dispatcher_writes_temp_file_and_cleans_up(tmp_path):
     # The temp file must have been cleaned up after the subprocess returned.
     for p in seen_tmp_paths:
         assert not os.path.exists(p), f"temp doc file not cleaned up: {p}"
+
+
+# --------------------------------------------------------------------------
+# scoped-spawn fix (2026-07-14): tmux_interactive_dispatch.dispatch()'s D2.2 scoping
+# precondition (tmux_interactive_dispatch.py, "D2.2 scoping precondition" -- fail-closed:
+# a working_tree_only dispatch is refused unless the env carries VNX_WORKER_SCOPED=1 or
+# VNX_ENFORCE_WORKER_PERMISSIONS=1) is deterministic and already has direct test coverage
+# in tests/test_working_tree_only.py (test_default_env_working_tree_only_is_rejected /
+# test_scoped_opt_in_working_tree_only_is_accepted_by_precondition) -- not duplicated here.
+# What's new in THIS module: the claude/tmux-lane subprocess env plan_gate_panel builds
+# must actually set the flag so that precondition is satisfied instead of tripping it.
+# --------------------------------------------------------------------------
+
+def test_claude_lane_dispatcher_sets_scoped_spawn_env(tmp_path, monkeypatch):
+    """The claude/tmux-lane subprocess env must carry VNX_WORKER_SCOPED=1.
+
+    Without it, tmux_interactive_dispatch.dispatch()'s D2.2 scoping precondition
+    refuses every --working-tree-only dispatch this lane sends (working_tree_only
+    requires a scoped detached spawn) before any report is written -- the opus/claude
+    seat's silent NO-VERDICT root cause. The base env must NOT already carry the flag,
+    so a pass here proves the dispatcher sets it rather than an ambient leak.
+    """
+    monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    seen_envs: list = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    authored_report = _make_report_with_fence("pass")
+    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(_pgp, "_read_report", return_value=authored_report):
+            pgp.run_panel(
+                doc,
+                track_id="feat-scoped",
+                project_id="p1",
+                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+                data_dir=str(tmp_path),
+            )
+
+    assert len(seen_envs) == 1
+    assert seen_envs[0] is not None
+    assert seen_envs[0].get("VNX_WORKER_SCOPED") == "1", (
+        "claude/tmux-lane subprocess env must set VNX_WORKER_SCOPED=1 so the "
+        "--working-tree-only D2.2 fail-closed precondition is satisfied"
+    )
+
+
+def test_provider_lane_dispatcher_does_not_set_scoped_spawn_env(tmp_path, monkeypatch):
+    """The scoped-spawn env fix is claude/tmux-lane-only.
+
+    kimi/glm/deepseek route through provider_dispatch.py, which has no
+    --working-tree-only concept; their subprocess env must be left untouched.
+    """
+    monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    seen_envs: list = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    authored_report = _make_report_with_fence("pass")
+    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(_pgp, "_read_report", return_value=authored_report):
+            pgp.run_panel(
+                doc,
+                track_id="feat-provider-scope",
+                project_id="p1",
+                panel=[{"label": "kimi", "provider": "kimi", "model_arg": "kimi-k2-7-code"}],
+                data_dir=str(tmp_path),
+            )
+
+    assert len(seen_envs) == 1
+    assert seen_envs[0] is not None
+    assert "VNX_WORKER_SCOPED" not in seen_envs[0]
+
+
+def test_claude_lane_no_report_error_surfaces_stdout_failure_reason(tmp_path):
+    """The 'no report' RuntimeError must include proc.stdout, not just stderr.
+
+    tmux_interactive_dispatch's CLI prints the InteractiveDispatchResult (incl. the
+    actionable failure_reason, e.g. the D2.2 scoping refusal) as JSON to STDOUT. The
+    previous stderr-only message masked the real cause behind an unrelated red herring
+    (a stray 'staging_validator: unstaged dispatch override' stderr line) for a full day.
+    """
+    import json
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        import subprocess as _sp
+        stdout = json.dumps({
+            "success": False,
+            "dispatch_id": "whatever",
+            "failure_reason": "working_tree_only requires a scoped detached spawn",
+        })
+        return _sp.CompletedProcess(
+            cmd, returncode=1, stdout=stdout,
+            stderr="staging_validator: unstaged dispatch override",
+        )
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(_pgp, "_read_report", return_value=None):
+            out = pgp.run_panel(
+                doc,
+                track_id="feat-diag",
+                project_id="p1",
+                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+                data_dir=str(tmp_path),
+            )
+
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["dispatched"] is False
+    assert "working_tree_only requires a scoped detached spawn" in opus["error"], (
+        "the real failure_reason (printed to stdout by tmux_interactive_dispatch's CLI) "
+        "must be surfaced, not swallowed behind a stderr-only error message"
+    )
 
 
 # --------------------------------------------------------------------------
