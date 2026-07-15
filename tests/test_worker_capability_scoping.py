@@ -42,12 +42,24 @@ from worker_permissions import (
     build_claude_scope_args,
     default_code_worker_profile,
     generate_claude_settings,
+    load_permissions,
     resolve_worker_profile,
     worker_scoped_enabled,
 )
 
 CODE_WORKER_ESSENTIALS = {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
 SKIP_FLAG = "--dangerously-skip-permissions"
+
+# OI-104: build toolchain a scoped autonomous build worker needs — git, gh,
+# python3, pytest, pip, rm, chmod, mkdir. These are redundant with the bare
+# "Bash" wildcard already in CODE_WORKER_ESSENTIALS, but are explicit,
+# self-documenting, and independently testable coverage of the ops that
+# previously stalled a scoped (VNX_WORKER_SCOPED=1) dispatch on an
+# un-allow-listed-op permission prompt (docs/operations/WORKER_PERMISSIONS.md).
+BUILD_TOOLCHAIN_PATTERNS = {
+    "Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)", "Bash(pytest:*)",
+    "Bash(pip:*)", "Bash(rm:*)", "Bash(chmod:*)", "Bash(mkdir:*)",
+}
 
 
 def _make_alive_process(pid: int = 4242) -> MagicMock:
@@ -500,3 +512,105 @@ class TestClaudeSpawnRoleForwarding:
         assert role_calls[0] is None, (
             f"expected None role for no-role spawn; got {role_calls[0]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. OI-104: scoped-profile allow-list covers the build toolchain
+# ---------------------------------------------------------------------------
+
+_REAL_YAML_PATH = Path(__file__).resolve().parents[1] / ".vnx" / "worker_permissions.yaml"
+_TMUX_DISPATCH_SRC_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "lib" / "tmux_interactive_dispatch.py"
+)
+
+
+class TestBuildToolchainAllowlistCoverage:
+    """A scoped (VNX_WORKER_SCOPED=1 / VNX_ENFORCE_WORKER_PERMISSIONS=1) build
+    worker must not stall on a permission prompt for git/gh/python3/pytest/
+    rm/chmod/mkdir — the build toolchain an autonomous build dispatch uses."""
+
+    def test_default_code_worker_tools_cover_build_toolchain(self):
+        allowed = set(DEFAULT_CODE_WORKER_TOOLS)
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed), (
+            f"missing from DEFAULT_CODE_WORKER_TOOLS: {BUILD_TOOLCHAIN_PATTERNS - allowed}"
+        )
+
+    def test_default_code_worker_profile_scope_args_cover_build_toolchain(self):
+        args = build_claude_scope_args(default_code_worker_profile())
+        allow_idx = args.index("--allowedTools")
+        allowed = set(args[allow_idx + 1].split(","))
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed)
+
+    def test_real_backend_developer_yaml_profile_covers_build_toolchain(self):
+        # Loads the ACTUAL project .vnx/worker_permissions.yaml (not a test
+        # fixture) so this fails if the shipped profile drifts from the fix.
+        assert _REAL_YAML_PATH.exists(), f"expected real yaml at {_REAL_YAML_PATH}"
+        profile = load_permissions("backend-developer", yaml_path=_REAL_YAML_PATH)
+        allowed = set(profile.allowed_tools)
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed), (
+            f"backend-developer profile missing: {BUILD_TOOLCHAIN_PATTERNS - allowed}"
+        )
+        # disallowedTools semantics (denied_tools) must stay intact.
+        assert "WebSearch" in profile.denied_tools
+        assert "WebFetch" in profile.denied_tools
+
+    def test_real_backend_developer_yaml_scope_args_cover_build_toolchain(self):
+        profile = load_permissions("backend-developer", yaml_path=_REAL_YAML_PATH)
+        args = build_claude_scope_args(profile)
+        allow_idx = args.index("--allowedTools")
+        allowed = set(args[allow_idx + 1].split(","))
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed)
+        deny_idx = args.index("--disallowedTools")
+        denied = set(args[deny_idx + 1].split(","))
+        assert {"WebSearch", "WebFetch"}.issubset(denied)
+
+    def test_tmux_detached_spawn_scoped_covers_build_toolchain(self, monkeypatch):
+        # End-to-end: VNX_WORKER_SCOPED=1 + role="backend-developer" resolves
+        # the real project yaml via worker_permissions' sibling-path lookup
+        # (Path(__file__).resolve().parents[2] from scripts/lib/), independent
+        # of ambient VNX_PROJECT_ROOT/PROJECT_ROOT env vars.
+        monkeypatch.delenv("VNX_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("PROJECT_ROOT", raising=False)
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
+        import shlex as _shlex
+        cmd = _default_launch_command(
+            "sonnet", skip_permissions=True, role="backend-developer"
+        )
+        tokens = _shlex.split(cmd)
+        idx = tokens.index("--allowedTools")
+        allowed = set(tokens[idx + 1].split(","))
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed), (
+            f"missing from scoped tmux spawn --allowedTools: {BUILD_TOOLCHAIN_PATTERNS - allowed}"
+        )
+
+    def test_enforcement_flag_also_covers_build_toolchain(self, monkeypatch):
+        # VNX_ENFORCE_WORKER_PERMISSIONS=1 (ADR-012) is the other flag that
+        # opts into the scoped posture; must get the same coverage.
+        monkeypatch.delenv("VNX_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+        monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "1")
+        import shlex as _shlex
+        cmd = _default_launch_command(
+            "sonnet", skip_permissions=True, role="backend-developer"
+        )
+        tokens = _shlex.split(cmd)
+        idx = tokens.index("--allowedTools")
+        allowed = set(tokens[idx + 1].split(","))
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed)
+
+    def test_inline_import_fallback_stays_in_parity_with_default_code_worker_tools(self):
+        # tmux_interactive_dispatch.py defines an inline fallback
+        # _wp_build_claude_scope_args (used only when `import worker_permissions`
+        # fails) with a hardcoded --allowedTools string that must be hand-kept
+        # in parity with DEFAULT_CODE_WORKER_TOOLS. This regression test reads
+        # the source text so drift is caught without simulating an ImportError
+        # at module-load time.
+        source = _TMUX_DISPATCH_SRC_PATH.read_text()
+        start = source.index("def _wp_build_claude_scope_args(profile")
+        end = source.index("def _wp_resolve_worker_profile", start)
+        fallback_body = source[start:end]
+        for pattern in BUILD_TOOLCHAIN_PATTERNS:
+            assert pattern in fallback_body, (
+                f"inline fallback in tmux_interactive_dispatch.py missing {pattern!r}"
+            )

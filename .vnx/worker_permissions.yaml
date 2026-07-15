@@ -22,16 +22,38 @@ _vnx_meta:
 
 profiles:
   backend-developer:
-    allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+    # Build-toolchain coverage (OI-104): bare "Bash" already wildcards every
+    # bash invocation, but these explicit Bash(<cmd>:*) entries self-document
+    # the toolchain a headless build worker needs and give redundant, explicit
+    # coverage independent of how a given claude CLI version interprets a bare
+    # tool-name entry. They do NOT bypass Claude Code's own unconditional
+    # dangerous-rm safety gate (see docs/operations/WORKER_PERMISSIONS.md) —
+    # that gate cannot be satisfied by any allow-list entry.
+    allowed_tools:
+      - Read
+      - Write
+      - Edit
+      - MultiEdit
+      - Bash
+      - Grep
+      - Glob
+      - "Bash(git:*)"
+      - "Bash(gh:*)"
+      - "Bash(python3:*)"
+      - "Bash(pytest:*)"
+      - "Bash(pip:*)"
+      - "Bash(rm:*)"
+      - "Bash(chmod:*)"
+      - "Bash(mkdir:*)"
     denied_tools: [WebSearch, WebFetch]
     bash_allow_patterns:
       - "pytest*"
       - "python3*"
-      - "git add*"
-      - "git commit*"
-      - "git push origin*"
+      - "git*"
+      - "gh*"
       - "pip install*"
       - "bash -n*"
+      - "chmod*"
     bash_deny_patterns:
       - "rm -rf*"
       - "git reset --hard*"

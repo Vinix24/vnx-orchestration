@@ -41,7 +41,16 @@ logger = logging.getLogger(__name__)
 # Essential tools a headless code worker needs to read, write, and commit code.
 # Used as the fallback allow-list when no role-specific profile is available so
 # capability scoping never strips a worker of its ability to do backend work.
-DEFAULT_CODE_WORKER_TOOLS = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Grep", "Glob"]
+#
+# The explicit Bash(<cmd>:*) entries (OI-104) self-document and redundantly
+# cover the build toolchain (git/gh/python3/pytest/pip/rm/chmod) on top of the
+# bare "Bash" wildcard already above them. Neither form bypasses Claude Code's
+# own unconditional dangerous-rm safety gate — see docs/operations/WORKER_PERMISSIONS.md.
+DEFAULT_CODE_WORKER_TOOLS = [
+    "Read", "Write", "Edit", "MultiEdit", "Bash", "Grep", "Glob",
+    "Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)", "Bash(pytest:*)",
+    "Bash(pip:*)", "Bash(rm:*)", "Bash(chmod:*)", "Bash(mkdir:*)",
+]
 
 # Empty ambient-MCP config string handed to `claude --mcp-config`. Paired with
 # `--strict-mcp-config` this makes a worker reach ZERO MCP servers (no Supabase,
