@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from ndjson_hash_chain import (  # type: ignore[import]
     append_epoch_marker,
     epoch_state,
+    seal_chain_origin,
     verify_chain,
 )
 
@@ -37,6 +38,11 @@ def seal_ledger(path: Path) -> dict:
     - ``action="noop"`` when the ledger is already chaining or absent.
     - ``action="sealed"`` when a marker was appended, with the new ``epoch`` and
       the post-seal ``status`` (should be ``verified-segmented`` or ``verified``).
+
+    ADR-033: also pins the ledger's chain-origin anchor (idempotent — a no-op
+    once an anchor exists). This only happens on the FIRST seal; a later
+    re-seal (opening epoch 2+) leaves the original anchor untouched, since the
+    origin is the ledger's earliest chained point, not its latest.
     """
     if not path.exists() or path.stat().st_size == 0:
         # A fresh/empty ledger needs no seal: the first appended receipt chains
@@ -45,11 +51,13 @@ def seal_ledger(path: Path) -> dict:
 
     max_epoch, chaining_active = epoch_state(path)
     if chaining_active:
+        seal_chain_origin(path)
         return {"ledger": str(path), "action": "noop", "reason": "already chaining", "epoch": max_epoch}
 
     epoch = max_epoch + 1
     marker_hash = append_epoch_marker(path, epoch)
     _ok, _violations, status = verify_chain(path)
+    seal_chain_origin(path)
     return {
         "ledger": str(path),
         "action": "sealed",

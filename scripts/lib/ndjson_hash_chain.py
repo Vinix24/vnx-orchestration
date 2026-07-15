@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import chain_origin_anchor
 
 GENESIS_HASH = "0" * 64  # Sentinel for first entry in chain
 
@@ -173,7 +174,8 @@ def _read_last_hash(path: Path) -> str | None:
 
 
 def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
-    """Verify the hash-chain integrity of an NDJSON ledger (ADR-029 epoch-aware).
+    """Verify the hash-chain integrity of an NDJSON ledger (ADR-029 epoch-aware,
+    ADR-033 origin-anchored).
 
     Returns (is_valid, violations_list, status) where status is one of:
 
@@ -188,22 +190,139 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
     - "broken": a within-epoch prev_hash mismatch, an unchained entry INSIDE a
       chained epoch, a chained entry with no preceding epoch marker after an
       unchained prefix (a naive VNX_CHAIN_RECEIPTS flip that skipped the seal),
-      an epoch marker whose prev_hash != GENESIS, or unparseable lines.
-      is_valid=False.
+      an epoch marker whose prev_hash != GENESIS, unparseable lines, OR (new,
+      ADR-033) a mismatch against a pinned chain-origin anchor.
 
-    Threat-model note (ADR-029, accepted residual): epoch-0 history and the
-    relocation of an epoch boundary are NOT defended here. A local actor with
-    write access to the ledger can strip a prefix, insert a fresh
-    chain_epoch_start marker, and re-chain the remainder — this verifies. A
-    ledger is only as trustworthy as its first sealed epoch onward; full
-    tamper-evidence against a local attacker needs an EXTERNAL append-only
-    anchor (out of scope for ADR-029 — a future epoch-seal-anchor ADR). This
-    check detects accidental corruption and within-epoch tampering, the
-    governance value ADR-023/ADR-029 target. Flag stays default-off until the
-    fleet-wide seal migration lands.
+    Threat-model note (ADR-029 residual, CLOSED by ADR-033 when an anchor is
+    present): epoch-0 history and the relocation of an epoch boundary are only
+    defended once a chain-origin anchor has been recorded for this ledger (see
+    `chain_origin_anchor.py`, written by `chain_epoch_seal.seal_ledger`). When
+    an anchor exists, this function additionally re-derives the ledger's
+    CURRENT origin (its earliest chain_epoch_start marker, or its first entry
+    for a marker-less genesis chain) and compares it against the pinned
+    anchor; a stripped-and-resealed prefix, a moved epoch boundary, or a
+    first-entry that no longer matches the pinned origin all return "broken".
+    With NO anchor present, this function is byte-for-byte identical to the
+    pre-ADR-033 behavior: a local actor with write access to the ledger can
+    still strip a prefix, insert a fresh chain_epoch_start marker, and
+    re-chain the remainder undetected. Sealing a ledger (which also anchors
+    it) is what turns this protection on. Even with an anchor, a root
+    attacker who edits BOTH the ledger and its sibling anchor file defeats
+    the scheme — full tamper-evidence against that needs an EXTERNAL
+    append-only anchor (out of scope for ADR-033, same accepted residual as
+    ADR-029).
 
     violations_list contains dicts with: line_number and one of
     expected_prev_hash/actual_prev_hash, 'error', or 'note'.
+    """
+    ok, violations, status = _verify_chain_unanchored(path)
+
+    anchor = chain_origin_anchor.read_origin_anchor(path)
+    if anchor is None:
+        return ok, violations, status
+
+    if anchor.get("_corrupt"):
+        return (
+            False,
+            violations + [{
+                "note": "chain-origin anchor file is present but corrupt/unparseable — failing closed",
+            }],
+            "broken",
+        )
+
+    if status == "broken":
+        return ok, violations, status
+
+    if status == "unchained":
+        return (
+            False,
+            violations + [{
+                "note": "chain-origin anchor is pinned but the ledger now shows no chain activity — history erased",
+                "expected_origin_hash": anchor.get("origin_hash"),
+                "expected_origin_line_number": anchor.get("origin_line_number"),
+            }],
+            "broken",
+        )
+
+    current_origin = _compute_current_origin(path, status)
+    if current_origin is None or (
+        current_origin["origin_hash"] != anchor.get("origin_hash")
+        or current_origin["origin_line_number"] != anchor.get("origin_line_number")
+    ):
+        return (
+            False,
+            violations + [{
+                "note": "chain-origin anchor mismatch — ledger prefix was stripped and re-chained (truncate-and-reseal)",
+                "expected_origin_hash": anchor.get("origin_hash"),
+                "actual_origin_hash": (current_origin or {}).get("origin_hash"),
+                "expected_origin_line_number": anchor.get("origin_line_number"),
+                "actual_origin_line_number": (current_origin or {}).get("origin_line_number"),
+            }],
+            "broken",
+        )
+
+    return ok, violations, status
+
+
+def _compute_current_origin(path: Path, status: str) -> dict | None:
+    """Return the ledger's CURRENT chain-origin fingerprint given its already-
+    computed `status`, or None if the ledger has no anchorable origin.
+
+    - "verified-segmented": origin is the EARLIEST chain_epoch_start marker
+      (verify_chain only reaches this status without violations when a marker
+      is present — see the state-machine note in verify_chain).
+    - "verified": origin is the first entry (marker-less genesis chain, no
+      unchained prefix, chained from line 1).
+    - anything else: no origin to compute.
+    """
+    if status not in ("verified", "verified-segmented"):
+        return None
+    for line_no, entry in _iter_parsed(path):
+        is_marker = entry.get("type") == EPOCH_MARKER_TYPE
+        has_prev = "prev_hash" in entry
+        if status == "verified-segmented":
+            if is_marker:
+                try:
+                    epoch = int(entry.get("epoch", 0))
+                except (TypeError, ValueError):
+                    epoch = 0
+                return {
+                    "origin_type": "epoch_marker",
+                    "origin_hash": compute_entry_hash(entry),
+                    "origin_line_number": line_no,
+                    "origin_epoch": epoch,
+                }
+        elif has_prev:
+            return {
+                "origin_type": "genesis_entry",
+                "origin_hash": compute_entry_hash(entry),
+                "origin_line_number": line_no,
+                "origin_epoch": 0,
+            }
+    return None
+
+
+def seal_chain_origin(path: Path) -> dict | None:
+    """Idempotently pin the ledger's current chain origin to its sibling
+    anchor store (see `chain_origin_anchor.py`).
+
+    Returns the anchor record (existing or newly-written), or None if the
+    ledger has no chain activity yet (status "unchained" or "broken" —
+    nothing trustworthy to anchor).
+    """
+    _ok, _violations, status = _verify_chain_unanchored(path)
+    origin = _compute_current_origin(path, status)
+    if origin is None:
+        return None
+    return chain_origin_anchor.write_origin_anchor_if_absent(path, origin)
+
+
+def _verify_chain_unanchored(path: Path) -> tuple[bool, list[dict], str]:
+    """ADR-029 epoch-aware chain verification, with NO chain-origin anchor
+    check. See `verify_chain` (the public, anchor-aware entry point) for the
+    full state-machine description; this is its core walk, factored out so
+    `_compute_current_origin` and `seal_chain_origin` can reuse it without
+    recursing through the anchor overlay.
     """
     entries: list[tuple[int, dict]] = []
     parse_errors: list[dict] = []
