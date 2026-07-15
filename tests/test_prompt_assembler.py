@@ -93,6 +93,70 @@ def test_layer1_always_included(assembler: PromptAssembler, basic_instruction: s
 
 
 # ---------------------------------------------------------------------------
+# test_layer1_scratch_cleanup_is_noninteractive (OI-104)
+# ---------------------------------------------------------------------------
+
+def test_layer1_scratch_cleanup_is_noninteractive(assembler: PromptAssembler, basic_instruction: str) -> None:
+    """base_worker.md's cleanup instruction must never tell a worker to run a
+    literal `rm -rf`/`rmdir` — Claude Code's own dangerous-rm safety check
+    requires interactive approval for that regardless of
+    --dangerously-skip-permissions, which hangs a headless dispatch forever
+    (OI-104). The instruction must point workers at a non-rm alternative
+    (python3 shutil.rmtree) instead.
+    """
+    # Scoped to Layer 1 alone (base_worker.md) — Layer 2 role files legitimately
+    # keep "rm -rf*" in their own (separate, pre-existing) bash_deny_patterns
+    # listing, which would otherwise pollute a whole-context substring check.
+    layer1 = assembler._load_base()
+    assert "temporary files" in layer1.lower()
+    # The instruction must explicitly warn against rm -rf/rmdir (this sentence
+    # itself legitimately contains the substring "rm -rf" as a warning, not a
+    # suggested command)...
+    assert "do not use `rm -rf`" in layer1.lower()
+    # ...and no *standalone suggested* rm -rf/rm -r/rmdir invocation may appear
+    # anywhere else in Layer 1 (only inside that one warning clause).
+    warning_clause = "rm -rf`/`rmdir`"
+    assert layer1.count(warning_clause) == 1
+    scrubbed = layer1.replace(warning_clause, "")
+    assert "rm -rf" not in scrubbed
+    assert "rm -r " not in scrubbed
+    assert "rmdir" not in scrubbed.lower()
+    # The safe non-rm alternative must be present.
+    assert "shutil.rmtree" in layer1
+
+    # The alternative must be a GUARDED delete, not a blind recursive one —
+    # swapping a gated `rm -rf` for an unguarded `shutil.rmtree` is a net
+    # safety regression: a wrong literal path gets silently, recursively
+    # deleted with no confirmation and no error (codex gate finding on PR
+    # #1169). The guidance must resolve the target to a real path and refuse
+    # deletion outside a recognized scope, instead of masking a bad path with
+    # ignore_errors=True.
+    assert "shutil.rmtree(target)" in layer1, (
+        "the recommended rmtree call must take no ignore_errors=True argument "
+        "— that flag would silently mask a wrong-path deletion instead of "
+        "surfacing it"
+    )
+    assert "realpath" in layer1.lower(), (
+        "guard must resolve the target to an absolute real path before deciding"
+    )
+    for keyword in ("home", "tempdir", "tmpdir", "/tmp"):
+        assert keyword in layer1.lower(), f"guard must reference {keyword!r} in its scoping checks"
+    assert "refus" in layer1.lower(), (
+        "guard must refuse (raise/exit without deleting) on an unsafe target, "
+        "not silently proceed"
+    )
+
+    # Sanity: the assembled prompt still includes L1 verbatim (regression guard
+    # against a future refactor silently dropping Layer 1 from the pipe input).
+    prompt = assembler.assemble(
+        dispatch_metadata={"role": "backend-developer", "terminal": "T1"},
+        instruction=basic_instruction,
+    )
+    assert "shutil.rmtree" in prompt.context
+    assert "realpath" in prompt.context.lower()
+
+
+# ---------------------------------------------------------------------------
 # test_unknown_role_falls_back_to_base
 # ---------------------------------------------------------------------------
 

@@ -81,7 +81,14 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
         args = ["--permission-mode", permission_mode]
         if not requires_mcp:
             args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
-        args += ["--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob"]
+        # Kept in parity with worker_permissions.DEFAULT_CODE_WORKER_TOOLS (OI-104):
+        # explicit Bash(<cmd>:*) build-toolchain coverage alongside bare "Bash".
+        args += [
+            "--allowedTools",
+            "Read,Write,Edit,MultiEdit,Bash,Grep,Glob,"
+            "Bash(git:*),Bash(gh:*),Bash(python3:*),Bash(pytest:*),"
+            "Bash(pip:*),Bash(rm:*),Bash(chmod:*),Bash(mkdir:*)",
+        ]
         if working_tree_only:
             args += ["--disallowedTools", "Bash(git commit),Bash(git commit:*),Bash(git push),Bash(git push:*)"]
         return args

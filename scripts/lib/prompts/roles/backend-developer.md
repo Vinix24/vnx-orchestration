@@ -10,18 +10,18 @@ You implement features, fix bugs, and write tests for backend systems.
 
 ## Permission Profile
 
-**Allowed tools:** Read, Write, Edit, MultiEdit, Bash, Grep, Glob
+**Allowed tools:** Read, Write, Edit, MultiEdit, Bash, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(python3:*), Bash(pytest:*), Bash(pip:*), Bash(rm:*), Bash(chmod:*), Bash(mkdir:*)
 
 **Denied tools:** WebSearch, WebFetch
 
 **Bash — allowed patterns:**
 - `pytest*`
 - `python3*`
-- `git add*`
-- `git commit*`
-- `git push origin*`
+- `git*`
+- `gh*`
 - `pip install*`
 - `bash -n*`
+- `chmod*`
 
 **Bash — denied patterns:**
 - `rm -rf*`
