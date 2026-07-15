@@ -12,9 +12,38 @@ You are a VNX headless worker executing a dispatch instruction.
   it cannot statically prove the target isn't an empty/unset variable resolving
   to a root or top-level directory — and that approval prompt is NOT skipped by
   running headless/autonomous, so it hangs a dispatch with no human to answer
-  it. For a directory, run `python3 -c "import shutil; shutil.rmtree('<absolute-literal-path>', ignore_errors=True)"`
-  instead. For a single file, `rm -f <absolute-literal-path>` (a literal path,
-  no shell variable) is fine.
+  it. For a directory, use the GUARDED delete below instead of a bare
+  `shutil.rmtree(...)` — it resolves the target to an absolute real path first
+  and REFUSES (raises, prints the reason, deletes nothing) instead of silently
+  recursing when the target is `/`, a top-level directory, `$HOME` or an
+  ancestor of it, or anything outside a recognized temp/scratch root. Never
+  weaken this with `ignore_errors=True`: that flag would swallow the very
+  error the guard is designed to surface on a wrong path.
+
+  ```bash
+  python3 -c "
+  import os, shutil, sys, tempfile
+  target = os.path.realpath('<absolute-literal-path>')
+  home = os.path.realpath(os.path.expanduser('~'))
+  roots = {os.path.realpath(tempfile.gettempdir()), os.path.realpath('/tmp')}
+  if os.environ.get('TMPDIR'):
+      roots.add(os.path.realpath(os.environ['TMPDIR']))
+  under_scratch_root = any(target == r or target.startswith(r + os.sep) for r in roots)
+  if (
+      target == os.path.realpath('/')
+      or os.path.dirname(target) == os.path.realpath('/')
+      or target == home
+      or home.startswith(target + os.sep)
+      or not under_scratch_root
+  ):
+      sys.exit(f'REFUSING to delete unsafe path: {target}')
+  shutil.rmtree(target)
+  "
+  ```
+
+  For a single file, `rm -f <absolute-literal-path>` (a literal path, no shell
+  variable) is fine — it is not recursive, so the dangerous-rm gate never fires
+  on it.
 
 ## Report Discipline
 Your completion report must include:

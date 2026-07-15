@@ -124,6 +124,28 @@ def test_layer1_scratch_cleanup_is_noninteractive(assembler: PromptAssembler, ba
     # The safe non-rm alternative must be present.
     assert "shutil.rmtree" in layer1
 
+    # The alternative must be a GUARDED delete, not a blind recursive one —
+    # swapping a gated `rm -rf` for an unguarded `shutil.rmtree` is a net
+    # safety regression: a wrong literal path gets silently, recursively
+    # deleted with no confirmation and no error (codex gate finding on PR
+    # #1169). The guidance must resolve the target to a real path and refuse
+    # deletion outside a recognized scope, instead of masking a bad path with
+    # ignore_errors=True.
+    assert "shutil.rmtree(target)" in layer1, (
+        "the recommended rmtree call must take no ignore_errors=True argument "
+        "— that flag would silently mask a wrong-path deletion instead of "
+        "surfacing it"
+    )
+    assert "realpath" in layer1.lower(), (
+        "guard must resolve the target to an absolute real path before deciding"
+    )
+    for keyword in ("home", "tempdir", "tmpdir", "/tmp"):
+        assert keyword in layer1.lower(), f"guard must reference {keyword!r} in its scoping checks"
+    assert "refus" in layer1.lower(), (
+        "guard must refuse (raise/exit without deleting) on an unsafe target, "
+        "not silently proceed"
+    )
+
     # Sanity: the assembled prompt still includes L1 verbatim (regression guard
     # against a future refactor silently dropping Layer 1 from the pipe input).
     prompt = assembler.assemble(
@@ -131,6 +153,7 @@ def test_layer1_scratch_cleanup_is_noninteractive(assembler: PromptAssembler, ba
         instruction=basic_instruction,
     )
     assert "shutil.rmtree" in prompt.context
+    assert "realpath" in prompt.context.lower()
 
 
 # ---------------------------------------------------------------------------

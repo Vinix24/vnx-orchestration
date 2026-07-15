@@ -124,12 +124,20 @@ interactive prompt, not a Unix shell `rm -i` confirmation).
 
 **Fix:** don't ask workers to run `rm -rf`/`rmdir` with a variable-expanded
 target at all. `scripts/lib/prompts/base_worker.md`'s cleanup instruction
-directs workers to `python3 -c "import shutil; shutil.rmtree(...)"` for
-directory removal instead — a `python3` invocation never routes through the
-CLI's rm-specific static analyzer, so no prompt is ever raised, headless or
-not. `rm -f <literal-path>` (a single named file, no shell variable) remains
-fine since the gate only fires on non-provably-safe *recursive* removal of a
-variable-expanded target.
+directs workers to a **guarded** `python3 -c "..."` snippet for directory
+removal instead — a `python3` invocation never routes through the CLI's
+rm-specific static analyzer, so no prompt is ever raised, headless or not.
+Guarded, not a bare `shutil.rmtree(...)`: the snippet resolves the target to
+an absolute real path and refuses — no delete, an explicit error instead — when
+the target is `/`, a top-level directory, `$HOME` or an ancestor of it, or
+outside a recognized temp/scratch root (`tempfile.gettempdir()` / `$TMPDIR` /
+`/tmp`). A bare, unguarded `shutil.rmtree()` would kill the interactive rm-gate
+hang but reintroduce the exact failure mode that gate exists to prevent — a
+wrong literal path silently, recursively deleted with no confirmation and no
+error (worse if paired with `ignore_errors=True`, which the guidance
+explicitly does not use). `rm -f <literal-path>` (a single named file, no
+shell variable) remains fine since the gate only fires on non-provably-safe
+*recursive* removal of a variable-expanded target.
 
 ## Related
 
