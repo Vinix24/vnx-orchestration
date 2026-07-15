@@ -76,13 +76,15 @@ def dedup_completion_receipts(receipts: list) -> "dict | None":
     if len(receipts) == 1:
         return receipts[0]
 
-    # Tier 0 (phantom override): a govern-time phantom rejection is FINAL — it overrides the
-    # worker's own claim regardless of authored/synthesized status or a same-second timestamp tie
-    # (codex P0.2 F4). The worker's original receipt stays on the ledger; this only decides which
-    # one is authoritative for gate evaluation.
-    phantom = [r for r in receipts if r.get("phantom_rejected")]
-    if phantom:
-        return max(phantom, key=lambda r: str(r.get("timestamp") or ""))
+    # Tier 0 (govern-time override): a phantom rejection OR an autopr rejection
+    # (pr_enforcement.py: the branch was pushed but no PR could be found/created) is
+    # FINAL — it overrides the worker's own claim regardless of authored/synthesized
+    # status or a same-second timestamp tie (codex P0.2 F4). The worker's original
+    # receipt stays on the ledger; this only decides which one is authoritative for
+    # gate evaluation.
+    override = [r for r in receipts if r.get("phantom_rejected") or r.get("autopr_rejected")]
+    if override:
+        return max(override, key=lambda r: str(r.get("timestamp") or ""))
 
     # Tier 1: authoritative status outranks unknown
     authoritative = [r for r in receipts if _receipt_authority(r)]

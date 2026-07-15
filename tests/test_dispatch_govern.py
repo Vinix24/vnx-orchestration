@@ -782,6 +782,35 @@ def test_dedup_multiple_done_authored_picks_newest():
     assert result is r2
 
 
+def test_dedup_autopr_rejected_wins_over_worker_done():
+    """pr_enforcement's corrective receipt (autopr_rejected) is a Tier-0 override,
+    same as phantom_rejected — a same-second timestamp tie must not let the
+    worker's own 'done' win."""
+    worker = {"dispatch_id": "d1", "status": "done", "timestamp": "2026-07-15T10:00:00Z"}
+    corrective = {
+        "dispatch_id": "d1", "status": "failed", "autopr_rejected": True,
+        "timestamp": "2026-07-15T10:00:00Z",
+    }
+    assert dedup_completion_receipts([worker, corrective])["status"] == "failed"
+    assert dedup_completion_receipts([corrective, worker])["status"] == "failed"
+
+
+def test_dedup_autopr_and_phantom_override_together():
+    """Either override marker alone is sufficient — both land in Tier 0."""
+    phantom = {
+        "dispatch_id": "d1", "status": "failed", "phantom_rejected": True,
+        "timestamp": "2026-07-15T09:00:00Z",
+    }
+    autopr = {
+        "dispatch_id": "d1", "status": "failed", "autopr_rejected": True,
+        "timestamp": "2026-07-15T10:00:00Z",
+    }
+    worker = {"dispatch_id": "d1", "status": "done", "timestamp": "2026-07-15T11:00:00Z"}
+    # worker is newest by timestamp but must still lose to the Tier-0 pool.
+    result = dedup_completion_receipts([worker, phantom, autopr])
+    assert result is autopr, "newest Tier-0 override (autopr) must win over a newer worker 'done'"
+
+
 # ---------------------------------------------------------------------------
 # ensure_receipt — uniform stamp: provider/sub_provider/model/lane
 # ---------------------------------------------------------------------------

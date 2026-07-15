@@ -804,6 +804,76 @@ class TmuxInteractiveDispatch:
         downgraded["phantom_reason"] = verdict.reason
         return downgraded
 
+    def _enforce_pr_exists(
+        self,
+        *,
+        dispatch_id: str,
+        label: str,
+        worktree_handle: "WorktreeHandle",
+        worktree_state: str,
+    ) -> "PrEnforcementResult":
+        """Lane-context adapter over pr_enforcement.enforce_pr_exists (lane-fix B).
+
+        ``worktree_state`` is the caller's already-computed classify(worktree_handle)
+        verdict — passed in rather than reclassified here so classify() runs exactly
+        once per dispatch (its result is memoized into _wt_classification and reused
+        by _teardown's reap() call).
+
+        When the branch was pushed to origin, ensures an open PR exists — creating
+        one via gh_pr_ensure when it does not. Emits an audit event either way; a
+        creation failure is ALSO recorded as a receipt-visible corrective receipt by
+        pr_enforcement itself.
+
+        Never raises: mirrors the fail-open contract of the phantom-guard hook —
+        an internal error here must not crash a real, successful dispatch.
+        """
+        try:
+            from pr_enforcement import enforce_pr_exists  # noqa: PLC0415
+
+            result = enforce_pr_exists(
+                dispatch_id=dispatch_id,
+                branch=worktree_handle.branch,
+                worktree_state=worktree_state,
+                repo_root=self._project_root,
+                receipts_file=self._receipts_file,
+                pr_title=f"dispatch({dispatch_id}): auto-created by VNX tmux-spawn lane",
+                pr_body=(
+                    f"Auto-created by VNX tmux-spawn build-dispatch completion "
+                    f"(dispatch `{dispatch_id}`) — the worker pushed this branch "
+                    "but did not open a PR itself. Please review before merging."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
+            logger.error(
+                "interactive: PR-enforcement guard errored dispatch=%s: %s", dispatch_id, exc,
+            )
+            from pr_enforcement import PrEnforcementResult  # noqa: PLC0415
+            return PrEnforcementResult(applicable=False, ok=True, reason=f"guard error: {exc}")
+
+        if not result.applicable:
+            return result
+
+        if result.ok:
+            self._emit_event(
+                "interactive_autopr",
+                dispatch_id=dispatch_id,
+                label=label,
+                reason="created" if result.created else "already_existed",
+                metadata={"pr_number": result.pr_number, "created": result.created},
+            )
+        else:
+            logger.warning(
+                "interactive: PR-enforcement REJECTED dispatch=%s — %s",
+                dispatch_id, result.reason,
+            )
+            self._emit_event(
+                "interactive_autopr_failed",
+                dispatch_id=dispatch_id,
+                label=label,
+                reason=result.reason,
+            )
+        return result
+
     def _build_completion_protocol(
         self, dispatch_id: str, label: str, model: str = "unknown", *, integrity=None
     ) -> str:
@@ -1805,6 +1875,11 @@ class TmuxInteractiveDispatch:
         # never spawns a tmux session with an uncontrolled cwd.
         worktree_handle: "WorktreeHandle | None" = None
         _wt_state: "list[str | None]" = [None]
+        # Set by the pre-govern auto-PR-enforcement check (success path only) so
+        # _teardown's classify() call is memoized rather than re-run — classify()
+        # is read-only/idempotent but callers (e.g. tests) assert it runs exactly
+        # once per dispatch.
+        _wt_classification: "list[str | None]" = [None]
         _raw_log: "list[Path | None]" = [None]
         # Worker-permission relay handle (flag-gated); stopped in _teardown.
         _relay_handle: "list[object | None]" = [None]
@@ -1904,7 +1979,11 @@ class TmuxInteractiveDispatch:
                     logger.debug("interactive: teardown normalizer dispatch=%s: %s", dispatch_id, exc)
             if worktree_handle is not None:
                 try:
-                    cls = classify(worktree_handle)
+                    cls = (
+                        _wt_classification[0]
+                        if _wt_classification[0] is not None
+                        else classify(worktree_handle)
+                    )
                     reap_result = reap(worktree_handle, cls)
                     _wt_state[0] = cls
                     self._emit_event(
@@ -2377,6 +2456,27 @@ class TmuxInteractiveDispatch:
                 "failed",
                 "blocked",
             )
+            # Auto-PR enforcement: a build worker that committed+pushed its dispatch
+            # branch but never ran `gh pr create` leaves T0 to salvage the PR by hand
+            # every time (lane-fix B). Runs BEFORE govern() so a creation failure is
+            # reflected in the governed report and InteractiveDispatchResult.success —
+            # never a silent "done" with a branch stranded on origin.
+            _autopr_failure_reason: "str | None" = None
+            if worker_succeeded and worktree_handle is not None:
+                _wt_classification[0] = classify(worktree_handle)
+                autopr_result = self._enforce_pr_exists(
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    worktree_handle=worktree_handle,
+                    worktree_state=_wt_classification[0],
+                )
+                if not autopr_result.ok:
+                    worker_succeeded = False
+                    _autopr_failure_reason = autopr_result.reason
+                    receipt = dict(receipt)
+                    receipt["status"] = "failed"
+                    receipt["autopr_rejected"] = True
+                    receipt["autopr_reason"] = autopr_result.reason
             emitted_report = self._govern_report(
                 dispatch_id=dispatch_id,
                 terminal_id=label,
@@ -2389,6 +2489,11 @@ class TmuxInteractiveDispatch:
                 token_usage=_pane_tokens,
                 role=role,
                 session_id=session_uuid,
+                **(
+                    {"failure_reason": f"pushed_branch_no_pr: {_autopr_failure_reason}"}
+                    if _autopr_failure_reason
+                    else {}
+                ),
             )
             # A governed-completion path (worker OK) with no linked report is an
             # audit-trail gap — do not report success with an unlinked report.
@@ -2412,7 +2517,11 @@ class TmuxInteractiveDispatch:
                     None if success else (
                         "unified_report_emit_failed"
                         if worker_succeeded
-                        else f"worker_status: {receipt.get('status')}"
+                        else (
+                            f"pushed_branch_no_pr: {_autopr_failure_reason}"
+                            if _autopr_failure_reason
+                            else f"worker_status: {receipt.get('status')}"
+                        )
                     )
                 ),
                 duration_seconds=time.monotonic() - start_time,
