@@ -231,6 +231,7 @@ def test_auto_gate_trigger_passes_dispatch_id_to_log_gate_result(tmp_path, monke
     _set_data_dir(tmp_path, monkeypatch)
 
     import auto_gate_trigger
+    import gh_pr_ensure
 
     recorded_calls: list[dict] = []
 
@@ -250,7 +251,10 @@ def test_auto_gate_trigger_passes_dispatch_id_to_log_gate_result(tmp_path, monke
         patch.object(auto_gate_trigger, "_extract_feature_id_from_plan", return_value="F51"),
         patch.object(auto_gate_trigger, "_load_required_gates", return_value=["codex_gate"]),
         patch.object(auto_gate_trigger, "_get_current_branch", return_value="feat/f51"),
-        patch.object(auto_gate_trigger, "_find_open_pr", return_value=261),
+        patch.object(
+            gh_pr_ensure, "ensure_pr",
+            return_value={"pr_number": 261, "created": False, "reason": None},
+        ),
         patch.object(auto_gate_trigger, "_trigger_gate", return_value=True),
         patch.object(auto_gate_trigger, "_log_auto_gate_event", return_value=None),
     ):

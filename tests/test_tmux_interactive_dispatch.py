@@ -37,6 +37,7 @@ from tmux_interactive_dispatch import (
     main,
 )
 from tmux_worktree import ReapResult, WorktreeAllocateError, WorktreeHandle
+from pr_enforcement import PrEnforcementResult
 
 
 class FakeTmux:
@@ -1260,6 +1261,108 @@ class TestWorktreeTeardownLifecycle(_WorktreeTestCase):
             "interactive_teardown_preserved must be emitted for dirty worktree",
         )
         self.assertEqual(result.worktree_state, "dirty")
+
+
+# ---------------------------------------------------------------------------
+# lane-worker-autopr-enforce: auto-PR enforcement wiring
+# ---------------------------------------------------------------------------
+
+class TestAutoPrEnforcement(_WorktreeTestCase):
+    """dispatch() wires pr_enforcement.enforce_pr_exists into the success path."""
+
+    def test_pushed_worktree_triggers_pr_enforcement(self):
+        """A worker that pushed its branch runs PR enforcement; success on PR found/created."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_enforce = MagicMock(
+            return_value=PrEnforcementResult(applicable=True, ok=True, pr_number=5, created=True)
+        )
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch("tmux_interactive_dispatch.classify", return_value="pushed") as mock_classify:
+                with patch("tmux_interactive_dispatch.reap", return_value=ReapResult(removed=True)):
+                    with patch("pr_enforcement.enforce_pr_exists", mock_enforce):
+                        result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertTrue(result.success)
+        mock_enforce.assert_called_once()
+        call_kwargs = mock_enforce.call_args.kwargs
+        self.assertEqual(call_kwargs["dispatch_id"], self.DISPATCH_ID)
+        self.assertEqual(call_kwargs["branch"], handle.branch)
+        self.assertEqual(call_kwargs["worktree_state"], "pushed")
+        # classify() must be called exactly once (memoized, reused by teardown's reap()).
+        mock_classify.assert_called_once_with(handle)
+        self.assertEqual(result.worktree_state, "pushed")
+
+    def test_non_pushed_worktree_skips_pr_enforcement(self):
+        """A clean/committed/dirty worktree has nothing to PR — the real enforcement path
+        runs (not mocked, to prove the end-to-end short-circuit) but never reaches gh."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_ensure_pr = MagicMock()
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch("tmux_interactive_dispatch.classify", return_value="clean"):
+                with patch("tmux_interactive_dispatch.reap", return_value=ReapResult(removed=True)):
+                    with patch("gh_pr_ensure.ensure_pr", mock_ensure_pr):
+                        result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertTrue(result.success)
+        mock_ensure_pr.assert_not_called()
+
+    def test_pr_enforcement_failure_fails_dispatch(self):
+        """A pushed branch that never gets a PR fails the dispatch loudly — no phantom success."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_enforce = MagicMock(
+            return_value=PrEnforcementResult(applicable=True, ok=False, reason="gh auth expired")
+        )
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch("tmux_interactive_dispatch.classify", return_value="pushed"):
+                with patch("tmux_interactive_dispatch.reap", return_value=ReapResult(removed=True)):
+                    with patch("pr_enforcement.enforce_pr_exists", mock_enforce):
+                        result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertFalse(result.success)
+        self.assertIn("pushed_branch_no_pr", result.failure_reason)
+        self.assertIn("gh auth expired", result.failure_reason)
+        self.assertEqual(result.receipt.get("status"), "failed")
+        self.assertTrue(result.receipt.get("autopr_rejected"))
+        self.assertEqual(result.receipt.get("autopr_reason"), "gh auth expired")
+
+    def test_pr_enforcement_skipped_when_worker_already_failed(self):
+        """A worker that self-reported failure is never PR-enforced (nothing to enforce)."""
+        handle = self._make_handle()
+        fake = FakeTmux(
+            receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID, receipt_status="failed",
+        )
+        lane = self._make_lane(fake)
+        mock_enforce = MagicMock()
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch("tmux_interactive_dispatch.classify", return_value="pushed"):
+                with patch("tmux_interactive_dispatch.reap", return_value=ReapResult(removed=True)):
+                    with patch("pr_enforcement.enforce_pr_exists", mock_enforce):
+                        result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertFalse(result.success)
+        mock_enforce.assert_not_called()
+
+    def test_pr_enforcement_skipped_without_worktree(self):
+        """isolated_worktree=False (no worktree_handle) never invokes PR enforcement."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_enforce = MagicMock()
+
+        with patch("pr_enforcement.enforce_pr_exists", mock_enforce):
+            result = self._fast_dispatch(lane, isolated_worktree=False)
+
+        self.assertTrue(result.success)
+        mock_enforce.assert_not_called()
 
 
 class TestWorktreeCliFlags(unittest.TestCase):

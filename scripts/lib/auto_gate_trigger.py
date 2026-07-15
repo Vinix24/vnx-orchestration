@@ -97,61 +97,6 @@ def _get_current_branch() -> str:
         return ""
 
 
-def _find_open_pr(branch: str) -> Optional[int]:
-    """Return open PR number for branch, or None if not found."""
-    if not branch:
-        return None
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "list", "--head", branch, "--json", "number,state"],
-            capture_output=True, text=True, timeout=20,
-            cwd=str(_REPO_ROOT),
-        )
-        if proc.returncode != 0:
-            logger.debug("gh pr list failed: %s", proc.stderr.strip()[:200])
-            return None
-        prs = json.loads(proc.stdout)
-        open_prs = [p for p in prs if p.get("state", "").upper() == "OPEN"]
-        return open_prs[0]["number"] if open_prs else None
-    except Exception as exc:
-        logger.debug("_find_open_pr failed: %s", exc)
-        return None
-
-
-def _create_pr(feature_id: str, branch: str) -> Optional[int]:
-    """Create a GitHub PR for branch; return PR number or None on failure."""
-    title = f"feat({feature_id.lower()}): auto-created by VNX governance trigger"
-    body = (
-        f"Auto-created by VNX auto_gate_trigger when all PRs for {feature_id} "
-        "were detected as committed.\n\n"
-        "This PR was opened automatically to satisfy the `pr_must_exist_before_next_dispatch` "
-        "governance check. Please update the title and description before merging."
-    )
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "create",
-             "--title", title,
-             "--body", body,
-             "--head", branch,
-             "--draft"],
-            capture_output=True, text=True, timeout=60,
-            cwd=str(_REPO_ROOT),
-        )
-        if proc.returncode != 0:
-            logger.warning("gh pr create failed: %s", proc.stderr.strip()[:400])
-            return None
-        # gh pr create outputs PR URL; parse the number from the last path segment
-        url = proc.stdout.strip()
-        m = re.search(r"/pull/(\d+)", url)
-        if m:
-            return int(m.group(1))
-        logger.warning("Could not parse PR number from gh output: %s", url[:200])
-        return None
-    except Exception as exc:
-        logger.warning("_create_pr exception: %s", exc)
-        return None
-
-
 def _trigger_gate(pr_number: int, branch: str, gate_name: str) -> bool:
     """Invoke review_gate_manager request-and-execute for a single gate.
 
@@ -259,24 +204,38 @@ def trigger_gates_if_feature_complete(
         feature_id, feature_state.completed_prs, feature_state.total_prs,
     )
 
-    # 4. Find or create GitHub PR
+    # 4. Find or create GitHub PR (shared implementation — see gh_pr_ensure.py)
     branch = _get_current_branch()
-    pr_number = _find_open_pr(branch)
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+    from gh_pr_ensure import ensure_pr  # noqa: PLC0415
+
+    pr_result = ensure_pr(
+        branch,
+        _REPO_ROOT,
+        title=f"feat({feature_id.lower()}): auto-created by VNX governance trigger",
+        body=(
+            f"Auto-created by VNX auto_gate_trigger when all PRs for {feature_id} "
+            "were detected as committed.\n\n"
+            "This PR was opened automatically to satisfy the `pr_must_exist_before_next_dispatch` "
+            "governance check. Please update the title and description before merging."
+        ),
+        draft=True,
+    )
+    pr_number = pr_result["pr_number"]
+    if pr_result.get("created"):
+        logger.info("No open PR found for branch '%s' — created PR #%s", branch, pr_number)
 
     if pr_number is None:
-        logger.info("No open PR found for branch '%s' — creating one", branch)
-        pr_number = _create_pr(feature_id, branch)
-        if pr_number is None:
-            reason = f"Failed to create GitHub PR for branch '{branch}'"
-            logger.warning("auto_gate_trigger: %s", reason)
-            _log_auto_gate_event(data_dir, {
-                "timestamp": _now_utc(),
-                "feature_id": feature_id,
-                "branch": branch,
-                "triggered": False,
-                "reason": reason,
-            })
-            return {"triggered": False, "reason": reason, "pr_number": None, "gates": []}
+        reason = pr_result.get("reason") or f"Failed to create GitHub PR for branch '{branch}'"
+        logger.warning("auto_gate_trigger: %s", reason)
+        _log_auto_gate_event(data_dir, {
+            "timestamp": _now_utc(),
+            "feature_id": feature_id,
+            "branch": branch,
+            "triggered": False,
+            "reason": reason,
+        })
+        return {"triggered": False, "reason": reason, "pr_number": None, "gates": []}
 
     logger.info("Using PR #%d for gate triggers", pr_number)
 
