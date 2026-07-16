@@ -53,6 +53,7 @@ def validate_staging_path(
     reason: Optional[str],
     *,
     data_dir: Optional[Path] = None,
+    dispatch_id: Optional[str] = None,
 ) -> None:
     """Enforce the staging→pending→promote dispatch gate.
 
@@ -64,6 +65,15 @@ def validate_staging_path(
         allow_unstaged:  Explicit bypass (requires non-empty reason for audit trail).
         reason:          Audit reason string — required with allow_unstaged.
         data_dir:        VNX data root (auto-resolved via project_root when None).
+        dispatch_id:     The --dispatch-id the caller is about to actually execute
+            with (OI-627). Only the staging *id* was previously checked for
+            existence — the lane then spawns the worker, worktree, and
+            provenance trailer (VNX_CURRENT_DISPATCH_ID) under a separately
+            supplied --dispatch-id with no cross-check, so a caller passing
+            mismatched values silently commits under the wrong id and breaks
+            the dispatch->commit provenance chain. When both are given they
+            must match exactly. Optional (defaults to None = no check) so
+            existing callers/tests that don't pass it are unaffected.
     """
     if allow_unstaged:
         if not reason or not reason.strip():
@@ -80,6 +90,13 @@ def validate_staging_path(
         # PATH TRAVERSAL FIX — validate format before any path join
         if not _DISPATCH_ID_RE.match(sid):
             _reject("staging-pending-flow violated: invalid dispatch_id format")
+        if dispatch_id is not None and dispatch_id.strip() != sid:
+            _reject(
+                f"staging-pending-flow violated: --dispatch-id {dispatch_id.strip()!r} "
+                f"does not match --from-staging-id {sid!r} — the executed dispatch "
+                "(worktree, worker env, commit provenance trailer) must run under the "
+                "same id that was staged"
+            )
         _data = _resolve_data_dir(data_dir)
         dispatches = _data / "dispatches"
         if _exists_in_dir(dispatches / "pending", sid) or _exists_in_dir(

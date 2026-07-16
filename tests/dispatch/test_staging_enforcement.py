@@ -127,6 +127,89 @@ class TestStagingEnforcement:
 
 
 # ---------------------------------------------------------------------------
+# OI-627 — --dispatch-id must match --from-staging-id
+#
+# Prior to this fix, validate_staging_path only checked that --from-staging-id
+# existed in pending/staging — it never cross-checked that the id the lane
+# actually executes (args.dispatch_id, which becomes the worktree/branch name,
+# the VNX_CURRENT_DISPATCH_ID env var, and ultimately the "Dispatch-ID:" git
+# commit trailer via the prepare-commit-msg hook) was the SAME id. A caller
+# could stage a spec bundle under the real governed id and then fire the lane
+# with an unrelated --dispatch-id, producing a real PR whose commit trailer
+# carries the wrong id and breaks dispatch->commit provenance (observed in
+# production: PR #1171 committed under the real dispatch
+# '20260715-hashchain-anchor' but the commit trailer read
+# 'Dispatch-ID: dispatch-fwd-02').
+# ---------------------------------------------------------------------------
+
+class TestDispatchIdMatchesStagingId:
+
+    def test_accepts_matching_dispatch_id_and_staging_id(self, tmp_path: Path) -> None:
+        """A fix-forward-style invocation where --dispatch-id == --from-staging-id passes."""
+        _make_pending_dispatch(tmp_path, "20260715-hashchain-anchor")
+        validate_staging_path(
+            "20260715-hashchain-anchor",
+            False,
+            None,
+            data_dir=tmp_path,
+            dispatch_id="20260715-hashchain-anchor",
+        )
+
+    def test_rejects_mismatched_dispatch_id(self, tmp_path: Path, capsys) -> None:
+        """A fix-forward-style invocation with a different --dispatch-id is rejected loudly."""
+        _make_pending_dispatch(tmp_path, "20260715-hashchain-anchor")
+        with pytest.raises(SystemExit) as exc_info:
+            validate_staging_path(
+                "20260715-hashchain-anchor",
+                False,
+                None,
+                data_dir=tmp_path,
+                dispatch_id="dispatch-fwd-02",
+            )
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "staging-pending-flow violated" in captured.err
+        assert "dispatch-fwd-02" in captured.err
+        assert "20260715-hashchain-anchor" in captured.err
+
+    def test_mismatch_rejected_before_existence_check(self, tmp_path: Path, capsys) -> None:
+        """The id-match check fires even when the staged bundle doesn't exist yet —
+        a mismatched --dispatch-id is a caller bug regardless of staging state."""
+        with pytest.raises(SystemExit) as exc_info:
+            validate_staging_path(
+                "20260715-hashchain-anchor",
+                False,
+                None,
+                data_dir=tmp_path,
+                dispatch_id="dispatch-fwd-02",
+            )
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "does not match" in captured.err
+
+    def test_dispatch_id_none_skips_check_backward_compat(self, tmp_path: Path) -> None:
+        """Callers that don't pass dispatch_id= (legacy call sites, other tests) are unaffected."""
+        _make_pending_dispatch(tmp_path, "20260601-test-dispatch")
+        validate_staging_path(
+            "20260601-test-dispatch",
+            False,
+            None,
+            data_dir=tmp_path,
+        )
+
+    def test_allow_unstaged_bypass_ignores_dispatch_id_mismatch(self, tmp_path: Path) -> None:
+        """--allow-unstaged is an explicit, audited bypass — it short-circuits before the
+        staging-id path entirely, so a dispatch_id mismatch is moot there."""
+        validate_staging_path(
+            None,
+            True,
+            "emergency hotfix",
+            data_dir=tmp_path,
+            dispatch_id="anything-goes-here",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Wiring checks — validate that both CLI entry-points declare the new args
 # ---------------------------------------------------------------------------
 
@@ -153,6 +236,10 @@ class TestArgWiring:
         assert "--allow-unstaged" in src
         assert "--reason" in src
         assert "validate_staging_path" in src
+        assert "dispatch_id=args.dispatch_id" in src, (
+            "OI-627: subprocess_dispatch must thread args.dispatch_id into "
+            "validate_staging_path so a mismatched --dispatch-id is rejected"
+        )
 
     def test_tmux_interactive_dispatch_declares_staging_args(self) -> None:
         """tmux_interactive_dispatch main() parser must accept --from-staging-id etc."""
@@ -164,6 +251,10 @@ class TestArgWiring:
         assert "--allow-unstaged" in src
         assert "--reason" in src
         assert "validate_staging_path" in src
+        assert "dispatch_id=args.dispatch_id" in src, (
+            "OI-627: tmux_interactive_dispatch must thread args.dispatch_id into "
+            "validate_staging_path so a mismatched --dispatch-id is rejected"
+        )
 
 
 # ---------------------------------------------------------------------------
