@@ -109,7 +109,8 @@ def _read_pattern_usage_totals(db_path: Path) -> Tuple[int, int]:
             ).fetchone()
         finally:
             conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("_read_pattern_usage_totals: query failed on %s: %s", db_path, exc)
         return 0, 0
     if row is None:
         return 0, 0
@@ -129,7 +130,8 @@ def _read_last_dream_cycle(db_path: Path) -> Optional[str]:
             ).fetchone()
         finally:
             conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("_read_last_dream_cycle: query failed on %s: %s", db_path, exc)
         return None
     if row is None:
         return None
@@ -305,7 +307,8 @@ def _read_reason_counts(db_path: Path) -> Dict[str, int]:
             ).fetchall()
         finally:
             conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("_read_reason_counts: query failed on %s: %s", db_path, exc)
         return {}
     return {str(reason): int(count) for reason, count in rows}
 

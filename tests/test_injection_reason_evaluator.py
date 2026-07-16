@@ -132,6 +132,19 @@ class TestBucketDistribution:
 
         assert distribution["total_ignored"] == 0
 
+    def test_missing_table_sqlite_error_is_logged_not_suppressed_silently(self, tmp_path, caplog):
+        # OI-623: the sqlite3.Error on this read path must be logged loudly,
+        # not returned as empty without a trace.
+        db_path = tmp_path / "quality_intelligence.db"
+        sqlite3.connect(str(db_path)).close()
+
+        with caplog.at_level("WARNING", logger="injection_effectiveness_probe"):
+            result = iep._read_reason_counts(db_path)
+
+        assert result == {}
+        assert "_read_reason_counts" in caplog.text
+        assert "no such table" in caplog.text
+
     def test_evaluator_never_writes_to_the_database_it_reads(self, tmp_path):
         rows = [(f"pat-{r}", 0, r) for r in NON_ADOPTION_REASONS]
         db_path = _make_outcome_db(tmp_path, rows)
