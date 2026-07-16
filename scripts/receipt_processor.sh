@@ -59,6 +59,15 @@ PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 RECEIPTS_PENDING_DIR="${VNX_DATA_DIR}/receipts/pending"
 RECEIPTS_PROCESSED_DIR="${VNX_DATA_DIR}/receipts/processed"
 RECEIPT_RETRY_INTERVAL="${VNX_RECEIPT_RETRY_INTERVAL:-10}"  # seconds between pending retry sweeps
+# VNX_RECEIPT_T0_PUSH=1 (default) pushes each receipt to the T0 tmux pane via
+# paste-buffer; 0 suppresses the push entirely — ndjson append + outbox
+# processing still happen (audit trail intact), only the pane notification is
+# skipped. For T0's that poll report-files instead of consuming pane pushes.
+# Read directly (no indirection var) by rp_delivery.sh at delivery time.
+# VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) — once more than this many distinct
+# dispatch_ids are stacked in receipts/pending/, the retry sweep sends ONE
+# digest paste instead of N individual ones. Read directly by
+# rp_delivery.sh's _retry_pending_receipts(). (OI-654)
 
 # Cross-platform SHA-256 helper (Linux: sha256sum, macOS: shasum -a 256)
 _SHA256_FALLBACK_WARN=""
