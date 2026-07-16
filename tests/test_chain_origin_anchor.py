@@ -390,6 +390,75 @@ def test_t18_reverse_scan_finds_epoch2_only_anchor_no_epoch1(git_repo, tmp_path)
     assert status != "unchained"
 
 
+def test_t19_chained_markerless_rechain_with_existing_anchor_is_broken(git_repo, tmp_path):
+    """ADR-034 fix-r1 Finding 1+2 (a): stripping every chain_epoch_start
+    marker and re-chaining from GENESIS makes _observed_epochs(path) == [],
+    so the per-epoch loop never runs. Only the reverse identity-scan — which
+    must run unconditionally in the chained path, not only when base_status
+    == "unchained" — catches that this identity has a committed anchor the
+    ledger no longer shows any epoch for."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_epoch_marker(ledger, 1)
+    append_chained_entry(ledger, {"seq": 1})
+    result = _seal(git_repo, ledger)
+    assert result.action == "sealed"
+
+    baseline_ok, _v, baseline_status, _p = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert baseline_ok and baseline_status == "verified-segmented"
+
+    # Attack: strip the ledger entirely and re-chain from GENESIS with no
+    # chain_epoch_start marker at all — the base walk sees a self-consistent
+    # marker-less "verified" chain (saw_chain True via base_status != "unchained").
+    ledger.write_text("")
+    append_chained_entry(ledger, {"seq": "re-chained-1"})
+
+    ok, violations, status, _prov = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok is False
+    assert status == "broken"
+    assert status != "unchained"
+    assert any("markerless" in str(v.get("note", "")) or "no longer observes" in str(v.get("note", "")) for v in violations)
+
+
+def test_t20_rollback_to_earlier_epoch_with_later_anchor_is_broken(git_repo, tmp_path):
+    """ADR-034 fix-r1 Finding 1+2 (b): rolling the ledger back to only epoch
+    1's original content (stripping epoch 2) while origin still holds the
+    epoch-2 open anchor + epoch-1 closure record. Epoch 1's own fingerprint
+    still matches and it's the LAST epoch the (rolled-back) ledger observes —
+    the bug this test guards against is treating that as "the open latest
+    epoch, no closure required" instead of checking it against the true
+    highest ANCHORED epoch (2)."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_epoch_marker(ledger, 1)
+    append_chained_entry(ledger, {"seq": "a"})
+    append_chained_entry(ledger, {"seq": "b"})
+    result1 = _seal(git_repo, ledger)
+    assert result1.action == "sealed" and result1.epoch == 1
+
+    original_epoch1_content = ledger.read_text()
+
+    result2 = _seal(git_repo, ledger, force_new_epoch=True)
+    assert result2.action == "sealed" and result2.epoch == 2 and result2.closed_epoch == 1
+
+    baseline_ok, _v, baseline_status, _p = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert baseline_ok and baseline_status == "verified-segmented"
+
+    # Attack: roll the local ledger back to JUST epoch 1's original content.
+    ledger.write_text(original_epoch1_content)
+
+    ok, violations, status, _prov = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok is False
+    assert status == "broken"
+    assert any("rollback" in str(v.get("note", "")) or "no longer observes" in str(v.get("note", "")) for v in violations)
+
+
 # ---------------------------------------------------------------------------
 # T6/T7: check_anchor_immutability pure diff logic (write-side rule; the
 # GitHub Actions wiring that invokes this in CI is PR-2 scope)
@@ -502,6 +571,62 @@ def test_t10_partial_seal_is_broken_then_idempotent_retry(git_repo, tmp_path, mo
         ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
     )
     assert ok2 is True and status2 == "verified-segmented"
+
+
+def test_t21_partial_seal_push_failed_after_commit_resumes_not_noop(git_repo, tmp_path, monkeypatch):
+    """ADR-034 fix-r1 Finding 3: commit succeeds locally (checkout + add +
+    commit all real), then `git push` itself raises — HEAD stays parked on
+    the seal branch WITH the anchor commit. A naive retry that only checks
+    local HEAD would find the anchor already there and wrongly report
+    "noop", even though origin never received it and verify_chain would stay
+    broken forever. The retry must check origin, find nothing, and resume by
+    re-pushing the same local branch instead."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_chained_entry(ledger, {"seq": 0})  # marker-less genesis chain -> forces epoch-1 open
+
+    real_git_run_checked = coa._git_run_checked
+
+    def push_fails(project_root, *args, **kwargs):
+        if args and args[0] == "push":
+            raise RuntimeError("simulated push failure (network unreachable)")
+        return real_git_run_checked(project_root, *args, **kwargs)
+
+    monkeypatch.setattr(coa, "_git_run_checked", push_fails)
+    with pytest.raises(RuntimeError, match="simulated push failure"):
+        seal_and_commit_origin(
+            ledger,
+            git_repo,
+            project_id="vnx-dev",
+            project_data_dir=data_dir,
+            branch="main",
+            branch_protection_confirmed=True,
+        )
+
+    # Confirm the bug precondition: HEAD is on the seal branch, anchor
+    # committed locally, nothing on origin at all.
+    identity = ledger_identity("vnx-dev", ledger, data_dir)
+    key = coa.anchor_key(identity, 1)
+    assert coa._read_local_head_anchor(git_repo, key) is not None
+    assert coa._read_remote_base_anchor(git_repo, "main", key) is None
+
+    monkeypatch.setattr(coa, "_git_run_checked", real_git_run_checked)
+    result = seal_and_commit_origin(
+        ledger,
+        git_repo,
+        project_id="vnx-dev",
+        project_data_dir=data_dir,
+        branch="main",
+        branch_protection_confirmed=True,
+    )
+    assert result.action != "noop"
+    assert result.branch_name is not None
+
+    # The resumed push actually landed the commit on origin's seal branch —
+    # no duplicate record was appended (still exactly one "open" record for
+    # this key).
+    rec, prov = read_git_anchor(git_repo, identity, 1, ref=f"origin/{result.branch_name}")
+    assert prov.resolved is True
+    assert rec is not None and rec != "corrupt"
 
 
 def test_t11_double_run_is_noop_new_epoch_produces_new_record(git_repo, tmp_path):
@@ -647,3 +772,52 @@ def test_read_git_anchors_for_identity_scopes_by_key_prefix(git_repo, tmp_path):
     assert prov.resolved is True
     assert len(anchors) == 1
     assert anchors[0].ledger_identity == identity
+
+
+def test_t22_local_branch_named_like_remote_ref_does_not_shadow_it(git_repo, tmp_path):
+    """ADR-034 fix-r1 Finding 5: git allows slashes in branch names, so a
+    local attacker can create a branch literally named `origin/main`. Per
+    gitrevisions(7)'s disambiguation order, an unqualified `git rev-parse
+    origin/main` resolves refs/heads/origin/main (the local shadow) BEFORE
+    refs/remotes/origin/main (the real remote-tracking ref) — a
+    committed-but-never-pushed forged anchor would otherwise get trusted
+    over the genuine remote content. The read path must qualify the ref
+    explicitly (refs/remotes/origin/main) and never fall back to the
+    ambiguous short form."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_epoch_marker(ledger, 1)
+    append_chained_entry(ledger, {"seq": 1})
+    result = _seal(git_repo, ledger)
+    assert result.action == "sealed"
+
+    identity = ledger_identity("vnx-dev", ledger, data_dir)
+    real_rec, real_prov = read_git_anchor(git_repo, identity, 1)
+    assert real_prov.resolved is True
+    assert real_rec is not None and real_rec != "corrupt"
+
+    # Attacker: create a LOCAL branch literally named "origin/main", branched
+    # from the current (real) main, then commit FORGED anchor content on it
+    # -- never pushed anywhere. This branch is never merged/pushed; it just
+    # sits locally as a same-named shadow of the remote-tracking ref.
+    fake_fp = coa.OriginFingerprint(
+        epoch=1, origin_type="chain_epoch_start", origin_hash="f" * 64, origin_line_number=1, entries_before_origin=0
+    )
+    forged_record = coa._origin_record(identity, fake_fp, sealed_at="2026-01-01T00:00:00Z")
+    _run("git", "checkout", "-b", "origin/main", cwd=git_repo)
+    anchor_path = git_repo / coa.ANCHOR_REL_PATH
+    anchor_path.write_text(json.dumps(forged_record, sort_keys=True, separators=(",", ":")) + "\n")
+    _run("git", "add", str(coa.ANCHOR_REL_PATH), cwd=git_repo)
+    _run("git", "commit", "-m", "forged shadow branch content", cwd=git_repo)
+    _run("git", "checkout", "main", cwd=git_repo)
+
+    shadowed_rec, shadowed_prov = read_git_anchor(git_repo, identity, 1)
+    assert shadowed_prov.resolved is True  # the real remote-tracking ref still resolves
+    assert shadowed_rec is not None and shadowed_rec != "corrupt"
+    assert shadowed_rec.origin_hash == real_rec.origin_hash
+    assert shadowed_rec.origin_hash != "f" * 64  # NOT the forged shadow-branch content
+
+    # verify_chain must also read the genuine content, not the local shadow.
+    ok, _v, status, _prov = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok is True and status == "verified-segmented"
