@@ -195,6 +195,7 @@ def build_receipt_from_report(
     """
     sys.path.insert(0, str(_LIB_DIR))
     from report_body_contract import validate_body
+    from report_contract_scope import classify_non_report_dispatch, truthy
     from datetime import datetime, timezone
 
     fm = parse_frontmatter(text)
@@ -255,7 +256,28 @@ def build_receipt_from_report(
         "report_path": str(report_path),
     }
 
+    route_dec = _load_route_decision(dispatch_id, state_dir) if state_dir else None
+
     if contract_violations:
+        report_class = classify_non_report_dispatch(
+            dispatch_id=dispatch_id,
+            role=merged.get("role"),
+            task_class=merged.get("task_class") or (route_dec or {}).get("task_class"),
+            read_only=truthy(merged.get("read_only")),
+        )
+        if report_class is not None:
+            logger.info(
+                "report_to_receipt_converter: %s is a non-report dispatch class"
+                " (%s) — contract violations exempted: %s",
+                report_path.name, report_class, contract_violations,
+            )
+            return {
+                **base,
+                "event_type": "report_exempt",
+                "status": "exempt",
+                "report_class": report_class,
+                "contract_violations": contract_violations,
+            }
         logger.warning(
             "report_to_receipt_converter: contract violations in %s: %s"
             " — emitting as report_contract_invalid",
@@ -273,10 +295,8 @@ def build_receipt_from_report(
         "event_type": "task_complete",
         "status": merged.get("status", "unknown"),
     }
-    if state_dir and dispatch_id:
-        route_dec = _load_route_decision(dispatch_id, state_dir)
-        if route_dec:
-            receipt["route_decision"] = route_dec
+    if route_dec:
+        receipt["route_decision"] = route_dec
     return receipt
 
 

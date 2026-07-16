@@ -668,7 +668,31 @@ class ReportParser:
         _contract_valid = extracted.get('_body_contract_valid', True)
         _status = str(metadata.get('status', 'unknown')).lower()
         _claims_success = _status in ('success', 'done', 'complete', 'completed', 'pass', 'passed')
+
+        # A success-claim with an invalid body is only a real contract violation
+        # for dispatch classes that are expected to produce a build report. A
+        # panel/deliberation seat or a review/read_only dispatch never writes a
+        # ## Changes section by design — classify before reclassifying (gate F1).
+        _report_class = None
         if _claims_success and not _contract_valid:
+            try:
+                _lib = str(Path(__file__).resolve().parent / "lib")
+                if _lib not in sys.path:
+                    sys.path.insert(0, _lib)
+                from report_contract_scope import classify_non_report_dispatch, truthy
+                _report_class = classify_non_report_dispatch(
+                    dispatch_id=metadata.get('dispatch_id'),
+                    role=metadata.get('role'),
+                    task_class=metadata.get('task_class'),
+                    read_only=truthy(metadata.get('read_only')),
+                )
+            except Exception:
+                _report_class = None
+
+        if _claims_success and not _contract_valid and _report_class is not None:
+            _event_type = 'report_exempt'
+            _receipt_status = 'exempt'
+        elif _claims_success and not _contract_valid:
             _event_type = 'report_contract_invalid'
             _receipt_status = 'contract_invalid'
         else:
@@ -694,6 +718,8 @@ class ReportParser:
             'report_file': Path(report_path).name,  # Add filename for easier tracking
             'title': metadata.get('title', 'No title')
         }
+        if _report_class is not None:
+            receipt['report_class'] = _report_class
 
         # Add extracted intelligence
         if extracted['tags'] and any(extracted['tags'].values()):

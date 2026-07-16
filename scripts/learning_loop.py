@@ -27,6 +27,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from report_contract_scope import is_stale_contract_invalid
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -419,6 +420,14 @@ class LearningLoop:
                     total_scanned += 1
                     status = str(receipt.get("status", "")).lower()
                     if status not in _FAILURE_STATUSES:
+                        continue
+
+                    # A frozen contract_invalid batch (bulk-emitted, single old
+                    # timestamp) is never a recurring pattern worth learning from —
+                    # exclude regardless of how far back start_time itself reaches.
+                    if status == "contract_invalid" and is_stale_contract_invalid(
+                        receipt.get("timestamp")
+                    ):
                         continue
 
                     # D3 data-quality filter: skip no-provider failure receipts.

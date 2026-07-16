@@ -26,6 +26,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from report_contract_scope import is_stale_contract_invalid
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -141,8 +142,16 @@ def collect_metrics(days: int = 7) -> dict:
                 event_type = (rec.get("event_type") or "").lower()
                 if event_type in _SKIP_EVENT_TYPES:
                     continue
-                metrics["dispatch_outcomes"]["total"] += 1
                 status = (rec.get("status") or "").lower()
+                # A frozen contract_invalid batch (bulk-emitted, single old
+                # timestamp) is excluded from the live count regardless of the
+                # digest's own --days window — a dedicated, tighter cutoff
+                # (default 14d) so a wide --days call doesn't resurrect it.
+                if (
+                    status == "contract_invalid" or event_type == "report_contract_invalid"
+                ) and is_stale_contract_invalid(rec.get("timestamp")):
+                    continue
+                metrics["dispatch_outcomes"]["total"] += 1
                 # Empty status falls back to event_type for classification —
                 # preserves pre-vocab recall for e.g. status-less task_complete
                 # receipts (the old code classified on status OR event_type).

@@ -78,5 +78,55 @@ def test_non_success_report_is_not_reclassified(tmp_path):
     assert r["contract_valid"] is False
 
 
+# ---------------------------------------------------------------------------
+# Non-report dispatch classes are exempted, not report_contract_invalid
+# ---------------------------------------------------------------------------
+
+_PANEL_SEAT_BODY = """# Completion Report
+**Status**: success
+**Dispatch-ID**: panel-architecture-diverge-1-abc123
+
+GATE GREEN — deliberation seat verdict, no diff produced by design.
+"""
+
+_REVIEW_ROLE_BODY = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260716-plan-review-seat
+**Role**: code-reviewer
+
+GATE GREEN — review verdict only, no required sections.
+"""
+
+_REAL_BROKEN_BODY = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260716-real-broken-build
+**Role**: backend-developer
+
+GATE GREEN — everything looks good. (No required sections, no evidence.)
+"""
+
+
+def test_panel_seat_success_claim_is_exempt(tmp_path):
+    r = _parse(tmp_path, _PANEL_SEAT_BODY)
+    assert r["event_type"] == "report_exempt"
+    assert r["status"] == "exempt"
+    assert r["report_class"] == "panel_seat"
+
+
+def test_review_role_success_claim_is_exempt(tmp_path):
+    r = _parse(tmp_path, _REVIEW_ROLE_BODY)
+    assert r["event_type"] == "report_exempt"
+    assert r["report_class"] == "review_role"
+
+
+def test_real_build_worker_broken_report_still_contract_invalid(tmp_path):
+    """No exemption class applies: a genuinely broken build-worker report must
+    still emit report_contract_invalid — over-exemption is a failure."""
+    r = _parse(tmp_path, _REAL_BROKEN_BODY)
+    assert r["event_type"] == "report_contract_invalid"
+    assert r["status"] == "contract_invalid"
+    assert "report_class" not in r
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

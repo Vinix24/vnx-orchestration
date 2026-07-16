@@ -637,3 +637,140 @@ class TestSmartRouterStrategyTag:
 
         result = _load_route_decision("bad-dispatch", state_dir)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Part 9: non-report dispatch classes are exempted, not report_contract_invalid
+# ---------------------------------------------------------------------------
+
+class TestNonReportDispatchExemption:
+    """Panel/deliberation seats, benchmark/smoke runs, and review/read_only
+    dispatches never write a ## Changes section by design. A contract
+    violation from one of those classes must emit report_exempt, not
+    report_contract_invalid — but a REAL build worker with a broken report
+    must still emit report_contract_invalid (no blanket exemption)."""
+
+    _BROKEN_BODY = "## Summary\n\nShort.\n"  # missing sections, no content dispatch_id
+
+    def test_panel_seat_dispatch_id_is_exempt(self, tmp_path, state_dir):
+        did = "panel-architecture-diverge-1-abc123"
+        report = tmp_path / f"{did}.md"
+        report.write_text(f"---\ndispatch_id: {did}\n---\n\n{self._BROKEN_BODY}", encoding="utf-8")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["status"] == "exempt"
+        assert r["report_class"] == "panel_seat"
+        assert r["dispatch_id"] == did
+
+    def test_bench_dispatch_id_is_exempt(self, tmp_path, state_dir):
+        did = "bench-model-x-task-y-20260716"
+        report = tmp_path / f"{did}.md"
+        report.write_text(f"---\ndispatch_id: {did}\n---\n\n{self._BROKEN_BODY}", encoding="utf-8")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["report_class"] == "benchmark"
+
+    def test_smoke_dispatch_id_is_exempt(self, tmp_path, state_dir):
+        did = "smoke-skill-injection-check"
+        report = tmp_path / f"{did}.md"
+        report.write_text(f"---\ndispatch_id: {did}\n---\n\n{self._BROKEN_BODY}", encoding="utf-8")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["report_class"] == "benchmark"
+
+    def test_review_role_frontmatter_is_exempt(self, tmp_path, state_dir):
+        did = "20260716-plan-review-seat"
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\nrole: code-reviewer\n---\n\n{self._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["report_class"] == "review_role"
+
+    def test_read_only_frontmatter_is_exempt(self, tmp_path, state_dir):
+        did = "20260716-read-only-seat"
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\nread_only: true\n---\n\n{self._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["report_class"] == "read_only"
+
+    def test_route_decision_task_class_is_used_as_fallback(self, tmp_path, state_dir):
+        """When the report body carries no task_class, the route_decision JSON's
+        task_class (written by smart_router) is consulted as a fallback signal."""
+        did = "20260716-router-tagged-review"
+        report = tmp_path / f"{did}.md"
+        report.write_text(f"---\ndispatch_id: {did}\n---\n\n{self._BROKEN_BODY}", encoding="utf-8")
+
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / f"{did}.json").write_text(
+            json.dumps({"strategy": "smart_router", "task_class": "research_structured"}),
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["report_class"] == "research_structured"
+
+    def test_real_build_worker_still_gets_contract_invalid(self, tmp_path, state_dir):
+        """No exemption class applies: a genuinely broken build-worker report
+        must still emit report_contract_invalid (over-exemption is a failure)."""
+        did = "20260716-real-broken-build"
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\nrole: backend-developer\n---\n\n{self._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["status"] == "contract_invalid"
+        assert "report_class" not in r
+
+    def test_dispatch_id_containing_panel_midstring_still_contract_invalid(self, tmp_path, state_dir):
+        """dispatch_id prefix match only — "panel" mid-string must NOT exempt."""
+        did = "20260716-review-panel-followup"
+        report = tmp_path / f"{did}.md"
+        report.write_text(f"---\ndispatch_id: {did}\n---\n\n{self._BROKEN_BODY}", encoding="utf-8")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
