@@ -13,7 +13,15 @@ T0 outputs: dispatch instructions, manager blocks, gate/closure decisions, light
 **NEVER**: author `claudedocs/*` reports, conduct multi-step research, or self-dispatch.
 
 ## Startup
-Load `@t0-orchestrator` before any orchestration action.
+The `t0-orchestrator` skill playbook governs every orchestration decision — never orchestrate
+from memory. It reaches your context one of two ways:
+1. **SessionStart hook injection (primary)** — `.claude/hooks/sessionstart.sh` (deployed by
+   `vnx init`/`bootstrap_hooks`) reads `.claude/skills/t0-orchestrator/SKILL.md` and injects its
+   body before your first prompt. A `# T0 Orchestrator` heading in this context means it's
+   already loaded — proceed.
+2. **Skill-tool invocation (fallback)** — if that heading is absent, invoke `@t0-orchestrator`
+   via the Skill tool. If it returns `Unknown skill` or is not model-invocable, STOP: do not
+   orchestrate from memory. Run `bash scripts/commands/t0_role_audit.sh` to confirm the drift.
 
 ## Quick Commands
 ```bash

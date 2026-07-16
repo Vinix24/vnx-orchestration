@@ -70,21 +70,97 @@ _t0_static_frontmatter_disables_invocation() {
   ' "$1"
 }
 
-# Does this project's SessionStart hook (the Claude-Code-only mechanism —
-# see hooks/sessionstart.sh and role-orchestrator.md's "Mandatory Startup")
-# inject a given skill's SKILL.md body into T0 context? Checked by literal
-# path reference, not execution — deliberately static, matching this
-# script's "never grow into a real parser/interpreter" discipline. Checks
-# the deployed consumer copy first, then the fabric-source template (the
-# shape this very repo's own checkout has, since it never runs `vnx init`
-# on itself).
-_t0_static_hook_injects_skill() {
+# Does a SessionStart hook script on disk (deployed consumer copy checked
+# first, then the fabric-source template — the shape this very repo's own
+# checkout has, since it never runs `vnx init` on itself) contain a literal
+# reference to a given skill's SKILL.md path? Checked by grep, not
+# execution — deliberately static, matching this script's "never grow into
+# a real parser/interpreter" discipline. Prints the matched hook's path on
+# stdout when found (so the caller can pass it straight to
+# _t0_static_settings_wires_hook without re-deriving it).
+#
+# File-content only — this does NOT prove Claude Code actually runs the
+# hook. See _t0_static_hook_injects_skill for the full check.
+_t0_static_hook_file_references_skill() {
   local root="$1" skill_name="$2" hook
   for hook in "$root/.claude/hooks/sessionstart.sh" "$root/hooks/sessionstart.sh"; do
     [ -f "$hook" ] || continue
-    grep -q "skills/$skill_name/SKILL.md" "$hook" 2>/dev/null && return 0
+    if grep -q "skills/$skill_name/SKILL.md" "$hook" 2>/dev/null; then
+      printf '%s' "$hook"
+      return 0
+    fi
   done
   return 1
+}
+
+# Does <settings_file>'s "hooks.SessionStart" array actually reference
+# $needle (a hook script's basename)? Bracket-depth tracked rather than
+# indentation-anchored, so reformatted JSON doesn't break the block
+# boundary: depth increments on every `[` and decrements on every `]` from
+# the "SessionStart" key's own line onward, and the scan stops the instant
+# depth returns to (or below) zero — i.e. the line that closes the
+# SessionStart array itself. A reference is ignored when it appears only
+# after an unescaped `#` in the command string — a shell comment, not an
+# active invocation (a commented-out hook wire does not count as wired).
+_t0_static_settings_json_wires_hook() {
+  local settings_file="$1" needle="$2"
+  [ -f "$settings_file" ] || return 1
+  awk -v needle="$needle" '
+    !in_block && /"SessionStart"[ \t]*:/ {
+      in_block = 1
+      o = gsub(/\[/, "[")
+      c = gsub(/\]/, "]")
+      depth = o - c
+      next
+    }
+    in_block {
+      line = $0
+      o = gsub(/\[/, "[")
+      c = gsub(/\]/, "]")
+      depth += (o - c)
+      idx = index(line, "#")
+      if (idx > 0) line = substr(line, 1, idx - 1)
+      if (index(line, needle) > 0) { found = 1 }
+      if (depth <= 0) { in_block = 0 }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$settings_file" 2>/dev/null
+}
+
+# Does this project actually invoke $hook (a SessionStart hook script path
+# already confirmed on disk by the caller) from its SessionStart config?
+# Checks the deployed .claude/settings.json first — the real, live config
+# that decides what Claude Code runs for THIS project, so a hook file's
+# content is never trusted as a proxy for "and it runs" once a settings.json
+# exists (a hook script existing is not proof it fires: finding 1, codex
+# round 2, 2026-07-16 — this repo's own hooks/sessionstart.sh correctly
+# injects the skill body, but .claude/settings.json's SessionStart config
+# never calls it). Only when no .claude/settings.json exists at all (a
+# project that hasn't run `vnx init`/`vnx regen-settings` yet) does this fall
+# back to the settings TEMPLATE that ships the wiring to future consumers,
+# so a not-yet-live consumer project isn't reported unloadable purely for
+# not having generated its settings.json yet.
+_t0_static_settings_wires_hook() {
+  local root="$1" hook="$2" hook_base settings
+  hook_base="$(basename "$hook")"
+  settings="$root/.claude/settings.json"
+  if [ -f "$settings" ]; then
+    _t0_static_settings_json_wires_hook "$settings" "$hook_base"
+    return $?
+  fi
+  settings="$root/templates/settings_vnx_keys.json.tmpl"
+  [ -f "$settings" ] || return 1
+  _t0_static_settings_json_wires_hook "$settings" "$hook_base"
+}
+
+# Full in-context check: a SessionStart hook script references the skill's
+# SKILL.md path AND this project's settings actually wire that hook up to
+# run. Both halves are required — see _t0_static_hook_file_references_skill
+# and _t0_static_settings_wires_hook for what each half checks.
+_t0_static_hook_injects_skill() {
+  local root="$1" skill_name="$2" hook
+  hook="$(_t0_static_hook_file_references_skill "$root" "$skill_name")" || return 1
+  _t0_static_settings_wires_hook "$root" "$hook"
 }
 
 # Static role<->skill invocability check for one project root. Prints one
@@ -100,6 +176,17 @@ _t0_static_hook_injects_skill() {
 #                        SessionStart hook) nor model-invocable (SKILL.md
 #                        missing, or present with `disable-model-invocation:
 #                        true` and not otherwise in-context).
+#   HOOK-NOT-WIRED    — a SessionStart hook script exists and its content
+#                        correctly references the skill's SKILL.md path, but
+#                        nothing in .claude/settings.json's (or the settings
+#                        template's) "hooks.SessionStart" config actually
+#                        invokes that hook script — so its body never runs
+#                        and never reaches T0 context, even though the hook
+#                        FILE itself looks correct (finding 1, codex round 2,
+#                        2026-07-16: a hook file existing was previously
+#                        accepted as sufficient proof of in-context delivery,
+#                        without checking whether Claude Code is actually
+#                        configured to run it).
 #   PLAYBOOK-MECHANISM-GAP — AGENTS.md/GEMINI.md (the codex/gemini T0
 #                        surfaces `vnx role sync` mirrors the role into) carry
 #                        the role text, but neither provider has a
@@ -158,7 +245,11 @@ _t0_static_check() {
       fi
 
       if _t0_static_frontmatter_disables_invocation "$skill_md"; then
-        echo "SKILL-UNLOADABLE: role-orchestrator.md references '@$skill_name' — not imported by CLAUDE.md, not hook-injected, and disable-model-invocation: true in $skill_md"
+        if _t0_static_hook_file_references_skill "$root" "$skill_name" >/dev/null; then
+          echo "HOOK-NOT-WIRED: role-orchestrator.md references '@$skill_name' — a SessionStart hook script correctly references $skill_md, but no active (uncommented) reference to that hook exists in the SessionStart config of .claude/settings.json (or, absent that file, the settings template) — disable-model-invocation: true in $skill_md means the Skill-tool fallback is blocked too, so the playbook body never reaches T0 context"
+        else
+          echo "SKILL-UNLOADABLE: role-orchestrator.md references '@$skill_name' — not imported by CLAUDE.md, not hook-injected, and disable-model-invocation: true in $skill_md"
+        fi
         findings=$((findings + 1))
       fi
     done < <(grep -oE '`@[a-zA-Z0-9_-]+`' "$role_md" 2>/dev/null | tr -d '`@' | sort -u)

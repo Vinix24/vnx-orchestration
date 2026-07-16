@@ -78,6 +78,32 @@ def _backups(t0_dir: Path, basename: str):
     return sorted(t0_dir.glob(f"{basename}.bak.*"))
 
 
+def _wire_sessionstart_hook(project: Path, hook_relpath: str):
+    """Write a minimal .claude/settings.json that actually registers
+    `hook_relpath` (e.g. ".claude/hooks/sessionstart.sh") in the
+    SessionStart hooks config — the piece a hook FILE existing does not by
+    itself prove (finding 1, codex round 2, 2026-07-16)."""
+    settings_dir = project / ".claude"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    (settings_dir / "settings.json").write_text(
+        '{\n'
+        '  "hooks": {\n'
+        '    "SessionStart": [\n'
+        '      {\n'
+        '        "matcher": "*",\n'
+        '        "hooks": [\n'
+        '          {\n'
+        '            "type": "command",\n'
+        f'            "command": "bash /abs/project/root/{hook_relpath}"\n'
+        '          }\n'
+        '        ]\n'
+        '      }\n'
+        '    ]\n'
+        '  }\n'
+        '}\n'
+    )
+
+
 # ---------------------------------------------------------------------------
 # --dry-run default / --apply writes
 # ---------------------------------------------------------------------------
@@ -309,7 +335,33 @@ class TestT0OrchestratorInvocabilityNote:
     def test_silent_when_target_has_hook_injection_for_skill(self, tmp_path):
         """Finding 0 mechanism change: the playbook body now reaches T0 via
         the SessionStart hook, not a CLAUDE.md `@`-import — the NOTE-check
-        must recognize that as satisfying the condition too."""
+        must recognize that as satisfying the condition too. This also
+        requires (finding 1, codex round 2, 2026-07-16) that the hook is
+        actually wired into .claude/settings.json's SessionStart config —
+        a hook file existing and referencing the skill is not enough by
+        itself."""
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\ndisable-model-invocation: true\n---\n\nplaybook body\n"
+        )
+        hooks_dir = project / ".claude" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "sessionstart.sh").write_text(
+            "#!/usr/bin/env bash\ncat \"$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md\"\n"
+        )
+        _wire_sessionstart_hook(project, ".claude/hooks/sessionstart.sh")
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+
+    def test_warns_when_hook_present_and_referencing_skill_but_settings_do_not_wire_it(self, tmp_path):
+        """Finding 1 (codex round 2, 2026-07-16): a hook script existing and
+        correctly referencing the skill is not proof Claude Code runs it —
+        this repo's own fabric-source hooks/sessionstart.sh does exactly
+        this and its .claude/settings.json never calls it. No settings.json
+        at all (and no settings template) here, mirroring that gap."""
         project = _make_project(tmp_path)
         skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
         skill_dir.mkdir(parents=True)
@@ -323,7 +375,43 @@ class TestT0OrchestratorInvocabilityNote:
         )
         r = _run_bash("--project-dir", str(project), cwd=tmp_path)
         assert r.returncode == 0, r.stderr
-        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+        assert "does not import the t0-orchestrator skill body" in (r.stdout + r.stderr)
+
+    def test_warns_when_settings_json_reference_to_hook_is_commented_out(self, tmp_path):
+        """A commented-out reference to the hook path inside the command
+        string must not count as wired."""
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\ndisable-model-invocation: true\n---\n\nplaybook body\n"
+        )
+        hooks_dir = project / ".claude" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "sessionstart.sh").write_text(
+            "#!/usr/bin/env bash\ncat \"$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md\"\n"
+        )
+        settings_dir = project / ".claude"
+        (settings_dir / "settings.json").write_text(
+            '{\n'
+            '  "hooks": {\n'
+            '    "SessionStart": [\n'
+            '      {\n'
+            '        "matcher": "*",\n'
+            '        "hooks": [\n'
+            '          {\n'
+            '            "type": "command",\n'
+            '            "command": "bash -c \'# exec bash .claude/hooks/sessionstart.sh\'"\n'
+            '          }\n'
+            '        ]\n'
+            '      }\n'
+            '    ]\n'
+            '  }\n'
+            '}\n'
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" in (r.stdout + r.stderr)
 
     def test_warns_when_hook_present_but_not_referencing_the_skill(self, tmp_path):
         project = _make_project(tmp_path)

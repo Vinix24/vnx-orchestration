@@ -1527,16 +1527,51 @@ cmd_role_sync() {
     ' "$t0_skill_md" 2>/dev/null; then
       t0_skill_invocable=0
     fi
+    # A hook script existing and correctly referencing the skill is not
+    # proof it actually runs — Claude Code only fires hooks registered in
+    # .claude/settings.json's "hooks.SessionStart" array. Without also
+    # checking that wiring, this NOTE stayed silent on exactly the gap
+    # finding 1 (codex round 2, 2026-07-16) found in this repo's own fabric
+    # source: hooks/sessionstart.sh correctly injects the skill body, but
+    # .claude/settings.json's SessionStart config never calls it. Same
+    # bracket-depth-tracked awk scan as t0_role_audit.sh's
+    # _t0_static_settings_json_wires_hook (see that file for full comments);
+    # duplicated here deliberately — this command does not source
+    # t0_role_audit.sh.
     local t0_skill_hook_injected=0
-    local hook_candidate
+    local hook_candidate hook_settings hook_base
     for hook_candidate in "$target_root/.claude/hooks/sessionstart.sh" "$target_root/hooks/sessionstart.sh"; do
-      if [ -f "$hook_candidate" ] && grep -q "skills/t0-orchestrator/SKILL.md" "$hook_candidate" 2>/dev/null; then
+      [ -f "$hook_candidate" ] || continue
+      grep -q "skills/t0-orchestrator/SKILL.md" "$hook_candidate" 2>/dev/null || continue
+      hook_base="$(basename "$hook_candidate")"
+      hook_settings="$target_root/.claude/settings.json"
+      [ -f "$hook_settings" ] || hook_settings="$target_root/templates/settings_vnx_keys.json.tmpl"
+      if [ -f "$hook_settings" ] && awk -v needle="$hook_base" '
+        !in_block && /"SessionStart"[ \t]*:/ {
+          in_block = 1
+          o = gsub(/\[/, "[")
+          c = gsub(/\]/, "]")
+          depth = o - c
+          next
+        }
+        in_block {
+          line = $0
+          o = gsub(/\[/, "[")
+          c = gsub(/\]/, "]")
+          depth += (o - c)
+          idx = index(line, "#")
+          if (idx > 0) line = substr(line, 1, idx - 1)
+          if (index(line, needle) > 0) { found = 1 }
+          if (depth <= 0) { in_block = 0 }
+        }
+        END { exit(found ? 0 : 1) }
+      ' "$hook_settings" 2>/dev/null; then
         t0_skill_hook_injected=1
         break
       fi
     done
     if [ "$t0_skill_invocable" -eq 0 ] && [ "$t0_skill_hook_injected" -eq 0 ]; then
-      log "[role-sync] NOTE: $target_root does not import the t0-orchestrator skill body into $project_t0_dir/CLAUDE.md (nor does its SessionStart hook inject it), and its SKILL.md is missing or not model-invocable."
+      log "[role-sync] NOTE: $target_root does not import the t0-orchestrator skill body into $project_t0_dir/CLAUDE.md, and its SKILL.md is missing or not model-invocable. Its SessionStart hook script either doesn't inject the skill, or isn't actually wired into .claude/settings.json's SessionStart config."
       log "[role-sync]       Run 'bash scripts/commands/t0_role_audit.sh --static $target_root' for detail; the shipped role's Mandatory Startup step will stall on Skill-tool invocation."
     fi
   fi

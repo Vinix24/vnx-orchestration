@@ -21,4 +21,5 @@ This project uses **VNX Glass Box Governance** for multi-agent orchestration.
 1. `vnx doctor` — validate setup
 2. Edit `.claude/terminals/T0/CLAUDE.md` for your project context
 3. `vnx track new <id> --project-id {{ project_id }} --title "..." --goal "..."`
-4. Start T0 terminal: load `@t0-orchestrator`
+4. Start T0 terminal — the SessionStart hook auto-loads the `t0-orchestrator` playbook; if that
+   heading is absent, invoke `@t0-orchestrator` via the Skill tool instead

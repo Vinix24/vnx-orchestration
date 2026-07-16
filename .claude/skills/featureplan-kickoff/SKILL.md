@@ -46,7 +46,9 @@ You are not responsible for:
 3. Use CLI and state verification; do not guess queue or dispatch state.
 4. Do not promote more than one new dispatch during kickoff.
 5. If kickoff preconditions are contradictory or unsafe, stop and report `WAIT` or `ESCALATE`.
-6. When kickoff succeeds, explicitly tell the operator or T0 to load `@t0-orchestrator` next.
+6. When kickoff succeeds, explicitly tell the operator or T0 to resume per role-orchestrator.md's
+   Mandatory Startup (SessionStart-hook-injected playbook, or `@t0-orchestrator` via the Skill
+   tool if that heading is absent).
 
 ## 2.1 Feature Plan Field Conventions
 
@@ -194,7 +196,7 @@ Return a concise kickoff summary containing:
 
 Then explicitly hand off:
 
-`Kickoff complete. Load @t0-orchestrator and continue normal orchestration from the current queue state.`
+`Kickoff complete. Resume orchestration per role-orchestrator.md's Mandatory Startup (SessionStart-hook-injected playbook, or invoke @t0-orchestrator via the Skill tool if that heading is absent) and continue from the current queue state.`
 
 ## 5. Failure Modes
 
