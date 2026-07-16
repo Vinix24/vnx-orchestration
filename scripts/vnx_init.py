@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -241,6 +242,79 @@ def _refresh_canon_skills(canon_dirs: List[Path], target: Path) -> "tuple[int, i
     return refreshed, preserved
 
 
+# Top-level (non-directory) files in the shipped skills root that are shipped
+# canon config, not project-authored, and must ship alongside the per-skill
+# dirs. `skills.yaml` is the registry `vnx doctor` and skill validation read
+# from the target root, not from a per-skill subdirectory (OI-624).
+SKILLS_REGISTRY_FILES = ("skills.yaml",)
+
+
+class RegistryCopyError(RuntimeError):
+    """Raised when a shipped registry file cannot be safely synced to target."""
+
+
+def _refresh_registry_files(shipped: Path, target: Path) -> "tuple[int, int]":
+    """Seed shipped top-level registry file(s) into target, copy-if-missing only.
+
+    Unlike the per-skill dirs (`_refresh_canon_skills`, never-drift-from-canon),
+    `skills.yaml` is a MIXED file by its own contract: consumers extend it with
+    project-specific skill registrations (ADR-032). Clobbering it on every run
+    would destroy those extensions, so a registry file already present at the
+    target is left byte-for-byte untouched — only a MISSING target file is
+    seeded from canon.
+
+    Must be called with a `target` directory that already exists (the normal
+    call order runs `_refresh_canon_skills(canon_dirs, target)` first, which
+    both removes a stale target-level symlink and creates the directory).
+
+    Raises RegistryCopyError (fail-loud, never silently skipped) when:
+      - the shipped source file is missing.
+      - the target path is itself a symlink (refuses to follow it, since that
+        could write outside the project root).
+      - the target directory resolves outside itself between mkdir and write
+        (defense-in-depth against a swapped-out parent dir).
+
+    Returns (copied_count, preserved_count).
+    """
+    copied = 0
+    preserved = 0
+    for name in SKILLS_REGISTRY_FILES:
+        src = shipped / name
+        if not src.is_file():
+            raise RegistryCopyError(f"Missing shipped registry file: {src}")
+
+        dest = target / name
+        if dest.is_symlink():
+            raise RegistryCopyError(
+                f"Refusing to write registry file through symlink: {dest} "
+                f"-> {os.path.realpath(str(dest))}"
+            )
+        if dest.exists():
+            preserved += 1
+            continue
+
+        resolved_target = os.path.realpath(str(target))
+        resolved_dest_dir = os.path.realpath(str(dest.parent))
+        if resolved_dest_dir != resolved_target:
+            raise RegistryCopyError(
+                f"Refusing registry write: {dest} resolves outside target dir {target}"
+            )
+
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=str(target))
+        try:
+            with os.fdopen(fd, "wb") as tmp_f, open(src, "rb") as src_f:
+                shutil.copyfileobj(src_f, tmp_f)
+            shutil.copystat(str(src), tmp_path)
+            os.replace(tmp_path, str(dest))
+        except OSError as e:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise RegistryCopyError(f"Failed to copy registry file {src} -> {dest}: {e}") from e
+        copied += 1
+
+    return copied, preserved
+
+
 def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
     """Refresh shipped canon skills into .claude/skills/ (and multi-provider dirs).
 
@@ -249,6 +323,11 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
     consumer's canon skills can never freeze/drift from fabric canon. Skill
     dirs whose name isn't in the shipped set are project-authored and are
     never touched.
+
+    The top-level `skills.yaml` registry is different: it is a MIXED file
+    (canon entries + a consumer's own project-specific registrations, per
+    ADR-032), so it is seeded copy-if-missing rather than refreshed every
+    run — see `_refresh_registry_files`.
     """
     project_root = Path(paths["PROJECT_ROOT"])
     vnx_home = Path(paths["VNX_HOME"])
@@ -263,9 +342,15 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
         return StepResult("skills", FAIL, f"No canon skill directories found under: {shipped}")
 
     refreshed, preserved = _refresh_canon_skills(canon_dirs, target)
+    try:
+        reg_copied, reg_preserved = _refresh_registry_files(shipped, target)
+    except RegistryCopyError as e:
+        return StepResult("skills", FAIL, f"Registry sync failed for {target}: {e}")
+
     details = [
         f".claude/skills: refreshed {refreshed} canon skill(s), "
-        f"preserved {preserved} project skill(s)"
+        f"preserved {preserved} project skill(s), "
+        f"{reg_copied} registry file(s) seeded, {reg_preserved} preserved (already present)"
     ]
 
     # Multi-provider sync
@@ -275,9 +360,14 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
     ]:
         if shutil.which(cli):
             r, p = _refresh_canon_skills(canon_dirs, skill_dir)
+            try:
+                reg_c, reg_p = _refresh_registry_files(shipped, skill_dir)
+            except RegistryCopyError as e:
+                return StepResult("skills", FAIL, f"Registry sync failed for {skill_dir}: {e}")
             details.append(
                 f"Synced to {cli} ({skill_dir}): refreshed {r} canon skill(s), "
-                f"preserved {p} project skill(s)"
+                f"preserved {p} project skill(s), "
+                f"{reg_c} registry file(s) seeded, {reg_p} preserved (already present)"
             )
 
     return StepResult("skills", PASS,

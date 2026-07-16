@@ -29,6 +29,8 @@ from vnx_init import (
     init_db,
     intelligence_import,
     run_init,
+    _refresh_registry_files,
+    RegistryCopyError,
 )
 
 
@@ -49,6 +51,7 @@ def vnx_env(tmp_path):
     (vnx_home / "skills").mkdir()
     (vnx_home / "skills" / "test-skill").mkdir()
     (vnx_home / "skills" / "test-skill" / "SKILL.md").write_text("# Test skill\n")
+    (vnx_home / "skills" / "skills.yaml").write_text("skills:\n  test-skill:\n    name: \"@test-skill\"\n")
     (vnx_home / "templates" / "terminals").mkdir(parents=True)
     for tid in ["T0", "T1", "T2", "T3"]:
         (vnx_home / "templates" / "terminals" / f"{tid}.md").write_text(f"# {tid}\n")
@@ -165,6 +168,134 @@ class TestBootstrapSkills:
         skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
         assert skills_dir.is_dir()
         assert (skills_dir / "test-skill" / "SKILL.md").exists()
+
+    def test_copies_top_level_registry_file(self, vnx_env):
+        """OI-624 regression: bootstrap_skills must copy skills.yaml alongside
+        the per-skill dirs, not just the dirs themselves — `vnx doctor` reads
+        the registry from the target root."""
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        registry = skills_dir / "skills.yaml"
+        assert registry.is_file(), "skills.yaml missing from fresh-install target"
+        shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
+        assert registry.read_text() == shipped_registry.read_text()
+
+    def test_refreshes_stale_registry_file(self, vnx_env):
+        """The registry is copy-if-missing, unlike canon skill dirs: an existing
+        target/skills.yaml is a MIXED file (canon + project extensions per
+        ADR-032) and must be preserved byte-for-byte, not clobbered."""
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "skills.yaml").write_text("skills: {}\n# STALE\n")
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        preserved = (skills_dir / "skills.yaml").read_text()
+        assert preserved == "skills: {}\n# STALE\n"
+
+    def test_preserves_project_extension_entry_in_registry(self, vnx_env):
+        """Regression: a consumer's project-specific skill registration in an
+        existing target skills.yaml must survive bootstrap_skills byte-identical."""
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+        existing = (
+            "skills:\n"
+            "  test-skill:\n"
+            "    name: \"@test-skill\"\n"
+            "  my-project-skill:\n"
+            "    name: \"@my-project-skill\"\n"
+            "    description: \"Project-specific extension, not shipped canon\"\n"
+        )
+        (skills_dir / "skills.yaml").write_text(existing)
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        assert (skills_dir / "skills.yaml").read_text() == existing
+
+    def test_seeds_missing_registry_from_canon(self, vnx_env):
+        """A genuinely missing target registry is seeded from shipped canon."""
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
+        assert (skills_dir / "skills.yaml").read_text() == shipped_registry.read_text()
+
+    def test_refuses_registry_symlink_destination(self, vnx_env):
+        """A target/skills.yaml symlink pointing outside the project must be
+        refused, not followed and written through."""
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+
+        outside_target = Path(vnx_env["PROJECT_ROOT"]).parent / "outside-secret.yaml"
+        outside_target.write_text("do-not-touch\n")
+        (skills_dir / "skills.yaml").symlink_to(outside_target)
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == FAIL
+        assert "symlink" in result.message.lower()
+        assert outside_target.read_text() == "do-not-touch\n"
+
+    def test_fails_loud_on_missing_shipped_registry(self, vnx_env):
+        """A missing shipped skills.yaml must fail the step, not silently copy 0 files."""
+        shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
+        shipped_registry.unlink()
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == FAIL
+        assert "registry" in result.message.lower()
+
+    def test_registry_copy_is_atomic(self, vnx_env, monkeypatch):
+        """A failure mid-copy must never leave a partially-written registry file
+        at the destination — the temp file is discarded, not renamed into place."""
+        import vnx_init as vnx_init_mod
+
+        def _boom(*args, **kwargs):
+            raise OSError("simulated mid-copy failure")
+
+        monkeypatch.setattr(vnx_init_mod.shutil, "copystat", _boom)
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == FAIL
+
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        assert not (skills_dir / "skills.yaml").exists(), \
+            "destination must not exist after a failed atomic write"
+        leftover_tmp = [
+            p for p in skills_dir.iterdir()
+            if p.name.startswith(".skills.yaml.")
+        ]
+        assert not leftover_tmp, f"temp file(s) left behind: {leftover_tmp}"
+
+    def test_mirror_dir_seeds_missing_registry(self, vnx_env):
+        """Multi-provider mirror targets (.agents/skills, .gemini/skills) use the
+        same _refresh_registry_files helper as .claude/skills — a missing mirror
+        registry is seeded from canon."""
+        mirror_dir = Path(vnx_env["PROJECT_ROOT"]) / ".agents" / "skills"
+        mirror_dir.mkdir(parents=True)
+        shipped = Path(vnx_env["VNX_HOME"]) / "skills"
+
+        copied, preserved = _refresh_registry_files(shipped, mirror_dir)
+        assert copied == 1
+        assert preserved == 0
+        assert (mirror_dir / "skills.yaml").read_text() == (shipped / "skills.yaml").read_text()
+
+    def test_mirror_dir_preserves_existing_registry(self, vnx_env):
+        """A mirror target (.gemini/skills) with its own existing skills.yaml
+        (e.g. a prior sync, or a provider-specific extension) is never clobbered."""
+        mirror_dir = Path(vnx_env["PROJECT_ROOT"]) / ".gemini" / "skills"
+        mirror_dir.mkdir(parents=True)
+        (mirror_dir / "skills.yaml").write_text("skills:\n  gemini-only-skill: {}\n")
+        shipped = Path(vnx_env["VNX_HOME"]) / "skills"
+
+        copied, preserved = _refresh_registry_files(shipped, mirror_dir)
+        assert copied == 0
+        assert preserved == 1
+        assert (mirror_dir / "skills.yaml").read_text() == "skills:\n  gemini-only-skill: {}\n"
 
     def test_refreshes_stale_canon_skill_and_preserves_project_skill(self, vnx_env):
         """Pre-existing target dir: canon skill refreshes, project skill is untouched."""
