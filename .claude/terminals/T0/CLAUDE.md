@@ -9,3 +9,11 @@
 -->
 
 @role-orchestrator.md
+
+<!--
+  Skill body imported passively because the skill is intentionally not
+  model-invocable (A-4, disable-model-invocation: true). Content-in-context
+  replaces the old `load @t0-orchestrator` Skill-tool call.
+-->
+
+@../../skills/t0-orchestrator/SKILL.md

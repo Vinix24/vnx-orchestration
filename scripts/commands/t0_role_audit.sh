@@ -14,13 +14,122 @@
 # This makes that drift observable: it reports, per project/terminal,
 # whether the running T0 would load its role file right now.
 #
-# Usage: bash scripts/commands/t0_role_audit.sh
+# Also audits a SECOND, independent drift class: role<->skill invocability.
+# role-orchestrator.md presupposes that certain skills are loadable (either
+# in-context via a CLAUDE.md `@`-import, or model-invocable via the Skill
+# tool). Nothing previously cross-checked that presupposition against skill
+# frontmatter (`disable-model-invocation: true`) or import targets actually
+# existing on disk — that gap is exactly how F1 (t0-orchestrator unloadable
+# in the fabric source) went undetected for ~7 weeks. `--static` runs this
+# check standalone; the default live-session audit below also runs it
+# automatically for every project it discovers.
+#
+# Usage:
+#   bash scripts/commands/t0_role_audit.sh                    # live-session audit (unchanged)
+#   bash scripts/commands/t0_role_audit.sh --static [ROOT]     # role<->skill invocability only
+#                                                                # ROOT defaults to cwd's git root
 #
 # Standalone by design — this must also audit OTHER registered VNX projects,
 # not just the one it happens to be invoked from, so it does not depend on
 # bin/vnx's command loader (PROJECT_ROOT/VNX_HOME/log/err are not assumed).
 
 set -uo pipefail
+
+# Absolute path to this script itself, so the registry sub-pass (a Python
+# heredoc, see below) can re-invoke `--static` per registered project without
+# guessing where it lives.
+_T0_AUDIT_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# Resolve an `@`-import target relative to the file that contains it.
+# $1 = raw path text after the leading `@` on an import line
+# $2 = directory of the importing file
+_t0_static_resolve_import() {
+  local raw="$1" base_dir="$2"
+  case "$raw" in
+    '~'*) printf '%s' "${raw/#\~/$HOME}" ;;
+    /*)   printf '%s' "$raw" ;;
+    *)    printf '%s' "$base_dir/$raw" ;;
+  esac
+}
+
+# Naive frontmatter check: does the FIRST `---`...`---` block contain the
+# literal line `disable-model-invocation: true`? This is deliberately not a
+# YAML parser — it must never grow into one.
+_t0_static_frontmatter_disables_invocation() {
+  awk '
+    /^---[ \t]*$/ { n++; if (n == 2) exit }
+    n == 1 && /disable-model-invocation:[ \t]*true/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
+# Static role<->skill invocability check for one project root. Prints one
+# finding per line (IMPORT-MISSING / SKILL-UNLOADABLE) to stdout; returns 0
+# when clean, 1 when any finding was printed.
+#
+#   IMPORT-MISSING    — an `@`-import line in the T0 CLAUDE.md or
+#                        role-orchestrator.md resolves to a file that does
+#                        not exist.
+#   SKILL-UNLOADABLE  — a backtick-quoted `@<skill>` reference in
+#                        role-orchestrator.md names a skill that is neither
+#                        in-context (imported by CLAUDE.md) nor
+#                        model-invocable (SKILL.md missing, or present with
+#                        `disable-model-invocation: true` and not imported).
+_t0_static_check() {
+  local root="$1"
+  local t0_dir="$root/.claude/terminals/T0"
+  local claude_md="$t0_dir/CLAUDE.md"
+  local role_md="$t0_dir/role-orchestrator.md"
+  local findings=0
+  local imported_targets=""
+
+  local f dir line raw resolved
+  for f in "$claude_md" "$role_md"; do
+    [ -f "$f" ] || continue
+    dir="$(dirname "$f")"
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      raw="${line#@}"
+      resolved="$(_t0_static_resolve_import "$raw" "$dir")"
+      if [ ! -f "$resolved" ]; then
+        echo "IMPORT-MISSING: $f imports '@$raw' -> $resolved (does not exist)"
+        findings=$((findings + 1))
+      else
+        # Normalize (the raw concatenation may still contain `../`) so an
+        # import target and a skill's canonical SKILL.md path compare equal
+        # whenever they name the same file on disk.
+        imported_targets="$imported_targets|$(realpath "$resolved" 2>/dev/null || printf '%s' "$resolved")"
+      fi
+    done < <(grep -h '^@' "$f" 2>/dev/null)
+  done
+
+  if [ -f "$role_md" ]; then
+    local skill_name skill_md
+    while IFS= read -r skill_name; do
+      [ -z "$skill_name" ] && continue
+      skill_md="$root/.claude/skills/$skill_name/SKILL.md"
+
+      if [ ! -f "$skill_md" ]; then
+        echo "SKILL-UNLOADABLE: role-orchestrator.md references '@$skill_name' but $skill_md does not exist"
+        findings=$((findings + 1))
+        continue
+      fi
+
+      local skill_md_real
+      skill_md_real="$(realpath "$skill_md" 2>/dev/null || printf '%s' "$skill_md")"
+      case "$imported_targets" in
+        *"|$skill_md_real"*) continue ;;  # in-context via CLAUDE.md import; invocability irrelevant
+      esac
+
+      if _t0_static_frontmatter_disables_invocation "$skill_md"; then
+        echo "SKILL-UNLOADABLE: role-orchestrator.md references '@$skill_name' — not imported by CLAUDE.md and disable-model-invocation: true in $skill_md"
+        findings=$((findings + 1))
+      fi
+    done < <(grep -oE '`@[a-zA-Z0-9_-]+`' "$role_md" 2>/dev/null | tr -d '`@' | sort -u)
+  fi
+
+  [ "$findings" -eq 0 ]
+}
 
 # All descendant PIDs of $1 (the FULL process tree, not just direct children).
 # BFS over pgrep -P; process trees are acyclic so this always terminates.
@@ -62,6 +171,21 @@ _t0_audit_row() {
 }
 
 main() {
+  if [ "${1:-}" = "--static" ]; then
+    local static_root="${2:-}"
+    if [ -z "$static_root" ]; then
+      static_root="$(git rev-parse --show-toplevel 2>/dev/null)" || static_root="$(pwd)"
+    fi
+    local static_output
+    static_output="$(_t0_static_check "$static_root")"
+    if [ -z "$static_output" ]; then
+      echo "(clean — no role<->skill invocability drift found in $static_root)"
+      return 0
+    fi
+    printf '%s\n' "$static_output"
+    return 1
+  fi
+
   if ! command -v tmux >/dev/null 2>&1; then
     echo "tmux not found — cannot audit live sessions." >&2
     exit 1
@@ -111,6 +235,13 @@ main() {
     _t0_audit_active_cli "$pane_pid" && cli="running"
 
     _t0_audit_row "$(basename "$project_root")" "T0" "$loaded" "$cli" "$pane_path"
+
+    local static_output_live
+    static_output_live="$(_t0_static_check "$project_root")"
+    if [ -n "$static_output_live" ]; then
+      echo "  [static] role<->skill invocability drift:"
+      printf '%s\n' "$static_output_live" | sed 's/^/    /'
+    fi
   done < <(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_current_path}' 2>/dev/null)
 
   if [ "$found_any" -eq 0 ]; then
@@ -122,10 +253,10 @@ main() {
   # instead of silently disappearing from the report.
   local registry="$HOME/.vnx/projects.json"
   if [ -f "$registry" ] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$registry" "$seen_roots" <<'PYEOF'
-import json, os, sys
+    python3 - "$registry" "$seen_roots" "$_T0_AUDIT_SELF" <<'PYEOF'
+import json, os, subprocess, sys
 
-registry_file, seen_raw = sys.argv[1], sys.argv[2]
+registry_file, seen_raw, audit_self = sys.argv[1], sys.argv[2], sys.argv[3]
 seen = set(seen_raw.split())
 
 try:
@@ -149,6 +280,14 @@ for p in data.get("projects", []):
     if os.path.isfile(role_file):
         print("{:<22} {:<6} {:<9} {:<9} {:<55}".format(
             os.path.basename(root), "T0", "n/a", "(not running)", root))
+        static_proc = subprocess.run(
+            ["bash", audit_self, "--static", root],
+            capture_output=True, text=True,
+        )
+        if static_proc.returncode != 0 and static_proc.stdout.strip():
+            print("  [static] role<->skill invocability drift:")
+            for line in static_proc.stdout.strip().splitlines():
+                print(f"    {line}")
 PYEOF
   fi
 }

@@ -1496,6 +1496,32 @@ cmd_role_sync() {
     log "[role-sync]       Convert it to a thin '@role-orchestrator.md' + project-context to activate this."
   fi
 
+  # Warn (do not block) when the shipped role's Mandatory Startup step has
+  # neither an in-context path nor an invocable fallback for the
+  # t0-orchestrator skill in the TARGET project: CLAUDE.md doesn't import its
+  # SKILL.md, and SKILL.md is either missing or carries
+  # `disable-model-invocation: true`. Grep-level only — the full
+  # IMPORT-MISSING / SKILL-UNLOADABLE check lives in
+  # scripts/commands/t0_role_audit.sh --static (F1: this exact gap left
+  # t0-orchestrator unloadable in this repo's own fabric source for ~7 weeks).
+  local t0_skill_md="$target_root/.claude/skills/t0-orchestrator/SKILL.md"
+  local t0_skill_imported=0
+  if [ -f "$project_t0_dir/CLAUDE.md" ] && grep -q "skills/t0-orchestrator/SKILL.md" "$project_t0_dir/CLAUDE.md" 2>/dev/null; then
+    t0_skill_imported=1
+  fi
+  if [ "$t0_skill_imported" -eq 0 ]; then
+    local t0_skill_invocable=1
+    if [ ! -f "$t0_skill_md" ]; then
+      t0_skill_invocable=0
+    elif awk '/^---[ \t]*$/{n++; if(n==2) exit} n==1 && /disable-model-invocation:[ \t]*true/{f=1} END{exit(f?0:1)}' "$t0_skill_md" 2>/dev/null; then
+      t0_skill_invocable=0
+    fi
+    if [ "$t0_skill_invocable" -eq 0 ]; then
+      log "[role-sync] NOTE: $target_root does not import the t0-orchestrator skill body into $project_t0_dir/CLAUDE.md, and its SKILL.md is missing or not model-invocable."
+      log "[role-sync]       Run 'bash scripts/commands/t0_role_audit.sh --static $target_root' for detail; the shipped role's Mandatory Startup step will stall on Skill-tool invocation."
+    fi
+  fi
+
   # Provider-agnostic (anti-lock-in): mirror the canonical role into a marked
   # block in AGENTS.md (Codex) and GEMINI.md (Gemini/Kimi), sitting alongside
   # role-orchestrator.md in the T0 dir. Reuses the same insert-or-replace

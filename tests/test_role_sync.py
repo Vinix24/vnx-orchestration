@@ -270,6 +270,44 @@ class TestConsumerRepoResolution:
 
 
 # ---------------------------------------------------------------------------
+# t0-orchestrator invocability NOTE (F1 prevention): the shipped role's
+# Mandatory Startup step needs the skill EITHER in-context (CLAUDE.md import)
+# OR model-invocable (SKILL.md without disable-model-invocation: true). Role
+# sync warns, never blocks, when a target project has neither.
+# ---------------------------------------------------------------------------
+
+class TestT0OrchestratorInvocabilityNote:
+    def test_warns_when_target_has_neither_import_nor_invocable_skill(self, tmp_path):
+        project = _make_project(tmp_path)
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        out = r.stdout + r.stderr
+        assert "does not import the t0-orchestrator skill body" in out
+        assert "t0_role_audit.sh --static" in out
+
+    def test_silent_when_target_imports_the_skill_body(self, tmp_path):
+        project = _make_project(tmp_path)
+        t0 = project / ".claude" / "terminals" / "T0"
+        (t0 / "CLAUDE.md").write_text(
+            "@role-orchestrator.md\n@../../skills/t0-orchestrator/SKILL.md\n"
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+
+    def test_silent_when_target_skill_is_model_invocable(self, tmp_path):
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\n---\n\nplaybook body\n"
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+
+
+# ---------------------------------------------------------------------------
 # VNX_HOME guard still refuses in-place (central install only)
 # ---------------------------------------------------------------------------
 

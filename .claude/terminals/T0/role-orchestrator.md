@@ -5,8 +5,15 @@ You are the BRAIN, not the HANDS.
 
 ## Mandatory Startup
 
-Before any orchestration action, load `@t0-orchestrator`.
-Do not run orchestration from memory; follow the skill workflow.
+The `t0-orchestrator` skill playbook governs all orchestration decisions — never orchestrate
+from memory. Its content reaches your context one of two ways, in order:
+
+1. **In context already** — your terminal `CLAUDE.md` imports the playbook body directly
+   (`@../../skills/t0-orchestrator/SKILL.md`). If you can see a `# T0 Orchestrator` heading
+   above, this is already satisfied; proceed.
+2. **Not in context** — invoke `@t0-orchestrator` via the Skill tool. If that call returns
+   `Unknown skill` or the skill is not model-invocable, STOP: do not orchestrate from memory.
+   Report role↔skill drift and run `bash scripts/commands/t0_role_audit.sh` to confirm.
 
 ### Autonomous Execution
 
@@ -69,7 +76,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 
 ## Crash Recovery (on-demand only)
 
-Follow the full procedure in `@t0-orchestrator` §7 (Startup / recovery / runbooks), which points to `docs/core/DISPATCH_RULES.md` §10.
+Follow the full procedure in the t0-orchestrator playbook §7 (Startup / recovery / runbooks), which points to `docs/core/DISPATCH_RULES.md` §10.
 Quick reference: validate schema → repair stale leases → reconcile queue → check orphaned dispatches → check incidents.
 
 ## Role-File Load Check (fleet drift)
