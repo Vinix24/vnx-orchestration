@@ -2,10 +2,13 @@
 """vnx status — show current VNX project dispatch and agent status."""
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
 from vnx_cli import _engine
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_project_id(args) -> str | None:
@@ -221,10 +224,22 @@ def vnx_status(args) -> int:
     # engine agents/, engine examples/), matching what dispatch_agent
     # actually resolves. A project-local-only read undercounted to 0 for
     # engine-fleet-only projects that dispatch fine.
+    #
+    # Mirrors doctor.py's _check_agents: an unreadable higher-precedence tier
+    # (e.g. a permissions-restricted project agents/ dir) can raise
+    # PermissionError out of list_available_agents even though a lower tier
+    # resolves fine (OI-622). Degrade gracefully instead of crashing the whole
+    # status readout — surface the reason, never suppress it silently.
     _engine.ensure_engine_on_path()
     from agent_resolver import list_available_agents
-    available_agents = list_available_agents(project_dir, engine_root=_engine.engine_root())
-    agent_names = sorted(a.name for a in available_agents)
+    agents_error: str | None = None
+    try:
+        available_agents = list_available_agents(project_dir, engine_root=_engine.engine_root())
+        agent_names = sorted(a.name for a in available_agents)
+    except Exception as exc:
+        logger.warning("vnx status: agent enumeration failed: %s", exc)
+        agent_names = []
+        agents_error = str(exc)
 
     if emit_json:
         output = {
@@ -235,6 +250,9 @@ def vnx_status(args) -> int:
             "agents": agent_names,
             "agent_count": len(agent_names),
         }
+        if agents_error is not None:
+            output["agents_status"] = "unavailable"
+            output["agents_error"] = agents_error
         if show_tracks:
             project_id = _resolve_project_id(args)
             if project_id:
@@ -277,12 +295,15 @@ def vnx_status(args) -> int:
         print(f"VNX status — {project_dir}")
         print()
         print(f"  Active dispatches : {active_count}")
-        print(f"  Agents            : {len(agent_names)}")
-        if agent_names:
-            for name in agent_names:
-                print(f"    - {name}")
+        if agents_error is not None:
+            print(f"  Agents            : unavailable ({agents_error})")
         else:
-            print("    (none — add subdirs to agents/)")
+            print(f"  Agents            : {len(agent_names)}")
+            if agent_names:
+                for name in agent_names:
+                    print(f"    - {name}")
+            else:
+                print("    (none — add subdirs to agents/)")
         print()
         if recent_completions:
             print("  Recent completions (last 5):")

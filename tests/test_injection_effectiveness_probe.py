@@ -263,6 +263,36 @@ def test_missing_pattern_usage_table_is_treated_as_no_data(tmp_path):
     assert result.detail["ignored_count"] == 0
 
 
+# --- OI-623: sqlite3.Error must be logged loudly, never suppressed silently ---
+
+def test_read_pattern_usage_totals_logs_on_sqlite_error(tmp_path, caplog):
+    from injection_effectiveness_probe import _read_pattern_usage_totals
+
+    db_path = tmp_path / "quality_intelligence.db"
+    sqlite3.connect(str(db_path)).close()  # exists, but no pattern_usage table
+
+    with caplog.at_level("WARNING", logger="injection_effectiveness_probe"):
+        result = _read_pattern_usage_totals(db_path)
+
+    assert result == (0, 0)
+    assert "_read_pattern_usage_totals" in caplog.text
+    assert "no such table" in caplog.text
+
+
+def test_read_last_dream_cycle_logs_on_sqlite_error(tmp_path, caplog):
+    from injection_effectiveness_probe import _read_last_dream_cycle
+
+    db_path = tmp_path / "quality_intelligence.db"
+    sqlite3.connect(str(db_path)).close()  # exists, but no dream_cycles table
+
+    with caplog.at_level("WARNING", logger="injection_effectiveness_probe"):
+        result = _read_last_dream_cycle(db_path)
+
+    assert result is None
+    assert "_read_last_dream_cycle" in caplog.text
+    assert "no such table" in caplog.text
+
+
 def test_corrupt_pending_rules_json_is_ignored_not_raised(tmp_path):
     _make_db(tmp_path, rows=[(80, 20)])
     (tmp_path / "pending_rules.json").write_text("{not valid json", encoding="utf-8")

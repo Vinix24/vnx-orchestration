@@ -9,6 +9,9 @@ Tests the 3-layer user message architecture:
 
 from __future__ import annotations
 
+import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -139,12 +142,10 @@ def test_layer1_scratch_cleanup_is_noninteractive(assembler: PromptAssembler, ba
     assert "realpath" in layer1.lower(), (
         "guard must resolve the target to an absolute real path before deciding"
     )
-    for keyword in ("home", "tempdir", "tmpdir", "/tmp"):
-        assert keyword in layer1.lower(), f"guard must reference {keyword!r} in its scoping checks"
-    assert "refus" in layer1.lower(), (
-        "guard must refuse (raise/exit without deleting) on an unsafe target, "
-        "not silently proceed"
-    )
+    # NOTE: the actual refuse/allow predicates (home, tempdir, top-level dir,
+    # outside-roots) are exercised by really RUNNING the snippet, not by
+    # grepping for keywords here — see
+    # TestScratchCleanupGuardExecutes below (OI-625).
 
     # Sanity: the assembled prompt still includes L1 verbatim (regression guard
     # against a future refactor silently dropping Layer 1 from the pipe input).
@@ -154,6 +155,154 @@ def test_layer1_scratch_cleanup_is_noninteractive(assembler: PromptAssembler, ba
     )
     assert "shutil.rmtree" in prompt.context
     assert "realpath" in prompt.context.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestScratchCleanupGuardExecutes (OI-625)
+# ---------------------------------------------------------------------------
+#
+# test_layer1_scratch_cleanup_is_noninteractive above only checked that the
+# guard's PROSE mentions the right keywords ("home", "tempdir", "refuse", ...).
+# That is a weak guarantee: the wording could stay intact while the actual
+# refuse/allow logic silently regresses (this is exactly the codex Round-2
+# finding on PR #1169 — an earlier version of this guard swapped a gated
+# `rm -rf` for an UNGUARDED `shutil.rmtree`, and a keyword-only test would
+# not have caught that). These tests extract the embedded `python3 -c "..."`
+# snippet out of base_worker.md's markdown fence and actually RUN it as a
+# subprocess against real target/home/tmpdir combinations, asserting the
+# observable refuse-vs-delete behavior rather than the wording.
+
+_GUARD_SNIPPET_RE = re.compile(r'python3 -c "\n(.*?)\n\s*"\n\s*```', re.DOTALL)
+
+
+def _extract_scratch_cleanup_guard(layer1: str) -> str:
+    """Pull the guard's python source out of base_worker.md's ```bash fence
+    and dedent it into runnable source (stripping the 2-space markdown-fence
+    indent). Fails loudly if the fence shape ever changes, rather than
+    silently no-op'ing the tests below."""
+    match = _GUARD_SNIPPET_RE.search(layer1)
+    assert match, "could not locate the `python3 -c \"...\"` guard snippet in base_worker.md"
+    lines = [
+        line[2:] if line.startswith("  ") else line
+        for line in match.group(1).splitlines()
+    ]
+    return "\n".join(lines)
+
+
+def _run_scratch_cleanup_guard(
+    snippet_source: str, target: Path, home: Path, tmpdir: Path
+) -> subprocess.CompletedProcess:
+    """Run the guard snippet as a real subprocess with `target` substituted
+    for the `<absolute-literal-path>` placeholder, and HOME/TMPDIR pointed at
+    isolated test directories so the guard's home/tempdir scoping checks
+    exercise controlled paths instead of the real developer machine."""
+    source = snippet_source.replace("<absolute-literal-path>", str(target))
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["TMPDIR"] = str(tmpdir)
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+
+
+class TestScratchCleanupGuardExecutes:
+    """OI-625: run the extracted guard against the cases named in the OI —
+    /, a top-level dir, $HOME, a $HOME ancestor, and /var/tmp (outside the
+    recognized roots) must all REFUSE; a subdir under $TMPDIR must ALLOW
+    (i.e. actually delete). A future weakening of the guard predicates fails
+    one of these, not just the prose."""
+
+    @pytest.fixture()
+    def guard_source(self, assembler: PromptAssembler) -> str:
+        return _extract_scratch_cleanup_guard(assembler._load_base())
+
+    @pytest.fixture()
+    def scopes(self, tmp_path: Path) -> tuple[Path, Path]:
+        home = tmp_path / "fakehome"
+        home.mkdir()
+        scratch_root = tmp_path / "scratchroot"
+        scratch_root.mkdir()
+        return home, scratch_root
+
+    def test_refuses_filesystem_root(self, guard_source: str, scopes: tuple[Path, Path]) -> None:
+        home, scratch_root = scopes
+        result = _run_scratch_cleanup_guard(guard_source, Path("/"), home, scratch_root)
+        assert result.returncode != 0
+        assert "REFUSING" in result.stdout + result.stderr
+
+    def test_refuses_top_level_directory(self, guard_source: str, scopes: tuple[Path, Path]) -> None:
+        home, scratch_root = scopes
+        # Deliberately nonexistent — the guard must refuse before ever
+        # touching the filesystem, so a nonexistent target proves the refusal
+        # happens purely from the path shape (dirname == "/"), not from a
+        # missing-path short-circuit.
+        target = Path("/nonexistent-top-level-dir-oi625-guardtest")
+        result = _run_scratch_cleanup_guard(guard_source, target, home, scratch_root)
+        assert result.returncode != 0
+        assert "REFUSING" in result.stdout + result.stderr
+
+    def test_refuses_home(self, guard_source: str, scopes: tuple[Path, Path]) -> None:
+        home, scratch_root = scopes
+        result = _run_scratch_cleanup_guard(guard_source, home, home, scratch_root)
+        assert result.returncode != 0
+        assert "REFUSING" in result.stdout + result.stderr
+        assert home.is_dir(), "guard must never delete $HOME"
+
+    def test_refuses_home_ancestor(self, guard_source: str, tmp_path: Path) -> None:
+        home = tmp_path / "a" / "fakehome"
+        home.mkdir(parents=True)
+        scratch_root = tmp_path / "scratchroot"
+        scratch_root.mkdir()
+        ancestor = tmp_path / "a"
+        result = _run_scratch_cleanup_guard(guard_source, ancestor, home, scratch_root)
+        assert result.returncode != 0
+        assert "REFUSING" in result.stdout + result.stderr
+        assert home.is_dir(), "guard must never delete an ancestor of $HOME"
+
+    def test_refuses_var_tmp_outside_recognized_roots(
+        self, guard_source: str, scopes: tuple[Path, Path]
+    ) -> None:
+        home, scratch_root = scopes
+        # /var/tmp looks like scratch space but is NOT one of the recognized
+        # roots (tempfile.gettempdir()/$TMPDIR/'/tmp') — nonexistent leaf so a
+        # regressed guard can do no real damage even if it fails to refuse.
+        target = Path("/var/tmp") / f"vnx-oi625-guardtest-{os.getpid()}"
+        result = _run_scratch_cleanup_guard(guard_source, target, home, scratch_root)
+        assert result.returncode != 0
+        assert "REFUSING" in result.stdout + result.stderr
+        assert not target.exists()
+
+    def test_allows_subdir_under_tempdir(self, guard_source: str, scopes: tuple[Path, Path]) -> None:
+        home, scratch_root = scopes
+        victim = scratch_root / "to-delete"
+        victim.mkdir()
+        (victim / "marker.txt").write_text("x")
+        result = _run_scratch_cleanup_guard(guard_source, victim, home, scratch_root)
+        assert result.returncode == 0
+        assert "REFUSING" not in result.stdout + result.stderr
+        assert not victim.exists(), "guard must actually delete a legitimate scratch subdir"
+
+    def test_stripped_guard_would_have_failed_this_test(
+        self, scopes: tuple[Path, Path]
+    ) -> None:
+        """Proof this test class has teeth: a guard with the safety checks
+        stripped (the pre-#1169-class regression — unconditional
+        `shutil.rmtree(target, ignore_errors=True)`) silently deletes $HOME
+        instead of refusing. Guards against a future edit hollowing out the
+        real snippet's predicates while this test file goes unchanged."""
+        home, scratch_root = scopes
+        stripped_snippet = (
+            "import os, shutil, sys, tempfile\n"
+            "target = os.path.realpath('<absolute-literal-path>')\n"
+            "shutil.rmtree(target, ignore_errors=True)\n"
+        )
+        result = _run_scratch_cleanup_guard(stripped_snippet, home, home, scratch_root)
+        assert "REFUSING" not in result.stdout + result.stderr
+        assert not home.is_dir(), "sanity check: the stripped guard really does delete $HOME"
 
 
 # ---------------------------------------------------------------------------
