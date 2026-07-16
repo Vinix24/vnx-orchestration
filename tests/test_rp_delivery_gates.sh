@@ -45,15 +45,16 @@ touch "$PROCESSING_LOG"
 MOCK_CALL_LOG="$TMP_ROOT/mock_calls"
 MOCK_LOADED_BUFFER="$TMP_ROOT/mock_loaded_buffer"
 MOCK_PASTE_FAIL_FLAG="$TMP_ROOT/mock_paste_fail"
+MOCK_LOADBUFFER_FAIL_FLAG="$TMP_ROOT/mock_loadbuffer_fail"
 MOCK_CAPTURE_RESPONSE_FILE="$TMP_ROOT/mock_capture_response"
 touch "$MOCK_CALL_LOG" "$MOCK_CAPTURE_RESPONSE_FILE"
 
 reset_mocks() {
-    rm -f "$MOCK_CALL_LOG" "$MOCK_LOADED_BUFFER" "$MOCK_PASTE_FAIL_FLAG"
+    rm -f "$MOCK_CALL_LOG" "$MOCK_LOADED_BUFFER" "$MOCK_PASTE_FAIL_FLAG" "$MOCK_LOADBUFFER_FAIL_FLAG"
     : > "$MOCK_CAPTURE_RESPONSE_FILE"
     touch "$MOCK_CALL_LOG"
     rm -rf "${RECEIPTS_PENDING_DIR:?}"/* "${RECEIPTS_PROCESSED_DIR:?}"/* 2>/dev/null
-    unset VNX_RECEIPT_T0_PUSH VNX_RECEIPT_DIGEST_THRESHOLD
+    unset VNX_RECEIPT_T0_PUSH VNX_RECEIPT_DIGEST_THRESHOLD VNX_RECEIPT_VERIFY_MAX_RETRIES
 }
 
 # capture-pane's "last line" response for the next verify call. Empty = submit
@@ -81,6 +82,10 @@ tmux() {
     echo "$subcmd" >> "$MOCK_CALL_LOG"
     case "$subcmd" in
         load-buffer)
+            if [ -f "$MOCK_LOADBUFFER_FAIL_FLAG" ]; then
+                cat > /dev/null
+                return 1
+            fi
             cat > "$MOCK_LOADED_BUFFER"
             return 0
             ;;
@@ -236,6 +241,102 @@ assert_eq "1" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
     "T6: default (VNX_RECEIPT_T0_PUSH unset) still pastes — no behavior change"
 assert_eq "1" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
     "T6: default push delivers and processes normally"
+
+# ===========================================================================
+# Test 7 (finding 4): verify-fail cap -> force-processed after N retries,
+# no (N+1)th paste attempted
+# ===========================================================================
+reset_mocks
+write_pending "d-cap-1.json" "d-cap"
+set_capture_response "Report: /tmp/r.md"   # always unverified
+
+_retry_pending_receipts
+_retry_pending_receipts
+_retry_pending_receipts
+assert_eq "3" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
+    "T7: 3 failed sweeps -> exactly 3 paste-buffer attempts"
+assert_eq "0" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
+    "T7: still pending after 3 failed sweeps (at cap, not yet over)"
+
+_retry_pending_receipts   # 4th sweep: cap reached -> force-process, no paste
+assert_eq "3" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
+    "T7: 4th sweep does not attempt another paste (cap already hit)"
+assert_eq "1" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
+    "T7: 4th sweep force-processes the item"
+assert_eq "0" "$(count_files "$RECEIPTS_PENDING_DIR")" \
+    "T7: pending dir empty after force-process"
+assert_file_contains "$PROCESSING_LOG" "unverified_after_3" \
+    "T7: force-process WARN logged with retry count"
+
+# ===========================================================================
+# Test 8 (finding 5): jq absent on PATH -> fail loud, zero processed-moves
+# ===========================================================================
+reset_mocks
+write_pending "d-nojq-1.json" "d-nojq"
+set_capture_response ""
+# PATH-stub containing only what log() needs (date, tee) so the fail-loud
+# error path can still write to $PROCESSING_LOG — everything else PATH would
+# normally resolve (jq included) is deliberately absent.
+NOJQ_BIN_DIR="$TMP_ROOT/nojq_bin"
+mkdir -p "$NOJQ_BIN_DIR"
+ln -sf "$(command -v date)" "$NOJQ_BIN_DIR/date"
+ln -sf "$(command -v tee)" "$NOJQ_BIN_DIR/tee"
+ORIG_PATH="$PATH"
+PATH="$NOJQ_BIN_DIR"
+_retry_pending_receipts
+RETRY_RC=$?
+PATH="$ORIG_PATH"
+
+assert_eq "1" "$RETRY_RC" \
+    "T8: jq absent -> _retry_pending_receipts returns failure"
+assert_eq "0" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
+    "T8: jq absent -> zero processed-moves"
+assert_eq "1" "$(count_files "$RECEIPTS_PENDING_DIR")" \
+    "T8: jq absent -> pending file untouched"
+assert_file_contains "$PROCESSING_LOG" "jq not found" \
+    "T8: jq-absence error logged"
+
+# ===========================================================================
+# Test 9 (finding 1a): load-buffer failure -> paste sequence aborts,
+# item stays pending
+# ===========================================================================
+reset_mocks
+write_pending "d-lb-1.json" "d-lb"
+touch "$MOCK_LOADBUFFER_FAIL_FLAG"
+set_capture_response ""
+_retry_pending_receipts
+
+assert_eq "0" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
+    "T9: load-buffer failure -> paste-buffer never attempted"
+assert_eq "0" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
+    "T9: load-buffer failure -> nothing moved to processed"
+assert_eq "1" "$(count_files "$RECEIPTS_PENDING_DIR")" \
+    "T9: load-buffer failure -> item stays pending"
+assert_file_contains "$PROCESSING_LOG" "Failed to load-buffer" \
+    "T9: load-buffer failure logged"
+rm -f "$MOCK_LOADBUFFER_FAIL_FLAG"
+
+# ===========================================================================
+# Test 10 (finding 3): digest message includes the dispatch_id list
+# ===========================================================================
+reset_mocks
+write_pending "d-idlist-1.json" "d-idlist-1"
+write_pending "d-idlist-2.json" "d-idlist-2"
+write_pending "d-idlist-3.json" "d-idlist-3"
+write_pending "d-idlist-4.json" "d-idlist-4"
+write_pending "d-idlist-5.json" "d-idlist-5"
+write_pending "d-idlist-6.json" "d-idlist-6"
+set_capture_response ""
+_retry_pending_receipts
+
+assert_file_contains "$MOCK_LOADED_BUFFER" "IDs:" \
+    "T10: digest message has an IDs: section"
+IDLIST_ALL_PRESENT=1
+for n in 1 2 3 4 5 6; do
+    grep -q "d-idlist-$n" "$MOCK_LOADED_BUFFER" || IDLIST_ALL_PRESENT=0
+done
+assert_eq "1" "$IDLIST_ALL_PRESENT" \
+    "T10: digest message lists all 6 pending dispatch_ids (under the 10-id cap)"
 
 # --- Cleanup ---
 rm -rf "$TMP_ROOT"

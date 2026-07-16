@@ -10,6 +10,10 @@
 #           pane; 0 suppresses the push (ndjson append + outbox still happen).
 #           VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) collapses a pending stack
 #           bigger than this into one digest paste instead of N individual ones.
+#           VNX_RECEIPT_VERIFY_MAX_RETRIES=3 (default) caps how many failed
+#           submit-verify sweeps a pending item/digest-group tolerates before
+#           it is force-processed (delivery_mode=unverified_after_N) instead
+#           of retried forever. Requires jq on PATH (fail-fast if absent).
 
 # Verify a paste actually submitted rather than sitting in T0's input line
 # (e.g. Enter landed while T0 was mid-turn or in a modal and got absorbed as
@@ -43,16 +47,28 @@ _rpd_paste_and_verify() {
     local message="$2"
     local log_label="$3"
 
-    echo "$message" | tmux load-buffer -
+    # finding 1a: check every tmux call's exit code. A failed load-buffer or
+    # send-keys means the paste never happened (or Enter never landed) — the
+    # item must stay pending, not fall through to submit-verify on a no-op.
+    if ! echo "$message" | tmux load-buffer - 2>/dev/null; then
+        log "ERROR" "Failed to load-buffer for T0 pane $t0_pane ($log_label)"
+        return 1
+    fi
     if ! tmux paste-buffer -t "$t0_pane" 2>/dev/null; then
         log "ERROR" "Failed to paste to T0 pane $t0_pane ($log_label)"
         return 1
     fi
 
     sleep 1
-    tmux send-keys -t "$t0_pane" Enter
+    if ! tmux send-keys -t "$t0_pane" Enter 2>/dev/null; then
+        log "ERROR" "Failed to send Enter (1st) to T0 pane $t0_pane ($log_label)"
+        return 1
+    fi
     sleep 0.3
-    tmux send-keys -t "$t0_pane" Enter
+    if ! tmux send-keys -t "$t0_pane" Enter 2>/dev/null; then
+        log "ERROR" "Failed to send Enter (2nd) to T0 pane $t0_pane ($log_label)"
+        return 1
+    fi
     sleep 0.3
 
     _rpd_verify_submit "$t0_pane" "$log_label"
@@ -118,12 +134,39 @@ Report: ${report_path}"
     return 0
 }
 
+# finding 3 (readability improvement, not an audit-trail change — see NOTE
+# above the digest branch in _retry_pending_receipts): builds a comma-joined
+# list of up to 10 dispatch_ids for the digest message, so T0 sees WHICH
+# dispatches are behind the count instead of only a bare number + the oldest
+# one. Caps at 10 + "…" so the message can't balloon for a very large stack —
+# t0_receipts.ndjson remains the full inventory for anyone who needs it.
+_rpd_build_id_list() {
+    local max=10
+    local n=$#
+    local limit=$n
+    [ "$limit" -gt "$max" ] && limit=$max
+
+    local list="" i=0 item
+    for item in "$@"; do
+        i=$((i + 1))
+        [ "$i" -gt "$limit" ] && break
+        if [ -n "$list" ]; then
+            list="${list},${item}"
+        else
+            list="$item"
+        fi
+    done
+    [ "$n" -gt "$max" ] && list="${list}…"
+    printf '%s' "$list"
+}
+
 # Deliver a digest paste covering a whole stack of pending receipts, instead of
 # pasting each one individually. Same push-switch + submit-verify discipline
 # as _deliver_receipt_to_t0_pane. Returns 0 verified-delivered / 1 otherwise.
 _rpd_deliver_digest() {
     local count="$1"
     local oldest_dispatch_id="$2"
+    local id_list="$3"
 
     if [ "${VNX_RECEIPT_T0_PUSH:-1}" = "0" ]; then
         log "INFO" "delivery_mode=suppressed digest count=$count (VNX_RECEIPT_T0_PUSH=0)"
@@ -137,7 +180,7 @@ _rpd_deliver_digest() {
         return 1
     fi
 
-    local digest_msg="/t0-orchestrator 📨 RECEIPT-DIGEST: ${count} receipts pending, oudste: ${oldest_dispatch_id}, zie t0_receipts.ndjson"
+    local digest_msg="/t0-orchestrator 📨 RECEIPT-DIGEST: ${count} receipts pending, oudste: ${oldest_dispatch_id}, IDs: ${id_list}, zie t0_receipts.ndjson"
 
     if ! _rpd_paste_and_verify "$t0_pane" "$digest_msg" "digest:${oldest_dispatch_id}"; then
         log "WARN" "Digest not verified delivered, leaving $count receipt(s) pending"
@@ -146,6 +189,49 @@ _rpd_deliver_digest() {
 
     log "INFO" "Digest delivered to T0 (pane: $t0_pane, count=$count)"
     return 0
+}
+
+# finding 4 vlucht-route: force-move a set of pending files straight to
+# processed/ without another delivery attempt. t0_receipts.ndjson already has
+# every one of these receipts (written upstream in append_and_track_receipt())
+# — retrying a submit-verify that fails forever is more harmful than accepting
+# one possibly-missed live paste. Shared by both the individual-group path and
+# the digest path so the cap behaves identically in both (codex checklist:
+# same fix to all handlers).
+_rpd_force_process() {
+    local max_retries="$1" label="$2" fail_count="$3"
+    shift 3
+    local f
+    for f in "$@"; do
+        mv "$f" "$RECEIPTS_PROCESSED_DIR/$(basename "$f")"
+    done
+    log "WARN" "delivery_mode=unverified_after_${max_retries} ${label} force-processed $# item(s) after ${fail_count} failed verify sweep(s)"
+}
+
+# finding 4: fail-count sidecar stored as a field inside the pending JSON
+# receipt itself (rather than the filename) so it survives dedupe grouping
+# and doesn't require renaming files mid-sweep. Defaults to 0 for files
+# predating this fix or on any parse error.
+_rpd_get_fail_count() {
+    local count
+    count=$(jq -r '._verify_fail_count // 0' "$1" 2>/dev/null)
+    [ -z "$count" ] && count=0
+    printf '%s' "$count"
+}
+
+# finding 4: atomic increment (codex checklist — never rewrite canonical state
+# in place). Writes to a tmp file in the same dir, then renames over the
+# original; a crash mid-write must not corrupt a pending receipt the next
+# sweep still needs to read.
+_rpd_increment_fail_count() {
+    local file="$1"
+    local tmp="${file}.tmp.$$"
+    if jq '._verify_fail_count = ((._verify_fail_count // 0) + 1)' "$file" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$file"
+    else
+        rm -f "$tmp"
+        log "WARN" "Failed to increment verify-fail count for $(basename "$file")"
+    fi
 }
 
 # Section F: Outbox wrapper — write-first, then deliver.
@@ -177,12 +263,39 @@ send_receipt_to_t0() {
 # files gets exactly ONE delivery attempt per sweep, and all its files move
 # together on success/stay together on failure — a repeatedly-failing pane
 # does not stack N identical notifications.
+#
+# NOTE (finding 2 — dedupe is a delivery-channel decision, not an audit-trail
+# one): collapsing N pending files for the same dispatch_id into ONE tmux
+# paste only reduces how many times T0's pane is interrupted. Every one of
+# those N payloads was already durably persisted before dedupe ever runs
+# (send_receipt_to_t0() writes to $RECEIPTS_PENDING_DIR before any delivery
+# attempt), and a successful delivery here moves EVERY file in the group —
+# not just the representative — to $RECEIPTS_PROCESSED_DIR. The full history
+# of older same-id payloads and their individual details survives intact in
+# t0_receipts.ndjson and receipts/processed/; this function only ever decides
+# notification cadence, never what the audit trail retains.
+#
 # When the resulting number of distinct pending dispatches exceeds
 # VNX_RECEIPT_DIGEST_THRESHOLD (default 5), one digest message replaces the
-# individual pastes entirely.
+# individual pastes entirely (see NOTE on finding 3 at the digest branch).
+#
+# finding 4: a pending item/group whose submit-verify has failed
+# VNX_RECEIPT_VERIFY_MAX_RETRIES (default 3) times in a row is force-processed
+# instead of retried forever — see _rpd_force_process().
+#
+# finding 5: jq is required (dispatch_id lookup, dedupe key extraction,
+# fail-count sidecar). Its absence must fail loud, not silently collapse
+# every file to dispatch_id="no-id" or move files without delivery.
+#
 # Called periodically from _poll_new_reports() and once on startup.
 _retry_pending_receipts() {
+    if ! command -v jq >/dev/null 2>&1; then
+        log "ERROR" "jq not found on PATH - cannot process pending receipts (dedupe/digest/retry-cap all require jq); leaving pending files untouched"
+        return 1
+    fi
+
     local digest_threshold="${VNX_RECEIPT_DIGEST_THRESHOLD:-5}"
+    local max_retries="${VNX_RECEIPT_VERIFY_MAX_RETRIES:-3}"
 
     local pending_files=()
     while IFS= read -r -d '' f; do
@@ -222,6 +335,15 @@ _retry_pending_receipts() {
     fi
 
     # Digest mode: too many distinct pending dispatches to paste individually.
+    #
+    # NOTE (finding 3 — digest is a delivery-channel decision, not an
+    # audit-trail one): collapsing the whole pending stack into one digest
+    # paste only affects the tmux-side notification. Every individual receipt
+    # behind it is already in t0_receipts.ndjson and moves intact to
+    # receipts/processed/ on delivery — the digest message now names up to
+    # ~10 dispatch_ids (_rpd_build_id_list) so T0 gets more than a bare
+    # count+oldest, but this is a cheap readability improvement, not a full
+    # inventory; the ndjson stays the source of truth.
     if [ "$group_count" -gt "$digest_threshold" ]; then
         local oldest_idx=0 oldest_mtime cur_mtime i
         oldest_mtime=$(stat -f%m "${pending_files[0]}" 2>/dev/null || stat -c%Y "${pending_files[0]}" 2>/dev/null || echo 0)
@@ -234,14 +356,33 @@ _retry_pending_receipts() {
         done
         local oldest_dispatch_id="${file_dispatch_ids[$oldest_idx]}"
 
+        # finding 4 vlucht-route (digest path): if this entire pending stack
+        # has already failed verify max_retries times, force-process the lot
+        # instead of attempting yet another digest paste.
+        local digest_fail_count=0 df_idx df_fc
+        for ((df_idx = 0; df_idx < total; df_idx++)); do
+            df_fc=$(_rpd_get_fail_count "${pending_files[$df_idx]}")
+            [ "$df_fc" -gt "$digest_fail_count" ] && digest_fail_count=$df_fc
+        done
+        if [ "$digest_fail_count" -ge "$max_retries" ]; then
+            _rpd_force_process "$max_retries" "digest" "$digest_fail_count" "${pending_files[@]}"
+            return 0
+        fi
+
+        local id_list
+        id_list=$(_rpd_build_id_list "${unique_ids[@]}")
+
         log "INFO" "Pending stack ($group_count dispatches, $total files) exceeds digest threshold ($digest_threshold); sending 1 digest"
-        if _rpd_deliver_digest "$total" "$oldest_dispatch_id"; then
+        if _rpd_deliver_digest "$total" "$oldest_dispatch_id" "$id_list"; then
             for f in "${pending_files[@]}"; do
                 mv "$f" "$RECEIPTS_PROCESSED_DIR/$(basename "$f")"
             done
             log "INFO" "Digest delivered covering $total pending receipt(s)"
         else
-            log "WARN" "Digest delivery unverified; $total receipt(s) remain pending"
+            for f in "${pending_files[@]}"; do
+                _rpd_increment_fail_count "$f"
+            done
+            log "WARN" "Digest delivery unverified; $total receipt(s) remain pending (fail count now $((digest_fail_count + 1))/$max_retries)"
         fi
         return 0
     fi
@@ -269,6 +410,23 @@ _retry_pending_receipts() {
             fi
         done
 
+        # finding 4 vlucht-route: if this dispatch_id's group has already
+        # failed submit-verify max_retries times, force-process it instead of
+        # attempting another paste this sweep.
+        local group_fail_count=0 gf_fc
+        for gj in "${group_indices[@]}"; do
+            gf_fc=$(_rpd_get_fail_count "${pending_files[$gj]}")
+            [ "$gf_fc" -gt "$group_fail_count" ] && group_fail_count=$gf_fc
+        done
+        if [ "$group_fail_count" -ge "$max_retries" ]; then
+            local group_files=()
+            for gj in "${group_indices[@]}"; do
+                group_files+=("${pending_files[$gj]}")
+            done
+            _rpd_force_process "$max_retries" "dispatch_id=$id" "$group_fail_count" "${group_files[@]}"
+            continue
+        fi
+
         local receipt_json terminal
         receipt_json=$(cat "${pending_files[$rep_idx]}")
         terminal=$(echo "$receipt_json" | jq -r '.terminal // "unknown"' 2>/dev/null)
@@ -284,6 +442,11 @@ _retry_pending_receipts() {
                 mv "${pending_files[$gj]}" "$RECEIPTS_PROCESSED_DIR/$(basename "${pending_files[$gj]}")"
             done
             log "INFO" "Pending receipt delivered: $(basename "${pending_files[$rep_idx]}")"
+        else
+            for gj in "${group_indices[@]}"; do
+                _rpd_increment_fail_count "${pending_files[$gj]}"
+            done
+            log "WARN" "Verify-fail count incremented for dispatch_id=$id (now $((group_fail_count + 1))/$max_retries)"
         fi
     done
 }
