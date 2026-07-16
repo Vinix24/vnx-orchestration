@@ -53,14 +53,16 @@ if [ -n "${CLAUDE_TRACK:-}" ]; then
   TRACK="$CLAUDE_TRACK"
 fi
 
-# ── Resolve project name from directory structure ────────────────────
+# ── Resolve project root from directory structure ────────────────────
 # Walk up from terminal dir to find project root
 PROJECT_NAME=""
+PROJECT_ROOT=""
 CURRENT_DIR="$PWD"
 for _ in 1 2 3 4 5; do
   PARENT="$(dirname "$CURRENT_DIR")"
   if [ -f "$PARENT/.vnx/config.yml" ] || [ -d "$PARENT/.vnx" ]; then
     PROJECT_NAME="$(basename "$PARENT")"
+    PROJECT_ROOT="$PARENT"
     break
   fi
   CURRENT_DIR="$PARENT"
@@ -114,6 +116,27 @@ case "$TERMINAL" in
       fi
     fi
 
+    # ── T0 Orchestrator playbook body (in-context injection) ────────────
+    # t0-orchestrator is intentionally not model-invocable
+    # (disable-model-invocation: true, A-4 hardening), so its content has to
+    # reach T0 some other way. A CLAUDE.md `@`-import of the skill body
+    # works for a git-tracked project file but trips Claude Code's
+    # external-CLAUDE.md-import trust prompt on a fresh autonomous spawn (F1,
+    # 2026-07-16 live smoke test) — nobody is there to answer that prompt, so
+    # the session just hangs. Reading the body here instead and returning it
+    # as hook additionalContext reaches the same content without any import
+    # or Skill-tool call, and without ever triggering that prompt. Fail-soft:
+    # an absent SKILL.md just means an unchanged (shorter) context, not a
+    # hook error — and each hook run recomputes this fresh from disk, so
+    # nothing accumulates across repeated SessionStart fires (/clear, etc).
+    T0_SKILL_BODY=""
+    if [ -n "$PROJECT_ROOT" ]; then
+      _T0_SKILL_MD="$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md"
+      if [ -f "$_T0_SKILL_MD" ]; then
+        T0_SKILL_BODY="$(cat "$_T0_SKILL_MD" 2>/dev/null || true)"
+      fi
+    fi
+
     ADDITIONAL_CONTEXT="T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
 Available skills: @t0-orchestrator @architect @planner
 Use /t0-orchestrator for orchestration decisions and receipt processing
@@ -123,7 +146,10 @@ $(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
 ${T0_OPEN_ITEMS:-No open items data}
 
 CRITICAL: After every completion receipt, check quality advisory + open items before proceeding.
-Skills must NOT use @ prefix in Role field. Check .vnx/skills/skills.yaml for valid skills."
+Skills must NOT use @ prefix in Role field. Check .vnx/skills/skills.yaml for valid skills.${T0_SKILL_BODY:+
+
+---
+$T0_SKILL_BODY}"
     ;;
 
   T1)

@@ -1496,6 +1496,100 @@ cmd_role_sync() {
     log "[role-sync]       Convert it to a thin '@role-orchestrator.md' + project-context to activate this."
   fi
 
+  # Warn (do not block) when the shipped role's Mandatory Startup step has
+  # neither an in-context path nor an invocable fallback for the
+  # t0-orchestrator skill in the TARGET project: CLAUDE.md doesn't import its
+  # SKILL.md, its SessionStart hook doesn't inject it either, and SKILL.md is
+  # either missing or carries `disable-model-invocation: true`. Grep-level
+  # only — the full IMPORT-MISSING / SKILL-UNLOADABLE check lives in
+  # scripts/commands/t0_role_audit.sh --static (F1: this exact gap left
+  # t0-orchestrator unloadable in this repo's own fabric source for ~7 weeks).
+  #
+  # The awk frontmatter check is anchored on the key's own line-start (no
+  # leading whitespace — real top-level frontmatter keys never have any) and
+  # skips comment lines: unanchored, a `description:` field merely MENTIONING
+  # the string `disable-model-invocation: true` false-positived here too
+  # (finding 3, codex, 2026-07-16 — same bug as t0_role_audit.sh's check).
+  local t0_skill_md="$target_root/.claude/skills/t0-orchestrator/SKILL.md"
+  local t0_skill_imported=0
+  if [ -f "$project_t0_dir/CLAUDE.md" ] && grep -q "skills/t0-orchestrator/SKILL.md" "$project_t0_dir/CLAUDE.md" 2>/dev/null; then
+    t0_skill_imported=1
+  fi
+  if [ "$t0_skill_imported" -eq 0 ]; then
+    local t0_skill_invocable=1
+    if [ ! -f "$t0_skill_md" ]; then
+      t0_skill_invocable=0
+    elif awk '
+      /^---[ \t]*$/{n++; if(n==2) exit}
+      n==1 && /^[ \t]*#/{next}
+      n==1 && /^disable-model-invocation:[ \t]*true([ \t]|$)/{f=1}
+      END{exit(f?0:1)}
+    ' "$t0_skill_md" 2>/dev/null; then
+      t0_skill_invocable=0
+    fi
+    # A hook script existing and correctly referencing the skill is not
+    # proof it actually runs — Claude Code only fires hooks registered in
+    # .claude/settings.json's "hooks.SessionStart" array. Without also
+    # checking that wiring, this NOTE stayed silent on exactly the gap
+    # finding 1 (codex round 2, 2026-07-16) found in this repo's own fabric
+    # source: hooks/sessionstart.sh correctly injects the skill body, but
+    # .claude/settings.json's SessionStart config never calls it. Same
+    # bracket-depth-tracked awk scan as t0_role_audit.sh's
+    # _t0_static_settings_json_wires_hook (see that file for full comments);
+    # duplicated here deliberately — this command does not source
+    # t0_role_audit.sh.
+    local t0_skill_hook_injected=0
+    local hook_candidate hook_settings hook_needle
+    for hook_candidate in "$target_root/.claude/hooks/sessionstart.sh" "$target_root/hooks/sessionstart.sh"; do
+      # A wired hook whose TEXT references the skill path is not proof the
+      # skill actually exists -- gate on SKILL.md's own existence first, same
+      # as the static audit already does (finding 4, 2026-07-16 r4).
+      [ -f "$t0_skill_md" ] || break
+      [ -f "$hook_candidate" ] || continue
+      grep -q "skills/t0-orchestrator/SKILL.md" "$hook_candidate" 2>/dev/null || continue
+      # Basename alone is too loose -- an unrelated script that merely SHARES
+      # the name "sessionstart.sh" at a different path would false-match.
+      # Use the last two path segments instead (finding 2, 2026-07-16 r4).
+      hook_needle="$(basename "$(dirname "$hook_candidate")")/$(basename "$hook_candidate")"
+      hook_settings="$target_root/.claude/settings.json"
+      [ -f "$hook_settings" ] || hook_settings="$target_root/templates/settings_vnx_keys.json.tmpl"
+      # The line that first matches "SessionStart": is itself scanned for the
+      # needle too (via scan()) -- a minified single-line settings.json
+      # otherwise false-negatives (finding 3, 2026-07-16 r4).
+      if [ -f "$hook_settings" ] && awk -v needle="$hook_needle" '
+        function scan(line,    idx) {
+          idx = index(line, "#")
+          if (idx > 0) line = substr(line, 1, idx - 1)
+          if (index(line, needle) > 0) { found = 1 }
+        }
+        !in_block && /"SessionStart"[ \t]*:/ {
+          in_block = 1
+          o = gsub(/\[/, "[")
+          c = gsub(/\]/, "]")
+          depth = o - c
+          scan($0)
+          if (depth <= 0) { in_block = 0 }
+          next
+        }
+        in_block {
+          o = gsub(/\[/, "[")
+          c = gsub(/\]/, "]")
+          depth += (o - c)
+          scan($0)
+          if (depth <= 0) { in_block = 0 }
+        }
+        END { exit(found ? 0 : 1) }
+      ' "$hook_settings" 2>/dev/null; then
+        t0_skill_hook_injected=1
+        break
+      fi
+    done
+    if [ "$t0_skill_invocable" -eq 0 ] && [ "$t0_skill_hook_injected" -eq 0 ]; then
+      log "[role-sync] NOTE: $target_root does not import the t0-orchestrator skill body into $project_t0_dir/CLAUDE.md, and its SKILL.md is missing or not model-invocable. Its SessionStart hook script either doesn't inject the skill, or isn't actually wired into .claude/settings.json's SessionStart config."
+      log "[role-sync]       Run 'bash scripts/commands/t0_role_audit.sh --static $target_root' for detail; the shipped role's Mandatory Startup step will stall on Skill-tool invocation."
+    fi
+  fi
+
   # Provider-agnostic (anti-lock-in): mirror the canonical role into a marked
   # block in AGENTS.md (Codex) and GEMINI.md (Gemini/Kimi), sitting alongside
   # role-orchestrator.md in the T0 dir. Reuses the same insert-or-replace
