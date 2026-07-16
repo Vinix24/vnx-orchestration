@@ -2657,11 +2657,15 @@ def main(argv: "list[str] | None" = None) -> int:
     args = parser.parse_args(argv)
 
     # ADR-006: staging→pending→promote gate — must pass before any dispatch work.
+    # OI-627: dispatch_id=args.dispatch_id cross-checks the id actually executed
+    # against the staged id — a caller cannot stage under the real id and then
+    # run (and stamp the commit trailer) under a different one.
     from staging_validator import validate_staging_path as _validate_staging  # noqa: PLC0415
     _validate_staging(
         getattr(args, "from_staging_id", None),
         getattr(args, "allow_unstaged", False),
         getattr(args, "reason", None),
+        dispatch_id=args.dispatch_id,
     )
 
     lane = TmuxInteractiveDispatch(
