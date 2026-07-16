@@ -55,12 +55,36 @@ _t0_static_resolve_import() {
 # Naive frontmatter check: does the FIRST `---`...`---` block contain the
 # literal line `disable-model-invocation: true`? This is deliberately not a
 # YAML parser — it must never grow into one.
+#
+# Anchored on the key's own line-start (no leading whitespace — real
+# top-level frontmatter keys never have any) and skips comment lines. Without
+# the anchor, a `description:` field or comment that merely MENTIONS the
+# string `disable-model-invocation: true` (e.g. documenting the flag) false-
+# positived as SKILL-UNLOADABLE (finding 3, codex, 2026-07-16).
 _t0_static_frontmatter_disables_invocation() {
   awk '
     /^---[ \t]*$/ { n++; if (n == 2) exit }
-    n == 1 && /disable-model-invocation:[ \t]*true/ { found = 1 }
+    n == 1 && /^[ \t]*#/ { next }
+    n == 1 && /^disable-model-invocation:[ \t]*true([ \t]|$)/ { found = 1 }
     END { exit(found ? 0 : 1) }
   ' "$1"
+}
+
+# Does this project's SessionStart hook (the Claude-Code-only mechanism —
+# see hooks/sessionstart.sh and role-orchestrator.md's "Mandatory Startup")
+# inject a given skill's SKILL.md body into T0 context? Checked by literal
+# path reference, not execution — deliberately static, matching this
+# script's "never grow into a real parser/interpreter" discipline. Checks
+# the deployed consumer copy first, then the fabric-source template (the
+# shape this very repo's own checkout has, since it never runs `vnx init`
+# on itself).
+_t0_static_hook_injects_skill() {
+  local root="$1" skill_name="$2" hook
+  for hook in "$root/.claude/hooks/sessionstart.sh" "$root/hooks/sessionstart.sh"; do
+    [ -f "$hook" ] || continue
+    grep -q "skills/$skill_name/SKILL.md" "$hook" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 # Static role<->skill invocability check for one project root. Prints one
@@ -72,9 +96,17 @@ _t0_static_frontmatter_disables_invocation() {
 #                        not exist.
 #   SKILL-UNLOADABLE  — a backtick-quoted `@<skill>` reference in
 #                        role-orchestrator.md names a skill that is neither
-#                        in-context (imported by CLAUDE.md) nor
-#                        model-invocable (SKILL.md missing, or present with
-#                        `disable-model-invocation: true` and not imported).
+#                        in-context (imported by CLAUDE.md, or injected by the
+#                        SessionStart hook) nor model-invocable (SKILL.md
+#                        missing, or present with `disable-model-invocation:
+#                        true` and not otherwise in-context).
+#   PLAYBOOK-MECHANISM-GAP — AGENTS.md/GEMINI.md (the codex/gemini T0
+#                        surfaces `vnx role sync` mirrors the role into) carry
+#                        the role text, but neither provider has a
+#                        SessionStart-hook equivalent to deliver the
+#                        playbook body in-context there. A tracked, reported
+#                        gap (finding 2, codex, 2026-07-16) — not silently
+#                        clean, but not required to block on today.
 _t0_static_check() {
   local root="$1"
   local t0_dir="$root/.claude/terminals/T0"
@@ -121,12 +153,32 @@ _t0_static_check() {
         *"|$skill_md_real"*) continue ;;  # in-context via CLAUDE.md import; invocability irrelevant
       esac
 
+      if _t0_static_hook_injects_skill "$root" "$skill_name"; then
+        continue  # in-context via SessionStart hook injection; invocability irrelevant
+      fi
+
       if _t0_static_frontmatter_disables_invocation "$skill_md"; then
-        echo "SKILL-UNLOADABLE: role-orchestrator.md references '@$skill_name' — not imported by CLAUDE.md and disable-model-invocation: true in $skill_md"
+        echo "SKILL-UNLOADABLE: role-orchestrator.md references '@$skill_name' — not imported by CLAUDE.md, not hook-injected, and disable-model-invocation: true in $skill_md"
         findings=$((findings + 1))
       fi
     done < <(grep -oE '`@[a-zA-Z0-9_-]+`' "$role_md" 2>/dev/null | tr -d '`@' | sort -u)
   fi
+
+  # Tri-file surfaces: `vnx role sync --apply` mirrors the SAME Mandatory
+  # Startup role text into AGENTS.md (codex) and GEMINI.md (gemini), marked
+  # by <!-- VNX:BEGIN T0-ROLE --> ... <!-- VNX:END T0-ROLE -->. A project can
+  # audit clean on CLAUDE.md while its codex/gemini T0 surface carries a
+  # "Mandatory Startup" step with no working delivery mechanism at all —
+  # Claude Code's SessionStart-hook injection has no codex/gemini equivalent
+  # yet. Report it rather than staying silent (finding 2); closing the gap
+  # itself is tracked separately, not enforced here.
+  local provider_file
+  for provider_file in "$t0_dir/AGENTS.md" "$t0_dir/GEMINI.md"; do
+    [ -f "$provider_file" ] || continue
+    grep -q '<!-- VNX:BEGIN T0-ROLE -->' "$provider_file" 2>/dev/null || continue
+    echo "PLAYBOOK-MECHANISM-GAP: $provider_file carries the T0 role but has no SessionStart-hook equivalent to deliver the t0-orchestrator playbook body in-context on this surface (tracked open item, not currently blocking)"
+    findings=$((findings + 1))
+  done
 
   [ "$findings" -eq 0 ]
 }

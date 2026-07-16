@@ -1499,11 +1499,17 @@ cmd_role_sync() {
   # Warn (do not block) when the shipped role's Mandatory Startup step has
   # neither an in-context path nor an invocable fallback for the
   # t0-orchestrator skill in the TARGET project: CLAUDE.md doesn't import its
-  # SKILL.md, and SKILL.md is either missing or carries
-  # `disable-model-invocation: true`. Grep-level only — the full
-  # IMPORT-MISSING / SKILL-UNLOADABLE check lives in
+  # SKILL.md, its SessionStart hook doesn't inject it either, and SKILL.md is
+  # either missing or carries `disable-model-invocation: true`. Grep-level
+  # only — the full IMPORT-MISSING / SKILL-UNLOADABLE check lives in
   # scripts/commands/t0_role_audit.sh --static (F1: this exact gap left
   # t0-orchestrator unloadable in this repo's own fabric source for ~7 weeks).
+  #
+  # The awk frontmatter check is anchored on the key's own line-start (no
+  # leading whitespace — real top-level frontmatter keys never have any) and
+  # skips comment lines: unanchored, a `description:` field merely MENTIONING
+  # the string `disable-model-invocation: true` false-positived here too
+  # (finding 3, codex, 2026-07-16 — same bug as t0_role_audit.sh's check).
   local t0_skill_md="$target_root/.claude/skills/t0-orchestrator/SKILL.md"
   local t0_skill_imported=0
   if [ -f "$project_t0_dir/CLAUDE.md" ] && grep -q "skills/t0-orchestrator/SKILL.md" "$project_t0_dir/CLAUDE.md" 2>/dev/null; then
@@ -1513,11 +1519,24 @@ cmd_role_sync() {
     local t0_skill_invocable=1
     if [ ! -f "$t0_skill_md" ]; then
       t0_skill_invocable=0
-    elif awk '/^---[ \t]*$/{n++; if(n==2) exit} n==1 && /disable-model-invocation:[ \t]*true/{f=1} END{exit(f?0:1)}' "$t0_skill_md" 2>/dev/null; then
+    elif awk '
+      /^---[ \t]*$/{n++; if(n==2) exit}
+      n==1 && /^[ \t]*#/{next}
+      n==1 && /^disable-model-invocation:[ \t]*true([ \t]|$)/{f=1}
+      END{exit(f?0:1)}
+    ' "$t0_skill_md" 2>/dev/null; then
       t0_skill_invocable=0
     fi
-    if [ "$t0_skill_invocable" -eq 0 ]; then
-      log "[role-sync] NOTE: $target_root does not import the t0-orchestrator skill body into $project_t0_dir/CLAUDE.md, and its SKILL.md is missing or not model-invocable."
+    local t0_skill_hook_injected=0
+    local hook_candidate
+    for hook_candidate in "$target_root/.claude/hooks/sessionstart.sh" "$target_root/hooks/sessionstart.sh"; do
+      if [ -f "$hook_candidate" ] && grep -q "skills/t0-orchestrator/SKILL.md" "$hook_candidate" 2>/dev/null; then
+        t0_skill_hook_injected=1
+        break
+      fi
+    done
+    if [ "$t0_skill_invocable" -eq 0 ] && [ "$t0_skill_hook_injected" -eq 0 ]; then
+      log "[role-sync] NOTE: $target_root does not import the t0-orchestrator skill body into $project_t0_dir/CLAUDE.md (nor does its SessionStart hook inject it), and its SKILL.md is missing or not model-invocable."
       log "[role-sync]       Run 'bash scripts/commands/t0_role_audit.sh --static $target_root' for detail; the shipped role's Mandatory Startup step will stall on Skill-tool invocation."
     fi
   fi

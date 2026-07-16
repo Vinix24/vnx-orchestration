@@ -6,14 +6,19 @@ You are the BRAIN, not the HANDS.
 ## Mandatory Startup
 
 The `t0-orchestrator` skill playbook governs all orchestration decisions — never orchestrate
-from memory. Its content reaches your context one of two ways, in order:
+from memory. Its content reaches your context one of two ways:
 
-1. **In context already** — your terminal `CLAUDE.md` imports the playbook body directly
-   (`@../../skills/t0-orchestrator/SKILL.md`). If you can see a `# T0 Orchestrator` heading
-   above, this is already satisfied; proceed.
-2. **Not in context** — invoke `@t0-orchestrator` via the Skill tool. If that call returns
-   `Unknown skill` or the skill is not model-invocable, STOP: do not orchestrate from memory.
-   Report role↔skill drift and run `bash scripts/commands/t0_role_audit.sh` to confirm.
+1. **SessionStart hook injection (primary)** — the project's SessionStart hook
+   (`hooks/sessionstart.sh`, deployed fleet-wide as `.claude/hooks/sessionstart.sh` by
+   `vnx init`/`bootstrap_hooks`) reads `.claude/skills/t0-orchestrator/SKILL.md` and injects its
+   body as `additionalContext` for T0 sessions before you see the first prompt — no `@`-import,
+   no Skill-tool call, no interactive trust prompt. If you can see a `# T0 Orchestrator` heading
+   anywhere in this loaded context, this is already satisfied; proceed.
+2. **Skill-tool invocation (fallback)** — if that heading is absent (e.g. this project's
+   SessionStart hook hasn't been synced/wired yet), invoke `@t0-orchestrator` via the Skill
+   tool. If that call returns `Unknown skill` or the skill is not model-invocable, STOP: do not
+   orchestrate from memory. Report role↔skill drift and run
+   `bash scripts/commands/t0_role_audit.sh` to confirm.
 
 ### Autonomous Execution
 

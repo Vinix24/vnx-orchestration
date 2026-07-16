@@ -306,6 +306,84 @@ class TestT0OrchestratorInvocabilityNote:
         assert r.returncode == 0, r.stderr
         assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
 
+    def test_silent_when_target_has_hook_injection_for_skill(self, tmp_path):
+        """Finding 0 mechanism change: the playbook body now reaches T0 via
+        the SessionStart hook, not a CLAUDE.md `@`-import — the NOTE-check
+        must recognize that as satisfying the condition too."""
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\ndisable-model-invocation: true\n---\n\nplaybook body\n"
+        )
+        hooks_dir = project / ".claude" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "sessionstart.sh").write_text(
+            "#!/usr/bin/env bash\ncat \"$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md\"\n"
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+
+    def test_warns_when_hook_present_but_not_referencing_the_skill(self, tmp_path):
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\ndisable-model-invocation: true\n---\n\nplaybook body\n"
+        )
+        hooks_dir = project / ".claude" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "sessionstart.sh").write_text("#!/usr/bin/env bash\necho '{}'\n")
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" in (r.stdout + r.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 (codex, 2026-07-16): the awk frontmatter check matched
+# `disable-model-invocation: true` anywhere in the frontmatter block
+# (comments, description text) instead of anchoring on the real key.
+# ---------------------------------------------------------------------------
+
+class TestFrontmatterAnchorIgnoresMentionsAndComments:
+    def test_silent_when_description_merely_mentions_the_disable_string(self, tmp_path):
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\n"
+            'description: "Docs note: disable-model-invocation: true is an example flag."\n'
+            "---\n\nplaybook body\n"
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+
+    def test_silent_when_disable_line_is_commented_out(self, tmp_path):
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\n"
+            "# disable-model-invocation: true  (left as documentation)\n"
+            "---\n\nplaybook body\n"
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" not in (r.stdout + r.stderr)
+
+    def test_still_warns_on_a_real_disable_key(self, tmp_path):
+        project = _make_project(tmp_path)
+        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: t0-orchestrator\ndescription: test\ndisable-model-invocation: true\n---\n\nplaybook body\n"
+        )
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" in (r.stdout + r.stderr)
+
 
 # ---------------------------------------------------------------------------
 # VNX_HOME guard still refuses in-place (central install only)
