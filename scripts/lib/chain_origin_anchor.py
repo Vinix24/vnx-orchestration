@@ -585,6 +585,41 @@ def _commit_and_push_anchor(
     return branch_name, pr_url
 
 
+def _missing_closure_fingerprints(
+    ledger_path: Path,
+    project_root: Path,
+    branch: str,
+    identity: str,
+    epochs: list[tuple[int, int]],
+) -> list[ClosureFingerprint]:
+    """Finding 2 fix (ADR-034 fix-r2): every epoch the CURRENT ledger tail
+    shows as CLOSED (a later epoch's marker exists) whose closure_key hasn't
+    yet landed on ``origin/<branch>`` — computed and returned regardless of
+    whether THIS seal call is the one that freshly opened the newer epoch.
+
+    Without this, a crash between appending a new epoch's marker (durable on
+    the ledger) and this call's own commit/push (never durable anywhere)
+    leaves epoch_state reporting the new epoch as already-current on retry —
+    ``opened_new_epoch=False``, ``prior_epoch=None`` — so a "only close what
+    I just opened" check would silently skip the prior epoch's closure
+    forever, and verify_chain would stay broken ("no closure record for a
+    CLOSED epoch") permanently. Idempotent per the same remote-check
+    discipline as ``seal_and_commit_origin``'s own noop check
+    (``_read_remote_base_anchor``): an epoch already closed on origin is
+    never recomputed/re-emitted. The currently-open (last) epoch is exempt —
+    there is nothing to close yet.
+    """
+    missing: list[ClosureFingerprint] = []
+    for idx, (epoch, _marker_line) in enumerate(epochs):
+        if idx + 1 >= len(epochs):
+            continue  # still open — no closure expected yet
+        if _read_remote_base_anchor(project_root, branch, closure_key(identity, epoch)) is not None:
+            continue  # already sealed by a prior (possibly different) seal call
+        next_marker_line = epochs[idx + 1][1]
+        missing.append(compute_epoch_closure(ledger_path, epoch, next_epoch_marker_line=next_marker_line))
+    return missing
+
+
 def _resume_partial_seal(project_root: Path, base_branch: str, identity: str, epoch: int) -> SealResult:
     """Finding 3 fix (ADR-034 fix-r1): a prior seal attempt committed the
     anchor record LOCALLY (on its deterministic seal branch, see
@@ -701,12 +736,17 @@ def seal_and_commit_origin(
             needs_resume = True
 
         origin_fp: OriginFingerprint | None = None
-        closure_fp: ClosureFingerprint | None = None
+        closure_fps: list[ClosureFingerprint] = []
         if not needs_resume:
             origin_fp = compute_epoch_fingerprint(ledger_path, epoch)
-            if prior_epoch is not None:
-                next_marker_line = sum(1 for _ in ledger_path.open("r", encoding="utf-8"))
-                closure_fp = compute_epoch_closure(ledger_path, prior_epoch, next_epoch_marker_line=next_marker_line)
+            # Backfill EVERY closed-but-unanchored epoch (Finding 2, ADR-034
+            # fix-r2) — not just `prior_epoch` (the epoch THIS call happens to
+            # have freshly closed). A prior crash between the marker-append
+            # and the commit/push can leave an older epoch's closure missing
+            # even when this call itself doesn't open a new epoch.
+            closure_fps = _missing_closure_fingerprints(
+                ledger_path, project_root, branch, identity, _observed_epochs(ledger_path)
+            )
 
     # Git/commit/push below intentionally happens OUTSIDE the ledger lock — it
     # touches project_root's git state, not the ledger file, and a slow push
@@ -716,7 +756,7 @@ def seal_and_commit_origin(
 
     sealed_at = datetime.now(timezone.utc).isoformat()
     records = [_origin_record(identity, origin_fp, sealed_at=sealed_at)]
-    if closure_fp is not None:
+    for closure_fp in closure_fps:
         records.append(_closure_record(identity, closure_fp, sealed_at=sealed_at))
 
     branch_name, pr_url = _commit_and_push_anchor(project_root, branch, records, identity=identity, epoch=epoch)
@@ -828,6 +868,22 @@ def verify_chain(
         violations.append({"note": "identity anchor scan failed (fail-closed)", "error": id_provenance.error})
         anchor_failed = True
     else:
+        if not anchors_for_identity:
+            # Finding 1 (ADR-034 fix-r2): a chaining-active ledger (saw_chain
+            # True — we're already inside that branch here) with ZERO anchors
+            # anywhere for its identity. The per-epoch loop below can't catch
+            # this on its own when epochs == [] (every chain_epoch_start
+            # marker stripped, a markerless GENESIS rechain) — it just never
+            # runs. A ledger with markers but genuinely no anchor yet is
+            # already caught per-epoch further down; this closes the
+            # markerless variant of the same gap so it fails identically.
+            violations.append(
+                {
+                    "note": "chaining-active ledger has no git anchor anywhere for this "
+                    "ledger_identity (unanchored or markerless chain)",
+                }
+            )
+            anchor_failed = True
         open_anchor_epochs = {r.epoch for r in anchors_for_identity if r.record_type == "open"}
         if open_anchor_epochs:
             max_anchored_open_epoch = max(open_anchor_epochs)

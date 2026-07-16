@@ -459,6 +459,104 @@ def test_t20_rollback_to_earlier_epoch_with_later_anchor_is_broken(git_repo, tmp
     assert any("rollback" in str(v.get("note", "")) or "no longer observes" in str(v.get("note", "")) for v in violations)
 
 
+def test_t23_markerless_chaining_no_anchor_anywhere_is_broken(git_repo, tmp_path):
+    """ADR-034 fix-r2 Finding 1: a marker-less GENESIS chain (chained from
+    line 1 via prev_hash == GENESIS, no chain_epoch_start marker at all)
+    that has NEVER been sealed — zero anchors anywhere for its identity —
+    must fail closed as `broken`, not pass through as the legitimate
+    "verified" marker-less-chain case. _observed_epochs(path) is [] here
+    (no markers), so the per-epoch loop never runs; only a reverse "no
+    anchor anywhere for this chaining-active identity" check catches it."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_chained_entry(ledger, {"seq": 1})  # marker-less GENESIS chain, never sealed
+
+    ok, violations, status, prov = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok is False
+    assert status == "broken"
+    assert prov is not None and prov.resolved is True
+    assert any("no git anchor anywhere" in str(v.get("note", "")) for v in violations)
+
+    # No over-fire: sealing this SAME identity properly (real marker + real
+    # anchor) must still verify — the new check must not catch a
+    # legitimately-anchored chain.
+    ledger.write_text("")
+    append_epoch_marker(ledger, 1)
+    append_chained_entry(ledger, {"seq": 1})
+    result = _seal(git_repo, ledger)
+    assert result.action == "sealed"
+
+    ok2, _v2, status2, _p2 = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok2 is True and status2 == "verified-segmented"
+
+
+def test_t24_force_new_epoch_crash_before_commit_resume_backfills_prior_closure(
+    git_repo, tmp_path, monkeypatch
+):
+    """ADR-034 fix-r2 Finding 2: force_new_epoch appends the new epoch's
+    marker under the lock (durable — max_epoch advances) and computes epoch
+    1's closure, but crashes before `_commit_and_push_anchor` ever runs — no
+    commit, no push, nothing lands anywhere except the marker on the ledger.
+    On retry (a plain re-seal, not re-passing force_new_epoch), epoch_state
+    now reports the new epoch as already-current: opened_new_epoch=False,
+    prior_epoch=None. A naive "only close what I just opened" check would
+    never emit epoch 1's closure again — it would stay permanently
+    un-anchored and verify_chain permanently `broken` on "no closure record
+    for a CLOSED epoch"."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_epoch_marker(ledger, 1)
+    append_chained_entry(ledger, {"seq": "a"})
+    result1 = _seal(git_repo, ledger)
+    assert result1.action == "sealed" and result1.epoch == 1
+
+    real_commit = coa._commit_and_push_anchor
+
+    def crash_before_commit(*_args, **_kwargs):
+        raise RuntimeError("simulated crash before commit/push")
+
+    monkeypatch.setattr(coa, "_commit_and_push_anchor", crash_before_commit)
+    with pytest.raises(RuntimeError, match="simulated crash before commit/push"):
+        seal_and_commit_origin(
+            ledger,
+            git_repo,
+            project_id="vnx-dev",
+            project_data_dir=data_dir,
+            branch="main",
+            force_new_epoch=True,
+            branch_protection_confirmed=True,
+        )
+
+    # Precondition: the epoch-2 marker landed (inside the lock, durable on
+    # disk before the crash), but nothing was ever committed for it, and
+    # epoch 1's closure never reached origin either.
+    identity = ledger_identity("vnx-dev", ledger, data_dir)
+    assert coa.epoch_state(ledger) == (2, True)
+    assert coa._read_local_head_anchor(git_repo, coa.anchor_key(identity, 2)) is None
+    assert coa._read_remote_base_anchor(git_repo, "main", coa.closure_key(identity, 1)) is None
+
+    ok_broken, _v, status_broken, _p = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok_broken is False and status_broken == "broken"
+
+    monkeypatch.setattr(coa, "_commit_and_push_anchor", real_commit)
+    result2 = _seal(git_repo, ledger)  # plain retry — does NOT re-pass force_new_epoch
+    assert result2.action == "sealed"
+    assert result2.epoch == 2
+
+    closure1, prov = read_git_anchor(git_repo, identity, 1, kind="close")
+    assert prov.resolved is True
+    assert closure1 is not None and closure1 != "corrupt"
+
+    ok, _v2, status, _p2 = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok is True and status == "verified-segmented"
+
+
 # ---------------------------------------------------------------------------
 # T6/T7: check_anchor_immutability pure diff logic (write-side rule; the
 # GitHub Actions wiring that invokes this in CI is PR-2 scope)
