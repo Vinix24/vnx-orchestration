@@ -4,6 +4,52 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.3.0] — 2026-07-16
+
+The third minor (70 commits since 1.2.0). Headlines: the **plan-first gate enforced at the dispatch door** (ADR-030, advisory-first with a config-plane flip), the **T0 playbook hook-injected at SessionStart** (F1 — no more trust-prompt/invocation gap), **auto-PR enforcement for build workers**, **fail-loud lanes** (empty provider completion or empty tmux extraction can no longer report success), the **effectiveness-probe registry** that gates the learning loop on measured health, and the **subsystem cockpit SSOT** (`SUBSYSTEMS.md` + `vnx subsystems`). Enforcement machinery stays default-off behind operator knobs.
+
+### Added — Governance & gates
+
+- **Plan-first gate at the dispatch door (ADR-030, #1111)** — advisory-first enforcement; enforce mode honors the persisted config plane (#1115), `VNX_PLAN_GATE_ENFORCE` registered for an audited flip (#1119); plan-gate-pass evidence as merge-gate primitive (#1121); hints emit the real `vnx horizon plan-gate` command (#1120).
+- **ADR-031 ratified (#1114, #1118)** — operator-facing orchestration-target architecture, supersedes ADR-028.
+- **ADR-032 (#1162)** — skills-in-consumers install-artifact model promoted to ADR.
+- **ADR-034 design (#1172)** — external chain-origin anchor for the receipt hash-chain, GOOD after 3 codex rounds (implementation lands post-1.3.0).
+- **Auto-close ON by default in the reconcile tick (#1110)** — merged PRs close their tracks without operator sweeps.
+
+### Added — Dispatch & lanes
+
+- **Auto-PR enforcement (#1170, #1175)** — tmux-spawn build workers create their own PR; `autopr_rejected` mirrored in the shell processor.
+- **Fail-loud lanes (#1107, #1127)** — empty provider-lane completion downgrades to loud `failure` with the raw spawn result; tmux lane refuses `done` on empty extraction.
+- **Worker-output salvage after lane timeout (#1176)** — a 3600s deadline no longer strands finished-but-unreported work.
+- **`--deadline-seconds` passthrough (#1180)** — consumer door overrides the 3600s receipt-wait end-to-end (300-14400).
+- **Final-prompt integrity persisted in both lanes (#1116, #1155)** — the enriched prompt a worker actually received is now audit-addressable.
+- **Subprocess lane on shared `dispatch_govern.govern()` (#1131)**; dispatch-agent honors the requested provider lane (#1158); per-role `mcp_servers` capability-binding (#1128); OpenRouter arbitrary-model lane skeleton (#1130).
+- **rm-rf worker-hang fix (#1169)** — scoped build-toolchain allow-list replaces the interactive dangerous-rm prompt that hung headless dispatches.
+
+### Added — Orchestrator (T0)
+
+- **F1: SessionStart hook-injects the t0-orchestrator playbook (#1174)** — role/audit/templates coherent; kills the trust-prompt + skill-invocation gap.
+- **Context rotation as T0-initiated control-plane (#1149, #1150, #1154)** — non-destructive, default OFF; respawned successor pinned to Opus (`t0-opus-only`).
+- **Receipt-delivery hardening (#1178)** — submit-verify + dedupe + digest + `VNX_RECEIPT_T0_PUSH` kill-switch; stale notifications can no longer flush into a T0 prompt as input.
+- **Proposed deliverables surfaced as `human_gate_queue` in t0-state (#1167)**; per-track `lane_hint` (#1168).
+
+### Added — Intelligence & observability
+
+- **Effectiveness-probe registry (#1137, #1139, #1141, #1146)** — probes for governance stack, plan-gate, migration, and injection; the learning loop activates only when its probe is healthy (#1143).
+- **Injection-eval PR-A/PR-B (#1157, #1160)** — delivery-time WHY instrumentation + reason-aware evaluator with measure-only tuning proposals.
+- **Subsystem cockpit SSOT (#1135, #1140, #1144)** — `SUBSYSTEMS.md` + config-registry metadata, `vnx subsystems` CLI over the live SSOT, cockpit tile on the observability page.
+- **Regression-attribution primitive (#1165)** — names the commit that broke a check.
+- **Bench generalization (#1122, #1123, #1132)** — bring-your-own-tasks/models, lane-calibration field-test, `--retry-from` DNF matching fixed.
+
+### Fixed
+
+- **Fleet keystone: `vnx init` seeds `skills.yaml` copy-if-missing (#1173)** and refreshes per-skill, mixed-dir-safe (#1163) — the fleet-wide consumer CI-breaker.
+- **Plan-gate-panel seat robustness (#1106, #1161)** — opus-seat data_dir resolution + codex/glm verdict-parser backward scan; scoped-spawn env.
+- **Phantom-guard (#1104, #1164)** — read-only reviews exempt; fix-forward dispatches resolve the pushed PR branch.
+- **Central-mode hygiene (#1152, #1159, #1166)** — embedded-layout path-assumption sweep, install-mode marker on `vnx update`, roadmap anchored on project root.
+- **Security batch (#1125)** — Anthropic credentials scrubbed from litellm/harness subprocess env (S1-S3).
+- **Kimi role-gate content-block text extraction (#1129)**; intelligence UPSERT conflict targets (#1147); dashboard light-theme migration + contrast (#1148, #1151).
+
 ## [1.2.0] — 2026-07-11
 
 The second minor. Headlines: **ADR-028 orchestration-target Phases 1–4** (agent-folder fusion + a decision-judge that shadows, fast-paths, then binds — all default-off, human-on-the-last-set), a **central-store project_id authority** fix that closes a week of multi-tenant store bugs at the root, **ADR-029 hash-chain epoch-rotation**, a **multi-provider deliberation panel** (`/panel`), an **evidence-bound merge gate**, and the **canonical provider-agnostic orchestrator role** with `vnx role sync`. All new decision/enforcement machinery ships default-off behind operator knobs.
