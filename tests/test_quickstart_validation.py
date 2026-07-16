@@ -197,11 +197,22 @@ class TestDoctorFlow:
     def test_doctor_skills_registry_check_passes(self, initialized_project):
         """OI-624 regression: the `template` check for .claude/skills/skills.yaml
         must pass on a freshly initialized project (this is what CI's
-        'vnx doctor smoke' job asserted, and it went red on every fresh install)."""
+        'vnx doctor smoke' job asserted, and it went red on every fresh install).
+
+        Asserts the structural check result via --json rather than matching on
+        output text, so the assertion doesn't depend on doctor's message wording."""
         vnx_bin = initialized_project / ".vnx" / "bin" / "vnx"
-        rc, out, err = _run([str(vnx_bin), "doctor"], cwd=initialized_project)
-        assert "skills.yaml" not in out or "FAIL] template: Missing" not in out, \
-            f"skills.yaml registry check failed in doctor output:\n{out}"
+        rc, out, err = _run([str(vnx_bin), "doctor", "--json"], cwd=initialized_project)
+        assert rc in (0, 1), f"vnx doctor --json crashed:\nstdout: {out}\nstderr: {err}"
+
+        results = json.loads(out)
+        registry_checks = [
+            r for r in results
+            if r.get("name") == "template" and "registry" in r.get("message", "").lower()
+        ]
+        assert registry_checks, f"no skills-registry template check found in doctor output:\n{out}"
+        assert all(r["status"] == "pass" for r in registry_checks), \
+            f"skills-registry template check did not PASS:\n{registry_checks}"
 
 
 # ---------------------------------------------------------------------------
