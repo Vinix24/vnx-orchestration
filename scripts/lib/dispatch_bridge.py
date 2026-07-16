@@ -252,6 +252,7 @@ def deliver_via_door(
     gate: str = "",
     pr_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    deadline_seconds: Optional[int] = None,
 ) -> bool:
     """Gated delivery for the in-process python callers (pool_worker_runner, claude_adapter,
     headless_dispatch_daemon). When ``VNX_SINGLE_ENTRY_DISPATCH=1`` route through the door
@@ -261,6 +262,11 @@ def deliver_via_door(
 
     ``project_id`` may be None: the door resolves + validates it fail-closed (ADR-007). Pass it
     explicitly when the caller already knows it (preferred).
+
+    ``deadline_seconds`` may be None: resolves to the unchanged 3600s default (matches
+    ``stage_spec_bundle``'s own default) so an omitted value reproduces byte-identical
+    prior behavior. Pass an explicit value (validated by the caller, e.g. dispatch-agent's
+    300-14400 range) to override the lane's receipt-wait deadline.
 
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
@@ -276,6 +282,7 @@ def deliver_via_door(
             gate=gate,
             pr_id=pr_id,
             project_id=project_id,
+            deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
         ) == 0
     return bool(legacy())
 

@@ -138,12 +138,32 @@ def _resolve_agent_config(
     }, True
 
 
+_DEADLINE_SECONDS_MIN = 300
+_DEADLINE_SECONDS_MAX = 14400
+
+
 def vnx_dispatch_agent(args) -> int:
     agent = args.agent
     instruction = getattr(args, "instruction", None)
     model = getattr(args, "model", None)
     explicit_model = model  # user's raw --model override, if any (captured before defaulting)
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
+
+    # --deadline-seconds passthrough (interim unblock, 20260716-deadline-passthrough):
+    # unset (None) preserves exactly the current behavior — the door/bundle default of
+    # 3600s (dispatch_bridge.deliver_via_door -> stage_spec_bundle). An explicit value
+    # is validated here (not silently clamped) so an out-of-range request fails loudly
+    # before any dispatch is staged.
+    deadline_seconds = getattr(args, "deadline_seconds", None)
+    if deadline_seconds is not None and not (
+        _DEADLINE_SECONDS_MIN <= deadline_seconds <= _DEADLINE_SECONDS_MAX
+    ):
+        print(
+            f"Error: --deadline-seconds {deadline_seconds} is out of range "
+            f"[{_DEADLINE_SECONDS_MIN}, {_DEADLINE_SECONDS_MAX}].",
+            file=sys.stderr,
+        )
+        return 1
 
     # Validate agent CLAUDE.md exists
     agent_claude_md = _resolve_agent_path(project_dir, agent)
@@ -282,6 +302,7 @@ def vnx_dispatch_agent(args) -> int:
         provider=provider,
         model=model,
         project_id=project_id,
+        deadline_seconds=deadline_seconds,
     )
 
     status = "done" if success else "failed"
