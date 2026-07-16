@@ -34,14 +34,30 @@ run `vnx regen-settings` yet). A hook-file-only match without settings wiring
 now reports the new HOOK-NOT-WIRED finding instead of the generic
 SKILL-UNLOADABLE.
 
-Isolation: every test targets a throwaway tmp_path project; a regression
-guard asserts the repo's own `.claude/terminals/T0/` audits honestly — it
-currently reports HOOK-NOT-WIRED, since wiring `.claude/settings.json` is an
-explicitly-authorized separate operator action, not part of this fix. That
-guard must flip to clean (not be re-loosened) once the operator makes that
-edit — never edited by these tests.
+Fix-forward round 4 (20260716-ff-1174-r4): the repo self-audit regression
+guard below asserted a FIXED expected outcome (HOOK-NOT-WIRED) that was true
+only until the operator wired `.claude/settings.json` — once that landed
+(commit 67f0bf91), the guard itself started failing on the branch that fixed
+the gap it exists to catch. It is now state-aware: it independently
+JSON-parses `.claude/settings.json` (not via the script under test) to
+determine whether the hook is actually wired, then asserts whichever outcome
+that state implies — clean/exit 0 when wired, HOOK-NOT-WIRED/exit!=0 when
+not. Both directions stay fixture-tested above regardless of this repo's own
+state; this guard only checks the self-audit stays consistent with reality.
+
+Also this round: finding 2 (basename-only hook matching let an unrelated
+script sharing the name "sessionstart.sh" at a different path false-match —
+fixed to compare the dir/file path suffix instead) and finding 3 (a minified
+single-line settings.json skipped the very line carrying both the
+"SessionStart" key and the hook command, false-negativing HOOK-NOT-WIRED —
+fixed to scan that line too).
+
+Isolation: every test targets a throwaway tmp_path project except the
+self-audit guard, which deliberately targets this repo's own
+`.claude/terminals/T0/` — never edited by these tests.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -462,6 +478,54 @@ class TestSkillHookInjected:
         assert r.returncode == 0, r.stdout + r.stderr
         assert "clean" in (r.stdout + r.stderr).lower()
 
+    def test_settings_reference_to_differently_located_same_basename_script_reports_not_wired(self, tmp_path):
+        """Finding 2 (2026-07-16 r4): matching only the hook's BASENAME let
+        an unrelated script that merely SHARES the name "sessionstart.sh" at
+        a different path count as wiring the real hook. The needle must
+        include the directory component (hooks/sessionstart.sh), not just
+        the basename."""
+        project = _make_project(tmp_path)
+        self._write_hook(project, ".claude/hooks")
+        settings_dir = project / ".claude"
+        (settings_dir / "settings.json").write_text(
+            '{\n'
+            '  "hooks": {\n'
+            '    "SessionStart": [\n'
+            '      {\n'
+            '        "matcher": "*",\n'
+            '        "hooks": [\n'
+            '          {\n'
+            '            "type": "command",\n'
+            '            "command": "bash scripts/unrelated-tool/sessionstart.sh"\n'
+            '          }\n'
+            '        ]\n'
+            '      }\n'
+            '    ]\n'
+            '  }\n'
+            '}\n'
+        )
+
+        r = _run_static(project)
+        assert r.returncode != 0
+        assert "HOOK-NOT-WIRED" in r.stdout
+
+    def test_minified_single_line_settings_json_wires_hook(self, tmp_path):
+        """Finding 3 (2026-07-16 r4): the awk scan skipped the very line
+        that matched "SessionStart": before checking it for the needle — a
+        minified single-line settings.json puts key, brackets, and hook
+        command all on that one line, so it was never found."""
+        project = _make_project(tmp_path)
+        self._write_hook(project, ".claude/hooks")
+        settings_dir = project / ".claude"
+        (settings_dir / "settings.json").write_text(
+            '{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command",'
+            '"command":"bash .claude/hooks/sessionstart.sh"}]}]}}\n'
+        )
+
+        r = _run_static(project)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "clean" in (r.stdout + r.stderr).lower()
+
 
 class TestTriFilePlaybookMechanismGap:
     """Finding 2 (codex): `vnx role sync` mirrors the same Mandatory Startup
@@ -537,23 +601,48 @@ class TestDefaultRootIsGitRoot:
         assert r.returncode == 0, r.stdout + r.stderr
 
 
+def _repo_sessionstart_hook_is_wired() -> bool:
+    """Independent (JSON-parse, not the awk logic under test) check of
+    whether this repo's own .claude/settings.json actively references
+    hooks/sessionstart.sh in its SessionStart config — decides which
+    assertion direction the regression guard below expects, rather than the
+    guard hardcoding one fixed outcome that goes stale the moment an
+    operator edits settings.json (finding 1 self-test staleness, 2026-07-16
+    r4: commit 67f0bf91 wired the hook and this guard's old fixed
+    HOOK-NOT-WIRED assertion started failing on its own branch)."""
+    settings_file = REPO / ".claude" / "settings.json"
+    if not settings_file.is_file():
+        return False
+    try:
+        data = json.loads(settings_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    for entry in data.get("hooks", {}).get("SessionStart", []):
+        for hook in entry.get("hooks", []):
+            if "hooks/sessionstart.sh" in hook.get("command", ""):
+                return True
+    return False
+
+
 class TestRepoSelfAudit:
-    def test_vnx_repo_itself_reports_the_honest_hook_not_wired_gap(self):
-        """Finding 1 (codex round 2, 2026-07-16): this repo's own
-        hooks/sessionstart.sh correctly injects the t0-orchestrator skill
-        body, but .claude/settings.json's SessionStart config does not
-        invoke that hook — that line is intentionally left for a separate,
-        explicitly-authorized operator action (an operator-config change,
-        not something this fix-forward makes on its own). Until that
-        settings.json edit lands, `--static` must report this gap honestly
-        rather than claim clean — this regression guard asserts the honest
-        state, and must flip back to clean (not be re-loosened) once the
-        operator wires the hook. Never edited by these tests."""
+    def test_vnx_repo_itself_matches_its_actual_hook_wiring_state(self):
+        """State-aware regression guard: whichever way this repo's own
+        .claude/settings.json currently wires (or doesn't wire)
+        hooks/sessionstart.sh, `--static` must report the matching outcome —
+        clean/exit 0 once wired, HOOK-NOT-WIRED/exit!=0 while it isn't. Both
+        directions stay independently fixture-tested above (TestSkillHookInjected);
+        this guard only checks the self-audit stays consistent with the real
+        state of this repo's own settings.json — never edited by these
+        tests."""
         r = _run_static(REPO)
-        assert r.returncode != 0, r.stdout + r.stderr
         out = r.stdout + r.stderr
-        assert "HOOK-NOT-WIRED" in out
-        assert "t0-orchestrator" in out
+        if _repo_sessionstart_hook_is_wired():
+            assert r.returncode == 0, out
+            assert "HOOK-NOT-WIRED" not in out
+        else:
+            assert r.returncode != 0, out
+            assert "HOOK-NOT-WIRED" in out
+            assert "t0-orchestrator" in out
 
 
 if __name__ == "__main__":

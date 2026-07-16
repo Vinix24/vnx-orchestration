@@ -1539,29 +1539,43 @@ cmd_role_sync() {
     # duplicated here deliberately — this command does not source
     # t0_role_audit.sh.
     local t0_skill_hook_injected=0
-    local hook_candidate hook_settings hook_base
+    local hook_candidate hook_settings hook_needle
     for hook_candidate in "$target_root/.claude/hooks/sessionstart.sh" "$target_root/hooks/sessionstart.sh"; do
+      # A wired hook whose TEXT references the skill path is not proof the
+      # skill actually exists -- gate on SKILL.md's own existence first, same
+      # as the static audit already does (finding 4, 2026-07-16 r4).
+      [ -f "$t0_skill_md" ] || break
       [ -f "$hook_candidate" ] || continue
       grep -q "skills/t0-orchestrator/SKILL.md" "$hook_candidate" 2>/dev/null || continue
-      hook_base="$(basename "$hook_candidate")"
+      # Basename alone is too loose -- an unrelated script that merely SHARES
+      # the name "sessionstart.sh" at a different path would false-match.
+      # Use the last two path segments instead (finding 2, 2026-07-16 r4).
+      hook_needle="$(basename "$(dirname "$hook_candidate")")/$(basename "$hook_candidate")"
       hook_settings="$target_root/.claude/settings.json"
       [ -f "$hook_settings" ] || hook_settings="$target_root/templates/settings_vnx_keys.json.tmpl"
-      if [ -f "$hook_settings" ] && awk -v needle="$hook_base" '
+      # The line that first matches "SessionStart": is itself scanned for the
+      # needle too (via scan()) -- a minified single-line settings.json
+      # otherwise false-negatives (finding 3, 2026-07-16 r4).
+      if [ -f "$hook_settings" ] && awk -v needle="$hook_needle" '
+        function scan(line,    idx) {
+          idx = index(line, "#")
+          if (idx > 0) line = substr(line, 1, idx - 1)
+          if (index(line, needle) > 0) { found = 1 }
+        }
         !in_block && /"SessionStart"[ \t]*:/ {
           in_block = 1
           o = gsub(/\[/, "[")
           c = gsub(/\]/, "]")
           depth = o - c
+          scan($0)
+          if (depth <= 0) { in_block = 0 }
           next
         }
         in_block {
-          line = $0
           o = gsub(/\[/, "[")
           c = gsub(/\]/, "]")
           depth += (o - c)
-          idx = index(line, "#")
-          if (idx > 0) line = substr(line, 1, idx - 1)
-          if (index(line, needle) > 0) { found = 1 }
+          scan($0)
           if (depth <= 0) { in_block = 0 }
         }
         END { exit(found ? 0 : 1) }

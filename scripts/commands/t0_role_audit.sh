@@ -105,22 +105,31 @@ _t0_static_hook_file_references_skill() {
 _t0_static_settings_json_wires_hook() {
   local settings_file="$1" needle="$2"
   [ -f "$settings_file" ] || return 1
+  # The line that first matches "SessionStart": is itself scanned for the
+  # needle too (via the shared scan() helper) -- a minified single-line
+  # settings.json puts the whole SessionStart array (key, brackets, and hook
+  # command) on that one line, and skipping it produced a false negative
+  # (finding 3, 2026-07-16 r4).
   awk -v needle="$needle" '
+    function scan(line,    idx) {
+      idx = index(line, "#")
+      if (idx > 0) line = substr(line, 1, idx - 1)
+      if (index(line, needle) > 0) { found = 1 }
+    }
     !in_block && /"SessionStart"[ \t]*:/ {
       in_block = 1
       o = gsub(/\[/, "[")
       c = gsub(/\]/, "]")
       depth = o - c
+      scan($0)
+      if (depth <= 0) { in_block = 0 }
       next
     }
     in_block {
-      line = $0
       o = gsub(/\[/, "[")
       c = gsub(/\]/, "]")
       depth += (o - c)
-      idx = index(line, "#")
-      if (idx > 0) line = substr(line, 1, idx - 1)
-      if (index(line, needle) > 0) { found = 1 }
+      scan($0)
       if (depth <= 0) { in_block = 0 }
     }
     END { exit(found ? 0 : 1) }
@@ -141,16 +150,20 @@ _t0_static_settings_json_wires_hook() {
 # so a not-yet-live consumer project isn't reported unloadable purely for
 # not having generated its settings.json yet.
 _t0_static_settings_wires_hook() {
-  local root="$1" hook="$2" hook_base settings
-  hook_base="$(basename "$hook")"
+  local root="$1" hook="$2" hook_needle settings
+  # Basename alone is too loose -- an unrelated script that merely SHARES the
+  # name "sessionstart.sh" at a different path would false-match. Use the
+  # last two path segments (dir/file, e.g. "hooks/sessionstart.sh") instead,
+  # so only a reference to the actual hook counts (finding 2, 2026-07-16 r4).
+  hook_needle="$(basename "$(dirname "$hook")")/$(basename "$hook")"
   settings="$root/.claude/settings.json"
   if [ -f "$settings" ]; then
-    _t0_static_settings_json_wires_hook "$settings" "$hook_base"
+    _t0_static_settings_json_wires_hook "$settings" "$hook_needle"
     return $?
   fi
   settings="$root/templates/settings_vnx_keys.json.tmpl"
   [ -f "$settings" ] || return 1
-  _t0_static_settings_json_wires_hook "$settings" "$hook_base"
+  _t0_static_settings_json_wires_hook "$settings" "$hook_needle"
 }
 
 # Full in-context check: a SessionStart hook script references the skill's

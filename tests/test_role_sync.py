@@ -427,6 +427,24 @@ class TestT0OrchestratorInvocabilityNote:
         assert r.returncode == 0, r.stderr
         assert "does not import the t0-orchestrator skill body" in (r.stdout + r.stderr)
 
+    def test_warns_when_skill_md_missing_even_if_hook_wired_and_references_it(self, tmp_path):
+        """Finding 4 (2026-07-16 r4): a wired hook whose TEXT references the
+        skill's SKILL.md path is not proof that file actually exists — no
+        SKILL.md at all here (the sales-copilot case), yet the hook-injection
+        check only grepped hook text and never confirmed SKILL.md existed on
+        disk, so the NOTE stayed silent instead of warning like the static
+        audit's SKILL-UNLOADABLE already does for this exact case."""
+        project = _make_project(tmp_path)
+        hooks_dir = project / ".claude" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "sessionstart.sh").write_text(
+            "#!/usr/bin/env bash\ncat \"$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md\"\n"
+        )
+        _wire_sessionstart_hook(project, ".claude/hooks/sessionstart.sh")
+        r = _run_bash("--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "does not import the t0-orchestrator skill body" in (r.stdout + r.stderr)
+
 
 # ---------------------------------------------------------------------------
 # Finding 3 (codex, 2026-07-16): the awk frontmatter check matched
