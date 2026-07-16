@@ -166,8 +166,13 @@ sys.path.insert(0, str(Path(scripts_dir) / 'lib'))
 from vnx_paths import ensure_env
 p = ensure_env()
 # G2: if a phantom-guard corrective receipt already rejected this dispatch,
-# downgrade the persisted outcome_status to failed. Fail-open: any read error
-# leaves the original status untouched.
+# downgrade the persisted outcome_status to failed. OI-626: mirrors
+# dispatch_govern.dedup_completion_receipts' Tier-0 override, which honors an
+# autopr_rejected receipt (pr_enforcement.py: branch pushed but no PR found/
+# created) the same way it honors phantom_rejected — without this mirror the
+# shell-processed intelligence-DB outcome_status disagreed with the python-lane
+# receipt resolution for a rejected auto-PR. Fail-open: any read error leaves
+# the original status untouched.
 ledger = Path(p['VNX_STATE_DIR']) / 't0_receipts.ndjson'
 try:
     if ledger.exists():
@@ -182,7 +187,9 @@ try:
                     continue
                 if not isinstance(r, dict):
                     continue
-                if r.get('dispatch_id') == dispatch_id and r.get('phantom_rejected') is True:
+                if r.get('dispatch_id') == dispatch_id and (
+                    r.get('phantom_rejected') is True or r.get('autopr_rejected') is True
+                ):
                     status = 'failed'
                     break
 except Exception:
