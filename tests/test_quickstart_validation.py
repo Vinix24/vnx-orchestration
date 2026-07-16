@@ -136,6 +136,16 @@ class TestInitFlow:
         for subdir in ["state", "dispatches", "logs"]:
             assert (data_dir / subdir).is_dir(), f".vnx-data/{subdir} not created"
 
+    def test_init_creates_skills_registry(self, installed_project):
+        """OI-624 regression: fresh `vnx init` must ship .claude/skills/skills.yaml,
+        not just the per-skill directories."""
+        vnx_bin = installed_project / ".vnx" / "bin" / "vnx"
+        rc, out, err = _run([str(vnx_bin), "init", "--starter"], cwd=installed_project)
+        assert rc == 0, f"vnx init --starter failed: {err}\n{out}"
+        registry = installed_project / ".claude" / "skills" / "skills.yaml"
+        assert registry.is_file(), \
+            f"skills.yaml missing from fresh-install target: {registry}"
+
 
 # ---------------------------------------------------------------------------
 # Doctor flow (post-init)
@@ -183,6 +193,15 @@ class TestDoctorFlow:
         rc, out, err = _run([str(vnx_bin), "doctor"], cwd=initialized_project)
         assert "VNX Doctor" in out, "Doctor should print header"
         assert "PASS" in out, "Doctor should have at least some passing checks"
+
+    def test_doctor_skills_registry_check_passes(self, initialized_project):
+        """OI-624 regression: the `template` check for .claude/skills/skills.yaml
+        must pass on a freshly initialized project (this is what CI's
+        'vnx doctor smoke' job asserted, and it went red on every fresh install)."""
+        vnx_bin = initialized_project / ".vnx" / "bin" / "vnx"
+        rc, out, err = _run([str(vnx_bin), "doctor"], cwd=initialized_project)
+        assert "skills.yaml" not in out or "FAIL] template: Missing" not in out, \
+            f"skills.yaml registry check failed in doctor output:\n{out}"
 
 
 # ---------------------------------------------------------------------------

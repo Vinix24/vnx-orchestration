@@ -241,6 +241,29 @@ def _refresh_canon_skills(canon_dirs: List[Path], target: Path) -> "tuple[int, i
     return refreshed, preserved
 
 
+# Top-level (non-directory) files in the shipped skills root that are shipped
+# canon config, not project-authored, and must ship alongside the per-skill
+# dirs. `skills.yaml` is the registry `vnx doctor` and skill validation read
+# from the target root, not from a per-skill subdirectory (OI-624).
+SKILLS_REGISTRY_FILES = ("skills.yaml",)
+
+
+def _refresh_registry_files(shipped: Path, target: Path) -> int:
+    """Copy shipped top-level registry file(s) into target, refreshed every run
+    (same never-drift-from-canon policy as _refresh_canon_skills).
+
+    Returns the count of files copied.
+    """
+    copied = 0
+    for name in SKILLS_REGISTRY_FILES:
+        src = shipped / name
+        if not src.is_file():
+            continue
+        shutil.copy2(str(src), str(target / name))
+        copied += 1
+    return copied
+
+
 def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
     """Refresh shipped canon skills into .claude/skills/ (and multi-provider dirs).
 
@@ -263,9 +286,11 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
         return StepResult("skills", FAIL, f"No canon skill directories found under: {shipped}")
 
     refreshed, preserved = _refresh_canon_skills(canon_dirs, target)
+    registry_count = _refresh_registry_files(shipped, target)
     details = [
         f".claude/skills: refreshed {refreshed} canon skill(s), "
-        f"preserved {preserved} project skill(s)"
+        f"preserved {preserved} project skill(s), "
+        f"{registry_count} registry file(s)"
     ]
 
     # Multi-provider sync
@@ -275,9 +300,10 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
     ]:
         if shutil.which(cli):
             r, p = _refresh_canon_skills(canon_dirs, skill_dir)
+            rc = _refresh_registry_files(shipped, skill_dir)
             details.append(
                 f"Synced to {cli} ({skill_dir}): refreshed {r} canon skill(s), "
-                f"preserved {p} project skill(s)"
+                f"preserved {p} project skill(s), {rc} registry file(s)"
             )
 
     return StepResult("skills", PASS,

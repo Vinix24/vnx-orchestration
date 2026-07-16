@@ -49,6 +49,7 @@ def vnx_env(tmp_path):
     (vnx_home / "skills").mkdir()
     (vnx_home / "skills" / "test-skill").mkdir()
     (vnx_home / "skills" / "test-skill" / "SKILL.md").write_text("# Test skill\n")
+    (vnx_home / "skills" / "skills.yaml").write_text("skills:\n  test-skill:\n    name: \"@test-skill\"\n")
     (vnx_home / "templates" / "terminals").mkdir(parents=True)
     for tid in ["T0", "T1", "T2", "T3"]:
         (vnx_home / "templates" / "terminals" / f"{tid}.md").write_text(f"# {tid}\n")
@@ -165,6 +166,33 @@ class TestBootstrapSkills:
         skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
         assert skills_dir.is_dir()
         assert (skills_dir / "test-skill" / "SKILL.md").exists()
+
+    def test_copies_top_level_registry_file(self, vnx_env):
+        """OI-624 regression: bootstrap_skills must copy skills.yaml alongside
+        the per-skill dirs, not just the dirs themselves — `vnx doctor` reads
+        the registry from the target root."""
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        registry = skills_dir / "skills.yaml"
+        assert registry.is_file(), "skills.yaml missing from fresh-install target"
+        shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
+        assert registry.read_text() == shipped_registry.read_text()
+
+    def test_refreshes_stale_registry_file(self, vnx_env):
+        """The registry refreshes every run (never-drift-from-canon), like canon skill dirs."""
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "skills.yaml").write_text("skills: {}\n# STALE\n")
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
+        refreshed = (skills_dir / "skills.yaml").read_text()
+        assert refreshed == shipped_registry.read_text()
+        assert "STALE" not in refreshed
 
     def test_refreshes_stale_canon_skill_and_preserves_project_skill(self, vnx_env):
         """Pre-existing target dir: canon skill refreshes, project skill is untouched."""
