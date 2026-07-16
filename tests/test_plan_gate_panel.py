@@ -970,6 +970,74 @@ def test_provider_lane_dispatcher_does_not_set_scoped_spawn_env(tmp_path, monkey
     assert "VNX_WORKER_SCOPED" not in seen_envs[0]
 
 
+def test_claude_lane_env_satisfies_real_scoping_precondition_under_default_flags(tmp_path, monkeypatch):
+    """OI-620 residue: connect the env-injection fix to the REAL D2.2 precondition.
+
+    test_claude_lane_dispatcher_sets_scoped_spawn_env proves plan_gate_panel's claude-lane
+    dispatcher builds a subprocess env carrying VNX_WORKER_SCOPED=1. Separately,
+    tests/test_working_tree_only.py proves tmux_interactive_dispatch's D2.2 precondition
+    accepts a HAND-SET VNX_WORKER_SCOPED=1. Neither test crosses the process boundary: this
+    one captures the ACTUAL env plan_gate_panel builds (with both enforcement flags left
+    unset in the ambient ---the true operator default---, not hand-set), replays that exact
+    env against the real TmuxInteractiveDispatch.dispatch(working_tree_only=True), and asserts
+    the D2.2 fail-closed rejection does NOT fire. A stub runner (no tmux calls) keeps this
+    fast and side-effect-free; dispatch fails later for an unrelated stub-runner reason, which
+    is exactly the point -- it must not be rejected AT the scoping precondition.
+    """
+    monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+    monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    captured_env: dict = {}
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    authored_report = _make_report_with_fence("pass")
+    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(_pgp, "_read_report", return_value=authored_report):
+            _pgp.run_panel(
+                doc,
+                track_id="feat-e2e-scope",
+                project_id="p1",
+                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+                data_dir=str(tmp_path),
+            )
+
+    assert captured_env.get("VNX_WORKER_SCOPED") == "1"
+
+    # Replay the ACTUAL captured env (not a hand-typed "1") against the real lane code the
+    # tmux CLI's main() invokes for every claude/tmux dispatch.
+    for key, value in captured_env.items():
+        monkeypatch.setenv(key, value)
+
+    import tmux_interactive_dispatch as tid
+
+    class _StubRunner:
+        def available(self) -> bool:
+            return True
+
+    lane = tid.TmuxInteractiveDispatch(
+        tmp_path, runner=_StubRunner(), project_root=tmp_path,
+        receipts_file=tmp_path / "receipts.ndjson",
+    )
+    result = lane.dispatch(
+        "noop", "oi620-proof", role="plan-reviewer", model="opus",
+        working_tree_only=True, skip_permissions=True, isolated_worktree=False,
+    )
+    assert "working_tree_only requires a scoped detached spawn" not in (result.failure_reason or ""), (
+        "the opus seat's env, as plan_gate_panel actually builds it under default "
+        "(unset) enforcement flags, must satisfy the real D2.2 scoping precondition"
+    )
+
+
 def test_claude_lane_no_report_error_surfaces_stdout_failure_reason(tmp_path):
     """The 'no report' RuntimeError must include proc.stdout, not just stderr.
 
