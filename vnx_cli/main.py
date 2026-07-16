@@ -282,6 +282,17 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         metavar="DIR",
         help="project directory (default: current directory)",
     )
+    dispatch_parser.add_argument(
+        "--deadline-seconds",
+        type=int,
+        default=None,
+        dest="deadline_seconds",
+        metavar="SECONDS",
+        help=(
+            "dispatch deadline in seconds, must be 300-14400 (default: unset, "
+            "which preserves the lane's current 3600s default)"
+        ),
+    )
 
 
 def _register_track_subparser(subparsers: argparse.Action) -> None:
