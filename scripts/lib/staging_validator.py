@@ -90,9 +90,18 @@ def validate_staging_path(
         # PATH TRAVERSAL FIX — validate format before any path join
         if not _DISPATCH_ID_RE.match(sid):
             _reject("staging-pending-flow violated: invalid dispatch_id format")
-        if dispatch_id is not None and dispatch_id.strip() != sid:
+        # OI-627 follow-up: compare the RAW dispatch_id (no .strip()) against sid.
+        # Both entry-points (subprocess_dispatch.py, tmux_interactive_dispatch.py)
+        # thread the raw, unstripped args.dispatch_id into every downstream use
+        # (worktree/branch name, VNX_CURRENT_DISPATCH_ID env var, commit trailer).
+        # Stripping only for this comparison let a caller pass e.g. "real-id "
+        # (trailing whitespace) and slip past the guard while downstream code
+        # still executed under the differing raw value — reopening the exact
+        # provenance break this guard exists to close. Comparing raw-to-raw
+        # means guard-pass implies byte-for-byte identity with what runs next.
+        if dispatch_id is not None and dispatch_id != sid:
             _reject(
-                f"staging-pending-flow violated: --dispatch-id {dispatch_id.strip()!r} "
+                f"staging-pending-flow violated: --dispatch-id {dispatch_id!r} "
                 f"does not match --from-staging-id {sid!r} — the executed dispatch "
                 "(worktree, worker env, commit provenance trailer) must run under the "
                 "same id that was staged"

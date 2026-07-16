@@ -208,6 +208,57 @@ class TestDispatchIdMatchesStagingId:
             dispatch_id="anything-goes-here",
         )
 
+    def test_rejects_dispatch_id_with_trailing_whitespace(self, tmp_path: Path, capsys) -> None:
+        """Codex finding: the guard used to compare dispatch_id.strip() against sid while
+        both entry-points (subprocess_dispatch.py, tmux_interactive_dispatch.py) go on to
+        use the RAW, unstripped args.dispatch_id for the worktree/branch name, the
+        VNX_CURRENT_DISPATCH_ID env var, and the commit trailer. A caller passing
+        --from-staging-id 'real-id' --dispatch-id 'real-id ' (trailing space) used to
+        slip past the guard while downstream code ran under a byte-different id — the
+        exact provenance break the guard exists to close. It must now be rejected."""
+        _make_pending_dispatch(tmp_path, "real-id")
+        with pytest.raises(SystemExit) as exc_info:
+            validate_staging_path(
+                "real-id",
+                False,
+                None,
+                data_dir=tmp_path,
+                dispatch_id="real-id ",
+            )
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "staging-pending-flow violated" in captured.err
+        assert "does not match" in captured.err
+
+    def test_rejects_dispatch_id_with_leading_whitespace(self, tmp_path: Path, capsys) -> None:
+        """Same gap, leading-whitespace variant — guard must reject, not silently strip."""
+        _make_pending_dispatch(tmp_path, "real-id")
+        with pytest.raises(SystemExit) as exc_info:
+            validate_staging_path(
+                "real-id",
+                False,
+                None,
+                data_dir=tmp_path,
+                dispatch_id=" real-id",
+            )
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "staging-pending-flow violated" in captured.err
+
+    def test_accepts_dispatch_id_with_whitespace_when_staging_id_matches_raw(
+        self, tmp_path: Path
+    ) -> None:
+        """Sanity check: raw-to-raw comparison still passes when both sides carry the
+        identical (untrimmed) value — the guard rejects DIVERGENCE, not whitespace itself."""
+        _make_pending_dispatch(tmp_path, "real-id")
+        validate_staging_path(
+            "real-id",
+            False,
+            None,
+            data_dir=tmp_path,
+            dispatch_id="real-id",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Wiring checks — validate that both CLI entry-points declare the new args
