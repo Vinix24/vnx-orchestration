@@ -1038,6 +1038,110 @@ def test_claude_lane_env_satisfies_real_scoping_precondition_under_default_flags
     )
 
 
+def test_run_panel_full_default_panel_five_seats_reach_verdict_or_real_reason(tmp_path, monkeypatch):
+    """OI-620 closing evidence: the REAL 5-seat DEFAULT_PANEL, through the REAL dispatcher.
+
+    Post-#1161, both root causes behind the opus-seat NO-VERDICT are fixed: (1) the
+    claude/tmux-lane subprocess env sets VNX_WORKER_SCOPED=1, satisfying tmux_interactive_
+    dispatch's D2.2 fail-closed precondition, and (2) the "no report" diagnostic surfaces
+    proc.stdout (the real failure_reason) instead of only a truncated, unrelated stderr
+    tail. Both are unit-tested in isolation above. This test proves they compose correctly
+    across the FULL default panel (opus/claude, kimi, glm-5.2-harness, deepseek-harness,
+    codex) driven through the REAL ``_make_default_dispatcher`` — only ``subprocess.run``
+    is faked (no live provider CLIs, no live tmux) — under DEFAULT (unset) enforcement
+    flags, the actual operator posture.
+
+    The opus/claude seat's faked subprocess call additionally crosses into the REAL
+    ``tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch()`` (stub runner, no tmux
+    binary) so the D2.2 check itself — not just the env plan_gate_panel builds — is
+    exercised end-to-end inside a full panel run, matching test_claude_lane_env_satisfies_
+    real_scoping_precondition_under_default_flags above but for all 5 seats at once.
+
+    Every seat must land on dispatched=True / parse_error=False / verdict="pass" — proving
+    5/5 seats reach a real verdict (the strongest form of "not NO-VERDICT via infra"). None
+    may fall through to the dispatch-exception no-verdict path this panel run is meant to
+    guard against.
+    """
+    monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+    monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\nOI-620 5-seat evidence run.\n", encoding="utf-8")
+
+    import json as _json
+    import subprocess as _sp
+    import unittest.mock as mock
+
+    import plan_gate_panel as _pgp
+    import tmux_interactive_dispatch as _tid
+
+    class _StubRunner:
+        def available(self) -> bool:
+            return True
+
+    seats_seen: list = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        did_idx = cmd.index("--dispatch-id")
+        did = cmd[did_idx + 1]
+        report_path = tmp_path / "unified_reports" / f"{did}.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if str(_pgp.TMUX_INTERACTIVE_DISPATCH) in cmd:
+            # opus/claude seat: replay the REAL env plan_gate_panel built against the
+            # REAL lane code (stub runner beyond the D2.2 precondition), exactly as
+            # test_claude_lane_env_satisfies_real_scoping_precondition_under_default_flags
+            # does for a single seat above.
+            env = kwargs.get("env") or {}
+            for key, value in env.items():
+                monkeypatch.setenv(key, value)
+            lane = _tid.TmuxInteractiveDispatch(
+                tmp_path, runner=_StubRunner(), project_root=tmp_path,
+                receipts_file=tmp_path / "receipts.ndjson",
+            )
+            result = lane.dispatch(
+                "noop", did, role="plan-reviewer", model="opus",
+                working_tree_only=True, skip_permissions=True, isolated_worktree=False,
+            )
+            seats_seen.append(("opus", result.failure_reason))
+            assert "working_tree_only requires a scoped detached spawn" not in (
+                result.failure_reason or ""
+            ), f"opus seat failed the real D2.2 precondition: {result.failure_reason}"
+            # Stub runner has no tmux to actually author the report; simulate the
+            # worker having done so (what a live opus worker would leave behind).
+            report_path.write_text(_make_report_with_fence("pass"), encoding="utf-8")
+            stdout = _json.dumps({"success": True, "dispatch_id": did, "failure_reason": None})
+            return _sp.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr="")
+
+        # provider lane (kimi / glm-5.2-harness / deepseek-harness / codex): fabricate the
+        # governed report + the "Report: <path>" stderr line provider_dispatch prints.
+        provider_idx = cmd.index("--provider")
+        seats_seen.append((cmd[provider_idx + 1], None))
+        report_path.write_text(_make_report_with_fence("pass"), encoding="utf-8")
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr=f"Report: {report_path}\n")
+
+    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        out = pgp.run_panel(
+            doc,
+            track_id="oi620-5seat-evidence",
+            project_id="p1",
+            panel=pgp.DEFAULT_PANEL,
+            data_dir=str(tmp_path),
+        )
+
+    assert len(pgp.DEFAULT_PANEL) == 5, "DEFAULT_PANEL drifted from the 5-family panel this test proves"
+    assert len(seats_seen) == 5, f"expected 5 dispatched seats, saw {len(seats_seen)}: {seats_seen}"
+    assert len(out["panelists"]) == 5
+
+    for p in out["panelists"]:
+        assert p["error"] == "", f"seat {p['label']} hit an infra dispatch error: {p['error']!r}"
+        assert p["dispatched"] is True, f"seat {p['label']} never dispatched (NO-VERDICT)"
+        assert p["parse_error"] is False, f"seat {p['label']} could not parse its verdict"
+        assert p["verdict"] == "pass"
+
+    assert out["decision"] == "PASS"
+
+
 def test_claude_lane_no_report_error_surfaces_stdout_failure_reason(tmp_path):
     """The 'no report' RuntimeError must include proc.stdout, not just stderr.
 
