@@ -19,6 +19,7 @@ caller explicitly invokes it; landing this file changes no runtime behavior.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys as _sys
 from dataclasses import dataclass
@@ -43,6 +44,13 @@ from ndjson_hash_chain import verify_chain as _base_verify_chain  # noqa: E402
 
 
 ANCHOR_REL_PATH = Path("governance/chain-origin.ndjson")  # NOT under docs/ — see ADR §3 placement note
+
+# Must byte-match the `name:` of the job in
+# .github/workflows/anchor-immutability-check.yml — that job name IS the
+# GitHub required-status-check "context" that check_branch_protection() looks
+# for in required_status_checks. Keep both in sync by hand; there is no single
+# source both sides can import from (one is Python, the other YAML).
+ANCHOR_IMMUTABILITY_CHECK_NAME = "Anchor Immutability Check"
 
 
 class BranchProtectionUnconfirmedError(RuntimeError):
@@ -123,6 +131,24 @@ class SealResult:
     branch_name: str | None
     pr_url: str | None
     closed_epoch: int | None
+
+
+@dataclass(frozen=True)
+class BranchProtectionStatus:
+    """Result of the ADR §6 step 2b activation-precondition check (PR-2 scope).
+
+    ``confirmed`` is the ONLY field a caller should branch on to decide
+    whether ``seal_and_commit_origin(branch_protection_confirmed=...)`` may be
+    passed ``True`` — the other fields are diagnostic detail for ``reason``.
+    """
+
+    confirmed: bool
+    owner_repo: str | None
+    branch: str
+    required_check_present: bool
+    enforce_admins: bool
+    force_pushes_blocked: bool
+    reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -468,22 +494,222 @@ def _read_remote_base_anchor(
 
 
 def check_anchor_immutability(base_content: str, head_content: str) -> list[dict]:
-    """Pure diff-logic for ADR §3's write-side rule: any key present in BOTH
-    base and head whose content changed, or present in base but removed in
-    head, is a violation. Brand-new keys in head are allowed. This is the
-    LOGIC the PR-2 GitHub Actions check invokes (base branch vs PR head) — no
+    """Pure diff-logic for ADR §3's write-side rule: append-only means neither
+    an existing key may change content NOR may a key (existing or brand-new)
+    be introduced more than once in head. Any key present in BOTH base and
+    head whose content changed, present in base but removed in head, or
+    appearing MORE THAN ONCE in head, is a violation. This is the LOGIC the
+    PR-2 GitHub Actions check invokes (base branch vs PR head) — no
     CI/workflow wiring lives in this module.
+
+    Finding 5 (ADR-034 fix-r1): a naive last-write-wins dict comprehension
+    over head's lines silently drops earlier duplicate occurrences of the
+    same key — a PR could rewrite an existing key's line to forged content
+    and then re-append the ORIGINAL line for that same key afterward, so the
+    last occurrence (the one a dict comprehension keeps) matches base and no
+    "modified" violation is ever raised, even though main would end up with
+    two lines sharing one key (a duplicate/corrupt anchor once merged, per
+    ``read_git_anchor``'s own "more than one match = corrupt" contract).
+    Counting occurrences per key in head, rather than collapsing to a dict,
+    catches that regardless of which occurrence a naive lookup would keep.
     """
-    base_by_key = {raw["key"]: raw for raw in _iter_anchor_lines(base_content) if "key" in raw}
-    head_by_key = {raw["key"]: raw for raw in _iter_anchor_lines(head_content) if "key" in raw}
+    base_by_key: dict[str, dict] = {}
+    for raw in _iter_anchor_lines(base_content):
+        if "key" in raw:
+            base_by_key[raw["key"]] = raw
+
+    head_occurrences: dict[str, list[dict]] = {}
+    for raw in _iter_anchor_lines(head_content):
+        if "key" in raw:
+            head_occurrences.setdefault(raw["key"], []).append(raw)
 
     violations: list[dict] = []
-    for key, base_record in base_by_key.items():
-        if key not in head_by_key:
+    for key in sorted(set(base_by_key) | set(head_occurrences)):
+        base_record = base_by_key.get(key)
+        occurrences = head_occurrences.get(key, [])
+
+        if base_record is not None and not occurrences:
             violations.append({"key": key, "violation": "removed"})
-        elif head_by_key[key] != base_record:
+            continue
+
+        if len(occurrences) > 1:
+            violations.append({"key": key, "violation": "duplicated"})
+
+        if base_record is not None and any(occ != base_record for occ in occurrences):
             violations.append({"key": key, "violation": "modified"})
+
     return violations
+
+
+# ---------------------------------------------------------------------------
+# Branch-protection precondition (ADR §6 step 2b, PR-2 scope)
+#
+# The caller-side check that may set seal_and_commit_origin's
+# branch_protection_confirmed=True. seal_and_commit_origin itself never shells
+# out to `gh` — it only trusts an explicit caller-supplied confirmation
+# (BranchProtectionUnconfirmedError above) — so a seal orchestration script
+# must call check_branch_protection() (or the CLI wrapper,
+# scripts/chain_branch_protection_check.py) first and pass its `.confirmed`
+# through.
+# ---------------------------------------------------------------------------
+
+
+def _owner_repo_from_remote(project_root: Path, remote: str = "origin") -> str | None:
+    """Resolve 'owner/repo' from `remote`'s URL (https or ssh form). None if the
+    remote isn't configured or its URL isn't a recognizable GitHub URL."""
+    proc = _git_run(project_root, "remote", "get-url", remote)
+    if proc.returncode != 0:
+        return None
+    url = proc.stdout.strip()
+    match = re.search(r"github\.com[:/]+([^/]+)/(.+?)(?:\.git)?/?$", url)
+    if not match:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def check_branch_protection(
+    project_root: Path,
+    branch: str = "main",
+    *,
+    required_check_name: str = ANCHOR_IMMUTABILITY_CHECK_NAME,
+    owner_repo: str | None = None,
+    timeout: int = 20,
+) -> BranchProtectionStatus:
+    """ADR §6 step 2b's machine-checkable activation precondition: is `branch`'s
+    GitHub branch protection ACTUALLY configured — not merely assumed — with
+    the anchor-immutability check required and enforce_admins on?
+
+    Calls ``gh api repos/{owner}/{repo}/branches/{branch}/protection`` (the
+    same endpoint ``scripts/commands/protect_branch.sh --show`` already uses)
+    and checks three things, ALL required for ``confirmed=True``:
+
+    1. ``required_check_name`` appears in ``required_status_checks`` — checked
+       against both the legacy ``contexts`` list and the newer ``checks[].context``
+       list, since GitHub has shipped both shapes over time.
+    2. ``enforce_admins.enabled`` is true — an admin/owner credential is bound
+       by the check too, not just ordinary contributors (ADR §5's admin-bypass
+       residual is explicitly what this closes for the anchor check specifically).
+    3. ``allow_force_pushes.enabled`` is false — a force-push could otherwise
+       rewrite the anchor branch's history out from under the required check.
+       Only an EXPLICIT ``allow_force_pushes.enabled == False`` counts as
+       blocked; a missing key, a missing ``allow_force_pushes`` object, or a
+       non-boolean value is treated as force-pushes NOT blocked (fail-closed,
+       Finding 2 ADR-034 fix-r1) — an unparseable field must never be read as
+       the safe answer.
+
+    Fail-CLOSED on anything that prevents a real answer — an unresolvable
+    owner/repo, a `gh` failure (auth/network/404-unprotected), a malformed
+    response, or `gh` not being installed all resolve ``confirmed=False`` with
+    ``reason`` set. Mirrors §2's "can't check is never assume fine": this
+    function never returns ``confirmed=True`` on anything less than a
+    positively-parsed, all-three-conditions-met response.
+    """
+    resolved_owner_repo = owner_repo or _owner_repo_from_remote(project_root)
+    if not resolved_owner_repo:
+        return BranchProtectionStatus(
+            confirmed=False,
+            owner_repo=None,
+            branch=branch,
+            required_check_present=False,
+            enforce_admins=False,
+            force_pushes_blocked=False,
+            reason="could not resolve owner/repo from git remote 'origin' (not a GitHub remote, or remote missing)",
+        )
+
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{resolved_owner_repo}/branches/{branch}/protection"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(project_root),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return BranchProtectionStatus(
+            confirmed=False,
+            owner_repo=resolved_owner_repo,
+            branch=branch,
+            required_check_present=False,
+            enforce_admins=False,
+            force_pushes_blocked=False,
+            reason=f"gh api invocation failed: {type(exc).__name__}: {exc}",
+        )
+
+    if proc.returncode != 0:
+        return BranchProtectionStatus(
+            confirmed=False,
+            owner_repo=resolved_owner_repo,
+            branch=branch,
+            required_check_present=False,
+            enforce_admins=False,
+            force_pushes_blocked=False,
+            reason=f"gh api branch-protection lookup failed (rc={proc.returncode}): "
+            f"{(proc.stderr or '').strip()[:300]}",
+        )
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return BranchProtectionStatus(
+            confirmed=False,
+            owner_repo=resolved_owner_repo,
+            branch=branch,
+            required_check_present=False,
+            enforce_admins=False,
+            force_pushes_blocked=False,
+            reason=f"malformed gh api response: {exc}",
+        )
+    if not isinstance(payload, dict):
+        return BranchProtectionStatus(
+            confirmed=False,
+            owner_repo=resolved_owner_repo,
+            branch=branch,
+            required_check_present=False,
+            enforce_admins=False,
+            force_pushes_blocked=False,
+            reason=f"unexpected gh api response shape: {type(payload).__name__}",
+        )
+
+    required_status_checks = payload.get("required_status_checks") or {}
+    contexts: set[str] = set(required_status_checks.get("contexts") or [])
+    for check in required_status_checks.get("checks") or []:
+        if isinstance(check, dict) and check.get("context"):
+            contexts.add(check["context"])
+    required_check_present = required_check_name in contexts
+
+    enforce_admins = bool((payload.get("enforce_admins") or {}).get("enabled"))
+
+    # Fail-closed (Finding 2, ADR-034 fix-r1): only an explicit boolean
+    # `False` counts as "force-pushes blocked". A missing key, a missing
+    # `allow_force_pushes` object, or a non-boolean value must NOT be read as
+    # blocked — the prior `not bool(...get("enabled"))` treated all of those
+    # as `not bool(None)` == True == blocked, i.e. fail-OPEN on the one field
+    # this function exists to gate on.
+    allow_force_pushes = payload.get("allow_force_pushes")
+    force_pushes_enabled = allow_force_pushes.get("enabled") if isinstance(allow_force_pushes, dict) else None
+    force_pushes_blocked = isinstance(force_pushes_enabled, bool) and force_pushes_enabled is False
+
+    confirmed = required_check_present and enforce_admins and force_pushes_blocked
+    reason: str | None = None
+    if not confirmed:
+        missing = []
+        if not required_check_present:
+            missing.append(f"required check {required_check_name!r} not in required_status_checks")
+        if not enforce_admins:
+            missing.append("enforce_admins not enabled")
+        if not force_pushes_blocked:
+            missing.append("force-pushes not blocked")
+        reason = "; ".join(missing)
+
+    return BranchProtectionStatus(
+        confirmed=confirmed,
+        owner_repo=resolved_owner_repo,
+        branch=branch,
+        required_check_present=required_check_present,
+        enforce_admins=enforce_admins,
+        force_pushes_blocked=force_pushes_blocked,
+        reason=reason,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -554,12 +780,33 @@ def _commit_and_push_anchor(
     failures DO raise (RuntimeError via _git_run_checked): a half-sealed
     ledger with no anchor commit must read as `broken` per verify_chain's
     fail-closed contract, never silently swallowed (ADR §4).
+
+    Working-tree append is idempotent (PR-2 seal-idempotency fix, deferred
+    from PR-1 codex-regate-3): if the process crashes (or a later
+    checkout/add/commit call raises) AFTER this write but BEFORE the commit
+    lands, the dirty working tree carries `records` that HEAD does not — and
+    `seal_and_commit_origin`'s own noop/resume check only reads HEAD (via
+    `_read_local_head_anchor`), so it cannot see the leftover and would
+    re-append the same records on retry, producing two lines for the same key
+    once a commit eventually lands (`read_git_anchor` then reports
+    "corrupt"). Reading whatever is already on disk first and skipping keys
+    already present closes that regardless of exactly when the crash landed.
     """
     anchor_path = project_root / ANCHOR_REL_PATH
     anchor_path.parent.mkdir(parents=True, exist_ok=True)
-    with anchor_path.open("a", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
+    existing_keys: set[str] = set()
+    if anchor_path.exists():
+        existing_keys = {
+            raw["key"]
+            for raw in _iter_anchor_lines(anchor_path.read_text(encoding="utf-8"))
+            if "key" in raw
+        }
+    new_records = [record for record in records if record["key"] not in existing_keys]
+    if new_records:
+        with anchor_path.open("a", encoding="utf-8") as f:
+            for record in new_records:
+                f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 
     branch_name = _seal_branch_name(identity, epoch)
 

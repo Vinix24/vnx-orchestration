@@ -28,6 +28,19 @@ Checks (each GREEN / RED / SKIP):
      (chaining not yet enabled) is reported OK — ADR-023 is PARTIAL by design.
      "verified" is GREEN; "broken" (tamper / partial chain) is RED.
 
+  D. Chain-origin anchor provenance (ADR-034).
+     The anchor-aware verify_chain() (scripts/lib/chain_origin_anchor.py) on
+     each project's `state/t0_receipts.ndjson`, run against that project's OWN
+     repo (the registry's `path`) as `project_root`. Additive to check C, not
+     a replacement — ADR-034 §6 step 3 (flipping check C's OWN verify_chain
+     call to the anchor-aware, fail-closed contract) is a separate, later
+     migration gated on step 2b's per-project branch-protection precondition.
+     This section surfaces AnchorProvenance (ref, anchor_commit_sha,
+     remote_url) for every checked ledger and goes RED on "broken" — which
+     includes the reverse-direction case (a git anchor exists for a ledger
+     that is now missing/empty/unchained), catching a deleted-then-reset
+     ledger that check C alone would still read as a clean "unchained".
+
 Exit 0 when no RED finding, 1 otherwise. `--json` for scripting.
 """
 from __future__ import annotations
@@ -47,6 +60,10 @@ try:
     from ndjson_hash_chain import verify_chain  # type: ignore
 except Exception:  # pragma: no cover - import guard
     verify_chain = None  # type: ignore
+try:
+    from chain_origin_anchor import verify_chain as anchor_verify_chain  # type: ignore
+except Exception:  # pragma: no cover - import guard
+    anchor_verify_chain = None  # type: ignore
 
 # Directory names at the data-home root that are shared/legacy by construction,
 # never a project-id. `state` holding *.db is the hard split-brain signal.
@@ -308,12 +325,103 @@ def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> Check
     )
 
 
+def check_anchor_provenance(data_home: Path, projects: list[tuple[str, str]]) -> CheckResult:
+    if anchor_verify_chain is None:
+        # Finding 4 (ADR-034 fix-r1): RED, not WARN. WARN is non-blocking
+        # (main() only fails on a RED finding) — an anchor verifier that
+        # can't even import means the anchor-provenance audit did NOT run at
+        # all, which must never let the overall audit exit 0. Unlike check
+        # C's underlying chain-integrity verifier (a long-standing, always-
+        # available import), this is the anchor check's OWN verifier — its
+        # absence is exactly the failure this specific check exists to catch.
+        return CheckResult(
+            "D", "Chain-origin anchor provenance (ADR-034)", "RED",
+            "anchor verifier (chain_origin_anchor.verify_chain) could not be imported — anchors NOT checked",
+        )
+    if not projects:
+        return CheckResult("D", "Chain-origin anchor provenance (ADR-034)", "SKIP", "no registered projects")
+
+    findings = []
+    broken_projects = []
+    verified = 0
+    unchained = 0
+    checked = 0
+    for pid, path in projects:
+        ledger = data_home / pid / "state" / "t0_receipts.ndjson"
+        project_root = Path(path) if path else None
+        if project_root is None or not project_root.is_dir() or not (project_root / ".git").exists():
+            # No resolvable GIT repo for this project — nothing to
+            # anchor-check against (verify_chain requires a real git
+            # checkout, ADR §2). Checking for `.git` specifically (not just
+            # "is a directory") matters now that a missing ledger file no
+            # longer short-circuits this loop (Finding 3 below) — a
+            # registered project path that exists but was never actually
+            # cloned/initialized as a git repo must still SKIP, not fail
+            # anchor resolution and read as broken/RED.
+            continue
+        # Finding 3 (ADR-034 fix-r1): do NOT skip on a missing ledger file
+        # here. A project whose t0_receipts.ndjson was deleted/reset but
+        # which has a committed anchor on origin for its identity must
+        # report "broken" (the reverse-direction case anchor_verify_chain
+        # already covers) — skipping before ever calling the anchor-aware
+        # verifier let that case fall through to SKIP/GREEN instead. A
+        # genuinely missing ledger with no anchor anywhere still resolves to
+        # "unchained" inside anchor_verify_chain itself (base verify_chain's
+        # own missing-file handling), so this is additive, not a false RED.
+        checked += 1
+        try:
+            _is_valid, violations, status, provenance = anchor_verify_chain(
+                ledger,
+                project_root=project_root,
+                project_id=pid,
+                project_data_dir=data_home / pid,
+            )
+        except Exception as exc:
+            broken_projects.append(pid)
+            findings.append({"project": pid, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        finding = {
+            "project": pid,
+            "status": status,
+            "anchor_ref": provenance.ref if provenance else None,
+            "anchor_commit_sha": provenance.anchor_commit_sha if provenance else None,
+            "remote_url": provenance.remote_url if provenance else None,
+        }
+        if status in ("verified", "verified-segmented"):
+            verified += 1
+        elif status == "unchained":
+            unchained += 1
+        else:  # broken
+            broken_projects.append(pid)
+            finding["violations"] = len(violations)
+        findings.append(finding)
+
+    if broken_projects:
+        names = ", ".join(broken_projects)
+        return CheckResult(
+            "D", "Chain-origin anchor provenance (ADR-034)", "RED",
+            f"broken anchor verification in: {names} (verified={verified}, unchained={unchained})",
+            findings,
+        )
+    if checked == 0:
+        return CheckResult(
+            "D", "Chain-origin anchor provenance (ADR-034)", "SKIP",
+            "no registered project has a resolvable repo to anchor-check against",
+        )
+    return CheckResult(
+        "D", "Chain-origin anchor provenance (ADR-034)", "GREEN",
+        f"{checked} ledgers ok (verified={verified}, unchained={unchained} — ADR-034)",
+        findings,
+    )
+
+
 def run_audit(data_home: Path, registry_file: Path) -> list[CheckResult]:
     projects, registry_error = _load_project_ids(registry_file)
     return [
         check_shared_root_state(data_home),
         check_per_project_stores(data_home, projects, registry_error),
         check_hash_chains(data_home, projects),
+        check_anchor_provenance(data_home, projects),
     ]
 
 
