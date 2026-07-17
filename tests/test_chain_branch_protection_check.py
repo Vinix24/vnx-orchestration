@@ -104,6 +104,49 @@ def test_force_pushes_allowed_fails_closed(monkeypatch):
     assert "force-push" in (status.reason or "")
 
 
+def test_missing_allow_force_pushes_key_fails_closed(monkeypatch):
+    """Finding 2 (ADR-034 fix-r1): a payload with the required check present
+    and enforce_admins on, but NO `allow_force_pushes` key at all, must fail
+    closed — not silently read as "force-pushes blocked"."""
+    payload = {
+        "required_status_checks": {
+            "strict": True, "contexts": [ANCHOR_IMMUTABILITY_CHECK_NAME], "checks": [],
+        },
+        "enforce_admins": {"enabled": True},
+        # no "allow_force_pushes" key at all
+    }
+
+    def fake_run(cmd, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(payload))
+
+    monkeypatch.setattr(coa.subprocess, "run", fake_run)
+    status = check_branch_protection(Path("/tmp"), "main", owner_repo="acme/repo")
+    assert status.confirmed is False
+    assert status.force_pushes_blocked is False
+    assert "force-push" in (status.reason or "")
+
+
+def test_unparseable_allow_force_pushes_enabled_fails_closed(monkeypatch):
+    """`allow_force_pushes.enabled` present but not a boolean (malformed API
+    response) must also fail closed, not be coerced into "blocked"."""
+    payload = {
+        "required_status_checks": {
+            "strict": True, "contexts": [ANCHOR_IMMUTABILITY_CHECK_NAME], "checks": [],
+        },
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": None},
+    }
+
+    def fake_run(cmd, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(payload))
+
+    monkeypatch.setattr(coa.subprocess, "run", fake_run)
+    status = check_branch_protection(Path("/tmp"), "main", owner_repo="acme/repo")
+    assert status.confirmed is False
+    assert status.force_pushes_blocked is False
+    assert "force-push" in (status.reason or "")
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed on anything that prevents a real answer
 # ---------------------------------------------------------------------------

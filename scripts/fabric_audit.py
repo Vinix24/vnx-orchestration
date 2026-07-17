@@ -327,11 +327,15 @@ def check_hash_chains(data_home: Path, projects: list[tuple[str, str]]) -> Check
 
 def check_anchor_provenance(data_home: Path, projects: list[tuple[str, str]]) -> CheckResult:
     if anchor_verify_chain is None:
-        # Same convention as check C: a verifier that fails to import must
-        # not read as a silent SKIP — the audit cannot vouch for anchor
-        # provenance, so surface it.
+        # Finding 4 (ADR-034 fix-r1): RED, not WARN. WARN is non-blocking
+        # (main() only fails on a RED finding) — an anchor verifier that
+        # can't even import means the anchor-provenance audit did NOT run at
+        # all, which must never let the overall audit exit 0. Unlike check
+        # C's underlying chain-integrity verifier (a long-standing, always-
+        # available import), this is the anchor check's OWN verifier — its
+        # absence is exactly the failure this specific check exists to catch.
         return CheckResult(
-            "D", "Chain-origin anchor provenance (ADR-034)", "WARN",
+            "D", "Chain-origin anchor provenance (ADR-034)", "RED",
             "anchor verifier (chain_origin_anchor.verify_chain) could not be imported — anchors NOT checked",
         )
     if not projects:
@@ -344,13 +348,26 @@ def check_anchor_provenance(data_home: Path, projects: list[tuple[str, str]]) ->
     checked = 0
     for pid, path in projects:
         ledger = data_home / pid / "state" / "t0_receipts.ndjson"
-        if not ledger.exists():
-            continue
         project_root = Path(path) if path else None
-        if project_root is None or not project_root.is_dir():
-            # No resolvable repo for this project — nothing to anchor-check
-            # against (verify_chain requires project_root, ADR §2).
+        if project_root is None or not project_root.is_dir() or not (project_root / ".git").exists():
+            # No resolvable GIT repo for this project — nothing to
+            # anchor-check against (verify_chain requires a real git
+            # checkout, ADR §2). Checking for `.git` specifically (not just
+            # "is a directory") matters now that a missing ledger file no
+            # longer short-circuits this loop (Finding 3 below) — a
+            # registered project path that exists but was never actually
+            # cloned/initialized as a git repo must still SKIP, not fail
+            # anchor resolution and read as broken/RED.
             continue
+        # Finding 3 (ADR-034 fix-r1): do NOT skip on a missing ledger file
+        # here. A project whose t0_receipts.ndjson was deleted/reset but
+        # which has a committed anchor on origin for its identity must
+        # report "broken" (the reverse-direction case anchor_verify_chain
+        # already covers) — skipping before ever calling the anchor-aware
+        # verifier let that case fall through to SKIP/GREEN instead. A
+        # genuinely missing ledger with no anchor anywhere still resolves to
+        # "unchained" inside anchor_verify_chain itself (base verify_chain's
+        # own missing-file handling), so this is additive, not a false RED.
         checked += 1
         try:
             _is_valid, violations, status, provenance = anchor_verify_chain(
@@ -389,7 +406,7 @@ def check_anchor_provenance(data_home: Path, projects: list[tuple[str, str]]) ->
     if checked == 0:
         return CheckResult(
             "D", "Chain-origin anchor provenance (ADR-034)", "SKIP",
-            "no t0_receipts.ndjson found with a resolvable project repo",
+            "no registered project has a resolvable repo to anchor-check against",
         )
     return CheckResult(
         "D", "Chain-origin anchor provenance (ADR-034)", "GREEN",

@@ -274,10 +274,38 @@ def test_check_d_deleted_ledger_with_anchor_is_red(tmp_path, monkeypatch):
     assert "vnx-dev" in r.detail
 
 
-def test_check_d_no_verifier_import_is_warn(monkeypatch, tmp_path):
+def test_check_d_missing_ledger_file_with_anchor_is_red(tmp_path, monkeypatch):
+    """Finding 3 (ADR-034 fix-r1): the ledger file is entirely ABSENT (not
+    merely emptied, as in test_check_d_deleted_ledger_with_anchor_is_red
+    above) while a git anchor exists on origin for this identity. The old
+    `if not ledger.exists(): continue` skipped this project before the
+    anchor-aware verifier ever ran, so `checked` stayed 0 and the whole
+    finding read as SKIP — silently missing the exact reverse-direction
+    tamper case check D exists to catch."""
+    data_home = tmp_path / "data"
+    project_root = _anchor_git_repo(tmp_path)
+    ledger = data_home / "vnx-dev" / "state" / "t0_receipts.ndjson"
+    ledger.parent.mkdir(parents=True)
+    append_chained_entry(ledger, {"seq": 0})
+
+    monkeypatch.setattr(coa, "ensure_pr", lambda *a, **kw: {"pr_number": None, "created": False, "reason": "test"})
+    _seal_and_merge(project_root, ledger, data_home)
+
+    ledger.unlink()  # file gone entirely, not just emptied
+    assert not ledger.exists()
+
+    r = fa.check_anchor_provenance(data_home, [("vnx-dev", str(project_root))])
+    assert r.status == "RED"
+    assert "vnx-dev" in r.detail
+
+
+def test_check_d_no_verifier_import_is_red(monkeypatch, tmp_path):
+    """Finding 4 (ADR-034 fix-r1): an import failure means the anchor check
+    never ran — that must block the audit (RED), not read as a merely
+    advisory WARN that lets `main()` exit 0."""
     monkeypatch.setattr(fa, "anchor_verify_chain", None)
     r = fa.check_anchor_provenance(tmp_path, [("vnx-dev", "")])
-    assert r.status == "WARN"
+    assert r.status == "RED"
 
 
 def test_check_d_no_projects_is_skip(tmp_path):
@@ -314,6 +342,22 @@ def test_run_audit_resolves_project_id_from_file(tmp_path):
     projects, err = fa._load_project_ids(reg)
     b = fa.check_per_project_stores(data_home, projects, err)
     assert b.status == "GREEN"
+
+
+def test_main_exits_red_when_anchor_verifier_missing(monkeypatch, tmp_path, capsys):
+    """Finding 4 (ADR-034 fix-r1) end-to-end: an anchor-verifier import
+    failure must fail the whole `main()` invocation (exit 1), not let an
+    otherwise-clean fabric read as GREEN/GREEN-WITH-WARN while the
+    anchor-provenance check silently never ran."""
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    reg = _registry(tmp_path, [("vnx-dev", "vnx-orchestration")])
+    _mk_project(data_home, "vnx-dev")
+    monkeypatch.setattr(fa, "anchor_verify_chain", None)
+    rc = fa.main(["--data-home", str(data_home), "--registry", str(reg), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert out["overall"] == "RED"
 
 
 def test_main_json_exit_code_red(tmp_path, capsys):

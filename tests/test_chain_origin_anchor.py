@@ -590,6 +590,49 @@ def test_t7_immutability_check_accepts_new_key():
     assert check_anchor_immutability(base, head) == []
 
 
+def test_t8_immutability_check_rejects_forged_then_reappended_duplicate():
+    """Finding 5 (ADR-034 fix-r1): base has `id#1` once. Head rewrites that
+    line to FORGED content, then appends the ORIGINAL line for the same key
+    again afterward. A last-write-wins dict over head's lines would see the
+    final (original) occurrence, find it equal to base, and report no
+    violation at all — while main would end up with `id#1` duplicated
+    (corrupt per read_git_anchor's own contract) and having been forged in
+    between. Both the forgery and the duplication must be caught."""
+    base_record = {"key": "id#1", "ledger_identity": "id", "epoch": 1, "record_type": "open", "origin_hash": "aaa"}
+    forged_record = {**base_record, "origin_hash": "FORGED"}
+    base = json.dumps(base_record, sort_keys=True) + "\n"
+    head = (
+        json.dumps(forged_record, sort_keys=True)
+        + "\n"
+        + json.dumps(base_record, sort_keys=True)
+        + "\n"
+    )
+
+    violations = check_anchor_immutability(base, head)
+    assert {"key": "id#1", "violation": "duplicated"} in violations
+    assert {"key": "id#1", "violation": "modified"} in violations
+    assert len(violations) == 2
+
+
+def test_t8b_immutability_check_rejects_duplicated_brand_new_key():
+    """A brand-new key (never in base) introduced TWICE in head is also a
+    violation — append-only forbids introducing a duplicate key even when
+    the key itself has no prior history to modify."""
+    base_record = {"key": "id#1", "ledger_identity": "id", "epoch": 1, "record_type": "open"}
+    new_record = {"key": "id#2", "ledger_identity": "id", "epoch": 2, "record_type": "open"}
+    base = json.dumps(base_record, sort_keys=True) + "\n"
+    head = (
+        base
+        + json.dumps(new_record, sort_keys=True)
+        + "\n"
+        + json.dumps(new_record, sort_keys=True)
+        + "\n"
+    )
+
+    violations = check_anchor_immutability(base, head)
+    assert violations == [{"key": "id#2", "violation": "duplicated"}]
+
+
 # ---------------------------------------------------------------------------
 # T9-T11, T16: seal_and_commit_origin
 # ---------------------------------------------------------------------------

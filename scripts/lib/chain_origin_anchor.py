@@ -494,21 +494,50 @@ def _read_remote_base_anchor(
 
 
 def check_anchor_immutability(base_content: str, head_content: str) -> list[dict]:
-    """Pure diff-logic for ADR §3's write-side rule: any key present in BOTH
-    base and head whose content changed, or present in base but removed in
-    head, is a violation. Brand-new keys in head are allowed. This is the
-    LOGIC the PR-2 GitHub Actions check invokes (base branch vs PR head) — no
+    """Pure diff-logic for ADR §3's write-side rule: append-only means neither
+    an existing key may change content NOR may a key (existing or brand-new)
+    be introduced more than once in head. Any key present in BOTH base and
+    head whose content changed, present in base but removed in head, or
+    appearing MORE THAN ONCE in head, is a violation. This is the LOGIC the
+    PR-2 GitHub Actions check invokes (base branch vs PR head) — no
     CI/workflow wiring lives in this module.
+
+    Finding 5 (ADR-034 fix-r1): a naive last-write-wins dict comprehension
+    over head's lines silently drops earlier duplicate occurrences of the
+    same key — a PR could rewrite an existing key's line to forged content
+    and then re-append the ORIGINAL line for that same key afterward, so the
+    last occurrence (the one a dict comprehension keeps) matches base and no
+    "modified" violation is ever raised, even though main would end up with
+    two lines sharing one key (a duplicate/corrupt anchor once merged, per
+    ``read_git_anchor``'s own "more than one match = corrupt" contract).
+    Counting occurrences per key in head, rather than collapsing to a dict,
+    catches that regardless of which occurrence a naive lookup would keep.
     """
-    base_by_key = {raw["key"]: raw for raw in _iter_anchor_lines(base_content) if "key" in raw}
-    head_by_key = {raw["key"]: raw for raw in _iter_anchor_lines(head_content) if "key" in raw}
+    base_by_key: dict[str, dict] = {}
+    for raw in _iter_anchor_lines(base_content):
+        if "key" in raw:
+            base_by_key[raw["key"]] = raw
+
+    head_occurrences: dict[str, list[dict]] = {}
+    for raw in _iter_anchor_lines(head_content):
+        if "key" in raw:
+            head_occurrences.setdefault(raw["key"], []).append(raw)
 
     violations: list[dict] = []
-    for key, base_record in base_by_key.items():
-        if key not in head_by_key:
+    for key in sorted(set(base_by_key) | set(head_occurrences)):
+        base_record = base_by_key.get(key)
+        occurrences = head_occurrences.get(key, [])
+
+        if base_record is not None and not occurrences:
             violations.append({"key": key, "violation": "removed"})
-        elif head_by_key[key] != base_record:
+            continue
+
+        if len(occurrences) > 1:
+            violations.append({"key": key, "violation": "duplicated"})
+
+        if base_record is not None and any(occ != base_record for occ in occurrences):
             violations.append({"key": key, "violation": "modified"})
+
     return violations
 
 
@@ -562,6 +591,11 @@ def check_branch_protection(
        residual is explicitly what this closes for the anchor check specifically).
     3. ``allow_force_pushes.enabled`` is false — a force-push could otherwise
        rewrite the anchor branch's history out from under the required check.
+       Only an EXPLICIT ``allow_force_pushes.enabled == False`` counts as
+       blocked; a missing key, a missing ``allow_force_pushes`` object, or a
+       non-boolean value is treated as force-pushes NOT blocked (fail-closed,
+       Finding 2 ADR-034 fix-r1) — an unparseable field must never be read as
+       the safe answer.
 
     Fail-CLOSED on anything that prevents a real answer — an unresolvable
     owner/repo, a `gh` failure (auth/network/404-unprotected), a malformed
@@ -644,7 +678,16 @@ def check_branch_protection(
     required_check_present = required_check_name in contexts
 
     enforce_admins = bool((payload.get("enforce_admins") or {}).get("enabled"))
-    force_pushes_blocked = not bool((payload.get("allow_force_pushes") or {}).get("enabled"))
+
+    # Fail-closed (Finding 2, ADR-034 fix-r1): only an explicit boolean
+    # `False` counts as "force-pushes blocked". A missing key, a missing
+    # `allow_force_pushes` object, or a non-boolean value must NOT be read as
+    # blocked — the prior `not bool(...get("enabled"))` treated all of those
+    # as `not bool(None)` == True == blocked, i.e. fail-OPEN on the one field
+    # this function exists to gate on.
+    allow_force_pushes = payload.get("allow_force_pushes")
+    force_pushes_enabled = allow_force_pushes.get("enabled") if isinstance(allow_force_pushes, dict) else None
+    force_pushes_blocked = isinstance(force_pushes_enabled, bool) and force_pushes_enabled is False
 
     confirmed = required_check_present and enforce_admins and force_pushes_blocked
     reason: str | None = None

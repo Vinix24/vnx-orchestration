@@ -11,10 +11,32 @@
 # in scripts/lib/chain_origin_anchor.py is the pure diff logic this check
 # invokes.
 #
-# Trust-anchor safety (reuses attestation-gate.yml's base-branch-trust
-# pattern): the CHECKING CODE itself (chain_origin_anchor.py + its import
-# chain) is extracted from origin/main, never the PR tree — a PR that
-# weakened check_anchor_immutability cannot affect its own gate decision.
+# Trust-anchor safety, TWO layers (ADR-034 fix-r1, Finding 1):
+#
+#  1. Trigger is `pull_request_target`, NOT `pull_request`. GitHub always
+#     evaluates a `pull_request_target` workflow using the JOB DEFINITION
+#     committed on the base branch — never the PR's own copy of this YAML.
+#     Under the old `pull_request` trigger, a PR could rewrite this very
+#     file into a no-op job with the SAME required-check name (and tamper
+#     governance/chain-origin.ndjson in the same diff) and its own
+#     neutered workflow version is what would run — the check would
+#     "pass" while immutability was violated. `pull_request_target`
+#     closes that: the steps below are always the trusted, base-branch
+#     version, regardless of what the PR's tree contains.
+#
+#  2. Classic `pull_request_target` footgun avoidance: this job NEVER
+#     checks out the PR head into the working tree, and NEVER executes
+#     anything from PR-authored content. The default checkout (no `ref:`
+#     override) resolves to the BASE branch tip. The PR head commit is
+#     fetched as a bare git object and read ONLY via `git show <sha>:path`
+#     / `git diff` — i.e. raw blob bytes fed as DATA into
+#     check_anchor_immutability's pure JSON-line parser, never as code.
+#     The checking code itself (chain_origin_anchor.py + its import chain)
+#     is likewise extracted from origin/main, mirroring
+#     attestation-gate.yml's base-branch-trust pattern.
+#
+# `permissions: contents: read` scopes the token down to the minimum this
+# read-only check needs — this job never writes back to the repo.
 #
 # This job always runs on every PR (no path filter at the workflow level) so
 # it always reports a status — required-status-check semantics need a
@@ -32,7 +54,10 @@
 name: Anchor Immutability Check
 
 on:
-  pull_request:
+  pull_request_target:
+
+permissions:
+  contents: read
 
 jobs:
   anchor-immutability:
@@ -40,13 +65,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout PR head
+      - name: Checkout base branch (trusted — PR code is NEVER checked out or executed)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - name: Fetch base branch for trust anchor + diff
+      - name: Fetch origin/main (trust anchor + diff base)
         run: git fetch origin main
 
       - name: Setup Python
@@ -54,13 +78,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Classify PR (touches governance/chain-origin.ndjson?)
-        id: classify
+      - name: Fetch PR head commit (bare object only — never checked out, never executed)
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          git fetch --no-tags origin "$HEAD_SHA"
 
-          CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
+      - name: Classify PR (touches governance/chain-origin.ndjson?)
+        id: classify
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          MERGE_BASE=$(git merge-base origin/main "$HEAD_SHA")
+
+          CHANGED=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")
           echo "Changed files:"
           echo "$CHANGED"
 
@@ -89,12 +122,16 @@ jobs:
 
       - name: Extract base + head content of governance/chain-origin.ndjson
         if: steps.classify.outputs.classification == 'touched'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # A missing base-side file (this PR's epoch is the ledger's
           # first-ever seal) is a legitimate empty-base case, not a failure.
+          # Both reads are raw blob content via `git show` — DATA, never
+          # checked out into a working tree and never executed.
           git show "origin/main:governance/chain-origin.ndjson" > /tmp/anchor_base.ndjson 2>/dev/null || : > /tmp/anchor_base.ndjson
-          git show "HEAD:governance/chain-origin.ndjson" > /tmp/anchor_head.ndjson
+          git show "$HEAD_SHA:governance/chain-origin.ndjson" > /tmp/anchor_head.ndjson
 
       - name: Run check_anchor_immutability (base-branch code, base vs head content)
         if: steps.classify.outputs.classification == 'touched'
