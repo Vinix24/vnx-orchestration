@@ -776,6 +776,76 @@ def test_t16_seal_refuses_without_branch_protection_confirmed(git_repo, tmp_path
     assert len(ledger.read_text().splitlines()) == 1
 
 
+def test_seal_idempotency_crash_between_working_tree_write_and_commit_no_duplicate(
+    git_repo, tmp_path, monkeypatch
+):
+    """PR-2 item 4 (deferred from PR-1, codex-regate-3): _commit_and_push_anchor
+    appends `records` to the WORKING-TREE copy of governance/chain-origin.ndjson
+    BEFORE checkout/add/commit. A crash (or a raised git error) landing after
+    that write but before the commit leaves the dirty working tree holding a
+    record HEAD does not have. seal_and_commit_origin's own noop/resume check
+    only reads HEAD (`_read_local_head_anchor`) — it cannot see the leftover,
+    so a naive retry would re-append the SAME record, producing two lines for
+    the same key once a commit eventually lands (`read_git_anchor` = corrupt,
+    `verify_chain` = broken). The fix makes the working-tree append itself
+    idempotent by key; this reproduces the crash, then asserts a retry
+    produces no duplicate and verify_chain reports verified-segmented."""
+    ledger, data_dir = _ledger_and_data_dir(tmp_path)
+    append_chained_entry(ledger, {"seq": 0})  # marker-less genesis chain -> forces epoch-1 open
+
+    real_git_run_checked = coa._git_run_checked
+
+    def commit_crashes(project_root, *args, **kwargs):
+        if args and args[0] == "commit":
+            raise RuntimeError("simulated crash between working-tree write and commit")
+        return real_git_run_checked(project_root, *args, **kwargs)
+
+    monkeypatch.setattr(coa, "_git_run_checked", commit_crashes)
+    with pytest.raises(RuntimeError, match="simulated crash between working-tree write and commit"):
+        seal_and_commit_origin(
+            ledger,
+            git_repo,
+            project_id="vnx-dev",
+            project_data_dir=data_dir,
+            branch="main",
+            branch_protection_confirmed=True,
+        )
+
+    # Precondition: the dirty working tree already carries exactly ONE
+    # (uncommitted) record from the crashed attempt; HEAD has none.
+    anchor_path = git_repo / coa.ANCHOR_REL_PATH
+    dirty_lines = [line for line in anchor_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(dirty_lines) == 1
+
+    identity = ledger_identity("vnx-dev", ledger, data_dir)
+    key = coa.anchor_key(identity, 1)
+    assert coa._read_local_head_anchor(git_repo, key) is None
+
+    monkeypatch.setattr(coa, "_git_run_checked", real_git_run_checked)
+    result = _seal(git_repo, ledger)
+    assert result.action == "sealed"
+    assert result.epoch == 1
+
+    # No duplicate: exactly one line for this key reached origin.
+    committed_lines = [
+        line
+        for line in _run("git", "show", "origin/main:governance/chain-origin.ndjson", cwd=git_repo).splitlines()
+        if line.strip()
+    ]
+    assert len(committed_lines) == 1
+
+    record, provenance = read_git_anchor(git_repo, identity, 1)
+    assert provenance.resolved is True
+    assert record is not None
+    assert record != "corrupt"
+
+    ok, _violations, status, _prov = verify_chain(
+        ledger, project_root=git_repo, project_id="vnx-dev", project_data_dir=data_dir
+    )
+    assert ok is True
+    assert status == "verified-segmented"
+
+
 # ---------------------------------------------------------------------------
 # T12: existing behavior / read-path unchanged for callers that don't opt in
 # ---------------------------------------------------------------------------

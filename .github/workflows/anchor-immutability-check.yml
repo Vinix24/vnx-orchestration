@@ -1,0 +1,126 @@
+# ADR-034 §3: Anchor immutability check — REQUIRED from commit one, NOT
+# continue-on-error (unlike attestation-gate.yml's staged-advisory rollout —
+# ADR §3 "C4" fix: an advisory-only write-side check is equivalent to no
+# write-side defense at all for this ADR's threat model).
+#
+# Diffs governance/chain-origin.ndjson between the PR's base (origin/main)
+# and head: any line whose {ledger_identity}#{epoch} (or ":close") key
+# already existed in the base-branch copy but changed content, or was
+# removed, fails the check. Only brand-new keys (an epoch's first-ever seal,
+# or its later closure record) may be appended — check_anchor_immutability()
+# in scripts/lib/chain_origin_anchor.py is the pure diff logic this check
+# invokes.
+#
+# Trust-anchor safety (reuses attestation-gate.yml's base-branch-trust
+# pattern): the CHECKING CODE itself (chain_origin_anchor.py + its import
+# chain) is extracted from origin/main, never the PR tree — a PR that
+# weakened check_anchor_immutability cannot affect its own gate decision.
+#
+# This job always runs on every PR (no path filter at the workflow level) so
+# it always reports a status — required-status-check semantics need a
+# consistent report, not a workflow that sometimes doesn't trigger at all.
+# Internally, the "classify" step exits early with a pass when
+# governance/chain-origin.ndjson isn't in this PR's diff at all — the
+# dispatch's "runs only when the file is in the diff" is the CHECK LOGIC's
+# scope, not the workflow trigger's.
+#
+# job name below MUST byte-match ANCHOR_IMMUTABILITY_CHECK_NAME in
+# scripts/lib/chain_origin_anchor.py — that constant is what
+# check_branch_protection() (ADR §6 step 2b) looks for in a repo's
+# required_status_checks.
+
+name: Anchor Immutability Check
+
+on:
+  pull_request:
+
+jobs:
+  anchor-immutability:
+    name: "Anchor Immutability Check"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branch for trust anchor + diff
+        run: git fetch origin main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Classify PR (touches governance/chain-origin.ndjson?)
+        id: classify
+        run: |
+          set -euo pipefail
+          MERGE_BASE=$(git merge-base origin/main HEAD)
+
+          CHANGED=$(git diff --name-only "$MERGE_BASE" HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -qx 'governance/chain-origin.ndjson'; then
+            echo "classification=touched" >> "$GITHUB_OUTPUT"
+            echo "::notice::Anchor Immutability Check: governance/chain-origin.ndjson is in this PR's diff — checking"
+          else
+            echo "classification=untouched" >> "$GITHUB_OUTPUT"
+            echo "::notice::Anchor Immutability Check: governance/chain-origin.ndjson not in this PR's diff — exempt"
+          fi
+
+      - name: Extract base-branch checker code (never trust the PR-tree copy)
+        if: steps.classify.outputs.classification == 'touched'
+        run: |
+          set -euo pipefail
+          # A PR that weakens check_anchor_immutability (or its imports)
+          # cannot affect its own gate decision — only the origin/main copy
+          # of the checking code is ever executed here.
+          VERIFIER_DIR="/tmp/vnx-anchor-verifier"
+          mkdir -p "$VERIFIER_DIR"
+          for f in chain_origin_anchor.py gh_pr_ensure.py ndjson_hash_chain.py; do
+            git show "origin/main:scripts/lib/$f" > "$VERIFIER_DIR/$f"
+            echo "Extracted $f from origin/main"
+          done
+          ls -la "$VERIFIER_DIR"
+
+      - name: Extract base + head content of governance/chain-origin.ndjson
+        if: steps.classify.outputs.classification == 'touched'
+        run: |
+          set -euo pipefail
+          # A missing base-side file (this PR's epoch is the ledger's
+          # first-ever seal) is a legitimate empty-base case, not a failure.
+          git show "origin/main:governance/chain-origin.ndjson" > /tmp/anchor_base.ndjson 2>/dev/null || : > /tmp/anchor_base.ndjson
+          git show "HEAD:governance/chain-origin.ndjson" > /tmp/anchor_head.ndjson
+
+      - name: Run check_anchor_immutability (base-branch code, base vs head content)
+        if: steps.classify.outputs.classification == 'touched'
+        run: |
+          set -euo pipefail
+          PYTHONPATH="/tmp/vnx-anchor-verifier" python3 - <<'PY'
+          import sys
+
+          sys.path.insert(0, "/tmp/vnx-anchor-verifier")
+          from chain_origin_anchor import check_anchor_immutability
+
+          with open("/tmp/anchor_base.ndjson", encoding="utf-8") as f:
+              base_content = f.read()
+          with open("/tmp/anchor_head.ndjson", encoding="utf-8") as f:
+              head_content = f.read()
+
+          violations = check_anchor_immutability(base_content, head_content)
+          if violations:
+              print("::error::governance/chain-origin.ndjson anchor-immutability violations found:")
+              for v in violations:
+                  print(f"::error::  key={v['key']!r} violation={v['violation']!r}")
+              print(
+                  f"::error::{len(violations)} existing anchor key(s) modified or removed — "
+                  "only brand-new keys may be appended (ADR-034 §3)."
+              )
+              sys.exit(1)
+
+          print("Anchor Immutability Check: PASS — no existing key modified or removed.")
+          PY
