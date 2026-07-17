@@ -27,7 +27,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
-from report_contract_scope import is_stale_contract_invalid
+from report_contract_scope import contract_invalid_effective_timestamp, is_stale_contract_invalid
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -426,7 +426,7 @@ class LearningLoop:
                     # timestamp) is never a recurring pattern worth learning from —
                     # exclude regardless of how far back start_time itself reaches.
                     if status == "contract_invalid" and is_stale_contract_invalid(
-                        receipt.get("timestamp")
+                        contract_invalid_effective_timestamp(receipt)
                     ):
                         continue
 
@@ -443,12 +443,19 @@ class LearningLoop:
                         no_provider_skipped += 1
                         continue
 
-                    # Window filter on the receipt timestamp. Drop records we
-                    # cannot place in time so a full historical stream does not
-                    # over-produce against the >=2 recurrence threshold.
+                    # Window filter on the receipt timestamp. Fail-open on a
+                    # missing/unparseable timestamp — only a receipt we can
+                    # POSITIVELY date as older than start_time is excluded.
+                    # Dropping on ts_dt is None here used to contradict the
+                    # is_stale_contract_invalid() fail-open check just above
+                    # (which lets a dateless contract_invalid receipt through):
+                    # weekly_digest / check_active_drain never drop a record
+                    # merely for lacking a timestamp, so this filter mirrors
+                    # that convention instead of silently re-excluding what the
+                    # staleness check just admitted.
                     ts_raw = receipt.get("timestamp")
                     ts_dt = _parse_receipt_timestamp(ts_raw)
-                    if ts_dt is None or ts_dt < start_time:
+                    if ts_dt is not None and ts_dt < start_time:
                         continue
 
                     failure_patterns.append({

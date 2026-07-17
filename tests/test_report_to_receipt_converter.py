@@ -774,3 +774,114 @@ class TestNonReportDispatchExemption:
 
         r = _receipts(state_dir)[0]
         assert r["event_type"] == "report_contract_invalid"
+
+
+# ---------------------------------------------------------------------------
+# Part 10: codex-gate fix-round (#1184) — Finding 1 BLOCKING: classification
+# must use the AUTHORITATIVE dispatch record, never report-body content the
+# reviewed worker itself writes.
+# ---------------------------------------------------------------------------
+
+class TestAuthoritativeClassificationBlocksSelfExempt:
+    """A real build-worker with a staged dispatch-spec.json (role=backend-
+    developer) cannot self-exempt from report_contract_invalid by forging
+    role/task_class/read_only exemption fields in its own report body."""
+
+    def _write_dispatch_spec(self, tmp_path: Path, dispatch_id: str, role: str, status: str = "pending") -> None:
+        """tmp_path here is the parent of the `state_dir` fixture — data_dir
+        in resolve_dispatch_authority() terms — mirroring stage_spec_bundle's
+        real bundle layout: <data_dir>/dispatches/<status>/<dispatch_id>/dispatch-spec.json."""
+        spec_dir = tmp_path / "dispatches" / status / dispatch_id
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        (spec_dir / "dispatch-spec.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "project_id": "vnx-dev",
+                "dispatch_id": dispatch_id,
+                "staging_id": dispatch_id,
+                "instruction_file": str(spec_dir / "instruction.md"),
+                "role": role,
+                "target_slot": "T1",
+            }),
+            encoding="utf-8",
+        )
+
+    def test_forged_self_exempt_fields_do_not_bypass_contract_with_spec(self, tmp_path, state_dir):
+        """T-adv1: dispatch has an authoritative spec (role=backend-developer).
+        Its report body forges read_only=true + role=code-reviewer +
+        task_class=research_structured AND has a broken body (missing
+        ## Changes). Must still get report_contract_invalid, NOT report_exempt."""
+        did = "20260716-t-adv1-self-exempt-attempt"
+        self._write_dispatch_spec(tmp_path, did, "backend-developer")
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\nread_only: true\nrole: code-reviewer\n"
+            f"task_class: research_structured\n---\n\n{TestNonReportDispatchExemption._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["status"] == "contract_invalid"
+        assert "report_class" not in r
+
+    def test_panel_seat_without_spec_still_exempt(self, tmp_path, state_dir):
+        """T-adv2: a genuinely ungoverned panel seat (dispatch_id panel-...,
+        NO dispatch-spec.json anywhere) still gets report_exempt — the
+        authority-first fix must not break the legitimate exemption path."""
+        did = "panel-t-adv2-arch-diverge-1"
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\n---\n\n{TestNonReportDispatchExemption._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["status"] == "exempt"
+        assert r["report_class"] == "panel_seat"
+
+    def test_review_role_spec_still_exempt(self, tmp_path, state_dir):
+        """A dispatch WITH a spec whose authoritative role genuinely is
+        code-reviewer is still exempt — the fix restricts the SOURCE of
+        truth, it does not remove the review_role exemption class itself."""
+        did = "20260716-t-adv-real-reviewer"
+        self._write_dispatch_spec(tmp_path, did, "code-reviewer")
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\n---\n\n{TestNonReportDispatchExemption._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_exempt"
+        assert r["report_class"] == "review_role"
+
+    def test_spec_in_active_dir_also_authoritative(self, tmp_path, state_dir):
+        """dispatches/active/ (promoted, not yet completed) must also be
+        searched — not just pending/."""
+        did = "20260716-t-adv-active-spec"
+        self._write_dispatch_spec(tmp_path, did, "backend-developer", status="active")
+        report = tmp_path / f"{did}.md"
+        report.write_text(
+            f"---\ndispatch_id: {did}\nrole: code-reviewer\n---\n\n{TestNonReportDispatchExemption._BROKEN_BODY}",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "report_contract_invalid"
+        assert "report_class" not in r

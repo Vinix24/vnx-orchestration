@@ -26,7 +26,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
-from report_contract_scope import is_stale_contract_invalid
+from report_contract_scope import contract_invalid_effective_timestamp, is_stale_contract_invalid
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -149,7 +149,7 @@ def collect_metrics(days: int = 7) -> dict:
                 # (default 14d) so a wide --days call doesn't resurrect it.
                 if (
                     status == "contract_invalid" or event_type == "report_contract_invalid"
-                ) and is_stale_contract_invalid(rec.get("timestamp")):
+                ) and is_stale_contract_invalid(contract_invalid_effective_timestamp(rec)):
                     continue
                 metrics["dispatch_outcomes"]["total"] += 1
                 # Empty status falls back to event_type for classification —

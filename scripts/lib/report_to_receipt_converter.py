@@ -195,7 +195,7 @@ def build_receipt_from_report(
     """
     sys.path.insert(0, str(_LIB_DIR))
     from report_body_contract import validate_body
-    from report_contract_scope import classify_non_report_dispatch, truthy
+    from report_contract_scope import classify_report_dispatch, truthy
     from datetime import datetime, timezone
 
     fm = parse_frontmatter(text)
@@ -259,11 +259,17 @@ def build_receipt_from_report(
     route_dec = _load_route_decision(dispatch_id, state_dir) if state_dir else None
 
     if contract_violations:
-        report_class = classify_non_report_dispatch(
-            dispatch_id=dispatch_id,
+        # classify_report_dispatch() resolves the AUTHORITATIVE role/task_class
+        # for dispatch_id (staged dispatch-spec.json, then dispatch_register.ndjson)
+        # first. When an authoritative record exists, the report-body-derived
+        # role/task_class/read_only/dispatch_id-prefix below are ignored outright —
+        # a broken build-worker cannot self-exempt by forging its own frontmatter.
+        report_class = classify_report_dispatch(
+            dispatch_id,
             role=merged.get("role"),
             task_class=merged.get("task_class") or (route_dec or {}).get("task_class"),
             read_only=truthy(merged.get("read_only")),
+            state_dir=state_dir,
         )
         if report_class is not None:
             logger.info(

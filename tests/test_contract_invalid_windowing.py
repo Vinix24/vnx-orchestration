@@ -34,6 +34,15 @@ def _iso(dt: datetime) -> str:
 _FROZEN_BATCH_TS = _iso(_NOW - timedelta(days=26))  # older than the 14d window
 _FRESH_FAILURE_TS = _iso(_NOW - timedelta(hours=2))  # inside the window
 
+# codex-gate fix-round (#1184) Finding 2 (HIGH): a worker-forged old
+# report-body `timestamp` (report_to_receipt_converter.py copies it straight
+# out of the report frontmatter) must not vanish a receipt that was actually
+# INGESTED just now. 45 days back — older than the 14d staleness window but
+# still inside a generous 60d digest/mining lookback so the coarse --days /
+# start_time cutoff (which still keys off `timestamp`) does not itself
+# exclude it; only the ingested_at-aware staleness check is under test.
+_FORGED_OLD_BODY_TS = _iso(_NOW - timedelta(days=45))
+
 
 # ---------------------------------------------------------------------------
 # weekly_digest.collect_metrics
@@ -87,6 +96,28 @@ class TestWeeklyDigestWindowing:
         out = self._run(records, tmp_path, days=30)
         assert out["total"] == 0
         assert out["failure"] == 0
+
+    def test_fresh_ingested_at_beats_forged_old_body_timestamp(self, tmp_path):
+        """T-adv3: a receipt ingested moments ago, whose report body forged
+        an old `timestamp`, still counts as a live failure — the staleness
+        check windows on ingested_at, not the worker-suppliable timestamp."""
+        records = [{
+            "status": "contract_invalid",
+            "timestamp": _FORGED_OLD_BODY_TS,
+            "ingested_at": _FRESH_FAILURE_TS,
+        }]
+        out = self._run(records, tmp_path, days=60)
+        assert out["total"] == 1
+        assert out["failure"] == 1
+
+    def test_no_parseable_timestamp_at_all_fails_open_and_counts(self, tmp_path):
+        """T-adv4: a contract_invalid receipt with NEITHER ingested_at NOR
+        timestamp still counts — consistent fail-open (weekly_digest already
+        did this; this locks it in against regression)."""
+        records = [{"status": "contract_invalid"}]
+        out = self._run(records, tmp_path, days=30)
+        assert out["total"] == 1
+        assert out["failure"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +198,44 @@ class TestLearningLoopWindowing:
         )
         assert len(failures) == 1
 
+    def test_fresh_ingested_at_beats_forged_old_body_timestamp(self, loop_env):
+        """T-adv3: ingested_at (fresh) wins over a forged old report-body
+        timestamp for the contract_invalid staleness check."""
+        loop, state_dir = loop_env
+        records = [{
+            "status": "contract_invalid", "terminal": "T1", "provider": "claude",
+            "dispatch_id": "d-adv3-forged-old-ts", "contract_violations": ["## Changes"],
+            "timestamp": _FORGED_OLD_BODY_TS, "ingested_at": _FRESH_FAILURE_TS,
+        }]
+        (state_dir / "t0_receipts.ndjson").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        failures = loop.extract_failure_patterns(
+            start_time=datetime.now(timezone.utc) - timedelta(days=60)
+        )
+        assert len(failures) == 1
+
+    def test_no_parseable_timestamp_at_all_fails_open_and_still_mined(self, loop_env):
+        """T-adv4: a contract_invalid receipt with NO timestamp field at all
+        (missing, not merely unparseable) still gets mined. Previously the
+        is_stale_contract_invalid() fail-open (missing timestamp -> not
+        stale, not skipped) was contradicted by a SECOND `ts_dt is None`
+        drop a few lines later — this locks in the fix so both checks agree."""
+        loop, state_dir = loop_env
+        records = [{
+            "status": "contract_invalid", "terminal": "T1", "provider": "claude",
+            "dispatch_id": "d-adv4-no-ts", "contract_violations": ["## Changes"],
+        }]
+        (state_dir / "t0_receipts.ndjson").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        failures = loop.extract_failure_patterns(
+            start_time=datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        assert len(failures) == 1
+
 
 # ---------------------------------------------------------------------------
 # check_active_drain.build_receipt_status_index
@@ -208,7 +277,9 @@ class TestCheckActiveDrainWindowing:
     def test_missing_timestamp_still_indexed_as_failure(self, tmp_path):
         """Regression guard: a receipt with NO timestamp field (pre-existing
         real-world shape) must still classify as failure — fail-open, not
-        fail-closed, on missing dating information."""
+        fail-closed, on missing dating information. (T-adv4: check_active_drain
+        already had this right via is_stale_contract_invalid(None)==False;
+        this test locks it in against regression.)"""
         from check_active_drain import build_receipt_status_index
 
         receipts_processed = tmp_path / "receipts" / "processed"
@@ -217,6 +288,24 @@ class TestCheckActiveDrainWindowing:
         did = "20260610-no-timestamp-field"
         (receipts_processed / f"receipt-{did}.json").write_text(
             json.dumps({"dispatch_id": did, "status": "contract_invalid"}),
+            encoding="utf-8",
+        )
+
+        idx = build_receipt_status_index(tmp_path / "receipts")
+        assert idx[did] == "failure"
+
+    def test_fresh_ingested_at_beats_forged_old_body_timestamp(self, tmp_path):
+        """T-adv3: ingested_at (fresh) wins over a forged old report-body
+        timestamp for the contract_invalid staleness check."""
+        from check_active_drain import build_receipt_status_index
+
+        receipts_processed = tmp_path / "receipts" / "processed"
+        receipts_processed.mkdir(parents=True)
+
+        did = "20260716-t-adv3-forged-old-body-ts"
+        (receipts_processed / f"receipt-{did}.json").write_text(
+            json.dumps({"dispatch_id": did, "status": "contract_invalid",
+                        "timestamp": _FORGED_OLD_BODY_TS, "ingested_at": _FRESH_FAILURE_TS}),
             encoding="utf-8",
         )
 

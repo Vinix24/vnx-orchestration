@@ -46,7 +46,10 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
 from project_root import resolve_data_dir  # noqa: E402
-from report_contract_scope import is_stale_contract_invalid  # noqa: E402
+from report_contract_scope import (  # noqa: E402
+    contract_invalid_effective_timestamp,
+    is_stale_contract_invalid,
+)
 
 
 def _data_dir(override: str | None) -> Path:
@@ -120,7 +123,7 @@ def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
         # key-match — skip it as if no receipt were found (falls through to
         # the active-dispatch's own age check instead).
         if status_raw == "contract_invalid" and is_stale_contract_invalid(
-            data.get("timestamp")
+            contract_invalid_effective_timestamp(data)
         ):
             continue
         if status_raw in FAILURE_STATUSES:

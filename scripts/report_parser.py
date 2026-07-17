@@ -22,8 +22,13 @@ from datetime import datetime
 class ReportParser:
     """Extract structured intelligence from markdown reports"""
 
-    def __init__(self):
-        """Initialize parser with regex patterns"""
+    def __init__(self, *, state_dir: Optional[Path] = None):
+        """Initialize parser with regex patterns.
+
+        ``state_dir`` overrides the resolved VNX_STATE_DIR (test injection point
+        for the dispatch-authority lookup in ``_build_enhanced_receipt``); it
+        defaults to the ambient-env resolution used everywhere else.
+        """
         script_dir = Path(__file__).resolve().parent
         sys.path.insert(0, str(script_dir / "lib"))
         try:
@@ -34,6 +39,7 @@ class ReportParser:
         paths = ensure_env()
         self.vnx_home = Path(paths["VNX_HOME"])
         self.dispatch_completed_dir = Path(paths["VNX_DISPATCH_DIR"]) / "completed"
+        self.state_dir = state_dir or Path(paths["VNX_STATE_DIR"])
 
         self.tag_patterns = {
             'issues': re.compile(r'\*\*Issue Tags\*\*:\s*(.+)'),
@@ -679,12 +685,18 @@ class ReportParser:
                 _lib = str(Path(__file__).resolve().parent / "lib")
                 if _lib not in sys.path:
                     sys.path.insert(0, _lib)
-                from report_contract_scope import classify_non_report_dispatch, truthy
-                _report_class = classify_non_report_dispatch(
-                    dispatch_id=metadata.get('dispatch_id'),
+                # classify_report_dispatch() resolves the AUTHORITATIVE role/task_class
+                # for dispatch_id (staged dispatch-spec.json, then dispatch_register.ndjson)
+                # first. When an authoritative record exists, the report-body-derived
+                # role/task_class/read_only/dispatch_id-prefix below are ignored outright —
+                # a broken build-worker cannot self-exempt by forging its own frontmatter.
+                from report_contract_scope import classify_report_dispatch, truthy
+                _report_class = classify_report_dispatch(
+                    metadata.get('dispatch_id'),
                     role=metadata.get('role'),
                     task_class=metadata.get('task_class'),
                     read_only=truthy(metadata.get('read_only')),
+                    state_dir=self.state_dir,
                 )
             except Exception:
                 _report_class = None
