@@ -356,6 +356,33 @@ class TestClassifyReportDispatch:
         _write_spec(tmp_path, did, "pending", {"role": "reviewer", "task_class": "research_structured"})
         assert classify_report_dispatch(did, data_dir=tmp_path) == "review_role"
 
+    def test_t_adv9_review_role_without_spec_task_class_now_exempt(self, tmp_path):
+        """T-adv9 (fix-r3): stage_spec_bundle() never writes task_class, only
+        role — a review-shaped role like security-engineer/quality-engineer
+        that isn't literally in REVIEW_ROLES must still be exempt via the
+        role's authoritative ROLE_TO_TASK_CLASS mapping (smart_router.py,
+        fabric code the worker cannot write — not a report-body claim).
+        Regression for codex-regate-2's Finding 1: this assertion fails on
+        pre-fix code (returns None -> wrongly flagged report_contract_invalid)
+        and passes post-fix (git stash proof recorded in the dispatch report)."""
+        did = "20260717-t-adv9-security-engineer"
+        _write_spec(tmp_path, did, "pending", {"role": "security-engineer"})
+        assert classify_report_dispatch(did, data_dir=tmp_path) == "research_structured"
+
+        did2 = "20260717-t-adv9-quality-engineer"
+        _write_spec(tmp_path, did2, "pending", {"role": "quality-engineer"})
+        assert classify_report_dispatch(did2, data_dir=tmp_path) == "research_structured"
+
+    def test_t_adv9_real_backend_developer_still_not_exempt(self, tmp_path):
+        """T-adv9 negative side: the derived-task_class path must not widen
+        the exemption to a genuine delivery role. backend-developer ->
+        01_code_generation (ROLE_TO_TASK_CLASS), which is NOT in
+        REVIEW_TASK_CLASSES, so a broken report from this role stays
+        report_contract_invalid — the over-exemption guard holds."""
+        did = "20260717-t-adv9-backend-developer"
+        _write_spec(tmp_path, did, "pending", {"role": "backend-developer"})
+        assert classify_report_dispatch(did, data_dir=tmp_path) is None
+
     def test_no_state_dir_no_data_dir_behaves_like_pure_function(self):
         """No lookup roots supplied at all -> same as classify_non_report_dispatch."""
         assert classify_report_dispatch("panel-no-roots-given") == "panel_seat"

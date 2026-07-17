@@ -40,6 +40,7 @@ if str(_LIB_DIR) not in sys.path:
 
 from dispatch_spec import _ID_RE  # noqa: E402
 from phantom_guard import REVIEW_ROLES, REVIEW_TASK_CLASSES  # noqa: E402
+from smart_router import ROLE_TO_TASK_CLASS  # noqa: E402
 
 # Dispatch-id prefixes for dispatch classes that never produce a unified build
 # report. Matched case-insensitively against the START of dispatch_id.
@@ -243,6 +244,17 @@ def classify_report_dispatch(
     (``dispatch_id=None`` passed through) — a governed dispatch's id prefix
     is coincidental, not a fabric-assigned classification.
 
+    ``stage_spec_bundle()`` writes ``role`` into ``dispatch-spec.json`` but
+    never ``task_class`` — so an authoritative record with a role and no
+    task_class (the common case) falls back to ``ROLE_TO_TASK_CLASS``
+    (``smart_router.py``, the fabric's own role→task_class map) to derive
+    one. This is still fully authoritative: both the role and the map come
+    from fabric code the worker cannot write, never from the worker's report
+    body (fix-round #1184, r3 — codex-regate-2 found review roles like
+    ``security-engineer``/``quality-engineer`` wrongly flagged
+    ``report_contract_invalid`` because they carry no spec task_class and
+    aren't in ``REVIEW_ROLES`` directly).
+
     When NO authoritative record exists (a reaped/missing spec, or a
     genuinely ungoverned fabric dispatch — panel seat, benchmark/smoke cell),
     the caller-supplied ``role``/``task_class``/``read_only`` arguments are
@@ -258,10 +270,16 @@ def classify_report_dispatch(
     """
     authority = resolve_dispatch_authority(dispatch_id, state_dir=state_dir, data_dir=data_dir)
     if authority is not None:
+        authoritative_role = authority.get("role")
+        authoritative_task_class = authority.get("task_class")
+        if not authoritative_task_class and authoritative_role:
+            authoritative_task_class = ROLE_TO_TASK_CLASS.get(
+                authoritative_role.strip().lstrip("/").lower()
+            )
         return classify_non_report_dispatch(
             dispatch_id=None,
-            role=authority.get("role"),
-            task_class=authority.get("task_class"),
+            role=authoritative_role,
+            task_class=authoritative_task_class,
             read_only=None,
         )
     return classify_non_report_dispatch(dispatch_id=dispatch_id)
