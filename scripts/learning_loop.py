@@ -422,12 +422,16 @@ class LearningLoop:
                     if status not in _FAILURE_STATUSES:
                         continue
 
+                    is_contract_invalid = status == "contract_invalid"
+                    effective_ts = (
+                        contract_invalid_effective_timestamp(receipt)
+                        if is_contract_invalid else None
+                    )
+
                     # A frozen contract_invalid batch (bulk-emitted, single old
                     # timestamp) is never a recurring pattern worth learning from —
                     # exclude regardless of how far back start_time itself reaches.
-                    if status == "contract_invalid" and is_stale_contract_invalid(
-                        contract_invalid_effective_timestamp(receipt)
-                    ):
+                    if is_contract_invalid and is_stale_contract_invalid(effective_ts):
                         continue
 
                     # D3 data-quality filter: skip no-provider failure receipts.
@@ -453,8 +457,15 @@ class LearningLoop:
                     # merely for lacking a timestamp, so this filter mirrors
                     # that convention instead of silently re-excluding what the
                     # staleness check just admitted.
+                    # contract_invalid records window on effective_ts (the
+                    # processor-stamped ingested_at, computed above) instead of
+                    # the worker-suppliable `timestamp` — otherwise a forged old
+                    # report-body timestamp could still drop a freshly-ingested
+                    # contract_invalid failure here even after surviving the
+                    # dedicated staleness check above (codex-gate fix-round
+                    # #1184, Finding 3 HIGH).
                     ts_raw = receipt.get("timestamp")
-                    ts_dt = _parse_receipt_timestamp(ts_raw)
+                    ts_dt = _parse_receipt_timestamp(effective_ts if is_contract_invalid else ts_raw)
                     if ts_dt is not None and ts_dt < start_time:
                         continue
 

@@ -114,10 +114,15 @@ def test_panel_seat_success_claim_is_exempt(tmp_path):
     assert r["report_class"] == "panel_seat"
 
 
-def test_review_role_success_claim_is_exempt(tmp_path):
+def test_review_role_body_without_spec_no_longer_exempt(tmp_path):
+    """fix-r2 Finding 1 BLOCKING (T-adv5): a report-body role, with no
+    authoritative dispatch-spec.json backing it (no state_dir passed here,
+    so no spec can ever be found), can no longer grant an exemption.
+    Previously this returned report_exempt/review_role."""
     r = _parse(tmp_path, _REVIEW_ROLE_BODY)
-    assert r["event_type"] == "report_exempt"
-    assert r["report_class"] == "review_role"
+    assert r["event_type"] == "report_contract_invalid"
+    assert r["status"] == "contract_invalid"
+    assert "report_class" not in r
 
 
 def test_real_build_worker_broken_report_still_contract_invalid(tmp_path):

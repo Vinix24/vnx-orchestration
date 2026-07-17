@@ -321,10 +321,35 @@ class TestClassifyReportDispatch:
         register record) keeps its existing prefix-based exemption."""
         assert classify_report_dispatch("panel-real-seat-1", data_dir=tmp_path) == "panel_seat"
 
-    def test_no_authority_falls_back_to_body_role(self, tmp_path):
+    def test_no_authority_body_role_no_longer_exempts(self, tmp_path):
+        """fix-r2 Finding 1 BLOCKING: with no authoritative record, a
+        report-body role/task_class/read_only must NEVER grant an exemption
+        either — only the dispatch_id prefix survives into the fallback.
+        Previously this returned "review_role" (the self-exempt bug); the
+        dispatch_id here deliberately has no panel-/bench-/smoke- prefix so
+        no exemption signal remains at all."""
         assert classify_report_dispatch(
             "20260716-ungoverned-review", role="code-reviewer", data_dir=tmp_path
-        ) == "review_role"
+        ) is None
+
+    def test_t_adv5_no_spec_forged_role_and_read_only_not_exempt(self, tmp_path):
+        """T-adv5 (fix-r2, Finding 1 BLOCKING): a dispatch with NO
+        authoritative spec/register record and a plain dispatch_id (no
+        panel-/bench-/smoke- prefix) cannot self-exempt via forged
+        report-body role/read_only anymore."""
+        assert classify_report_dispatch(
+            "20260716-t-adv5-no-spec-forged",
+            role="code-reviewer",
+            task_class="research_structured",
+            read_only=True,
+            data_dir=tmp_path,
+        ) is None
+
+    def test_t_adv6_no_spec_panel_prefix_still_exempt(self, tmp_path):
+        """T-adv6 (fix-r2): the legitimate dispatch_id-prefix exemption
+        survives the Finding 1 fix — a spec-less panel-/bench-/smoke- seat is
+        still a genuinely ungoverned fabric dispatch."""
+        assert classify_report_dispatch("panel-t-adv6-no-spec", data_dir=tmp_path) == "panel_seat"
 
     def test_authoritative_task_class_from_spec_exempts(self, tmp_path):
         did = "20260716-spec-task-class"

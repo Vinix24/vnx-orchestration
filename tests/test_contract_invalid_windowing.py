@@ -119,6 +119,24 @@ class TestWeeklyDigestWindowing:
         assert out["total"] == 1
         assert out["failure"] == 1
 
+    def test_t_adv8_fresh_ingested_at_beats_forged_old_timestamp_narrow_days(self, tmp_path):
+        """T-adv8 (fix-r2, Finding 3 HIGH): with a NARROW --days window, the
+        generic worker-`timestamp` window filter used to run before the
+        dedicated contract_invalid staleness check ever saw the record — a
+        forged old body `timestamp` (45d) outside a 7-day digest window
+        dropped the record even though its processor-stamped ingested_at was
+        fresh. Windowing for contract_invalid records must key off
+        ingested_at exclusively, for both the --days cutoff and the
+        dedicated staleness check."""
+        records = [{
+            "status": "contract_invalid",
+            "timestamp": _FORGED_OLD_BODY_TS,
+            "ingested_at": _FRESH_FAILURE_TS,
+        }]
+        out = self._run(records, tmp_path, days=7)
+        assert out["total"] == 1
+        assert out["failure"] == 1
+
 
 # ---------------------------------------------------------------------------
 # learning_loop.LearningLoop.extract_failure_patterns
@@ -226,6 +244,28 @@ class TestLearningLoopWindowing:
         records = [{
             "status": "contract_invalid", "terminal": "T1", "provider": "claude",
             "dispatch_id": "d-adv4-no-ts", "contract_violations": ["## Changes"],
+        }]
+        (state_dir / "t0_receipts.ndjson").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        failures = loop.extract_failure_patterns(
+            start_time=datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        assert len(failures) == 1
+
+    def test_t_adv8_fresh_ingested_at_beats_forged_old_timestamp_narrow_start(self, loop_env):
+        """T-adv8 (fix-r2, Finding 3 HIGH): a SECOND generic window filter on
+        the worker-suppliable `timestamp` ran after the dedicated staleness
+        check and could still drop a freshly-ingested contract_invalid
+        receipt whose report body forged an old `timestamp` (45d) outside a
+        narrow start_time (2d). Both window decisions for contract_invalid
+        records must key off ingested_at exclusively."""
+        loop, state_dir = loop_env
+        records = [{
+            "status": "contract_invalid", "terminal": "T1", "provider": "claude",
+            "dispatch_id": "d-adv8-forged-old-ts", "contract_violations": ["## Changes"],
+            "timestamp": _FORGED_OLD_BODY_TS, "ingested_at": _FRESH_FAILURE_TS,
         }]
         (state_dir / "t0_receipts.ndjson").write_text(
             "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"

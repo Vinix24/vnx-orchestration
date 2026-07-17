@@ -693,7 +693,11 @@ class TestNonReportDispatchExemption:
         assert r["event_type"] == "report_exempt"
         assert r["report_class"] == "benchmark"
 
-    def test_review_role_frontmatter_is_exempt(self, tmp_path, state_dir):
+    def test_review_role_frontmatter_without_spec_no_longer_exempt(self, tmp_path, state_dir):
+        """fix-r2 Finding 1 BLOCKING (T-adv5): report-body role, with no
+        authoritative dispatch-spec.json/register record backing it, can no
+        longer grant an exemption. Previously this returned report_exempt —
+        the self-exempt bug a reaped/missing spec left open."""
         did = "20260716-plan-review-seat"
         report = tmp_path / f"{did}.md"
         report.write_text(
@@ -704,11 +708,15 @@ class TestNonReportDispatchExemption:
 
         result = convert_report_to_receipt(report, receipts_file=receipts_file)
 
+        assert result is not None
         r = _receipts(state_dir)[0]
-        assert r["event_type"] == "report_exempt"
-        assert r["report_class"] == "review_role"
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["status"] == "contract_invalid"
+        assert "report_class" not in r
 
-    def test_read_only_frontmatter_is_exempt(self, tmp_path, state_dir):
+    def test_read_only_frontmatter_without_spec_no_longer_exempt(self, tmp_path, state_dir):
+        """fix-r2 Finding 1 BLOCKING (T-adv5): same as above for read_only —
+        a spec-less dispatch cannot self-exempt via a forged read_only flag."""
         did = "20260716-read-only-seat"
         report = tmp_path / f"{did}.md"
         report.write_text(
@@ -719,13 +727,20 @@ class TestNonReportDispatchExemption:
 
         result = convert_report_to_receipt(report, receipts_file=receipts_file)
 
+        assert result is not None
         r = _receipts(state_dir)[0]
-        assert r["event_type"] == "report_exempt"
-        assert r["report_class"] == "read_only"
+        assert r["event_type"] == "report_contract_invalid"
+        assert r["status"] == "contract_invalid"
+        assert "report_class" not in r
 
-    def test_route_decision_task_class_is_used_as_fallback(self, tmp_path, state_dir):
-        """When the report body carries no task_class, the route_decision JSON's
-        task_class (written by smart_router) is consulted as a fallback signal."""
+    def test_route_decision_task_class_no_longer_used_as_fallback(self, tmp_path, state_dir):
+        """fix-r2 Finding 1 BLOCKING: classify_report_dispatch's no-authority
+        fallback now ignores every caller-supplied role/task_class/read_only
+        argument, not just report-body ones — a route_decision-derived
+        task_class no longer grants an exemption either. Only an
+        authoritative dispatch-spec.json/register record, or the dispatch_id
+        prefix, can exempt. Previously this asserted report_exempt; that was
+        the same non-authoritative-signal class of bug as Finding 1."""
         did = "20260716-router-tagged-review"
         report = tmp_path / f"{did}.md"
         report.write_text(f"---\ndispatch_id: {did}\n---\n\n{self._BROKEN_BODY}", encoding="utf-8")
@@ -740,9 +755,10 @@ class TestNonReportDispatchExemption:
 
         result = convert_report_to_receipt(report, receipts_file=receipts_file)
 
+        assert result is not None
         r = _receipts(state_dir)[0]
-        assert r["event_type"] == "report_exempt"
-        assert r["report_class"] == "research_structured"
+        assert r["event_type"] == "report_contract_invalid"
+        assert "report_class" not in r
 
     def test_real_build_worker_still_gets_contract_invalid(self, tmp_path, state_dir):
         """No exemption class applies: a genuinely broken build-worker report

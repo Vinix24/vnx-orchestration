@@ -322,18 +322,20 @@ def _stamp_identity(receipt: Dict[str, Any], *, identity_cwd: Optional[Path] = N
 
 
 def _stamp_ingested_at(receipt: Dict[str, Any]) -> None:
-    """Stamp the authoritative ingest time — set by this append layer, NEVER
-    merged from report-body content (report_to_receipt_converter.py copies its
-    ``timestamp``/``recorded_at`` fields straight out of the worker's own
-    report frontmatter, which a broken/adversarial worker can forge to an
-    arbitrary old date). Staleness windowing for ``contract_invalid`` receipts
-    (``report_contract_scope.contract_invalid_effective_timestamp``) keys off
-    this field so a forged old body timestamp can no longer vanish a fresh
-    failure from the fleet's counters. Caller-supplied values are never
-    overwritten (idempotent re-append keeps the original ingest time).
+    """Stamp the authoritative ingest time — ALWAYS set to now by this append
+    layer, never preserved from a caller-supplied value. append_receipt.py
+    accepts worker-authored JSON directly, so a pre-set ``ingested_at`` is
+    exactly as forgeable as ``timestamp``/``recorded_at`` (which
+    report_to_receipt_converter.py copies straight out of the worker's own
+    report frontmatter) — honoring it would let a broken/adversarial worker
+    pre-stamp an old ``ingested_at`` and defeat the very staleness check
+    (``report_contract_scope.contract_invalid_effective_timestamp``) this
+    field exists to make forge-proof (codex-gate fix-round #1184, Finding 2
+    HIGH). A re-append of the same receipt content simply gets a fresh ingest
+    time for that write — nothing downstream keys dedup off this field
+    (``IDEMPOTENCY_FIELDS`` excludes ``ingested_at``; see the comment at its
+    call site below).
     """
-    if receipt.get("ingested_at"):
-        return
     from datetime import datetime, timezone
     receipt["ingested_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

@@ -243,10 +243,18 @@ def classify_report_dispatch(
     (``dispatch_id=None`` passed through) — a governed dispatch's id prefix
     is coincidental, not a fabric-assigned classification.
 
-    Only when NO authoritative record exists (a genuinely ungoverned fabric
-    dispatch — panel seat, benchmark/smoke cell) do the body-supplied fields
-    and the dispatch_id prefix apply, exactly as ``classify_non_report_dispatch``
-    already does.
+    When NO authoritative record exists (a reaped/missing spec, or a
+    genuinely ungoverned fabric dispatch — panel seat, benchmark/smoke cell),
+    the caller-supplied ``role``/``task_class``/``read_only`` arguments are
+    STILL never trusted — they are report-body content (or a route_decision-
+    derived fallback) the worker itself can shape, so a build-worker whose
+    spec bundle has already been reaped could otherwise self-exempt by
+    forging its own frontmatter. Only the ``dispatch_id`` prefix survives
+    into this fallback (codex-gate fix-round #1184, Finding 1 BLOCKING).
+    The ``role``/``task_class``/``read_only`` parameters remain part of this
+    function's signature for call-site stability, but are intentionally
+    unused now — a future extension that resolves them from another
+    AUTHORITATIVE source could reintroduce narrow trust without an API change.
     """
     authority = resolve_dispatch_authority(dispatch_id, state_dir=state_dir, data_dir=data_dir)
     if authority is not None:
@@ -256,9 +264,7 @@ def classify_report_dispatch(
             task_class=authority.get("task_class"),
             read_only=None,
         )
-    return classify_non_report_dispatch(
-        dispatch_id=dispatch_id, role=role, task_class=task_class, read_only=read_only,
-    )
+    return classify_non_report_dispatch(dispatch_id=dispatch_id)
 
 
 def contract_invalid_window_days() -> int:

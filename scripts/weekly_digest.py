@@ -135,22 +135,37 @@ def collect_metrics(days: int = 7) -> dict:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                ts = rec.get("timestamp", "")
-                if ts and isinstance(ts, str) and ts[:10] < since:
-                    continue
                 # Skip infra events before counting totals.
                 event_type = (rec.get("event_type") or "").lower()
                 if event_type in _SKIP_EVENT_TYPES:
                     continue
                 status = (rec.get("status") or "").lower()
-                # A frozen contract_invalid batch (bulk-emitted, single old
-                # timestamp) is excluded from the live count regardless of the
-                # digest's own --days window — a dedicated, tighter cutoff
-                # (default 14d) so a wide --days call doesn't resurrect it.
-                if (
+                is_contract_invalid = (
                     status == "contract_invalid" or event_type == "report_contract_invalid"
-                ) and is_stale_contract_invalid(contract_invalid_effective_timestamp(rec)):
-                    continue
+                )
+                if is_contract_invalid:
+                    # contract_invalid/report_contract_invalid records window
+                    # EXCLUSIVELY on the processor-stamped ingested_at (via
+                    # contract_invalid_effective_timestamp) — never on the
+                    # worker-suppliable `timestamp` field the generic filter
+                    # below uses. Otherwise a freshly-ingested contract_invalid
+                    # receipt whose report body forged an old `timestamp` would
+                    # get dropped by the generic --days filter before it ever
+                    # reaches the dedicated staleness check just below
+                    # (codex-gate fix-round #1184, Finding 3 HIGH).
+                    effective_ts = contract_invalid_effective_timestamp(rec)
+                    if effective_ts and isinstance(effective_ts, str) and effective_ts[:10] < since:
+                        continue
+                    # A frozen contract_invalid batch (bulk-emitted, single old
+                    # timestamp) is excluded from the live count regardless of the
+                    # digest's own --days window — a dedicated, tighter cutoff
+                    # (default 14d) so a wide --days call doesn't resurrect it.
+                    if is_stale_contract_invalid(effective_ts):
+                        continue
+                else:
+                    ts = rec.get("timestamp", "")
+                    if ts and isinstance(ts, str) and ts[:10] < since:
+                        continue
                 metrics["dispatch_outcomes"]["total"] += 1
                 # Empty status falls back to event_type for classification —
                 # preserves pre-vocab recall for e.g. status-less task_complete
