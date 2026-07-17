@@ -27,6 +27,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from report_contract_scope import contract_invalid_effective_timestamp, is_stale_contract_invalid
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -421,6 +422,18 @@ class LearningLoop:
                     if status not in _FAILURE_STATUSES:
                         continue
 
+                    is_contract_invalid = status == "contract_invalid"
+                    effective_ts = (
+                        contract_invalid_effective_timestamp(receipt)
+                        if is_contract_invalid else None
+                    )
+
+                    # A frozen contract_invalid batch (bulk-emitted, single old
+                    # timestamp) is never a recurring pattern worth learning from —
+                    # exclude regardless of how far back start_time itself reaches.
+                    if is_contract_invalid and is_stale_contract_invalid(effective_ts):
+                        continue
+
                     # D3 data-quality filter: skip no-provider failure receipts.
                     # Targets receipts where 'provider' is explicitly set to a
                     # none-sentinel ("none", "unknown", "null", ""), e.g. the 9,052+
@@ -434,12 +447,26 @@ class LearningLoop:
                         no_provider_skipped += 1
                         continue
 
-                    # Window filter on the receipt timestamp. Drop records we
-                    # cannot place in time so a full historical stream does not
-                    # over-produce against the >=2 recurrence threshold.
+                    # Window filter on the receipt timestamp. Fail-open on a
+                    # missing/unparseable timestamp — only a receipt we can
+                    # POSITIVELY date as older than start_time is excluded.
+                    # Dropping on ts_dt is None here used to contradict the
+                    # is_stale_contract_invalid() fail-open check just above
+                    # (which lets a dateless contract_invalid receipt through):
+                    # weekly_digest / check_active_drain never drop a record
+                    # merely for lacking a timestamp, so this filter mirrors
+                    # that convention instead of silently re-excluding what the
+                    # staleness check just admitted.
+                    # contract_invalid records window on effective_ts (the
+                    # processor-stamped ingested_at, computed above) instead of
+                    # the worker-suppliable `timestamp` — otherwise a forged old
+                    # report-body timestamp could still drop a freshly-ingested
+                    # contract_invalid failure here even after surviving the
+                    # dedicated staleness check above (codex-gate fix-round
+                    # #1184, Finding 3 HIGH).
                     ts_raw = receipt.get("timestamp")
-                    ts_dt = _parse_receipt_timestamp(ts_raw)
-                    if ts_dt is None or ts_dt < start_time:
+                    ts_dt = _parse_receipt_timestamp(effective_ts if is_contract_invalid else ts_raw)
+                    if ts_dt is not None and ts_dt < start_time:
                         continue
 
                     failure_patterns.append({

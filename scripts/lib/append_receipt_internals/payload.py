@@ -321,6 +321,25 @@ def _stamp_identity(receipt: Dict[str, Any], *, identity_cwd: Optional[Path] = N
         receipt["agent_id"] = identity.agent_id
 
 
+def _stamp_ingested_at(receipt: Dict[str, Any]) -> None:
+    """Stamp the authoritative ingest time — ALWAYS set to now by this append
+    layer, never preserved from a caller-supplied value. append_receipt.py
+    accepts worker-authored JSON directly, so a pre-set ``ingested_at`` is
+    exactly as forgeable as ``timestamp``/``recorded_at`` (which
+    report_to_receipt_converter.py copies straight out of the worker's own
+    report frontmatter) — honoring it would let a broken/adversarial worker
+    pre-stamp an old ``ingested_at`` and defeat the very staleness check
+    (``report_contract_scope.contract_invalid_effective_timestamp``) this
+    field exists to make forge-proof (codex-gate fix-round #1184, Finding 2
+    HIGH). A re-append of the same receipt content simply gets a fresh ingest
+    time for that write — nothing downstream keys dedup off this field
+    (``IDEMPOTENCY_FIELDS`` excludes ``ingested_at``; see the comment at its
+    call site below).
+    """
+    from datetime import datetime, timezone
+    receipt["ingested_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def append_receipt_payload(
     receipt: Dict[str, Any],
     *,
@@ -347,6 +366,11 @@ def append_receipt_payload(
 
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)
+
+    # Stamped AFTER the idempotency key so a fresh ingest time never perturbs
+    # dedup (IDEMPOTENCY_FIELDS does not include ingested_at, but the rare
+    # content-hash fallback branch would otherwise mint a new hash every call).
+    _stamp_ingested_at(receipt)
 
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)
