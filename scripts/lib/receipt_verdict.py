@@ -34,9 +34,22 @@ HARD_FAILURE_STATUSES = frozenset(
 # rather than "we checked and it's clean" — ADR-035 §3.1 (evidence_complete).
 INCOMPLETE_EVIDENCE_METHODS = frozenset({"unknown", "none_claimed", "pending-report"})
 
+# status literals that assert the dispatch actually completed — the same
+# vocabulary phantom_guard.py::COMPLETION_STATUSES uses to decide whether a
+# completion claim is even eligible for scrutiny. `accept` requires one of
+# these explicitly: "not a hard-failure status" is not the same claim as
+# "is a success status" (fix-r1 BLOCKING-1) — a receipt sitting in
+# "unknown"/"in_progress" with clean-looking test evidence is neither a
+# failure nor a completed success, and must never fall through to accept.
+SUCCESS_STATUSES = frozenset({"done", "success", "complete", "completed"})
+
 
 def _doc_only_path(path: str) -> bool:
-    return path.startswith("docs/") or path.endswith(".md")
+    """True only when `path` matches the glob `docs/**/*.md` — under `docs/`
+    AND ending in `.md`. Both conditions are required (fix-r1 HIGH-3): a
+    loose `or` let `scripts/README.md` (not under docs/) or `docs/schema.json`
+    (not markdown) slip through the doc-only bypass."""
+    return path.startswith("docs/") and path.endswith(".md")
 
 
 def _doc_only_paths_confirmed(receipt: Dict[str, Any]) -> bool:
@@ -81,12 +94,17 @@ def compute_verdict(receipt: Dict[str, Any]) -> Dict[str, Any]:
       2. doc-only — `verification.method == "n/a"`: accept only if every
                      changed path is confirmed under docs/**/*.md, else
                      investigate (fail-safe on missing/partial evidence).
-      3. investigate — `verification.method == "pending-report"`, or an
-                     unresolved `destination: "oi_pending"` warning, or a
-                     success-claiming status with missing/incomplete test
-                     evidence.
-      4. accept   — success-claiming status, `tests_failed == 0` with
-                     `tests_run > 0`, no blocker/oi_pending warnings.
+      3. investigate — `verification.method == "pending-report"`, an
+                     unresolved `destination: "oi_pending"` warning, a
+                     `status` outside both the hard-failure set and the
+                     success allowlist (`SUCCESS_STATUSES` — e.g.
+                     "unknown"/"in_progress" never reach accept, fix-r1
+                     BLOCKING-1), incomplete verification evidence
+                     (`method` in `unknown`/`none_claimed`, fix-r1 HIGH-2),
+                     or missing/failing test evidence.
+      4. accept   — `status` in `SUCCESS_STATUSES`, `evidence_complete`,
+                     `tests_failed == 0` with `tests_run > 0`, no
+                     blocker/oi_pending warnings.
     """
     status = receipt.get("status")
     warnings = receipt.get("warnings") or []
@@ -142,6 +160,22 @@ def compute_verdict(receipt: Dict[str, Any]) -> Dict[str, Any]:
         return _verdict(
             "investigate",
             "an unresolved destination=oi_pending warning is present",
+            evidence_complete,
+        )
+
+    if status not in SUCCESS_STATUSES:
+        return _verdict(
+            "investigate",
+            f"status={status!r} is neither a hard-failure status nor a "
+            "recognized success status — no basis for accept",
+            evidence_complete,
+        )
+
+    if not evidence_complete:
+        return _verdict(
+            "investigate",
+            f"status={status!r} claims success but verification.method="
+            f"{method!r} does not provide complete evidence",
             evidence_complete,
         )
 

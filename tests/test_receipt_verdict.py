@@ -189,6 +189,9 @@ def test_t23_na_method_nondocs_path_forces_investigate_regardless_of_status(stat
 
 
 def test_t23_na_method_all_docs_paths_accepts():
+    """fix-r1 HIGH-3: doc-only requires BOTH under docs/ AND .md — the
+    fixture uses docs/README.md (not a bare repo-root README.md) so this
+    stays a true positive under the tightened glob."""
     receipt = {
         "status": "done",
         "verification": {"method": "n/a", "spec_deviation": "doc-only dispatch"},
@@ -196,7 +199,7 @@ def test_t23_na_method_all_docs_paths_accepts():
             "diff_summary": {
                 "paths": [
                     "docs/governance/decisions/ADR-035-receipt-v2.md",
-                    "README.md",
+                    "docs/README.md",
                 ]
             }
         },
@@ -283,3 +286,117 @@ def test_compute_verdict_returns_exactly_three_keys():
     receipt = {"status": "done", "verification": {"method": "pytest", "tests_run": 1, "tests_failed": 0}}
     verdict = compute_verdict(receipt)
     assert set(verdict.keys()) == {"decision", "reason", "evidence_complete"}
+
+
+# ── fix-r1 BLOCKING-1 — accept requires an explicit success-status allowlist ──
+# PR #1186 codex-gate finding: status="unknown"/"in_progress" with clean test
+# evidence fell through the old "not a hard-failure" check straight to accept.
+# accept now requires status ∈ SUCCESS_STATUSES (done/success/complete/completed).
+
+
+@pytest.mark.parametrize("status", ["unknown", "in_progress"])
+def test_fixr1_blocking1_non_success_status_never_accepts_despite_clean_evidence(status):
+    receipt = {
+        "status": status,
+        "verification": {"method": "pytest", "tests_run": 1, "tests_failed": 0},
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+
+
+@pytest.mark.parametrize("status", ["unknown", "in_progress"])
+def test_fixr1_blocking1_non_success_status_not_confused_with_reject(status):
+    """Non-success/non-failure statuses must land on investigate, not reject —
+    only HARD_FAILURE_STATUSES triggers reject."""
+    receipt = {
+        "status": status,
+        "verification": {"method": "pytest", "tests_run": 1, "tests_failed": 0},
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] != "reject"
+    assert verdict["decision"] != "accept"
+
+
+# ── fix-r1 HIGH-2 — accept requires evidence_complete, not just non-blocking method ──
+# PR #1186 codex-gate finding: status="success" with method="unknown" (or
+# "none_claimed") still fell through to accept because only "pending-report"
+# blocked the accept branch. evidence_complete now gates accept directly.
+
+
+@pytest.mark.parametrize("method", ["unknown", "none_claimed"])
+def test_fixr1_high2_success_status_incomplete_evidence_method_investigates(method):
+    receipt = {"status": "success", "verification": {"method": method}}
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+    assert verdict["evidence_complete"] is False
+
+
+def test_fixr1_high2_success_status_method_unknown_with_clean_test_fields_still_investigates():
+    """Even if tests_run/tests_failed happen to look clean, an incomplete-
+    evidence method must block accept — evidence_complete is checked
+    independently of the test-count fields."""
+    receipt = {
+        "status": "success",
+        "verification": {"method": "unknown", "tests_run": 5, "tests_failed": 0},
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+    assert verdict["evidence_complete"] is False
+
+
+# ── fix-r1 HIGH-3 — doc-only glob tightened to docs/**/*.md (AND, not OR) ──
+# PR #1186 codex-gate finding: the old predicate accepted any path either
+# under docs/ OR ending in .md. scripts/README.md (not under docs/) and
+# docs/schema.json (under docs/ but not markdown) both slipped through.
+
+
+def test_fixr1_high3_doc_only_path_outside_docs_dir_investigates():
+    receipt = {
+        "status": "done",
+        "verification": {"method": "n/a"},
+        "provenance": {"diff_summary": {"paths": ["scripts/README.md"]}},
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+
+
+def test_fixr1_high3_doc_only_path_under_docs_but_not_markdown_investigates():
+    receipt = {
+        "status": "done",
+        "verification": {"method": "n/a"},
+        "provenance": {"diff_summary": {"paths": ["docs/schema.json"]}},
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+
+
+def test_fixr1_high3_doc_only_one_bad_path_among_good_ones_investigates():
+    receipt = {
+        "status": "done",
+        "verification": {"method": "n/a"},
+        "provenance": {
+            "diff_summary": {
+                "paths": [
+                    "docs/governance/decisions/ADR-035-receipt-v2.md",
+                    "scripts/README.md",
+                ]
+            }
+        },
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+
+
+def test_fixr1_high3_doc_only_nested_docs_md_path_still_accepts():
+    """Regression guard: the AND-tightening must not also break the
+    legitimate nested-docs case — docs/**/*.md still matches multiple
+    directory levels deep."""
+    receipt = {
+        "status": "done",
+        "verification": {"method": "n/a"},
+        "provenance": {
+            "diff_summary": {"paths": ["docs/governance/decisions/ADR-035-receipt-v2.md"]}
+        },
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "accept"
