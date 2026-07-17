@@ -269,13 +269,27 @@ def _scaffold_vnx_data_local(project_dir: Path) -> None:
     print(f"  created .vnx-data/ (local scaffold)")
 
 
-def _write_vnx_version(project_dir: Path, version: str, force: bool) -> bool:
-    """Write .vnx-version to ``project_dir``. Returns True if written."""
+def _write_vnx_version(project_dir: Path, version: str, set_version: str | None = None) -> str:
+    """Write/preserve .vnx-version in ``project_dir``. Returns the action taken.
+
+    The pin is operator-owned state, not a scaffold artifact: an existing pin
+    is ALWAYS preserved, even under ``--force`` — ``--force`` refreshes
+    scaffold files, it must never silently reset a pin back to the running
+    package version (that was the direct cause of the fleet version-pin
+    drift this function fixes). The only way to rewrite an existing pin is
+    the explicit ``set_version`` argument (``vnx init --set-version <ver>``).
+
+    Returns one of "preserved", "set", "created".
+    """
     path = project_dir / ".vnx-version"
-    if path.exists() and not force:
-        return False
+    existed = path.is_file()
+    if set_version:
+        _atomic_write(path, set_version + "\n")
+        return "set" if existed else "created"
+    if existed:
+        return "preserved"
     _atomic_write(path, version + "\n")
-    return True
+    return "created"
 
 
 def _write_root_claude_md(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:
@@ -581,9 +595,17 @@ def vnx_init(args) -> int:
     project_dir = Path(raw_dir).resolve()
     template = getattr(args, "template", "default") or "default"
     force = getattr(args, "force", False)
+    set_version = getattr(args, "set_version", None)
 
     if template not in _VALID_TEMPLATES:
         print(f"  error: unknown template {template!r}. Choose: {', '.join(sorted(_VALID_TEMPLATES))}", file=sys.stderr)
+        return 1
+
+    if set_version and not _engine.VERSION_PIN_RE.match(set_version):
+        print(
+            f"  error: --set-version {set_version!r} invalid: must match {_engine.VERSION_PIN_RE.pattern}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Initialising VNX project at: {project_dir}")
@@ -693,8 +715,17 @@ def vnx_init(args) -> int:
     if inside_project:
         _scaffold_vnx_data_local(project_dir)
 
-    written = _write_vnx_version(project_dir, __version__, force)
-    print(f"  {'created' if written else 'exists '} .vnx-version ({__version__})")
+    version_action = _write_vnx_version(project_dir, __version__, set_version=set_version)
+    if version_action == "preserved":
+        existing_pin = (project_dir / ".vnx-version").read_text(encoding="utf-8").strip()
+        print(
+            f"  preserved .vnx-version ({existing_pin}) — pin is operator-owned, "
+            "not reset by --force; use --set-version to repin explicitly"
+        )
+    elif version_action == "set":
+        print(f"  set       .vnx-version ({set_version}) via --set-version")
+    else:
+        print(f"  created   .vnx-version ({set_version or __version__})")
 
     _write_root_claude_md(project_dir, tmpl_root, ctx, force)
     _write_feature_plan(project_dir, force)

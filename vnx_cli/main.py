@@ -171,7 +171,16 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
     init_parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite existing scaffold files (allows reinitialisation)",
+        help="overwrite existing scaffold files (allows reinitialisation); "
+             "never resets an existing .vnx-version pin — use --set-version for that",
+    )
+    init_parser.add_argument(
+        "--set-version",
+        dest="set_version",
+        default=None,
+        metavar="VERSION",
+        help="explicitly (re)write the .vnx-version pin to VERSION, even if a pin "
+             "already exists; must match [A-Za-z0-9._-]+",
     )
 
 
