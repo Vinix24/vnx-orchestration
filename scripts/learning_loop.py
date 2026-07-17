@@ -27,6 +27,10 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from contract_invalid_window import (
+    contract_invalid_effective_timestamp,
+    is_stale_contract_invalid,
+)
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -421,6 +425,18 @@ class LearningLoop:
                     if status not in _FAILURE_STATUSES:
                         continue
 
+                    event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+                    is_contract_invalid = (
+                        status == "contract_invalid" or event_type == "report_contract_invalid"
+                    )
+
+                    # A frozen contract_invalid batch (bulk-emitted, single old
+                    # timestamp) is never a recurring pattern worth learning
+                    # from — exclude regardless of how far back start_time
+                    # itself reaches.
+                    if is_contract_invalid and is_stale_contract_invalid(receipt):
+                        continue
+
                     # D3 data-quality filter: skip no-provider failure receipts.
                     # Targets receipts where 'provider' is explicitly set to a
                     # none-sentinel ("none", "unknown", "null", ""), e.g. the 9,052+
@@ -437,8 +453,15 @@ class LearningLoop:
                     # Window filter on the receipt timestamp. Drop records we
                     # cannot place in time so a full historical stream does not
                     # over-produce against the >=2 recurrence threshold.
+                    # contract_invalid records window on the processor-stamped
+                    # ingested_at (contract_invalid_effective_timestamp)
+                    # instead of the worker-suppliable `timestamp` — otherwise
+                    # a forged old report-body timestamp could still drop a
+                    # freshly-ingested contract_invalid failure here even
+                    # after surviving the dedicated staleness check above.
                     ts_raw = receipt.get("timestamp")
-                    ts_dt = _parse_receipt_timestamp(ts_raw)
+                    window_ts = contract_invalid_effective_timestamp(receipt) if is_contract_invalid else ts_raw
+                    ts_dt = _parse_receipt_timestamp(window_ts)
                     if ts_dt is None or ts_dt < start_time:
                         continue
 
