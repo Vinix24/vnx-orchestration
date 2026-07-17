@@ -14,8 +14,10 @@ not a replacement.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -47,6 +49,42 @@ def compute_entry_hash(entry: dict) -> str:
     return hashlib.sha256(canonical_json(entry).encode("utf-8")).hexdigest()
 
 
+def ledger_lock_path(ledger_path: Path) -> Path:
+    """The ONE public lock primitive for a given ledger (ADR-034 §4).
+
+    Byte-identical to ``append_receipt_internals.idempotency._lock_file_for``'s
+    private path — the hot receipt-append path already locks here today via
+    that private helper, so the live lock file for ``state/t0_receipts.ndjson``
+    is unchanged and no migration is needed. This is now the single shared
+    source of truth: ``append_receipt_payload`` (via ``idempotency``, itself
+    unmodified by this ADR), ``append_chained_entry``, ``append_epoch_marker``,
+    and ``chain_origin_anchor.seal_and_commit_origin`` all take this SAME lock
+    around their critical sections — not independent locks on different paths
+    (the original ADR-034 draft's bug, corrected before implementation).
+    """
+    return ledger_path.parent / "append_receipt.lock"
+
+
+@contextmanager
+def _ledger_locked(ledger_path: Path) -> Iterator[None]:
+    """Hold ``ledger_lock_path(ledger_path)``'s flock for the wrapped block.
+
+    Not re-entrant: ``fcntl.flock`` excludes by open-file-description, not by
+    process, so a second ``open()`` + ``flock()`` of the same path from the
+    same process would block on itself. A caller that already holds this lock
+    (``seal_and_commit_origin``) must call the ``_locked`` suffixed internals
+    below directly instead of re-entering this context manager (ADR-034 §4).
+    """
+    lock_path = ledger_lock_path(ledger_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def append_chained_entry(
     path: Path,
     entry: dict,
@@ -65,6 +103,27 @@ def append_chained_entry(
     - 'correction': must include 'corrects_hash' field
     - 'redaction': must include 'redacts_hash' field; body should be opaque
     - 'tombstone': must include 'tombstones_hash' field
+
+    Holds ``ledger_lock_path(path)``'s flock around the read-tail + write
+    critical section (ADR-034 §4) — previously unlocked, which let a
+    concurrent writer race the tail-hash read.
+    """
+    with _ledger_locked(path):
+        return _append_chained_entry_locked(path, entry, event_type=event_type)
+
+
+def _append_chained_entry_locked(
+    path: Path,
+    entry: dict,
+    *,
+    event_type: str | None = None,
+) -> str:
+    """Body of ``append_chained_entry``, minus lock acquisition.
+
+    Caller MUST already hold ``ledger_lock_path(path)``'s flock. Exists so
+    ``seal_and_commit_origin`` (which holds the lock itself across a larger
+    critical section) can append without a second, self-deadlocking
+    ``flock()`` call on the same file from the same process.
     """
     if event_type == "backfill":
         prev_hash = GENESIS_HASH
@@ -133,6 +192,21 @@ def append_epoch_marker(path: Path, epoch: int) -> str:
 
     Append-only: never rewrites a historical line (ADR-005 preserved). Returns
     the marker entry's hash so the next appended receipt links to it.
+
+    Holds ``ledger_lock_path(path)``'s flock around the append (ADR-034 §4) —
+    previously unlocked.
+    """
+    with _ledger_locked(path):
+        return _append_epoch_marker_locked(path, epoch)
+
+
+def _append_epoch_marker_locked(path: Path, epoch: int) -> str:
+    """Body of ``append_epoch_marker``, minus lock acquisition.
+
+    Caller MUST already hold ``ledger_lock_path(path)``'s flock. Exists so
+    ``seal_and_commit_origin`` can open a new epoch inside its own
+    already-held critical section without a second, self-deadlocking
+    ``flock()`` call (ADR-034 §4).
     """
     marker = {
         "type": EPOCH_MARKER_TYPE,

@@ -384,3 +384,63 @@ def test_epoch_state_reports_max_epoch_and_active(tmp_path):
     append_epoch_marker(p, 1)
     max_epoch, active = epoch_state(p)
     assert max_epoch == 1 and active is True   # last entry is the marker -> chaining
+
+
+# ---------------------------------------------------------------------------
+# ADR-034: ledger_lock_path (T14) + lock adoption in append_chained_entry /
+# append_epoch_marker (the write-side primitives seal_and_commit_origin
+# shares — scripts/lib/chain_origin_anchor.py).
+# ---------------------------------------------------------------------------
+from ndjson_hash_chain import ledger_lock_path  # noqa: E402
+from append_receipt_internals.idempotency import _lock_file_for  # noqa: E402
+
+
+def test_t14_ledger_lock_path_matches_hot_path_lock_file(tmp_path):
+    """T14: seal_and_commit_origin and a concurrent append_receipt_payload call
+    target the SAME lock file. Assert identical resolved Path, not just "both
+    take some lock" — proves the original wrong-lock-target bug (ADR-034 §4,
+    R2/C2) can't silently regress. The hot path (append_receipt_internals/
+    idempotency.py) is NOT modified by this ADR; this only verifies the two
+    already agree."""
+    ledger_path = tmp_path / "state" / "t0_receipts.ndjson"
+    assert ledger_lock_path(ledger_path) == _lock_file_for(ledger_path)
+    assert ledger_lock_path(ledger_path).resolve() == _lock_file_for(ledger_path).resolve()
+
+
+def test_ledger_lock_path_is_append_receipt_lock_sibling(tmp_path):
+    p = tmp_path / "state" / "t0_receipts.ndjson"
+    assert ledger_lock_path(p) == p.parent / "append_receipt.lock"
+
+
+def test_append_chained_entry_still_works_under_new_lock(tmp_path):
+    """Regression: append_chained_entry's locked refactor must not change its
+    observable output (ADR-034 §4 adopts a lock but must not change behavior
+    with the flag off)."""
+    p = tmp_path / "chain.ndjson"
+    h1 = append_chained_entry(p, {"event": "first", "id": "e1"})
+    h2 = append_chained_entry(p, {"event": "second", "id": "e2"})
+    lines = p.read_text().splitlines()
+    assert json.loads(lines[0])["prev_hash"] == GENESIS_HASH
+    assert json.loads(lines[1])["prev_hash"] == h1
+    assert h1 != h2
+
+
+def test_append_epoch_marker_still_works_under_new_lock(tmp_path):
+    p = tmp_path / "chain.ndjson"
+    append_epoch_marker(p, 1)
+    max_epoch, active = epoch_state(p)
+    assert max_epoch == 1 and active is True
+    ok, violations, status = verify_chain(p)
+    assert ok is True and violations == [] and status == "verified-segmented"
+
+
+def test_ledger_lock_file_created_and_released(tmp_path):
+    """The lock file exists after an append and is not left locked (flock
+    released) — a second immediate append must not hang."""
+    p = tmp_path / "chain.ndjson"
+    append_chained_entry(p, {"seq": 0})
+    lock_path = ledger_lock_path(p)
+    assert lock_path.exists()
+    # A second append must complete promptly (lock released after the first).
+    append_chained_entry(p, {"seq": 1})
+    assert len(p.read_text().splitlines()) == 2
