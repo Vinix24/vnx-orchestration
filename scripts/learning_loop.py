@@ -450,9 +450,10 @@ class LearningLoop:
                         no_provider_skipped += 1
                         continue
 
-                    # Window filter on the receipt timestamp. Drop records we
-                    # cannot place in time so a full historical stream does not
-                    # over-produce against the >=2 recurrence threshold.
+                    # Window filter on the receipt timestamp. Frozen batches
+                    # (parseable old timestamps) are excluded; contract_invalid
+                    # is fail-open on missing/unparseable effective timestamps
+                    # so a fresh real failure is never silently hidden.
                     # contract_invalid records window on the processor-stamped
                     # ingested_at (contract_invalid_effective_timestamp)
                     # instead of the worker-suppliable `timestamp` — otherwise
@@ -462,7 +463,9 @@ class LearningLoop:
                     ts_raw = receipt.get("timestamp")
                     window_ts = contract_invalid_effective_timestamp(receipt) if is_contract_invalid else ts_raw
                     ts_dt = _parse_receipt_timestamp(window_ts)
-                    if ts_dt is None or ts_dt < start_time:
+                    if ts_dt is not None and ts_dt < start_time:
+                        continue
+                    if ts_dt is None and not is_contract_invalid:
                         continue
 
                     failure_patterns.append({

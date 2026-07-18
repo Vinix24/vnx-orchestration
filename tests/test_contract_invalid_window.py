@@ -367,3 +367,174 @@ class TestCheckActiveDrainWindowing:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# 4. Codex-gate fix-ronde 1: fail-open on unparseable/missing effective time
+#    (dispatch 20260718-windowing-fix-r1)
+# ---------------------------------------------------------------------------
+
+class TestLearningLoopFailOpenOnUnparseableTime:
+    """The dedicated staleness helper is fail-open, but a later ts_dt is None
+    branch used to drop the same records. Ensure it no longer does."""
+
+    def test_missing_effective_time_counts(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {"status": "contract_invalid", "provider": "claude"}
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 1
+
+    def test_unparseable_effective_time_counts(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {
+            "status": "contract_invalid",
+            "ingested_at": "not-a-date",
+            "provider": "claude",
+        }
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 1
+
+    def test_zero_prefix_unparseable_effective_time_counts(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {
+            "status": "contract_invalid",
+            "ingested_at": "0000-not-a-date",
+            "provider": "claude",
+        }
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 1, "lexicographically-old prefix must not hide contract_invalid"
+
+    def test_old_parseable_still_excluded(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {
+            "status": "contract_invalid",
+            "ingested_at": _OLD_26D,
+            "provider": "claude",
+        }
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=365)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 0
+
+    def test_non_contract_invalid_unparseable_still_dropped(self, tmp_path: Path) -> None:
+        """Fail-open is scoped to contract_invalid; other failures keep the time guard."""
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {"status": "failed", "timestamp": "not-a-date", "provider": "claude"}
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 0
+
+
+class TestWeeklyDigestFailOpenOnUnparseableTime:
+    """The lexicographic effective_ts[:10] < since check used to hide
+    contract_invalid records with an unparseable old-looking prefix."""
+
+    def test_zero_prefix_unparseable_counts(self, tmp_path: Path) -> None:
+        record = {"status": "contract_invalid", "ingested_at": "0000-not-a-date"}
+        out = _run_weekly_digest([record], tmp_path=tmp_path)
+        assert out["failure"] == 1
+        assert out["total"] == 1
+
+    def test_unparseable_text_counts(self, tmp_path: Path) -> None:
+        record = {"status": "contract_invalid", "ingested_at": "not-a-date"}
+        out = _run_weekly_digest([record], tmp_path=tmp_path)
+        assert out["failure"] == 1
+        assert out["total"] == 1
+
+    def test_report_contract_invalid_zero_prefix_counts(self, tmp_path: Path) -> None:
+        record = {
+            "event_type": "report_contract_invalid",
+            "status": "contract_invalid",
+            "ingested_at": "0000-not-a-date",
+        }
+        out = _run_weekly_digest([record], tmp_path=tmp_path)
+        assert out["failure"] == 1
+        assert out["total"] == 1
+
+    def test_old_parseable_still_excluded(self, tmp_path: Path) -> None:
+        record = {"status": "contract_invalid", "ingested_at": _OLD_26D}
+        out = _run_weekly_digest([record], tmp_path=tmp_path)
+        assert out["total"] == 0
+
+
+class TestCheckActiveDrainFailOpenOnUnparseableTime:
+    """contract_invalid must route to dead_letter even when the manifest
+    timestamp is missing or unparseable."""
+
+    def _drain_one(self, tmp_path: Path, manifest_timestamp):
+        from check_active_drain import (
+            DispatchEntry,
+            drain_one,
+            build_receipt_status_index,
+        )
+
+        receipts_processed = tmp_path / "receipts" / "processed"
+        receipts_processed.mkdir(parents=True)
+        dispatches_dir = tmp_path / "dispatches"
+        for bucket in ("active", "completed", "dead_letter"):
+            (dispatches_dir / bucket).mkdir(parents=True)
+
+        did = "20260718-fail-open-drain"
+        active_dir = dispatches_dir / "active" / did
+        active_dir.mkdir(parents=True)
+
+        manifest: dict = {"dispatch_id": did}
+        if manifest_timestamp is not None:
+            manifest["timestamp"] = manifest_timestamp
+        (active_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        (receipts_processed / f"receipt-{did}.json").write_text(
+            json.dumps({"dispatch_id": did, "status": "contract_invalid"}),
+            encoding="utf-8",
+        )
+
+        idx = build_receipt_status_index(tmp_path / "receipts")
+        entry = DispatchEntry(dispatch_id=did, directory=active_dir, timestamp=None)
+        return drain_one(
+            entry=entry,
+            receipt_index=idx,
+            dispatches_dir=dispatches_dir,
+            now=_NOW,
+            older_than_seconds=3600,
+            dry_run=False,
+        )
+
+    def test_missing_manifest_timestamp_routes_dead_letter(self, tmp_path: Path) -> None:
+        result = self._drain_one(tmp_path, manifest_timestamp=None)
+        assert result.action == "dead_letter"
+
+    def test_unparseable_manifest_timestamp_routes_dead_letter(self, tmp_path: Path) -> None:
+        result = self._drain_one(tmp_path, manifest_timestamp="0000-not-a-date")
+        assert result.action == "dead_letter"
+
+    def test_unparseable_ingested_at_still_failure_in_index(self, tmp_path: Path) -> None:
+        from check_active_drain import build_receipt_status_index
+
+        receipts_dir = tmp_path / "receipts"
+        processed = receipts_dir / "processed"
+        processed.mkdir(parents=True)
+        (processed / "receipt-bad-ts.json").write_text(
+            json.dumps(
+                {"dispatch_id": "d-bad-ts", "status": "contract_invalid", "ingested_at": "0000-not-a-date"}
+            ),
+            encoding="utf-8",
+        )
+        idx = build_receipt_status_index(receipts_dir)
+        assert idx["d-bad-ts"] == "failure"
