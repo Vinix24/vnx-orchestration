@@ -91,18 +91,18 @@ def compute_verdict(receipt: Dict[str, Any]) -> Dict[str, Any]:
     order (highest precedence first):
 
       1. reject   — hard-failure `status`, or any `severity: "blocker"` warning.
-      2. doc-only — `verification.method == "n/a"`: accept only if every
+      2. investigate — `status` outside `SUCCESS_STATUSES` (e.g.
+                     "unknown"/"in_progress"). No non-success status can
+                     reach `accept`, even for a doc-only change (fix-r2).
+      3. doc-only — `verification.method == "n/a"`: accept only if every
                      changed path is confirmed under docs/**/*.md, else
                      investigate (fail-safe on missing/partial evidence).
-      3. investigate — `verification.method == "pending-report"`, an
-                     unresolved `destination: "oi_pending"` warning, a
-                     `status` outside both the hard-failure set and the
-                     success allowlist (`SUCCESS_STATUSES` — e.g.
-                     "unknown"/"in_progress" never reach accept, fix-r1
-                     BLOCKING-1), incomplete verification evidence
-                     (`method` in `unknown`/`none_claimed`, fix-r1 HIGH-2),
-                     or missing/failing test evidence.
-      4. accept   — `status` in `SUCCESS_STATUSES`, `evidence_complete`,
+      4. investigate — `verification.method == "pending-report"`, an
+                     unresolved `destination: "oi_pending"` warning,
+                     incomplete verification evidence (`method` in
+                     `unknown`/`none_claimed`, fix-r1 HIGH-2), or
+                     missing/failing test evidence.
+      5. accept   — `status` in `SUCCESS_STATUSES`, `evidence_complete`,
                      `tests_failed == 0` with `tests_run > 0`, no
                      blocker/oi_pending warnings.
     """
@@ -124,6 +124,14 @@ def compute_verdict(receipt: Dict[str, Any]) -> Dict[str, Any]:
         return _verdict(
             "reject",
             "an unresolved severity=blocker warning is present",
+            evidence_complete,
+        )
+
+    if status not in SUCCESS_STATUSES:
+        return _verdict(
+            "investigate",
+            f"status={status!r} is neither a hard-failure status nor a "
+            "recognized success status — no basis for accept",
             evidence_complete,
         )
 
@@ -160,14 +168,6 @@ def compute_verdict(receipt: Dict[str, Any]) -> Dict[str, Any]:
         return _verdict(
             "investigate",
             "an unresolved destination=oi_pending warning is present",
-            evidence_complete,
-        )
-
-    if status not in SUCCESS_STATUSES:
-        return _verdict(
-            "investigate",
-            f"status={status!r} is neither a hard-failure status nor a "
-            "recognized success status — no basis for accept",
             evidence_complete,
         )
 

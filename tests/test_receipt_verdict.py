@@ -400,3 +400,66 @@ def test_fixr1_high3_doc_only_nested_docs_md_path_still_accepts():
     }
     verdict = compute_verdict(receipt)
     assert verdict["decision"] == "accept"
+
+
+# ── fix-r2 BLOCKING — non-success status cannot use doc-only accept bypass ──
+# PR #1186 codex-regate finding: the doc-only branch returned accept before the
+# success-status gate, so status="in_progress"/"unknown" with verification.
+# method="n/a" and docs-only paths was incorrectly accepted.
+
+
+@pytest.mark.parametrize("status", ["in_progress", "unknown"])
+def test_fixr2_blocking_non_success_doc_only_is_investigate(status):
+    """Non-success status + n/a verification + docs-only paths must NOT
+    reach accept; it must route to investigate."""
+    receipt = {
+        "status": status,
+        "verification": {"method": "n/a", "spec_deviation": "doc-only dispatch"},
+        "provenance": {
+            "diff_summary": {
+                "paths": [
+                    "docs/governance/decisions/ADR-035-receipt-v2.md",
+                    "docs/README.md",
+                ]
+            }
+        },
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+    assert status in verdict["reason"]
+    assert verdict["evidence_complete"] is True
+
+
+@pytest.mark.parametrize("status", ["in_progress", "unknown"])
+def test_fixr2_blocking_non_success_doc_only_is_not_reject(status):
+    """Non-success/non-failure doc-only cases land on investigate, not reject."""
+    receipt = {
+        "status": status,
+        "verification": {"method": "n/a"},
+        "provenance": {
+            "diff_summary": {"paths": ["docs/governance/decisions/ADR-035-receipt-v2.md"]}
+        },
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "investigate"
+    assert verdict["decision"] != "reject"
+    assert verdict["decision"] != "accept"
+
+
+def test_fixr2_doc_only_success_status_still_accepts():
+    """A genuine success-status doc-only dispatch must continue to accept."""
+    receipt = {
+        "status": "done",
+        "verification": {"method": "n/a", "spec_deviation": "doc-only dispatch"},
+        "provenance": {
+            "diff_summary": {
+                "paths": [
+                    "docs/governance/decisions/ADR-035-receipt-v2.md",
+                    "docs/README.md",
+                ]
+            }
+        },
+    }
+    verdict = compute_verdict(receipt)
+    assert verdict["decision"] == "accept"
+    assert verdict["evidence_complete"] is True
