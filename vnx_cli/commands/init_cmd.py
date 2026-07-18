@@ -14,10 +14,19 @@ pin, root CLAUDE.md and FEATURE_PLAN.md via Jinja2 templates (default/minimal).
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
 from vnx_cli import _engine, __version__
+
+# Mirror of the char-class check in templates/vnx_shim.sh.tpl's pin validation
+# (`[[ "$pin" =~ ^[A-Za-z0-9._-]+$ ]]`). Kept local to init_cmd because the
+# pip-CLI engine resolver intentionally does NOT honor .vnx-version for engine
+# selection (see _engine.engine_root). --set-version writes the pin file, but
+# until design-track ``pip-cli-honor-pin-via-reexec`` lands the running pip CLI
+# keeps using its own engine.
+_VERSION_PIN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 GOVERNANCE_PROFILES_YAML = """\
 # VNX Governance Profiles
@@ -601,9 +610,9 @@ def vnx_init(args) -> int:
         print(f"  error: unknown template {template!r}. Choose: {', '.join(sorted(_VALID_TEMPLATES))}", file=sys.stderr)
         return 1
 
-    if set_version and not _engine.VERSION_PIN_RE.match(set_version):
+    if set_version and not _VERSION_PIN_RE.match(set_version):
         print(
-            f"  error: --set-version {set_version!r} invalid: must match {_engine.VERSION_PIN_RE.pattern}",
+            f"  error: --set-version {set_version!r} invalid: must match {_VERSION_PIN_RE.pattern}",
             file=sys.stderr,
         )
         return 1

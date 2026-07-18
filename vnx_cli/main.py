@@ -180,7 +180,9 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         default=None,
         metavar="VERSION",
         help="explicitly (re)write the .vnx-version pin to VERSION, even if a pin "
-             "already exists; must match [A-Za-z0-9._-]+",
+             "already exists; must match [A-Za-z0-9._-]+. The pin is written but "
+             "the running pip CLI still resolves its own engine until the "
+             "pip-cli-honor-pin-via-reexec design-track lands",
     )
 
 

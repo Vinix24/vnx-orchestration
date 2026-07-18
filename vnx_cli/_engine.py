@@ -23,83 +23,25 @@ from typing import Optional
 # regex is the single source of truth and is asserted identical in tests.
 _PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
-# Mirror of the char-class check in templates/vnx_shim.sh.tpl's pin validation
-# (`[[ "$pin" =~ ^[A-Za-z0-9._-]+$ ]]`). Keeping this identical means a pin the
-# bash shim accepts is also accepted here, and vice versa.
-VERSION_PIN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-_VNX_VERSION_FILENAME = ".vnx-version"
-
-
-def find_version_pin(start: Optional[Path] = None) -> Optional[str]:
-    """Traverse upward from ``start`` (default: cwd) for a ``.vnx-version`` pin.
-
-    Mirrors ``templates/vnx_shim.sh.tpl``'s ``find_version_pin`` so the
-    pip-installed CLI and a central install's bash shim agree on which pin
-    file governs a given invocation: walk up one directory at a time until a
-    ``.vnx-version`` file is found or the filesystem root is reached. Returns
-    the first line, stripped, or None if no pin file exists or it's empty.
-    """
-    directory = (start or Path.cwd()).resolve()
-    while True:
-        candidate = directory / _VNX_VERSION_FILENAME
-        if candidate.is_file():
-            try:
-                lines = candidate.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                return None
-            pin = lines[0].strip() if lines else ""
-            return pin or None
-        parent = directory.parent
-        if parent == directory:
-            return None
-        directory = parent
-
-
-def _pinned_engine_root() -> Optional[Path]:
-    """Resolve a ``.vnx-version`` pin to an installed central-install version tree.
-
-    Returns ``~/.vnx-system/versions/<pin>`` when: a pin is found upward from
-    cwd; the pin passes the bash shim's char-class check; the resolved path
-    stays inside the versions root (defends against a ``..`` pin, which the
-    char-class alone permits); and that version is actually installed locally
-    (has a ``scripts/`` dir). Returns None in every other case so
-    ``engine_root()`` falls back to its existing sibling-of-``vnx_cli``
-    resolution — a pin that isn't centrally installed on this machine must not
-    break the pip CLI.
-    """
-    pin = find_version_pin()
-    if not pin or not VERSION_PIN_RE.match(pin):
-        return None
-    versions_root = (Path.home() / ".vnx-system" / "versions").resolve()
-    pinned_root = (versions_root / pin).resolve()
-    if pinned_root != versions_root and versions_root not in pinned_root.parents:
-        return None
-    if not (pinned_root / "scripts").is_dir():
-        return None
-    return pinned_root
-
 
 def engine_root() -> Path:
     """Return the engine root (the dir holding ``scripts/``, ``schemas/`` ...).
 
-    Honors a ``.vnx-version`` pin first: if one is found upward from cwd and
-    resolves to an installed ``~/.vnx-system/versions/<pin>`` tree, that tree
-    is the engine root — this is what makes the pin consequential for the
-    pip-installed CLI, not just the bash shim (see ``_pinned_engine_root``).
+    In an installed wheel the engine ships under the ``vnx_orchestration``
+    namespace package, so the trees live at ``<site-packages>/vnx_orchestration``
+    — a sibling of the ``vnx_cli`` package, not site-packages itself. In a dev
+    checkout the engine trees sit at the repo root, also a sibling of
+    ``vnx_cli/``. Probe the packaged location first (PR-PIP-REPACKAGE) and fall
+    back to the checkout layout; both are validated by the ``scripts/`` presence.
 
-    Otherwise falls back to the unpinned default: in an installed wheel the
-    engine ships under the ``vnx_orchestration`` namespace package, so the
-    trees live at ``<site-packages>/vnx_orchestration`` — a sibling of the
-    ``vnx_cli`` package, not site-packages itself. In a dev checkout the
-    engine trees sit at the repo root, also a sibling of ``vnx_cli/``. Probe
-    the packaged location first (PR-PIP-REPACKAGE) and fall back to the
-    checkout layout; both are validated by the ``scripts/`` presence.
+    NOTE: this resolver intentionally does NOT honor ``.vnx-version`` for engine
+    selection. The pip-installed CLI and the pinned engine are API-coupled, so
+    swapping the engine root based on a pin can crash commands that call new
+    APIs against an old engine (e.g. ``deliver_via_door(deadline_seconds=...)``).
+    Honoring the pin from a pip install is tracked as design-track
+    ``pip-cli-honor-pin-via-reexec``; until that lands, ``vnx init --set-version``
+    writes the pin file but the running pip CLI keeps using its own engine.
     """
-    pinned = _pinned_engine_root()
-    if pinned is not None:
-        return pinned
-
     parent = Path(__file__).resolve().parent.parent
     packaged = parent / "vnx_orchestration"
     if (packaged / "scripts").is_dir():
