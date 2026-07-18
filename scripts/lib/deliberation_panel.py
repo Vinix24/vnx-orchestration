@@ -139,8 +139,22 @@ class DeliberationResult:
         return "\n".join(lines)
 
 
-def _digest(fan_out: List[Dict[str, str]], limit: int = 1500) -> str:
-    """Compact digest of the fan-out for the contrarian/verify/synthesis stages."""
+# Per-seat char budget fed into the sequential stages (contrarian/verify/synthesis).
+# Was 1500 and got entirely consumed by each report's echoed frontmatter + instruction +
+# shared context, so the downstream seats saw only boilerplate, never the analysis
+# (sales-copilot panel, 2026-07-18). Heuristic echo-stripping was attempted in two
+# follow-up fix rounds but proved fragile (codex-gate kept finding edge cases), so we
+# deliberately fall back to the robust minimum: a plain budget that keeps boilerplate
+# but leaves room for the actual analysis.
+_DIGEST_LIMIT = 6000
+
+
+def _digest(fan_out: List[Dict[str, str]], limit: int = _DIGEST_LIMIT) -> str:
+    """Compact digest of the fan-out for the contrarian/verify/synthesis stages.
+
+    Budget-only: no heuristic echo-stripping. Downstream seats can read past the
+    boilerplate; the important thing is that the analysis is not truncated.
+    """
     parts = []
     for fo in fan_out:
         text = (fo.get("text") or "").strip()
@@ -211,7 +225,7 @@ def run_deliberation(
     verify_prompt = (
         f"You are the VERIFY pass on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
-        f"Panel findings:\n{digest}\n\nRed-team:\n{result.contrarian[:1500]}\n\n"
+        f"Panel findings:\n{digest}\n\nRed-team:\n{result.contrarian[:_DIGEST_LIMIT]}\n\n"
         f"Take the TOP 5 concrete claims across the above and adversarially verify each against "
         f"{spec.verify_target}. Mark each: CONFIRMED / REFUTED / UNVERIFIABLE, with the specific "
         "evidence (file:line or source). Default to REFUTED/UNVERIFIABLE when evidence is thin."
@@ -225,8 +239,8 @@ def run_deliberation(
     synth_prompt = (
         f"You are the SYNTHESISER on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
-        f"Divergent views:\n{digest}\n\nRed-team:\n{result.contrarian[:1500]}\n\n"
-        f"Verification:\n{result.factcheck[:1500]}\n\n"
+        f"Divergent views:\n{digest}\n\nRed-team:\n{result.contrarian[:_DIGEST_LIMIT]}\n\n"
+        f"Verification:\n{result.factcheck[:_DIGEST_LIMIT]}\n\n"
         f"Produce {spec.synth_goal}. Structure: CONSENSUS (verified), CONTESTED (surviving "
         "dissent), VERIFIED CLAIMS (ranked, with evidence), OPEN QUESTIONS. Dedupe. Cite "
         "file:line / sources. Do not invent agreement that isn't there."

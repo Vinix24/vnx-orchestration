@@ -115,3 +115,25 @@ class TestPick:
 
     def test_falls_back_to_first_seat(self):
         assert dp._pick(ROSTER, prefer=("nope",))[0] == "codex"
+
+
+class TestDigestBudget:
+    def test_realistic_report_fits_in_digest(self):
+        """A realistic ~4000 char report (boilerplate + analysis) must be included in full,
+        not truncated to the old 1500 char budget that left only boilerplate."""
+        analysis_marker = "ACTUAL_ANALYSIS_END"
+        report = (
+            "---\ntitle: panel report\nprovider: codex\n---\n"
+            "You are one seat on a deliberation panel.\n"
+            "QUESTION: audit src/\n\n## Shared context\n"
+            + "\n".join(f"context line {i:02d}: lorem ipsum dolor sit amet" for i in range(30))
+            + "\n\nYOUR LENS: security vulnerabilities.\n\n"
+            + "Findings:\n"
+            + "\n".join(f"- issue {i}: potential bug in module/{i}.py" for i in range(55))
+            + f"\n{analysis_marker}"
+        )
+        assert 3500 < len(report) < 4500, f"report size {len(report)} outside realistic 3500-4500 band"
+        fan_out = [{"provider": "codex", "lens": "security", "text": report}]
+        digest = dp._digest(fan_out)
+        assert analysis_marker in digest
+        assert digest.count("issue ") == 55
