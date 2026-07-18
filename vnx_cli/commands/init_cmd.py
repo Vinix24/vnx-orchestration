@@ -16,6 +16,7 @@ pin, root CLAUDE.md and FEATURE_PLAN.md via Jinja2 templates (default/minimal).
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 from vnx_cli import _engine, __version__
@@ -192,11 +193,28 @@ _CODEOWNERS_ATTEST_BLOCK = """\
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` via a tmp file + os.replace (atomic)."""
+    """Write ``content`` to ``path`` via a tmp file + os.replace (atomic).
+
+    Uses a randomized temp name in the same directory so a pre-planted symlink
+    at a fixed ``.tmp`` path cannot be followed/truncated (symlink-TOCTOU).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _write_project_id_marker(project_dir: Path, project_id: str) -> bool:
