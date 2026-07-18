@@ -139,11 +139,37 @@ class DeliberationResult:
         return "\n".join(lines)
 
 
-def _digest(fan_out: List[Dict[str, str]], limit: int = 1500) -> str:
+# Per-seat char budget fed into the sequential stages (contrarian/verify/synthesis).
+# Was 1500 and got entirely consumed by each report's echoed frontmatter + instruction +
+# shared context, so the downstream seats saw only boilerplate, never the analysis
+# (sales-copilot panel, 2026-07-18). Strip the echo AND raise the budget.
+_DIGEST_LIMIT = 6000
+
+
+def _strip_echo(text: str, context: str) -> str:
+    """Seat/stage reports echo YAML frontmatter + instruction + the full shared context
+    before their actual answer. That boilerplate otherwise eats the whole digest budget,
+    leaving the later stages with echoes instead of analysis. Drop the frontmatter and
+    everything up to and including the echoed shared context. Degrades safely: when no
+    frontmatter/echo is present the (stripped) text is returned unchanged."""
+    t = (text or "").strip()
+    if t.startswith("---"):
+        end = t.find("\n---", 3)
+        if end != -1:
+            t = t[end + 4:].lstrip()
+    if context:
+        tail = context.strip()[-160:]
+        pos = t.rfind(tail)
+        if pos != -1:
+            t = t[pos + len(tail):].lstrip()
+    return t.strip()
+
+
+def _digest(fan_out: List[Dict[str, str]], context: str = "", limit: int = _DIGEST_LIMIT) -> str:
     """Compact digest of the fan-out for the contrarian/verify/synthesis stages."""
     parts = []
     for fo in fan_out:
-        text = (fo.get("text") or "").strip()
+        text = _strip_echo(fo.get("text") or "", context)
         parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text[:limit]}")
     return "\n\n".join(parts)
 
@@ -191,7 +217,7 @@ def run_deliberation(
     order = {p: i for i, (p, _) in enumerate(roster)}
     result.fan_out.sort(key=lambda fo: order.get(fo["provider"], 99))
 
-    digest = _digest(result.fan_out)
+    digest = _digest(result.fan_out, context)
 
     # ── Stage 2: CONTRARIAN (one red-team seat — the strongest reasoner) ──────
     contra_prompt = (
@@ -211,7 +237,7 @@ def run_deliberation(
     verify_prompt = (
         f"You are the VERIFY pass on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
-        f"Panel findings:\n{digest}\n\nRed-team:\n{result.contrarian[:1500]}\n\n"
+        f"Panel findings:\n{digest}\n\nRed-team:\n{_strip_echo(result.contrarian, context)[:_DIGEST_LIMIT]}\n\n"
         f"Take the TOP 5 concrete claims across the above and adversarially verify each against "
         f"{spec.verify_target}. Mark each: CONFIRMED / REFUTED / UNVERIFIABLE, with the specific "
         "evidence (file:line or source). Default to REFUTED/UNVERIFIABLE when evidence is thin."
@@ -225,8 +251,8 @@ def run_deliberation(
     synth_prompt = (
         f"You are the SYNTHESISER on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
-        f"Divergent views:\n{digest}\n\nRed-team:\n{result.contrarian[:1500]}\n\n"
-        f"Verification:\n{result.factcheck[:1500]}\n\n"
+        f"Divergent views:\n{digest}\n\nRed-team:\n{_strip_echo(result.contrarian, context)[:_DIGEST_LIMIT]}\n\n"
+        f"Verification:\n{_strip_echo(result.factcheck, context)[:_DIGEST_LIMIT]}\n\n"
         f"Produce {spec.synth_goal}. Structure: CONSENSUS (verified), CONTESTED (surviving "
         "dissent), VERIFIED CLAIMS (ranked, with evidence), OPEN QUESTIONS. Dedupe. Cite "
         "file:line / sources. Do not invent agreement that isn't there."
