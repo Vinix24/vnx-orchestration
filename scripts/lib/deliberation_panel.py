@@ -145,24 +145,51 @@ class DeliberationResult:
 # (sales-copilot panel, 2026-07-18). Strip the echo AND raise the budget.
 _DIGEST_LIMIT = 6000
 
+# Guards for _strip_echo so it never throws away real analysis.
+_MIN_CONTEXT_TAIL = 40          # ignore whitespace-only / trivial shared context
+_MAX_LEAD_CHARS = 1000          # context echo sits in the leading boilerplate (context + prompt framing)
+_SUBSTANTIAL_INPUT = 200        # fall back if stripping leaves almost nothing behind
+_MIN_OUTPUT = 80
+
 
 def _strip_echo(text: str, context: str) -> str:
     """Seat/stage reports echo YAML frontmatter + instruction + the full shared context
     before their actual answer. That boilerplate otherwise eats the whole digest budget,
     leaving the later stages with echoes instead of analysis. Drop the frontmatter and
-    everything up to and including the echoed shared context. Degrades safely: when no
-    frontmatter/echo is present the (stripped) text is returned unchanged."""
-    t = (text or "").strip()
+    everything up to and including the echoed shared context.
+
+    Edge-case guards:
+    * A whitespace-only ``context`` is ignored — it would otherwise match the empty string
+      and delete the whole report.
+    * A short context tail that also appears in the real analysis is ignored unless it
+      occurs in the leading boilerplate (shared context + prompt framing).
+    * If stripping would leave a near-empty digest while the post-frontmatter text was
+      substantial, return the post-frontmatter text instead ("never make it worse").
+    """
+    original = (text or "").strip()
+    t = original
     if t.startswith("---"):
         end = t.find("\n---", 3)
         if end != -1:
             t = t[end + 4:].lstrip()
-    if context:
-        tail = context.strip()[-160:]
-        pos = t.rfind(tail)
-        if pos != -1:
-            t = t[pos + len(tail):].lstrip()
-    return t.strip()
+    after_frontmatter = t
+
+    ctx = (context or "").strip()
+    if len(ctx) >= _MIN_CONTEXT_TAIL:
+        tail_len = min(160, len(ctx))
+        tail = ctx[-tail_len:]
+        pos = t.find(tail)
+        # The echoed context always appears early: prompt framing + the shared context.
+        # A match beyond that window is a panelist citing the context, not the echo.
+        lead_limit = min(len(t), len(ctx) + _MAX_LEAD_CHARS)
+        if pos != -1 and pos <= lead_limit:
+            t = t[pos + tail_len:].lstrip()
+
+    stripped = t.strip()
+    # Safety net: never return an empty/near-empty digest when the input had real content.
+    if len(stripped) < _MIN_OUTPUT and len(after_frontmatter) > _SUBSTANTIAL_INPUT:
+        return after_frontmatter.strip()
+    return stripped
 
 
 def _digest(fan_out: List[Dict[str, str]], context: str = "", limit: int = _DIGEST_LIMIT) -> str:
