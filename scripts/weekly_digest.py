@@ -26,6 +26,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from contract_invalid_window import is_stale_contract_invalid
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -134,15 +135,25 @@ def collect_metrics(days: int = 7) -> dict:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                ts = rec.get("timestamp", "")
-                if ts and isinstance(ts, str) and ts[:10] < since:
-                    continue
                 # Skip infra events before counting totals.
                 event_type = (rec.get("event_type") or "").lower()
                 if event_type in _SKIP_EVENT_TYPES:
                     continue
-                metrics["dispatch_outcomes"]["total"] += 1
                 status = (rec.get("status") or "").lower()
+                is_contract_invalid = (
+                    status == "contract_invalid" or event_type == "report_contract_invalid"
+                )
+                if is_contract_invalid:
+                    # contract_invalid/report_contract_invalid records window
+                    # EXCLUSIVELY through the shared staleness helper. No
+                    # independent date-prefix pre-filter is allowed to drop them.
+                    if is_stale_contract_invalid(rec):
+                        continue
+                else:
+                    ts = rec.get("timestamp", "")
+                    if ts and isinstance(ts, str) and ts[:10] < since:
+                        continue
+                metrics["dispatch_outcomes"]["total"] += 1
                 # Empty status falls back to event_type for classification —
                 # preserves pre-vocab recall for e.g. status-less task_complete
                 # receipts (the old code classified on status OR event_type).

@@ -27,6 +27,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from contract_invalid_window import is_stale_contract_invalid
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -55,6 +56,10 @@ def _parse_receipt_timestamp(value) -> Optional[datetime]:
 
     Handles both ISO forms seen in t0_receipts.ndjson:
       "2026-05-07T08:31:55.295343+00:00" and "2026-06-26T12:51:47Z".
+
+    Strict full-ISO parse only: no date-prefix fallback. A
+    malformed-but-prefix-valid string such as "2020-01-01-not-a-date" is
+    treated as unparseable, not as an old date.
     """
     if not value or not isinstance(value, str):
         return None
@@ -64,11 +69,7 @@ def _parse_receipt_timestamp(value) -> Optional[datetime]:
     try:
         return _to_aware_utc(datetime.fromisoformat(raw))
     except ValueError:
-        # Fall back to a date-only prefix (day-granularity window).
-        try:
-            return _to_aware_utc(datetime.fromisoformat(raw[:10]))
-        except ValueError:
-            return None
+        return None
 
 
 class LearningLoopMisconfigured(RuntimeError):
@@ -421,6 +422,21 @@ class LearningLoop:
                     if status not in _FAILURE_STATUSES:
                         continue
 
+                    event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+                    is_contract_invalid = (
+                        status == "contract_invalid" or event_type == "report_contract_invalid"
+                    )
+                    ts_raw = receipt.get("timestamp")
+
+                    # contract_invalid / report_contract_invalid records window
+                    # EXCLUSIVELY through the shared staleness helper. No second
+                    # timestamp parse (e.g. a date-prefix fallback) is allowed to
+                    # drop them afterwards — a malformed-but-prefix-valid time
+                    # fails strict parsing and must fail-open (counted).
+                    if is_contract_invalid:
+                        if is_stale_contract_invalid(receipt):
+                            continue
+
                     # D3 data-quality filter: skip no-provider failure receipts.
                     # Targets receipts where 'provider' is explicitly set to a
                     # none-sentinel ("none", "unknown", "null", ""), e.g. the 9,052+
@@ -434,13 +450,11 @@ class LearningLoop:
                         no_provider_skipped += 1
                         continue
 
-                    # Window filter on the receipt timestamp. Drop records we
-                    # cannot place in time so a full historical stream does not
-                    # over-produce against the >=2 recurrence threshold.
-                    ts_raw = receipt.get("timestamp")
-                    ts_dt = _parse_receipt_timestamp(ts_raw)
-                    if ts_dt is None or ts_dt < start_time:
-                        continue
+                    # Generic window filter for all other failure statuses.
+                    if not is_contract_invalid:
+                        ts_dt = _parse_receipt_timestamp(ts_raw)
+                        if ts_dt is None or ts_dt < start_time:
+                            continue
 
                     failure_patterns.append({
                         "task": str(receipt.get("task_id") or receipt.get("task_description") or ""),
