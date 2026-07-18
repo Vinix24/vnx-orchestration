@@ -136,6 +136,36 @@ class TestVnxInitCli:
         assert (tmp_path / ".vnx-version").is_file()
 
 
+class TestVnxInitAtomicWriteSafety:
+    """Symlink-TOCTOU regression tests for the atomic temp-write path."""
+
+    def test_init_ignores_pre_planted_vnx_version_tmp_symlink(self, tmp_path, tmp_path_factory):
+        """A pre-existing .vnx-version.tmp symlink must not be followed or
+        truncated; the real .vnx-version is still written atomically.
+        """
+        outside = tmp_path_factory.mktemp("outside") / "target.txt"
+        outside.write_text("do-not-touch\n")
+
+        planted = tmp_path / ".vnx-version.tmp"
+        planted.symlink_to(outside)
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc == 0
+
+        # The symlink target outside the repo must be untouched.
+        assert outside.read_text() == "do-not-touch\n"
+
+        # The actual pin file must exist and contain the current version.
+        version_file = tmp_path / ".vnx-version"
+        assert version_file.is_file()
+        assert version_file.read_text().strip() == __version__
+        assert not version_file.is_symlink()
+
+        # The planted symlink may be left behind; it must not be the pin.
+        if planted.exists():
+            assert planted.resolve() != version_file.resolve()
+
+
 class TestVnxInitAttestDelivery:
     """D5a + D5b: attestation trust-root and gate workflow delivery."""
 
