@@ -26,10 +26,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
-from contract_invalid_window import (
-    contract_invalid_effective_timestamp,
-    is_stale_contract_invalid,
-)
+from contract_invalid_window import is_stale_contract_invalid
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -43,21 +40,6 @@ DIGEST_PATH = STATE_DIR / "weekly_digest.json"
 _SEVERITY_SCORE = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
 
 
-def _parse_date_prefix(value) -> datetime | None:
-    """Return a date if the first 10 chars are a valid YYYY-MM-DD, else None.
-
-    Guards the window pre-filter against lexicographic accidents: an
-    unparseable timestamp such as ``"0000-not-a-date"`` must not be treated
-    as "old" and silently dropped.
-    """
-    if not isinstance(value, str) or len(value) < 10:
-        return None
-    try:
-        return datetime.strptime(value[:10], "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Metrics collection
 # ---------------------------------------------------------------------------
@@ -65,7 +47,6 @@ def _parse_date_prefix(value) -> datetime | None:
 def collect_metrics(days: int = 7) -> dict:
     """Aggregate intelligence data for the last N days."""
     since = (datetime.now(tz=_UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
-    since_date = datetime.strptime(since, "%Y-%m-%d").date()
     metrics: dict = {
         "patterns_learned": 0,
         "top_patterns": [],
@@ -164,22 +145,8 @@ def collect_metrics(days: int = 7) -> dict:
                 )
                 if is_contract_invalid:
                     # contract_invalid/report_contract_invalid records window
-                    # EXCLUSIVELY on the processor-stamped ingested_at (via
-                    # contract_invalid_effective_timestamp) — never on the
-                    # worker-suppliable `timestamp` field the generic filter
-                    # below uses. Otherwise a freshly-ingested contract_invalid
-                    # receipt whose report body forged an old `timestamp`
-                    # would get dropped by the generic --days filter before it
-                    # ever reaches the dedicated staleness check just below.
-                    effective_ts = contract_invalid_effective_timestamp(rec)
-                    eff_date = _parse_date_prefix(effective_ts)
-                    if eff_date is not None and eff_date < since_date:
-                        continue
-                    # A frozen contract_invalid batch (bulk-emitted, single old
-                    # timestamp) is excluded from the live count regardless of
-                    # the digest's own --days window — a dedicated, tighter
-                    # cutoff (default 14d) so a wide --days call doesn't
-                    # resurrect it.
+                    # EXCLUSIVELY through the shared staleness helper. No
+                    # independent date-prefix pre-filter is allowed to drop them.
                     if is_stale_contract_invalid(rec):
                         continue
                 else:

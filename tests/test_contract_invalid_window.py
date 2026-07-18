@@ -365,6 +365,95 @@ class TestCheckActiveDrainWindowing:
         assert "d-old-v1" not in idx
 
 
+class TestMalformedPrefixValidCountsInAllCounters:
+    """Fix-ronde 2 regression: a malformed-but-prefix-valid ingested_at
+    ("2020-01-01-not-a-date") must fail-open and count in every counter.
+    A genuinely old, fully-parseable ingested_at stays excluded.
+    """
+
+    def test_helper_malformed_prefix_valid_not_stale(self) -> None:
+        record = {"ingested_at": "2020-01-01-not-a-date"}
+        assert is_stale_contract_invalid(record, now=_NOW) is False
+
+    def test_helper_genuine_old_parseable_still_stale(self) -> None:
+        # 26 days ago is older than the default 14-day window.
+        record = {"ingested_at": _OLD_26D}
+        assert is_stale_contract_invalid(record, now=_NOW) is True
+
+    def test_helper_fresh_parseable_not_stale(self) -> None:
+        record = {"ingested_at": _FRESH}
+        assert is_stale_contract_invalid(record, now=_NOW) is False
+
+    def test_learning_loop_malformed_prefix_valid_counts(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {
+            "status": "contract_invalid",
+            "ingested_at": "2020-01-01-not-a-date",
+            "provider": "claude",
+        }
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 1, "prefix-valid malformed time must not hide contract_invalid"
+
+    def test_learning_loop_genuine_old_excluded(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        record = {"status": "contract_invalid", "ingested_at": _OLD_26D, "provider": "claude"}
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=365)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 0
+
+    def test_weekly_digest_malformed_prefix_valid_counts(self, tmp_path: Path) -> None:
+        record = {"status": "contract_invalid", "ingested_at": "2020-01-01-not-a-date"}
+        out = _run_weekly_digest([record], tmp_path=tmp_path)
+        assert out["failure"] == 1
+        assert out["total"] == 1
+
+    def test_weekly_digest_genuine_old_excluded(self, tmp_path: Path) -> None:
+        record = {"status": "contract_invalid", "ingested_at": _OLD_26D}
+        out = _run_weekly_digest([record], tmp_path=tmp_path)
+        assert out["total"] == 0
+
+    def test_check_active_drain_malformed_prefix_valid_counts(self, tmp_path: Path) -> None:
+        from check_active_drain import build_receipt_status_index
+
+        receipts_dir = tmp_path / "receipts"
+        processed = receipts_dir / "processed"
+        processed.mkdir(parents=True, exist_ok=True)
+        (processed / "receipt-prefix-valid.json").write_text(
+            json.dumps(
+                {
+                    "dispatch_id": "d-prefix-valid",
+                    "status": "contract_invalid",
+                    "ingested_at": "2020-01-01-not-a-date",
+                }
+            ),
+            encoding="utf-8",
+        )
+        idx = build_receipt_status_index(receipts_dir)
+        assert idx["d-prefix-valid"] == "failure"
+
+    def test_check_active_drain_genuine_old_excluded(self, tmp_path: Path) -> None:
+        from check_active_drain import build_receipt_status_index
+
+        receipts_dir = tmp_path / "receipts"
+        processed = receipts_dir / "processed"
+        processed.mkdir(parents=True, exist_ok=True)
+        (processed / "receipt-old.json").write_text(
+            json.dumps(
+                {"dispatch_id": "d-old", "status": "contract_invalid", "ingested_at": _OLD_26D}
+            ),
+            encoding="utf-8",
+        )
+        idx = build_receipt_status_index(receipts_dir)
+        assert "d-old" not in idx
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 
