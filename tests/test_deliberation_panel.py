@@ -117,41 +117,23 @@ class TestPick:
         assert dp._pick(ROSTER, prefer=("nope",))[0] == "codex"
 
 
-class TestStripEcho:
-    def test_whitespace_only_context_keeps_report(self):
-        """A context that is only whitespace is not a real echo source; stripping must not
-        empty a substantive report (HIGH edge-case #1)."""
-        report = "Real findings:\n- bug in scripts/lib/deliberation_panel.py:42\n- edge case"
-        assert dp._strip_echo(report, context="\n") == report
-
-    def test_short_context_tail_in_analysis_not_stripped(self):
-        """A short shared context cited by a panelist in real analysis must not be treated as
-        an echoed prefix (HIGH edge-case #2)."""
-        context = "scripts/lib/deliberation_panel.py"
-        analysis = (
-            "## Answer\n"
-            "I reviewed the file and found an issue at "
-            "scripts/lib/deliberation_panel.py:42.\n"
-            "Conclusion: fix the off-by-one."
-        )
-        assert dp._strip_echo(analysis, context=context) == analysis
-
-    def test_full_context_echo_is_stripped(self):
-        """The original bug: reports that echo frontmatter + instruction + shared context
-        must have that boilerplate removed, leaving the actual analysis."""
-        long_context = "\n".join(f"context line {i:02d}: lorem ipsum dolor sit amet" for i in range(10))
-        assert len(long_context) >= 40
-        tail_marker = long_context[-50:]
+class TestDigestBudget:
+    def test_realistic_report_fits_in_digest(self):
+        """A realistic ~4000 char report (boilerplate + analysis) must be included in full,
+        not truncated to the old 1500 char budget that left only boilerplate."""
+        analysis_marker = "ACTUAL_ANALYSIS_END"
         report = (
             "---\ntitle: panel report\nprovider: codex\n---\n"
             "You are one seat on a deliberation panel.\n"
-            f"QUESTION: audit src/\n\n## Shared context\n{long_context}\n\n"
-            "YOUR LENS: security vulnerabilities.\n\n"
-            "Actual analysis: found an XSS in dashboard/login.php:23."
+            "QUESTION: audit src/\n\n## Shared context\n"
+            + "\n".join(f"context line {i:02d}: lorem ipsum dolor sit amet" for i in range(30))
+            + "\n\nYOUR LENS: security vulnerabilities.\n\n"
+            + "Findings:\n"
+            + "\n".join(f"- issue {i}: potential bug in module/{i}.py" for i in range(55))
+            + f"\n{analysis_marker}"
         )
-        stripped = dp._strip_echo(report, context=long_context)
-        assert tail_marker not in stripped
-        assert "XSS in dashboard/login.php:23" in stripped
-        # The leading boilerplate (frontmatter + shared context echo) must be gone.
-        assert not stripped.startswith("---")
-        assert "Shared context" not in stripped
+        assert 3500 < len(report) < 4500, f"report size {len(report)} outside realistic 3500-4500 band"
+        fan_out = [{"provider": "codex", "lens": "security", "text": report}]
+        digest = dp._digest(fan_out)
+        assert analysis_marker in digest
+        assert digest.count("issue ") == 55
