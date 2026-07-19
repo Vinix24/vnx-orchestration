@@ -33,6 +33,14 @@ def engine_root() -> Path:
     checkout the engine trees sit at the repo root, also a sibling of
     ``vnx_cli/``. Probe the packaged location first (PR-PIP-REPACKAGE) and fall
     back to the checkout layout; both are validated by the ``scripts/`` presence.
+
+    NOTE: this resolver intentionally does NOT honor ``.vnx-version`` for engine
+    selection. The pip-installed CLI and the pinned engine are API-coupled, so
+    swapping the engine root based on a pin can crash commands that call new
+    APIs against an old engine (e.g. ``deliver_via_door(deadline_seconds=...)``).
+    Honoring the pin from a pip install is tracked as design-track
+    ``pip-cli-honor-pin-via-reexec``; until that lands, ``vnx init --set-version``
+    writes the pin file but the running pip CLI keeps using its own engine.
     """
     parent = Path(__file__).resolve().parent.parent
     packaged = parent / "vnx_orchestration"

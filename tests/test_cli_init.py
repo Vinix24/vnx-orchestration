@@ -27,6 +27,7 @@ def _args(tmp_path, **overrides):
         template="default",
         force=False,
         non_interactive=False,
+        set_version=None,
     )
     for k, v in overrides.items():
         setattr(ns, k, v)
@@ -122,6 +123,59 @@ class TestVnxInitCli:
         assert (tmp_path / ".claude" / "terminals" / "T0" / "CLAUDE.md").is_file()
         assert (tmp_path / ".vnx-version").is_file()
 
+    def test_init_force_preserves_existing_pin(self, tmp_path):
+        # The direct cause of the fleet version-pin drift incident: a fleet-lift
+        # running `vnx init --force` per project must NOT reset an operator's
+        # pin back to the running package version.
+        vnx_init(_args(tmp_path))
+        version_file = tmp_path / ".vnx-version"
+        version_file.write_text("v1.3.0\n")
+
+        rc = vnx_init(_args(tmp_path, force=True))
+        assert rc == 0
+        assert version_file.read_text().strip() == "v1.3.0"
+
+    def test_init_force_without_set_version_never_writes_running_version(self, tmp_path):
+        vnx_init(_args(tmp_path))
+        version_file = tmp_path / ".vnx-version"
+        pinned = "v1.3.0"
+        assert pinned != __version__, "test fixture must pin a version other than the running one"
+        version_file.write_text(pinned + "\n")
+
+        rc = vnx_init(_args(tmp_path, force=True))
+        assert rc == 0
+        assert version_file.read_text().strip() == pinned
+        assert version_file.read_text().strip() != __version__
+
+    def test_init_set_version_repins_existing(self, tmp_path):
+        vnx_init(_args(tmp_path))
+        version_file = tmp_path / ".vnx-version"
+        version_file.write_text("v1.3.0\n")
+
+        rc = vnx_init(_args(tmp_path, force=True, set_version="v1.4.0"))
+        assert rc == 0
+        assert version_file.read_text().strip() == "v1.4.0"
+
+    def test_init_set_version_on_fresh_init(self, tmp_path):
+        rc = vnx_init(_args(tmp_path, set_version="v1.4.0"))
+        assert rc == 0
+        version_file = tmp_path / ".vnx-version"
+        assert version_file.read_text().strip() == "v1.4.0"
+
+    def test_init_set_version_rejects_invalid_format(self, tmp_path):
+        rc = vnx_init(_args(tmp_path, set_version="not a valid pin"))
+        assert rc != 0
+        assert not (tmp_path / ".vnx-version").exists()
+
+    def test_init_set_version_without_force_on_existing_still_aborts(self, tmp_path):
+        # --set-version does not bypass the existing-init safety gate; an
+        # operator repinning an already-initialised project still needs
+        # --force too (consistent with every other scaffold file).
+        vnx_init(_args(tmp_path))
+        rc = vnx_init(_args(tmp_path, set_version="v1.4.0"))
+        assert rc != 0
+        assert (tmp_path / ".vnx-version").read_text().strip() == __version__
+
     def test_init_project_path_positional(self, tmp_path):
         ns = argparse.Namespace(
             project_path=str(tmp_path),
@@ -134,6 +188,36 @@ class TestVnxInitCli:
         rc = vnx_init(ns)
         assert rc == 0
         assert (tmp_path / ".vnx-version").is_file()
+
+
+class TestVnxInitAtomicWriteSafety:
+    """Symlink-TOCTOU regression tests for the atomic temp-write path."""
+
+    def test_init_ignores_pre_planted_vnx_version_tmp_symlink(self, tmp_path, tmp_path_factory):
+        """A pre-existing .vnx-version.tmp symlink must not be followed or
+        truncated; the real .vnx-version is still written atomically.
+        """
+        outside = tmp_path_factory.mktemp("outside") / "target.txt"
+        outside.write_text("do-not-touch\n")
+
+        planted = tmp_path / ".vnx-version.tmp"
+        planted.symlink_to(outside)
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc == 0
+
+        # The symlink target outside the repo must be untouched.
+        assert outside.read_text() == "do-not-touch\n"
+
+        # The actual pin file must exist and contain the current version.
+        version_file = tmp_path / ".vnx-version"
+        assert version_file.is_file()
+        assert version_file.read_text().strip() == __version__
+        assert not version_file.is_symlink()
+
+        # The planted symlink may be left behind; it must not be the pin.
+        if planted.exists():
+            assert planted.resolve() != version_file.resolve()
 
 
 class TestVnxInitAttestDelivery:
