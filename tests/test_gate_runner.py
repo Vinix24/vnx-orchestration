@@ -27,7 +27,25 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+import gate_runner
 from gate_runner import GateRunner
+
+
+@pytest.fixture(autouse=True)
+def _fake_gate_worktree(tmp_path, monkeypatch):
+    """Default OI-708 worktree checkout to a no-op fake for tests unrelated to it.
+
+    Without this, every `runner.run(gate="codex_gate"/"gemini_review", ...)`
+    call in this file would try a REAL `git fetch`/`git worktree add` (see
+    gate_worktree.create_gate_worktree), which is neither hermetic nor fast.
+    Tests that specifically exercise the worktree-checkout mechanism override
+    these via their own ``with patch(...)`` block, which nests correctly over
+    this default for the duration of that test.
+    """
+    fake_path = tmp_path / "_fake_gate_worktree"
+    monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: fake_path)
+    monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
+    return fake_path
 
 
 @pytest.fixture
@@ -811,3 +829,195 @@ class TestGateTimeoutConfig:
         from headless_adapter import gate_timeout, gate_stall_threshold
         assert gate_timeout("unknown_gate") == 600  # DEFAULT_TIMEOUT
         assert gate_stall_threshold("unknown_gate") == 60
+
+
+class TestGateWorktreeCheckout:
+    """OI-708: codex_gate/gemini_review subprocess must run with cwd at an
+    isolated worktree checked out from origin/<branch>, never the
+    orchestrator's ambient checkout. See scripts/lib/gate_worktree.py.
+
+    These tests override the file-level `_fake_gate_worktree` autouse fixture
+    with explicit patches so they can assert on the exact call args.
+    """
+
+    @staticmethod
+    def _mock_completed_proc(output: bytes, pid=55555):
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = 0
+        mock_proc.returncode = 0
+        mock_proc.pid = pid
+
+        read_count = [0]
+
+        def mock_os_read(fd, size):
+            read_count[0] += 1
+            if fd == 10 and read_count[0] == 1:
+                return output
+            return b""
+
+        return mock_proc, mock_os_read
+
+    def test_subprocess_cwd_is_the_created_worktree(self, gate_env, monkeypatch, tmp_path):
+        """Popen must receive cwd= the exact path returned by create_gate_worktree."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+            project_root=gate_env["project_root"],
+        )
+
+        report_path = str(gate_env["reports_dir"] / "worktree-cwd-report.md")
+        payload = _make_request_payload(
+            gate="codex_gate", report_path=report_path, branch="fix/oi-708",
+        )
+
+        fake_worktree = tmp_path / "isolated-worktree-abcd1234"
+        review_output = b'{"type":"message","message":"LGTM"}\nAll clear.\nNo issues.\n'
+        mock_proc, mock_os_read = self._mock_completed_proc(review_output)
+
+        with patch("gate_runner.create_gate_worktree", return_value=fake_worktree) as mock_create, \
+             patch("gate_runner.remove_gate_worktree") as mock_remove, \
+             patch("gate_runner.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=mock_proc.pid):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+
+        assert result["status"] == "completed"
+
+        # create_gate_worktree called with the request's branch, gate name, PR
+        # identifier, and the GateRunner's own resolved project_root.
+        mock_create.assert_called_once_with(
+            branch="fix/oi-708", gate="codex_gate", identifier="1",
+            project_root=gate_env["project_root"],
+        )
+
+        # The codex subprocess must run with cwd = the created worktree, not
+        # the orchestrator's ambient cwd (which Popen would inherit if cwd=None).
+        popen_kwargs = mock_popen.call_args.kwargs
+        assert popen_kwargs["cwd"] == str(fake_worktree)
+
+        mock_remove.assert_called_once_with(fake_worktree, project_root=gate_env["project_root"])
+
+    def test_worktree_removed_on_subprocess_timeout(self, gate_env, monkeypatch):
+        """remove_gate_worktree must run even when the gate subprocess times out."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"],
+        )
+
+        report_path = str(gate_env["reports_dir"] / "worktree-timeout-report.md")
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
+
+        fake_worktree = Path("/fake/gate-worktree-timeout")
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = None  # never finishes
+        mock_proc.pid = 66666
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = MagicMock()
+
+        real_monotonic = time.monotonic
+        call_count = [0]
+        base_time = [real_monotonic()]
+
+        def fake_monotonic():
+            call_count[0] += 1
+            return base_time[0] + (call_count[0] * 0.5)
+
+        with patch("gate_runner.create_gate_worktree", return_value=fake_worktree), \
+             patch("gate_runner.remove_gate_worktree") as mock_remove, \
+             patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.time.monotonic", side_effect=fake_monotonic), \
+             patch("gate_runner.os.getpgid", return_value=mock_proc.pid), \
+             patch("gate_runner.os.killpg"):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+
+        assert result["status"] == "failed"
+        assert result["reason"] in ("timeout", "stall")
+        mock_remove.assert_called_once_with(fake_worktree, project_root=None)
+
+    def test_worktree_creation_failure_fails_gate_without_running_subprocess(
+        self, gate_env, monkeypatch,
+    ):
+        """No stale-checkout fallback: when the worktree can't be created, the
+        gate must fail loudly and codex/gemini must NEVER run against the
+        orchestrator's ambient (possibly stale) checkout."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"],
+        )
+
+        payload = _make_request_payload(gate="codex_gate", branch="fix/oi-708")
+
+        with patch(
+            "gate_runner.create_gate_worktree",
+            side_effect=gate_runner.GateWorktreeError(
+                "git fetch origin fix/oi-708 failed: no route to host",
+            ),
+        ) as mock_create, \
+             patch("gate_runner.remove_gate_worktree") as mock_remove, \
+             patch("gate_runner.subprocess.Popen") as mock_popen:
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+
+        mock_create.assert_called_once()
+        mock_popen.assert_not_called()
+        mock_remove.assert_not_called()
+
+        assert result["status"] == "failed"
+        assert result["reason"] == "worktree_checkout_failed"
+        assert "no route to host" in result["reason_detail"]
+
+        result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
+        assert result_file.exists()
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["status"] == "failed"
+        assert saved["reason"] == "worktree_checkout_failed"
+
+    def test_project_root_threaded_from_gate_runner_constructor(
+        self, gate_env, monkeypatch, tmp_path,
+    ):
+        """GateRunner(project_root=...) must reach create_gate_worktree and
+        remove_gate_worktree, matching how ReviewGateManager constructs it."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        custom_root = tmp_path / "custom-project-root"
+        custom_root.mkdir()
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"],
+            project_root=custom_root,
+        )
+
+        report_path = str(gate_env["reports_dir"] / "project-root-report.md")
+        payload = _make_request_payload(gate="gemini_review", report_path=report_path)
+        fake_worktree = tmp_path / "isolated-worktree-xyz"
+        review_output = b"LGTM\nAll clear.\nNo issues.\n"
+        mock_proc, mock_os_read = self._mock_completed_proc(review_output, pid=44444)
+
+        with patch("gate_runner.create_gate_worktree", return_value=fake_worktree) as mock_create, \
+             patch("gate_runner.remove_gate_worktree") as mock_remove, \
+             patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=44444):
+            runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+
+        mock_create.assert_called_once_with(
+            branch=payload["branch"], gate="gemini_review", identifier="1",
+            project_root=custom_root,
+        )
+        mock_remove.assert_called_once_with(fake_worktree, project_root=custom_root)

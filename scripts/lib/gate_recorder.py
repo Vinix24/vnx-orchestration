@@ -42,6 +42,8 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     "exit_nonzero", "timeout", "stall", "stalled", "killed",
     # Subprocess / binary
     "subprocess_error", "subprocess_failed", "binary_not_found",
+    # Isolated-checkout setup (OI-708)
+    "worktree_checkout_failed",
     # Artifact and content issues
     "artifact_materialization_error", "artifact_materialization_failed",
     "empty_review_content", "validation_failed",
