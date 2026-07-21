@@ -811,39 +811,7 @@ class ProviderAdapter:
 
         # ---- kimi ----
         if pv == Provider.KIMI:
-            from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
-            from provider_dispatch import (  # noqa: PLC0415
-                KimiModelResolutionError,
-                _kimi_resolve_cli_model_arg,
-                _kimi_resolve_requested_key,
-            )
-
-            # Shared resolver (20260721-kimi-lane-hardening): args.model/plan.model >
-            # VNX_KIMI_MODEL > registry K3 default; bare provider/alias tokens ("kimi",
-            # "kimi-default") normalize to the default; an unmapped/stale model_key RAISES
-            # instead of ever being passed raw to `-m` or silently substituted with K3.
-            try:
-                model = _kimi_resolve_cli_model_arg(_kimi_resolve_requested_key(plan.model))
-            except KimiModelResolutionError as exc:
-                return _AdapterResult(
-                    returncode=1, completion_text="", status="failure",
-                    error=f"kimi model resolution failed: {exc}",
-                )
-            try:
-                result = spawn_kimi(
-                    prompt=instruction,
-                    model=model,
-                    dispatch_id=plan.dispatch_id,
-                    terminal_id=plan.target_id,
-                    event_writer=event_writer,
-                    cwd=cwd,
-                )
-            except BrokenPipeError as exc:
-                return _AdapterResult(
-                    returncode=1, completion_text="", status="failure",
-                    error=f"kimi spawn BrokenPipeError: {exc}",
-                )
-            return _map_generic_spawn_result(result, pv.value)
+            return self._run_kimi(plan, instruction, event_writer=event_writer, cwd=cwd)
 
         # ---- gemini ----
         if pv == Provider.GEMINI:
@@ -1080,6 +1048,53 @@ class ProviderAdapter:
             f"claude and auto do not route through the provider envelope "
             f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
         )
+
+    def _run_kimi(
+        self,
+        plan: "ExecutionPlan",
+        instruction: str,
+        *,
+        event_writer: Optional[Callable] = None,
+        cwd: Optional[Path] = None,
+    ) -> _AdapterResult:
+        """Kimi spawn branch, extracted from run() (OI-709 function-size gate).
+
+        Pure extraction — behavior identical to the former inline kimi branch.
+        """
+        from dispatch_spec import Provider  # noqa: PLC0415
+        from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
+        from provider_dispatch import (  # noqa: PLC0415
+            KimiModelResolutionError,
+            _kimi_resolve_cli_model_arg,
+            _kimi_resolve_requested_key,
+        )
+
+        # Shared resolver (20260721-kimi-lane-hardening): args.model/plan.model >
+        # VNX_KIMI_MODEL > registry K3 default; bare provider/alias tokens ("kimi",
+        # "kimi-default") normalize to the default; an unmapped/stale model_key RAISES
+        # instead of ever being passed raw to `-m` or silently substituted with K3.
+        try:
+            model = _kimi_resolve_cli_model_arg(_kimi_resolve_requested_key(plan.model))
+        except KimiModelResolutionError as exc:
+            return _AdapterResult(
+                returncode=1, completion_text="", status="failure",
+                error=f"kimi model resolution failed: {exc}",
+            )
+        try:
+            result = spawn_kimi(
+                prompt=instruction,
+                model=model,
+                dispatch_id=plan.dispatch_id,
+                terminal_id=plan.target_id,
+                event_writer=event_writer,
+                cwd=cwd,
+            )
+        except BrokenPipeError as exc:
+            return _AdapterResult(
+                returncode=1, completion_text="", status="failure",
+                error=f"kimi spawn BrokenPipeError: {exc}",
+            )
+        return _map_generic_spawn_result(result, Provider.KIMI.value)
 
 
 def run_envelope_plan(

@@ -81,6 +81,14 @@ def _provider_parts(provider: Optional[str], sub_provider: Optional[str]) -> tup
 
 _NATIVE_CLI_PROVIDERS = frozenset({"claude", "codex", "gemini", "kimi"})
 
+# Bare provider/alias tokens a caller might pass as --model for the kimi provider —
+# mirrors provider_dispatch._KIMI_BARE_ALIASES (20260721-kimi-lane-hardening, OI-707).
+# These are NOT real kimi-cli model ids; normalized to the registry default before
+# the model-in-registry gate below so a bare `--model kimi` isn't rejected at this
+# earlier door pre-flight (the shared resolver in provider_dispatch already handles
+# them once the plan reaches ProviderAdapter.run(), but this gate runs first).
+_KIMI_BARE_ALIASES = frozenset({"kimi", "kimi-default", "kimi_cli"})
+
 
 def _effective_provider(provider: Optional[str], sub_provider: Optional[str]) -> Optional[str]:
     base, sub = _provider_parts(provider, sub_provider)
@@ -201,6 +209,27 @@ def _model_matches(model: Optional[str], spec: Any) -> bool:
     if model is None:
         return False
     return bool(_registry_model_aliases(model) & _registry_model_aliases(str(spec)))
+
+
+def _kimi_bare_alias_registry_default(model_norm: str) -> Optional[str]:
+    """Resolve a bare kimi alias ('kimi', 'kimi-default', 'kimi_cli') to the
+    registry's kimi_cli.default_model key — single source of truth, no hardcoded
+    model id (OI-707). Returns None for anything that isn't a recognized bare
+    alias, so a real/unmapped id (e.g. 'kimi-bogus') is left untouched and still
+    fails the registry gate below instead of being silently substituted.
+    """
+    if model_norm not in _KIMI_BARE_ALIASES:
+        return None
+    try:
+        registry = _load_registry()
+    except Exception as e:
+        logger.warning("constraint_enforcer: registry load for kimi bare-alias default failed: %s", e)
+        return None
+    cfg = registry.get("kimi_cli")
+    if cfg is None:
+        return None
+    default_key = getattr(cfg, "default_model", None)
+    return default_key or None
 
 
 def _model_in_registry(provider: Optional[str], sub_provider: Optional[str], model: Optional[str]) -> bool:
@@ -520,16 +549,25 @@ class ConstraintEnforcer:
                 message=f"Route forbidden: {model} is deprecated; use glm-5.1.",
             ))
 
-        if check_registry and model and not _model_in_registry(base, sub, model):
-            registry_key = _registry_key_for(base, sub) or "unknown"
-            violations.append(ConstraintViolation(
-                code="model-not-in-current-registry",
-                severity="blocking",
-                message=(
-                    f"Route forbidden: model {model!r} is not registered for "
-                    f"provider {provider!r} (registry key {registry_key!r})."
-                ),
-            ))
+        if check_registry and model:
+            # OI-707: a bare `--model kimi`/`kimi-default` reaching this door
+            # pre-flight normalizes to the registry default before the lookup —
+            # a real unmapped id (e.g. 'kimi-bogus') is untouched and still fails.
+            registry_check_model = model
+            if _norm(base) == "kimi":
+                bare_alias_default = _kimi_bare_alias_registry_default(model_norm)
+                if bare_alias_default:
+                    registry_check_model = bare_alias_default
+            if not _model_in_registry(base, sub, registry_check_model):
+                registry_key = _registry_key_for(base, sub) or "unknown"
+                violations.append(ConstraintViolation(
+                    code="model-not-in-current-registry",
+                    severity="blocking",
+                    message=(
+                        f"Route forbidden: model {model!r} is not registered for "
+                        f"provider {provider!r} (registry key {registry_key!r})."
+                    ),
+                ))
 
         return violations
 
