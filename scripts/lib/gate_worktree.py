@@ -190,23 +190,28 @@ def remove_gate_worktree(wt_path: Optional[Path], *, project_root: Optional[Path
                     "git worktree remove failed: %s; falling back to shutil.rmtree", detail,
                 )
                 resolved = wt_path.resolve()
-                managed_root = (root / ".vnx-data" / "worktrees").resolve()
-                try:
-                    resolved.relative_to(managed_root)
-                except ValueError:
-                    log.warning(
-                        "refusing rmtree: %s is not under the managed worktree root %s",
-                        resolved, managed_root,
-                    )
-                    return
-                if not resolved.name.startswith(_MANAGED_WORKTREE_PREFIX):
-                    log.warning(
-                        "refusing rmtree: %s leaf name does not start with the managed "
-                        "prefix %r", resolved, _MANAGED_WORKTREE_PREFIX,
-                    )
-                    return
                 if wt_path.is_symlink():
                     log.warning("refusing rmtree: %s is a symlink", wt_path)
+                    return
+                # Verify the STRUCTURE of the actual path being removed — a
+                # managed gate worktree always looks like
+                # ``.vnx-data/worktrees/gate-*`` — rather than reconstructing
+                # an expected root from project_root (which may itself fall
+                # back to a __file__-anchored resolution). All three checks
+                # are plain string comparisons on `resolved`, a function
+                # parameter, never a Path(...) join.
+                grandparent_name = resolved.parent.parent.name
+                parent_name = resolved.parent.name
+                if not (
+                    resolved.name.startswith(_MANAGED_WORKTREE_PREFIX)
+                    and parent_name == "worktrees"
+                    and grandparent_name == ".vnx-data"
+                ):
+                    log.warning(
+                        "refusing rmtree: %s does not match the managed gate-worktree "
+                        "structure ('.vnx-data/worktrees/%s*'); got parent=%r grandparent=%r",
+                        resolved, _MANAGED_WORKTREE_PREFIX, parent_name, grandparent_name,
+                    )
                     return
                 shutil.rmtree(str(resolved), ignore_errors=True)
 
