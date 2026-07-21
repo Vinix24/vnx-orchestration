@@ -79,12 +79,12 @@ class TestResolveKimiModelLabel:
         assert result != "default", "should not return generic 'default' — use registry key"
 
     def test_fallback_when_registry_unavailable(self):
-        """When registry raises, falls back to 'kimi-default'."""
+        """When registry raises, falls back to the K3 default (20260721-kimi-lane-hardening)."""
         import provider_dispatch
 
         with patch("providers.provider_registry.load", side_effect=FileNotFoundError("no yaml")):
             result = provider_dispatch._resolve_kimi_model_label()
-        assert result == "kimi-default"
+        assert result == "kimi-k3"
 
     def test_fallback_when_kimi_cli_missing_from_registry(self):
         """When kimi_cli section is absent, returns hardcoded fallback."""
@@ -93,7 +93,7 @@ class TestResolveKimiModelLabel:
         mock_registry = {}  # empty — no 'kimi_cli' key
         with patch("providers.provider_registry.load", return_value=mock_registry):
             result = provider_dispatch._resolve_kimi_model_label()
-        assert result == "kimi-default"
+        assert result == "kimi-k3"
 
 
 class TestDispatchCodexModelNonEmpty:

@@ -752,7 +752,7 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
     if provider == "gemini":
         return args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     if provider == "kimi":
-        return os.environ.get("VNX_KIMI_MODEL", "") or _resolve_kimi_model_label()
+        return _kimi_resolve_requested_key(getattr(args, "model", None))
     if provider == "deepseek-harness":
         from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
 
@@ -1359,13 +1359,24 @@ def _resolve_codex_model() -> str:
     return next(iter(cfg.models.keys()))
 
 
-def _resolve_kimi_model_label() -> str:
-    """Load kimi CLI default model key from registry (kimi_cli section), fallback to 'kimi-default'.
+class KimiModelResolutionError(ValueError):
+    """A kimi model request could not be resolved to a verified kimi-cli model.
 
-    Returns the registry model key (e.g. 'kimi-default') so the receipt model field
-    is never the generic 'default' string when VNX_KIMI_MODEL is unset.
+    Raised instead of ever silently substituting the K3 default or passing an
+    unmapped/stale string through to ``-m`` (20260721-kimi-lane-hardening) — a bad
+    request must fail the dispatch loudly, not spawn a worker with a bogus model arg.
     """
-    _KIMI_FALLBACK = "kimi-default"
+
+
+def _resolve_kimi_model_label() -> str:
+    """Load the kimi CLI default model key from the registry's ``kimi_cli`` section.
+
+    Reads the explicit ``default_model`` flag (kimi_cli.default_model in
+    wave7_models.yaml) so the default is independent of YAML dict-key order;
+    falls back to the first model key when the flag is absent/stale, and to the
+    hardcoded 'kimi-k3' when the registry itself is unavailable.
+    """
+    _KIMI_FALLBACK = "kimi-k3"
     try:
         from providers import provider_registry as _reg
         registry = _reg.load()
@@ -1375,37 +1386,95 @@ def _resolve_kimi_model_label() -> str:
     cfg = registry.get("kimi_cli")
     if cfg is None or not cfg.models:
         return _KIMI_FALLBACK
+    default_key = getattr(cfg, "default_model", None)
+    if default_key and default_key in cfg.models:
+        return default_key
     return next(iter(cfg.models.keys()))
+
+
+# Bare provider/alias tokens a caller might pass as --model — these are NOT real
+# kimi-cli model ids and must never reach _kimi_resolve_cli_model_arg raw.
+_KIMI_BARE_ALIASES = frozenset({"kimi", "kimi-default", "kimi_cli"})
+# Sentinels meaning "no explicit model was requested" (D4 in dispatch_plan.py emits
+# "default" for non-claude lanes; dispatch-agent's own CLI default is "sonnet").
+_KIMI_MODEL_PLACEHOLDERS = frozenset({"", "default", "sonnet"})
+
+
+def _kimi_normalize_alias(model_key: str) -> str:
+    """Map a bare kimi provider/alias token to the registry's default model key."""
+    normalized = (model_key or "").strip().lower()
+    if normalized in _KIMI_BARE_ALIASES:
+        return _resolve_kimi_model_label()
+    return model_key
+
+
+def _kimi_resolve_requested_key(explicit_model: Optional[str]) -> str:
+    """Resolve the effective kimi model down to a registry KEY (not a CLI arg).
+
+    Shared by the spawn seam (dispatch_envelope.ProviderAdapter, _dispatch_kimi),
+    governance labeling, and the constraint pre-flight so all three agree on the
+    same requested model. Precedence (WS2, 20260721-kimi-lane-hardening):
+      1. ``explicit_model`` when set and not a placeholder ("default"/"sonnet"/"");
+      2. else the ``VNX_KIMI_MODEL`` env var (source-path override);
+      3. else the registry's K3-flagged default.
+    Bare provider/alias tokens ('kimi', 'kimi-default') are normalized to the
+    default key at whichever precedence step they appear. Never raises — callers
+    needing the CLI arg form (and its fail-loud validation) pass the result to
+    _kimi_resolve_cli_model_arg().
+    """
+    requested = (explicit_model or "").strip()
+    if requested and requested.lower() not in _KIMI_MODEL_PLACEHOLDERS:
+        return _kimi_normalize_alias(requested)
+    env_model = os.environ.get("VNX_KIMI_MODEL", "").strip()
+    if env_model:
+        return _kimi_normalize_alias(env_model)
+    return _resolve_kimi_model_label()
 
 
 def _kimi_resolve_cli_model_arg(model_key: str) -> str:
     """Return the CLI arg form for a kimi model key.
 
     The registry uses dashes (kimi-k2-6) but the kimi CLI 1.46.0 requires dots
-    (kimi-k2.6). The registry entry's cli_model_arg field carries the authoritative
-    CLI arg; fall back to model_key unchanged for entries without the field.
+    (kimi-k2.6) or slash-form managed ids (kimi-code/k3). The registry entry's
+    cli_model_arg field carries the authoritative CLI arg.
+
+    Fail-loud (never silently substitutes K3 or passes a stale/unmapped string
+    through as ``-m``): raises KimiModelResolutionError when the registry can't
+    be loaded, when model_key resolves to a disabled (dispatch_allowed=false)
+    entry, or when model_key matches nothing in the registry at all.
     """
     try:
         from providers import provider_registry as _reg
         registry = _reg.load()
     except Exception as e:
-        logger.warning("provider_dispatch: registry load for kimi cli arg failed: %s", e)
-        return model_key
+        raise KimiModelResolutionError(
+            f"kimi model registry unavailable — refusing to guess a CLI arg for {model_key!r}: {e}"
+        ) from e
     cfg = registry.get("kimi_cli")
     if cfg is None or not cfg.models:
-        return model_key
-    # Direct registry-key lookup (e.g. model_key='kimi-k2-6')
+        raise KimiModelResolutionError("kimi_cli registry section missing or empty")
+    # Direct registry-key lookup (e.g. model_key='kimi-k3')
     entry = cfg.models.get(model_key)
     if entry is not None:
+        if not getattr(entry, "dispatch_allowed", True):
+            raise KimiModelResolutionError(
+                f"kimi model {model_key!r} is disabled (dispatch_allowed=false) — "
+                "not a currently-dispatchable kimi-cli model"
+            )
         cli_arg = getattr(entry, "cli_model_arg", None)
         return cli_arg if cli_arg else model_key
-    # model_key may already be in CLI arg form (e.g. 'kimi-k2.6'); search by cli_model_arg
+    # model_key may already be in CLI arg form (e.g. 'kimi-code/k3'); search by cli_model_arg
     model_key_lower = model_key.lower()
     for e in cfg.models.values():
+        if not getattr(e, "dispatch_allowed", True):
+            continue
         cli_arg = getattr(e, "cli_model_arg", None)
         if cli_arg and cli_arg.lower() == model_key_lower:
             return model_key
-    return model_key
+    raise KimiModelResolutionError(
+        f"unmapped kimi model {model_key!r} — not a kimi_cli registry key or a known "
+        "cli_model_arg value; refusing to guess (no silent K3 substitution)"
+    )
 
 
 def _resolve_deepseek_model() -> str:
@@ -1648,8 +1717,11 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     """Route to spawn_kimi for kimi-provider dispatches (Wave 7.7).
 
     Auth via ``kimi login`` (OAuth). No API key env var required.
-    Model resolved via VNX_KIMI_MODEL env var or kimi config default.
-    Wires EventStore as event_writer so kimi dispatches produce a NDJSON audit trail.
+    Model resolved via the shared precedence (args.model > VNX_KIMI_MODEL > K3
+    default — 20260721-kimi-lane-hardening); a bare dispatch with neither set
+    now resolves to the registry's K3 default instead of the kimi CLI's own
+    config default. Wires EventStore as event_writer so kimi dispatches produce
+    a NDJSON audit trail.
     """
     from provider_spawns.kimi_spawn import spawn_kimi
 
@@ -1664,10 +1736,14 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model_key = os.environ.get("VNX_KIMI_MODEL", "") or None
-    model_label = model_key or _resolve_kimi_model_label()
-    # Resolve CLI arg form (e.g. kimi-k2-6 → kimi-k2.6 per kimi CLI 1.46.0)
-    model_cli_arg = _kimi_resolve_cli_model_arg(model_key) if model_key else None
+    explicit_model = getattr(args, "model", None)
+    try:
+        model_label = _kimi_resolve_requested_key(explicit_model)
+        model_cli_arg = _kimi_resolve_cli_model_arg(model_label)
+    except KimiModelResolutionError as _model_exc:
+        logger.error("_dispatch_kimi: model resolution failed for %r: %s", explicit_model, _model_exc)
+        print(f"_dispatch_kimi: model resolution failed: {_model_exc}", file=sys.stderr)
+        return 1
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
     # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):

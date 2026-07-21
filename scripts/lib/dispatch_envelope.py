@@ -812,9 +812,23 @@ class ProviderAdapter:
         # ---- kimi ----
         if pv == Provider.KIMI:
             from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
+            from provider_dispatch import (  # noqa: PLC0415
+                KimiModelResolutionError,
+                _kimi_resolve_cli_model_arg,
+                _kimi_resolve_requested_key,
+            )
 
-            # None signals kimi CLI to use its own default; label used only for logging
-            model = plan.model if plan.model not in ("default", "") else None
+            # Shared resolver (20260721-kimi-lane-hardening): args.model/plan.model >
+            # VNX_KIMI_MODEL > registry K3 default; bare provider/alias tokens ("kimi",
+            # "kimi-default") normalize to the default; an unmapped/stale model_key RAISES
+            # instead of ever being passed raw to `-m` or silently substituted with K3.
+            try:
+                model = _kimi_resolve_cli_model_arg(_kimi_resolve_requested_key(plan.model))
+            except KimiModelResolutionError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"kimi model resolution failed: {exc}",
+                )
             try:
                 result = spawn_kimi(
                     prompt=instruction,

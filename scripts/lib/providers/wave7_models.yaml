@@ -192,7 +192,34 @@ providers:
   kimi_cli:
     enabled: true
     api_key_env: ""  # no API key; OAuth via `kimi login`
+    # WS1 (20260721-kimi-lane-hardening): explicit default, independent of YAML key
+    # order — _resolve_kimi_model_label() reads this flag rather than "first dict key".
+    default_model: kimi-k3
     models:
+      kimi-k3:
+        litellm_name: ""  # kimi CLI direct; not via LiteLLM
+        # Verified 20260721 against the installed kimi-cli 1.46.0's own ~/.kimi/config.toml
+        # (models."kimi-code/k3", 1M context, display_name "K3") — not guessed.
+        cli_model_arg: "kimi-code/k3"
+        cost_input_per_mtok: 0.60
+        cost_output_per_mtok: 2.50
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "coding-premium", "review", "analysis"]
+        dispatch_allowed: true
+      kimi-k2-7:
+        litellm_name: ""  # kimi CLI direct; not via LiteLLM
+        # Verified 20260721 against ~/.kimi/config.toml (models."kimi-code/kimi-for-coding",
+        # display_name "K2.7 Coding"; this is the CLI's OWN config default_model).
+        cli_model_arg: "kimi-code/kimi-for-coding"
+        cost_input_per_mtok: 0.60
+        cost_output_per_mtok: 2.50
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+        dispatch_allowed: true
       kimi-default:
         litellm_name: ""  # kimi CLI direct; not via LiteLLM
         cost_input_per_mtok: 0.60   # estimate based on moonshot K2 pricing
@@ -210,5 +237,11 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding-premium"]
-        dispatch_allowed: true
-        cli_model_arg: "kimi-k2.6"  # kimi CLI 1.46.0 requires dots; registry key uses dashes
+        # DISABLED 20260721 (kimi-lane-hardening): kimi-cli 1.46.0 has no "kimi-k2.6"/K2.6
+        # model (verified against the installed CLI's own config.toml — only kimi-code/k3,
+        # kimi-code/kimi-for-coding, and kimi-code/kimi-for-coding-highspeed exist; K2.6 was
+        # apparently retired/renamed upstream to K2.7). The old dot-form cli_model_arg was
+        # stale and unverifiable in this env, so it is cleared (not kept) rather than passed
+        # through — disabled here so the pre-flight registry check rejects it instead of a
+        # worker silently receiving a dead `-m` string.
+        dispatch_allowed: false

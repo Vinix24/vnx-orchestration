@@ -39,6 +39,7 @@ class ProviderConfig:
     enabled: bool
     api_key_env: str
     models: Dict[str, ProviderModel] = field(default_factory=dict)
+    default_model: Optional[str] = None
 
 
 def _parse_model(data: dict) -> ProviderModel:
@@ -63,10 +64,12 @@ def _parse_provider(data: dict) -> ProviderConfig:
     models: Dict[str, ProviderModel] = {}
     for model_key, model_data in (data.get("models") or {}).items():
         models[model_key] = _parse_model(model_data)
+    default_model_raw = data.get("default_model")
     return ProviderConfig(
         enabled=bool(data.get("enabled", False)),
         api_key_env=str(data.get("api_key_env") or ""),
         models=models,
+        default_model=str(default_model_raw) if default_model_raw is not None else None,
     )
 
 
