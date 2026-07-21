@@ -146,6 +146,100 @@ class TestRemoveGateWorktree:
         remove_gate_worktree(tmp_path / "never-existed")  # must not raise
 
 
+class TestBranchInjectionRejected:
+    """Finding 1 (fix-r1): a branch beginning with '-' (e.g. an injected git
+    option like --upload-pack=...) must be rejected before ANY git subprocess
+    runs — git would otherwise parse it as an option, not a ref."""
+
+    @pytest.mark.parametrize(
+        "unsafe_branch",
+        [
+            "--upload-pack=evil",
+            "-x",
+            "-",
+            "foo bar",
+            "foo\tbar",
+            "\n",
+        ],
+    )
+    def test_unsafe_branch_raises_before_any_git_call(
+        self, origin_and_local, monkeypatch, unsafe_branch,
+    ):
+        local = origin_and_local["local"]
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError(
+                f"subprocess.run must not be called for unsafe branch {unsafe_branch!r}: "
+                f"args={args!r}"
+            )
+
+        monkeypatch.setattr("gate_worktree.subprocess.run", _fail_if_called)
+
+        with pytest.raises(GateWorktreeError, match="unsafe branch"):
+            create_gate_worktree(
+                branch=unsafe_branch, gate="codex_gate", identifier="1", project_root=local,
+            )
+
+    def test_safe_branch_with_slashes_and_hyphens_still_allowed(self, origin_and_local):
+        """Regression guard: the allowlist must not reject ordinary branch
+        names like 'feature/oi-708' used throughout the rest of this suite."""
+        local = origin_and_local["local"]
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="1", project_root=local,
+        )
+        try:
+            assert wt_path.exists()
+        finally:
+            remove_gate_worktree(wt_path, project_root=local)
+
+
+class TestRemoveGateWorktreeRmtreeScope:
+    """Finding 2 (fix-r1): the shutil.rmtree fallback (used when `git worktree
+    remove --force` fails) must only ever touch the managed
+    `.vnx-data/worktrees/gate-*` subtree, never an arbitrary directory that
+    merely happens to sit under project_root.
+    """
+
+    def test_refuses_path_outside_managed_worktrees_dir(self, origin_and_local):
+        local = origin_and_local["local"]
+        # Under project_root, but NOT under .vnx-data/worktrees/. Named with
+        # the managed 'gate-' prefix so this isolates the managed-root check
+        # from the leaf-prefix check.
+        rogue = local / "some-other-dir" / "gate-not-managed"
+        rogue.mkdir(parents=True)
+        (rogue / "keepme.txt").write_text("do not delete\n")
+
+        remove_gate_worktree(rogue, project_root=local)
+
+        assert rogue.exists()
+        assert (rogue / "keepme.txt").exists()
+
+    def test_refuses_leaf_without_gate_prefix_even_under_managed_root(self, origin_and_local):
+        local = origin_and_local["local"]
+        rogue = local / ".vnx-data" / "worktrees" / "not-a-gate-worktree"
+        rogue.mkdir(parents=True)
+        (rogue / "keepme.txt").write_text("do not delete\n")
+
+        remove_gate_worktree(rogue, project_root=local)
+
+        assert rogue.exists()
+        assert (rogue / "keepme.txt").exists()
+
+    def test_still_removes_legitimate_gate_worktree_via_rmtree_fallback(self, origin_and_local):
+        """A plain directory living at the exact path/naming a real
+        create_gate_worktree() call produces, but not registered with git (so
+        `git worktree remove --force` fails and the rmtree fallback fires),
+        must still be deleted."""
+        local = origin_and_local["local"]
+        legit = local / ".vnx-data" / "worktrees" / "gate-codex_gate-1-deadbeef"
+        legit.mkdir(parents=True)
+        (legit / "marker.txt").write_text("scratch\n")
+
+        remove_gate_worktree(legit, project_root=local)
+
+        assert not legit.exists()
+
+
 class TestConcurrentGatesDoNotCollide:
     def test_two_worktrees_for_same_branch_get_distinct_paths(self, origin_and_local):
         """Two concurrent gate executions on the same PR (e.g. codex + gemini)

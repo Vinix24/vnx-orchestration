@@ -32,6 +32,15 @@ log = logging.getLogger(__name__)
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_SAFE_LEN = 60
 
+# Conservative git ref-name allowlist: must start with an alnum (never '-', so
+# a branch cannot be mistaken for a git option), and contain only the chars
+# real branch names use. Whitespace of any kind is excluded implicitly.
+_SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+# Managed worktree directory prefix — must match _worktree_dir() below. Used
+# by remove_gate_worktree to scope its shutil.rmtree fallback.
+_MANAGED_WORKTREE_PREFIX = "gate-"
+
 
 class GateWorktreeError(RuntimeError):
     """Raised when a gate's isolated worktree cannot be created.
@@ -60,8 +69,22 @@ def _worktree_dir(project_root: Path, gate: str, identifier: str) -> Path:
     token = secrets.token_hex(4)
     return (
         project_root / ".vnx-data" / "worktrees"
-        / f"gate-{_sanitize(gate)}-{_sanitize(identifier)}-{token}"
+        / f"{_MANAGED_WORKTREE_PREFIX}{_sanitize(gate)}-{_sanitize(identifier)}-{token}"
     )
+
+
+def _validate_branch(branch: str, *, gate: str, identifier: str) -> None:
+    """Reject any branch that is not a safe git ref name.
+
+    MUST run before any git subprocess call: a branch beginning with '-'
+    (e.g. ``--upload-pack=...``) would otherwise be parsed by git as an
+    option rather than a ref.
+    """
+    if not _SAFE_BRANCH_RE.match(branch):
+        raise GateWorktreeError(
+            f"create_gate_worktree: unsafe branch {branch!r} rejected before any git call "
+            f"(gate={gate!r}, identifier={identifier!r})"
+        )
 
 
 @contextmanager
@@ -105,6 +128,7 @@ def create_gate_worktree(
             "create_gate_worktree requires a non-empty branch "
             f"(gate={gate!r}, identifier={identifier!r})"
         )
+    _validate_branch(branch, gate=gate, identifier=identifier)
 
     root = _resolve_project_root(project_root)
     wt_path = _worktree_dir(root, gate, identifier)
@@ -166,7 +190,21 @@ def remove_gate_worktree(wt_path: Optional[Path], *, project_root: Optional[Path
                     "git worktree remove failed: %s; falling back to shutil.rmtree", detail,
                 )
                 resolved = wt_path.resolve()
-                resolved.relative_to(root)  # safety: refuse rmtree outside project root
+                managed_root = (root / ".vnx-data" / "worktrees").resolve()
+                try:
+                    resolved.relative_to(managed_root)
+                except ValueError:
+                    log.warning(
+                        "refusing rmtree: %s is not under the managed worktree root %s",
+                        resolved, managed_root,
+                    )
+                    return
+                if not resolved.name.startswith(_MANAGED_WORKTREE_PREFIX):
+                    log.warning(
+                        "refusing rmtree: %s leaf name does not start with the managed "
+                        "prefix %r", resolved, _MANAGED_WORKTREE_PREFIX,
+                    )
+                    return
                 if wt_path.is_symlink():
                     log.warning("refusing rmtree: %s is a symlink", wt_path)
                     return
