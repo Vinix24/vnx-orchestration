@@ -216,6 +216,7 @@ def test_provider_adapter_routes_each_provider(tmp_path, monkeypatch):
     # Stub resolution helpers and token extractor to avoid registry/env access
     monkeypatch.setattr("provider_dispatch._resolve_codex_model", lambda: "gpt-codex-test")
     monkeypatch.setattr("provider_dispatch._resolve_kimi_model_label", lambda: "kimi-test")
+    monkeypatch.setattr("provider_dispatch._kimi_resolve_cli_model_arg", lambda k: "kimi-test-cli-arg")
     monkeypatch.setattr("provider_dispatch._resolve_deepseek_model", lambda: "deepseek/test")
     monkeypatch.setattr("provider_dispatch._resolve_zai_model", lambda m=None: "openrouter/glm-test")
     monkeypatch.setattr("provider_dispatch._resolve_moonshot_model", lambda m=None: "moonshot/kimi-test")
