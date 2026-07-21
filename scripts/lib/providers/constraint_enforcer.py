@@ -222,7 +222,8 @@ def _kimi_bare_alias_registry_default(model_norm: str) -> Optional[str]:
         return None
     try:
         registry = _load_registry()
-    except Exception:
+    except Exception as e:
+        logger.warning("constraint_enforcer: registry load for kimi bare-alias default failed: %s", e)
         return None
     cfg = registry.get("kimi_cli")
     if cfg is None:
