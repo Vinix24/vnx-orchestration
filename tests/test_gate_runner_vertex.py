@@ -27,12 +27,22 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+import gate_runner
 from gate_runner import GateRunner
 
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fake_gate_worktree(tmp_path, monkeypatch):
+    """Default OI-708 worktree checkout to a no-op fake — see test_gate_runner.py."""
+    fake_path = tmp_path / "_fake_gate_worktree"
+    monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: fake_path)
+    monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
+    return fake_path
 
 
 @pytest.fixture

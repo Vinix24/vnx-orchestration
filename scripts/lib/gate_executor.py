@@ -127,6 +127,7 @@ class GateExecutorMixin:
         runner = GateRunner(
             state_dir=self.state_dir,
             reports_dir=self.reports_dir,
+            project_root=Path(self.paths["PROJECT_ROOT"]),
         )
         return runner.run(
             gate=gate,

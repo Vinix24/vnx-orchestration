@@ -28,6 +28,7 @@ from headless_adapter import gate_timeout, gate_stall_threshold
 import gate_recorder as _rec
 import gate_artifacts as _art
 import vertex_ai_runner as _vtx
+from gate_worktree import create_gate_worktree, remove_gate_worktree, GateWorktreeError
 from prompt_assembler import PromptAssembler, format_for_provider
 
 _REVIEWER_VERDICT_TEMPLATE = (
@@ -61,11 +62,18 @@ GATE_CLI_ARGS: Dict[str, List[str]] = {
 class GateRunner:
     """Subprocess-based gate execution with timeout and stall detection."""
 
-    def __init__(self, state_dir: Path, reports_dir: Path) -> None:
+    def __init__(
+        self, state_dir: Path, reports_dir: Path, *, project_root: Optional[Path] = None,
+    ) -> None:
         self._state_dir = state_dir
         self._reports_dir = reports_dir
         self._requests_dir = state_dir / "review_gates" / "requests"
         self._results_dir = state_dir / "review_gates" / "results"
+        # Explicit project root for isolated gate-worktree checkout (OI-708).
+        # When unset, create_gate_worktree/remove_gate_worktree fall back to
+        # git-based auto-detection — callers that construct GateRunner from a
+        # resolved ReviewGateManager should always pass this explicitly.
+        self._project_root = project_root
 
     def run(
         self,
@@ -159,12 +167,46 @@ class GateRunner:
         self, *, gate: str, binary: str, prompt: str,
         pr_number: Optional[int], pr_id: str, request_payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Execute gate via subprocess with stall detection, then record result."""
-        result = self._run_with_stall_detection(
-            gate=gate, binary=binary, prompt=prompt,
-            timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
-            request_payload=request_payload,
-        )
+        """Execute gate via subprocess with stall detection, then record result.
+
+        Runs the subprocess with `cwd` at an isolated worktree checked out from
+        `origin/<branch>` (OI-708) so the gate agent's own file reads (sed/rg/
+        cat, etc.) reflect the PR branch under review instead of the
+        orchestrator's local (possibly stale) checkout. If worktree creation
+        itself fails, the gate fails loud here — no silent fallback to the
+        ambient checkout. Once created, the worktree is removed unconditionally
+        afterward, whether the subprocess run succeeds or fails.
+        """
+        if pr_id:
+            identifier = pr_id
+        elif pr_number is not None:
+            identifier = str(pr_number)
+        else:
+            identifier = "unknown"
+        try:
+            worktree_path = create_gate_worktree(
+                branch=request_payload.get("branch", ""), gate=gate, identifier=identifier,
+                project_root=self._project_root,
+            )
+        except GateWorktreeError as exc:
+            return _rec.record_failure_simple(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                reason="worktree_checkout_failed",
+                reason_detail=str(exc),
+                request_payload=request_payload,
+                requests_dir=self._requests_dir, results_dir=self._results_dir,
+            )
+
+        try:
+            result = self._run_with_stall_detection(
+                gate=gate, binary=binary, prompt=prompt,
+                timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
+                request_payload=request_payload,
+                cwd=worktree_path,
+            )
+        finally:
+            remove_gate_worktree(worktree_path, project_root=self._project_root)
+
         if result["status"] == "failed":
             return _rec.record_failure(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
@@ -414,8 +456,14 @@ class GateRunner:
         timeout: int,
         stall_threshold: int,
         request_payload: Dict[str, Any],
+        cwd: Optional[Path] = None,
     ) -> Dict[str, Any]:
-        """Spawn subprocess and monitor for timeout/stall (GATE-6/7/8)."""
+        """Spawn subprocess and monitor for timeout/stall (GATE-6/7/8).
+
+        `cwd` (OI-708) pins the subprocess's working directory to the isolated
+        gate worktree so the gate agent's own file reads match the PR branch
+        under review instead of the orchestrator's ambient checkout.
+        """
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         start = time.monotonic()
         try:
@@ -423,6 +471,7 @@ class GateRunner:
                 cmd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
+                cwd=str(cwd) if cwd else None,
             )
         except OSError as exc:
             return {
