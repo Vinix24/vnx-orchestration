@@ -15,6 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
@@ -187,8 +188,18 @@ def test_rejects_non_provider_lane(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_provider_adapter_routes_each_provider(tmp_path, monkeypatch):
-    """Each supported provider routes to its spawn_*; no _dispatch_* wrappers invoked."""
+@pytest.fixture
+def stubbed_provider_spawns(monkeypatch):
+    """Stub every provider spawn_* and resolver helper (registry/env/CLI-free).
+
+    Split out of the former single test_provider_adapter_routes_each_provider
+    (OI-709, function-size gate) so each provider gets its own <70-line test
+    function while sharing the same routing-mock setup.
+
+    Returns a SimpleNamespace(calls, litellm_calls, dispatch_wrapper_called) —
+    `calls`/`litellm_calls` record each spawn_* invocation; `dispatch_wrapper_called`
+    must stay empty (the envelope must never call a _dispatch_* wrapper directly).
+    """
     calls: Dict[str, Dict[str, Any]] = {}
     litellm_calls: list = []
 
@@ -230,7 +241,7 @@ def test_provider_adapter_routes_each_provider(tmp_path, monkeypatch):
     )
 
     # Track _dispatch_* calls — must all remain uncalled
-    dispatch_wrapper_called = []
+    dispatch_wrapper_called: list = []
     for fn_name in [
         "_dispatch_codex", "_dispatch_kimi", "_dispatch_gemini",
         "_dispatch_litellm", "_dispatch_deepseek_harness", "_dispatch_local_gemma",
@@ -241,65 +252,99 @@ def test_provider_adapter_routes_each_provider(tmp_path, monkeypatch):
             return _bad
         monkeypatch.setattr(f"provider_dispatch.{fn_name}", _make_bad(fn_name))
 
-    adapter = ProviderAdapter()
-    instruction_file = tmp_path / "inst.md"
-    instruction_file.write_text("test instruction", encoding="utf-8")
+    return SimpleNamespace(
+        calls=calls, litellm_calls=litellm_calls, dispatch_wrapper_called=dispatch_wrapper_called
+    )
 
-    # codex
-    calls.clear()
+
+def test_provider_adapter_routes_codex(tmp_path, stubbed_provider_spawns):
+    """codex routes to spawn_codex; no _dispatch_* wrapper invoked."""
+    adapter = ProviderAdapter()
     r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.CODEX, model="default"), "prompt")
     assert r.status == "success", f"codex: {r}"
-    assert "codex" in calls
+    assert "codex" in stubbed_provider_spawns.calls
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # kimi
-    calls.clear()
+
+def test_provider_adapter_routes_kimi(tmp_path, stubbed_provider_spawns):
+    """kimi routes to spawn_kimi (via ProviderAdapter._run_kimi); no _dispatch_* wrapper invoked."""
+    adapter = ProviderAdapter()
     r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.KIMI, model="default"), "prompt")
     assert r.status == "success", f"kimi: {r}"
-    assert "kimi" in calls
+    assert "kimi" in stubbed_provider_spawns.calls
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # gemini
-    calls.clear()
+
+def test_provider_adapter_routes_gemini(tmp_path, stubbed_provider_spawns):
+    """gemini routes to spawn_gemini; no _dispatch_* wrapper invoked."""
+    adapter = ProviderAdapter()
     r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.GEMINI, model="default"), "prompt")
     assert r.status == "success", f"gemini: {r}"
-    assert "gemini" in calls
+    assert "gemini" in stubbed_provider_spawns.calls
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # litellm:deepseek
-    litellm_calls.clear()
-    r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.LITELLM_DEEPSEEK, model="default"), "prompt")
+
+def test_provider_adapter_routes_litellm_deepseek(tmp_path, stubbed_provider_spawns):
+    """litellm:deepseek routes to spawn_litellm with the resolved deepseek model."""
+    adapter = ProviderAdapter()
+    r = adapter.run(
+        _make_provider_plan(tmp_path, provider=Provider.LITELLM_DEEPSEEK, model="default"), "prompt"
+    )
     assert r.status == "success", f"litellm:deepseek: {r}"
+    litellm_calls = stubbed_provider_spawns.litellm_calls
     assert litellm_calls, "spawn_litellm not called for litellm:deepseek"
     assert litellm_calls[-1]["kwargs"].get("sub_provider") == "deepseek"
     assert litellm_calls[-1]["kwargs"].get("model") == "deepseek/test"
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # litellm:zai — model resolved to the zai registry model
-    litellm_calls.clear()
-    r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.LITELLM_ZAI, model="default"), "prompt")
+
+def test_provider_adapter_routes_litellm_zai(tmp_path, stubbed_provider_spawns):
+    """litellm:zai routes to spawn_litellm with the resolved zai registry model."""
+    adapter = ProviderAdapter()
+    r = adapter.run(
+        _make_provider_plan(tmp_path, provider=Provider.LITELLM_ZAI, model="default"), "prompt"
+    )
     assert r.status == "success", f"litellm:zai: {r}"
+    litellm_calls = stubbed_provider_spawns.litellm_calls
     assert litellm_calls, "spawn_litellm not called for litellm:zai"
     assert litellm_calls[-1]["kwargs"].get("sub_provider") == "zai"
     assert litellm_calls[-1]["kwargs"].get("model") == "openrouter/glm-test"
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # litellm:moonshot
-    litellm_calls.clear()
-    r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.LITELLM_MOONSHOT, model="default"), "prompt")
+
+def test_provider_adapter_routes_litellm_moonshot(tmp_path, stubbed_provider_spawns):
+    """litellm:moonshot routes to spawn_litellm with sub_provider=moonshot."""
+    adapter = ProviderAdapter()
+    r = adapter.run(
+        _make_provider_plan(tmp_path, provider=Provider.LITELLM_MOONSHOT, model="default"), "prompt"
+    )
     assert r.status == "success", f"litellm:moonshot: {r}"
+    litellm_calls = stubbed_provider_spawns.litellm_calls
     assert litellm_calls, "spawn_litellm not called for litellm:moonshot"
     assert litellm_calls[-1]["kwargs"].get("sub_provider") == "moonshot"
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # deepseek-harness
-    calls.clear()
-    r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.DEEPSEEK_HARNESS, model="default"), "prompt")
+
+def test_provider_adapter_routes_deepseek_harness(tmp_path, stubbed_provider_spawns):
+    """deepseek-harness routes to spawn_deepseek_harness; no _dispatch_* wrapper invoked."""
+    adapter = ProviderAdapter()
+    r = adapter.run(
+        _make_provider_plan(tmp_path, provider=Provider.DEEPSEEK_HARNESS, model="default"), "prompt"
+    )
     assert r.status == "success", f"deepseek-harness: {r}"
-    assert "deepseek_harness" in calls
+    assert "deepseek_harness" in stubbed_provider_spawns.calls
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
-    # local-gemma
-    calls.clear()
-    r = adapter.run(_make_provider_plan(tmp_path, provider=Provider.LOCAL_GEMMA, model="default"), "prompt")
+
+def test_provider_adapter_routes_local_gemma(tmp_path, stubbed_provider_spawns):
+    """local-gemma routes to spawn_local_gemma; no _dispatch_* wrapper invoked."""
+    adapter = ProviderAdapter()
+    r = adapter.run(
+        _make_provider_plan(tmp_path, provider=Provider.LOCAL_GEMMA, model="default"), "prompt"
+    )
     assert r.status == "success", f"local-gemma: {r}"
-    assert "local_gemma" in calls
-
-    # No _dispatch_* wrappers must have been invoked
-    assert dispatch_wrapper_called == [], f"_dispatch_* wrappers were invoked: {dispatch_wrapper_called}"
+    assert "local_gemma" in stubbed_provider_spawns.calls
+    assert stubbed_provider_spawns.dispatch_wrapper_called == []
 
 
 # ---------------------------------------------------------------------------
