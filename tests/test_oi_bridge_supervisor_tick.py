@@ -249,6 +249,77 @@ def test_bridge_tick_failure_survives_and_marks_not_fresh(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Freshness-state write is atomic (tmp+rename), never a truncating redirect
+# ---------------------------------------------------------------------------
+
+def test_bridge_tick_writes_freshness_file_via_atomic_rename(tmp_path):
+    """A crash/kill mid-write must never leave a corrupt/empty
+    $STATE_DIR/.oi_bridge_fresh for _maybe_objective_reconcile to read as an
+    auto-close green light. The write MUST go through tmp+rename, not a bare
+    truncating `>` redirect straight onto the canonical path."""
+    source = TICKS_SH.read_text()
+    match = re.search(
+        r"^_maybe_oi_bridge_tick\(\) \{\n.*?^\}\n", source, re.MULTILINE | re.DOTALL,
+    )
+    assert match, "could not locate _maybe_oi_bridge_tick() in dispatcher_supervisor_ticks.sh"
+    body = match.group(0)
+
+    # The old buggy pattern must be gone.
+    assert 'echo "1" > "$fresh_file"' not in body
+    assert 'echo "0" > "$fresh_file"' not in body
+
+    # The new pattern must be present: write to a tmp sibling, then rename.
+    assert ".tmp.$$" in body, "freshness write must land on a tmp sibling first"
+    assert "mv -f" in body, "freshness write must complete via an atomic rename"
+
+    # Functional check: a real tick still produces the correct final content
+    # and leaves no stray tmp file behind.
+    state_dir = tmp_path / "state"
+    _build_db_v30(state_dir)
+    _seed_blocking_oi(state_dir)
+
+    env = _base_env(state_dir, tmp_path)
+    env["VNX_OI_BRIDGE_INTERVAL"] = "0"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    env["VNX_LOG_CAPTURE"] = str(tmp_path / "log_capture.txt")
+
+    proc = _run_bash("_maybe_oi_bridge_tick", env)
+    assert proc.returncode == 0, proc.stderr
+
+    fresh_file = state_dir / ".oi_bridge_fresh"
+    assert fresh_file.read_text().strip() == "1"
+
+    stray_tmp = list(state_dir.glob(".oi_bridge_fresh.tmp.*"))
+    assert stray_tmp == [], f"tmp file(s) left behind after rename: {stray_tmp}"
+
+    log_capture = Path(env["VNX_LOG_CAPTURE"]).read_text()
+    assert "freshness=1 written" in log_capture
+
+
+def test_bridge_tick_failure_writes_freshness_via_atomic_rename_too(tmp_path):
+    """The '0' (not-fresh) branch must use the same atomic tmp+rename path,
+    not just the '1' (fresh) branch."""
+    state_dir = tmp_path / "state"
+    _build_db_v30(state_dir)
+    # No open_items.json — bridge failure (exit 3), same as
+    # test_bridge_tick_failure_survives_and_marks_not_fresh.
+
+    env = _base_env(state_dir, tmp_path)
+    env["VNX_OI_BRIDGE_INTERVAL"] = "0"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    env["VNX_LOG_CAPTURE"] = str(tmp_path / "log_capture.txt")
+
+    proc = _run_bash("_maybe_oi_bridge_tick", env)
+    assert proc.returncode == 0, proc.stderr
+
+    fresh_file = state_dir / ".oi_bridge_fresh"
+    assert fresh_file.read_text().strip() == "0"
+
+    stray_tmp = list(state_dir.glob(".oi_bridge_fresh.tmp.*"))
+    assert stray_tmp == [], f"tmp file(s) left behind after rename: {stray_tmp}"
+
+
+# ---------------------------------------------------------------------------
 # Reconcile freshness gate: --apply withheld unless bridge signal == "1"
 # ---------------------------------------------------------------------------
 

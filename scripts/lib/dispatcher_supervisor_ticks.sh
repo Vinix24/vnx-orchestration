@@ -97,10 +97,17 @@ _maybe_oi_bridge_tick() {
         --project-id "$VNX_PROJECT_ID" \
         --state-dir "$STATE_DIR" \
         >> "$log_file" 2>&1 || rc=$?
-    if [[ "$rc" == "0" || "$rc" == "4" ]]; then
-        echo "1" > "$fresh_file"
+    # Exit 4 is import_open_items_to_tracks.py's own exit contract for "the
+    # track_open_items commit succeeded, but the post-commit ledger-emit step
+    # only warned" — the write already landed, so freshness still holds. Any
+    # other non-zero exit means the commit itself is suspect and freshness
+    # must fail closed.
+    local -r OI_BRIDGE_RC_LEDGER_WARN=4
+    if [[ "$rc" == "0" || "$rc" == "$OI_BRIDGE_RC_LEDGER_WARN" ]]; then
+        printf '%s' "1" > "$fresh_file.tmp.$$" && mv -f "$fresh_file.tmp.$$" "$fresh_file"
+        log "V-OI-BRIDGE INFO: OI bridge tick succeeded (exit $rc); freshness=1 written to $fresh_file"
     else
-        echo "0" > "$fresh_file"
+        printf '%s' "0" > "$fresh_file.tmp.$$" && mv -f "$fresh_file.tmp.$$" "$fresh_file"
         log "V-OI-BRIDGE WARN: OI bridge tick failed (exit $rc); see $log_file — reconcile-apply is gated this cycle until the next successful bridge run"
     fi
     echo "$now" > "$state_file"
