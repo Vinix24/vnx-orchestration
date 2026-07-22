@@ -1,7 +1,14 @@
+# PROVENANCE NOTICE (2026-07-22, dispatch 20260722-model-registry-refresh):
+# composite_score / avg_duration_seconds / launch_success_rate below are INHERITED from
+# the 2026-05 field-tests benchmark (export_routing_matrix.py), which ran on the PRIOR
+# model generation (claude-sonnet-4-6, claude-opus-4-6, glm-5-1). Model IDs were bumped to
+# current (claude-sonnet-5, claude-opus-4-8, glm-5-2) on 2026-07-22 per operator mandate,
+# WITHOUT a re-benchmark. Every remapped entry carries an inline "# remapped ..." comment.
+# Treat all scores here as a snapshot pending refresh — see track bench-v2-model-refresh.
 routing_by_task:
   01_code_generation:
     candidates:
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 9.53
       quality_tier: 3
@@ -9,7 +16,7 @@ routing_by_task:
       avg_duration_seconds: 230.5
       launch_success_rate: 1.0
       n: 28
-    - model_id: claude-opus-4-6
+    - model_id: claude-opus-4-8  # remapped 2026-07-22 from claude-opus-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 9.4
       quality_tier: 3
@@ -81,7 +88,7 @@ routing_by_task:
       avg_duration_seconds: 281.3
       launch_success_rate: 0.61
       n: 30
-    - model_id: glm-5-1
+    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 4.83
       quality_tier: 1
@@ -155,7 +162,7 @@ routing_by_task:
       avg_duration_seconds: 146.4
       launch_success_rate: 1.0
       n: 6
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 8.5
       quality_tier: 3
@@ -163,7 +170,7 @@ routing_by_task:
       avg_duration_seconds: 278.9
       launch_success_rate: 1.0
       n: 6
-    - model_id: claude-opus-4-6
+    - model_id: claude-opus-4-8  # remapped 2026-07-22 from claude-opus-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 8.49
       quality_tier: 3
@@ -171,7 +178,7 @@ routing_by_task:
       avg_duration_seconds: 303.7
       launch_success_rate: 1.0
       n: 6
-    - model_id: glm-5-1
+    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 7.82
       quality_tier: 3
@@ -214,7 +221,7 @@ routing_by_task:
     min_quality_tier: 3
   03_refactoring:
     candidates:
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 9.93
       quality_tier: 3
@@ -246,7 +253,7 @@ routing_by_task:
       avg_duration_seconds: 72.0
       launch_success_rate: 1.0
       n: 14
-    - model_id: claude-opus-4-6
+    - model_id: claude-opus-4-8  # remapped 2026-07-22 from claude-opus-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 9.14
       quality_tier: 3
@@ -294,7 +301,7 @@ routing_by_task:
       avg_duration_seconds: 68.1
       launch_success_rate: 1.0
       n: 18
-    - model_id: glm-5-1
+    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 5.26
       quality_tier: 2
@@ -328,7 +335,7 @@ routing_by_task:
       avg_duration_seconds: 112.5
       launch_success_rate: 0.8
       n: 12
-    - model_id: claude-opus-4-6
+    - model_id: claude-opus-4-8  # remapped 2026-07-22 from claude-opus-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 9.56
       quality_tier: 3
@@ -336,7 +343,7 @@ routing_by_task:
       avg_duration_seconds: 46.6
       launch_success_rate: 0.71
       n: 10
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 9.53
       quality_tier: 3
@@ -392,7 +399,7 @@ routing_by_task:
       avg_duration_seconds: 149.3
       launch_success_rate: 0.43
       n: 9
-    - model_id: glm-5-1
+    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 6.76
       quality_tier: 2
@@ -459,7 +466,7 @@ routing_by_task:
       avg_duration_seconds: 261.6
       launch_success_rate: 1.0
       n: 2
-    - model_id: claude-opus-4-6
+    - model_id: claude-opus-4-8  # remapped 2026-07-22 from claude-opus-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 8.84
       quality_tier: 3
@@ -467,7 +474,7 @@ routing_by_task:
       avg_duration_seconds: 249.5
       launch_success_rate: 1.0
       n: 2
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 8.81
       quality_tier: 3
@@ -507,7 +514,7 @@ routing_by_task:
       avg_duration_seconds: 203.8
       launch_success_rate: 1.0
       n: 2
-    - model_id: glm-5-1
+    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 4.05
       quality_tier: 1
@@ -521,7 +528,7 @@ routing_by_task:
     # general-purpose models above the capability bar. Replaced when export_routing_matrix.py
     # gains documentation-task runs.
     candidates:
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 8.0
       quality_tier: 3
@@ -551,7 +558,7 @@ routing_by_task:
     # general-purpose models above the capability bar. Replaced when export_routing_matrix.py
     # gains translation-task runs.
     candidates:
-    - model_id: claude-sonnet-4-6
+    - model_id: claude-sonnet-5  # remapped 2026-07-22 from claude-sonnet-4-6 (inherited score, not re-benchmarked)
       runner: subscription
       composite_score: 8.0
       quality_tier: 3
