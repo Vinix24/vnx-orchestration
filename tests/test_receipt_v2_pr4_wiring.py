@@ -501,3 +501,104 @@ def test_t25_multi_provider_subpath_pending_report(tmp_path, monkeypatch):
     report_path = tmp_path / "data" / "unified_reports" / "t25-multiprovider.md"
     assert report_path.exists()
     assert len(_read_lines(receipts_path)) == 1
+
+
+# ---------------------------------------------------------------------------
+# fix-r1 — the classify/commit split: a deduped or validator-rejected
+# receipt must never commit a warning's side effects (OI-store promotion,
+# recurrence-counter increment). Both go through the REAL write path
+# (append_receipt_payload, Path 2) so the assertion covers the actual
+# ordering inside _write_receipt_under_lock's pre_write_hook wiring, not
+# just the finalize_receipt_v2_fields all-in-one composition T7-T9 exercise.
+# ---------------------------------------------------------------------------
+
+
+def test_fixr1_dedup_never_commits_warning_side_effects(tmp_path, monkeypatch):
+    """A receipt that idempotency dedups (same dispatch_id, second append
+    attempt) must not touch the OI store or bump the recurrence counter on
+    the deduped attempt -- only the first (actually-appended) attempt may
+    commit those side effects. Proven with an OIM call-count spy plus the
+    on-disk counter value before/after the duplicate attempt."""
+    import append_receipt_internals.warning_destination as wd
+
+    counter_path = tmp_path / "counts.json"
+    monkeypatch.setattr(wd, "_default_counter_path", lambda: counter_path)
+
+    oi_calls = {"n": 0}
+
+    class _CountingOIM:
+        def add_item_programmatic(self, **kwargs):
+            oi_calls["n"] += 1
+            return f"OI-{oi_calls['n']}", True
+
+    monkeypatch.setattr(wd, "_get_open_items_manager", lambda: _CountingOIM())
+
+    def _fresh_receipt():
+        return _base_path2_receipt(
+            "fixr1-dedup",
+            warnings=[
+                {"code": "dedup_blocker_check", "severity": "blocker", "message": "m"},
+                {"code": "dedup_counted_check", "severity": "warn", "message": "m"},
+            ],
+        )
+
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+
+    result1 = _path2_append(_fresh_receipt(), receipts_path)
+    assert result1.status == "appended"
+    assert oi_calls["n"] == 1
+    counter_after_first = json.loads(counter_path.read_text(encoding="utf-8"))
+    assert counter_after_first["dedup_counted_check"] == 1
+
+    result2 = _path2_append(_fresh_receipt(), receipts_path)
+    assert result2.status == "duplicate"
+    # Neither side effect fires a second time for the deduped attempt.
+    assert oi_calls["n"] == 1
+    counter_after_dup = json.loads(counter_path.read_text(encoding="utf-8"))
+    assert counter_after_dup["dedup_counted_check"] == 1
+
+    lines = _read_lines(receipts_path)
+    assert len(lines) == 1
+    assert lines[0]["warnings"][0]["destination"] == "oi"
+    assert lines[0]["warnings"][1]["destination"] == "counted"
+
+
+def test_fixr1_validator_rejection_never_commits_warning_side_effects(tmp_path, monkeypatch):
+    """A receipt the shared validator rejects (here: missing dispatch_id on
+    a task_complete event, discovered by _validate_receipt AFTER
+    classification has already run) must never touch the OI store or the
+    recurrence counter. Classification itself (pure, read-only counter
+    peek) is allowed to run; the commit that would call
+    add_item_programmatic / increment the counter must never fire for a
+    receipt that ends up rejected."""
+    import append_receipt_internals.warning_destination as wd
+
+    counter_path = tmp_path / "counts.json"
+    monkeypatch.setattr(wd, "_default_counter_path", lambda: counter_path)
+
+    class _NeverCalledOIM:
+        def add_item_programmatic(self, **kwargs):
+            raise AssertionError("must not touch the OI store for a rejected receipt")
+
+    monkeypatch.setattr(wd, "_get_open_items_manager", lambda: _NeverCalledOIM())
+
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    receipt = {
+        "timestamp": "2026-07-22T10:00:00Z",
+        "event_type": "task_complete",
+        "status": "done",
+        # dispatch_id deliberately omitted: task_complete requires one
+        # (_requires_dispatch_id), so _validate_receipt rejects this receipt
+        # AFTER classify_receipt_v2_warnings has already produced its
+        # placeholder destinations.
+        "warnings": [
+            {"code": "reject_blocker_check", "severity": "blocker", "message": "m"},
+            {"code": "reject_counted_check", "severity": "warn", "message": "m"},
+        ],
+    }
+
+    with pytest.raises(AppendReceiptError):
+        _path2_append(receipt, receipts_path)
+
+    assert not _read_lines(receipts_path)
+    assert not counter_path.exists()

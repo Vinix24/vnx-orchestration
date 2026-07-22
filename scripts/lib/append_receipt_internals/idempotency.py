@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .common import (
     AppendReceiptError,
@@ -194,8 +194,23 @@ def _write_receipt_under_lock(
     cache_path: Path,
     idempotency_key: str,
     cache_window_seconds: int,
+    *,
+    pre_write_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> AppendResult:
-    """Acquire the append lock and either write the receipt or skip as duplicate."""
+    """Acquire the append lock and either write the receipt or skip as duplicate.
+
+    ``pre_write_hook``, when given, runs INSIDE the lock exactly once the
+    idempotency check has confirmed this receipt is not a duplicate and WILL
+    be physically written — never on a duplicate hit. It receives ``receipt``
+    and may mutate it in place before the JSON line is serialized.
+
+    ADR-035 §9 PR-4 fix-r1: this is the seam the receipt-v2 warning
+    side-effect commit (``receipt_finalize.commit_receipt_v2_fields``) uses
+    so that promoting a warning to an open item / incrementing its
+    recurrence counter only happens for a receipt that actually lands in
+    the ledger — a deduped receipt must never touch the open-items store or
+    the counter.
+    """
     lock_path = _lock_file_for(receipt_path)
     min_epoch = time.time() - max(1, int(cache_window_seconds))
 
@@ -215,6 +230,9 @@ def _write_receipt_under_lock(
                     receipts_file=receipt_path,
                     idempotency_key=idempotency_key,
                 )
+
+            if pre_write_hook is not None:
+                pre_write_hook(receipt)
 
             # Hash-chain stamping (flag-gated). The read-tail + stamp happens
             # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so

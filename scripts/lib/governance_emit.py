@@ -38,7 +38,10 @@ from append_receipt_internals.idempotency import (
     _compute_idempotency_key,
     _write_receipt_under_lock,
 )
-from append_receipt_internals.receipt_finalize import finalize_receipt_v2_fields
+from append_receipt_internals.receipt_finalize import (
+    classify_receipt_v2_warnings,
+    commit_receipt_v2_fields,
+)
 from append_receipt_internals.validation import _validate_receipt
 
 logger = logging.getLogger(__name__)
@@ -126,10 +129,12 @@ def emit_dispatch_receipt(
     receipt shape.
 
     ``warnings``: ADR-035 §6.1 — raw ``{code, severity, message}`` entries.
-    Run through the destination-assignment engine (via
-    ``finalize_receipt_v2_fields``, called below) before the receipt is
-    validated/appended, exactly like Path 2 (``append_receipt_payload``).
-    Only stamped when provided.
+    Classified (side-effect-free) via ``classify_receipt_v2_warnings``
+    before the receipt is validated, then committed (open-items promotion,
+    counter increment) via ``commit_receipt_v2_fields`` only once the
+    append primitive confirms the receipt will actually be written
+    (fix-r1) — exactly like Path 2 (``append_receipt_payload``). Only
+    stamped when provided.
 
     Raises:
         ValueError: provider field doesn't match required pattern
@@ -184,10 +189,15 @@ def emit_dispatch_receipt(
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # ADR-035 §9 PR-4: wire verdict{}/warnings[] into the receipt,
-        # additively, before the shared validator sees it — the same
-        # finalize function append_receipt_payload (Path 2) calls.
-        finalize_receipt_v2_fields(receipt)
+        # ADR-035 §9 PR-4 (fix-r1): pure classification of warnings[] (no
+        # side effects) before the shared validator sees it — the same
+        # classify step append_receipt_payload (Path 2) calls. The matching
+        # side-effect commit (open-items promotion, counter increment) is
+        # deferred to commit_receipt_v2_fields, passed below as
+        # pre_write_hook so it only fires once _write_receipt_under_lock
+        # confirms this receipt is not a duplicate and will actually be
+        # written.
+        classify_receipt_v2_warnings(receipt)
         event_name = _validate_receipt(receipt)
         idempotency_key = _compute_idempotency_key(receipt, event_name)
         cache_path = _cache_file_for(receipt_path)
@@ -197,6 +207,7 @@ def emit_dispatch_receipt(
             cache_path,
             idempotency_key,
             _RECEIPT_CACHE_WINDOW_SECONDS,
+            pre_write_hook=commit_receipt_v2_fields,
         )
     except AppendReceiptError as exc:
         raise RuntimeError(
