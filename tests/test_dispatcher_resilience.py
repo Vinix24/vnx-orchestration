@@ -64,6 +64,9 @@ def _run_scan(scenario_setup: str) -> subprocess.CompletedProcess:
         _cleanup_stuck_dispatches() { :; }
         _unified_supervisor_lease_sweep_tick() { :; }
         _maybe_auto_seed_tracks() { :; }
+        _maybe_oi_bridge_tick() { :; }
+        _maybe_objective_reconcile() { :; }
+        _maybe_learning_cycle() { :; }
         extract_agent_role() { echo "backend-developer"; }
 
         PENDING_DIR="$1"
