@@ -10,15 +10,26 @@ Scoring components (weighted, 7 total):
   - Effort efficiency (15%): Token usage vs median for role
   - Error density (10%): Error/fail messages ratio in JSONL
   - Rework indicator (10%): Same gate+pr_id dispatched before?
-  - T0 Advisory (10%): quality_advisory.t0_recommendation decision + risk_score
+  - T0 Advisory (10%): verdict.decision + warnings[] severity risk
   - Open Items Delta (10%): Created vs resolved open items balance
+
+T0 Advisory reads receipt["verdict"]/receipt["warnings"] (ADR-035 §3.1/§6) as
+its primary source — migrated by ADR-035 §9 PR-4b, the required prerequisite
+before PR-5 drops receipt["quality_advisory"] (§3.3, HIGH-5). It falls back to
+receipt["quality_advisory"] only when verdict{} is absent (a receipt written
+before PR-4, or a DB-projection round-trip like update_dispatch_cqs.py
+replaying a historical quality_advisory_json column) — quality_advisory{}
+itself is not removed from the receipt shape until PR-5, so this reader must
+keep tolerating it until then.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+from quality_advisory import RISK_WEIGHT_BLOCKING, RISK_WEIGHT_WARNING
 
 # Normalize the ~166 unique status values into 5 categories
 STATUS_MAP: Dict[str, str] = {
@@ -79,7 +90,7 @@ def _score_completion(receipt: Dict[str, Any]) -> float:
         score += 100
         signals += 1
 
-    gate = receipt.get("gate_passed") or receipt.get("quality_advisory", {}).get("t0_recommendation", {}).get("decision") == "approve"
+    gate = receipt.get("gate_passed") or _t0_decision_is_accept(receipt)
     if gate:
         score += 100
         signals += 1
@@ -177,8 +188,71 @@ def _score_rework(dispatch_id: str, gate: str | None, pr_id: str | None, db_path
         return 100.0
 
 
+def _t0_decision_is_accept(receipt: Dict[str, Any]) -> bool:
+    """True when the T0 decision reads as an outright accept/approve.
+
+    Reads verdict.decision (ADR-035 §3.1, PR-4-populated receipts) when
+    present. Falls back to quality_advisory.t0_recommendation.decision only
+    for a receipt that has no verdict{} at all — a receipt written before
+    PR-4, or a DB-projection round-trip (e.g. update_dispatch_cqs.py
+    replaying a historical dispatch_metadata.quality_advisory_json column,
+    OI-1175) that predates this migration. quality_advisory{} itself is not
+    removed until PR-5 (§3.3), so it must still be readable here until then.
+    """
+    verdict = receipt.get("verdict")
+    if isinstance(verdict, dict) and "decision" in verdict:
+        return verdict.get("decision") == "accept"
+
+    advisory = receipt.get("quality_advisory") or {}
+    rec = advisory.get("t0_recommendation") or {}
+    return rec.get("decision") == "approve"
+
+
+def _reconstruct_t0_risk_score(warnings: List[Any]) -> float:
+    """Reconstruct a 0-100 risk score from warnings[] severities.
+
+    Weighted identically to the pre-v2 quality_advisory.calculate_risk_score
+    (RISK_WEIGHT_BLOCKING/RISK_WEIGHT_WARNING): ADR-035 §6.3 preserves each
+    quality check's severity 1:1 onto its warnings[] entry's severity
+    (blocking->blocker, warning->warn), so summing warnings[] here reproduces
+    the same number the old quality_advisory dry-run produced.
+    """
+    score = 0
+    for entry in warnings:
+        severity = (entry or {}).get("severity")
+        if severity == "blocker":
+            score += RISK_WEIGHT_BLOCKING
+        elif severity == "warn":
+            score += RISK_WEIGHT_WARNING
+    return min(score, 100)
+
+
+def _blend_t0_advisory(decision_score: float, risk_score: float) -> float:
+    """70% decision weight, 30% inverse risk score — the blend itself is
+    unchanged across the quality_advisory{}->verdict{}/warnings[] migration
+    (ADR-035 §9 PR-4b), only the two inputs' source shape differs."""
+    return decision_score * 0.7 + max(0, 100 - risk_score) * 0.3
+
+
 def _score_t0_advisory(receipt: Dict[str, Any]) -> float:
-    """Score from quality_advisory.t0_recommendation (0-100)."""
+    """Score from verdict.decision + warnings[] severity risk (0-100).
+
+    Reads the v2 shape PR-4 now populates on both write paths. Falls back to
+    the pre-v2 quality_advisory{} shape only when verdict{} is absent (see
+    `_t0_decision_is_accept`'s docstring for why that fallback is still
+    needed pre-PR-5) — a receipt carrying both is scored from verdict{}/
+    warnings[] only, never a blend of the two sources.
+    """
+    verdict = receipt.get("verdict")
+    if isinstance(verdict, dict) and "decision" in verdict:
+        decision = verdict.get("decision")
+        warnings = receipt.get("warnings")
+        risk_score = _reconstruct_t0_risk_score(warnings) if isinstance(warnings, list) else 0
+
+        decision_scores = {"accept": 100.0, "investigate": 60.0, "reject": 0.0}
+        decision_score = decision_scores.get(decision, 50.0)
+        return _blend_t0_advisory(decision_score, risk_score)
+
     advisory = receipt.get("quality_advisory")
     if not isinstance(advisory, dict):
         return 50.0  # neutral
@@ -187,14 +261,12 @@ def _score_t0_advisory(receipt: Dict[str, Any]) -> float:
     if not isinstance(rec, dict):
         return 50.0
 
-    decision = rec.get("decision", "approve")
+    legacy_decision = rec.get("decision", "approve")
     risk_score = advisory.get("summary", {}).get("risk_score", 0)
 
-    decision_scores = {"approve": 100.0, "approve_with_followup": 60.0, "hold": 0.0}
-    decision_score = decision_scores.get(decision, 50.0)
-
-    # Blend: 70% decision weight, 30% inverse risk score
-    return decision_score * 0.7 + max(0, 100 - risk_score) * 0.3
+    legacy_decision_scores = {"approve": 100.0, "approve_with_followup": 60.0, "hold": 0.0}
+    decision_score = legacy_decision_scores.get(legacy_decision, 50.0)
+    return _blend_t0_advisory(decision_score, risk_score)
 
 
 def _score_open_items_delta(receipt: Dict[str, Any]) -> float:
