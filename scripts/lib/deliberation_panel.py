@@ -30,10 +30,10 @@ DispatcherFn = Callable[[str, str, str, str], str]
 # deepseek-harness is optional (needs its own key + hardening) — degrades gracefully if absent.
 DEFAULT_ROSTER: List[Tuple[str, str]] = [
     ("codex", "gpt-5.5"),
-    ("kimi", "kimi-k2-7-code"),
+    ("kimi", "kimi-k3"),
     ("claude", "sonnet"),
     ("glm-harness", "glm-5.2"),
-    ("deepseek-harness", "deepseek-reasoner"),
+    ("deepseek-harness", "deepseek-v4-pro"),
 ]
 
 

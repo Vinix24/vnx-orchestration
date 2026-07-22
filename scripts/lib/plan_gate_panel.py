@@ -57,7 +57,7 @@ _CLAUDE_PROVIDERS = {"claude"}
 # retry only rescues transient flakes. glm-harness requires the local litellm proxy on :4141.
 DEFAULT_PANEL: List[Dict[str, str]] = [
     {"label": "opus", "provider": "claude", "model_arg": "opus"},
-    {"label": "kimi", "provider": "kimi", "model_arg": "kimi-k2-7-code"},
+    {"label": "kimi", "provider": "kimi", "model_arg": "kimi-k3"},
     {"label": "glm-5.2-harness", "provider": "glm-harness", "model_arg": "glm-5.2"},
     {"label": "deepseek", "provider": "deepseek-harness", "model_arg": "deepseek-v4-pro"},
     {"label": "codex", "provider": "codex", "model_arg": "gpt-5.5"},
