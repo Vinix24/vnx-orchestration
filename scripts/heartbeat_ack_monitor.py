@@ -559,7 +559,6 @@ class HeartbeatACKMonitor:
             'status': 'confirmed',
             'auto_generated': True,
             'source': 'heartbeat_ack_monitor',
-            'confidence': confidence,
 
             # Enhanced fields (Phase 1A intelligence)
             'terminal_load': {
@@ -576,7 +575,7 @@ class HeartbeatACKMonitor:
             logger.error(f"[ACK] Failed to persist start receipt for {dispatch_info['dispatch_id']}")
             return
 
-        logger.info(f"[ACK] Generated start receipt for {dispatch_info['dispatch_id']} (confidence: {receipt['confidence']:.2f})")
+        logger.info(f"[ACK] Generated start receipt for {dispatch_info['dispatch_id']} (confidence: {confidence:.2f})")
 
         # Refresh terminal_state lease/last_activity on confirmed start.
         if self._shadow_terminal_state_enabled:

@@ -67,6 +67,43 @@ def test_corrupt_timestamp_logs_debug_not_error(caplog):
         os.unlink(tmp_path)
 
 
+def test_generate_ack_receipt_persists_without_confidence_field(tmp_path, monkeypatch):
+    """ADR-035 §9 PR-5 fix-r1 regression: `_generate_ack_receipt` used to set
+    `confidence` on the persisted receipt with no `schema_version`, so the
+    payload's own `schema_version` setdefault (v2) collided with the new
+    legacy-field guard (T27) and `_append_receipt`'s broad except swallowed
+    the resulting `AppendReceiptError` -- the ACK receipt silently failed to
+    persist. `confidence` is a §3.3 trimmed field with no live receipt
+    reader; drop it from the receipt (keep the local var for the log line)."""
+    from heartbeat_ack_monitor import HeartbeatACKMonitor
+
+    monitor = object.__new__(HeartbeatACKMonitor)
+    monitor.state_dir = str(tmp_path)
+    monitor.receipts_file = str(tmp_path / "t0_receipts.ndjson")
+    monitor.active_dispatches = {}
+    monitor._shadow_terminal_state_enabled = False
+    monkeypatch.setenv("VNX_ACK_DIRECT_NOTIFY", "0")
+
+    now = datetime(2026, 7, 22, 10, 0, 0, tzinfo=timezone.utc)
+    dispatch_info = {
+        "dispatch_id": "ack-confidence-regression",
+        "task_id": "task-1",
+        "terminal": "T1",
+        "confirmation_time": now,
+        "sent_time": now,
+        "confirmation_method": "heartbeat",
+    }
+    signals = [{"type": "heartbeat", "delay_seconds": 1.2, "timestamp": now}]
+
+    monitor._generate_ack_receipt(dispatch_info, signals)
+
+    lines = Path(monitor.receipts_file).read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1, "ACK receipt must persist, not be silently dropped"
+    stored = json.loads(lines[0])
+    assert stored["dispatch_id"] == "ack-confidence-regression"
+    assert "confidence" not in stored
+
+
 def test_check_log_change_oserror_swallowed(caplog, tmp_path):
     """OSError from getmtime on inaccessible log is caught and logged at DEBUG."""
     monitor = _make_monitor()
