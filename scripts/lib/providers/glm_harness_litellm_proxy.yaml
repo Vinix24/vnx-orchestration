@@ -5,18 +5,23 @@
 # while inference still flows through OpenRouter — so `zai-via-openrouter-only` stays
 # intact (no direct z.ai/Zhipu account) and it's the CLI not the SDK (`no-anthropic-sdk`
 # intact). The key is read from OPENROUTER_API_KEY in the proxy's env; never hardcoded.
+# Model registry refresh (2026-07-22): glm-5.2 is CURRENT/preferred — it's the default
+# glm_harness_spawn.py resolves to (DEFAULT_GLM_HARNESS_MODEL). glm-5.1 and base glm-5 stay
+# listed deliberately: provider_constraints.yaml keeps glm-5.1 "available" for explicit
+# override, and glm-5 is the intentional flat-runner baseline — neither is a stale/broken
+# route, so both remain reachable via VNX_GLM_HARNESS_MODEL.
 model_list:
-  - model_name: glm-5
+  - model_name: glm-5.2
     litellm_params:
-      model: openrouter/z-ai/glm-5
+      model: openrouter/z-ai/glm-5.2
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: glm-5.1
     litellm_params:
       model: openrouter/z-ai/glm-5.1
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: glm-5.2
+  - model_name: glm-5
     litellm_params:
-      model: openrouter/z-ai/glm-5.2
+      model: openrouter/z-ai/glm-5
       api_key: os.environ/OPENROUTER_API_KEY
 
 litellm_settings:

@@ -24,6 +24,11 @@ providers:
         supports_tool_calls: true
         task_classes: ["coding-premium", "review", "analysis"]
       opus-4-6:
+        # RETIRED alias, kept deliberately (2026-07-22 model-registry-refresh): the field-test
+        # benchmark harness (scripts/benchmark/) pins this exact retired snapshot for historical
+        # reproducibility (see scripts/benchmark/models.yaml comment "pin 4-6 explicitly").
+        # NOT used by current routing — smart_router / routing_recommendations.yaml use
+        # `opus`/`opus-4-8` (current) instead. Do not repurpose this key for current traffic.
         litellm_name: "anthropic/claude-opus-4-6"
         cost_input_per_mtok: 15.00
         cost_output_per_mtok: 75.00

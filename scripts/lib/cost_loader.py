@@ -18,8 +18,16 @@ _AVG_INPUT_TOKENS = 5_000
 _AVG_OUTPUT_TOKENS = 2_000
 
 # Maps routing_recommendations model_id → (provider_key, model_key) in wave7_models.yaml.
+#
+# 2026-07-22 model-registry-refresh: routing_recommendations.yaml model_ids were bumped to
+# current (claude-sonnet-4-6 -> claude-sonnet-5, glm-5-1 -> glm-5-2; claude-opus-4-6 already
+# had a claude-opus-4-8 entry). The retired keys below are kept ADDITIVELY (not renamed) —
+# tests/test_smart_router_cost_aware.py calls compute_cost_per_call() with these exact retired
+# strings directly against the real wave7_models.yaml and must keep resolving. New keys for the
+# current model_ids are added alongside so real enrichment doesn't silently break post-rename.
 _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4-6": ("anthropic", "sonnet"),
+    "claude-sonnet-5": ("anthropic", "sonnet"),
     "claude-opus-4-6": ("anthropic", "opus"),
     "claude-opus-4-7": ("anthropic", "opus"),
     "claude-opus-4-8": ("anthropic", "opus"),
@@ -27,6 +35,7 @@ _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "deepseek-v4-flash": ("deepseek", "deepseek-v4-flash"),
     "deepseek-v4-pro": ("deepseek", "deepseek-v4-pro"),
     "glm-5-1": ("zai", "glm-5.1-default"),
+    "glm-5-2": ("zai", "glm-5.2"),
     "kimi-k2-0905": ("kimi_cli", "kimi-default"),
     "kimi-k2-6": ("kimi_cli", "kimi-k2-6"),
 }
