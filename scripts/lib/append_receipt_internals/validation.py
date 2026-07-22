@@ -73,6 +73,60 @@ def _resolve_schema_version(receipt: Dict[str, Any]) -> int:
         return 1
 
 
+# ADR-035 §3.3/§9 PR-5: the field set the v2 shape cutover trimmed. A
+# `schema_version >= 2` receipt carrying any of these is the mixed "v1.5"
+# shape HIGH-6/T27 forbid — the version stamp and the trimmed shape must
+# land together, never one ahead of the other. `provenance.captured_at`/
+# `captured_by` are the one trimmed pair that live under a subkey rather
+# than top-level, so they are checked separately below.
+LEGACY_TRIMMED_TOP_LEVEL_FIELDS = frozenset({
+    "session",
+    "validation",
+    "recorded_at",
+    "quality_advisory",
+    "confidence",
+    "tags",
+    "root_cause",
+    "dependencies",
+    "metrics",
+    "prevention_rules",
+    "used_pattern_hashes",
+    "legacy_format",
+})
+
+LEGACY_TRIMMED_PROVENANCE_SUBKEYS = frozenset({"captured_at", "captured_by"})
+
+
+def _reject_legacy_fields_on_v2(receipt: Dict[str, Any], schema_version: int) -> None:
+    """Fail-closed (reject, write nothing) rather than silently strip: a
+    caller that sets a trimmed legacy field on a v2-stamped receipt has a
+    bug that must surface loudly, not get silently corrected. `schema_version`
+    absent/`1` is unaffected — v1 lines keep full tolerance for these fields
+    (append-only, the past is never rewritten)."""
+    if schema_version < 2:
+        return
+
+    offending = sorted(field for field in LEGACY_TRIMMED_TOP_LEVEL_FIELDS if field in receipt)
+
+    provenance = receipt.get("provenance")
+    if isinstance(provenance, dict):
+        offending.extend(
+            sorted(
+                f"provenance.{subkey}"
+                for subkey in LEGACY_TRIMMED_PROVENANCE_SUBKEYS
+                if subkey in provenance
+            )
+        )
+
+    if offending:
+        raise AppendReceiptError(
+            "legacy_field_on_v2_receipt",
+            EXIT_VALIDATION_ERROR,
+            f"schema_version={schema_version} receipt carries trimmed legacy "
+            f"field(s) removed by ADR-035 §9 PR-5: {', '.join(offending)}",
+        )
+
+
 def _resolve_event_name(receipt: Dict[str, Any], schema_version: int) -> str:
     """ADR-035 §3.2.1 (r3 HIGH-2): for `schema_version >= 2`, `event_type`
     alone is consulted — the legacy `event` alias is NOT a fallback for a
@@ -203,6 +257,7 @@ def _validate_receipt(receipt: Dict[str, Any]) -> str:
         )
 
     schema_version = _resolve_schema_version(receipt)
+    _reject_legacy_fields_on_v2(receipt, schema_version)
     event_name = _resolve_event_name(receipt, schema_version)
     if not event_name:
         raise AppendReceiptError(

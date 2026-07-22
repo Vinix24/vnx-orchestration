@@ -625,37 +625,11 @@ class TestReceiptEnrichment:
         assert _is_completion_event(receipt)
         enriched = _enrich_completion_receipt(receipt, repo_root=tmp_path)
 
-        # Should have both quality_advisory and terminal_snapshot
-        assert "quality_advisory" in enriched
+        # ADR-035 §3.3/§9 PR-5: quality_advisory{} generation is retired
+        # (superseded by verdict{}/warnings[], §6) -- terminal_snapshot is
+        # unaffected.
+        assert "quality_advisory" not in enriched
         assert "terminal_snapshot" in enriched
-
-    def test_completion_receipt_uses_report_files_when_git_clean(self, tmp_path):
-        """Fallback to report file list when git diff is empty."""
-        from append_receipt import _enrich_completion_receipt
-
-        # Create a file that should trigger file-size warning (>500 lines)
-        target = tmp_path / "demo.py"
-        target.write_text("x = 1\n" * 600, encoding="utf-8")
-
-        # Create a report listing the file
-        report = tmp_path / "20260218-110750-A-demo.md"
-        report.write_text(
-            "# Report: Demo\n\n### Files Modified\n- `demo.py`: test file\n",
-            encoding="utf-8",
-        )
-
-        receipt = {
-            "timestamp": "2026-02-15T10:00:00Z",
-            "event_type": "task_complete",
-            "task_id": "test-123",
-            "report_path": str(report),
-        }
-
-        enriched = _enrich_completion_receipt(receipt, repo_root=tmp_path)
-        advisory = enriched.get("quality_advisory", {})
-        summary = advisory.get("summary", {})
-
-        assert summary.get("warning_count", 0) >= 1
 
     def test_enrichment_failure_fallback(self, tmp_path):
         """Failed enrichment should add unavailable status markers."""

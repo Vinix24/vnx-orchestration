@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .common import _emit, _utc_now_iso, facade
+from .common import _emit, facade
 from .validation import _is_completion_event, _is_subprocess_intermediate_completion
 
 
@@ -27,38 +26,42 @@ def _enrich_project_id_and_git(enriched: Dict[str, Any], paths: Dict[str, str], 
             "is_dirty": False,
             "dirty_files": 0,
             "diff_summary": None,
-            "captured_at": _utc_now_iso(),
-            "captured_by": "append_receipt",
             "status": "unavailable",
             "error": str(exc),
         }
 
 
 def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
-    existing_session = enriched.get("session")
-    if isinstance(existing_session, dict):
-        merged_session = dict(existing_session)
-        try:
-            defaults = facade._build_session_metadata(enriched, state_dir)
-            for key, value in defaults.items():
-                merged_session.setdefault(key, value)
-        except Exception as exc:
-            _emit("WARN", "session_metadata_failed", error=str(exc))
-        enriched["session"] = merged_session
-        return
+    """ADR-035 §4: session{} collapses to a single session_id pointer.
+
+    model/provider/token_usage/instruction_sha256 are already top-level
+    fields in the v2 canonical shape (§3) — not session state — so they are
+    promoted directly onto the receipt here instead of nested under a
+    (now-removed) session{} object. Caller-supplied values are never
+    overwritten. The rest of the session's state (liveness, terminal
+    heartbeat) is resolved by session_id against runtime_coordination.db at
+    read time, not carried on the immutable receipt line.
+    """
     try:
-        enriched["session"] = facade._build_session_metadata(enriched, state_dir)
+        session_meta = facade._build_session_metadata(enriched, state_dir)
     except Exception as exc:
         _emit("WARN", "session_metadata_failed", error=str(exc))
-        enriched["session"] = {
+        session_meta = {
             "session_id": "unknown",
             "terminal": str(enriched.get("terminal") or "unknown"),
             "model": "unknown",
             "provider": "unknown",
-            "captured_at": _utc_now_iso(),
-            "status": "unavailable",
-            "error": str(exc),
         }
+
+    enriched.setdefault("session_id", session_meta.get("session_id", "unknown"))
+    if not enriched.get("terminal"):
+        enriched["terminal"] = session_meta.get("terminal", "unknown")
+    enriched.setdefault("model", session_meta.get("model", "unknown"))
+    enriched.setdefault("provider", session_meta.get("provider", "unknown"))
+    if "token_usage" in session_meta:
+        enriched.setdefault("token_usage", session_meta["token_usage"])
+    if "instruction_sha256" in session_meta:
+        enriched.setdefault("instruction_sha256", session_meta["instruction_sha256"])
 
 
 def _enrich_provenance_linkage(enriched: Dict[str, Any], state_dir: Path) -> None:
@@ -138,47 +141,6 @@ def _enrich_terminal_snapshot(enriched: Dict[str, Any], state_dir: Path) -> None
         terminals["T0"] = t0_entry
         snapshot_data["terminals"] = terminals
         enriched["terminal_snapshot"] = snapshot_data
-
-
-def _enrich_quality_advisory(enriched: Dict[str, Any], receipt: Dict[str, Any], repo_root: Optional[Path]) -> None:
-    try:
-        if repo_root is None:
-            repo_root = Path.cwd()
-
-        changed_files = facade.get_changed_files(repo_root)
-
-        if not changed_files:
-            report_path = str(receipt.get("report_path") or "")
-            if report_path:
-                changed_files = facade._extract_changed_files_from_report(Path(report_path), repo_root)
-
-        if changed_files:
-            advisory = facade.generate_quality_advisory(changed_files, repo_root)
-            enriched["quality_advisory"] = advisory.to_dict()
-        else:
-            enriched["quality_advisory"] = {
-                "version": "1.0",
-                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "scope": [],
-                "checks": [],
-                "summary": {
-                    "warning_count": 0,
-                    "blocking_count": 0,
-                    "risk_score": 0,
-                },
-                "t0_recommendation": {
-                    "decision": "approve",
-                    "reason": "No changed files detected",
-                    "suggested_dispatches": [],
-                    "open_items": [],
-                },
-            }
-    except Exception as exc:
-        _emit("WARN", "quality_advisory_failed", error=str(exc))
-        enriched["quality_advisory"] = {
-            "status": "unavailable",
-            "error": str(exc),
-        }
 
 
 def _enrich_oi_delta(enriched: Dict[str, Any], state_dir: Path) -> None:
@@ -281,10 +243,16 @@ def _enrich_cqs(enriched: Dict[str, Any], state_dir: Path) -> None:
 
 
 def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path] = None) -> Dict[str, Any]:
-    """Enrich completion receipts with quality advisory and terminal snapshot.
+    """Enrich completion receipts with provenance, session, and terminal snapshot.
 
     This is best-effort - failures will result in status="unavailable" markers
     rather than crashing the receipt append flow.
+
+    ADR-035 §3.3/§9 PR-5: quality_advisory{} is no longer generated here —
+    superseded by verdict{}/warnings[] (§6), which the shared append
+    primitive's finalize step populates. cqs_calculator.py (migrated PR-4b)
+    reads verdict{}/warnings[] first, falling back to quality_advisory{}
+    only when replaying a pre-cutover (v1) receipt.
     """
     if not _is_completion_event(receipt):
         return receipt
@@ -301,7 +269,6 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     if _is_subprocess_intermediate_completion(receipt):
         return enriched
 
-    _enrich_quality_advisory(enriched, receipt, repo_root)
     _enrich_oi_delta(enriched, state_dir)
 
     if "open_items_created" not in enriched:

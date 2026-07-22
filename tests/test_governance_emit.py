@@ -178,12 +178,15 @@ def test_receipt_cost_usd_nullable_when_provider_does_not_report(tmp_state):
     assert data["cost_usd"] is None
 
 
-def test_recorded_at_timestamp_present(tmp_state):
+def test_recorded_at_removed_timestamp_present(tmp_state):
+    """ADR-035 §3.3/§9 PR-5: recorded_at is byte-identical to timestamp on
+    every governed receipt (a verified duplicate) -- trimmed. A reader that
+    needs record time reads timestamp."""
     emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
     data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
-    assert "recorded_at" in data
-    assert data["recorded_at"].endswith("Z")
+    assert "recorded_at" not in data
     assert "timestamp" in data
+    assert data["timestamp"].endswith("Z")
 
 
 def test_receipt_written_atomically(tmp_state, monkeypatch):

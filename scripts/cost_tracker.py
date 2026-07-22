@@ -342,17 +342,20 @@ def resolve_usage_for_receipt(receipt: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve usage data from transcript for a receipt.
 
     Priority order:
-    1. Find session_id in receipt.session object (Phase 1B)
+    1. Find session_id (top-level, ADR-035 §4 — falls back to the pre-cutover
+       nested receipt.session object for a v1 receipt)
     2. Locate transcript file via find_transcript()
     3. Parse usage from transcript via extract_usage_from_transcript()
-    4. Calculate cost using model from receipt.session
+    4. Calculate cost using model (top-level, same v1 fallback)
 
     Returns dict with input_tokens, output_tokens, total_tokens, cost_usd, resolution_status.
     """
-    # Extract session info from Phase 1B session object
-    session = receipt.get("session", {})
-    session_id = session.get("session_id")
-    model = session.get("model", "unknown")
+    # ADR-035 §4/§9 PR-5: session{} collapsed to a session_id pointer;
+    # model/provider promoted to top-level fields. A pre-cutover (v1) receipt
+    # still carries the nested session{} object, so it stays the fallback.
+    session = receipt.get("session") or {}
+    session_id = receipt.get("session_id") or session.get("session_id")
+    model = receipt.get("model") or session.get("model", "unknown")
 
     # If no session_id, cannot resolve
     if not session_id or session_id == "unknown":

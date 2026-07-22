@@ -35,11 +35,6 @@ class ReportParser:
         self.vnx_home = Path(paths["VNX_HOME"])
         self.dispatch_completed_dir = Path(paths["VNX_DISPATCH_DIR"]) / "completed"
 
-        self.tag_patterns = {
-            'issues': re.compile(r'\*\*Issue Tags\*\*:\s*(.+)'),
-            'components': re.compile(r'\*\*Component Tags\*\*:\s*(.+)'),
-            'solutions': re.compile(r'\*\*Solution Tags\*\*:\s*(.+)')
-        }
         self.header_pattern = re.compile(r'^#{1,3}\s+(.+)$', re.MULTILINE)
         self.metadata_pattern = re.compile(r'\*\*([^*]+)\*\*:\s*(.+)')
 
@@ -73,17 +68,16 @@ class ReportParser:
         except Exception as e:
             return {'error': f'Error reading report: {str(e)}'}
 
-        # Extract all components
+        # Extract all components. ADR-035 §3.3/§9 PR-5: tags/root_cause/
+        # dependencies/metrics/used_pattern_hashes are dead weight (zero
+        # receipt-field readers, verified) and no longer extracted;
+        # recommendations/intelligence (pattern_count/quality_context) are
+        # live readers (§3.2) and stay.
         extracted = {
             'metadata': self.extract_metadata(content),
-            'tags': self.extract_tags(content),
-            'root_cause': self.extract_root_cause(content),
-            'dependencies': self.extract_dependencies(content),
             'recommendations': self.extract_recommendations(content),
-            'metrics': self.extract_metrics(content),
             'validation': self.extract_validation(content),
             'intelligence': self.extract_intelligence(content),  # PR #8: Extract quality_context
-            'used_pattern_hashes': self.extract_used_pattern_hashes(content)
         }
 
         # Governance (audit #10): validate the worker report body. A success-claim with an invalid
@@ -280,94 +274,6 @@ class ReportParser:
 
         return metadata
 
-    def extract_tags(self, content: str) -> Dict[str, List[str]]:
-        """Extract categorized tags from report"""
-        tags = {
-            'issues': [],
-            'components': [],
-            'solutions': []
-        }
-
-        for category, pattern in self.tag_patterns.items():
-            match = pattern.search(content)
-            if match:
-                # Split tags and clean them
-                raw_tags = match.group(1).split()
-                tags[category] = [tag.strip() for tag in raw_tags if tag.startswith('#')]
-
-        return tags
-
-    def extract_root_cause(self, content: str) -> Dict[str, Any]:
-        """Extract root cause analysis section"""
-        root_cause = {
-            'identified': None,
-            'confidence': 0.0,
-            'evidence': []
-        }
-
-        # Find root cause section
-        root_cause_section = self._extract_section(content, 'Root Cause')
-        if not root_cause_section:
-            return root_cause
-
-        # Extract main cause (usually first paragraph after header)
-        lines = root_cause_section.strip().split('\n')
-        for i, line in enumerate(lines):
-            if line and not line.startswith('#') and not line.startswith('*'):
-                root_cause['identified'] = line.strip()
-                break
-
-        # Look for evidence bullets
-        evidence_pattern = re.compile(r'^[-*]\s+(.+)$', re.MULTILINE)
-        evidence_matches = evidence_pattern.findall(root_cause_section)
-        root_cause['evidence'] = evidence_matches[:5]  # Limit to 5 pieces of evidence
-
-        # Estimate confidence based on evidence count
-        if root_cause['identified']:
-            root_cause['confidence'] = min(0.95, 0.70 + (len(root_cause['evidence']) * 0.05))
-
-        return root_cause
-
-    def extract_dependencies(self, content: str) -> Dict[str, Any]:
-        """Extract cross-track dependencies and impacts"""
-        dependencies = {
-            'tracks': [],
-            'components': [],
-            'blocking': False,
-            'risk_level': 'unknown'
-        }
-
-        # Find dependencies section
-        dep_section = self._extract_section(content, 'Dependenc')
-        if not dep_section:
-            # Also check for "Cross-Track Impact" or similar
-            dep_section = self._extract_section(content, 'Impact')
-
-        if dep_section:
-            # Extract track mentions
-            track_pattern = re.compile(r'Track\s+([ABC])', re.IGNORECASE)
-            tracks = track_pattern.findall(dep_section)
-            dependencies['tracks'] = list(set(tracks))
-
-            # Extract file/component mentions
-            file_pattern = re.compile(r'([a-z_]+(?:/[a-z_]+)*\.py)', re.IGNORECASE)
-            components = file_pattern.findall(dep_section)
-            dependencies['components'] = list(set(components))[:5]  # Limit to 5
-
-            # Check for blocking keywords
-            if re.search(r'\b(block|blocking|blocked|critical)\b', dep_section, re.IGNORECASE):
-                dependencies['blocking'] = True
-
-            # Determine risk level
-            if re.search(r'\b(high risk|critical|severe)\b', dep_section, re.IGNORECASE):
-                dependencies['risk_level'] = 'high'
-            elif re.search(r'\b(medium risk|moderate)\b', dep_section, re.IGNORECASE):
-                dependencies['risk_level'] = 'medium'
-            elif re.search(r'\b(low risk|minimal|safe)\b', dep_section, re.IGNORECASE):
-                dependencies['risk_level'] = 'low'
-
-        return dependencies
-
     def extract_recommendations(self, content: str) -> Dict[str, List[str]]:
         """Extract recommendations and next steps"""
         recommendations = {
@@ -401,99 +307,6 @@ class ReportParser:
             recommendations['warnings'] = recommendations['warnings'][:3]
 
         return recommendations
-
-    def extract_metrics(self, content: str) -> Dict[str, Any]:
-        """Extract categorized metrics from report"""
-        metrics = {
-            'performance': {},
-            'quality': {},
-            'business': {}
-        }
-
-        # Find metrics section
-        metrics_section = self._extract_section(content, 'Metrics')
-        if not metrics_section:
-            # Try alternative sections
-            metrics_section = self._extract_section(content, 'Results')
-
-        if metrics_section:
-            # Extract Performance metrics
-            perf_patterns = {
-                'processing_time_ms': re.compile(r'Processing time:\s*(\d+(?:\.\d+)?)\s*ms', re.IGNORECASE),
-                'memory_mb': re.compile(r'Memory usage:\s*(\d+(?:\.\d+)?)\s*MB', re.IGNORECASE),
-                'cpu_percent': re.compile(r'CPU usage:\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE),
-                'response_time_ms': re.compile(r'Response time:\s*(\d+(?:\.\d+)?)\s*ms', re.IGNORECASE)
-            }
-
-            for key, pattern in perf_patterns.items():
-                match = pattern.search(metrics_section)
-                if match:
-                    try:
-                        metrics['performance'][key] = float(match.group(1))
-                    except ValueError:
-                        pass
-
-            # Extract Quality metrics
-            quality_patterns = {
-                'tests_passed': re.compile(r'Tests passed:\s*(\d+)', re.IGNORECASE),
-                'tests_failed': re.compile(r'Tests failed:\s*(\d+)', re.IGNORECASE),
-                'coverage_percent': re.compile(r'Coverage:\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE),
-                'lines_changed': re.compile(r'Lines changed:\s*(\d+)', re.IGNORECASE)
-            }
-
-            for key, pattern in quality_patterns.items():
-                match = pattern.search(metrics_section)
-                if match:
-                    try:
-                        if 'percent' in key:
-                            metrics['quality'][key] = float(match.group(1))
-                        else:
-                            metrics['quality'][key] = int(match.group(1))
-                    except ValueError:
-                        pass
-
-            # Extract Business metrics
-            business_patterns = {
-                'records_processed': re.compile(r'Records processed:\s*(\d+)', re.IGNORECASE),
-                'success_rate_percent': re.compile(r'Success rate:\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE),
-                'errors_encountered': re.compile(r'Errors encountered:\s*(\d+)', re.IGNORECASE)
-            }
-
-            for key, pattern in business_patterns.items():
-                match = pattern.search(metrics_section)
-                if match:
-                    try:
-                        if 'percent' in key:
-                            metrics['business'][key] = float(match.group(1))
-                        else:
-                            metrics['business'][key] = int(match.group(1))
-                    except ValueError:
-                        pass
-
-        # Also search for metrics in entire content if section not found
-        if not any(metrics.values()):
-            # Fallback to searching entire content with simpler patterns
-            simple_patterns = {
-                'memory_mb': re.compile(r'(\d+(?:\.\d+)?)\s*MB', re.IGNORECASE),
-                'tests': re.compile(r'(\d+)\s*tests?\s*pass', re.IGNORECASE),
-                'performance_ms': re.compile(r'(\d+(?:\.\d+)?)\s*ms\b')
-            }
-
-            for key, pattern in simple_patterns.items():
-                match = pattern.search(content)
-                if match:
-                    try:
-                        value = float(match.group(1))
-                        if 'memory' in key:
-                            metrics['performance']['memory_mb'] = value
-                        elif 'test' in key:
-                            metrics['quality']['tests_passed'] = int(value)
-                        elif 'performance' in key:
-                            metrics['performance']['processing_time_ms'] = value
-                    except ValueError:
-                        pass
-
-        return metrics
 
     def extract_validation(self, content: str) -> Dict[str, Any]:
         """Extract validation and testing results"""
@@ -587,32 +400,6 @@ class ReportParser:
 
         return intelligence
 
-    def extract_used_pattern_hashes(self, content: str) -> List[str]:
-        """Extract pattern hashes used by the agent (optional, for usage tracking)"""
-        hashes: List[str] = []
-
-        # YAML or JSON-like list (used_pattern_hashes: [abc, def])
-        list_match = re.search(r'used_pattern_hashes\s*:\s*\[(.*?)\]', content, re.IGNORECASE | re.DOTALL)
-        if list_match:
-            hashes.extend(re.findall(r'[a-f0-9]{8,40}', list_match.group(1), re.IGNORECASE))
-
-        # Plaintext line (Patterns Used: <hash1>, <hash2>)
-        for line in content.splitlines():
-            if 'patterns used' in line.lower() or 'pattern_hash' in line.lower():
-                hashes.extend(re.findall(r'[a-f0-9]{8,40}', line, re.IGNORECASE))
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique = []
-        for h in hashes:
-            key = h.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(key)
-
-        return unique
-
     def extract_intelligence_from_dispatch(self, dispatch_id: str) -> Dict[str, Any]:
         """
         Extract intelligence from original dispatch file using dispatch_id
@@ -688,7 +475,6 @@ class ReportParser:
             'gate': metadata.get('gate', 'unknown'),
             'status': _receipt_status,
             'contract_valid': _contract_valid,  # governance visibility (audit #10)
-            'confidence': metadata.get('confidence', 0.50),
             'task_id': metadata.get('task_id', 'unknown'),
             'dispatch_id': metadata.get('dispatch_id', 'unknown'),
             'session_id': metadata.get('session_id'),  # Phase 2: Session tracking for cost attribution
@@ -697,61 +483,55 @@ class ReportParser:
             'title': metadata.get('title', 'No title')
         }
 
-        # Add extracted intelligence
-        if extracted['tags'] and any(extracted['tags'].values()):
-            receipt['tags'] = extracted['tags']
-
-        if extracted['root_cause']['identified']:
-            receipt['root_cause'] = extracted['root_cause']
-
-        if extracted['dependencies']:
-            receipt['dependencies'] = extracted['dependencies']
-
         if any(extracted['recommendations'].values()):
             receipt['recommendations'] = extracted['recommendations']
 
-        # Add structured metrics
-        if any(extracted['metrics'].values()):
-            receipt['metrics'] = extracted['metrics']
-
-        if extracted['validation'] and (extracted['validation']['tests_passed'] or
-                                       extracted['validation']['tests_failed'] or
-                                       extracted['validation']['quality_gates']):
-            receipt['validation'] = extracted['validation']
+        # ADR-035 §3.1/§9 PR-5: promote the raw extract_validation() output to
+        # the canonical verification{} shape — the same shape
+        # dispatch_envelope.py::_verification_from_report builds for Path 1's
+        # envelope sub-path, so compute_verdict reads one consistent
+        # verification.method vocabulary regardless of which write path
+        # produced the receipt. Always present (never omitted): an absent
+        # verification{} reads to compute_verdict as evidence_complete=True
+        # (method=None isn't in INCOMPLETE_EVIDENCE_METHODS), which is wrong —
+        # "unknown" is the honest default when no evidence was found (§3.1).
+        raw_validation = extracted.get('validation') or {}
+        tests_passed = int(raw_validation.get('tests_passed') or 0)
+        tests_failed = int(raw_validation.get('tests_failed') or 0)
+        tests_run = tests_passed + tests_failed
+        if tests_run > 0:
+            verification_method = 'pytest'
+        elif raw_validation.get('quality_gates'):
+            verification_method = 'manual'
+        else:
+            verification_method = 'unknown'
+        receipt['verification'] = {
+            'method': verification_method,
+            'tests_run': tests_run if tests_run > 0 else None,
+            'tests_passed': tests_passed if tests_run > 0 else None,
+            'tests_failed': tests_failed if tests_run > 0 else None,
+            'command': None,
+            'pr_ref': None,
+            'push_verified': None,
+            'spec_deviation': None,
+        }
 
         # INTELLIGENCE INTEGRATION (PR #8): Add quality_context to receipt
+        # (pattern_count/quality_context are live readers, §3.2; prevention_rules
+        # is dead weight, §3.3, and is no longer promoted onto the receipt).
         if extracted.get('intelligence'):
             intelligence_data = extracted['intelligence']
             if intelligence_data.get('pattern_count', 0) > 0:
                 receipt['pattern_count'] = intelligence_data['pattern_count']
-            if intelligence_data.get('prevention_rules', 0) > 0:
-                receipt['prevention_rules'] = intelligence_data['prevention_rules']
             if intelligence_data.get('quality_context') and intelligence_data['quality_context'] != {}:
                 receipt['quality_context'] = intelligence_data['quality_context']
 
-        if extracted.get('used_pattern_hashes'):
-            receipt['used_pattern_hashes'] = extracted['used_pattern_hashes']
-
-        # Use provided confidence or calculate based on completeness
-        if metadata.get('confidence', 0) > 0:
-            receipt['confidence'] = metadata['confidence']
-        else:
-            # Calculate confidence based on data completeness
-            field_count = sum([
-                bool(receipt.get('tags')),
-                bool(receipt.get('root_cause')),
-                bool(receipt.get('dependencies')),
-                bool(receipt.get('recommendations')),
-                bool(receipt.get('metrics')),
-                bool(receipt.get('validation'))
-            ])
-            receipt['confidence'] = min(0.98, 0.50 + (field_count * 0.08))
-
-        # Mark if this is legacy format (missing required fields)
-        required_fields = ['task_id', 'dispatch_id', 'confidence']
+        # Mark if this is legacy format (missing required fields). `confidence`
+        # dropped from this check (§3.3): the field itself no longer exists on
+        # the receipt, so checking for it would spuriously flag every receipt.
+        required_fields = ['task_id', 'dispatch_id']
         missing_fields = [f for f in required_fields if receipt.get(f) in ['unknown', None, 0]]
         if missing_fields:
-            receipt['legacy_format'] = True
             receipt['missing_fields'] = missing_fields
 
         return receipt

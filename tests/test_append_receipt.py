@@ -88,8 +88,9 @@ def test_append_receipt_persists_valid_receipt_once(tmp_path: Path):
     assert stored["dispatch_id"] == receipt["dispatch_id"]
     assert stored["event_type"] == "task_complete"
     assert "provenance" in stored
-    assert "session" in stored
-    assert stored["session"]["terminal"] == "T1"
+    # ADR-035 §4/§9 PR-5: session{} collapsed to a top-level session_id pointer.
+    assert "session" not in stored
+    assert stored["terminal"] == "T1"
     assert "git_ref" in stored["provenance"]
 
 
@@ -106,7 +107,32 @@ def test_append_receipt_session_id_prefers_receipt_metadata_over_env(tmp_path: P
 
     receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
     stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert stored["session"]["session_id"] == "report-session-123"
+    assert "session" not in stored
+    assert stored["session_id"] == "report-session-123"
+
+
+def test_append_receipt_session_id_explicit_top_level_survives_enrichment(tmp_path: Path):
+    """ADR-035 §9 PR-5 fix-r1 advisory: a receipt that already carries a
+    top-level `session_id` (the real §4 promoted field, not the nested
+    `metadata.session_id` the previous test covers) must not have it
+    overwritten by the resolved session metadata. `_enrich_session_metadata`
+    uses `setdefault` for exactly this reason -- confirm the caller-supplied
+    value wins over both the env var and whatever `_build_session_metadata`
+    would otherwise resolve."""
+    receipt = _build_receipt(index=23)
+    receipt["session_id"] = "explicit-caller-session"
+
+    result = _run_append(
+        tmp_path,
+        json.dumps(receipt),
+        extra_env={"CLAUDE_SESSION_ID": "env-session-should-be-ignored"},
+    )
+    assert result.returncode == 0
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert "session" not in stored
+    assert stored["session_id"] == "explicit-caller-session"
 
 
 def test_append_receipt_session_id_falls_back_to_gemini_current_file(tmp_path: Path, monkeypatch):
@@ -124,7 +150,8 @@ def test_append_receipt_session_id_falls_back_to_gemini_current_file(tmp_path: P
 
     receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
     stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert stored["session"]["session_id"] == "gemini-session-abc"
+    assert "session" not in stored
+    assert stored["session_id"] == "gemini-session-abc"
 
 
 def test_session_id_uses_panes_json_provider_for_standard_terminal(tmp_path: Path):
@@ -161,8 +188,9 @@ def test_session_id_uses_panes_json_provider_for_standard_terminal(tmp_path: Pat
 
     receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
     stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert stored["session"]["session_id"] == "codex-panes-session-xyz", (
-        f"Expected codex session ID from panes.json provider, got {stored['session']['session_id']!r}. "
+    assert "session" not in stored
+    assert stored["session_id"] == "codex-panes-session-xyz", (
+        f"Expected codex session ID from panes.json provider, got {stored['session_id']!r}. "
         "Terminal T3 with codex_cli provider must read CODEX_SESSION_ID, not CLAUDE_SESSION_ID."
     )
 
@@ -207,8 +235,9 @@ def test_session_id_priority4_prefers_provider_session_file(tmp_path: Path, monk
 
     receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
     stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert stored["session"]["session_id"] == "codex-file-session-abc", (
-        f"Expected codex file session for T3 with codex_cli provider, got {stored['session']['session_id']!r}."
+    assert "session" not in stored
+    assert stored["session_id"] == "codex-file-session-abc", (
+        f"Expected codex file session for T3 with codex_cli provider, got {stored['session_id']!r}."
     )
 
 

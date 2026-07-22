@@ -143,9 +143,11 @@ def emit_dispatch_receipt(
     _validate_provider(provider)
 
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    recorded_ts = now_ts
 
     receipt: Dict[str, Any] = {
+        # ADR-035 §9 PR-5 (HIGH-6): stamped atomically with the trimmed v2
+        # shape in this same PR — never separately from the shape change.
+        "schema_version": 2,
         "dispatch_id": dispatch_id,
         "terminal_id": terminal_id,
         "provider": provider,
@@ -168,7 +170,6 @@ def emit_dispatch_receipt(
         "report_path": report_path,
         "events_path": events_path,
         "timestamp": now_ts,
-        "recorded_at": recorded_ts,
     }
     if permission_enforcement:
         receipt["permission_enforcement"] = permission_enforcement
