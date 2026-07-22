@@ -26,6 +26,7 @@ from .idempotency import (
     _resolve_receipts_file,
     _write_receipt_under_lock,
 )
+from .receipt_finalize import finalize_receipt_v2_fields
 from .validation import _validate_receipt
 
 import logging
@@ -362,6 +363,11 @@ def append_receipt_payload(
     receipts_file = _maybe_reroute_to_gate_stream(receipt, receipts_file)
     # Keep the resolved receipt path aligned with any gate-stream reroute.
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
+
+    # ADR-035 §9 PR-4: wire verdict{}/warnings[] into the receipt, additively,
+    # before the shared validator sees it. Both write paths call this same
+    # finalize function (governance_emit.emit_dispatch_receipt is the other).
+    finalize_receipt_v2_fields(receipt)
 
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)

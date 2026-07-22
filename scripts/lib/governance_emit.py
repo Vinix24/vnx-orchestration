@@ -38,6 +38,7 @@ from append_receipt_internals.idempotency import (
     _compute_idempotency_key,
     _write_receipt_under_lock,
 )
+from append_receipt_internals.receipt_finalize import finalize_receipt_v2_fields
 from append_receipt_internals.validation import _validate_receipt
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,8 @@ def emit_dispatch_receipt(
     final_prompt_path: Optional[str] = None,
     final_prompt_sha256: Optional[str] = None,
     injection_reconstructs: Optional[bool] = None,
+    verification: Optional[Dict[str, Any]] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -112,6 +115,21 @@ def emit_dispatch_receipt(
     recorded intelligence injections literally reconstruct that body. Each is only
     stamped when provided so lanes that do not yet compute integrity keep a
     byte-identical receipt shape.
+
+    ``verification``: ADR-035 §3.1.1 — the v2 ``verification{}`` object. The
+    envelope sub-path (``dispatch_envelope.py``) threads the report already on
+    disk through ``report_parser.py::extract_validation`` and passes the
+    result here; the multi-provider sub-path (``provider_dispatch.py``) passes
+    ``{"method": "pending-report", ...}`` explicitly, since ``report_path`` is
+    not yet a real file at call time on that sub-path. Only stamped when
+    provided, so callers that do not yet compute it keep a byte-identical
+    receipt shape.
+
+    ``warnings``: ADR-035 §6.1 — raw ``{code, severity, message}`` entries.
+    Run through the destination-assignment engine (via
+    ``finalize_receipt_v2_fields``, called below) before the receipt is
+    validated/appended, exactly like Path 2 (``append_receipt_payload``).
+    Only stamped when provided.
 
     Raises:
         ValueError: provider field doesn't match required pattern
@@ -157,11 +175,19 @@ def emit_dispatch_receipt(
         receipt["final_prompt_sha256"] = final_prompt_sha256
     if injection_reconstructs is not None:
         receipt["injection_reconstructs"] = injection_reconstructs
+    if verification is not None:
+        receipt["verification"] = verification
+    if warnings is not None:
+        receipt["warnings"] = warnings
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        # ADR-035 §9 PR-4: wire verdict{}/warnings[] into the receipt,
+        # additively, before the shared validator sees it — the same
+        # finalize function append_receipt_payload (Path 2) calls.
+        finalize_receipt_v2_fields(receipt)
         event_name = _validate_receipt(receipt)
         idempotency_key = _compute_idempotency_key(receipt, event_name)
         cache_path = _cache_file_for(receipt_path)

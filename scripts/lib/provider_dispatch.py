@@ -662,6 +662,22 @@ def _emit_governance(
                 injection_reconstructs=(
                     getattr(_integrity, "injection_reconstructs", None) if _integrity is not None else None
                 ),
+                # ADR-035 §3.1.1: multi-provider sub-path — this call runs
+                # BEFORE emit_unified_report below, so report_path is a
+                # precomputed string with no file behind it yet. Stamp
+                # method="pending-report" explicitly, never a silent blank —
+                # this sub-path is never backfilled (append-only, no second
+                # write for this dispatch_id).
+                verification={
+                    "method": "pending-report",
+                    "tests_run": None,
+                    "tests_passed": None,
+                    "tests_failed": None,
+                    "command": None,
+                    "pr_ref": None,
+                    "push_verified": None,
+                    "spec_deviation": None,
+                },
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
