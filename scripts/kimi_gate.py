@@ -57,7 +57,7 @@ def _extract_verdict(text: str) -> dict:
             return obj
     return {}
 
-DEFAULT_MODEL = "kimi-k2-7-code"
+DEFAULT_MODEL = "kimi-k3"
 DEFAULT_TIMEOUT = 900
 MAX_DIFF_CHARS = 50000
 
