@@ -4,18 +4,20 @@ Used by both subprocess_dispatch.py (claude path) and provider_dispatch.py (mult
 path) so every dispatch writes a governance-enriched receipt and unified report.
 
 ADR-005: NDJSON audit completeness. ADR-016: unified events.
+ADR-035 §7.1: the receipt append itself is delegated to
+``append_receipt_internals.idempotency._write_receipt_under_lock`` — the same
+lock-file, hash-chain-stamping, validated append primitive Path 2
+(``append_receipt_payload``) uses. This module no longer opens/locks/writes
+``t0_receipts.ndjson`` itself.
 
 Hard rules (PRD provider-governance-unification):
   - Provider field MUST match _PROVIDER_RE — raises ValueError on mismatch.
-  - Receipt write MUST NOT silently fail — raises RuntimeError on OSError.
-  - NDJSON append uses fcntl.flock(LOCK_EX) for concurrent safety.
+  - Receipt write MUST NOT silently fail — raises RuntimeError on write/validation failure.
   - Unified report uses tmp + os.replace for atomic write.
 """
 
 from __future__ import annotations
 
-import fcntl
-import json
 import logging
 import os
 import re
@@ -30,9 +32,19 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from ndjson_io import fsync_fileno
+from append_receipt_internals.common import AppendReceiptError
+from append_receipt_internals.idempotency import (
+    _cache_file_for,
+    _compute_idempotency_key,
+    _write_receipt_under_lock,
+)
+from append_receipt_internals.validation import _validate_receipt
 
 logger = logging.getLogger(__name__)
+
+# Matches append_receipt_internals.payload.append_receipt_payload's default so
+# a receipt emitted via either write path dedups against the same window.
+_RECEIPT_CACHE_WINDOW_SECONDS = 300
 
 # The third (model-alias) segment allows "/" — the openrouter-arbitrary lane passes
 # raw OpenRouter "vendor/model" paths as the alias (e.g. litellm:openrouter:openai/gpt-4o-mini).
@@ -72,7 +84,9 @@ def emit_dispatch_receipt(
     final_prompt_sha256: Optional[str] = None,
     injection_reconstructs: Optional[bool] = None,
 ) -> Path:
-    """Atomic-append to t0_receipts.ndjson. fcntl.flock for concurrent safety.
+    """Atomic-append to t0_receipts.ndjson via the shared append primitive
+    (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
+    uses.
 
     Returns the receipt file path on success.
 
@@ -114,6 +128,13 @@ def emit_dispatch_receipt(
         "provider": provider,
         "model": model,
         "status": status,
+        # ADR-035 §3.2.1/§7.1 (r2 BLOCKING-1): stamped unconditionally, never
+        # keyed on status — task_complete marks "reached a terminal outcome",
+        # status carries which outcome (matches outcome_signals.py's
+        # task_complete-plus-status convention). This is the one field Path 1
+        # must add to survive contact with the shared validator below, which
+        # it has never faced before this PR.
+        "event_type": "task_complete",
         "completion_pct": completion_pct,
         "risk": risk,
         "duration_seconds": round(float(duration_seconds), 3),
@@ -139,22 +160,19 @@ def emit_dispatch_receipt(
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(receipt, separators=(",", ":")) + "\n"
 
     try:
-        with open(receipt_path, "a", encoding="utf-8") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            try:
-                fh.write(line)
-                fh.flush()
-                # Durability: force the appended record to stable storage before
-                # the lock releases, so a crash after this point cannot lose the
-                # receipt. Best-effort — a filesystem that rejects fsync degrades
-                # with a warning rather than failing the write (never raises).
-                fsync_fileno(fh, context=f"dispatch={dispatch_id}")
-            finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
-    except OSError as exc:
+        event_name = _validate_receipt(receipt)
+        idempotency_key = _compute_idempotency_key(receipt, event_name)
+        cache_path = _cache_file_for(receipt_path)
+        _write_receipt_under_lock(
+            receipt,
+            receipt_path,
+            cache_path,
+            idempotency_key,
+            _RECEIPT_CACHE_WINDOW_SECONDS,
+        )
+    except AppendReceiptError as exc:
         raise RuntimeError(
             f"governance_emit: receipt write failed for dispatch={dispatch_id}: {exc}"
         ) from exc

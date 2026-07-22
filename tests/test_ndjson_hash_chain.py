@@ -444,3 +444,125 @@ def test_ledger_lock_file_created_and_released(tmp_path):
     # A second append must complete promptly (lock released after the first).
     append_chained_entry(p, {"seq": 1})
     assert len(p.read_text().splitlines()) == 2
+
+
+# ---------------------------------------------------------------------------
+# ADR-035 §7.1/§9 PR-3: shared append primitive — T19 (schema_version
+# transition mid-chain) and T21 (Path-1/Path-2 concurrent-write fork guard).
+# ---------------------------------------------------------------------------
+import threading  # noqa: E402
+
+from append_receipt_internals.idempotency import (  # noqa: E402
+    _cache_file_for as _t9_cache_file_for,
+    _compute_idempotency_key as _t9_compute_idempotency_key,
+    _write_receipt_under_lock as _t9_write_receipt_under_lock,
+)
+
+
+def test_t19_schema_version_transition_mid_chain_stays_verified(tmp_path, monkeypatch):
+    """T19: with VNX_CHAIN_RECEIPTS=1, a ledger transitioning from
+    schema_version-absent to schema_version: 2 mid-chain stays
+    verified/verified-segmented — the PR-3 writer unification does not change
+    hash-chain behavior; ndjson_hash_chain.py itself is untouched (ADR-035 §7)."""
+    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
+    receipt_path = tmp_path / "t0_receipts.ndjson"
+    cache_path = _t9_cache_file_for(receipt_path)
+
+    for i in range(3):
+        receipt = {"event_type": "test_event", "dispatch_id": f"v1-{i}", "n": i}
+        key = _t9_compute_idempotency_key(receipt, "test_event")
+        _t9_write_receipt_under_lock(receipt, receipt_path, cache_path, key, cache_window_seconds=300)
+
+    for i in range(3):
+        receipt = {
+            "event_type": "test_event",
+            "dispatch_id": f"v2-{i}",
+            "schema_version": 2,
+            "n": i,
+        }
+        key = _t9_compute_idempotency_key(receipt, "test_event")
+        _t9_write_receipt_under_lock(receipt, receipt_path, cache_path, key, cache_window_seconds=300)
+
+    entries = [json.loads(l) for l in receipt_path.read_text().splitlines() if l.strip()]
+    assert len(entries) == 6
+    assert "schema_version" not in entries[0]
+    assert entries[-1]["schema_version"] == 2
+
+    ok, violations, status = verify_chain(receipt_path)
+    assert ok, f"chain should verify across a schema_version transition: {violations}"
+    assert status in ("verified", "verified-segmented")
+
+
+def test_t21_path1_and_path2_concurrent_writes_never_fork(tmp_path, monkeypatch):
+    """T21: with VNX_CHAIN_RECEIPTS=1, a Path-1 write (governance_emit.
+    emit_dispatch_receipt) and a Path-2 write (_write_receipt_under_lock,
+    the shape append_receipt_payload feeds it) firing concurrently never
+    produce two entries sharing the same prev_hash — the shared-lock
+    regression guard for BLOCKING-1's dual-lock race (two independent locks
+    on two different files, closed by routing both paths through the one
+    shared append primitive, ADR-035 §7.1)."""
+    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipt_path = state_dir / "t0_receipts.ndjson"
+
+    import governance_emit
+
+    errors: list = []
+
+    def path1_write(i):
+        try:
+            governance_emit.emit_dispatch_receipt(
+                dispatch_id=f"path1-{i}",
+                terminal_id="T1",
+                provider="claude",
+                model="claude-sonnet-5",
+                pr_id=None,
+                status="success",
+                completion_pct=100,
+                risk=0.0,
+                findings=[],
+                duration_seconds=1.0,
+                token_usage={"input": 1, "output": 1},
+                cost_usd=None,
+                state_dir=state_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def path2_write(i):
+        try:
+            cache_path = _t9_cache_file_for(receipt_path)
+            receipt = {
+                "event_type": "task_complete",
+                "dispatch_id": f"path2-{i}",
+                "status": "success",
+                "timestamp": "2026-07-22T00:00:00Z",
+            }
+            key = _t9_compute_idempotency_key(receipt, "task_complete")
+            _t9_write_receipt_under_lock(receipt, receipt_path, cache_path, key, cache_window_seconds=300)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = []
+    for i in range(8):
+        threads.append(threading.Thread(target=path1_write, args=(i,)))
+        threads.append(threading.Thread(target=path2_write, args=(i,)))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"concurrent Path-1/Path-2 writes raised: {errors}"
+
+    entries = [json.loads(l) for l in receipt_path.read_text().splitlines() if l.strip()]
+    assert len(entries) == 16, f"expected 16 appended entries, got {len(entries)}"
+
+    prev_hashes = [e["prev_hash"] for e in entries]
+    assert len(prev_hashes) == len(set(prev_hashes)), (
+        "chain forked: duplicate prev_hash across concurrent Path-1/Path-2 writes"
+    )
+
+    ok, violations, status = verify_chain(receipt_path)
+    assert ok, f"chain forked/broken under Path-1/Path-2 concurrency: {violations}"
+    assert status in ("verified", "verified-segmented")
