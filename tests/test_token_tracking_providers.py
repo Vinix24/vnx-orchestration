@@ -209,10 +209,11 @@ class TestCaseE_ReceiptEnrichmentCodex:
         lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
         assert len(lines) >= 1
         saved = json.loads(lines[-1])
-        session = saved.get("session", {})
-        assert "token_usage" in session, f"token_usage missing from session: {session}"
-        assert session["token_usage"]["input_tokens"] == 1500
-        assert session["token_usage"]["output_tokens"] == 400
+        # ADR-035 §4/§9 PR-5: session{} collapsed — token_usage promoted top-level.
+        assert "session" not in saved
+        assert "token_usage" in saved, f"token_usage missing from receipt: {saved}"
+        assert saved["token_usage"]["input_tokens"] == 1500
+        assert saved["token_usage"]["output_tokens"] == 400
 
     def test_gemini_terminal_token_usage_merged(self, tmp_path: Path):
         env = _build_env(tmp_path)
@@ -236,9 +237,9 @@ class TestCaseE_ReceiptEnrichmentCodex:
         receipts_file = Path(env["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
         lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
         saved = json.loads(lines[-1])
-        session = saved.get("session", {})
-        assert "token_usage" in session, f"token_usage missing from session: {session}"
-        assert session["token_usage"]["input_tokens"] == 900
+        assert "session" not in saved
+        assert "token_usage" in saved, f"token_usage missing from receipt: {saved}"
+        assert saved["token_usage"]["input_tokens"] == 900
 
     def test_no_cache_means_no_token_usage_key(self, tmp_path: Path):
         env = _build_env(tmp_path)
@@ -255,9 +256,9 @@ class TestCaseE_ReceiptEnrichmentCodex:
         receipts_file = Path(env["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
         lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
         saved = json.loads(lines[-1])
-        session = saved.get("session", {})
+        assert "session" not in saved
         # token_usage may be absent or None — either is acceptable; must not crash
-        assert session.get("token_usage") is None
+        assert saved.get("token_usage") is None
 
 
 # ---------------------------------------------------------------------------
@@ -279,9 +280,9 @@ class TestCaseF_ClaudePathUnchanged:
         receipts_file = Path(env["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
         lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
         saved = json.loads(lines[-1])
-        session = saved.get("session", {})
+        assert "session" not in saved
         # Without a real Claude session JSONL, token_usage is absent — no crash
-        assert "token_usage" not in session or session["token_usage"] is None
+        assert "token_usage" not in saved or saved["token_usage"] is None
 
     def test_claude_terminal_provider_is_claude_code(self, tmp_path: Path):
         env = _build_env(tmp_path)
@@ -297,5 +298,5 @@ class TestCaseF_ClaudePathUnchanged:
         receipts_file = Path(env["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
         lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
         saved = json.loads(lines[-1])
-        session = saved.get("session", {})
-        assert session.get("provider") == "claude_code"
+        assert "session" not in saved
+        assert saved.get("provider") == "claude_code"

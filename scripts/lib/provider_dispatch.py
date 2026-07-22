@@ -880,7 +880,6 @@ def _emit_constraint_failure_receipt(
         "pr_id": getattr(args, "pr_id", None),
         "failure_reason": failure_reason,
         "timestamp": now_ts,
-        "recorded_at": now_ts,
     }
     line = json.dumps(receipt, separators=(",", ":")) + "\n"
     with receipt_path.open("a", encoding="utf-8") as fh:

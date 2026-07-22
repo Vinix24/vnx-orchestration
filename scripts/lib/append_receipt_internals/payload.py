@@ -350,6 +350,13 @@ def append_receipt_payload(
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
+    # ADR-035 §9 PR-5 (HIGH-6): stamped atomically with the trimmed v2 shape
+    # in this same PR, on the one shared Path-2 entry point every writer
+    # (report_parser.py output, governance_receipts.py, state_mutation.py,
+    # raw worker-authored JSON via the append_receipt.py CLI) funnels
+    # through — never touched separately from the shape change.
+    receipt.setdefault("schema_version", 2)
+
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
     _stamp_identity(receipt, identity_cwd=receipt_path.parent)

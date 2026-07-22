@@ -273,11 +273,13 @@ def test_subprocess_completion_surfaces_sha256_via_append_path(ar, tmp_path):
     written = (tmp_path / "receipts.ndjson").read_text().strip()
     persisted = json.loads(written)
 
-    session = persisted.get("session", {})
-    assert "instruction_sha256" in session, (
-        "instruction_sha256 must be present in session metadata for subprocess_completion receipts"
+    # ADR-035 §4/§9 PR-5: session{} collapsed — instruction_sha256 is now a
+    # top-level field, promoted directly by _enrich_session_metadata.
+    assert "session" not in persisted
+    assert "instruction_sha256" in persisted, (
+        "instruction_sha256 must be present on the receipt for subprocess_completion receipts"
     )
-    assert session["instruction_sha256"] == "deadbeef00112233"
+    assert persisted["instruction_sha256"] == "deadbeef00112233"
 
 
 # ── Case G: subprocess_completion must NOT overwrite quality_advisory_json/cqs ──
@@ -421,10 +423,14 @@ def test_subprocess_completion_does_not_overwrite_dispatch_metadata(ar, tmp_path
     assert after["open_items_resolved"] == 1
 
 
-# ── Case H: real task_complete still triggers quality_advisory + CQS persistence ──
+# ── Case H: real task_complete still triggers CQS persistence (ADR-035 §9 PR-5: ──
+# quality_advisory{} generation is retired entirely — superseded by
+# verdict{}/warnings[] (§6) — so a task_complete receipt no longer carries
+# a quality_advisory{} object at all, but CQS computation/persistence itself
+# is unaffected.)
 
 def test_task_complete_still_persists_quality_advisory_and_cqs(ar, tmp_path):
-    """Positive control: real completion events still persist advisory + CQS.
+    """Positive control: real completion events still persist CQS.
 
     Ensures the subprocess_completion guard does not regress the canonical
     completion path.
@@ -476,9 +482,12 @@ def test_task_complete_still_persists_quality_advisory_and_cqs(ar, tmp_path):
 
     assert mock_cqs.called, "calculate_cqs must run for task_complete events"
     assert enriched.get("cqs") == fake_cqs
-    assert "quality_advisory" in enriched, "task_complete must produce a quality_advisory on receipt"
+    assert "quality_advisory" not in enriched, (
+        "ADR-035 §9 PR-5: quality_advisory{} is retired, superseded by verdict{}/warnings[]"
+    )
 
     after = _read_dispatch_metadata(db_path, dispatch_id)
     assert after["cqs"] == 0.91
-    persisted_advisory = json.loads(after["quality_advisory_json"])
-    assert persisted_advisory.get("t0_recommendation", {}).get("reason") == "No changed files detected"
+    # quality_advisory{} no longer generated -> the DB column round-trips an
+    # empty object rather than a synthetic "no changed files" advisory.
+    assert json.loads(after["quality_advisory_json"]) == {}

@@ -75,3 +75,49 @@ def test_paths_uses_same_is_dirty_gate_as_shortstat(git_repo):
     provenance = _build_git_provenance(git_repo)
     assert "paths" in provenance["diff_summary"]
     assert "files_changed" in provenance["diff_summary"]
+
+
+# ---------------------------------------------------------------------------
+# ADR-035 §9 PR-5 paths-fix: `git diff --name-only` alone only sees unstaged
+# tracked changes. A dispatch that STAGES its code change and leaves docs
+# unstaged would previously show only the docs path -- and the doc-only
+# invariant (§3.1.1) would wrongly accept a change that includes staged code.
+# ---------------------------------------------------------------------------
+
+
+def test_paths_includes_staged_changes(git_repo):
+    """A fully staged (git add, not committed) change must appear in paths —
+    `git diff --name-only` alone would miss it entirely."""
+    (git_repo / "scripts.py").write_text("print(3)\n", encoding="utf-8")
+    _run(["git", "add", "scripts.py"], git_repo)
+
+    provenance = _build_git_provenance(git_repo)
+    assert provenance["is_dirty"] is True
+    paths = provenance["diff_summary"]["paths"]
+    assert "scripts.py" in paths
+
+
+def test_paths_includes_untracked_files(git_repo):
+    """A brand-new, never-added file must appear in paths — `git diff
+    --name-only` (staged or unstaged) never sees untracked files at all."""
+    (git_repo / "new_untracked.py").write_text("print('new')\n", encoding="utf-8")
+
+    provenance = _build_git_provenance(git_repo)
+    assert provenance["is_dirty"] is True
+    paths = provenance["diff_summary"]["paths"]
+    assert "new_untracked.py" in paths
+
+
+def test_paths_includes_staged_code_plus_unstaged_docs(git_repo):
+    """The dispatch's exact failure scenario: staged code-change + unstaged
+    docs change under method='n/a' must NOT read as doc-only — paths must
+    carry the staged code path alongside the unstaged docs path."""
+    (git_repo / "scripts.py").write_text("print('staged change')\n", encoding="utf-8")
+    _run(["git", "add", "scripts.py"], git_repo)
+    (git_repo / "docs" / "ADR.md").write_text("unstaged docs change\n", encoding="utf-8")
+
+    provenance = _build_git_provenance(git_repo)
+    paths = provenance["diff_summary"]["paths"]
+    assert set(paths) == {"scripts.py", "docs/ADR.md"}
+    # Not every path is docs/**/*.md -- the doc-only invariant must reject this.
+    assert not all(p.startswith("docs/") and p.endswith(".md") for p in paths)

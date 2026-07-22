@@ -119,7 +119,15 @@ def _emit(level: str, code: str, **fields: Any) -> None:
     print(json.dumps(payload, separators=(",", ":"), sort_keys=True), file=sys.stderr)
 
 
-def _safe_subprocess(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 5) -> Optional[str]:
+def _safe_subprocess(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 5, *, strip: bool = True) -> Optional[str]:
+    """Run `cmd`, returning stdout on success or None on any failure/timeout.
+
+    ``strip=False`` preserves stdout byte-for-byte (only decoded, never
+    trimmed) — needed for fixed-column output like `git status --porcelain`,
+    where a blob-level `.strip()` can eat the leading space of the first
+    line's status code (e.g. " M path" -> "M path", silently shifting every
+    subsequent fixed-offset slice by one column).
+    """
     try:
         result = subprocess.run(
             cmd,
@@ -133,7 +141,8 @@ def _safe_subprocess(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 
         return None
     if result.returncode != 0:
         return None
-    return (result.stdout or "").strip()
+    stdout = result.stdout or ""
+    return stdout.strip() if strip else stdout
 
 
 def _utc_now_iso() -> str:
