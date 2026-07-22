@@ -65,6 +65,11 @@ def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
                 "insertions": _extract_shortstat_value(shortstat, "insertion"),
                 "deletions": _extract_shortstat_value(shortstat, "deletion"),
             }
+            # ADR-035 §3.1.1/§3.2 (r2 HIGH-4): the changed-file list the
+            # doc-only invariant needs — same is_dirty gate, alongside the
+            # existing --shortstat call, no new git-invocation class.
+            name_only = _safe_subprocess(["git", "diff", "--name-only"], cwd=git_root) or ""
+            diff_summary["paths"] = [p for p in name_only.splitlines() if p.strip()]
 
     git_dir = _safe_subprocess(["git", "rev-parse", "--git-dir"], cwd=git_root) or ""
     git_common_dir = _safe_subprocess(["git", "rev-parse", "--git-common-dir"], cwd=git_root) or ""

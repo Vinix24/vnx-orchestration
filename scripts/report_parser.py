@@ -535,8 +535,10 @@ class ReportParser:
 
     def _extract_section(self, content: str, section_name: str) -> Optional[str]:
         """Extract a specific section from markdown content"""
-        # Find section header
-        pattern = re.compile(rf'^#{1,3}\s*{section_name}.*?$', re.MULTILINE | re.IGNORECASE)
+        # Find section header. Note: {{1,3}} (double-braced) is required — a
+        # bare {1,3} inside an f-string is parsed as the tuple literal (1, 3),
+        # not the regex quantifier, and silently never matches any heading.
+        pattern = re.compile(rf'^#{{1,3}}\s*{section_name}.*?$', re.MULTILINE | re.IGNORECASE)
         match = pattern.search(content)
 
         if not match:

@@ -451,6 +451,72 @@ def _resolve_fix_forward_diff(
     return pushed_diff if pushed_diff.strip() else own_diff
 
 
+def _unknown_verification() -> Dict[str, Any]:
+    """ADR-035 §3.1.1 fallback: an explicit 'we don't know' beats the
+    current silent absence — used when no report is on disk to extract from."""
+    return {
+        "method": "unknown",
+        "tests_run": None,
+        "tests_passed": None,
+        "tests_failed": None,
+        "command": None,
+        "pr_ref": None,
+        "push_verified": None,
+        "spec_deviation": None,
+    }
+
+
+def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
+    """ADR-035 §3.1.1 — envelope sub-path: `emit_unified_report` already ran,
+    so the markdown report is on disk by the time the receipt is written.
+    Threads the SAME `report_parser.py::extract_validation` regex extractor
+    Path 2 already uses into this call — no new extraction mechanism, no new
+    report format (§8 non-goal).
+
+    Never raises: any extraction failure degrades to `method: "unknown"`
+    rather than blocking the (fail-closed) receipt write.
+    """
+    if report_path is None or not report_path.exists():
+        return _unknown_verification()
+
+    try:
+        content = report_path.read_text(encoding="utf-8", errors="ignore")
+
+        _scripts_dir = str(Path(__file__).resolve().parent.parent)
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        from report_parser import ReportParser  # noqa: PLC0415
+
+        extracted = ReportParser().extract_validation(content)
+        tests_passed = int(extracted.get("tests_passed") or 0)
+        tests_failed = int(extracted.get("tests_failed") or 0)
+        tests_run = tests_passed + tests_failed
+
+        if tests_run > 0:
+            method = "pytest"
+        elif extracted.get("quality_gates"):
+            method = "manual"
+        else:
+            method = "unknown"
+
+        return {
+            "method": method,
+            "tests_run": tests_run if tests_run > 0 else None,
+            "tests_passed": tests_passed if tests_run > 0 else None,
+            "tests_failed": tests_failed if tests_run > 0 else None,
+            "command": None,
+            "pr_ref": None,
+            "push_verified": None,
+            "spec_deviation": None,
+        }
+    except Exception as exc:  # noqa: BLE001 — never block the receipt write
+        logger.warning(
+            "envelope._verification_from_report: extraction failed for %s: %s",
+            report_path, exc,
+        )
+        return _unknown_verification()
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -528,6 +594,10 @@ def _govern(
                     if integrity is not None
                     else None
                 ),
+                # ADR-035 §3.1.1: envelope sub-path — the report is already
+                # on disk (emit_unified_report ran above), so extract
+                # verification{} from it via the shared regex extractor.
+                verification=_verification_from_report(report_path),
             )
         except Exception as exc:
             raise EnvelopeGovernError(

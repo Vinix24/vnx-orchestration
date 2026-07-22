@@ -26,6 +26,7 @@ from .idempotency import (
     _resolve_receipts_file,
     _write_receipt_under_lock,
 )
+from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields
 from .validation import _validate_receipt
 
 import logging
@@ -363,6 +364,15 @@ def append_receipt_payload(
     # Keep the resolved receipt path aligned with any gate-stream reroute.
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
+    # ADR-035 §9 PR-4 (fix-r1): pure classification of warnings[] (no side
+    # effects — no OI-store writes, no counter increments) before the shared
+    # validator sees it. Both write paths call this same classify step
+    # (governance_emit.emit_dispatch_receipt is the other). The matching
+    # side-effect commit (commit_receipt_v2_fields) runs only once
+    # _write_receipt_under_lock confirms this receipt is not a duplicate and
+    # will actually be written — see that function's pre_write_hook.
+    classify_receipt_v2_warnings(receipt)
+
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)
 
@@ -379,6 +389,7 @@ def append_receipt_payload(
         cache_path,
         idempotency_key,
         cache_window_seconds,
+        pre_write_hook=commit_receipt_v2_fields,
     )
 
     if result.status == "appended":
