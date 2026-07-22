@@ -27,16 +27,30 @@ rest of the interface plus the §6.4 oi_pending follow-up loop:
                         resolved dispatch_id. No new index, no receipt-shape change.
   digest             — verdict counts (accept/investigate/reject) over a window,
                         the top ``warnings[]`` codes at destination:"counted",
-                        and a second tally — "N warnings met oi_pending zonder
+                        a tally — "N warnings met oi_pending zonder
                         resolutie" (§6.4), computed as a dedup_key join against
                         the CURRENT open-items store, never a rewrite of the
-                        (immutable) receipt line.
+                        (immutable) receipt line, and a further
+                        ``oi_pending_escalated_count`` of those unresolved
+                        entries already past ``--max-age-days`` — the same
+                        read-only age check reconcile-oi-pending applies,
+                        computed here without attempting any write, so an
+                        entry that keeps failing shows up every time digest
+                        runs, not just when someone happens to invoke
+                        reconcile-oi-pending directly (§9 PR-8 fold-in).
   reconcile-oi-pending — scans the ledger for still-unresolved oi_pending
                         warnings and retries add_item_programmatic per entry
-                        using the preserved dedup_key (§6.4). An entry whose
-                        originating receipt is older than --max-age-days and
-                        still fails is reported as escalated — surfaced via
-                        digest, not a new alerting channel.
+                        using the preserved dedup_key (§6.4). A real
+                        add_item_programmatic failure is counted in ``failed``
+                        (distinct from ``still_pending``'s missing-code skips)
+                        and logged to stderr — never a bare swallow (codex
+                        finding folded in from PR-7, §9 PR-8) — while staying
+                        best-effort (one bad entry never crashes the scan). An
+                        entry whose originating receipt is older than
+                        --max-age-days and still fails is reported as
+                        escalated — surfaced via digest's
+                        oi_pending_escalated_count, not a new alerting
+                        channel.
 
 Every subcommand tolerates a mixed v1/v2 ledger: a line missing
 ``schema_version`` is a v1 line, read like any other JSON object — never a
@@ -306,16 +320,42 @@ def _unresolved_oi_pending(
     return unresolved
 
 
+def _escalated_oi_pending(
+    unresolved: List[Dict[str, Any]],
+    now: datetime,
+    max_age_days: float,
+) -> List[Dict[str, Any]]:
+    """§6.4's escalation rule, applied read-only: an unresolved `oi_pending`
+    entry (already computed by `_unresolved_oi_pending` — still no matching
+    open item in the store) whose ORIGINATING receipt is older than
+    `max_age_days` has been failing to reconcile long enough to escalate.
+    No new retry-count store — age is measured from the receipt already on
+    disk (the same rule `reconcile_oi_pending` applies), so this never needs
+    to actually attempt `add_item_programmatic` to know an entry is stuck."""
+    escalated: List[Dict[str, Any]] = []
+    for entry in unresolved:
+        age_days = _age_in_days(entry.get("timestamp"), now)
+        if age_days is not None and age_days >= max_age_days:
+            escalated.append({**entry, "age_days": round(age_days, 2)})
+    return escalated
+
+
 def compute_digest(
     ledger_path: Path,
     *,
     window: str = DEFAULT_DIGEST_WINDOW,
     now: Optional[datetime] = None,
+    max_age_days: float = DEFAULT_RECONCILE_MAX_AGE_DAYS,
     open_items_manager_module: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """`digest` (ADR-035 §5.2/§6.4): verdict counts (accept/investigate/reject)
     over `window`, the top `warnings[]` codes at `destination: "counted"`, and
-    the "N warnings met oi_pending zonder resolutie" tally.
+    the "N warnings met oi_pending zonder resolutie" tally — plus, per §6.4's
+    follow-up obligation ("surfaced via T0 digest, not a new alerting
+    channel"), an `oi_pending_escalated_count` tally of unresolved entries
+    already past `max_age_days` (`reconcile-oi-pending`'s own escalation
+    threshold, §9 PR-8 — the failure isn't a one-off logged-and-forgotten
+    event, it stays visible here every time digest runs until it resolves).
 
     A line missing `schema_version`/`verdict` entirely (legacy v1, or any
     line the writer never stamped a verdict onto) buckets under an explicit
@@ -354,9 +394,11 @@ def compute_digest(
                 oi_pending_candidates.append({
                     "dispatch_id": entry.get("dispatch_id"),
                     "code": code,
+                    "timestamp": entry.get("timestamp"),
                 })
 
     unresolved = _unresolved_oi_pending(oi_pending_candidates, open_items_manager_module)
+    escalated = _escalated_oi_pending(unresolved, now, max_age_days)
     top_counted = sorted(counted_codes.items(), key=lambda kv: (-kv[1], kv[0]))
 
     return {
@@ -365,6 +407,8 @@ def compute_digest(
         "counted_warnings": [{"code": code, "count": count} for code, count in top_counted],
         "oi_pending_unresolved_count": len(unresolved),
         "oi_pending_unresolved": unresolved,
+        "oi_pending_escalated_count": len(escalated),
+        "oi_pending_escalated": escalated,
     }
 
 
@@ -394,9 +438,19 @@ def reconcile_oi_pending(
 
     An entry whose ORIGINATING receipt's own `timestamp` is older than
     `max_age_days` and still fails to promote is reported as escalated in the
-    return value — surfaced via `digest`, not a new alerting channel (§6.4).
-    No new retry-count store: age is measured from the receipt already on
-    disk, not a separately persisted attempt counter.
+    return value — surfaced via `digest`'s `oi_pending_escalated_count`
+    (computed independently, read-only, by `_escalated_oi_pending`), not a
+    new alerting channel (§6.4). No new retry-count store: age is measured
+    from the receipt already on disk, not a separately persisted attempt
+    counter.
+
+    A real `add_item_programmatic` failure (store unreachable/locked, raises)
+    is never a bare log-and-forget: it is counted in `failed` (distinct from
+    `still_pending`'s missing-`code` skips, so a caller can tell "nothing to
+    do" from "this genuinely failed"), and a one-line diagnostic is written to
+    stderr — this scan stays best-effort (it must never crash on one bad
+    entry), but a failure must be visible, not silently swallowed (codex
+    finding folded in from PR-7, §9 PR-8).
     """
     now = now or datetime.now(timezone.utc)
     oim = open_items_manager_module or _load_open_items_manager()
@@ -409,6 +463,7 @@ def reconcile_oi_pending(
 
     reconciled = 0
     still_pending = 0
+    failed = 0
     escalated: List[Dict[str, Any]] = []
 
     for receipt, warning in pending_entries:
@@ -431,8 +486,16 @@ def reconcile_oi_pending(
                 source="reconcile-oi-pending",
             )
             reconciled += 1
-        except Exception as exc:  # noqa: BLE001 — OI store failure must never crash the scan
+        except Exception as exc:  # noqa: BLE001 — best-effort scan must never crash on one
+            # bad entry, but the failure must be counted and logged, never a
+            # silent swallow (codex finding folded in from PR-7, §9 PR-8).
             still_pending += 1
+            failed += 1
+            print(
+                f"reconcile-oi-pending: FAILED to promote dedup_key={code!r} "
+                f"dispatch_id={dispatch_id!r}: {exc}",
+                file=sys.stderr,
+            )
             age_days = _age_in_days(receipt.get("timestamp"), now)
             if age_days is not None and age_days >= max_age_days:
                 escalated.append({
@@ -446,6 +509,7 @@ def reconcile_oi_pending(
         "scanned": len(pending_entries),
         "reconciled": reconciled,
         "still_pending": still_pending,
+        "failed": failed,
         "escalated": escalated,
     }
 
@@ -575,7 +639,7 @@ def _cmd_digest(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
     ledger = _ledger_path(state_dir)
     try:
-        result = compute_digest(ledger, window=args.window)
+        result = compute_digest(ledger, window=args.window, max_age_days=args.max_age_days)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -591,6 +655,8 @@ def _cmd_digest(args: argparse.Namespace) -> int:
         )
         print(f"  counted warnings (top codes): {result['counted_warnings']}")
         print(f"  oi_pending zonder resolutie: {result['oi_pending_unresolved_count']}")
+        print(f"  oi_pending escalated (>{args.max_age_days}d, still failing): "
+              f"{result['oi_pending_escalated_count']}")
     return 0
 
 
@@ -604,7 +670,8 @@ def _cmd_reconcile_oi_pending(args: argparse.Namespace) -> int:
     else:
         print(
             f"scanned={result['scanned']} reconciled={result['reconciled']} "
-            f"still_pending={result['still_pending']} escalated={len(result['escalated'])}"
+            f"still_pending={result['still_pending']} failed={result['failed']} "
+            f"escalated={len(result['escalated'])}"
         )
     return 0
 
@@ -675,10 +742,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p_digest = sub.add_parser(
         "digest",
-        help="verdict counts + counted-warning top codes + oi_pending-unresolved tally",
+        help="verdict counts + counted-warning top codes + oi_pending-unresolved/escalated tallies",
     )
     p_digest.add_argument("--state-dir", required=True)
     p_digest.add_argument("--window", default=DEFAULT_DIGEST_WINDOW)
+    p_digest.add_argument(
+        "--max-age-days", type=float, default=DEFAULT_RECONCILE_MAX_AGE_DAYS,
+        help="same threshold as reconcile-oi-pending's escalation rule (§6.4)",
+    )
     p_digest.add_argument("--json", action="store_true")
     p_digest.set_defaults(func=_cmd_digest)
 

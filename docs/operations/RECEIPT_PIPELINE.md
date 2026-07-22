@@ -81,10 +81,10 @@ rp_delivery.sh delivers the receipt to the T0 pane (outbox pattern)
 - `scripts/receipt_processor.sh` watches `VNX_REPORTS_DIR` (and `VNX_REPORTS_DIR/headless`) for new reports. Monitor mode processes only reports newer than startup; catchup mode reprocesses a recent window.
 - `scripts/report_parser.py` extracts the receipt fields from the report.
 - `scripts/append_receipt.py` performs the append. This is the path that applies hash-chaining when `VNX_CHAIN_RECEIPTS=1` (see below).
-- Delivery to T0 uses an **outbox pattern** (`scripts/lib/receipt_processor/rp_delivery.sh`): the receipt is persisted to `receipts/pending/` first, then delivered to the T0 tmux pane via `tmux load-buffer` → `paste-buffer` → `Enter`. A retry poller re-delivers anything still pending after a restart. Write-first guarantees no receipt is lost if delivery fails.
+- Delivery to T0 uses an **outbox pattern** (`scripts/lib/receipt_processor/rp_delivery.sh`): the receipt is persisted to `receipts/pending/` first, then — only when `VNX_RECEIPT_T0_PUSH=1` (opt-in transition escape hatch; **default is `0`** since ADR-035 §5.3/§9 PR-8) — delivered to the T0 tmux pane via `tmux load-buffer` → `paste-buffer` → `Enter`. A retry poller re-delivers anything still pending after a restart when the push is enabled. Write-first guarantees no receipt is lost regardless of the push flag; the pull interface (`scripts/receipt_query.py pull`, `docs/core/DISPATCH_RULES.md` §13) is the default way T0 becomes aware of new receipts now.
 - `scripts/report_watcher.sh` is **deprecated** (it exits 0 immediately); `receipt_processor.sh` is the single watcher.
 
-Report delivery via the T0 tmux pane requires a tmux pane to be present. Headless and CLI flows write the ledger line regardless; the pane paste is the T0-notification step, not the audit write.
+Report delivery via the T0 tmux pane (`VNX_RECEIPT_T0_PUSH=1`) requires a tmux pane to be present. Headless and CLI flows write the ledger line regardless; the pane paste is an opt-in T0-notification step, not the audit write — `scripts/receipt_query.py pull` is the default notification path (`docs/core/DISPATCH_RULES.md` §13).
 
 ## The mandatory report contract
 
@@ -138,7 +138,7 @@ Common causes: processor not running; report predates monitor-mode startup (use 
 
 ### Receipt written but T0 did not see it
 
-Receipt delivery to T0 is a tmux pane paste. It works from a CLI or desktop tmux session but not from a mobile remote-control session. If receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check the delivery surface before suspecting the pipeline — the audit write already succeeded.
+As of ADR-035 §5.3 (§9 PR-8), `VNX_RECEIPT_T0_PUSH` defaults to `0` — the tmux pane paste is suppressed by default, and T0 is expected to pull instead: `python3 scripts/receipt_query.py pull --state-dir <state-dir>` (cadence + rationale: `docs/core/DISPATCH_RULES.md` §13). Set `VNX_RECEIPT_T0_PUSH=1` to re-enable the legacy pane push as a transition escape hatch — it works from a CLI or desktop tmux session but not from a mobile remote-control session. Either way, if receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check the delivery/pull surface before suspecting the pipeline — the audit write already succeeded.
 
 ### Verify ledger integrity
 
