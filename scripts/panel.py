@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`vnx panel` runner — multi-provider deliberation panel for complex, multi-view questions.
 
-    python3 scripts/panel.py <mode> "<question>" [--context-file F] [--timeout S] [--out F]
+    python3 scripts/panel.py <mode> "<question>" [--context-file F] [--timeout S] [--out F] [--seats LIST]
 
 Modes: sweep | research | architecture | strategy. Runs the 4-stage deliberation
 (diverge → contrarian → verify → synthesis) via the governed review-lane dispatcher, then
@@ -19,7 +19,7 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from deliberation_panel import MODES, run_deliberation  # noqa: E402
+from deliberation_panel import DEFAULT_ROSTER, MODES, run_deliberation  # noqa: E402
 
 
 def _resolve_reports_dir() -> Path:
@@ -33,6 +33,25 @@ def _resolve_reports_dir() -> Path:
     return d
 
 
+def _parse_seats(value: str | None) -> "list[tuple[str, str]] | None":
+    if value is None:
+        return None
+
+    seats = [part.strip() for part in value.split(",")]
+    if not seats or any(not seat for seat in seats):
+        known = ", ".join(sorted(provider for provider, _ in DEFAULT_ROSTER))
+        raise ValueError(f"--seats must be a comma-list of known seats: {known}")
+
+    known_roster = {provider: (provider, model) for provider, model in DEFAULT_ROSTER}
+    unknown = [seat for seat in seats if seat not in known_roster]
+    if unknown:
+        known = ", ".join(sorted(known_roster))
+        bad = ", ".join(unknown)
+        raise ValueError(f"unknown --seats value(s): {bad}; known seats: {known}")
+
+    return [known_roster[seat] for seat in seats]
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(description="VNX multi-provider deliberation panel")
     parser.add_argument("mode", choices=sorted(MODES), help="deliberation mode")
@@ -40,7 +59,14 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--context-file", default=None, help="file whose contents ground every stage")
     parser.add_argument("--timeout", type=int, default=900, help="per-panelist timeout seconds")
     parser.add_argument("--out", default=None, help="write the report here (default: unified_reports/)")
+    parser.add_argument("--seats", default=None, help="comma-list of seats to run; default = full fleet")
     args = parser.parse_args(argv)
+
+    try:
+        roster = _parse_seats(args.seats)
+    except ValueError as exc:
+        print(f"panel: {exc}", file=sys.stderr)
+        return 2
 
     context = ""
     if args.context_file:
@@ -60,7 +86,10 @@ def main(argv: "list[str] | None" = None) -> int:
     dispatcher = _make_default_dispatcher(data_dir, args.timeout)
 
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
-    result = run_deliberation(args.mode, args.question, dispatcher=dispatcher, context=context)
+    if roster is None:
+        result = run_deliberation(args.mode, args.question, dispatcher=dispatcher, context=context)
+    else:
+        result = run_deliberation(args.mode, args.question, dispatcher=dispatcher, context=context, roster=roster)
     report = result.to_report()
 
     out = Path(args.out) if args.out else (_resolve_reports_dir() / f"panel-{args.mode}-{uuid.uuid4().hex[:8]}.md")
