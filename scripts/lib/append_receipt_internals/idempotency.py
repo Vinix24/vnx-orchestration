@@ -71,6 +71,25 @@ def _last_hash_under_lock(receipt_path: Path) -> str:
     return _read_last_hash(receipt_path) or GENESIS_HASH
 
 
+def _fsync_receipt_append(fh: Any, *, context: str) -> None:
+    """Best-effort durability sync for the locked receipt write.
+
+    ADR-035 §7.1: this is now the ONE code path that appends to
+    ``t0_receipts.ndjson`` for both write paths, so the fsync-before-lock-
+    release guarantee ``governance_emit.emit_dispatch_receipt`` (Path 1) used
+    to make on its own inline write lives here instead of being lost in the
+    consolidation. Lazy-imported so the flag-OFF hot path takes on no
+    import-time dependency, matching ``_last_hash_under_lock`` above.
+    """
+    import sys as _sys
+
+    if str(_LIB_DIR) not in _sys.path:
+        _sys.path.insert(0, str(_LIB_DIR))
+    from ndjson_io import fsync_fileno
+
+    fsync_fileno(fh, context=context)
+
+
 def _resolve_receipts_file(receipts_file: Optional[str] = None) -> Path:
     if receipts_file:
         return Path(receipts_file).expanduser()
@@ -211,6 +230,11 @@ def _write_receipt_under_lock(
                 with receipt_path.open("a", encoding="utf-8") as receipts_handle:
                     receipts_handle.write(json.dumps(receipt, separators=(",", ":"), sort_keys=False))
                     receipts_handle.write("\n")
+                    receipts_handle.flush()
+                    _fsync_receipt_append(
+                        receipts_handle,
+                        context=f"dispatch={receipt.get('dispatch_id', '')} idempotency_key={idempotency_key}",
+                    )
             except OSError as exc:
                 raise AppendReceiptError("receipt_write_failed", EXIT_IO_ERROR, f"Failed to append receipt: {exc}") from exc
 

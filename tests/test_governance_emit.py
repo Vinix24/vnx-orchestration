@@ -256,21 +256,86 @@ def test_provider_validation_raises_before_write(tmp_state):
 
 
 # ---------------------------------------------------------------------------
+# ADR-035 §7.1/§9 PR-3 — shared append primitive
+# ---------------------------------------------------------------------------
+
+def test_t30_stamps_event_type_task_complete_on_success(tmp_state):
+    """T30: emit_dispatch_receipt (Path 1) stamps event_type='task_complete'
+    for a status='success' receipt — never a different event_type per outcome."""
+    kwargs = _base_receipt_kwargs(tmp_state)
+    kwargs["status"] = "success"
+    emit_dispatch_receipt(**kwargs)
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert data["event_type"] == "task_complete"
+    assert data["status"] == "success"
+
+
+def test_t30_stamps_event_type_task_complete_on_failure(tmp_state):
+    """T30: emit_dispatch_receipt (Path 1) stamps event_type='task_complete'
+    for a status='failed' receipt too — status carries the outcome, event_type
+    only marks that a terminal outcome was reached (outcome_signals.py convention)."""
+    kwargs = _base_receipt_kwargs(tmp_state)
+    kwargs["dispatch_id"] = "test-dispatch-failed-001"
+    kwargs["status"] = "failed"
+    emit_dispatch_receipt(**kwargs)
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert data["event_type"] == "task_complete"
+    assert data["status"] == "failed"
+
+
+def test_emit_dispatch_receipt_uses_shared_append_lock_file(tmp_state):
+    """ADR-035 §7.1 point 1: Path 1 now takes the same append_receipt.lock
+    Path 2 uses, not a separate lock on the receipts file handle directly —
+    the mechanism that makes a concurrent Path-1/Path-2 write genuinely
+    serialize against each other (closes BLOCKING-1's dual-lock race)."""
+    emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
+    assert (tmp_state / "append_receipt.lock").exists()
+
+
+def test_emit_dispatch_receipt_no_longer_has_inline_write(tmp_state):
+    """ADR-035 §9 PR-3 acceptance criterion 1: emit_dispatch_receipt has no
+    inline open()/flock() on t0_receipts.ndjson of its own anymore."""
+    import inspect
+    import governance_emit as ge
+    source = inspect.getsource(ge.emit_dispatch_receipt)
+    assert "fcntl" not in source
+    assert "flock" not in source
+
+
+def test_emit_dispatch_receipt_rejects_empty_dispatch_id(tmp_state):
+    """ADR-035 §7.1 point 3 / BLOCKING-3: emit_dispatch_receipt now runs
+    through the shared validator (_validate_receipt) before append — an
+    empty dispatch_id is rejected the same way Path 2 already rejects it,
+    proving the validator binds to Path 1 too (never lands durably)."""
+    kwargs = _base_receipt_kwargs(tmp_state)
+    kwargs["dispatch_id"] = ""
+    with pytest.raises(RuntimeError, match="dispatch_id"):
+        emit_dispatch_receipt(**kwargs)
+    assert not (tmp_state / "t0_receipts.ndjson").exists()
+
+
+# ---------------------------------------------------------------------------
 # Durability (fsync) tests
 # ---------------------------------------------------------------------------
 
 def test_emit_is_durable_and_fsyncs_the_append(tmp_state, monkeypatch):
-    """The append is fsync'd before the lock releases, and the record is on disk."""
-    import governance_emit as ge
+    """The append is fsync'd before the lock releases, and the record is on disk.
+
+    ADR-035 §7.1: the fsync now happens inside the shared append primitive
+    (append_receipt_internals.idempotency._write_receipt_under_lock), which
+    lazy-imports ndjson_io.fsync_fileno on each call — patch it there rather
+    than on governance_emit, which no longer holds its own reference.
+    """
+    import ndjson_io
 
     contexts = []
-    real_fsync = ge.fsync_fileno
+    real_fsync = ndjson_io.fsync_fileno
 
     def spy(fh, **kwargs):
         contexts.append(kwargs.get("context"))
         return real_fsync(fh, **kwargs)
 
-    monkeypatch.setattr(ge, "fsync_fileno", spy)
+    monkeypatch.setattr(ndjson_io, "fsync_fileno", spy)
 
     emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
 
