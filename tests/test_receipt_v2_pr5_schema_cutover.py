@@ -29,6 +29,26 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import append_receipt as ar  # noqa: E402 — registers the Path-2 facade
 import governance_emit  # noqa: E402
 from receipt_provenance import find_receipt_by_commit  # noqa: E402
+from append_receipt_internals.validation import _validate_receipt  # noqa: E402
+
+# ADR-035 §3.3/§9 PR-5: the trimmed field set, mirrored from
+# append_receipt_internals.validation.LEGACY_TRIMMED_TOP_LEVEL_FIELDS so the
+# parametrization stays in lockstep with the reject-list the fix implements.
+LEGACY_TOP_LEVEL_FIELDS = [
+    "session",
+    "validation",
+    "recorded_at",
+    "quality_advisory",
+    "confidence",
+    "tags",
+    "root_cause",
+    "dependencies",
+    "metrics",
+    "prevention_rules",
+    "used_pattern_hashes",
+    "legacy_format",
+]
+LEGACY_PROVENANCE_SUBKEYS = ["captured_at", "captured_by"]
 
 
 def _read_lines(receipts_path: Path) -> list:
@@ -234,6 +254,138 @@ def test_t27_report_parser_output_renames_validation_to_verification(tmp_path):
     assert receipt["verification"]["method"] == "pytest"
     assert receipt["verification"]["tests_run"] == 4
     assert receipt["verification"]["tests_passed"] == 4
+
+
+# ---------------------------------------------------------------------------
+# T27 fix-r1: the version stamp alone is not the guarantee -- a caller-
+# supplied legacy field on a schema_version>=2 receipt must be REJECTED
+# (fail-closed, nothing written), never silently accepted or stripped. This
+# is the structural enforcement of "v2 <=> no legacy field" the codex-BLOCKING
+# finding on PR #1198 required.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("legacy_field", LEGACY_TOP_LEVEL_FIELDS)
+def test_t27_schema_v2_rejects_each_trimmed_top_level_field(tmp_path, legacy_field):
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    receipt = _base_path2_receipt(
+        f"t27-reject-{legacy_field}",
+        verification={"method": "pytest", "tests_run": 1, "tests_passed": 1, "tests_failed": 0},
+    )
+    # {} is a safe marker for every field here: presence is all the check
+    # cares about, and an empty dict never trips up an unrelated pre-validation
+    # reader (e.g. quality_advisory is peeked at by open_items_created
+    # bookkeeping before the receipt ever reaches the validator).
+    receipt[legacy_field] = {}
+
+    with pytest.raises(ar.AppendReceiptError) as excinfo:
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_path), skip_enrichment=True)
+
+    assert excinfo.value.code == "legacy_field_on_v2_receipt"
+    assert legacy_field in str(excinfo.value)
+    assert not receipts_path.exists() or _read_lines(receipts_path) == []
+
+
+@pytest.mark.parametrize("provenance_subkey", LEGACY_PROVENANCE_SUBKEYS)
+def test_t27_schema_v2_rejects_trimmed_provenance_subkeys(tmp_path, provenance_subkey):
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    receipt = _base_path2_receipt(
+        f"t27-reject-provenance-{provenance_subkey}",
+        verification={"method": "pytest", "tests_run": 1, "tests_passed": 1, "tests_failed": 0},
+        provenance={
+            "git_ref": "HEAD", "branch": "main", "is_dirty": False,
+            "dirty_files": 0, "diff_summary": None,
+            provenance_subkey: "2026-01-01T00:00:00Z",
+        },
+    )
+
+    with pytest.raises(ar.AppendReceiptError) as excinfo:
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_path), skip_enrichment=True)
+
+    assert excinfo.value.code == "legacy_field_on_v2_receipt"
+    assert f"provenance.{provenance_subkey}" in str(excinfo.value)
+    assert not receipts_path.exists() or _read_lines(receipts_path) == []
+
+
+def test_t27_schema_v2_explicit_stamp_still_rejects(tmp_path):
+    """An explicit schema_version=2 (not just the append primitive's own
+    setdefault-stamp) is rejected exactly like the implicit/absent case --
+    the check reads the resolved version, not how it got there."""
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    receipt = _base_path2_receipt("t27-explicit-v2", schema_version=2, session={})
+
+    with pytest.raises(ar.AppendReceiptError) as excinfo:
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_path), skip_enrichment=True)
+
+    assert excinfo.value.code == "legacy_field_on_v2_receipt"
+    assert not receipts_path.exists() or _read_lines(receipts_path) == []
+
+
+def test_t27_schema_v2_rejection_lists_every_offending_field(tmp_path):
+    """Multiple legacy fields present at once are all named in the error,
+    not just the first hit -- makes the rejection message actionable."""
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    receipt = _base_path2_receipt("t27-multi-reject", session={}, validation={}, tags=[])
+
+    with pytest.raises(ar.AppendReceiptError) as excinfo:
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_path), skip_enrichment=True)
+
+    message = str(excinfo.value)
+    assert "session" in message
+    assert "validation" in message
+    assert "tags" in message
+
+
+@pytest.mark.parametrize("legacy_field", LEGACY_TOP_LEVEL_FIELDS)
+def test_t27_schema_v1_explicit_tolerates_legacy_field(tmp_path, legacy_field):
+    """schema_version=1 (explicit) keeps full v1 tolerance end-to-end through
+    the real append primitive -- the legacy field survives untouched. This is
+    the append-only guarantee: v1 lines are never rewritten/rejected by the
+    v2 shape rule."""
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    receipt = _base_path2_receipt(f"t27-v1-tolerate-{legacy_field}", schema_version=1)
+    receipt[legacy_field] = {}
+
+    result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_path), skip_enrichment=True)
+    assert result.status == "appended"
+    stored = _read_lines(receipts_path)[-1]
+    assert stored["schema_version"] == 1
+    assert stored[legacy_field] == {}
+
+
+@pytest.mark.parametrize("legacy_field", LEGACY_TOP_LEVEL_FIELDS)
+def test_t27_validator_schema_version_absent_tolerates_legacy_field(legacy_field):
+    """Direct unit coverage of the shared validator (`_validate_receipt`,
+    the exact choke point both write paths funnel through): a receipt with NO
+    `schema_version` key at all resolves to v1 (`_resolve_schema_version`'s
+    documented default) and tolerates every trimmed field. This is the
+    validator-level guarantee distinct from `append_receipt_payload`'s own
+    `setdefault("schema_version", 2)`, which promotes an absent key to v2
+    before the validator ever sees it on that particular entry point."""
+    receipt = {
+        "timestamp": "2026-07-22T10:00:00Z",
+        "event_type": "task_complete",
+        "dispatch_id": "t27-validator-absent",
+        legacy_field: {},
+    }
+    event_name = _validate_receipt(receipt)
+    assert event_name == "task_complete"
+
+
+@pytest.mark.parametrize("legacy_field", LEGACY_TOP_LEVEL_FIELDS)
+def test_t27_validator_schema_version_2_rejects_legacy_field(legacy_field):
+    """Mirror of the tolerance test above, at the same direct-validator
+    level: schema_version=2 rejects every trimmed field."""
+    receipt = {
+        "timestamp": "2026-07-22T10:00:00Z",
+        "event_type": "task_complete",
+        "dispatch_id": "t27-validator-v2",
+        "schema_version": 2,
+        legacy_field: {},
+    }
+    with pytest.raises(ar.AppendReceiptError) as excinfo:
+        _validate_receipt(receipt)
+    assert excinfo.value.code == "legacy_field_on_v2_receipt"
 
 
 # ---------------------------------------------------------------------------

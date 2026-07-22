@@ -108,6 +108,23 @@ def test_paths_includes_untracked_files(git_repo):
     assert "new_untracked.py" in paths
 
 
+def test_dirty_metrics_never_half_filled(git_repo):
+    """ADR-035 §9 PR-5 fix-r1 advisory: files_changed/insertions/deletions
+    (from `git diff --shortstat`) and paths (from `git status --porcelain`)
+    must be consistent -- both come from the same `is_dirty` gate, so a
+    clean tree leaves diff_summary entirely absent and a dirty tree fills
+    all four keys together. Never a diff_summary with paths but no
+    files_changed, or vice versa."""
+    clean = _build_git_provenance(git_repo)
+    assert clean["diff_summary"] is None
+
+    (git_repo / "scripts.py").write_text("print('dirty')\n", encoding="utf-8")
+    dirty = _build_git_provenance(git_repo)
+    assert dirty["diff_summary"] is not None
+    for key in ("files_changed", "insertions", "deletions", "paths"):
+        assert key in dirty["diff_summary"], f"{key} missing from a dirty-tree diff_summary"
+
+
 def test_paths_includes_staged_code_plus_unstaged_docs(git_repo):
     """The dispatch's exact failure scenario: staged code-change + unstaged
     docs change under method='n/a' must NOT read as doc-only — paths must

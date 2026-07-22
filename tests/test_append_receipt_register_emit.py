@@ -335,13 +335,20 @@ def test_count_quality_violations_null_advisory(ar):
 
 def test_open_items_created_embedded_in_ndjson(tmp_path: Path):
     """Receipt with pre-populated quality_advisory must persist open_items_created
-    in the NDJSON line, not as 0 (the pre-existing bug)."""
+    in the NDJSON line, not as 0 (the pre-existing bug).
+
+    ADR-035 §9 PR-5 fix-r1: quality_advisory{} is a trimmed v2 legacy field
+    (T27) -- explicit schema_version=1 marks this as a pre-cutover/replay
+    receipt, matching test_enrich_sets_open_items_created_internally's
+    established pattern, so the OI dedup-count mechanism under test still
+    runs instead of being rejected by the v2 legacy-field guard."""
     receipt = {
         "timestamp": "2026-04-28T12:00:00Z",
         "event_type": "task_complete",
         "status": "success",
         "dispatch_id": "DISP-OI-PRECOUNT-001",
         "terminal": "T1",
+        "schema_version": 1,
         "quality_advisory": {
             "t0_recommendation": {
                 "open_items": [
@@ -456,13 +463,17 @@ def test_count_quality_violations_different_checks_not_deduped(ar):
 # ── Test: NDJSON persists dedup-aware open_items_created ────────────────────
 
 def test_open_items_created_dedup_count_in_ndjson(tmp_path: Path):
-    """5 violations: c1 different dirs (not deduped) + c3 same file twice (deduped) → open_items_created=4 in NDJSON."""
+    """5 violations: c1 different dirs (not deduped) + c3 same file twice (deduped) → open_items_created=4 in NDJSON.
+
+    ADR-035 §9 PR-5 fix-r1: schema_version=1 marks this as a pre-cutover/
+    replay receipt (quality_advisory{} is a trimmed v2 legacy field, T27)."""
     receipt = {
         "timestamp": "2026-04-28T12:00:00Z",
         "event_type": "task_complete",
         "status": "success",
         "dispatch_id": "DISP-OI-DEDUP-001",
         "terminal": "T1",
+        "schema_version": 1,
         "quality_advisory": {
             "t0_recommendation": {
                 "open_items": [
@@ -626,6 +637,11 @@ def test_open_items_created_from_enrichment_generated_advisory(tmp_path: Path, a
 
     Regression guard for codex post-merge audit v2 (PR #281): pre-count ran before
     enrichment so advisory was empty → count was always 0.
+
+    ADR-035 §9 PR-5 fix-r1: the stubbed enrichment below injects
+    quality_advisory{} (simulating the pre-cutover generator this test
+    predates) -- schema_version=1 marks the receipt as pre-cutover/replay so
+    the v2 legacy-field guard (T27) does not reject it.
     """
     receipts_file = tmp_path / "receipts.ndjson"
     receipt = {
@@ -634,6 +650,7 @@ def test_open_items_created_from_enrichment_generated_advisory(tmp_path: Path, a
         "status": "success",
         "dispatch_id": "DISP-CQS-TIMING-001",
         "terminal": "T1",
+        "schema_version": 1,
         # No quality_advisory here — enrichment generates it
     }
 
@@ -669,7 +686,11 @@ def test_open_items_created_from_enrichment_generated_advisory(tmp_path: Path, a
 
 
 def test_open_items_created_zero_when_enrichment_adds_no_violations(tmp_path: Path, ar):
-    """Normal completion path: enrichment generates empty open_items → open_items_created=0."""
+    """Normal completion path: enrichment generates empty open_items → open_items_created=0.
+
+    ADR-035 §9 PR-5 fix-r1: schema_version=1 marks the receipt as pre-cutover/
+    replay since the stubbed enrichment below injects quality_advisory{}
+    (T27 legacy field)."""
     receipts_file = tmp_path / "receipts_clean.ndjson"
     receipt = {
         "timestamp": "2026-04-28T12:00:01Z",
@@ -677,6 +698,7 @@ def test_open_items_created_zero_when_enrichment_adds_no_violations(tmp_path: Pa
         "status": "success",
         "dispatch_id": "DISP-CQS-TIMING-002",
         "terminal": "T1",
+        "schema_version": 1,
     }
 
     def fake_enrich_clean(r, repo_root=None):
@@ -908,7 +930,10 @@ def test_count_quality_violations_against_store_empty_advisory(ar):
 
 def test_duplicate_receipt_does_not_mutate_open_items_store(tmp_path: Path, ar):
     """Round-2 codex regate Finding 1: a replayed receipt that lands as 'duplicate'
-    must NOT call _register_quality_open_items. The OI store stays untouched."""
+    must NOT call _register_quality_open_items. The OI store stays untouched.
+
+    ADR-035 §9 PR-5 fix-r1: schema_version=1 marks this as a pre-cutover/
+    replay receipt (quality_advisory{} is a trimmed v2 legacy field, T27)."""
     receipts_file = tmp_path / "receipts.ndjson"
     receipt = {
         "timestamp": "2026-04-28T12:00:00Z",
@@ -916,6 +941,7 @@ def test_duplicate_receipt_does_not_mutate_open_items_store(tmp_path: Path, ar):
         "status": "success",
         "dispatch_id": "DISP-REPLAY-SAFE-001",
         "terminal": "T1",
+        "schema_version": 1,
         "quality_advisory": {
             "t0_recommendation": {
                 "open_items": [
@@ -965,6 +991,9 @@ def test_ndjson_written_when_oi_register_fails(tmp_path: Path, ar):
     append_receipt_payload, masking a successful NDJSON write as a failure.
     Post-fix: each post-append hook is wrapped in its own try/except so the
     durable NDJSON record is never at risk from downstream side-effects.
+
+    ADR-035 §9 PR-5 fix-r1: schema_version=1 marks this as a pre-cutover/
+    replay receipt (quality_advisory{} is a trimmed v2 legacy field, T27).
     """
     receipts_file = tmp_path / "receipts_oi_fail.ndjson"
     receipt = {
@@ -973,6 +1002,7 @@ def test_ndjson_written_when_oi_register_fails(tmp_path: Path, ar):
         "status": "success",
         "dispatch_id": "DISP-OI-FAIL-001",
         "terminal": "T1",
+        "schema_version": 1,
         "quality_advisory": {
             "t0_recommendation": {
                 "open_items": [
@@ -1012,6 +1042,9 @@ def test_open_items_flag_consistent_with_ndjson(tmp_path: Path, ar):
 
     The dry-run count set during enrichment and the count returned by
     _register_quality_open_items must agree for a clean (non-racing) receipt.
+
+    ADR-035 §9 PR-5 fix-r1: schema_version=1 marks this as a pre-cutover/
+    replay receipt (quality_advisory{} is a trimmed v2 legacy field, T27).
     """
     receipts_file = tmp_path / "receipts_consistent.ndjson"
     receipt = {
@@ -1020,6 +1053,7 @@ def test_open_items_flag_consistent_with_ndjson(tmp_path: Path, ar):
         "status": "success",
         "dispatch_id": "DISP-OI-CONSISTENT-001",
         "terminal": "T1",
+        "schema_version": 1,
         "quality_advisory": {
             "t0_recommendation": {
                 "open_items": [
