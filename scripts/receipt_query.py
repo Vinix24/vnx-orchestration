@@ -357,6 +357,13 @@ def compute_digest(
     threshold, §9 PR-8 — the failure isn't a one-off logged-and-forgotten
     event, it stays visible here every time digest runs until it resolves).
 
+    `window` scopes the verdict counts, the counted-warning codes, and the
+    `oi_pending_unresolved` tally — but escalation is computed over EVERY
+    `oi_pending` warning in the ledger, regardless of `window`. An entry
+    older than `window` still needs to escalate once it passes `max_age_days`;
+    scoping escalation to `window` would mean an entry old enough to fall out
+    of the window could never be escalated, defeating the age-based rule.
+
     A line missing `schema_version`/`verdict` entirely (legacy v1, or any
     line the writer never stamped a verdict onto) buckets under an explicit
     `"unknown"` verdict count — never crashes, never silently miscounted as
@@ -370,11 +377,31 @@ def compute_digest(
 
     verdict_counts: Dict[str, int] = {"accept": 0, "investigate": 0, "reject": 0, "unknown": 0}
     counted_codes: Dict[str, int] = {}
-    oi_pending_candidates: List[Dict[str, Any]] = []
+    oi_pending_window_candidates: List[Dict[str, Any]] = []
+    oi_pending_all_candidates: List[Dict[str, Any]] = []
 
     for entry in _iter_ledger(ledger_path):
         ts = _parse_iso8601(entry.get("timestamp"))
-        if ts is None or ts < cutoff:
+        in_window = ts is not None and ts >= cutoff
+
+        for warning in entry.get("warnings") or []:
+            if not isinstance(warning, dict):
+                continue
+            destination = warning.get("destination")
+            code = str(warning.get("code") or "")
+            if destination == "oi_pending":
+                candidate = {
+                    "dispatch_id": entry.get("dispatch_id"),
+                    "code": code,
+                    "timestamp": entry.get("timestamp"),
+                }
+                oi_pending_all_candidates.append(candidate)
+                if in_window:
+                    oi_pending_window_candidates.append(candidate)
+            elif destination == "counted" and code and in_window:
+                counted_codes[code] = counted_codes.get(code, 0) + 1
+
+        if not in_window:
             continue
 
         verdict = entry.get("verdict")
@@ -383,22 +410,12 @@ def compute_digest(
             decision = "unknown"
         verdict_counts[decision] += 1
 
-        for warning in entry.get("warnings") or []:
-            if not isinstance(warning, dict):
-                continue
-            destination = warning.get("destination")
-            code = str(warning.get("code") or "")
-            if destination == "counted" and code:
-                counted_codes[code] = counted_codes.get(code, 0) + 1
-            elif destination == "oi_pending":
-                oi_pending_candidates.append({
-                    "dispatch_id": entry.get("dispatch_id"),
-                    "code": code,
-                    "timestamp": entry.get("timestamp"),
-                })
-
-    unresolved = _unresolved_oi_pending(oi_pending_candidates, open_items_manager_module)
-    escalated = _escalated_oi_pending(unresolved, now, max_age_days)
+    # escalation reads the full (window-independent) set; the tally below
+    # filters that same result down to the window-scoped candidates so the
+    # OI store is only ever loaded once per digest call.
+    all_unresolved = _unresolved_oi_pending(oi_pending_all_candidates, open_items_manager_module)
+    unresolved = [entry for entry in all_unresolved if entry in oi_pending_window_candidates]
+    escalated = _escalated_oi_pending(all_unresolved, now, max_age_days)
     top_counted = sorted(counted_codes.items(), key=lambda kv: (-kv[1], kv[0]))
 
     return {

@@ -889,6 +889,28 @@ def test_digest_does_not_escalate_recent_oi_pending_entries(tmp_path):
     assert result["oi_pending_escalated"] == []
 
 
+def test_digest_escalates_oi_pending_entry_outside_digest_window(tmp_path):
+    # Regression guard: escalation must scope the FULL oi_pending set, not
+    # the digest-window-filtered one. An entry 21 days old is well outside a
+    # 24h window (so the window-scoped tally excludes it), but it is past
+    # max_age_days=7 and must still show up as escalated.
+    oim = _load_oim(tmp_path)
+    now = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+    receipt = _oi_pending_receipt(
+        "d1", "worker_permission_violation", "2026-07-01T00:00:00Z",  # 21 days old
+    )
+    _write_ledger(tmp_path, receipt)
+    ledger = tmp_path / rq.LEDGER_NAME
+
+    result = rq.compute_digest(
+        ledger, window="24h", now=now, max_age_days=7.0, open_items_manager_module=oim,
+    )
+    assert result["oi_pending_unresolved_count"] == 0  # outside the window -> tally excludes it
+    assert result["oi_pending_escalated_count"] == 1  # but escalation is window-independent
+    assert result["oi_pending_escalated"][0]["dispatch_id"] == "d1"
+    assert result["oi_pending_escalated"][0]["age_days"] >= 7.0
+
+
 def test_digest_escalation_drops_out_after_reconcile_resolves_it(tmp_path):
     oim = _load_oim(tmp_path)
     now = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
