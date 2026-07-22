@@ -145,3 +145,20 @@ Proven end-to-end sequence for a T0 that has no role file loaded (no `.claude/te
 3. **Dry-run the door** — `bin/vnx dispatch <dispatch-id> --dry-run`. A bare dispatch-id with an existing bundle at `pending/<id>/dispatch-spec.json` routes to the door, not the legacy lane; `--dry-run` prints the compiled plan + permit fingerprint (lane/model/billing/route_reason) and spawns nothing.
 4. **Fire** — `bin/vnx dispatch <dispatch-id>`. The single-entry door selects the lane per §5/§8: claude/Opus/Sonnet → tmux-subscription lane; kimi/glm/deepseek → `provider_dispatch.py`.
 5. **After merge** — `python3 scripts/planning_cli.py objective link-pr <track-id> <pr-number>`. **Caveat:** `stage_spec_bundle`'s written spec payload has no `track_id` field (`scripts/lib/dispatch_bridge.py:166-195`), so a bridge-staged dispatch's `track_id` is always absent at the door. The TL-D2 auto-propagation that upserts `tracks.pr_ref` from `dispatch.track_id` on merge (`reconcile_commit_provenance`, #1034) therefore never fires for dispatches staged this way — `link-pr` is currently the only way to record the PR on the track for this path.
+
+## 13. Receipt pull cadence — T0 cycle step 0 (ADR-035 §5/§5.3, §9 PR-8)
+
+Receipts are no longer pushed into the T0 pane by default. **Step 0 of every T0 cycle, before reading any receipt, is a pull:**
+
+```bash
+python3 scripts/receipt_query.py pull --state-dir <state-dir> --json
+```
+
+- Reads everything appended to `t0_receipts.ndjson` since T0's own cursor (`receipt_pull_cursor.json` in the same state dir) and advances the cursor past what it read. A concurrent writer's not-yet-newline-terminated line is never consumed early (safe against a mid-append race).
+- **First use on a given state dir:** run once with `--seed-now` to set the cursor to EOF and skip the historical backlog (the backlog stays on disk, still reachable via `by-dispatch`/`by-pr`/`since` — nothing is deleted).
+- `--peek` reads without advancing the cursor, for a look-without-consuming check.
+- Follow the pull with `python3 scripts/receipt_query.py digest --state-dir <state-dir> --json` for the accept/investigate/reject rollup, and periodically (same cadence, not a separate operational task) `python3 scripts/receipt_query.py reconcile-oi-pending --state-dir <state-dir> --json` to retry any `oi_pending` warnings — see ADR-035 §6.4. An entry that keeps failing past `--max-age-days` (default 7) shows up in both `reconcile-oi-pending`'s own `escalated`/`failed` counts and in `digest`'s `oi_pending_escalated_count` — a standing operator obligation, not a new alerting channel.
+- This replaces waiting for `rp_delivery.sh`'s tmux pane-paste (`_deliver_receipt_to_t0_pane` / `_rpd_deliver_digest`), which is now suppressed by default (`VNX_RECEIPT_T0_PUSH` defaults to `0` — set it to `1` only as the transition escape hatch, e.g. a T0 setup that cannot run a pull cadence yet). The push code path and the flag are **kept**, not removed (§8/ADR-035 §5.3) — retiring them outright is a separate follow-up PR. The durability half (`send_receipt_to_t0`'s write-first-then-attempt-delivery) is untouched either way: the ledger line lands regardless of whether the pane notification fires.
+- **OI-188 note:** this step belongs in the `t0-orchestrator` skill's cycle steps (`.claude/skills/t0-orchestrator/SKILL.md` §"2. Primary workflow"), mirroring the parked commit `24f71d22`'s intent. No lane can reliably write under `.claude/skills/` (Claude treats it read-only) — this section is the canonical, git-tracked source until an operator applies the equivalent edit to the skill file by hand. Track as an operator follow-up, not something to force through a lane edit.
+
+See also: `docs/operations/RECEIPT_PIPELINE.md` (pipeline mechanics), ADR-035 §5 (pull interface design), §5.3 (push retirement), §6.4 (`oi_pending` lifecycle + escalation).

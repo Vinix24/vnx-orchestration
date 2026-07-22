@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Tests for rp_delivery.sh (OI-654: submit-verify + dedupe + digest + push-switch)
 #
+# ADR-035 §5.3/§9 PR-8 flipped VNX_RECEIPT_T0_PUSH's default from 1 (push) to 0
+# (suppressed — T0 pulls instead, scripts/receipt_query.py pull). Tests that
+# exercise the tmux paste path (submit-verify, dedupe, digest, force-process,
+# load-buffer failure) now explicitly `export VNX_RECEIPT_T0_PUSH=1` — they are
+# testing the transition-escape-hatch push mechanism itself, not the default.
+#
 # Coverage:
-#   - Baseline: default env (push=1, unset) still pastes + verifies + processes (no regression)
-#   - Submit-verify: empty input line after Enter -> verified -> pending file moves to processed
-#   - Submit-verify: non-empty input line after Enter -> NOT verified -> stays pending, WARN logged
-#   - Dedupe: 3 pending files, same dispatch_id -> exactly 1 paste-buffer call, all 3 processed
-#   - Digest: pending dispatches over threshold -> exactly 1 digest paste, all processed
-#   - Push-switch: VNX_RECEIPT_T0_PUSH=0 -> zero tmux calls, item still moves to processed (suppressed)
+#   - Baseline: default env (push unset -> 0, suppressed) makes zero tmux calls, still processed
+#   - Submit-verify (push=1): empty input line after Enter -> verified -> pending file moves to processed
+#   - Submit-verify (push=1): non-empty input line after Enter -> NOT verified -> stays pending, WARN logged
+#   - Dedupe (push=1): 3 pending files, same dispatch_id -> exactly 1 paste-buffer call, all 3 processed
+#   - Digest (push=1): pending dispatches over threshold -> exactly 1 digest paste, all processed
+#   - Push-switch: VNX_RECEIPT_T0_PUSH=0 (explicit, same as default) -> zero tmux calls, still processed
+#   - Push-switch: VNX_RECEIPT_T0_PUSH=1 (explicit override) -> pane push re-enabled
 #
 # Mirrors the function-override tmux mock pattern from tests/test_input_mode_guard.sh.
 
@@ -112,24 +119,25 @@ source "$PROJECT_ROOT/scripts/lib/receipt_processor/rp_extract.sh"
 source "$PROJECT_ROOT/scripts/lib/receipt_processor/rp_delivery.sh"
 
 # ===========================================================================
-# Test 0: Baseline — default env (VNX_RECEIPT_T0_PUSH unset) still delivers
+# Test 0: Baseline — default env (VNX_RECEIPT_T0_PUSH unset -> 0) is suppressed
 # ===========================================================================
 reset_mocks
 write_pending "d-000-1.json" "d-000"
-set_capture_response ""   # empty input line -> verified
+set_capture_response ""   # irrelevant when suppressed — never reaches capture-pane
 _retry_pending_receipts
 
-assert_eq "1" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
-    "T0: baseline (push unset) sends exactly 1 paste-buffer"
+assert_eq "0" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
+    "T0: baseline (push unset, new default) sends zero paste-buffer calls"
 assert_eq "1" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
-    "T0: baseline pending item moved to processed"
+    "T0: baseline pending item still moved to processed (suppressed = success)"
 assert_eq "0" "$(count_files "$RECEIPTS_PENDING_DIR")" \
     "T0: baseline pending dir empty after delivery"
 
 # ===========================================================================
-# Test 1: Submit-verify success — empty input line -> processed
+# Test 1: Submit-verify success (push=1) — empty input line -> processed
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-101-1.json" "d-101"
 set_capture_response ""
 _retry_pending_receipts
@@ -138,11 +146,13 @@ assert_eq "1" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
     "T1: verified-empty input line -> item moved to processed"
 assert_eq "0" "$(count_files "$RECEIPTS_PENDING_DIR")" \
     "T1: verified-empty input line -> pending dir empty"
+unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
-# Test 2: Submit-verify failure — non-empty input line -> stays pending
+# Test 2: Submit-verify failure (push=1) — non-empty input line -> stays pending
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-102-1.json" "d-102"
 set_capture_response "Report: /tmp/r.md"   # residual receipt text still in input line
 _retry_pending_receipts
@@ -153,11 +163,13 @@ assert_eq "1" "$(count_files "$RECEIPTS_PENDING_DIR")" \
     "T2: unverified (non-empty input line) -> item stays pending"
 assert_file_contains "$PROCESSING_LOG" "Submit-verify failed" \
     "T2: WARN logged for unverified submit"
+unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
-# Test 3: Dedupe — 3 pending files, same dispatch_id -> 1 delivery
+# Test 3: Dedupe (push=1) — 3 pending files, same dispatch_id -> 1 delivery
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-dup-1.json" "d-dup"
 write_pending "d-dup-2.json" "d-dup"
 write_pending "d-dup-3.json" "d-dup"
@@ -172,11 +184,13 @@ assert_eq "0" "$(count_files "$RECEIPTS_PENDING_DIR")" \
     "T3: pending dir empty after deduped delivery"
 assert_file_contains "$PROCESSING_LOG" "Deduped 3 pending receipts for dispatch_id=d-dup" \
     "T3: dedupe logged"
+unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
-# Test 4: Digest — 6 distinct pending dispatches (> default threshold 5) -> 1 digest
+# Test 4: Digest (push=1) — 6 distinct pending dispatches (> default threshold 5) -> 1 digest
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-digest-1.json" "d-digest-1"
 write_pending "d-digest-2.json" "d-digest-2"
 write_pending "d-digest-3.json" "d-digest-3"
@@ -194,11 +208,13 @@ assert_file_contains "$MOCK_LOADED_BUFFER" "RECEIPT-DIGEST: 6 receipts pending" 
     "T4: digest message states the correct count"
 assert_file_contains "$MOCK_LOADED_BUFFER" "oudste: d-digest-1" \
     "T4: digest message names the oldest dispatch_id"
+unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
-# Test 4b: Digest threshold is configurable via VNX_RECEIPT_DIGEST_THRESHOLD
+# Test 4b: Digest threshold is configurable via VNX_RECEIPT_DIGEST_THRESHOLD (push=1)
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 export VNX_RECEIPT_DIGEST_THRESHOLD=1
 write_pending "d-cfg-1.json" "d-cfg-1"
 write_pending "d-cfg-2.json" "d-cfg-2"
@@ -208,6 +224,7 @@ _retry_pending_receipts
 assert_file_contains "$MOCK_LOADED_BUFFER" "RECEIPT-DIGEST" \
     "T4b: lowered threshold (1) triggers digest for just 2 dispatches"
 unset VNX_RECEIPT_DIGEST_THRESHOLD
+unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
 # Test 5: Push-switch — VNX_RECEIPT_T0_PUSH=0 -> zero tmux calls, still processed
@@ -229,7 +246,9 @@ assert_file_contains "$PROCESSING_LOG" "delivery_mode=suppressed dispatch_id=d-p
 unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
-# Test 6: Push-switch default (unset) behaves exactly like push=1 (no surprise)
+# Test 6: Push-switch default (unset) behaves like push=0 — suppressed
+# (ADR-035 §5.3/§9 PR-8 flipped the default; §5.3 formalizes the operator's
+# post-#1178 practice into the script's own baked-in default)
 # ===========================================================================
 reset_mocks
 receipt_json='{"dispatch_id":"d-push-default","terminal":"T2","status":"success","event_type":"task_complete","timestamp":"2026-07-16T10:00:00Z","report_path":"/tmp/r.md"}'
@@ -237,16 +256,35 @@ extract_receipt_fields "$receipt_json"
 set_capture_response ""
 send_receipt_to_t0 "$receipt_json" "T2"
 
-assert_eq "1" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
-    "T6: default (VNX_RECEIPT_T0_PUSH unset) still pastes — no behavior change"
+assert_eq "0" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
+    "T6: default (VNX_RECEIPT_T0_PUSH unset) makes zero paste-buffer calls (new default)"
 assert_eq "1" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
-    "T6: default push delivers and processes normally"
+    "T6: default-suppressed delivery still moves item to processed"
+assert_file_contains "$PROCESSING_LOG" "delivery_mode=suppressed dispatch_id=d-push-default" \
+    "T6: default suppressed delivery_mode logged"
 
 # ===========================================================================
-# Test 7 (finding 4): verify-fail cap -> force-processed after N retries,
-# no (N+1)th paste attempted
+# Test 6b: explicit VNX_RECEIPT_T0_PUSH=1 override re-enables the pane push
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
+receipt_json='{"dispatch_id":"d-push-on","terminal":"T2","status":"success","event_type":"task_complete","timestamp":"2026-07-16T10:00:00Z","report_path":"/tmp/r.md"}'
+extract_receipt_fields "$receipt_json"
+set_capture_response ""
+send_receipt_to_t0 "$receipt_json" "T2"
+
+assert_eq "1" "$(grep -c '^paste-buffer$' "$MOCK_CALL_LOG")" \
+    "T6b: explicit VNX_RECEIPT_T0_PUSH=1 makes exactly 1 paste-buffer call"
+assert_eq "1" "$(count_files "$RECEIPTS_PROCESSED_DIR")" \
+    "T6b: explicit push=1 delivers and processes normally"
+unset VNX_RECEIPT_T0_PUSH
+
+# ===========================================================================
+# Test 7 (finding 4, push=1): verify-fail cap -> force-processed after N
+# retries, no (N+1)th paste attempted
+# ===========================================================================
+reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-cap-1.json" "d-cap"
 set_capture_response "Report: /tmp/r.md"   # always unverified
 
@@ -297,10 +335,11 @@ assert_file_contains "$PROCESSING_LOG" "jq not found" \
     "T8: jq-absence error logged"
 
 # ===========================================================================
-# Test 9 (finding 1a): load-buffer failure -> paste sequence aborts,
+# Test 9 (finding 1a, push=1): load-buffer failure -> paste sequence aborts,
 # item stays pending
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-lb-1.json" "d-lb"
 touch "$MOCK_LOADBUFFER_FAIL_FLAG"
 set_capture_response ""
@@ -315,11 +354,13 @@ assert_eq "1" "$(count_files "$RECEIPTS_PENDING_DIR")" \
 assert_file_contains "$PROCESSING_LOG" "Failed to load-buffer" \
     "T9: load-buffer failure logged"
 rm -f "$MOCK_LOADBUFFER_FAIL_FLAG"
+unset VNX_RECEIPT_T0_PUSH
 
 # ===========================================================================
-# Test 10 (finding 3): digest message includes the dispatch_id list
+# Test 10 (finding 3, push=1): digest message includes the dispatch_id list
 # ===========================================================================
 reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
 write_pending "d-idlist-1.json" "d-idlist-1"
 write_pending "d-idlist-2.json" "d-idlist-2"
 write_pending "d-idlist-3.json" "d-idlist-3"

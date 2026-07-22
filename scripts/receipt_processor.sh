@@ -59,10 +59,11 @@ PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 RECEIPTS_PENDING_DIR="${VNX_DATA_DIR}/receipts/pending"
 RECEIPTS_PROCESSED_DIR="${VNX_DATA_DIR}/receipts/processed"
 RECEIPT_RETRY_INTERVAL="${VNX_RECEIPT_RETRY_INTERVAL:-10}"  # seconds between pending retry sweeps
-# VNX_RECEIPT_T0_PUSH=1 (default) pushes each receipt to the T0 tmux pane via
-# paste-buffer; 0 suppresses the push entirely — ndjson append + outbox
-# processing still happen (audit trail intact), only the pane notification is
-# skipped. For T0's that poll report-files instead of consuming pane pushes.
+# VNX_RECEIPT_T0_PUSH=0 (default, ADR-035 §5.3/§9 PR-8) suppresses the pane
+# push entirely — ndjson append + outbox processing still happen (audit trail
+# intact), only the pane notification is skipped. T0 pulls instead
+# (scripts/receipt_query.py pull, docs/core/DISPATCH_RULES.md §13). 1
+# re-enables the legacy tmux paste as a transition escape hatch.
 # Read directly (no indirection var) by rp_delivery.sh at delivery time.
 # VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) — once more than this many distinct
 # dispatch_ids are stacked in receipts/pending/, the retry sweep sends ONE

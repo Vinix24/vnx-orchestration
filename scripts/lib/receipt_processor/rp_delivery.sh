@@ -6,8 +6,11 @@
 #           extract_receipt_fields() from rp_extract.sh,
 #           get_pane_id_smart() from pane_manager,
 #           _rf_* fields, $RECEIPTS_PENDING_DIR, $RECEIPTS_PROCESSED_DIR
-# Env flags (OI-654): VNX_RECEIPT_T0_PUSH=1 (default) pushes to the T0 tmux
-#           pane; 0 suppresses the push (ndjson append + outbox still happen).
+# Env flags (OI-654, default flipped by ADR-035 §5.3/§9 PR-8):
+#           VNX_RECEIPT_T0_PUSH=0 (default) suppresses the pane-paste push —
+#           ndjson append + outbox still happen; T0 is expected to pull instead
+#           (scripts/receipt_query.py pull, docs/core/DISPATCH_RULES.md §13).
+#           1 re-enables the legacy tmux pane push as a transition escape hatch.
 #           VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) collapses a pending stack
 #           bigger than this into one digest paste instead of N individual ones.
 #           VNX_RECEIPT_VERIFY_MAX_RETRIES=3 (default) caps how many failed
@@ -95,12 +98,13 @@ _deliver_receipt_to_t0_pane() {
             ;;
     esac
 
-    # Push-switch (OI-654): T0's polling on report-files instead of pane pushes
-    # doesn't need the paste. Suppress it entirely — ndjson append already
-    # happened upstream in append_and_track_receipt(), so the audit trail is
-    # intact; only the tmux side-channel notification is skipped.
-    if [ "${VNX_RECEIPT_T0_PUSH:-1}" = "0" ]; then
-        log "INFO" "delivery_mode=suppressed dispatch_id=$dispatch_id (VNX_RECEIPT_T0_PUSH=0)"
+    # Push-switch (OI-654; default flipped OFF by ADR-035 §5.3/§9 PR-8): T0
+    # pulls (scripts/receipt_query.py pull) instead of consuming pane pushes
+    # now. Suppress the paste unless explicitly re-enabled — ndjson append
+    # already happened upstream in append_and_track_receipt(), so the audit
+    # trail is intact; only the tmux side-channel notification is skipped.
+    if [ "${VNX_RECEIPT_T0_PUSH:-0}" != "1" ]; then
+        log "INFO" "delivery_mode=suppressed dispatch_id=$dispatch_id (VNX_RECEIPT_T0_PUSH!=1)"
         return 0
     fi
 
@@ -168,8 +172,8 @@ _rpd_deliver_digest() {
     local oldest_dispatch_id="$2"
     local id_list="$3"
 
-    if [ "${VNX_RECEIPT_T0_PUSH:-1}" = "0" ]; then
-        log "INFO" "delivery_mode=suppressed digest count=$count (VNX_RECEIPT_T0_PUSH=0)"
+    if [ "${VNX_RECEIPT_T0_PUSH:-0}" != "1" ]; then
+        log "INFO" "delivery_mode=suppressed digest count=$count (VNX_RECEIPT_T0_PUSH!=1)"
         return 0
     fi
 
