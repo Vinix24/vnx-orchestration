@@ -1264,11 +1264,21 @@ def run_envelope_plan(
     from dispatch_worktree_isolation import (  # noqa: PLC0415
         create_dispatch_worktree,
         remove_dispatch_worktree,
+        resolve_consumer_project_root,
     )
 
     wt_path: Optional[Path] = None
     try:
-        wt_path = create_dispatch_worktree(plan.dispatch_id)
+        # Resolve the CONSUMER project root explicitly (VNX_PROJECT_ROOT / CWD-git,
+        # never __file__) so a central-install consumer (SC/MC/SEO/...) gets its
+        # worktree under ITS OWN project — not the shared ~/.vnx-system checkout
+        # this lane code lives under in a central install (P0 provider-worktree-
+        # root-fix). Resolved once and reused for both create and remove below so
+        # a fluctuating ambient CWD can't split the two onto different roots.
+        # Any resolution failure is handled by the same fail-loud path below as
+        # a worktree-creation failure — never falls back to a shared checkout.
+        _consumer_project_root = resolve_consumer_project_root()
+        wt_path = create_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
     except Exception as _wt_exc:
         _isolation_error = (
             f"isolation required (require_worktree) but worktree creation failed "
@@ -1311,7 +1321,7 @@ def run_envelope_plan(
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
     finally:
-        remove_dispatch_worktree(plan.dispatch_id)
+        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
 
     report_path, receipt_path = _govern(
         enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,

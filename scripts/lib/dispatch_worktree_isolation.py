@@ -24,6 +24,32 @@ log = logging.getLogger(__name__)
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_SAFE_ID_LEN = 60
 
+# The shared VNX central-install tree (e.g. ~/.vnx-system/versions/<v>/). A
+# dispatch worktree must NEVER be created here — see CentralInstallWorktreeError.
+_CENTRAL_INSTALL_ROOT = Path.home() / ".vnx-system"
+
+
+class CentralInstallWorktreeError(RuntimeError):
+    """Raised when dispatch-worktree resolution would land inside the shared
+    VNX central install tree (``~/.vnx-system/...``) instead of a consumer
+    project.
+
+    A dispatch worktree must NEVER be created there: ``git worktree add``
+    against the shared fabric checkout that every central-install consumer
+    (SC/MC/SEO/...) reads from causes cross-consumer branch/worktree
+    collisions (P0 provider-worktree-root-fix). Callers must resolve and pass
+    an explicit consumer ``project_root`` instead of relying on the
+    ``__file__``-based fallback — see ``resolve_consumer_project_root()``.
+    """
+
+
+def _is_central_install_path(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(_CENTRAL_INSTALL_ROOT.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
 
 def _sanitize_dispatch_id(dispatch_id: str) -> str:
     """Return a filesystem- and git-branch-safe version of dispatch_id."""
@@ -46,12 +72,44 @@ def _dispatch_worktree_dir(project_root: Path, dispatch_id: str) -> Path:
 
 def _resolve_project_root(project_root: Optional[Path]) -> Path:
     if project_root is not None:
-        return project_root.resolve()
-    try:
-        from project_root import resolve_project_root  # type: ignore[attr-defined]
-        return Path(resolve_project_root(__file__)).resolve()
-    except Exception:
-        return Path(__file__).resolve().parents[2]
+        root = project_root.resolve()
+    else:
+        try:
+            from project_root import resolve_project_root  # type: ignore[attr-defined]
+            root = Path(resolve_project_root(__file__)).resolve()
+        except Exception:
+            root = Path(__file__).resolve().parents[2]
+
+    if _is_central_install_path(root):
+        raise CentralInstallWorktreeError(
+            f"dispatch-worktree root resolved to the shared VNX central install "
+            f"({root}) instead of a consumer project; refusing to create/remove a "
+            f"worktree there. Pass an explicit consumer project_root — see "
+            f"resolve_consumer_project_root()."
+        )
+    return root
+
+
+def resolve_consumer_project_root() -> Path:
+    """Resolve the CONSUMER project root a dispatch worktree must be created in.
+
+    Delegates to ``vnx_paths.resolve_paths()["PROJECT_ROOT"]`` — the canonical
+    resolver that already threads ``VNX_PROJECT_ROOT`` (exported by the
+    central-install shim) and CWD-git-toplevel resolution ahead of any
+    ``__file__``-based fallback. This is the same resolver ``gate_executor``
+    passes into ``create_gate_worktree`` (OI-708) and that the tmux lane's
+    ``_resolve_invocation_project_root`` mirrors, so a consumer running the
+    central install (SC/MC/SEO/...) resolves to ITS OWN project instead of the
+    shared ``~/.vnx-system`` checkout — the root cause of cross-consumer
+    dispatch-worktree collisions (P0 provider-worktree-root-fix).
+
+    Callers MUST pass the result explicitly:
+    ``create_dispatch_worktree(..., project_root=resolve_consumer_project_root())``.
+    Relying on ``create_dispatch_worktree``'s own zero-arg ``__file__`` fallback
+    resolves the shared fabric install in a central-install consumer.
+    """
+    from vnx_paths import resolve_paths  # noqa: PLC0415
+    return Path(resolve_paths()["PROJECT_ROOT"]).resolve()
 
 
 @contextmanager

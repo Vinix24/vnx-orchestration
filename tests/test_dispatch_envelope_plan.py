@@ -501,19 +501,21 @@ class TestEnvelopeWorktreeIsolation:
             adapter_calls.append({"cwd": cwd})
             return _fake_adapter_success()
 
-        with patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
+        _fake_consumer_root = tmp_path / "consumer-root"
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=_fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
              patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove, \
              patch.object(ProviderAdapter, "run", fake_adapter_run), \
              patch("dispatch_envelope._govern", return_value=(None, fake_receipt)):
             result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
 
         assert result.status == "success"
-        mock_create.assert_called_once_with("wt-cwd-test")
+        mock_create.assert_called_once_with("wt-cwd-test", project_root=_fake_consumer_root)
         assert adapter_calls, "ProviderAdapter.run was not called"
         assert adapter_calls[0]["cwd"] == _FAKE_WT_PATH, (
             f"expected cwd={_FAKE_WT_PATH}, got cwd={adapter_calls[0]['cwd']}"
         )
-        mock_remove.assert_called_once_with("wt-cwd-test")
+        mock_remove.assert_called_once_with("wt-cwd-test", project_root=_fake_consumer_root)
 
     def test_worktree_removed_on_spawn_failure(self, tmp_path):
         """remove_dispatch_worktree is called even when ProviderAdapter.run raises."""
@@ -527,13 +529,15 @@ class TestEnvelopeWorktreeIsolation:
         def bad_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
             raise RuntimeError("spawn exploded")
 
-        with patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH), \
+        _fake_consumer_root = tmp_path / "consumer-root"
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=_fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH), \
              patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove, \
              patch.object(ProviderAdapter, "run", bad_adapter_run):
             with pytest.raises(RuntimeError, match="spawn exploded"):
                 run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
 
-        mock_remove.assert_called_once_with("wt-rm-fail-test")
+        mock_remove.assert_called_once_with("wt-rm-fail-test", project_root=_fake_consumer_root)
 
     def test_worktree_creation_failure_aborts_dispatch(self, tmp_path):
         """Worktree creation failure → dispatch aborts (status=failure, rc!=0), spawn NOT called."""
@@ -548,7 +552,7 @@ class TestEnvelopeWorktreeIsolation:
 
         adapter_calls: list = []
 
-        def bad_create(dispatch_id):
+        def bad_create(dispatch_id, project_root=None):
             raise RuntimeError("no disk space")
 
         def spy_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
