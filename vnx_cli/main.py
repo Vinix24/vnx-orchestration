@@ -261,6 +261,53 @@ def _register_update_subparser(subparsers: argparse.Action) -> None:
         action="store_true",
         help="revert current symlink to the previous version",
     )
+    update_parser.add_argument(
+        "--protect-pins",
+        dest="protect_pins",
+        default=None,
+        metavar="V,V,...",
+        help="comma-separated versions to protect from GC prune, in addition to "
+             "fleet .vnx-version pins (from ~/.vnx/projects.json) and the "
+             "<root>/protected-versions file",
+    )
+
+
+def _register_release_subparser(subparsers: argparse.Action) -> None:
+    release_parser = subparsers.add_parser(
+        "release",
+        help="release management (publish immutable central versions from git tags)",
+    )
+    release_subs = release_parser.add_subparsers(
+        dest="release_subcommand", metavar="SUBCOMMAND"
+    )
+
+    publish_parser = release_subs.add_parser(
+        "publish",
+        help="materialize a git tag into the central version store (immutable)",
+    )
+    publish_parser.add_argument(
+        "--tag",
+        required=True,
+        metavar="vX.Y.Z",
+        help="git tag to publish (must exist and match the version alphabet)",
+    )
+    publish_parser.add_argument(
+        "--repo",
+        default=None,
+        metavar="PATH_OR_URL",
+        help="git repo containing the tag (default: current repo, else the VNX remote)",
+    )
+    publish_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print planned actions without making filesystem changes",
+    )
+    publish_parser.add_argument(
+        "--set-current",
+        dest="set_current",
+        action="store_true",
+        help="also flip current -> <tag> (default OFF: publish without cutover)",
+    )
 
 
 def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
@@ -982,6 +1029,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.update import vnx_update
         sys.exit(vnx_update(args))
 
+    elif args.command == "release":
+        from vnx_cli.commands.release import vnx_release
+        sys.exit(vnx_release(args))
+
     elif args.command == "track":
         from vnx_cli.commands.track import vnx_track
         sys.exit(vnx_track(args))
@@ -1050,6 +1101,7 @@ def main() -> None:
     _register_pool_subparser(subparsers)
     _register_role_subparser(subparsers)
     _register_update_subparser(subparsers)
+    _register_release_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
     _register_track_subparser(subparsers)
     _register_handoff_subparser(subparsers)

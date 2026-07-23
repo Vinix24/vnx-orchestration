@@ -16,6 +16,7 @@ VERSION="v1.0.0"
 TARGET_DIR="${HOME}/.vnx-system"
 SOURCE_URL="https://github.com/Vinix24/vnx-orchestration"
 DRY_RUN=false
+MATERIALIZE_ONLY=false
 
 # Defined early so arg parsing can call it before helpers are defined.
 validate_version() {
@@ -48,6 +49,11 @@ while [ $# -gt 0 ]; do
       SOURCE_URL="${1#*=}"; shift ;;
     --dry-run)
       DRY_RUN=true; shift ;;
+    --materialize-only)
+      # Produce versions/<version>/ only: skip the current-symlink swap, shim
+      # install, and post-install verification. Used by `vnx release publish`,
+      # which owns the (optional, --set-current-gated) cutover itself.
+      MATERIALIZE_ONLY=true; shift ;;
     -h|--help)
       cat <<HELP
 Usage: install-central.sh [OPTIONS]
@@ -57,6 +63,7 @@ Options:
   --version <ver>   Version to install (default: v1.0.0)
   --source <url>    Git source URL (default: github.com/Vinix24/vnx-orchestration)
   --dry-run         Print steps without touching filesystem
+  --materialize-only  Only materialize versions/<version>/ (no current flip, no shim)
   -h, --help        Show this help
 
 Examples:
@@ -184,8 +191,12 @@ clone_version() {
   run mkdir -p "$(dirname "$version_dir")"
 
   local clone_url="$SOURCE_URL"
-  # Normalize: add https:// if not present
-  if [[ "$clone_url" != https://* ]] && [[ "$clone_url" != git@* ]] && [[ "$clone_url" != http://* ]]; then
+  # Normalize: add https:// if not present. Local sources (existing path or
+  # file:// URL) are used as-is — `vnx release publish` passes a temp checkout
+  # dir as --source, and prepending https:// would break the clone.
+  if [ -e "$clone_url" ] || [[ "$clone_url" == file://* ]]; then
+    : # local source — no URL normalization
+  elif [[ "$clone_url" != https://* ]] && [[ "$clone_url" != git@* ]] && [[ "$clone_url" != http://* ]]; then
     clone_url="https://${clone_url}"
   fi
 
@@ -363,6 +374,12 @@ main() {
 
   check_prereqs
   clone_version
+
+  if [ "$MATERIALIZE_ONLY" = "true" ]; then
+    success "Materialized ${VERSION} at ${TARGET_DIR}/versions/${VERSION} (no current flip, no shim)"
+    return 0
+  fi
+
   if [ -L "${TARGET_DIR}/current" ]; then
     _PREVIOUS_TARGET=$(readlink "${TARGET_DIR}/current")
   fi

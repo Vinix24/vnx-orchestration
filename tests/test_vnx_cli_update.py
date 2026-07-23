@@ -3,6 +3,7 @@
 
 import io
 import json
+import os
 import subprocess
 import sys
 from argparse import Namespace
@@ -23,6 +24,8 @@ from vnx_cli.commands.update import (
     _list_version_dirs,
     _current_target,
     _prune_old_versions,
+    _collect_protected_versions,
+    _load_fleet_pins,
     _atomic_symlink_flip,
     _validate_version_name,
     _fetch_version,
@@ -55,12 +58,13 @@ def _git_origin(tmp_path: Path) -> Path:
     return origin
 
 
-def _update_args(*, to_version=None, keep_last=DEFAULT_KEEP_LAST, dry_run=False, rollback=False):
+def _update_args(*, to_version=None, keep_last=DEFAULT_KEEP_LAST, dry_run=False, rollback=False, protect_pins=None):
     return Namespace(
         to_version=to_version,
         keep_last=keep_last,
         dry_run=dry_run,
         rollback=rollback,
+        protect_pins=protect_pins,
     )
 
 
@@ -687,3 +691,246 @@ def test_vnx_update_dry_run_does_not_repair_marker(tmp_path, monkeypatch):
     vnx_update(_update_args(to_version="edge", dry_run=True))
 
     assert not (active / INSTALL_MODE_MARKER).exists()
+
+
+# ---------------------------------------------------------------------------
+# Pin-safe GC: _prune_old_versions never prunes a pinned/protected version
+# ---------------------------------------------------------------------------
+
+def _version_dirs(root: Path, names, *, oldest_first=True):
+    """Create version dirs with strictly increasing mtimes (deterministic age)."""
+    dirs = []
+    ordered = names if oldest_first else list(reversed(names))
+    base = 1_700_000_000
+    for i, name in enumerate(ordered):
+        d = root / "versions" / name
+        d.mkdir(parents=True, exist_ok=True)
+        ts = base + i * 100
+        os.utime(d, (ts, ts))
+        dirs.append(d)
+    return dirs
+
+
+def _empty_registry(tmp_path, monkeypatch):
+    """Point the fleet registry at a nonexistent path for hermetic tests."""
+    missing = tmp_path / "no-such-registry.json"
+    monkeypatch.setenv("VNX_PROJECT_REGISTRY", str(missing))
+    return missing
+
+
+def _audit_events(audit_log: Path):
+    return [json.loads(line) for line in audit_log.read_text().strip().splitlines()]
+
+
+def test_prune_protects_cli_protect_pins(tmp_path, monkeypatch):
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        protect_pins="v1.0.1,v1.0.2", audit_log=audit_log,
+    )
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    # v1.0.1 and v1.0.2 are prune candidates (oldest of 5, keep 3) but protected.
+    assert remaining == ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+
+    events = _audit_events(audit_log)
+    protected_events = [e for e in events if e["event_type"] == "central_install_prune_protected"]
+    assert sorted(e["protected_version"] for e in protected_events) == ["v1.0.1", "v1.0.2"]
+    for event in protected_events:
+        assert event["keep_last_N"] == 3
+        assert any("--protect-pins" in r for r in event["reasons"])
+        assert "timestamp" in event and event["timestamp"]
+    # Nothing was actually pruned (both candidates protected), so no prune events.
+    assert not [e for e in events if e["event_type"] == "central_install_prune"]
+
+
+def test_prune_protects_versions_from_protected_versions_file(tmp_path, monkeypatch):
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    # v-prefix normalization: the file lists the bare form, the dir is v-prefixed.
+    (tmp_path / "protected-versions").write_text(
+        "# operator-curated GC protection\n1.0.1\n\n", encoding="utf-8"
+    )
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    # v1.0.2 pruned (unprotected candidate); v1.0.1 survives via the file.
+    assert remaining == ["v1.0.1", "v1.0.3", "v1.0.4", "v1.0.5"]
+
+    events = _audit_events(audit_log)
+    protected_events = [e for e in events if e["event_type"] == "central_install_prune_protected"]
+    assert len(protected_events) == 1
+    assert protected_events[0]["protected_version"] == "v1.0.1"
+    assert any("protected-versions" in r for r in protected_events[0]["reasons"])
+    pruned = [e["pruned_version"] for e in events if e["event_type"] == "central_install_prune"]
+    assert pruned == ["v1.0.2"]
+
+
+def test_prune_protects_fleet_registry_pins(tmp_path, monkeypatch):
+    """A pin in any registered consumer project's .vnx-version protects the dir."""
+    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
+    consumer = tmp_path / "consumer-project"
+    consumer.mkdir()
+    (consumer / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
+    registry = tmp_path / "projects.json"
+    registry.write_text(
+        json.dumps({"schema_version": 2, "projects": [{"path": str(consumer)}]}),
+        encoding="utf-8",
+    )
+
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        registry_path=registry, audit_log=audit_log,
+    )
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == ["v1.0.1", "v1.0.3", "v1.0.4", "v1.0.5"]
+
+    events = _audit_events(audit_log)
+    protected_events = [e for e in events if e["event_type"] == "central_install_prune_protected"]
+    assert len(protected_events) == 1
+    assert protected_events[0]["protected_version"] == "v1.0.1"
+    assert any("pinned by project" in r for r in protected_events[0]["reasons"])
+
+
+def test_prune_protection_sources_union(tmp_path, monkeypatch):
+    """Registry + protected-versions file + --protect-pins all union together."""
+    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
+    consumer = tmp_path / "consumer-project"
+    consumer.mkdir()
+    (consumer / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
+    registry = tmp_path / "projects.json"
+    registry.write_text(
+        json.dumps({"projects": [{"path": str(consumer)}]}), encoding="utf-8"
+    )
+    (tmp_path / "protected-versions").write_text("v1.0.2\n", encoding="utf-8")
+
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        protect_pins="v1.0.3", registry_path=registry,
+        audit_log=tmp_path / "events" / "central_install.ndjson",
+    )
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+
+
+def test_prune_protection_dry_run_no_deletion_no_audit(tmp_path, monkeypatch):
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _prune_old_versions(
+            tmp_path, keep_last=3, dry_run=True,
+            protect_pins="v1.0.1", audit_log=audit_log,
+        )
+
+    output = buf.getvalue()
+    assert "[dry-run] Would protect from prune:" in output
+    assert "v1.0.1" in output
+    assert len(list((tmp_path / "versions").iterdir())) == 5
+    assert not audit_log.exists()
+
+
+def test_prune_keep_last_still_prunes_unprotected(tmp_path, monkeypatch):
+    """Protecting one candidate must not shield the other old candidates."""
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5", "v1.0.6"]
+    _version_dirs(tmp_path, names)
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        protect_pins="v1.0.1",
+        audit_log=tmp_path / "events" / "central_install.ndjson",
+    )
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    # 3 prune candidates (v1.0.1..v1.0.3): v1.0.1 protected, other two pruned.
+    assert remaining == ["v1.0.1", "v1.0.4", "v1.0.5", "v1.0.6"]
+
+
+def test_prune_protection_ignores_malformed_entries(tmp_path, monkeypatch, capsys):
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        protect_pins="../escape,v1.0.1,foo;rm -rf /",
+        audit_log=tmp_path / "events" / "central_install.ndjson",
+    )
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert "v1.0.1" in remaining
+    assert "v1.0.2" not in remaining
+    captured = capsys.readouterr()
+    assert "malformed protected version" in captured.err
+
+
+def test_collect_protected_versions_normalizes_v_prefix(tmp_path, monkeypatch):
+    _empty_registry(tmp_path, monkeypatch)
+    protected = _collect_protected_versions(tmp_path, protect_pins="v1.3.0,1.2.3")
+    assert "1.3.0" in protected
+    assert "1.2.3" in protected
+
+
+def test_load_fleet_pins_skips_missing_and_malformed(tmp_path, monkeypatch):
+    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
+    pinned = tmp_path / "pinned-project"
+    pinned.mkdir()
+    (pinned / ".vnx-version").write_text("v2.0.0\n", encoding="utf-8")
+    unpinned = tmp_path / "unpinned-project"
+    unpinned.mkdir()
+    malformed = tmp_path / "malformed-project"
+    malformed.mkdir()
+    (malformed / ".vnx-version").write_text("../escape\n", encoding="utf-8")
+    registry = tmp_path / "projects.json"
+    registry.write_text(
+        json.dumps({"projects": [
+            {"path": str(pinned)},
+            {"path": str(unpinned)},
+            {"path": str(malformed)},
+            {"path": str(tmp_path / "does-not-exist")},
+            {},  # no path key
+        ]}),
+        encoding="utf-8",
+    )
+
+    pins = _load_fleet_pins(registry)
+
+    assert list(pins.keys()) == ["2.0.0"]
+    assert any("pinned by project" in s for s in pins["2.0.0"])
+
+
+def test_vnx_update_dry_run_threads_protect_pins(tmp_path, monkeypatch):
+    """End-to-end: vnx_update --dry-run surfaces pin protection in prune plan."""
+    _empty_registry(tmp_path, monkeypatch)
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = vnx_update(_update_args(to_version="edge", dry_run=True, protect_pins="v1.0.1"))
+
+    output = buf.getvalue()
+    assert rc == 0
+    assert "Would protect from prune" in output
+    assert len(list((tmp_path / "versions").iterdir())) == 5
