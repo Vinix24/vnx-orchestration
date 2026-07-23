@@ -180,9 +180,9 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         default=None,
         metavar="VERSION",
         help="explicitly (re)write the .vnx-version pin to VERSION, even if a pin "
-             "already exists; must match [A-Za-z0-9._-]+. The pin is written but "
-             "the running pip CLI still resolves its own engine until the "
-             "pip-cli-honor-pin-via-reexec design-track lands",
+             "already exists; must match [A-Za-z0-9._-]+. The central-install pip "
+             "CLI honors the pin by re-exec'ing the pinned version at startup "
+             "(vnx_cli/_reexec.py)",
     )
 
 
@@ -1024,6 +1024,13 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
 
 
 def main() -> None:
+    # FIRST: honor a project's .vnx-version pin by re-exec'ing the pinned
+    # central install (vnx_cli + engine stay version-consistent). No-op for
+    # dev checkouts, matching pins, and any ambiguity (fail-open).
+    from vnx_cli._reexec import maybe_reexec_pinned
+
+    maybe_reexec_pinned()
+
     parser = argparse.ArgumentParser(
         prog="vnx",
         description="VNX — governance-first multi-agent orchestration for AI CLI workers",
