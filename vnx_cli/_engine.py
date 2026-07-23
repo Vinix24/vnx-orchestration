@@ -38,9 +38,10 @@ def engine_root() -> Path:
     selection. The pip-installed CLI and the pinned engine are API-coupled, so
     swapping the engine root based on a pin can crash commands that call new
     APIs against an old engine (e.g. ``deliver_via_door(deadline_seconds=...)``).
-    Honoring the pin from a pip install is tracked as design-track
-    ``pip-cli-honor-pin-via-reexec``; until that lands, ``vnx init --set-version``
-    writes the pin file but the running pip CLI keeps using its own engine.
+    The pin is instead honored by RE-EXEC'ing the pinned install as a whole
+    (its ``vnx_cli`` + its engine) at startup — see
+    ``vnx_cli/_reexec.py`` (design-track ``pip-cli-honor-pin-via-reexec``).
+    This in-process resolver keeps using its own engine.
     """
     parent = Path(__file__).resolve().parent.parent
     packaged = parent / "vnx_orchestration"
