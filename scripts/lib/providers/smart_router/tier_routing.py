@@ -2,8 +2,9 @@
 
 Tier→provider mappings (honoring provider_constraints.yaml):
   tier-zero → local Gemma e4b via MLX; fallback Ollama
-  tier-low  → DeepSeek via Claude-harness key-auth (DEEPSEEK_API_KEY required)
-               OR Kimi via CLI (kimi-via-cli-only constraint)
+  tier-low  → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
+               (DEEPSEEK_API_KEY required) OR Kimi via CLI (kimi-via-cli-only
+               constraint)
   tier-mid  → claude-sonnet-4-6
   tier-high → claude-opus-4-8
 
@@ -97,7 +98,7 @@ def resolve_tier_route(tier: str, env: Optional[dict] = None) -> TierRoute:
             return TierRoute(
                 tier=tier,
                 provider="deepseek",
-                model="deepseek-chat",
+                model="deepseek-v4-flash",  # deepseek-chat discontinued 2026-07-24
                 lane="claude_harness_keyed",
                 env_requirements=("DEEPSEEK_API_KEY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
                 fallback=_ROUTE_KIMI,

@@ -60,6 +60,15 @@ def test_tier_low_with_deepseek_key_uses_harness():
     assert "DEEPSEEK_API_KEY" in route.env_requirements
 
 
+def test_tier_low_deepseek_route_uses_v4_flash():
+    """tier-low DeepSeek route must use deepseek-v4-flash — deepseek-chat was
+    discontinued by the provider on 2026-07-24."""
+    env = {"DEEPSEEK_API_KEY": "sk-test-123"}
+    route = resolve_tier_route(TIER_LOW, env=env)
+    assert route.provider == "deepseek"
+    assert route.model == "deepseek-v4-flash"
+
+
 def test_deepseek_harness_blocked_without_key():
     """Empty DEEPSEEK_API_KEY falls back to Kimi (subscription route blocked)."""
     route = resolve_tier_route(TIER_LOW, env={"DEEPSEEK_API_KEY": ""})
