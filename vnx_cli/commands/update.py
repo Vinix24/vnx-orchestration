@@ -14,9 +14,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from vnx_cli._reexec import PIN_FILE_NAME, _PIN_RE, _normalize_version
+
 
 VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration.git"
 DEFAULT_KEEP_LAST = 3
+DEFAULT_REGISTRY_PATH = Path.home() / ".vnx" / "projects.json"
+PROTECTED_VERSIONS_FILE = "protected-versions"
 
 _VERSION_RE = re.compile(r"^(edge|latest|v?\d+\.\d+\.\d+(?:-[\w.]+)?)$")
 
@@ -275,11 +279,115 @@ def _atomic_symlink_flip(
     print(f"Activated: {current} -> {target_dir}")
 
 
+def _iter_pin_values(text: str) -> list:
+    """Yield validated pin values from newline/comma separated text.
+
+    Blank lines and ``#`` comments are ignored; values that violate the pin
+    alphabet (same regex as the re-exec keystone and the shim) are skipped
+    with a warning instead of aborting the whole protection sweep.
+    """
+    values = []
+    for raw in re.split(r"[\n,]", text):
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            continue
+        if value in (".", "..") or not _PIN_RE.match(value):
+            print(f"[warn] ignoring malformed protected version: {value!r}", file=sys.stderr)
+            continue
+        values.append(value)
+    return values
+
+
+def _load_fleet_pins(registry_path: "Path | None" = None) -> dict:
+    """Collect ``{normalized_pin: {sources}}`` from the fleet project registry.
+
+    Reads the same ``~/.vnx/projects.json`` registry the fabric already uses
+    (scripts/commands/registry.sh, scripts/lib/vnx_identity.py) and harvests
+    each registered project's ``.vnx-version`` pin. A pruned pinned version
+    silently degrades that project's ``vnx`` to ``current`` (the re-exec
+    keystone fails open), so every pin found here protects its version dir.
+    """
+    if registry_path is None:
+        env_registry = os.environ.get("VNX_PROJECT_REGISTRY")
+        registry_path = (
+            Path(env_registry).expanduser() if env_registry else DEFAULT_REGISTRY_PATH
+        )
+    protected: dict = {}
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return protected
+    for entry in data.get("projects", []) or []:
+        project_path = entry.get("path")
+        if not project_path:
+            continue
+        project_dir = Path(project_path).expanduser()
+        pin_file = project_dir / PIN_FILE_NAME
+        try:
+            if not pin_file.is_file():
+                continue
+            lines = pin_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        pin = lines[0].strip() if lines else ""
+        if not pin or pin in (".", "..") or not _PIN_RE.match(pin):
+            continue
+        protected.setdefault(_normalize_version(pin), set()).add(
+            f"pinned by project {project_dir}"
+        )
+    return protected
+
+
+def _collect_protected_versions(
+    root: Path,
+    protect_pins: "str | list | None" = None,
+    registry_path: "Path | None" = None,
+    protected_file: "Path | None" = None,
+) -> dict:
+    """Union of all version-protection sources: ``{normalized_pin: {reasons}}``.
+
+    Sources (all optional, all unioned):
+
+    1. Fleet registry: every registered consumer project's ``.vnx-version``.
+    2. ``<root>/protected-versions``: operator-curated newline file.
+    3. ``--protect-pins``: explicit comma-separated CLI argument.
+
+    Normalization matches ``vnx_cli._reexec._normalize_version`` so a pin of
+    ``1.3.0`` protects the version dir ``v1.3.0`` (and vice versa).
+    """
+    protected = _load_fleet_pins(registry_path)
+
+    pfile = protected_file or (root / PROTECTED_VERSIONS_FILE)
+    try:
+        if pfile.is_file():
+            for value in _iter_pin_values(pfile.read_text(encoding="utf-8")):
+                protected.setdefault(_normalize_version(value), set()).add(
+                    f"listed in {pfile}"
+                )
+    except OSError:
+        pass
+
+    if protect_pins:
+        text = protect_pins if isinstance(protect_pins, str) else ",".join(protect_pins)
+        for value in _iter_pin_values(text):
+            protected.setdefault(_normalize_version(value), set()).add("--protect-pins")
+
+    return protected
+
+
 def _prune_old_versions(
-    root: Path, keep_last: int, dry_run: bool, audit_log: "Path | None" = None
+    root: Path,
+    keep_last: int,
+    dry_run: bool,
+    audit_log: "Path | None" = None,
+    protect_pins: "str | list | None" = None,
+    registry_path: "Path | None" = None,
 ) -> None:
     versions = _list_version_dirs(root)
     current = _current_target(root)
+    protected = _collect_protected_versions(
+        root, protect_pins=protect_pins, registry_path=registry_path
+    )
 
     # Keep the newest keep_last dirs; prune anything older, skip current
     if len(versions) <= keep_last:
@@ -288,6 +396,23 @@ def _prune_old_versions(
     to_prune = versions[: len(versions) - keep_last]
     for version_dir in to_prune:
         if current and version_dir.resolve() == current.resolve():
+            continue
+        reasons = sorted(protected.get(_normalize_version(version_dir.name), ()))
+        if reasons:
+            reason_text = "; ".join(reasons)
+            if dry_run:
+                print(f"[dry-run] Would protect from prune: {version_dir} ({reason_text})")
+            else:
+                _emit_audit_event(
+                    "central_install_prune_protected",
+                    {
+                        "protected_version": version_dir.name,
+                        "keep_last_N": keep_last,
+                        "reasons": reasons,
+                    },
+                    audit_log=audit_log,
+                )
+                print(f"Protected from prune: {version_dir} ({reason_text})")
             continue
         if dry_run:
             print(f"[dry-run] Would prune: {version_dir}")
@@ -329,6 +454,7 @@ def vnx_update(args) -> int:
     keep_last: int = getattr(args, "keep_last", DEFAULT_KEEP_LAST)
     dry_run: bool = getattr(args, "dry_run", False)
     rollback: bool = getattr(args, "rollback", False)
+    protect_pins = getattr(args, "protect_pins", None)
 
     root = _resolve_root()
 
@@ -357,7 +483,9 @@ def vnx_update(args) -> int:
     try:
         target_dir = _fetch_version(root, target, dry_run=dry_run)
         _atomic_symlink_flip(root, target_dir, dry_run=dry_run)
-        _prune_old_versions(root, keep_last=keep_last, dry_run=dry_run)
+        _prune_old_versions(
+            root, keep_last=keep_last, dry_run=dry_run, protect_pins=protect_pins
+        )
     except FileNotFoundError:
         print("Error: git executable not found in PATH", file=sys.stderr)
         return 1
