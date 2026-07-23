@@ -564,6 +564,8 @@ def _make_bundle_spec(
     staging_id: str = "20260615-staging-probe",
     dispatch_id: str = "20260615-probe-dispatch",
     provider: str = "claude",
+    target_slot: str = "T0",
+    model: str | None = None,
 ) -> tuple[Path, Path]:
     """Build a promoted bundle under <tmp>/vnx-data with the given instruction.
 
@@ -589,10 +591,11 @@ def _make_bundle_spec(
         # Claude model and hard-rejects (model-not-in-current-registry). T0's pin
         # (t0-opus-only -> claude-opus-4-8) stays a valid Claude model, so it's the
         # clean slot for a generic "claude dispatch that should proceed" fixture.
-        "target_slot": "T0",
+        "target_slot": target_slot,
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": provider,
+        "model": model,
         "deadline_seconds": 3600,
         "isolation": "worktree",
     }
@@ -2028,3 +2031,228 @@ class TestTrackIdEndToEnd:
 
         assert rc == 0
         mock_execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# worker-claude-override (escape-hatch-worker-claude, 2026-07-23) — gated,
+# audited operator escape-hatch routing ONE build-worker dispatch back to claude
+# ---------------------------------------------------------------------------
+
+def _clear_worker_claude_override_env(monkeypatch) -> None:
+    """Guarantee a clean override env regardless of the ambient operator env."""
+    monkeypatch.delenv("VNX_OVERRIDE_WORKER_CLAUDE", raising=False)
+    monkeypatch.delenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", raising=False)
+
+
+def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, monkeypatch):
+    """Override env + reason + provider=claude + T1 => the kimi-k3 pin coercion is
+    skipped for THIS dispatch: effective/plan model is a claude model, the
+    constraint check passes, and the route is the claude tmux-subscription lane.
+    An audited `worker-claude-override-applied` entry carrying the reason, the
+    target_slot, and the resolved model lands on the plan's governed record."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Escape hatch\n\nRoute this one build task to claude.\n",
+        staging_id="20260723-staging-escape-hatch",
+        dispatch_id="20260723-escape-hatch-apply",
+        provider="claude",
+        target_slot="T1",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
+    monkeypatch.setenv(
+        "VNX_OVERRIDE_WORKER_CLAUDE_REASON",
+        "kimi failed 2x on this chain-critical task (C1 escalation)",
+    )
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, "gated override must route the dispatch, not reject it"
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.provider == Provider.CLAUDE
+    assert plan_arg.billing == "subscription"
+    assert plan_arg.model == "sonnet", (
+        "pin coercion skipped: no spec.model -> claude-lane default 'sonnet', "
+        f"not the kimi-k3 pin (got {plan_arg.model!r})"
+    )
+    audit = [w for w in plan_arg.warnings if "worker-claude-override-applied" in w]
+    assert audit, f"audited override verdict missing from plan warnings: {plan_arg.warnings}"
+    assert "kimi failed 2x on this chain-critical task (C1 escalation)" in audit[0]
+    assert "T1" in audit[0]
+    assert "sonnet" in audit[0]
+
+
+def test_worker_claude_override_honors_requested_claude_model(tmp_path, monkeypatch):
+    """Override + explicit spec.model=opus => plan.model is opus (requested claude
+    model), still via the tmux-subscription lane."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Escape hatch\n\nRoute this one build task to opus.\n",
+        staging_id="20260723-staging-escape-hatch-opus",
+        dispatch_id="20260723-escape-hatch-opus",
+        provider="claude",
+        target_slot="T2",
+        model="opus",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", "operator pre-assessed opus-depth task")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.model == "opus"
+    assert any("worker-claude-override-applied" in w for w in plan_arg.warnings)
+
+
+@pytest.mark.parametrize("reason_value", [None, "", "   "])
+def test_worker_claude_override_without_reason_is_blocking_refusal(tmp_path, monkeypatch, capsys, reason_value):
+    """Override env set but reason absent/empty/whitespace => blocking refusal
+    (worker-claude-override-reason-required). The override is inert without an
+    audit reason; no executor runs."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Escape hatch\n\nNo reason given.\n",
+        staging_id="20260723-staging-escape-hatch-noreason",
+        dispatch_id="20260723-escape-hatch-noreason",
+        provider="claude",
+        target_slot="T1",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
+    if reason_value is None:
+        monkeypatch.delenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", raising=False)
+    else:
+        monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", reason_value)
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "override without a reason must be a blocking refusal"
+    mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    assert "worker-claude-override-reason-required" in err
+
+
+def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeypatch, capsys):
+    """DEFAULT INTACT: no override env + provider=claude + T1 => still hard-rejected
+    via the kimi-k3 registry failure (model-not-in-current-registry, blocking).
+    No silent claude fallback is ever introduced."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# No override\n\nThis must keep hard-rejecting.\n",
+        staging_id="20260723-staging-no-override",
+        dispatch_id="20260723-no-override-reject",
+        provider="claude",
+        target_slot="T1",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _clear_worker_claude_override_env(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "default kimi-k3 hard-reject must stand without the override env"
+    mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    # The emergent reject surfaces as the first blocking verdict for a kimi-branded
+    # model on the claude lane (kimi-via-cli-only fires ahead of the registry gate).
+    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
+    assert "worker-claude-override" not in err
+
+
+def test_no_override_kimi_build_dispatch_unchanged(tmp_path, monkeypatch):
+    """DEFAULT INTACT: a normal kimi build dispatch on T1 (no override env) routes
+    to the provider lane exactly as before — no override artifacts on the plan."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Normal kimi build dispatch\n\nUnchanged path.\n",
+        staging_id="20260723-staging-kimi-default",
+        dispatch_id="20260723-kimi-default",
+        provider="kimi",
+        target_slot="T1",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _clear_worker_claude_override_env(monkeypatch)
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.status = "success"
+    with patch("dispatch_cli.run_envelope_plan", return_value=mock_result) as mock_envelope:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_envelope.assert_called_once()
+    plan_arg = mock_envelope.call_args[0][0]
+    assert plan_arg.lane == "provider"
+    assert plan_arg.provider == Provider.KIMI
+    assert not any("worker-claude-override" in w for w in plan_arg.warnings)
+
+
+def test_worker_claude_override_cannot_smuggle_mismatched_model(tmp_path, monkeypatch, capsys):
+    """Belt-and-suspenders intact: override + reason but spec.model is kimi-branded
+    => the constraint engine still blocks (kimi-via-cli-only / registry). The
+    override skips the pin coercion only; it is claude->claude, never a hole the
+    kimi-via-cli-only guard can be smuggled through."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Escape hatch abuse attempt\n\nkimi model on the claude lane.\n",
+        staging_id="20260723-staging-escape-hatch-abuse",
+        dispatch_id="20260723-escape-hatch-abuse",
+        provider="claude",
+        target_slot="T1",
+        model="kimi-k3",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", "attempt to route kimi via the claude lane")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "a kimi-branded model on the claude lane must still hard-reject"
+    mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
+
+
+def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monkeypatch):
+    """Scope guard: the override only applies to provider=claude on T1/T2/T3.
+    Override env + provider=claude on T0 is unaffected (T0 pin path unchanged:
+    claude-opus-4-8, NO override audit entry)."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# T0 dispatch with stray override env\n\nPin path unchanged.\n",
+        staging_id="20260723-staging-override-t0",
+        dispatch_id="20260723-override-t0",
+        provider="claude",
+        target_slot="T0",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", "stray env must not affect T0")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "claude-opus-4-8", (
+        f"T0 pin (t0-opus-only) must be unaffected by the worker override (got {plan_arg.model!r})"
+    )
+    assert not any("worker-claude-override" in w for w in plan_arg.warnings)

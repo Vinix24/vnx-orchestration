@@ -237,6 +237,18 @@ _DEFAULT_MODEL_PINS: dict[str, str] = {
     "T3": "kimi-k3",
 }
 
+# worker-claude-override (escape-hatch-worker-claude, 2026-07-23): gated, audited
+# operator escape-hatch that routes ONE build-worker dispatch back to claude via
+# the tmux-subscription lane. ALL of these must hold or the default kimi-k3
+# hard-reject stands unchanged:
+#   1. VNX_OVERRIDE_WORKER_CLAUDE=1 (explicit env override, per-dispatch)
+#   2. VNX_OVERRIDE_WORKER_CLAUDE_REASON non-empty (audit; inert + blocking refusal without it)
+#   3. spec.provider is explicitly claude
+#   4. spec.target_slot is a build worker (T1/T2/T3)
+_BUILD_WORKER_SLOTS = frozenset({"T1", "T2", "T3"})
+WORKER_CLAUDE_OVERRIDE_ENV = "VNX_OVERRIDE_WORKER_CLAUDE"
+WORKER_CLAUDE_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_WORKER_CLAUDE_REASON"
+
 
 def _load_model_pins_from_yaml() -> dict[str, str]:
     """Load T0/T1/T2/T3 model pins from provider_constraints.yaml SSOT.
@@ -631,9 +643,51 @@ def build_runtime_snapshot(
     # label) which correctly fails the check_registry gate below (model-not-in-
     # current-registry, blocking) instead of silently dispatching sonnet — matching
     # the "kimi-only, no fallback" policy (fail loud, never a silent claude rescue).
+    # The ONLY sanctioned way past that reject is the gated, audited operator
+    # escape-hatch directly below (worker-claude-override); everything else about
+    # the default path is unchanged.
     is_claude_lane = spec.provider == Provider.CLAUDE
+
+    # worker-claude-override gate (escape-hatch-worker-claude): evaluate the
+    # override conditions BEFORE the effective-model computation. The override is
+    # read from this process's env, which is per-dispatch (the door runs one
+    # process per dispatch) — it is never global state. Default path (no override
+    # env) is byte-for-byte unchanged.
+    override_gate_verdicts: list[ConstraintVerdict] = []
+    worker_claude_override_reason: Optional[str] = None
+    if (
+        is_claude_lane
+        and spec.target_slot in _BUILD_WORKER_SLOTS
+        and os.environ.get(WORKER_CLAUDE_OVERRIDE_ENV) == "1"
+    ):
+        reason = (os.environ.get(WORKER_CLAUDE_OVERRIDE_REASON_ENV) or "").strip()
+        if reason:
+            worker_claude_override_reason = reason
+        else:
+            # Override env set but no audit reason -> the override is INERT and the
+            # dispatch is REFUSED (blocking). Fail loud, never silently fall back to
+            # either kimi-k3 or claude.
+            override_gate_verdicts.append(ConstraintVerdict(
+                code="worker-claude-override-reason-required",
+                severity="blocking",
+                message=(
+                    f"{WORKER_CLAUDE_OVERRIDE_ENV}=1 is set but "
+                    f"{WORKER_CLAUDE_OVERRIDE_REASON_ENV} is empty/absent — the "
+                    "worker-claude override is inert without an audit reason. "
+                    "Refusing; the default kimi-k3 hard-reject stands."
+                ),
+            ))
+
     if is_claude_lane:
-        effective_model = model_pins.get(spec.target_slot) or spec.model or "sonnet"
+        if worker_claude_override_reason is not None:
+            # Override granted: SKIP the kimi-k3 model_pins coercion for THIS
+            # dispatch only, so effective_model is the requested claude model. The
+            # constraint check below still runs against this model (registry,
+            # kimi-via-cli-only, etc.) — the override is claude->claude, never a
+            # bypass of the constraint engine.
+            effective_model = spec.model or "sonnet"
+        else:
+            effective_model = model_pins.get(spec.target_slot) or spec.model or "sonnet"
     else:
         effective_model = spec.model or "default"
 
@@ -713,6 +767,31 @@ def build_runtime_snapshot(
                 ),)
                 existing_codes.add(v.code)
 
+    # worker-claude-override verdicts: a gate refusal (reason required) is
+    # prepended so it surfaces as THE reject; an applied override is recorded as an
+    # audited warn verdict (flows via D3 into plan.warnings — advisory, excluded
+    # from the plan digest) carrying the reason, target_slot, and resolved model.
+    if override_gate_verdicts:
+        constraint_verdicts = tuple(override_gate_verdicts) + constraint_verdicts
+    if worker_claude_override_reason is not None:
+        constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+            code="worker-claude-override-applied",
+            severity="warn",
+            message=(
+                f"operator override {WORKER_CLAUDE_OVERRIDE_ENV}=1 applied for THIS "
+                f"dispatch only: build worker {spec.target_slot} routes to claude "
+                f"model {effective_model!r} via the tmux-subscription lane "
+                f"(kimi-k3 pin skipped). Reason: {worker_claude_override_reason}"
+            ),
+            override_applied=True,
+        ),)
+        logger.warning(
+            "[dispatch_cli] AUDIT worker-claude-override-applied target=%s model=%s reason=%s",
+            spec.target_slot,
+            effective_model,
+            worker_claude_override_reason,
+        )
+
     # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
     # dispatches/pending that escapes the data root cannot host a promoted bundle
     # (fail-closed) — checked unconditionally so it holds even if existence is faked.
@@ -749,12 +828,22 @@ def build_runtime_snapshot(
         target_health = {target_id: "healthy"}
         target_capable = {target_id: True}
 
+    # worker-claude-override: strip the kimi-k3 pin for THIS dispatch's snapshot
+    # only, so compile_plan's D4 resolves the requested claude model instead of the
+    # pin. The loaded model_pins dict itself is never mutated; every dispatch that
+    # does not carry the override still sees the full pins (kimi stays default).
+    snapshot_model_pins = model_pins
+    if worker_claude_override_reason is not None:
+        snapshot_model_pins = {
+            slot: pin for slot, pin in model_pins.items() if slot != spec.target_slot
+        }
+
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
         staging_promoted=staging_promoted,
         target_health=target_health,
         target_capable=target_capable,
-        model_pins=model_pins,
+        model_pins=snapshot_model_pins,
     )
 
 
