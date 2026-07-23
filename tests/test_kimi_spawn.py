@@ -261,6 +261,48 @@ class TestNormalizeKimiEvent(unittest.TestCase):
         self.assertEqual(event.event_type, "text")
         self.assertEqual(event.data["text"], "legacy string")
 
+    # --- plain-string assistant content (final message without content[]) --
+    # kimi-cli sometimes emits the FINAL assistant message with ``content`` as
+    # a bare string instead of an array-of-blocks. Previously this shape
+    # skipped content-block extraction entirely -> zero text -> false-failure
+    # ("text extraction yielded ZERO characters") on an otherwise-successful
+    # run. The string itself is the answer text.
+
+    def test_normalize_plain_string_assistant_content_extracts_text(self):
+        """{"role": "assistant", "content": "..."} -> text event with the string."""
+        raw = {"role": "assistant", "content": "real answer text"}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "real answer text")
+
+    def test_normalize_plain_string_assistant_content_has_no_reasoning_or_tool_calls(self):
+        """The string-content shape carries no separate reasoning/tool_calls."""
+        raw = {"role": "assistant", "content": "just the answer"}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertNotIn("reasoning", event.data)
+        self.assertNotIn("tool_calls", event.data)
+
+    def test_normalize_plain_string_assistant_content_does_not_shadow_legacy(self):
+        """Legacy events also use string content — the new branch must not steal them."""
+        raw = {"event_type": "assistant_text", "content": "legacy string"}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "legacy string")
+
+    def test_normalize_empty_string_assistant_content_yields_empty_text(self):
+        """Empty string content -> empty text (fail-loud guard stays intact downstream)."""
+        raw = {"role": "assistant", "content": ""}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "")
+
+    def test_normalize_plain_string_non_assistant_role_not_extracted_as_text(self):
+        """A user/system turn with string content must never become answer text."""
+        raw = {"role": "user", "content": "echoed prompt"}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertNotEqual(event.event_type, "text")
+
     def test_event_has_correct_dispatch_and_terminal(self):
         raw = {"event_type": "complete"}
         event = normalize_kimi_event(raw, "T2", "my-dispatch")
@@ -634,6 +676,62 @@ class TestSpawnKimiIntegration(unittest.TestCase):
         self.assertIsNone(result.error, f"unexpected error: {result.error!r}")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.completion_text, "The command printed: hi")
+
+    # --- plain-string assistant content end-to-end --------------------------
+    # kimi-cli sometimes emits the FINAL assistant message with content as a
+    # plain string instead of an array-of-blocks. Before the fix this shape
+    # yielded zero extracted text and false-reported as failure even though
+    # the run succeeded.
+
+    def test_plain_string_final_message_reports_success_with_text(self):
+        """Final assistant message with plain-string content -> success + text."""
+        events = [
+            {
+                "role": "assistant",
+                "content": [{"type": "think", "think": "working on it"}],
+                "tool_calls": [{
+                    "type": "function", "id": "tool_1",
+                    "function": {"name": "Shell", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "content": [{"type": "text", "text": "ok"}], "tool_call_id": "tool_1"},
+            # The final assistant message arrives as a plain string.
+            {"role": "assistant", "content": "Done, file created."},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNone(result.error, f"unexpected error: {result.error!r}")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.completion_text, "Done, file created.")
+
+    def test_plain_string_only_stream_reports_success(self):
+        """A stream whose ONLY assistant message has string content still succeeds."""
+        events = [
+            {"role": "assistant", "content": "real answer text"},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNone(result.error, f"unexpected error: {result.error!r}")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.completion_text, "real answer text")
+
+    def test_empty_string_assistant_content_still_fails_loud(self):
+        """Guard intact: empty string content -> zero chars -> FAILURE, not success."""
+        events = [
+            {"role": "assistant", "content": ""},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertEqual(result.completion_text, "")
+        self.assertIsNotNone(result.error, "empty extraction must surface as an error")
+        self.assertNotEqual(result.returncode, 0, "empty extraction must not exit 0")
+
+    def test_whitespace_only_string_assistant_content_still_fails_loud(self):
+        """Guard intact: whitespace-only string content -> FAILURE, not success."""
+        events = [
+            {"role": "assistant", "content": "   \n\t  "},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertEqual(result.completion_text.strip(), "")
+        self.assertIsNotNone(result.error, "whitespace-only extraction must surface as an error")
+        self.assertNotEqual(result.returncode, 0, "whitespace-only extraction must not exit 0")
 
     def test_144_empty_extraction_on_nonempty_response_is_failure(self):
         """FAIL-LOUD: CLI emits message lines but no text block -> FAILURE, not empty-success.

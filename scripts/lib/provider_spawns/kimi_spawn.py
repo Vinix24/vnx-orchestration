@@ -137,6 +137,10 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
       {"role": "assistant", "content": [{"type": "think", "think": "..."},
                                         {"type": "text", "text": "..."}],
        "tool_calls": [...]}                 -> text (+ reasoning, tool_calls)
+      {"role": "assistant", "content": "plain answer text"}   -> text
+       (kimi-cli sometimes emits the FINAL assistant message with content
+        as a plain STRING instead of an array-of-blocks; the string itself
+        is the answer text, equivalent to a single text block)
       {"role": "tool", "content": [{"type": "text", "text": "..."}],
        "tool_call_id": "..."}               -> tool_result
       {"role": "user"|"system"|other, "content": [...]}  -> info (non-fatal;
@@ -233,6 +237,19 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
             "raw_type": f"role:{role}",
             "raw": str(raw)[:300],
         })
+
+    # Plain-string assistant content: kimi-cli sometimes emits the FINAL
+    # assistant message with ``content`` as a bare string rather than an
+    # array-of-blocks. The string itself IS the answer text (equivalent to a
+    # single {"type": "text", "text": <str>} block). Scoped strictly to
+    # role == "assistant" with NO legacy event_type: legacy events also carry
+    # string content but are routed via their event_type below, so this check
+    # never shadows them. An empty/whitespace-only string still yields empty
+    # text here, so the fail-loud guard in _finalize_kimi_result stays intact
+    # for the genuinely-empty case. The string-content shape has no separate
+    # reasoning/tool_calls, so those stay empty for it.
+    if not event_type and role == "assistant" and isinstance(content, str):
+        return make("text", {"text": content})
 
     if event_type in ("assistant_text", "text"):
         return make("text", {"text": str(raw.get("content", ""))})
