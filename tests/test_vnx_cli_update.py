@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 import vnx_cli.commands.update as update_module
 from vnx_cli.commands.update import (
     vnx_update,
+    ProtectionSetUnavailable,
     _resolve_root,
     _list_version_dirs,
     _current_target,
@@ -184,7 +185,7 @@ def test_dry_run_schema_warning_present(tmp_path, monkeypatch):
     with redirect_stdout(buf):
         vnx_update(args)
 
-    assert "schema-bootstrap" in buf.getvalue().lower() or "central-4" in buf.getvalue().lower()
+    assert "would migrate all central per-project stores" in buf.getvalue().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +918,164 @@ def test_load_fleet_pins_skips_missing_and_malformed(tmp_path, monkeypatch):
 
     assert list(pins.keys()) == ["2.0.0"]
     assert any("pinned by project" in s for s in pins["2.0.0"])
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed GC: an undeterminable protected set aborts the prune entirely
+# ---------------------------------------------------------------------------
+
+def test_prune_aborts_on_malformed_fleet_registry(tmp_path, monkeypatch, capsys):
+    """Registry EXISTS but JSON parse fails => fail CLOSED: nothing pruned."""
+    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
+    registry = tmp_path / "projects.json"
+    registry.write_text("{ not valid json", encoding="utf-8")
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        registry_path=registry, audit_log=audit_log,
+    )
+
+    # Fail-closed: NO version dir was deleted.
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == names
+
+    captured = capsys.readouterr()
+    assert "GC prune ABORTED (fail-closed)" in captured.err
+    assert str(registry) in captured.err
+
+    events = _audit_events(audit_log)
+    aborted = [e for e in events if e["event_type"] == "central_install_prune_aborted"]
+    assert len(aborted) == 1
+    assert aborted[0]["source"] == str(registry)
+    assert aborted[0]["keep_last_N"] == 3
+    assert "reason" in aborted[0] and aborted[0]["reason"]
+    assert "timestamp" in aborted[0] and aborted[0]["timestamp"]
+    # No prune/protected events — the prune never ran.
+    assert not [e for e in events if e["event_type"] == "central_install_prune"]
+    assert not [e for e in events if e["event_type"] == "central_install_prune_protected"]
+
+
+def test_prune_aborts_on_unreadable_fleet_registry_oserror(tmp_path, monkeypatch, capsys):
+    """Registry EXISTS but the read itself fails (chmod 000) => fail CLOSED."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can read chmod-000 files — OSError path unreachable")
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"projects": []}), encoding="utf-8")
+    registry.chmod(0o000)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    try:
+        _prune_old_versions(
+            tmp_path, keep_last=3, dry_run=False,
+            registry_path=registry, audit_log=audit_log,
+        )
+    finally:
+        registry.chmod(0o644)
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == names
+    captured = capsys.readouterr()
+    assert "GC prune ABORTED (fail-closed)" in captured.err
+    aborted = [
+        e for e in _audit_events(audit_log)
+        if e["event_type"] == "central_install_prune_aborted"
+    ]
+    assert len(aborted) == 1
+    assert aborted[0]["source"] == str(registry)
+
+
+def test_prune_aborts_on_unreadable_protected_versions_file(tmp_path, monkeypatch, capsys):
+    """protected-versions EXISTS but is unreadable (invalid UTF-8) => fail CLOSED."""
+    _empty_registry(tmp_path, monkeypatch)
+    (tmp_path / "protected-versions").write_bytes(b"v1.0.1\n\xff\xfe not utf-8\n")
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    # Fail-closed: NO version dir was deleted — not even the unprotected v1.0.2.
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == names
+
+    captured = capsys.readouterr()
+    assert "GC prune ABORTED (fail-closed)" in captured.err
+    assert "protected-versions" in captured.err
+
+    aborted = [
+        e for e in _audit_events(audit_log)
+        if e["event_type"] == "central_install_prune_aborted"
+    ]
+    assert len(aborted) == 1
+    assert "protected-versions" in aborted[0]["source"]
+
+
+def test_prune_abort_dry_run_warns_without_audit(tmp_path, monkeypatch, capsys):
+    """Dry-run also aborts pruning, but (like all dry-run paths) writes no audit."""
+    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
+    registry = tmp_path / "projects.json"
+    registry.write_text("{ not valid json", encoding="utf-8")
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=True,
+        registry_path=registry, audit_log=audit_log,
+    )
+
+    assert len(list((tmp_path / "versions").iterdir())) == 5
+    captured = capsys.readouterr()
+    assert "GC prune ABORTED (fail-closed)" in captured.err
+    assert not audit_log.exists()
+
+
+def test_prune_absent_sources_still_prunes_unprotected(tmp_path, monkeypatch):
+    """ABSENT registry + ABSENT protected-versions file = no pins, NOT a failure:
+    normal pruning of unprotected candidates still happens."""
+    _empty_registry(tmp_path, monkeypatch)
+    assert not (tmp_path / "protected-versions").exists()
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == ["v1.0.3", "v1.0.4", "v1.0.5"]
+    events = _audit_events(audit_log)
+    assert sorted(e["pruned_version"] for e in events if e["event_type"] == "central_install_prune") == [
+        "v1.0.1", "v1.0.2",
+    ]
+    assert not [e for e in events if e["event_type"] == "central_install_prune_aborted"]
+
+
+def test_load_fleet_pins_raises_on_malformed_registry(tmp_path, monkeypatch):
+    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
+    registry = tmp_path / "projects.json"
+    registry.write_text("{ not valid json", encoding="utf-8")
+
+    with pytest.raises(ProtectionSetUnavailable) as excinfo:
+        _load_fleet_pins(registry)
+
+    assert excinfo.value.source == str(registry)
+    assert isinstance(excinfo.value.cause, json.JSONDecodeError)
+
+
+def test_collect_protected_versions_raises_on_unreadable_file(tmp_path, monkeypatch):
+    _empty_registry(tmp_path, monkeypatch)
+    pfile = tmp_path / "protected-versions"
+    pfile.write_bytes(b"\xff\xfe not utf-8")
+
+    with pytest.raises(ProtectionSetUnavailable) as excinfo:
+        _collect_protected_versions(tmp_path)
+
+    assert excinfo.value.source == str(pfile)
 
 
 def test_vnx_update_dry_run_threads_protect_pins(tmp_path, monkeypatch):

@@ -32,6 +32,22 @@ INSTALL_MODE_MARKER = ".vnx-install-mode"
 INSTALL_MODE_VALUE = "central"
 
 
+class ProtectionSetUnavailable(Exception):
+    """The set of GC-protected versions could not be reliably determined.
+
+    Raised instead of returning a partial protected set: pruning while blind
+    to what is pinned is exactly the catastrophe GC-protect exists to prevent,
+    so any read/parse failure of a protection source that EXISTS must surface,
+    never be swallowed. Carries the offending ``source`` path and the
+    underlying ``cause``.
+    """
+
+    def __init__(self, source, cause: BaseException):
+        self.source = str(source)
+        self.cause = cause
+        super().__init__(f"cannot determine protected versions from {source}: {cause}")
+
+
 def _resolve_root() -> Path:
     env_root = os.environ.get("VNX_HOME_ROOT")
     if env_root:
@@ -314,9 +330,17 @@ def _load_fleet_pins(registry_path: "Path | None" = None) -> dict:
         )
     protected: dict = {}
     try:
-        data = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        text = registry_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Absent registry legitimately means "no pins from this source".
         return protected
+    except (OSError, UnicodeDecodeError) as exc:
+        # A registry that EXISTS but cannot be read => fail CLOSED.
+        raise ProtectionSetUnavailable(registry_path, exc) from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProtectionSetUnavailable(registry_path, exc) from exc
     for entry in data.get("projects", []) or []:
         project_path = entry.get("path")
         if not project_path:
@@ -327,8 +351,13 @@ def _load_fleet_pins(registry_path: "Path | None" = None) -> dict:
             if not pin_file.is_file():
                 continue
             lines = pin_file.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except FileNotFoundError:
+            # Raced removal between stat and read = absent, not a failure.
             continue
+        except (OSError, UnicodeDecodeError) as exc:
+            # A pin file that EXISTS but cannot be read => fail CLOSED: its
+            # pin must not silently become eligible for deletion.
+            raise ProtectionSetUnavailable(pin_file, exc) from exc
         pin = lines[0].strip() if lines else ""
         if not pin or pin in (".", "..") or not _PIN_RE.match(pin):
             continue
@@ -358,14 +387,21 @@ def _collect_protected_versions(
     protected = _load_fleet_pins(registry_path)
 
     pfile = protected_file or (root / PROTECTED_VERSIONS_FILE)
-    try:
-        if pfile.is_file():
-            for value in _iter_pin_values(pfile.read_text(encoding="utf-8")):
+    if pfile.is_file():
+        try:
+            text = pfile.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # Raced removal between stat and read = absent, not a failure.
+            text = None
+        except (OSError, UnicodeDecodeError) as exc:
+            # An operator protection file that EXISTS but cannot be read =>
+            # fail CLOSED: the versions it protects must not be pruned blind.
+            raise ProtectionSetUnavailable(pfile, exc) from exc
+        if text is not None:
+            for value in _iter_pin_values(text):
                 protected.setdefault(_normalize_version(value), set()).add(
                     f"listed in {pfile}"
                 )
-    except OSError:
-        pass
 
     if protect_pins:
         text = protect_pins if isinstance(protect_pins, str) else ",".join(protect_pins)
@@ -385,9 +421,31 @@ def _prune_old_versions(
 ) -> None:
     versions = _list_version_dirs(root)
     current = _current_target(root)
-    protected = _collect_protected_versions(
-        root, protect_pins=protect_pins, registry_path=registry_path
-    )
+
+    # FAIL-CLOSED: if the protected set cannot be reliably determined, prune
+    # NOTHING. Pruning while blind to what is pinned is the exact catastrophe
+    # GC-protect exists to prevent.
+    try:
+        protected = _collect_protected_versions(
+            root, protect_pins=protect_pins, registry_path=registry_path
+        )
+    except ProtectionSetUnavailable as exc:
+        print(
+            f"[warn] GC prune ABORTED (fail-closed): {exc}. "
+            "No versions were deleted.",
+            file=sys.stderr,
+        )
+        if not dry_run:
+            _emit_audit_event(
+                "central_install_prune_aborted",
+                {
+                    "reason": str(exc),
+                    "source": exc.source,
+                    "keep_last_N": keep_last,
+                },
+                audit_log=audit_log,
+            )
+        return
 
     # Keep the newest keep_last dirs; prune anything older, skip current
     if len(versions) <= keep_last:
