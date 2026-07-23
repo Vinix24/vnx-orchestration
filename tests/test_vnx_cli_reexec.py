@@ -40,6 +40,7 @@ def central_store(tmp_path, monkeypatch):
     # Hermetic: no inherited loop-guard flag / PYTHONPATH from the outer env.
     monkeypatch.delenv(_reexec.REEXEC_ENV_FLAG, raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
     return versions
 
 
@@ -129,10 +130,27 @@ def test_pin_different_installed_version_reexecs(central_store, execv_spy, tmp_p
     assert len(execv_spy) == 1
     python, args = execv_spy[0]
     assert python == sys.executable
-    assert args == [sys.executable, "-m", "vnx_cli.main", *argv]
+    assert args == [sys.executable, "-P", "-m", "vnx_cli.main", *argv]
     # Loop-guard armed + pinned install on PYTHONPATH for the exec'd process.
     assert os.environ[_reexec.REEXEC_ENV_FLAG] == "v1.2.0"
     assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(pinned)
+
+
+def test_reexec_sets_safepath_against_cwd_shadow(central_store, execv_spy, tmp_path):
+    """cwd-shadow hardening: `python -m` prepends cwd to sys.path ahead of
+    PYTHONPATH, so a cwd-local `vnx_cli/` would shadow the pinned install.
+    The re-exec must set PYTHONSAFEPATH=1 in the environment AND pass the
+    explicit `-P` flag BEFORE `-m` so the pinned install always wins."""
+    _add_version(central_store, "v1.2.0", "1.2.0")
+    _pin(tmp_path, "v1.2.0")
+    argv = ["--project-dir", str(tmp_path)]
+    _reexec.maybe_reexec_pinned(argv)
+
+    assert len(execv_spy) == 1
+    _, args = execv_spy[0]
+    assert os.environ["PYTHONSAFEPATH"] == "1"
+    assert "-P" in args and "-m" in args
+    assert args.index("-P") < args.index("-m")
 
 
 def test_pin_without_v_resolves_v_prefixed_dir(central_store, execv_spy, tmp_path):
