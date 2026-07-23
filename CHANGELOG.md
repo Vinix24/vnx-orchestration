@@ -4,6 +4,22 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.3.1] — 2026-07-23
+
+Patch release. Headlines: **kimi-k3 is the default build-worker** for T1/T2/T3, the pip CLI **honors the `.vnx-version` pin via startup re-exec** (hardened against cwd-local `vnx_cli` shadowing), **`vnx release publish --tag`** cuts immutable central-store versions with pin-safe GC, the **deepseek-v4-flash migration** off the discontinued deepseek-chat, and **symlink-safe `vnx init` scaffold writes**.
+
+### Added
+
+- **`vnx release publish --tag` + pin-safe GC (#1218)** — immutable `versions/v<X.Y.Z>/` materialization from a git tag; GC prune protects pinned/running versions and fails closed when the protected set is undeterminable.
+- **Pin-honoring re-exec (#1213, #1216)** — the pip-installed CLI re-execs into the pinned central install at startup; re-exec hardened against cwd-local `vnx_cli` shadowing.
+
+### Changed
+
+- **kimi-k3 default build-workers (#1211, #1210, #1209)** — T1/T2/T3 default from sonnet to kimi-k3; the kimi worker lane made agentic (`--yolo` + `-w`); provider dispatch resolves the consumer project root, never the central install.
+- **deepseek-v4-flash migration (#1215)** — smart_router moves off the discontinued deepseek-chat.
+- **kimi spawn hardening (#1212, #1214)** — plain-string assistant content extracted; per-chunk stall-timeout default raised 600s → 1200s.
+- **Symlink-safe init scaffold (#1217)** — all `vnx init` scaffold writes are symlink-safe and atomic.
+
 ## [1.3.0] — 2026-07-16
 
 The third minor (70 commits since 1.2.0). Headlines: the **plan-first gate enforced at the dispatch door** (ADR-030, advisory-first with a config-plane flip), the **T0 playbook hook-injected at SessionStart** (F1 — no more trust-prompt/invocation gap), **auto-PR enforcement for build workers**, **fail-loud lanes** (empty provider completion or empty tmux extraction can no longer report success), the **effectiveness-probe registry** that gates the learning loop on measured health, and the **subsystem cockpit SSOT** (`SUBSYSTEMS.md` + `vnx subsystems`). Enforcement machinery stays default-off behind operator knobs.
