@@ -1128,9 +1128,20 @@ def _create_provider_worktree(dispatch_id: str) -> Path:
 
     Only called when VNX_ISOLATED_WORKTREE=1.  Returns the worktree Path on
     success, raises RuntimeError on failure — no shared-checkout fallback.
+
+    Resolves the CONSUMER project root explicitly (dispatch_worktree_isolation.
+    resolve_consumer_project_root) and threads it into create_dispatch_worktree
+    — never lets the callee fall back to its own __file__ location, which in a
+    central install resolves to the shared ~/.vnx-system checkout instead of
+    the operator's project (the root cause of cross-consumer dispatch-worktree
+    collisions; P0 provider-worktree-root-fix).
     """
-    from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
-    wt_path = create_dispatch_worktree(dispatch_id)
+    from dispatch_worktree_isolation import (  # noqa: PLC0415
+        create_dispatch_worktree,
+        resolve_consumer_project_root,
+    )
+    project_root = resolve_consumer_project_root()
+    wt_path = create_dispatch_worktree(dispatch_id, project_root=project_root)
     logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
     return wt_path
 
@@ -1174,10 +1185,18 @@ def _prepare_provider_workdir(
 
 
 def _remove_provider_worktree(dispatch_id: str) -> None:
-    """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent."""
+    """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent.
+
+    Resolves the same consumer project_root as _create_provider_worktree —
+    otherwise the __file__ fallback would try to remove a worktree that was
+    never created there (in a central install), silently leaking the real one.
+    """
     try:
-        from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
-        remove_dispatch_worktree(dispatch_id)
+        from dispatch_worktree_isolation import (  # noqa: PLC0415
+            remove_dispatch_worktree,
+            resolve_consumer_project_root,
+        )
+        remove_dispatch_worktree(dispatch_id, project_root=resolve_consumer_project_root())
         logger.info("provider isolation: worktree removed (dispatch=%s)", dispatch_id)
     except Exception as exc:
         logger.warning(

@@ -381,25 +381,56 @@ class TestLiteLLMIsolation:
 
 class TestProviderWorktreeHelpers:
     def test_create_returns_path_on_success(self, tmp_path):
-        with patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=tmp_path) as mock_create:
+        consumer_root = tmp_path / "consumer"
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=tmp_path) as mock_create:
             result = provider_dispatch._create_provider_worktree("helper-create-test")
         assert result == tmp_path
-        mock_create.assert_called_once_with("helper-create-test")
+        mock_create.assert_called_once_with("helper-create-test", project_root=consumer_root)
 
     def test_create_raises_on_runtime_error(self):
-        with patch("dispatch_worktree_isolation.create_dispatch_worktree", side_effect=RuntimeError("disk full")):
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=Path("/tmp/consumer")), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree", side_effect=RuntimeError("disk full")):
             with pytest.raises(RuntimeError, match="disk full"):
                 provider_dispatch._create_provider_worktree("helper-fail-test")
 
     def test_remove_is_best_effort(self):
         """_remove_provider_worktree must not raise even if underlying call fails."""
-        with patch("dispatch_worktree_isolation.remove_dispatch_worktree", side_effect=Exception("gone")):
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=Path("/tmp/consumer")), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree", side_effect=Exception("gone")):
             provider_dispatch._remove_provider_worktree("remove-fail-test")
 
     def test_remove_calls_underlying(self):
-        with patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove:
+        consumer_root = Path("/tmp/consumer")
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=consumer_root), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove:
             provider_dispatch._remove_provider_worktree("remove-ok-test")
-        mock_remove.assert_called_once_with("remove-ok-test")
+        mock_remove.assert_called_once_with("remove-ok-test", project_root=consumer_root)
+
+    def test_remove_best_effort_when_resolver_raises(self):
+        """A resolver failure must also be swallowed — remove is best-effort end-to-end."""
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", side_effect=RuntimeError("no git")):
+            provider_dispatch._remove_provider_worktree("remove-resolver-fail-test")
+
+
+class TestResolveConsumerProjectRoot:
+    """Regression: the invocation-context project root wins over __file__-based
+    resolution — the exact consumer scenario (P0 provider-worktree-root-fix):
+    the lane code executes from inside a central-install-like tree, but
+    VNX_PROJECT_ROOT (exported by the central-install shim) names the
+    operator's actual project elsewhere, and that must win.
+    """
+
+    def test_vnx_project_root_env_wins_over_file_location(self, tmp_path, monkeypatch):
+        from dispatch_worktree_isolation import resolve_consumer_project_root
+
+        consumer_project = tmp_path / "my-consumer-project"
+        consumer_project.mkdir()
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(consumer_project))
+
+        resolved = resolve_consumer_project_root()
+
+        assert resolved == consumer_project.resolve()
 
 
 # ---------------------------------------------------------------------------

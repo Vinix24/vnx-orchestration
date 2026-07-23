@@ -701,7 +701,7 @@ if __name__ == "__main__":
     # Default (unset): no change — proven path runs exactly as before.
     _isolated = os.environ.get("VNX_ISOLATED_WORKTREE") == "1"
     _isolation_wt_path = None
-    _isolation_project_root = Path(__file__).resolve().parents[2]
+    _isolation_project_root = None
     if _isolated:
         try:
             import logging as _log_mod
@@ -712,7 +712,15 @@ if __name__ == "__main__":
             from dispatch_worktree_isolation import (
                 create_dispatch_worktree as _create_wt,
                 remove_dispatch_worktree as _remove_wt,
+                resolve_consumer_project_root as _resolve_consumer_root,
             )
+            # Resolve the CONSUMER project root (VNX_PROJECT_ROOT / CWD-git,
+            # never __file__) so a central-install consumer gets its worktree
+            # under ITS OWN project — not the shared ~/.vnx-system checkout
+            # this lane code lives under in a central install (P0
+            # provider-worktree-root-fix). Any resolution failure is handled
+            # by the same fail-loud abort below as a worktree-creation failure.
+            _isolation_project_root = _resolve_consumer_root()
             _isolation_wt_path = _create_wt(
                 args.dispatch_id,
                 project_root=_isolation_project_root,

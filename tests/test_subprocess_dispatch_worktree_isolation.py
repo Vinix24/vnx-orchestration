@@ -169,6 +169,46 @@ class TestCreateDispatchWorktree:
         assert result == expected_wt.resolve()
 
 
+class TestCentralInstallGuard:
+    """P0 provider-worktree-root-fix: a dispatch worktree must NEVER be created
+    (or removed) inside the shared VNX central install tree
+    (``~/.vnx-system/...``) — that would run `git worktree` against the fabric
+    checkout every central-install consumer (SC/MC/SEO/...) reads from,
+    colliding across unrelated consumers. Resolution must fail loud instead.
+    """
+
+    def test_create_raises_when_project_root_is_central_install(self):
+        from dispatch_worktree_isolation import (
+            CentralInstallWorktreeError,
+            create_dispatch_worktree,
+        )
+
+        central_install_path = Path.home() / ".vnx-system" / "versions" / "v1.9.9"
+
+        with patch("dispatch_worktree_isolation.subprocess.run") as mock_run:
+            with pytest.raises(CentralInstallWorktreeError):
+                create_dispatch_worktree("central-install-guard-test", project_root=central_install_path)
+
+        assert not mock_run.called, "guard must fire before any git subprocess call"
+
+    def test_remove_raises_when_project_root_is_central_install(self):
+        from dispatch_worktree_isolation import (
+            CentralInstallWorktreeError,
+            remove_dispatch_worktree,
+        )
+
+        central_install_path = Path.home() / ".vnx-system" / "current"
+
+        with pytest.raises(CentralInstallWorktreeError):
+            remove_dispatch_worktree("central-install-guard-remove-test", project_root=central_install_path)
+
+    def test_consumer_project_root_outside_central_install_is_unaffected(self, tmp_path):
+        """A normal consumer project_root (not under ~/.vnx-system) must resolve cleanly."""
+        from dispatch_worktree_isolation import _resolve_project_root
+
+        assert _resolve_project_root(tmp_path) == tmp_path.resolve()
+
+
 class TestRemoveDispatchWorktree:
     def test_calls_remove_force_and_prune(self, tmp_path):
         from dispatch_worktree_isolation import remove_dispatch_worktree, _dispatch_worktree_dir
