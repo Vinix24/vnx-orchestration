@@ -10,6 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import sys
 from dataclasses import dataclass, field
@@ -273,6 +274,19 @@ def test_provider_adapter_routes_kimi(tmp_path, stubbed_provider_spawns):
     assert r.status == "success", f"kimi: {r}"
     assert "kimi" in stubbed_provider_spawns.calls
     assert stubbed_provider_spawns.dispatch_wrapper_called == []
+
+
+def test_provider_adapter_kimi_honors_plan_deadline(tmp_path, stubbed_provider_spawns):
+    """worker-provider-kimi-flip (2026-07-23): the plan's staged deadline_seconds must
+    reach spawn_kimi's total_deadline — a caller staging a longer deadline than
+    spawn_kimi's own 900s default must not be silently capped short (memory:
+    provider-lane-900s-deadline-kills-builds)."""
+    adapter = ProviderAdapter()
+    plan = _make_provider_plan(tmp_path, provider=Provider.KIMI, model="default")
+    plan = dataclasses.replace(plan, deadline_seconds=1800)
+    r = adapter.run(plan, "prompt")
+    assert r.status == "success", f"kimi: {r}"
+    assert stubbed_provider_spawns.calls["kimi"]["kwargs"]["total_deadline"] == 1800.0
 
 
 def test_provider_adapter_routes_gemini(tmp_path, stubbed_provider_spawns):

@@ -23,9 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 from dispatch_cli import (
     _check_track_link_verdict,
+    _DEFAULT_MODEL_PINS,
     _execute_claude,
     _execute_claude_headless,
     _has_col,
+    _load_model_pins_from_yaml,
     _persist_track_id,
     _tracks_db_path,
     build_runtime_snapshot,
@@ -223,7 +225,7 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "staging_id": staging_id,
         "instruction_file": str(evil_inst),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -252,7 +254,7 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "staging_id": staging_id,
         "instruction_file": str(clean_inst),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -455,7 +457,9 @@ def test_staging_binding_required(tmp_path, monkeypatch, capsys):
         "staging_id": staging_id,
         "instruction_file": str(instruction_file),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",  # T1/T2/T3 unconditionally pin to kimi-k3 (workers-kimi-pinned);
+        # T0 stays a valid Claude model so the ADR-006-binding reject under test isn't
+        # masked by an unrelated kimi-via-cli-only reject firing first.
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -578,7 +582,14 @@ def _make_bundle_spec(
         "staging_id": staging_id,
         "instruction_file": str(inst),
         "role": "backend-developer",
-        "target_slot": "T1",
+        # T0 (not T1): these callers all use provider="claude" to exercise the
+        # SDK-scan/claude-lane mechanics, unrelated to worker model routing. Since
+        # worker-provider-kimi-flip (2026-07-23), T1/T2/T3 unconditionally pin the
+        # claude lane's model to kimi-k3 (workers-kimi-pinned), which is not a valid
+        # Claude model and hard-rejects (model-not-in-current-registry). T0's pin
+        # (t0-opus-only -> claude-opus-4-8) stays a valid Claude model, so it's the
+        # clean slot for a generic "claude dispatch that should proceed" fixture.
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": provider,
@@ -668,7 +679,7 @@ def test_symlinked_pending_root_rejected(tmp_path, monkeypatch, capsys):
         "staging_id": staging_id,
         "instruction_file": str(pending_link / staging_id / "instruction.md"),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -944,7 +955,7 @@ def test_symlinked_dispatches_dir_rejected(tmp_path, monkeypatch, capsys):
         "staging_id": staging_id,
         "instruction_file": str(dispatches_link / "pending" / staging_id / "instruction.md"),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -1087,12 +1098,64 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
     mock_exec.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# worker-provider-kimi-flip (2026-07-23) — pin-loader id rename regression tests
+# ---------------------------------------------------------------------------
+
+def test_default_model_pins_flip_workers_to_kimi_k3():
+    """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus."""
+    assert _DEFAULT_MODEL_PINS == {
+        "T0": "opus",
+        "T1": "kimi-k3",
+        "T2": "kimi-k3",
+        "T3": "kimi-k3",
+    }
+
+
+def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
+    """_load_model_pins_from_yaml() matches the RENAMED constraint id
+    (workers-kimi-pinned, not workers-sonnet-pinned) and loads its
+    required_route.model (kimi-k3) for T1/T2/T3 from the real
+    provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only."""
+    pins = _load_model_pins_from_yaml()
+    assert pins["T0"] == "claude-opus-4-8"
+    assert pins["T1"] == "kimi-k3"
+    assert pins["T2"] == "kimi-k3"
+    assert pins["T3"] == "kimi-k3"
+
+
+def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
+    """A constraints file that still uses the OLD id (workers-sonnet-pinned) with an
+    old-style model must NOT be matched by the renamed loader's id check — it silently
+    falls through to the hardcoded _DEFAULT_MODEL_PINS (kimi-k3), proving the id-string
+    match was actually updated and isn't accidentally matching on role/model shape alone."""
+    import yaml as _yaml
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "provider_constraints.yaml").write_text(_yaml.safe_dump({
+        "version": 1,
+        "constraints": [
+            {
+                "id": "workers-sonnet-pinned",
+                "rule": "require_route",
+                "required_route": {"role": ["T1", "T2", "T3"], "model": "claude-sonnet-5"},
+            },
+        ],
+    }))
+    with patch("dispatch_cli._LIB_DIR", tmp_path):
+        pins = _load_model_pins_from_yaml()
+    assert pins["T1"] == "kimi-k3", "stale workers-sonnet-pinned id must not override the default pin"
+    assert pins["T2"] == "kimi-k3"
+    assert pins["T3"] == "kimi-k3"
+
+
 def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatch, capsys):
     """dispatch-agent-lane-coercion (20260713-LANECOERCE), defense-in-depth: a REAL staged spec
     with provider=claude, model=kimi, target_slot=T1 must be REJECTED by build_runtime_snapshot's
-    raw-model guard, not silently pinned to claude-sonnet-5 (workers-sonnet-pinned) before the
-    kimi-via-cli-only check ever inspects the requested model. Uses the real constraint engine
-    end-to-end (no snapshot mocking) so the fix is exercised exactly as dispatch_cli runs it."""
+    raw-model guard, not silently pinned to the claude-lane model (workers-kimi-pinned since
+    worker-provider-kimi-flip, 2026-07-23) before the kimi-via-cli-only check ever inspects the
+    requested model. Uses the real constraint engine end-to-end (no snapshot mocking) so the fix
+    is exercised exactly as dispatch_cli runs it."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260713-staging-kimi-coercion"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -1130,10 +1193,15 @@ def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatc
     assert "kimi-via-cli-only" in err
 
 
-def test_raw_opus_model_pin_override_still_proceeds(tmp_path, monkeypatch):
-    """Regression: --model opus pinned to sonnet (workers-sonnet-pinned, a WARN-only verdict)
-    must still PROCEED. The new raw-model guard only rejects a genuine cross-provider model
-    (e.g. kimi); it must not turn every ordinary pin-override into a hard reject."""
+def test_raw_opus_model_pin_now_rejects_explicit_claude_override(tmp_path, monkeypatch):
+    """worker-provider-kimi-flip (2026-07-23): the workers-kimi-pinned SSOT now resolves T1's
+    pin to "kimi-k3" regardless of the requested model. An explicit provider=claude override on
+    T1 (e.g. --model opus) is pinned to that same "kimi-k3" label, which is not a valid Claude
+    model — the registry gate (check_registry=True) correctly REJECTS it (blocking,
+    model-not-in-current-registry) instead of silently proceeding on a claude lane. This is the
+    intended "kimi-only, no fallback" behavior: there is no warn-and-proceed escape hatch left
+    for a claude override on a build-worker role. (Formerly this scenario pinned to
+    claude-sonnet-5 and proceeded under workers-sonnet-pinned — see git history.)"""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260713-staging-opus-pin"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -1162,13 +1230,14 @@ def test_raw_opus_model_pin_override_still_proceeds(tmp_path, monkeypatch):
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude") as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 0, "requested opus pinned to sonnet for T1 must still proceed (warn only)"
-    mock_execute.assert_called_once()
-    plan_arg = mock_execute.call_args[0][0]
-    assert plan_arg.model == "claude-sonnet-5"
+    assert rc == 1, (
+        "requested opus on T1 pins to kimi-k3 (workers-kimi-pinned) and must be rejected — "
+        "no silent claude fallback for a build-worker role"
+    )
+    mock_execute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1249,7 +1318,7 @@ def test_default_claude_still_routes_tmux(tmp_path, monkeypatch):
         "staging_id": staging_id,
         "instruction_file": str(inst),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -1293,7 +1362,7 @@ def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
         "staging_id": staging_id,
         "instruction_file": str(inst),
         "role": "backend-developer",
-        "target_slot": "T1",
+        "target_slot": "T0",
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -1787,7 +1856,7 @@ class TestTrackIdEndToEnd:
             "staging_id": staging_id,
             "instruction_file": str(instruction),
             "role": "backend-developer",
-            "target_slot": "T1",
+            "target_slot": "T0",
             "gate": "human-promoted",
             "dispatch_paths": [],
             "provider": "claude",
@@ -1832,7 +1901,7 @@ class TestTrackIdEndToEnd:
             "staging_id": staging_id,
             "instruction_file": str(instruction),
             "role": "backend-developer",
-            "target_slot": "T1",
+            "target_slot": "T0",
             "gate": "human-promoted",
             "dispatch_paths": [],
             "provider": "claude",
@@ -1869,7 +1938,7 @@ class TestTrackIdEndToEnd:
             "staging_id": staging_id,
             "instruction_file": str(instruction),
             "role": "backend-developer",
-            "target_slot": "T1",
+            "target_slot": "T0",
             "gate": "human-promoted",
             "dispatch_paths": [],
             "provider": "claude",
@@ -1902,7 +1971,7 @@ class TestTrackIdEndToEnd:
             "staging_id": staging_id,
             "instruction_file": str(instruction),
             "role": "backend-developer",
-            "target_slot": "T1",
+            "target_slot": "T0",
             "gate": "human-promoted",
             "dispatch_paths": [],
             "provider": "claude",
@@ -1940,7 +2009,7 @@ class TestTrackIdEndToEnd:
             "staging_id": staging_id,
             "instruction_file": str(instruction),
             "role": "backend-developer",
-            "target_slot": "T1",
+            "target_slot": "T0",
             "gate": "human-promoted",
             "dispatch_paths": [],
             "provider": "claude",

@@ -427,7 +427,9 @@ def _deliver(
     scripts_lib = _repo_root() / "scripts" / "lib"
     sys.path.insert(0, str(scripts_lib))
 
-    model = os.environ.get("VNX_DISPATCH_MODEL", "sonnet")
+    # worker-provider-kimi-flip (20260723): mirrors pool_worker_runner.py's VNX_DISPATCH_MODEL
+    # default — build workers default to kimi-k3 (vnx_workers.default.yaml).
+    model = os.environ.get("VNX_DISPATCH_MODEL", "kimi-k3")
 
     # Track effective lease target — updated if reroute + lease swap occurs
     eff_terminal = original_terminal if original_terminal is not None else meta.target_terminal

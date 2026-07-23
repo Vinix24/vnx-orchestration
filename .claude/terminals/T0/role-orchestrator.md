@@ -76,7 +76,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 - All dispatches go through the single-entry door `vnx dispatch <pending-id>`, which decides the lane. Calling a lane script directly is a side door (rollback only: `VNX_DISPATCH_LEGACY=1`).
 - Source vs. consumer: the door above (`bin/vnx dispatch <id>`) is the fabric source repo's form. In a pip-installed consumer repo (no `bin/`), the equivalent governed door is `vnx dispatch-agent --agent <name>` (it routes through the same `deliver_via_door` bridge); `vnx pool` replaces `bin/vnx pool`.
 - Provider→lane (hard): `claude`/Opus/Sonnet route via the tmux-spawn lane (`scripts/lib/tmux_interactive_dispatch.py`, interactive, subscription-preserving) — NEVER `provider_dispatch`, NEVER `claude -p`. `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
-- Default model: sonnet. For complex reasoning: `--model opus` with `VNX_OVERRIDE_WORKERS_SONNET_PINNED=1`.
+- Default worker: kimi-k3 (via `provider_dispatch.py`, kimi-only, no fallback — worker-provider-kimi-flip, 2026-07-23). Stage build dispatches with `provider="kimi", model="kimi-k3"` explicitly. For complex reasoning: `--model sonnet` (claude) with `VNX_OVERRIDE_WORKERS_KIMI_PINNED=1`. T0 stays Opus (`t0-opus-only`).
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
 ## Crash Recovery (on-demand only)
@@ -99,7 +99,7 @@ Project files describe the project; the fabric describes itself. A repo's `CLAUD
 ## Runtime Policy
 
 - T0 runtime is Claude Opus only.
-- `T1` and `T2` are manually Sonnet-pinned; do not assume runtime `/model` switching works.
+- `T1` and `T2` are manually kimi-k3-pinned (worker-provider-kimi-flip, 2026-07-23); do not assume runtime `/model` switching works.
 - `T3` is a Claude review/certification terminal and must be treated as modal-sensitive after `/clear`.
 - Tri-file support (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) is fleet-wide, including T0 (deliberate,
   as of the provider-agnostic role sync): an orchestrator session may run under Claude
@@ -262,10 +262,17 @@ python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch
 ## Headless T1 Dispatch
 
 T1 is a headless backend-developer. This is the **dominant dispatch path** — not a special case.
-Dispatch via the single-entry door (`vnx dispatch`), which routes T1 onto the subprocess lane when `VNX_ADAPTER_T1=subprocess` (default since F32). The underlying lane script is `scripts/lib/subprocess_dispatch.py` (`--terminal-id T1 --dispatch-id <id> --model sonnet`); call it directly only to debug the lane, not as the normal path.
+Dispatch via the single-entry door (`vnx dispatch`), which selects the lane from the staged
+spec's `provider` field (D1). Since worker-provider-kimi-flip (2026-07-23) the default `provider`
+for T1/T2/T3 is `kimi` (`workers-kimi-pinned`), so the door routes to the **provider lane**
+(`run_envelope_plan` → `provider_dispatch`/`kimi_spawn.py`), NOT the claude subprocess/tmux lanes —
+`VNX_ADAPTER_T1=subprocess` and `scripts/lib/subprocess_dispatch.py` only apply when a dispatch
+explicitly overrides `provider="claude"` for T1 (`--terminal-id T1 --dispatch-id <id> --model sonnet`;
+call it directly only to debug that lane, not as the normal path).
 
 T1 dispatches do NOT go through tmux send-keys.
-T1 receipts arrive in t0_receipts.ndjson with source="subprocess".
+T1 receipts arrive in t0_receipts.ndjson (source="subprocess" only applies to an explicit
+claude override that lands on `subprocess_dispatch.py`).
 T1 events stream to .vnx-data/events/T1.ndjson and are visible via SSE.
 The subprocess automatically loads T1's CLAUDE.md as skill context (injected by subprocess_dispatch.py).
 

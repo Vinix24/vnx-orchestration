@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 TERMINALS = ("T1", "T2", "T3")
 TRACK_BY_TERMINAL = {"T1": "A", "T2": "B", "T3": "C"}
-MODEL_BY_TERMINAL = {"T0": "unknown", "T1": "sonnet", "T2": "sonnet", "T3": "opus"}
+MODEL_BY_TERMINAL = {"T0": "unknown", "T1": "kimi-k3", "T2": "kimi-k3", "T3": "kimi-k3"}
 
 CONTEXT_PRESSURE_THRESHOLD = 80  # usage % above which context-pressure attention fires
 STALE_WORKING_SECONDS = 180      # working terminal with no update triggers stale attention

@@ -34,7 +34,7 @@ vnx dispatch <pending-id>          # the door; decides lane, runs phantom-guard
 ```
 
 - **Provider→lane (hard):** `claude`/Opus/Sonnet route via the tmux-spawn lane (`scripts/lib/tmux_interactive_dispatch.py`, interactive, subscription-preserving) — NEVER `provider_dispatch`, NEVER headless `claude -p` (API-metered after 2026-06-15). `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
-- Default worker model: sonnet. Opus only with `--model opus` + `VNX_OVERRIDE_WORKERS_SONNET_PINNED=1`.
+- Default build-worker model: kimi-k3 (worker-provider-kimi-flip, 2026-07-23; kimi-only, no fallback). Claude/sonnet only via an explicit `provider=claude` override — `VNX_OVERRIDE_WORKERS_KIMI_PINNED=1` only downgrades the warning, it does not change routing.
 - Rollback to legacy routing: `VNX_DISPATCH_LEGACY=1` (per terminal).
 - Autonomous staging flow (no template): track → central `stage_spec_bundle` → dry-run → fire → post-merge `link-pr`. Full rule: `docs/core/DISPATCH_RULES.md` (§12 for autonomous).
 - No Claude Code subagents (Task tool) for dispatch work — governed lanes only.

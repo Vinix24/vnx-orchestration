@@ -232,9 +232,9 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
 
 _DEFAULT_MODEL_PINS: dict[str, str] = {
     "T0": "opus",
-    "T1": "sonnet",
-    "T2": "sonnet",
-    "T3": "sonnet",
+    "T1": "kimi-k3",
+    "T2": "kimi-k3",
+    "T3": "kimi-k3",
 }
 
 
@@ -259,7 +259,7 @@ def _load_model_pins_from_yaml() -> dict[str, str]:
                 continue
             if cid == "t0-opus-only":
                 pins["T0"] = str(model)
-            elif cid == "workers-sonnet-pinned":
+            elif cid == "workers-kimi-pinned":
                 for slot in ("T1", "T2", "T3"):
                     pins[slot] = str(model)
         return {**_DEFAULT_MODEL_PINS, **pins}
@@ -621,6 +621,16 @@ def build_runtime_snapshot(
     model_pins = _load_model_pins_from_yaml()
 
     # P0-1: effective model — same computation compile_plan uses in D4
+    #
+    # worker-provider-kimi-flip (20260723): model_pins now resolves T1/T2/T3 to
+    # "kimi-k3" (workers-kimi-pinned). The "sonnet" fallback below is intentionally
+    # UNCHANGED — it only fires when is_claude_lane is True (an explicit provider=
+    # claude override, or a non-standard target_slot with no pin) and spec.model was
+    # not given; it must stay a valid Claude model name. If an explicit claude
+    # override lands on T1/T2/T3, model_pins.get() returns "kimi-k3" (a non-Claude
+    # label) which correctly fails the check_registry gate below (model-not-in-
+    # current-registry, blocking) instead of silently dispatching sonnet — matching
+    # the "kimi-only, no fallback" policy (fail loud, never a silent claude rescue).
     is_claude_lane = spec.provider == Provider.CLAUDE
     if is_claude_lane:
         effective_model = model_pins.get(spec.target_slot) or spec.model or "sonnet"
@@ -663,12 +673,15 @@ def build_runtime_snapshot(
         ),)
 
     # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): a worker-model pin
-    # (workers-sonnet-pinned) replaces spec.model with effective_model BEFORE the check above
+    # (workers-kimi-pinned) replaces spec.model with effective_model BEFORE the check above
     # ever runs, so a cross-provider requested model (e.g. --model kimi resolved onto the claude
-    # lane) is invisible to the kimi-via-cli-only guard by the time it inspects effective_model
-    # ("claude-sonnet-5"). Re-run the check against the RAW requested model too, so the pin can
-    # never mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
-    # noise (e.g. --model opus pinned to sonnet) is already reported once via D4's own warning.
+    # lane) is invisible to the kimi-via-cli-only guard by the time it inspects effective_model.
+    # Since worker-provider-kimi-flip (2026-07-23) effective_model on a claude-lane T1/T2/T3 is
+    # itself "kimi-k3" whenever a pin exists — that mismatch is already caught by check_registry
+    # in the block above, so this raw-model re-check is belt-and-suspenders for any target_slot
+    # outside the SSOT pin dict. Re-run the check against the RAW requested model too, so the pin
+    # can never mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
+    # noise (e.g. --model opus pinned to kimi-k3) is already reported once via D4's own warning.
     raw_model = spec.model
     if raw_model and raw_model != effective_model:
         try:

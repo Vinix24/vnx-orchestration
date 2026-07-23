@@ -688,6 +688,23 @@ if __name__ == "__main__":
         _hb_thread.join(timeout=5)
         sys.exit(_execute_cheap_lane_dispatch(args, _cheap_lane_provider))
 
+    # worker-provider-kimi-flip (20260723): this script ONLY ever spawns the `claude`
+    # binary from this point on (deliver_with_recovery below). T1/T2/T3 now pin to
+    # kimi-k3 (workers-kimi-pinned); a kimi-branded model reaching here means a
+    # routing miss upstream (e.g. an explicit provider=claude override colliding
+    # with the kimi model pin — see dispatch_cli.py/dispatch_plan.py D4 comments).
+    # Fail loud instead of invoking `claude --model kimi-k3`, which would either
+    # error opaquely or silently fall back to the claude CLI's own default model —
+    # exactly the silent-sonnet-rescue the kimi-only/no-fallback policy forbids.
+    if "kimi" in (_effective_model or "").lower():
+        print(
+            f"[subprocess_dispatch] REJECT: model {_effective_model!r} is a kimi label but "
+            "this lane only drives the claude CLI — refusing to spawn claude with a "
+            "non-Claude model (routing miss upstream; no silent fallback).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Scale chunk/total timeouts by --complexity so compute-heavy ("high")
     # dispatches get more headroom and aren't killed by the per-chunk timeout
     # during a long quiet-but-working step (e.g. static analysis). These are the
