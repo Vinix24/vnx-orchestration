@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -20,7 +22,9 @@ if _LIB_DIR not in sys.path:
 from provider_spawns.kimi_spawn import (  # noqa: E402
     KimiSpawnResult,
     _build_kimi_cmd,
+    _finalize_kimi_result,
     _is_quota_or_auth_error,
+    _worktree_has_changes,
     normalize_kimi_event,
     spawn_kimi,
 )
@@ -47,25 +51,34 @@ def _mock_proc(stdout_events: list, returncode: int = 0) -> MagicMock:
 class TestBuildKimiCmd(unittest.TestCase):
     def test_constructs_correct_argv_no_model(self):
         cmd = _build_kimi_cmd("hello world", None, None)
-        self.assertEqual(cmd[:5], ["kimi", "--print", "--output-format", "stream-json", "-p"])
-        self.assertEqual(cmd[5], "hello world")
+        self.assertEqual(
+            cmd[:6], ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p"],
+        )
+        self.assertEqual(cmd[6], "hello world")
 
-    def test_no_yolo_by_default(self):
-        env_backup = os.environ.pop("VNX_KIMI_YOLO", None)
+    def test_yolo_always_added(self):
+        """--yolo is unconditional: without it kimi auto-dismisses tool calls
+        instead of executing them (the fabrication bug this dispatch fixes)."""
+        cmd = _build_kimi_cmd("prompt", None, None)
+        self.assertIn("--yolo", cmd)
+
+    def test_yolo_added_regardless_of_stray_env_var(self):
+        """--yolo is hardcoded, not env-gated — a stray VNX_KIMI_YOLO must not
+        be able to turn it off (there is no override mechanism by design)."""
+        os.environ["VNX_KIMI_YOLO"] = "0"
         try:
             cmd = _build_kimi_cmd("prompt", None, None)
-            self.assertNotIn("--yolo", cmd)
-        finally:
-            if env_backup is not None:
-                os.environ["VNX_KIMI_YOLO"] = env_backup
-
-    def test_yolo_never_added_even_when_env_set(self):
-        os.environ["VNX_KIMI_YOLO"] = "1"
-        try:
-            cmd = _build_kimi_cmd("prompt", None, None)
-            self.assertNotIn("--yolo", cmd)
+            self.assertIn("--yolo", cmd)
         finally:
             del os.environ["VNX_KIMI_YOLO"]
+
+    def test_yolo_and_work_dir_together_for_governed_build_dispatch(self):
+        """The governed build lane passes both flags together: --yolo makes
+        kimi execute tools, -w scopes the blast radius to the dispatch worktree."""
+        cmd = _build_kimi_cmd("prompt", None, Path("/tmp/worktree"))
+        self.assertIn("--yolo", cmd)
+        self.assertIn("-w", cmd)
+        self.assertEqual(cmd[cmd.index("-w") + 1], "/tmp/worktree")
 
     def test_passes_model_when_specified(self):
         cmd = _build_kimi_cmd("prompt", "kimi-k2-6", None)
@@ -414,19 +427,14 @@ class TestSpawnKimiSubprocess(unittest.TestCase):
             captured_cmd.extend(cmd)
             raise FileNotFoundError("not testing real spawn")
 
-        env_backup = os.environ.pop("VNX_KIMI_YOLO", None)
-        try:
-            with patch("subprocess.Popen", side_effect=fake_popen):
-                spawn_kimi("my prompt", dispatch_id="d1", terminal_id="T1")
-        finally:
-            if env_backup is not None:
-                os.environ["VNX_KIMI_YOLO"] = env_backup
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            spawn_kimi("my prompt", dispatch_id="d1", terminal_id="T1")
 
         self.assertIn("kimi", captured_cmd)
         self.assertIn("--print", captured_cmd)
         self.assertIn("--output-format", captured_cmd)
         self.assertIn("stream-json", captured_cmd)
-        self.assertNotIn("--yolo", captured_cmd)
+        self.assertIn("--yolo", captured_cmd)
         self.assertIn("-p", captured_cmd)
         self.assertIn("my prompt", captured_cmd)
 
@@ -456,38 +464,53 @@ class TestSpawnKimiSubprocess(unittest.TestCase):
         self.assertNotIn("-m", captured_cmd)
 
 
+def _spawn_kimi_with_events(
+    events: list, returncode: int = 0, cwd=None, event_writer=None,
+) -> KimiSpawnResult:
+    """Run spawn_kimi with a real-pipe-backed fake process emitting the given events.
+
+    Shared by integration-style test classes below — real pipe so
+    drain_stream.fileno() works, ``_start_kimi_subprocess`` mocked out so no
+    real ``kimi`` binary is required.
+    """
+    data = b"".join((json.dumps(e) + "\n").encode() for e in events)
+    read_fd, write_fd = os.pipe()
+
+    def _writer():
+        try:
+            os.write(write_fd, data)
+        finally:
+            os.close(write_fd)
+
+    writer_thread = threading.Thread(target=_writer, daemon=True)
+    writer_thread.start()
+
+    fake_proc = MagicMock()
+    fake_proc.returncode = returncode
+    fake_proc.poll.return_value = returncode
+    fake_proc.stdout = os.fdopen(read_fd, "rb", buffering=0)
+    fake_proc.stderr = io.BytesIO(b"")
+    fake_proc.wait = MagicMock(return_value=returncode)
+    fake_proc.kill = MagicMock()
+
+    try:
+        with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start:
+            mock_start.return_value = (fake_proc, None)
+            result = spawn_kimi(
+                "prompt", dispatch_id="d1", terminal_id="T1", cwd=cwd,
+                event_writer=event_writer,
+            )
+    finally:
+        writer_thread.join(timeout=5)
+    return result
+
+
 class TestSpawnKimiIntegration(unittest.TestCase):
     """Integration-style tests using a real pipe so drain_stream.fileno() works."""
 
     def _run_with_events(self, events: list, returncode: int = 0) -> KimiSpawnResult:
         """Run spawn_kimi with a real-pipe-backed fake process emitting the given events."""
-        data = b"".join((json.dumps(e) + "\n").encode() for e in events)
-        read_fd, write_fd = os.pipe()
-
-        def _writer():
-            try:
-                os.write(write_fd, data)
-            finally:
-                os.close(write_fd)
-
-        writer_thread = threading.Thread(target=_writer, daemon=True)
-        writer_thread.start()
-
-        fake_proc = MagicMock()
-        fake_proc.returncode = returncode
-        fake_proc.poll.return_value = returncode
-        fake_proc.stdout = os.fdopen(read_fd, "rb", buffering=0)
-        fake_proc.stderr = io.BytesIO(b"")
-        fake_proc.wait = MagicMock(return_value=returncode)
-        fake_proc.kill = MagicMock()
-
-        try:
-            with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start:
-                mock_start.return_value = (fake_proc, None)
-                result = spawn_kimi("prompt", dispatch_id="d1", terminal_id="T1")
-        finally:
-            writer_thread.join(timeout=5)
-        return result
+        return _spawn_kimi_with_events(events, returncode=returncode)
 
     def test_response_text_concatenation(self):
         events = [
@@ -871,6 +894,222 @@ class TestKimiEnvIsolation(unittest.TestCase):
         self.assertNotIn("VIRTUAL_ENV", env)
         self.assertNotIn("PYTHONPATH", env)
         self.assertNotIn("PYTHONHOME", env)
+
+
+# ---------------------------------------------------------------------------
+# kimi-agentic-worker-lane: --yolo/-w wiring + completion-vs-execution invariant
+# ---------------------------------------------------------------------------
+
+
+class TestKimiEffectiveArgvLogging(unittest.TestCase):
+    """The effective argv (yolo/worktree posture) must be logged, never silent,
+    and recorded as an event when a sink is wired — the "always logged, never
+    hidden" YOLO-mode principle."""
+
+    def test_effective_argv_logged_without_leaking_prompt(self) -> None:
+        secret_prompt = "SECRET_INSTRUCTION_DO_NOT_LEAK_THIS_CONTENT"
+        with patch(
+            "provider_spawns.kimi_spawn._start_kimi_subprocess",
+            return_value=(None, KimiSpawnResult(
+                returncode=127, completion_text="", events_written=0,
+                session_id=None, timed_out=False, stopped_early=False,
+                token_usage=None, error="kimi binary not found",
+            )),
+        ), self.assertLogs("provider_spawns.kimi_spawn", level=logging.INFO) as cap:
+            spawn_kimi(
+                prompt=secret_prompt, model="k2-test",
+                dispatch_id="test-argv-log", terminal_id="T1",
+            )
+
+        log_text = "\n".join(cap.output)
+        self.assertNotIn(secret_prompt, log_text)
+        self.assertIn(str(len(secret_prompt)), log_text)
+        self.assertIn("--yolo", log_text)
+
+    def test_effective_argv_emitted_as_event_via_event_writer(self) -> None:
+        """When an event_writer sink is wired (the governed build lane's
+        production wiring), the effective argv must be recorded through it so
+        it lands in the archived event stream the receipt points to."""
+        recorded: list = []
+
+        def _fake_writer(terminal_id, event_dict, dispatch_id=None):
+            recorded.append(event_dict)
+
+        with patch(
+            "provider_spawns.kimi_spawn._start_kimi_subprocess",
+            return_value=(None, KimiSpawnResult(
+                returncode=127, completion_text="", events_written=0,
+                session_id=None, timed_out=False, stopped_early=False,
+                token_usage=None, error="kimi binary not found",
+            )),
+        ):
+            spawn_kimi(
+                prompt="do the thing", dispatch_id="d1", terminal_id="T1",
+                event_writer=_fake_writer, cwd=Path("/tmp/worktree-xyz"),
+            )
+
+        argv_events = [e for e in recorded if (e.get("data") or {}).get("kind") == "effective_argv"]
+        self.assertEqual(len(argv_events), 1, f"expected exactly one effective_argv event, got {recorded}")
+        data = argv_events[0]["data"]
+        self.assertTrue(data["yolo"])
+        self.assertEqual(data["work_dir"], "/tmp/worktree-xyz")
+        self.assertIn("--yolo", data["argv"])
+        self.assertIn("-w", data["argv"])
+
+
+class TestWorktreeHasChanges(unittest.TestCase):
+    """`_worktree_has_changes` drives the completion-vs-execution invariant —
+    exercised against a real git repo, not a mocked subprocess, per the "tests
+    run real code" convention."""
+
+    def test_clean_worktree_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            self.assertIs(_worktree_has_changes(Path(tmp)), False)
+
+    def test_dirty_worktree_returns_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            Path(tmp, "new_file.txt").write_text("hello")
+            self.assertIs(_worktree_has_changes(Path(tmp)), True)
+
+    def test_non_git_directory_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(_worktree_has_changes(Path(tmp)))
+
+
+class TestFabricationInvariant(unittest.TestCase):
+    """Unit coverage of `_finalize_kimi_result`'s completion-vs-execution guard,
+    with `_worktree_has_changes` mocked so behavior is isolated from git."""
+
+    @staticmethod
+    def _mock_proc(returncode: int = 0) -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.wait = MagicMock(return_value=returncode)
+        return proc
+
+    def test_tool_calls_with_no_worktree_diff_fails_loud(self) -> None:
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False):
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_tool_calls_with_worktree_diff_passes(self) -> None:
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=True):
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="Done, file created.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_no_worktree_skips_check_gracefully(self) -> None:
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes") as mock_check:
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="Done, file created.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=None,
+            )
+        mock_check.assert_not_called()
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_no_tool_calls_skips_check_even_with_known_worktree(self) -> None:
+        """A pure-text response (no tool_calls) never triggers the git check —
+        it only guards the specific completion-without-execution pattern."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes") as mock_check:
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="Here's my analysis, no changes needed.",
+                events_written=2,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=False,
+                worktree=Path("/tmp/fake-worktree"),
+            )
+        mock_check.assert_not_called()
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+
+class TestKimiFabricationInvariantEndToEnd(unittest.TestCase):
+    """Full wiring through spawn_kimi() -> _consume_kimi_stream() ->
+    _finalize_kimi_result(), against a real temp git worktree — proves the
+    saw_tool_calls signal and the worktree arg are actually threaded through,
+    not just correct in isolation."""
+
+    _TOOL_CALL_EVENTS = [
+        {
+            "role": "assistant",
+            "content": [{"type": "think", "think": "writing a file"}],
+            "tool_calls": [{
+                "type": "function", "id": "t1",
+                "function": {"name": "Write", "arguments": "{\"path\": \"x\"}"},
+            }],
+        },
+        {"role": "tool", "content": [{"type": "text", "text": "ok"}], "tool_call_id": "t1"},
+        {"role": "assistant", "content": [{"type": "text", "text": "Done, file created."}]},
+    ]
+
+    def test_tool_calls_no_diff_fails_loud(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            result = _spawn_kimi_with_events(self._TOOL_CALL_EVENTS, cwd=tmp)
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_tool_calls_with_diff_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            Path(tmp, "x").write_text("content")
+            result = _spawn_kimi_with_events(self._TOOL_CALL_EVENTS, cwd=tmp)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_tool_calls_no_worktree_known_skips_gracefully(self) -> None:
+        result = _spawn_kimi_with_events(self._TOOL_CALL_EVENTS, cwd=None)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

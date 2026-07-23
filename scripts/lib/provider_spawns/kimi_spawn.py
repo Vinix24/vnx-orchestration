@@ -4,7 +4,11 @@ Owns: spawn + stream-json parsing + canonical event normalization.
 Caller (provider_dispatch.py) handles: receipt, unified report, lease, etc.
 
 Kimi CLI invocation:
-    kimi --print --output-format stream-json -p "<prompt>"
+    kimi --print --output-format stream-json --yolo -p "<prompt>" [-m <model>] [-w <worktree>]
+
+``--yolo`` is always passed — see ``_build_kimi_cmd`` for why. ``-w`` scopes the
+agent to the dispatch's isolated worktree when one is supplied; without it kimi
+would auto-dismiss its own tool calls (fabrication) rather than execute them.
 
 Authentication: OAuth via `kimi login` (operator-managed). No API key in spawn.
 
@@ -334,16 +338,57 @@ def _is_quota_or_auth_error(text: str) -> bool:
 def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) -> list:
     """Build the kimi argv list.
 
-    Kimi's --print mode is non-interactive and does not require --yolo.
-    --yolo is never passed; VNX_KIMI_YOLO is ignored.
+    ``--yolo`` is always passed (confirmed against kimi-cli 1.46.0 ``--help``):
+    kimi's ``--print`` mode is non-interactive but still AUTO-DISMISSES tool-call
+    approval prompts without ``--yolo``/``--yes``/``-y`` — the model emits
+    tool_call intent, nothing actually runs, and the dispatch comes back
+    GATE-GREEN with zero real file edits (the fabrication bug this fixes).
+    ``--yolo`` here is the same posture as codex's default
+    ``--dangerously-bypass-approvals-and-sandbox``: the dispatch worktree
+    (``-w``, when supplied) bounds the blast radius exactly like codex's
+    isolated worktree cell. Never silent — ``spawn_kimi`` logs the effective
+    argv (and, when an event sink is wired, records it in the event stream so
+    it lands in the receipt), and ``_finalize_kimi_result`` fails loud if the
+    stream shows tool_calls with no corresponding worktree diff.
     """
-    cmd = ["kimi", "--print", "--output-format", "stream-json"]
+    cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo"]
     cmd.extend(["-p", prompt])
     if model:
         cmd.extend(["-m", model])
     if work_dir:
         cmd.extend(["-w", str(work_dir)])
     return cmd
+
+
+def _worktree_has_changes(worktree: Any) -> Optional[bool]:
+    """Return True/False for uncommitted git changes in *worktree*, or None if unknown.
+
+    None means the check itself could not be performed (git missing, *worktree*
+    is not a git repo, or the command timed out) — callers must treat that as
+    "cannot verify" and skip the fabrication-invariant rather than treating an
+    inability to check as evidence of fabrication.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "kimi_spawn: fabrication-invariant git status failed for %s (skipping check): %s",
+            worktree, exc,
+        )
+        return None
+    if proc.returncode != 0:
+        logger.warning(
+            "kimi_spawn: fabrication-invariant git status exited %d for %s (skipping check): %s",
+            proc.returncode, worktree, (proc.stderr or "")[:200],
+        )
+        return None
+    return bool(proc.stdout.strip())
 
 
 # Inherited venv-activation vars that point Python at a FOREIGN site-packages.
@@ -420,16 +465,23 @@ def _consume_kimi_stream(
     event_store: Optional[Any],
     chunk_timeout: float,
     total_deadline: float,
-) -> "tuple[str, int, Optional[Dict], bool, bool, int, list, bool, list]":
+) -> "tuple[str, int, Optional[Dict], bool, bool, int, list, bool, list, bool]":
     """Drain the stream.
 
     Returns (completion_text, events_written, token_usage, timed_out,
-    stopped_early, failures, errors_captured, saw_stream_output, raw_samples).
+    stopped_early, failures, errors_captured, saw_stream_output, raw_samples,
+    saw_tool_calls).
 
     ``saw_stream_output`` is True once the CLI emits any real message line (text,
     tool, thinking, or info event). Combined with an empty ``completion_text`` it
     is the fail-loud signal: output arrived but no answer text was extracted.
     ``raw_samples`` carries short excerpts of those lines for the error message.
+
+    ``saw_tool_calls`` is True once the stream shows evidence kimi attempted to
+    execute a tool (a legacy ``tool_use``/``tool_result`` event, or a 1.44.0+
+    content-block assistant message carrying a ``tool_calls`` list). Feeds the
+    completion-vs-execution invariant in ``_finalize_kimi_result``: intent to
+    call a tool with no corresponding worktree diff is the fabrication signature.
     """
     events_written = 0
     completion_parts: list = []
@@ -439,6 +491,7 @@ def _consume_kimi_stream(
     _event_writer_failures = 0
     errors_captured: list = []
     saw_stream_output = False
+    saw_tool_calls = False
     raw_samples: list = []
 
     _CONTENT_EVENT_TYPES = ("text", "tool_use", "tool_result", "thinking", "info")
@@ -457,6 +510,11 @@ def _consume_kimi_stream(
                     raw_samples.append(json.dumps(canonical_event.data)[:200])
                 except (TypeError, ValueError):
                     raw_samples.append(str(canonical_event.data)[:200])
+
+        if evt_type in ("tool_use", "tool_result"):
+            saw_tool_calls = True
+        elif evt_type == "text" and (canonical_event.data or {}).get("tool_calls"):
+            saw_tool_calls = True
 
         if evt_type in ("text", "complete"):
             text = (canonical_event.data or {}).get("text", "")
@@ -507,7 +565,7 @@ def _consume_kimi_stream(
     return (
         "".join(completion_parts), events_written, token_usage, timed_out,
         stopped_early, _event_writer_failures, errors_captured,
-        saw_stream_output, raw_samples,
+        saw_stream_output, raw_samples, saw_tool_calls,
     )
 
 
@@ -522,8 +580,20 @@ def _finalize_kimi_result(
     errors_captured: Optional[list] = None,
     saw_stream_output: bool = False,
     raw_samples: Optional[list] = None,
+    saw_tool_calls: bool = False,
+    worktree: Optional[Any] = None,
 ) -> KimiSpawnResult:
-    """Wait for process exit and return a KimiSpawnResult."""
+    """Wait for process exit and return a KimiSpawnResult.
+
+    ``saw_tool_calls`` + ``worktree`` feed the completion-vs-execution invariant:
+    when the stream showed kimi attempting to call a tool, a clean result is only
+    accepted if the dispatch worktree actually changed. This defends against a
+    FUTURE regression silently re-introducing fabrication even with ``--yolo``
+    present (e.g. kimi dismissing its own tool call, or a CLI update changing
+    approval defaults again). ``worktree=None`` (no isolation worktree known,
+    e.g. non-worktree dispatches) skips the check gracefully — there is nothing
+    to diff against.
+    """
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -532,6 +602,10 @@ def _finalize_kimi_result(
     rc = proc.returncode if proc.returncode is not None else 1
 
     empty_extraction = not (completion_text or "").strip()
+
+    worktree_unchanged = False
+    if saw_tool_calls and worktree is not None:
+        worktree_unchanged = _worktree_has_changes(worktree) is False
 
     if errors_captured:
         error: Optional[str] = "\n".join(errors_captured)
@@ -548,6 +622,18 @@ def _finalize_kimi_result(
             "kimi returned a non-empty response but text extraction yielded ZERO "
             "characters — likely a kimi-cli stream-json format change. "
             f"events={events_written} raw_event_sample={sample}"
+        )
+        if rc == 0:
+            rc = 1
+    elif worktree_unchanged:
+        # FAIL-LOUD: the stream shows kimi attempting to call a tool, but the
+        # dispatch worktree has no git changes — completion without execution,
+        # the exact fabrication pattern --yolo exists to prevent. Never accept
+        # this as a silent clean success.
+        error = (
+            "kimi emitted tool_calls but the dispatch worktree shows no git "
+            "changes — completion without execution (fabrication guard). "
+            f"worktree={worktree} events={events_written}"
         )
         if rc == 0:
             rc = 1
@@ -585,7 +671,7 @@ def spawn_kimi(
     event_store: Optional[Any] = None,
     **kwargs: Any,
 ) -> KimiSpawnResult:
-    """Spawn ``kimi --print --output-format stream-json -p <prompt>``.
+    """Spawn ``kimi --print --output-format stream-json --yolo -p <prompt>``.
 
     Returns KimiSpawnResult on completion (success OR controlled failure).
     Returns KimiSpawnResult(returncode=127) when the kimi binary is absent.
@@ -624,11 +710,39 @@ def spawn_kimi(
     cwd_str = str(cwd) if cwd is not None else None
 
     cmd = _build_kimi_cmd(prompt, model, cwd)
+
+    # Never launch --yolo silently: log the effective argv (prompt redacted to a
+    # char count) and, when an event sink is wired, record it as an "info" event
+    # so it lands in the archived event stream the receipt points to via
+    # events_path — the "always logged, never hidden" posture for YOLO mode.
+    _redacted_argv = [tok if tok != prompt else f"<prompt:{len(prompt)}chars>" for tok in cmd]
     logger.info(
-        "kimi_spawn: launching kimi -p <%d chars> -m %s",
+        "kimi_spawn: launching kimi -p <%d chars> -m %s effective_argv=%s",
         len(prompt),
         cmd[cmd.index("-m") + 1] if "-m" in cmd else "default",
+        _redacted_argv,
     )
+    _flags_sink = event_writer or (event_store.append if event_store is not None else None)
+    if _flags_sink is not None:
+        try:
+            _flags_event = CanonicalEvent(
+                dispatch_id=dispatch_id,
+                terminal_id=terminal_id,
+                provider="kimi",
+                event_type="info",
+                data={
+                    "kind": "effective_argv",
+                    "argv": _redacted_argv,
+                    "yolo": "--yolo" in cmd,
+                    "work_dir": cwd_str,
+                },
+                observability_tier=1,
+            )
+            _flags_sink(terminal_id, _flags_event.to_dict(), dispatch_id=dispatch_id)
+        except Exception as _flags_exc:
+            logger.debug(
+                "kimi_spawn: effective-argv event emission failed (non-fatal): %s", _flags_exc,
+            )
 
     proc, err_result = _start_kimi_subprocess(cmd, env, cwd_str)
     if err_result is not None:
@@ -638,6 +752,7 @@ def spawn_kimi(
     (
         completion_text, events_written, token_usage, timed_out, stopped_early,
         _event_writer_failures, errors_captured, saw_stream_output, raw_samples,
+        saw_tool_calls,
     ) = _consume_kimi_stream(
         proc=proc, host=host, on_event=on_event,
         health_monitor=health_monitor, event_writer=event_writer,
@@ -653,4 +768,6 @@ def spawn_kimi(
         errors_captured=errors_captured,
         saw_stream_output=saw_stream_output,
         raw_samples=raw_samples,
+        saw_tool_calls=saw_tool_calls,
+        worktree=cwd,
     )
