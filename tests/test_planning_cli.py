@@ -197,6 +197,7 @@ def _close_args(
     apply: bool = False,
     approval_id: str = "",
     attest: str | None = None,
+    pr: list[str] | None = None,
     include_parked: bool = False,
     project_id: str = PROJECT_ID,
     json: bool = False,
@@ -208,6 +209,7 @@ def _close_args(
         apply=apply,
         approval_id=approval_id,
         attest=attest,
+        pr=pr,
         include_parked=include_parked,
         json=json,
         repo_root="",
@@ -279,6 +281,93 @@ def test_close_attest_advances_ops_track_and_writes_audit(tmp_path):
     assert details["reason"] == "fleet-sync"
     assert details["approval_id"] == "APR-OPS"
     assert details["pr_ref"].startswith("ops-attest:")
+
+
+def test_close_attest_with_pr_stamps_real_ref_not_date(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "ops", PROJECT_ID, title="fleet sync", goal_state="done", phase="queued")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "ops", apply=True, approval_id="APR-OPS", attest="fleet-sync", pr=["1234"])
+    )
+    assert rc == 0
+    assert _phase(sd, "ops") == "done"
+    assert _pr_ref(sd, "ops") == "#1234"
+    assert not _pr_ref(sd, "ops").startswith("ops-attest:")
+
+    events = _track_events(sd, "ops", "track_ops_attest")
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["pr_ref"] == "#1234"
+    assert details["pr_arg_raw"] == ["1234"]
+    assert details["pr_arg_resolved"] == "#1234"
+
+
+def test_close_attest_with_multi_pr_stamps_ordered_deduped_ref(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "ops", PROJECT_ID, title="fleet sync", goal_state="done", phase="queued")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "ops", apply=True, approval_id="APR-OPS", attest="fleet-sync",
+                    pr=["1199,1200"])
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "ops") == "#1199,#1200"
+
+    events = _track_events(sd, "ops", "track_ops_attest")
+    assert events[0]["details"]["pr_ref"] == "#1199,#1200"
+
+
+def test_close_attest_pr_normalization_variants(tmp_path):
+    # Bare number, '#'-prefixed, and repeated --pr all resolve via _merge_pr_refs.
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "bare", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "bare", apply=True, approval_id="A", attest="r", pr=["1234"])
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "bare") == "#1234"
+
+    tracks_lib.create_track(sd, "hashed", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "hashed", apply=True, approval_id="A", attest="r", pr=["#1234"])
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "hashed") == "#1234"
+
+    tracks_lib.create_track(sd, "repeated", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "repeated", apply=True, approval_id="A", attest="r", pr=["1234", "1235"])
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "repeated") == "#1234,#1235"
+
+
+def test_close_pr_without_attest_is_rejected_no_write(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", pr=["1234"])
+    )
+    assert rc != 0
+    out = (capsys.readouterr().err)
+    assert "--attest" in out and "link-pr" in out
+    assert _phase(sd, "T") == "queued"
+    assert _pr_ref(sd, "T") == ""
+
+
+def test_close_attest_pr_scoped_to_project_id(tmp_path):
+    # ADR-007: the UPDATE stays WHERE track_id=? AND project_id=? — a same-named
+    # track in another project must not be touched.
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    tracks_lib.create_track(sd, "T", "other-proj", title="x", goal_state="y", phase="queued")
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r", pr=["1234"],
+                    project_id=PROJECT_ID)
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "T", PROJECT_ID) == "#1234"
+    assert _pr_ref(sd, "T", "other-proj") == ""
+    assert _phase(sd, "T", "other-proj") == "queued"
 
 
 def test_close_attest_without_apply_or_approval_is_rejected(tmp_path, capsys):

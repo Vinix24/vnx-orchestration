@@ -826,11 +826,14 @@ def _close_with_attest(
 ) -> int:
     """Attested close path for ops-tracks with no PR evidence.
 
-    Human-gated: --attest REQUIRES --apply AND --approval-id. Sets
-    tracks.pr_ref = 'ops-attest:<YYYY-MM-DD>', emits an audit event, then walks
-    the track's declared phase to 'done' through tracks.transition_phase (the
-    single-writer). This is an explicit operator override; it does NOT resolve
-    blocker open-items.
+    Human-gated: --attest REQUIRES --apply AND --approval-id. When --pr is given,
+    stamps the real delivering PR ref (normalized via `_merge_pr_refs`, same
+    shape as `link-pr`) as tracks.pr_ref instead of the date stamp — this
+    grounds the track for the reconciler. Without --pr, fails open to
+    tracks.pr_ref = 'ops-attest:<YYYY-MM-DD>' exactly as before. Either way an
+    audit event is emitted, then the track's declared phase is walked to 'done'
+    through tracks.transition_phase (the single-writer). This is an explicit
+    operator override; it does NOT resolve blocker open-items.
     """
     if not args.apply:
         print(
@@ -903,8 +906,26 @@ def _close_with_attest(
         return 2
     payload["path"] = [declared, *path]
 
+    # Resolve the ref to stamp: a real PR (via --pr, normalized like `link-pr`)
+    # when given, else the fail-open ops-attest date stamp (unchanged default).
+    raw_pr_args = list(getattr(args, "pr", None) or [])
+    resolved_pr_ref: Optional[str] = None
+    if raw_pr_args:
+        resolved_pr_ref, _pr_added, _pr_already = _merge_pr_refs(None, raw_pr_args)
+        if resolved_pr_ref is None:
+            payload["action"] = "rejected_invalid_pr"
+            if args.json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+                print(
+                    f"  ERROR: no valid PR refs provided via --pr: {raw_pr_args!r}. "
+                    "No change made.\n"
+                )
+            return 2
+
     # Stamp the explicit attestation on the track.
-    attest_ref = f"ops-attest:{date.today().isoformat()}"
+    attest_ref = resolved_pr_ref or f"ops-attest:{date.today().isoformat()}"
     conn = _db_conn(state_dir)
     try:
         conn.execute(
@@ -915,14 +936,21 @@ def _close_with_attest(
     finally:
         conn.close()
 
-    # Audit the operator attestation (reason + approval_id).
+    # Audit the operator attestation (reason + approval_id + full PR provenance:
+    # raw --pr args as given, and the resolved ref actually stamped).
     tracks_lib._emit_track_event(
         state_dir,
         "track_ops_attest",
         track_id,
         project_id,
         "operator",
-        {"reason": reason, "approval_id": approval_id, "pr_ref": attest_ref},
+        {
+            "reason": reason,
+            "approval_id": approval_id,
+            "pr_ref": attest_ref,
+            "pr_arg_raw": raw_pr_args,
+            "pr_arg_resolved": resolved_pr_ref,
+        },
     )
 
     # Walk the legal phase path via the single-writer.
@@ -1016,8 +1044,13 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
 
     --attest <reason> is the escape hatch for ops-tracks with no PR evidence
     (e.g. a fleet-sync or docs-sweep). It still requires --apply + --approval-id,
-    writes tracks.pr_ref = 'ops-attest:<date>', emits an audit event, then walks
-    the phase to 'done'. It does NOT resolve blocker open-items.
+    emits an audit event, then walks the phase to 'done'. It does NOT resolve
+    blocker open-items. When --pr is also given, it records the real delivering
+    PR (normalized like `link-pr`) as tracks.pr_ref, so the track can later be
+    grounded by the reconciler instead of carrying a date stamp forever. Without
+    --pr, it fails open to tracks.pr_ref = 'ops-attest:<date>' exactly as before.
+    --pr without --attest is rejected — use `link-pr` to link a ref without
+    closing.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -1030,6 +1063,14 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
         repo_root = None
 
     attest_reason = getattr(args, "attest", None)
+    if getattr(args, "pr", None) and attest_reason is None:
+        print(
+            "objective close: --pr requires --attest (to record the delivering PR on an "
+            "attested close). To link a PR ref without closing the track, use "
+            "`vnx objective link-pr <track_id> <pr>` instead. No change made.",
+            file=sys.stderr,
+        )
+        return 2
     if attest_reason is not None:
         return _close_with_attest(args, state_dir, track_id, project_id, attest_reason, repo_root)
 
@@ -2221,7 +2262,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_close.add_argument(
         "--attest", default=None, metavar="REASON",
-        help="operator attestation for ops-tracks with no PR evidence (requires --apply --approval-id)",
+        help="operator attestation for ops-tracks with no PR evidence (requires --apply "
+             "--approval-id). Records the real PR via --pr when given, else fails open to "
+             "ops-attest:<date>",
+    )
+    p_close.add_argument(
+        "--pr", action="append", default=None, metavar="NNN",
+        help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
+             "with --attest: records the real PR as pr_ref instead of ops-attest:<date>. "
+             "Without --attest, use `vnx objective link-pr` instead.",
     )
     p_close.set_defaults(func=cmd_objective_close)
 
