@@ -192,13 +192,62 @@ _CODEOWNERS_ATTEST_BLOCK = """\
 """
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _assert_symlink_safe(path: Path, root: Path) -> None:
+    """Refuse scaffold writes that would escape the project root via symlinks.
+
+    Raises OSError (fail loud, naming the offending component) when:
+      - ``path`` is not lexically under ``root``;
+      - ``path`` itself is an existing symlink (never follow/replace-through);
+      - any parent directory component between ``root`` and ``path`` is a
+        symlink whose target resolves OUTSIDE ``root``.
+
+    A symlink component that resolves back INSIDE the project root is allowed
+    (e.g. an operator linking .vnx-data to a sibling dir inside the project).
+    """
+    root_resolved = Path(root).resolve()
+    path = Path(path)
+    try:
+        rel = path.relative_to(root_resolved)
+    except ValueError:
+        raise OSError(
+            f"refusing to scaffold {path}: outside project root {root_resolved}"
+        ) from None
+    if path.is_symlink():
+        raise OSError(
+            f"refusing to write {path}: target is an existing symlink "
+            f"(-> {os.readlink(path)})"
+        )
+    current = root_resolved
+    for part in rel.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            resolved = current.resolve()
+            if not _is_within(resolved, root_resolved):
+                raise OSError(
+                    f"refusing to write {path}: parent component {current} is a "
+                    f"symlink escaping the project root (-> {resolved})"
+                )
+
+
+def _atomic_write(path: Path, content: str, root: Path) -> None:
     """Write ``content`` to ``path`` via a tmp file + os.replace (atomic).
+
+    Symlink-safe: ``root`` is the project root being initialised; the write is
+    refused (OSError) if ``path`` or any parent component up to ``root`` is a
+    symlink escaping that root — the scaffold never lands outside the project.
 
     Uses a randomized temp name in the same directory so a pre-planted symlink
     at a fixed ``.tmp`` path cannot be followed/truncated (symlink-TOCTOU).
     """
+    _assert_symlink_safe(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Post-mkdir re-check: closes the window where a component was swapped for
+    # an escaping symlink between the pre-check and the directory creation.
+    if not _is_within(path.parent, root):
+        raise OSError(
+            f"refusing to write {path}: resolved parent {path.parent.resolve()} "
+            f"escapes project root {Path(root).resolve()}"
+        )
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
     )
@@ -233,7 +282,7 @@ def _write_project_id_marker(project_dir: Path, project_id: str) -> bool:
     if existing_lines and existing_lines[0].strip() == project_id:
         return False
     rest = existing_lines[1:] if len(existing_lines) > 1 else []
-    _atomic_write(marker, "\n".join([project_id, *rest]) + "\n")
+    _atomic_write(marker, "\n".join([project_id, *rest]) + "\n", project_dir)
     return True
 
 
@@ -268,7 +317,7 @@ def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: b
     t0_md = claude_dir / "terminals" / "T0" / "CLAUDE.md"
     t0_md.parent.mkdir(parents=True, exist_ok=True)
     if not t0_md.exists() or force:
-        _atomic_write(t0_md, _render_template(tmpl_root / "terminals" / "T0_claude_md.j2", ctx))
+        _atomic_write(t0_md, _render_template(tmpl_root / "terminals" / "T0_claude_md.j2", ctx), project_dir)
         print(f"  created {t0_md.relative_to(project_dir)}")
     else:
         print(f"  exists  {t0_md.relative_to(project_dir)}")
@@ -282,7 +331,7 @@ def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: b
 
     settings_path = claude_dir / "settings.json"
     if not settings_path.exists() or force:
-        _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx))
+        _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx), project_dir)
         print(f"  created {settings_path.relative_to(project_dir)}")
     else:
         print(f"  exists  {settings_path.relative_to(project_dir)}")
@@ -311,11 +360,11 @@ def _write_vnx_version(project_dir: Path, version: str, set_version: str | None 
     path = project_dir / ".vnx-version"
     existed = path.is_file()
     if set_version:
-        _atomic_write(path, set_version + "\n")
+        _atomic_write(path, set_version + "\n", project_dir)
         return "set" if existed else "created"
     if existed:
         return "preserved"
-    _atomic_write(path, version + "\n")
+    _atomic_write(path, version + "\n", project_dir)
     return "created"
 
 
@@ -324,7 +373,7 @@ def _write_root_claude_md(project_dir: Path, tmpl_root: Path, ctx: dict, force: 
     if path.exists() and not force:
         print("  exists  CLAUDE.md")
         return
-    _atomic_write(path, _render_template(tmpl_root / "claude_md.j2", ctx))
+    _atomic_write(path, _render_template(tmpl_root / "claude_md.j2", ctx), project_dir)
     print("  created CLAUDE.md")
 
 
@@ -338,6 +387,7 @@ def _write_feature_plan(project_dir: Path, force: bool) -> None:
         "# Feature Plan\n\n"
         "<!-- Start a new track: vnx track new <id>"
         " --project-id <proj-id> --title '...' --goal '...' -->\n",
+        project_dir,
     )
     print("  created FEATURE_PLAN.md")
 
@@ -354,7 +404,7 @@ def _update_gitignore(project_dir: Path) -> None:
         new_content = content.rstrip() + "\n\n# VNX runtime state\n" + marker + "\n"
     else:
         new_content = "# VNX runtime state\n" + marker + "\n"
-    _atomic_write(gi_path, new_content)
+    _atomic_write(gi_path, new_content, project_dir)
     print(f"  updated .gitignore (added {marker})")
 
 
@@ -561,14 +611,14 @@ def _provision_attest_trust_root(project_dir: Path, force: bool) -> None:
 
     signers_path = attest_dir / "allowed_signers"
     if not signers_path.exists() or force:
-        _atomic_write(signers_path, _ATTEST_ALLOWED_SIGNERS_SCAFFOLD)
+        _atomic_write(signers_path, _ATTEST_ALLOWED_SIGNERS_SCAFFOLD, project_dir)
         print(f"  created .vnx-attest/allowed_signers (scaffold — no key generated)")
     else:
         print(f"  exists  .vnx-attest/allowed_signers")
 
     readme_path = attest_dir / "README.md"
     if not readme_path.exists() or force:
-        _atomic_write(readme_path, _ATTEST_README_CONTENT)
+        _atomic_write(readme_path, _ATTEST_README_CONTENT, project_dir)
         print(f"  created .vnx-attest/README.md")
     else:
         print(f"  exists  .vnx-attest/README.md")
@@ -586,7 +636,7 @@ def _provision_attest_trust_root(project_dir: Path, force: bool) -> None:
         print(f"  exists  CODEOWNERS (attest entries already present)")
     else:
         new_content = existing.rstrip() + _CODEOWNERS_ATTEST_BLOCK
-        _atomic_write(codeowners_path, new_content)
+        _atomic_write(codeowners_path, new_content, project_dir)
         print(f"  {'updated' if existing else 'created'} CODEOWNERS (added attest trust-root entries)")
 
 
@@ -613,7 +663,7 @@ def _provision_github_workflow(project_dir: Path) -> None:
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(dest, template_path.read_text(encoding="utf-8"))
+    _atomic_write(dest, template_path.read_text(encoding="utf-8"), project_dir)
     print(f"  created .github/workflows/attestation-gate.yml")
 
 
@@ -656,6 +706,20 @@ def vnx_init(args) -> int:
         print(f"  error: {exc}", file=sys.stderr)
         return 1
 
+    # Every scaffold write below goes through the symlink-safe _atomic_write;
+    # a refusal (hostile/escaping symlink in the target tree) aborts init with
+    # a clear error instead of writing outside the project root.
+    try:
+        return _vnx_init_scaffold(
+            project_dir, template, force, set_version, project_id
+        )
+    except OSError as exc:
+        print(f"\n  error: scaffold write refused: {exc}", file=sys.stderr)
+        return 1
+
+
+def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) -> int:
+    """Scaffold body of vnx_init (split out so OSError refusals fail clean)."""
     # --- tracked, in-project config (tiny footprint) ----------------------
     vnx_dir = project_dir / ".vnx"
     vnx_dir.mkdir(parents=True, exist_ok=True)
@@ -667,7 +731,7 @@ def vnx_init(args) -> int:
 
     profiles_path = vnx_dir / "governance_profiles.yaml"
     if not profiles_path.exists():
-        profiles_path.write_text(GOVERNANCE_PROFILES_YAML)
+        _atomic_write(profiles_path, GOVERNANCE_PROFILES_YAML, project_dir)
         print(f"  created {profiles_path.relative_to(project_dir)}")
     else:
         print(f"  exists  {profiles_path.relative_to(project_dir)}")
@@ -683,6 +747,7 @@ def vnx_init(args) -> int:
             f'project_root: "{project_dir}"\n'
             f'project_id: "{project_id}"\n'
             f'vnx_data_dir: "{data_root}"\n',
+            project_dir,
         )
         print(f"  created {config_path.relative_to(project_dir)}")
     else:
@@ -693,14 +758,14 @@ def vnx_init(args) -> int:
     agents_dir.mkdir(exist_ok=True)
     readme_path = agents_dir / "README.md"
     if not readme_path.exists():
-        readme_path.write_text(AGENTS_README)
+        _atomic_write(readme_path, AGENTS_README, project_dir)
         print(f"  created {readme_path.relative_to(project_dir)}")
     else:
         print(f"  exists  {readme_path.relative_to(project_dir)}")
 
     claude_md = agents_dir / "CLAUDE.md.template"
     if not claude_md.exists():
-        claude_md.write_text(CLAUDE_MD_TEMPLATE)
+        _atomic_write(claude_md, CLAUDE_MD_TEMPLATE, project_dir)
         print(f"  created {claude_md.relative_to(project_dir)}")
     else:
         print(f"  exists  {claude_md.relative_to(project_dir)}")

@@ -220,6 +220,122 @@ class TestVnxInitAtomicWriteSafety:
             assert planted.resolve() != version_file.resolve()
 
 
+class TestVnxInitSymlinkHardening:
+    """init-scaffold-symlink-hardening: every scaffold write is atomic +
+    symlink-safe (refuses escaping parent symlinks and symlink targets)."""
+
+    def test_escaping_parent_symlink_refused(self, tmp_path, tmp_path_factory):
+        # agents/ is a pre-planted symlink pointing OUTSIDE the project root:
+        # the agents/ scaffold writes must be refused, nothing lands outside.
+        outside = tmp_path_factory.mktemp("outside")
+        (tmp_path / "agents").symlink_to(outside, target_is_directory=True)
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc != 0
+        assert not (outside / "README.md").exists()
+        assert not (outside / "CLAUDE.md.template").exists()
+
+    def test_escaping_parent_symlink_error_names_component(
+        self, tmp_path, tmp_path_factory, capsys
+    ):
+        outside = tmp_path_factory.mktemp("outside")
+        (tmp_path / "agents").symlink_to(outside, target_is_directory=True)
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "symlink" in err
+        assert "agents" in err
+
+    def test_broken_symlink_at_profiles_path_refused(self, tmp_path, tmp_path_factory):
+        # A pre-planted (broken) symlink AT a scaffold target must be refused,
+        # never followed — the escape target must not be created.
+        outside_target = tmp_path_factory.mktemp("outside") / "profiles.yaml"
+        vnx_dir = tmp_path / ".vnx"
+        vnx_dir.mkdir()
+        (vnx_dir / "governance_profiles.yaml").symlink_to(outside_target)
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc != 0
+        assert not outside_target.exists()
+
+    def test_atomic_write_refuses_symlink_target_directly(self, tmp_path):
+        from vnx_cli.commands import init_cmd
+
+        outside = tmp_path / "outside.txt"
+        outside.write_text("do-not-touch\n")
+        link = tmp_path / "target.txt"
+        link.symlink_to(outside)
+
+        with pytest.raises(OSError, match="symlink"):
+            init_cmd._atomic_write(link, "payload\n", tmp_path)
+
+        # The symlink target is untouched and the link itself is left in place.
+        assert outside.read_text() == "do-not-touch\n"
+        assert link.is_symlink()
+
+    def test_atomic_write_refuses_path_outside_root(self, tmp_path, tmp_path_factory):
+        from vnx_cli.commands import init_cmd
+
+        outside = tmp_path_factory.mktemp("outside") / "file.txt"
+        with pytest.raises(OSError, match="outside project root"):
+            init_cmd._atomic_write(outside, "payload\n", tmp_path)
+        assert not outside.exists()
+
+    def test_raw_callsites_routed_through_atomic_write(self, tmp_path, monkeypatch):
+        # The three previously-raw writes (profiles / agents README /
+        # agents CLAUDE.md.template) must go through the atomic helper.
+        from vnx_cli.commands import init_cmd
+
+        written: list[Path] = []
+        orig = init_cmd._atomic_write
+
+        def spy(path, content, root):
+            written.append(Path(path))
+            return orig(path, content, root)
+
+        monkeypatch.setattr(init_cmd, "_atomic_write", spy)
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc == 0
+
+        profiles = tmp_path / ".vnx" / "governance_profiles.yaml"
+        agents_readme = tmp_path / "agents" / "README.md"
+        agents_claude = tmp_path / "agents" / "CLAUDE.md.template"
+        assert profiles in written
+        assert agents_readme in written
+        assert agents_claude in written
+
+        # Content is unchanged from the scaffold constants.
+        assert profiles.read_text() == init_cmd.GOVERNANCE_PROFILES_YAML
+        assert agents_readme.read_text() == init_cmd.AGENTS_README
+        assert agents_claude.read_text() == init_cmd.CLAUDE_MD_TEMPLATE
+
+    def test_full_scaffold_no_regression(self, tmp_path):
+        # Normal (non-symlink) init still scaffolds every file correctly.
+        rc = vnx_init(_args(tmp_path))
+        assert rc == 0
+        expected_files = [
+            ".vnx-project-id",
+            ".vnx/governance_profiles.yaml",
+            ".vnx/config.yml",
+            ".vnx-version",
+            "agents/README.md",
+            "agents/CLAUDE.md.template",
+            ".claude/terminals/T0/CLAUDE.md",
+            ".claude/settings.json",
+            "CLAUDE.md",
+            "FEATURE_PLAN.md",
+            ".gitignore",
+            "CODEOWNERS",
+            ".vnx-attest/allowed_signers",
+            ".vnx-attest/README.md",
+            ".github/workflows/attestation-gate.yml",
+        ]
+        for rel in expected_files:
+            assert (tmp_path / rel).is_file(), f"missing scaffold file: {rel}"
+
+
 class TestVnxInitAttestDelivery:
     """D5a + D5b: attestation trust-root and gate workflow delivery."""
 
