@@ -4,6 +4,9 @@ Uses a FAKE dispatcher (records calls) so no live provider is hit."""
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -137,3 +140,72 @@ class TestDigestBudget:
         digest = dp._digest(fan_out)
         assert analysis_marker in digest
         assert digest.count("issue ") == 55
+
+    def test_large_context_echo_does_not_cut_analysis(self):
+        """A report whose echoed provenance/context ALONE exceeds the old 6000-char budget
+        (an 11.7KB --context-file reproduced the bug live) must still surface the analysis
+        that comes after it — the exact failure mode that degraded the panel silently."""
+        analysis_marker = "ANALYSIS_ONLY_MARKER_XYZ_789"
+        echoed_context = "context line: lorem ipsum dolor sit amet consectetur adipiscing\n" * 200
+        assert len(echoed_context) > 12_000, f"echo size {len(echoed_context)} must exceed 12KB"
+        report = (
+            "---\ntitle: panel report\nprovider: codex\n---\n"
+            "## Instruction\nYou are one seat on a deliberation panel.\n"
+            "QUESTION: audit src/\n\n## Shared context\n"
+            + echoed_context
+            + f"\n\nFindings:\n{analysis_marker}\nreal analysis text follows here."
+        )
+        assert len(report) > 12_000
+        fan_out = [{"provider": "codex", "lens": "security", "text": report}]
+        digest = dp._digest(fan_out)
+        assert analysis_marker in digest, "analysis was cut off — the old truncation bug is back"
+
+
+class TestReportBackstop:
+    """The generous per-report backstop replaces the old normal-case 6000-char truncation.
+    It must never fire on realistic reports, and when it DOES fire (pathological runaway
+    report), the clip must be loud (a warning), never silent."""
+
+    def test_report_under_backstop_passed_whole(self, caplog):
+        text = "a" * 1000
+        fan_out = [{"provider": "codex", "lens": "security", "text": text}]
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            digest = dp._digest(fan_out, limit=5000)
+        assert text in digest
+        assert not any("clipped" in r.message for r in caplog.records)
+
+    def test_report_over_backstop_is_clipped_and_warns(self, caplog):
+        text = "b" * 6000
+        fan_out = [{"provider": "codex", "lens": "security", "text": text}]
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            digest = dp._digest(fan_out, limit=5000)
+        body = digest.split("]\n", 1)[1]
+        assert len(body) == 5000
+        warnings = [r for r in caplog.records if "clipped" in r.message]
+        assert warnings, "clipping must emit a loud warning, never fail silently"
+        assert "codex" in warnings[0].message
+        assert "VNX_PANEL_REPORT_BACKSTOP" in warnings[0].message
+
+    def test_default_backstop_is_generous(self):
+        """The default backstop is a pathological-runaway guard, not a normal-case limit —
+        it must comfortably exceed any realistic single-seat report."""
+        assert dp._REPORT_BACKSTOP >= 40_000
+
+    def test_backstop_env_var_override(self):
+        lib_dir = str(REPO_ROOT / "scripts" / "lib")
+        code = f"import sys; sys.path.insert(0, {lib_dir!r}); import deliberation_panel as dp; print(dp._REPORT_BACKSTOP)"
+        env = {**os.environ, "VNX_PANEL_REPORT_BACKSTOP": "12345"}
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
+        )
+        assert result.stdout.strip() == "12345"
+
+    def test_downstream_slices_use_backstop_not_old_limit(self, caplog):
+        """result.contrarian / result.factcheck feeding into later stages must go through the
+        same generous backstop (_clip), not the removed 6000-char slice — text well past the
+        old 6000-char budget but under the default backstop must survive whole."""
+        text_past_old_limit = "c" * 20_000
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            clipped = dp._clip(text_past_old_limit, "contrarian", limit=dp._REPORT_BACKSTOP)
+        assert len(clipped) == 20_000  # far past the old 6000-char cut, still passed whole
+        assert not caplog.records
