@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_ID_RE = re.compile(r"^T[0-9]+$")
 _VALID_SCALING_POLICIES = frozenset({"fixed", "queue_aware"})
-_VALID_PROVIDERS_BASE = frozenset({"claude", "codex", "gemini"})
+_VALID_PROVIDERS_BASE = frozenset({"claude", "codex", "gemini", "kimi"})
 # System roles that are valid but not listed in validate_skill.py (non-worker roles).
 _SYSTEM_ROLES = frozenset({"orchestrator"})
 
@@ -51,12 +51,12 @@ _HARDCODED_FALLBACK = {
     "workers": [
         {"terminal_id": "T0", "role": "orchestrator", "provider": "claude",
          "model": "opus", "pool_id": "default", "aliases": []},
-        {"terminal_id": "T1", "role": "backend-developer", "provider": "claude",
-         "model": "sonnet", "pool_id": "default", "aliases": []},
-        {"terminal_id": "T2", "role": "backend-developer", "provider": "claude",
-         "model": "sonnet", "pool_id": "default", "aliases": []},
-        {"terminal_id": "T3", "role": "reviewer", "provider": "claude",
-         "model": "sonnet", "pool_id": "default", "aliases": []},
+        {"terminal_id": "T1", "role": "backend-developer", "provider": "kimi",
+         "model": "kimi-k3", "pool_id": "default", "aliases": []},
+        {"terminal_id": "T2", "role": "backend-developer", "provider": "kimi",
+         "model": "kimi-k3", "pool_id": "default", "aliases": []},
+        {"terminal_id": "T3", "role": "reviewer", "provider": "kimi",
+         "model": "kimi-k3", "pool_id": "default", "aliases": []},
     ],
     "pools": [
         {"pool_id": "default", "min_workers": 4, "max_workers": 4,

@@ -184,6 +184,15 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     fired.append("D2")
 
     # D4 — model tier; warn-only pins are NOT a Reject
+    #
+    # worker-provider-kimi-flip (20260723): snapshot.model_pins now resolves T1/T2/T3
+    # to "kimi-k3". This branch only runs when is_claude_lane is True (explicit
+    # provider=claude). The "sonnet" fallback below deliberately stays a valid Claude
+    # model name — it is the no-pin-found default for the claude lane specifically,
+    # not a worker-role default. When a pin IS found for a claude-lane T1/T2/T3
+    # (pinned="kimi-k3"), `model = pinned` intentionally yields a non-Claude label;
+    # the D3 registry/constraint gate upstream rejects that combination fail-loud
+    # rather than silently falling back to sonnet (kimi-only, no fallback policy).
     target_slot = spec.target_slot
     if is_claude_lane:
         pinned = snapshot.model_pins.get(target_slot)

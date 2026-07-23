@@ -1158,6 +1158,11 @@ class ProviderAdapter:
                 terminal_id=plan.target_id,
                 event_writer=event_writer,
                 cwd=cwd,
+                # worker-provider-kimi-flip (20260723): honor the spec's staged deadline
+                # instead of spawn_kimi's own hardcoded 900s default — a caller staging a
+                # longer deadline (e.g. stage_spec_bundle's 3600s default) was previously
+                # silently capped short (memory: provider-lane-900s-deadline-kills-builds).
+                total_deadline=float(plan.deadline_seconds),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(

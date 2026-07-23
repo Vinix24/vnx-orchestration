@@ -36,7 +36,7 @@ python3 scripts/lib/tmux_interactive_dispatch.py \
 
 Required flags: `--dispatch-id`, `--instruction`. Defaults: `--isolated-worktree` on, `--model sonnet`, `--base-ref origin/main`. Staging gate enforced via `--from-staging-id` (per ADR-006).
 
-`--model sonnet` resolves through the T1/T2/T3 worker pin — since 2026-07-05 (#1013) that is `claude-sonnet-5` (bumped from 4.6), enforced by the `workers-sonnet-pinned` constraint and loaded unconditionally by `dispatch_cli._load_model_pins_from_yaml()`. T0 stays on Opus.
+`--model sonnet` above is illustrative of the claude-lane CLI shape only. Since worker-provider-kimi-flip (2026-07-23), T1/T2/T3 are pinned to `kimi-k3` (`workers-kimi-pinned` constraint, loaded unconditionally by `dispatch_cli._load_model_pins_from_yaml()`), and that pin applies to the `provider` field at staging time, not this tmux-spawn CLI — `tmux_interactive_dispatch.py`/`--model sonnet` only runs for an explicit `provider=claude` build-worker override, and the door's registry check now correctly REJECTS a claude-lane T1/T2/T3 dispatch (the kimi-k3 pin is not a valid Claude model) rather than silently resolving it to `claude-sonnet-5`. T0 stays on Opus.
 
 The detached spawn also defaults to blanket `--dangerously-skip-permissions` (#1016) — the isolated per-dispatch worktree already bounds blast radius, so the scoped posture is opt-in via `VNX_WORKER_SCOPED=1` rather than the default. See `docs/operations/WORKER_PERMISSIONS.md`.
 

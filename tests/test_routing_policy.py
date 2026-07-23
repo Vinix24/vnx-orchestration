@@ -71,37 +71,40 @@ def test_non_mapping_yaml_raises(tmp_path: Path) -> None:
 
 
 def test_default_lane_unmatched() -> None:
+    """worker-provider-kimi-flip (2026-07-23): default_lane is now kimi."""
     decision = decide_lane("unknown-task-class", complexity="medium", env=_env())
-    assert decision.lane == "claude/sonnet-5"
+    assert decision.lane == "kimi"
     assert decision.rule_name == "default"
 
 
-def test_simple_cleanup_routes_to_haiku() -> None:
+def test_simple_cleanup_routes_to_kimi() -> None:
+    """worker-provider-kimi-flip: simple-cleanup no longer carves out haiku — kimi
+    covers low-complexity build-worker housekeeping too."""
     decision = decide_lane("lint-narrow", complexity="low", env=_env())
-    assert decision.lane == "claude/haiku-4-5"
+    assert decision.lane == "kimi"
     assert decision.rule_name == "simple-cleanup"
 
 
-def test_doc_update_routes_to_haiku() -> None:
+def test_doc_update_routes_to_kimi() -> None:
     decision = decide_lane("doc-update", complexity="low", env=_env())
-    assert decision.lane == "claude/haiku-4-5"
+    assert decision.lane == "kimi"
 
 
-def test_refactor_medium_routes_to_sonnet() -> None:
+def test_refactor_medium_routes_to_kimi() -> None:
     decision = decide_lane("refactor", complexity="medium", env=_env())
-    assert decision.lane == "claude/sonnet-5"
+    assert decision.lane == "kimi"
     assert decision.rule_name == "refactor-code-default"
 
 
-def test_refactor_high_routes_to_sonnet() -> None:
+def test_refactor_high_routes_to_kimi() -> None:
     decision = decide_lane("refactor", complexity="high", env=_env())
-    assert decision.lane == "claude/sonnet-5"
+    assert decision.lane == "kimi"
 
 
 def test_opt_in_deepseek_requires_flag() -> None:
-    # Without opt-in flag: refactor + medium -> refactor-code-default (sonnet)
+    # Without opt-in flag: refactor + medium -> refactor-code-default (kimi)
     without_flag = decide_lane("refactor", complexity="medium", env=_env())
-    assert without_flag.lane == "claude/sonnet-5"
+    assert without_flag.lane == "kimi"
     assert without_flag.rule_name == "refactor-code-default"
 
     # With opt-in flag: cost-optimized-code rule fires first because rules are ordered
@@ -114,10 +117,10 @@ def test_opt_in_deepseek_requires_flag() -> None:
     # but it has the same task_class + complexity criteria PLUS an opt_in_flag guard.
     # First-match semantics: refactor-code-default fires first (no opt_in_flag guard).
     # Cost-optimized-code only fires when the earlier rule doesn't match — but it does.
-    # So with the current yaml order, sonnet still wins even with the flag.
+    # So with the current yaml order, kimi still wins even with the flag.
     # This is intentional: operators must move cost-optimized-code above refactor-code-default
     # in the yaml to activate it for refactor tasks.
-    assert with_flag.lane == "claude/sonnet-5"
+    assert with_flag.lane == "kimi"
 
     # Directly validate that _rule_matches respects opt_in_flag:
     cost_rule = {
@@ -158,10 +161,11 @@ def test_research_high_routes_to_opus() -> None:
 
 
 def test_fallback_chain_resolution_deepseek() -> None:
+    """worker-provider-kimi-flip (2026-07-23): kimi has NO fallback — a kimi-lane
+    failure must fail loud, never silently re-route onto the Claude subscription."""
     decision = decide_lane("code-review", complexity="medium", env=_env())
-    # review-analysis -> kimi (CLI lane)
-    # Its fallback chain: kimi -> [litellm:deepseek:deepseek-v4-pro, claude/sonnet-5]
-    assert "claude/sonnet-5" in decision.fallback_chain
+    assert decision.lane == "kimi"
+    assert decision.fallback_chain == []
 
 
 def test_fallback_chain_wildcard_deepseek() -> None:
@@ -178,6 +182,14 @@ def test_fallback_chain_haiku() -> None:
     fallback_map = policy.get("fallback_chain", {})
     chain = _resolve_fallback_chain("claude/haiku-4-5", fallback_map)
     assert chain == ["claude/sonnet-5"]
+
+
+def test_fallback_chain_kimi_empty() -> None:
+    """worker-provider-kimi-flip (2026-07-23): kimi has NO fallback chain — a routing
+    miss on the kimi lane must fail loud, not silently re-route onto claude/sonnet-5."""
+    policy = load_routing_policy(_POLICY_PATH)
+    fallback_map = policy.get("fallback_chain", {})
+    assert _resolve_fallback_chain("kimi", fallback_map) == []
 
 
 def test_fallback_chain_sonnet_empty() -> None:

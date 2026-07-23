@@ -66,6 +66,7 @@ both env-clean and env-set operations.
 PROVIDER_CLAUDE = "claude_code"
 PROVIDER_CODEX = "codex"
 PROVIDER_GEMINI = "gemini"
+PROVIDER_KIMI = "kimi"
 
 # Aliases that map to canonical provider names
 PROVIDER_ALIASES = {
@@ -75,6 +76,8 @@ PROVIDER_ALIASES = {
     "gemini": PROVIDER_GEMINI,
     "claude_code": PROVIDER_CLAUDE,
     "claude": PROVIDER_CLAUDE,
+    "kimi_cli": PROVIDER_KIMI,
+    "kimi": PROVIDER_KIMI,
 }
 
 
@@ -118,8 +121,8 @@ class StartConfig:
         terminals = {}
         for tid, default_provider, default_model, role, track in [
             ("T0", PROVIDER_CLAUDE, os.environ.get("VNX_T0_MODEL", "default"), "orchestrator", ""),
-            ("T1", os.environ.get("VNX_T1_PROVIDER", PROVIDER_CLAUDE), os.environ.get("VNX_T1_MODEL", "sonnet"), "worker", "A"),
-            ("T2", os.environ.get("VNX_T2_PROVIDER", PROVIDER_CLAUDE), os.environ.get("VNX_T2_MODEL", "sonnet"), "worker", "B"),
+            ("T1", os.environ.get("VNX_T1_PROVIDER", PROVIDER_KIMI), os.environ.get("VNX_T1_MODEL", "kimi-k3"), "worker", "A"),
+            ("T2", os.environ.get("VNX_T2_PROVIDER", PROVIDER_KIMI), os.environ.get("VNX_T2_MODEL", "kimi-k3"), "worker", "B"),
             ("T3", os.environ.get("VNX_T3_PROVIDER", PROVIDER_CLAUDE), os.environ.get("VNX_T3_MODEL", "default"), "worker", "C"),
         ]:
             raw_provider = default_provider
@@ -167,6 +170,16 @@ def build_provider_command(
     if provider == PROVIDER_GEMINI:
         return f"gemini --yolo -m {gemini_model} --include-directories '{project_root}'"
 
+    if provider == PROVIDER_KIMI:
+        # worker-provider-kimi-flip (20260723): kimi's only verified invocation in this
+        # codebase is the one-shot governed lane (`kimi --print ... --yolo -p <prompt>`,
+        # provider_spawns/kimi_spawn.py) — there is no established interactive-REPL launch
+        # syntax to mirror the claude/codex/gemini branches above. Reuse the proven agentic
+        # flags (--yolo auto-approves tool calls, -w scopes the worktree/cwd, #1210) for a
+        # best-effort interactive session; NOT smoke-tested against a live tmux pane by this
+        # change (see dispatch report Open Items).
+        return f"kimi --yolo -w '{project_root}'"
+
     # Default: Claude Code
     skip_flag = " --dangerously-skip-permissions" if tc.skip_permissions else ""
     extra = f" {tc.extra_flags}" if tc.extra_flags else ""
@@ -180,6 +193,8 @@ def build_provider_label(provider: str) -> str:
         return "Codex CLI"
     if canonical == PROVIDER_GEMINI:
         return "Gemini CLI"
+    if canonical == PROVIDER_KIMI:
+        return "Kimi CLI"
     return "Claude"
 
 
@@ -190,6 +205,8 @@ def build_pane_title(terminal_id: str, provider: str) -> str:
         return f"{terminal_id} [CODEX]"
     if canonical == PROVIDER_GEMINI:
         return f"{terminal_id} [GEMINI]"
+    if canonical == PROVIDER_KIMI:
+        return f"{terminal_id} [KIMI]"
     return terminal_id
 
 

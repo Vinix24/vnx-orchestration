@@ -1,9 +1,10 @@
 # Wave 7 cost-routing policy
 # Maps task-class + complexity to preferred provider lane
-# Default: Anthropic Sonnet 5 (untouched safety default)
+# Default: kimi (worker-provider-kimi-flip, 2026-07-23) — build workers (T1/T2/T3)
+# default to the kimi CLI OAuth lane; Sonnet remains an explicit operator override.
 
 version: 1
-default_lane: "claude/sonnet-5"
+default_lane: "kimi"
 
 # Task-class -> lane mapping
 # First match wins; no match -> default_lane
@@ -12,15 +13,15 @@ rules:
     when:
       task_class: ["lint-narrow", "doc-update", "oi-closure", "rename"]
       complexity: ["low"]
-    lane: "claude/haiku-4-5"  # 3x cheaper than Sonnet, sufficient for simple work
-    rationale: "Low-complexity housekeeping; Haiku matches quality for these tasks at 1/3 cost"
+    lane: "kimi"  # kimi CLI OAuth lane; flat subscription quota covers low-complexity housekeeping too
+    rationale: "worker-provider-kimi-flip: low-complexity housekeeping routes to kimi like every other build-worker task; no separate haiku carve-out"
 
   - name: refactor-code-default
     when:
       task_class: ["refactor", "module-split", "feature-implementation"]
       complexity: ["medium", "high"]
-    lane: "claude/sonnet-5"  # quality-default for code
-    rationale: "Refactor needs depth; Sonnet 5 remains baseline"
+    lane: "kimi"  # kimi CLI OAuth lane — kimi-via-cli-only constraint enforced
+    rationale: "worker-provider-kimi-flip (2026-07-23): kimi is the build-worker default (proven agentic, #1210); Sonnet remains an explicit operator override, not the baseline"
 
   - name: cost-optimized-code
     when:
@@ -54,9 +55,15 @@ rules:
 # below — OI-223 wired lane_safety.headless_block live, NOT fallback_chain. The kimi
 # entry below reflects the corrected kimi CLI lane — litellm:moonshot:* entries are
 # kept for reference but litellm:moonshot routing is blocked by kimi-via-cli-only.
+#
+# worker-provider-kimi-flip (2026-07-23): "kimi" has NO fallback entry — a kimi-lane
+# failure on a build-worker dispatch must fail loud, never silently re-route onto the
+# Claude subscription. The other lanes' chains (litellm:deepseek:*, litellm:zai:*)
+# still list kimi as A step in THEIR OWN fallback, which is unrelated to kimi's own
+# (empty) chain.
 fallback_chain:
   "litellm:deepseek:*": ["kimi", "claude/sonnet-5"]
-  "kimi": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-5"]
+  "kimi": []
   "litellm:zai:*": ["kimi", "claude/sonnet-5"]
   "claude/haiku-4-5": ["claude/sonnet-5"]
   # Sonnet and Opus have no fallback (they are the safety net)

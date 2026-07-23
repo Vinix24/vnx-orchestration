@@ -4,7 +4,7 @@
 Covers every constraint in provider_constraints.yaml:
   - kimi-via-cli-only       (forbid_route, blocking)
   - t0-opus-only            (require_route, warn, override)
-  - workers-sonnet-pinned   (require_route, warn, override)
+  - workers-kimi-pinned     (require_route, warn, override)
   - no-anthropic-sdk        (forbid_import — warning at runtime)
   - zai-via-openrouter-only (forbid_route, blocking)
   - deprecated-glm-models   (forbid_route, blocking)
@@ -105,28 +105,35 @@ class TestT0OpusOnly:
 
 
 # ---------------------------------------------------------------------------
-# workers-sonnet-pinned — require_route role=[T1,T2,T3] model=claude-sonnet-4-6
+# workers-kimi-pinned — require_route role=[T1,T2,T3] model=kimi-k3
+# (worker-provider-kimi-flip, 2026-07-23 — renamed from workers-sonnet-pinned)
 # ---------------------------------------------------------------------------
 
-class TestWorkersSonnetPinned:
+class TestWorkersKimiPinned:
 
     def test_t1_with_opus_warns(self, real_enforcer: ConstraintEnforcer, caplog):
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(terminal_id="T1", model="claude-opus-4-8")
-        assert "workers-sonnet-pinned" in caplog.text
+        assert "workers-kimi-pinned" in caplog.text
 
-    def test_t2_with_sonnet_allowed(self, real_enforcer: ConstraintEnforcer, caplog):
+    def test_t2_with_kimi_k3_allowed(self, real_enforcer: ConstraintEnforcer, caplog):
+        with caplog.at_level("WARNING"):
+            real_enforcer.enforce(provider="kimi", terminal_id="T2", model="kimi-k3")
+        assert "workers-kimi-pinned" not in caplog.text
+
+    def test_t2_with_sonnet_now_warns(self, real_enforcer: ConstraintEnforcer, caplog):
+        """Sonnet was the pinned model pre-flip; it's now a deviation that warns."""
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(terminal_id="T2", model="claude-sonnet-4-6")
-        assert "workers-sonnet-pinned" not in caplog.text
+        assert "workers-kimi-pinned" in caplog.text
 
     def test_t3_with_haiku_warns(self, real_enforcer: ConstraintEnforcer, caplog):
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(terminal_id="T3", model="claude-haiku-4-5")
-        assert "workers-sonnet-pinned" in caplog.text
+        assert "workers-kimi-pinned" in caplog.text
 
     def test_t1_override_env(self, real_enforcer: ConstraintEnforcer, caplog, monkeypatch):
-        monkeypatch.setenv("VNX_OVERRIDE_WORKERS_SONNET_PINNED", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_WORKERS_KIMI_PINNED", "1")
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(terminal_id="T1", model="claude-opus-4-8")
         assert "overridden" in caplog.text
@@ -294,13 +301,13 @@ class TestRequireRouteModelNoneStrict:
     def test_worker_model_none_warns(self, real_enforcer: ConstraintEnforcer, caplog):
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(terminal_id="T1", model=None)
-        assert "workers-sonnet-pinned" in caplog.text
+        assert "workers-kimi-pinned" in caplog.text
 
     def test_non_matching_role_model_none_ok(self, real_enforcer: ConstraintEnforcer, caplog):
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(terminal_id="T9", model=None)
         assert "t0-opus-only" not in caplog.text
-        assert "workers-sonnet-pinned" not in caplog.text
+        assert "workers-kimi-pinned" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -336,17 +343,35 @@ class TestRoute1Requirements:
         assert any(v.code == "kimi-via-cli-only" and v.severity == "blocking" for v in violations)
 
     def test_override_flag_allows_warn_rule(self, monkeypatch, caplog):
-        monkeypatch.setenv("VNX_OVERRIDE_WORKERS_SONNET_PINNED", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_WORKERS_KIMI_PINNED", "1")
         with caplog.at_level("WARNING"):
             violations = ConstraintEnforcer().enforce(
                 provider="claude",
                 terminal_id="T1",
                 model="claude-opus-4-8",
             )
-        assert any(v.code == "workers-sonnet-pinned" and v.override_applied for v in violations)
+        assert any(v.code == "workers-kimi-pinned" and v.override_applied for v in violations)
         assert "overridden" in caplog.text
 
     def test_clean_dispatch_unaffected(self):
+        """A genuinely clean T1 dispatch post worker-provider-kimi-flip (2026-07-23)
+        requests the pinned kimi-k3 model — previously this asserted provider=claude
+        model=sonnet was clean, which is no longer true (sonnet now deviates from
+        workers-kimi-pinned and produces a warn; see test_clean_dispatch_claude_sonnet
+        below for that case)."""
+        violations = check_constraints(
+            provider="kimi",
+            model="kimi-k3",
+            terminal_id="T1",
+            via="cli",
+            check_registry=True,
+        )
+        assert violations == []
+
+    def test_clean_dispatch_claude_sonnet_now_warns(self):
+        """provider=claude, model=sonnet on T1 deviates from the kimi-k3 pin
+        (workers-kimi-pinned) and produces exactly one warn-severity violation —
+        not blocking, and not silently swallowed."""
         violations = check_constraints(
             provider="claude",
             model="sonnet",
@@ -354,7 +379,8 @@ class TestRoute1Requirements:
             via="cli",
             check_registry=True,
         )
-        assert violations == []
+        assert not any(v.severity == "blocking" for v in violations)
+        assert any(v.code == "workers-kimi-pinned" and v.severity == "warn" for v in violations)
 
     def test_model_not_in_current_registry_blocks(self):
         violations = check_constraints(
