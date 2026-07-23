@@ -246,7 +246,16 @@ def _maybe_reexec_pinned(argv: List[str]) -> None:
     if existing:
         pythonpath.append(existing)
     os.environ["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    # cwd-shadow hardening: `python -m` prepends the process's CWD to
+    # sys.path ahead of PYTHONPATH, so a cwd-local `vnx_cli/` (a dev checkout
+    # or a vendored copy in a consumer repo) would SHADOW the pinned install.
+    # PYTHONSAFEPATH=1 + the explicit `-P` flag (both Python 3.11+, and
+    # pyproject declares requires-python >= 3.11) tell the re-exec'd
+    # interpreter not to prepend cwd, so the pinned vnx_cli on PYTHONPATH
+    # always wins. Both are set belt-and-suspenders: env var survives any
+    # argv rewrapping by a wrapper, -P documents the intent at the call site.
+    os.environ["PYTHONSAFEPATH"] = "1"
     try:
-        os.execv(python, [python, "-m", "vnx_cli.main", *argv])
+        os.execv(python, [python, "-P", "-m", "vnx_cli.main", *argv])
     except OSError as exc:
         _warn(f"re-exec to pinned version {pin!r} failed ({exc}); running current version")
