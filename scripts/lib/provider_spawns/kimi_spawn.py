@@ -683,7 +683,7 @@ def spawn_kimi(
     on_event: Optional[Callable[[Any], Optional[bool]]] = None,
     extra_env: Optional[Dict[str, str]] = None,
     cwd: Optional[Any] = None,
-    chunk_timeout: float = 600.0,
+    chunk_timeout: float = 1200.0,
     total_deadline: float = 900.0,
     event_store: Optional[Any] = None,
     **kwargs: Any,
@@ -694,7 +694,7 @@ def spawn_kimi(
     Returns KimiSpawnResult(returncode=127) when the kimi binary is absent.
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
-    The per-chunk stall default is 600s (overridable via VNX_KIMI_STALL_THRESHOLD):
+    The per-chunk stall default is 1200s (overridable via VNX_KIMI_STALL_THRESHOLD):
     Kimi is a reasoning model whose 1.44.0 content-block output is end-loaded, so
     the first token can arrive only after a long reasoning gap (a 300s default
     spuriously killed adversarial-review dispatches mid-think). A FAILURE is
