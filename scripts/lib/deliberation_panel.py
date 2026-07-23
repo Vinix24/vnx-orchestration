@@ -19,9 +19,13 @@ provider string through its correct lane.
 from __future__ import annotations
 
 import concurrent.futures as _cf
+import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # A dispatcher runs one panelist and returns its report text.
 DispatcherFn = Callable[[str, str, str, str], str]
@@ -139,26 +143,42 @@ class DeliberationResult:
         return "\n".join(lines)
 
 
-# Per-seat char budget fed into the sequential stages (contrarian/verify/synthesis).
-# Was 1500 and got entirely consumed by each report's echoed frontmatter + instruction +
-# shared context, so the downstream seats saw only boilerplate, never the analysis
-# (sales-copilot panel, 2026-07-18). Heuristic echo-stripping was attempted in two
-# follow-up fix rounds but proved fragile (codex-gate kept finding edge cases), so we
-# deliberately fall back to the robust minimum: a plain budget that keeps boilerplate
-# but leaves room for the actual analysis.
-_DIGEST_LIMIT = 6000
+# Per-report backstop fed into the sequential stages (contrarian/verify/synthesis). This is
+# NOT a normal-case truncation — full seat reports (~15-25k tokens total across a 5-seat
+# fan-out) fit easily in a modern context window, so the digest feeds them WHOLE. A prior
+# 6000-char budget was consumed entirely by each report's echoed frontmatter + instruction +
+# shared context, so downstream stages saw only boilerplate and never the analysis, and it
+# degraded silently for a whole session (sales-copilot panel, 2026-07-18/22). Heuristic
+# echo-stripping and a model-emitted sentinel were both considered and rejected — fragile,
+# or dependent on model cooperation. This backstop exists only to bound a pathological
+# runaway report; hitting it must never be silent (see _clip).
+_REPORT_BACKSTOP = int(os.environ.get("VNX_PANEL_REPORT_BACKSTOP", "40000"))
 
 
-def _digest(fan_out: List[Dict[str, str]], limit: int = _DIGEST_LIMIT) -> str:
-    """Compact digest of the fan-out for the contrarian/verify/synthesis stages.
+def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
+    """Pass text through whole unless it exceeds the generous backstop. A clip is always
+    logged loudly — silent degradation is the exact bug this replaces."""
+    if len(text) > limit:
+        logger.warning(
+            "panel digest: report for %s clipped at %d chars (was %d) — raise VNX_PANEL_REPORT_BACKSTOP",
+            tag, limit, len(text),
+        )
+        return text[:limit]
+    return text
 
-    Budget-only: no heuristic echo-stripping. Downstream seats can read past the
-    boilerplate; the important thing is that the analysis is not truncated.
+
+def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str:
+    """Full digest of the fan-out for the contrarian/verify/synthesis stages.
+
+    Feeds each seat's FULL report text — no normal-case truncation. ``limit`` is a
+    generous per-report backstop against a pathological runaway report only; hitting it
+    is always logged (see _clip), never silent.
     """
     parts = []
     for fo in fan_out:
         text = (fo.get("text") or "").strip()
-        parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text[:limit]}")
+        text = _clip(text, fo.get("provider", "?"), limit)
+        parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text}")
     return "\n\n".join(parts)
 
 
@@ -225,7 +245,7 @@ def run_deliberation(
     verify_prompt = (
         f"You are the VERIFY pass on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
-        f"Panel findings:\n{digest}\n\nRed-team:\n{result.contrarian[:_DIGEST_LIMIT]}\n\n"
+        f"Panel findings:\n{digest}\n\nRed-team:\n{_clip(result.contrarian, 'contrarian')}\n\n"
         f"Take the TOP 5 concrete claims across the above and adversarially verify each against "
         f"{spec.verify_target}. Mark each: CONFIRMED / REFUTED / UNVERIFIABLE, with the specific "
         "evidence (file:line or source). Default to REFUTED/UNVERIFIABLE when evidence is thin."
@@ -239,8 +259,8 @@ def run_deliberation(
     synth_prompt = (
         f"You are the SYNTHESISER on a deliberation panel ({spec.description}).\n"
         f"QUESTION: {question}\n{ctx_block}\n"
-        f"Divergent views:\n{digest}\n\nRed-team:\n{result.contrarian[:_DIGEST_LIMIT]}\n\n"
-        f"Verification:\n{result.factcheck[:_DIGEST_LIMIT]}\n\n"
+        f"Divergent views:\n{digest}\n\nRed-team:\n{_clip(result.contrarian, 'contrarian')}\n\n"
+        f"Verification:\n{_clip(result.factcheck, 'verify')}\n\n"
         f"Produce {spec.synth_goal}. Structure: CONSENSUS (verified), CONTESTED (surviving "
         "dissent), VERIFIED CLAIMS (ranked, with evidence), OPEN QUESTIONS. Dedupe. Cite "
         "file:line / sources. Do not invent agreement that isn't there."
