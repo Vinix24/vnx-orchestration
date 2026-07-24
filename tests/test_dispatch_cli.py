@@ -1116,15 +1116,16 @@ def test_default_model_pins_flip_workers_to_kimi_k3():
 
 
 def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
-    """_load_model_pins_from_yaml() matches the RENAMED constraint id
-    (workers-kimi-pinned, not workers-sonnet-pinned) and loads its
-    required_route.model (kimi-k3) for T1/T2/T3 from the real
-    provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only."""
+    """_load_model_pins_from_yaml() matches the (intentionally retained) constraint
+    id workers-kimi-pinned and loads its required_route.model for T1/T2/T3 from the
+    real provider_constraints.yaml SSOT. Value reverted to sonnet 2026-07-24
+    (kimi CLI OAuth quota exhausted fleet-wide) — id unchanged so this loader's
+    id-string match keeps working. T0 still resolves via t0-opus-only."""
     pins = _load_model_pins_from_yaml()
     assert pins["T0"] == "claude-opus-4-8"
-    assert pins["T1"] == "kimi-k3"
-    assert pins["T2"] == "kimi-k3"
-    assert pins["T3"] == "kimi-k3"
+    assert pins["T1"] == "sonnet"
+    assert pins["T2"] == "sonnet"
+    assert pins["T3"] == "sonnet"
 
 
 def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
@@ -1196,15 +1197,15 @@ def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatc
     assert "kimi-via-cli-only" in err
 
 
-def test_raw_opus_model_pin_now_rejects_explicit_claude_override(tmp_path, monkeypatch):
-    """worker-provider-kimi-flip (2026-07-23): the workers-kimi-pinned SSOT now resolves T1's
-    pin to "kimi-k3" regardless of the requested model. An explicit provider=claude override on
-    T1 (e.g. --model opus) is pinned to that same "kimi-k3" label, which is not a valid Claude
-    model — the registry gate (check_registry=True) correctly REJECTS it (blocking,
-    model-not-in-current-registry) instead of silently proceeding on a claude lane. This is the
-    intended "kimi-only, no fallback" behavior: there is no warn-and-proceed escape hatch left
-    for a claude override on a build-worker role. (Formerly this scenario pinned to
-    claude-sonnet-5 and proceeded under workers-sonnet-pinned — see git history.)"""
+def test_raw_opus_model_pin_now_succeeds_pinned_to_sonnet(tmp_path, monkeypatch):
+    """kimi-quota-exhausted revert (2026-07-24): the workers-kimi-pinned SSOT (id
+    retained, value reverted) now resolves T1's pin to "sonnet", a valid Claude
+    model. An explicit provider=claude override on T1 (e.g. --model opus) is
+    pinned down to sonnet with a warn-only "model-tier" advisory — the registry
+    gate (check_registry=True) no longer rejects it, since sonnet is a real Claude
+    model (unlike the interim kimi-k3 label). No blocking violation, no executor
+    skip. (Formerly — worker-provider-kimi-flip, 2026-07-23 — this scenario pinned
+    to kimi-k3 and was hard-rejected; see git history.)"""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260713-staging-opus-pin"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -1233,14 +1234,17 @@ def test_raw_opus_model_pin_now_rejects_explicit_claude_override(tmp_path, monke
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, (
-        "requested opus on T1 pins to kimi-k3 (workers-kimi-pinned) and must be rejected — "
-        "no silent claude fallback for a build-worker role"
+    assert rc == 0, (
+        "requested opus on T1 pins to sonnet (workers-kimi-pinned, value reverted) and "
+        "must proceed — the pin target is a valid Claude model again"
     )
-    mock_execute.assert_not_called()
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "sonnet"
+    assert any("requested opus, pinned sonnet" in w for w in plan_arg.warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -2144,13 +2148,20 @@ def test_worker_claude_override_without_reason_is_blocking_refusal(tmp_path, mon
     assert "worker-claude-override-reason-required" in err
 
 
-def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeypatch, capsys):
-    """DEFAULT INTACT: no override env + provider=claude + T1 => still hard-rejected
-    via the kimi-k3 registry failure (model-not-in-current-registry, blocking).
-    No silent claude fallback is ever introduced."""
+def test_no_override_claude_on_build_worker_now_succeeds_pinned_to_sonnet(tmp_path, monkeypatch):
+    """kimi-quota-exhausted revert (2026-07-24): no override env + provider=claude +
+    T1 (no explicit model) now resolves via the reverted sonnet pin and PROCEEDS —
+    sonnet is a valid Claude model, so neither kimi-via-cli-only nor
+    model-not-in-current-registry fires. The escape-hatch override is no longer
+    required to route a plain claude dispatch onto a build-worker slot; it still
+    adds its own audited warn entry when explicitly invoked (see
+    test_worker_claude_override_routes_build_worker_to_claude_tmux), but a
+    no-override claude dispatch is no longer hard-rejected by default. (Formerly —
+    worker-provider-kimi-flip, 2026-07-23 — this was a kimi-k3 registry
+    hard-reject; see git history.)"""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
-        instruction_text="# No override\n\nThis must keep hard-rejecting.\n",
+        instruction_text="# No override\n\nThis now proceeds via the sonnet pin.\n",
         staging_id="20260723-staging-no-override",
         dispatch_id="20260723-no-override-reject",
         provider="claude",
@@ -2160,16 +2171,14 @@ def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeyp
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _clear_worker_claude_override_env(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, "default kimi-k3 hard-reject must stand without the override env"
-    mock_execute.assert_not_called()
-    err = capsys.readouterr().err
-    # The emergent reject surfaces as the first blocking verdict for a kimi-branded
-    # model on the claude lane (kimi-via-cli-only fires ahead of the registry gate).
-    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
-    assert "worker-claude-override" not in err
+    assert rc == 0, "sonnet pin (workers-kimi-pinned, value reverted) must let a plain claude dispatch proceed"
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "sonnet"
+    assert not any("worker-claude-override" in w for w in plan_arg.warnings)
 
 
 def test_no_override_kimi_build_dispatch_unchanged(tmp_path, monkeypatch):

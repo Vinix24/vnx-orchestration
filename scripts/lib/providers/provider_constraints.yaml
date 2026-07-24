@@ -53,18 +53,25 @@ constraints:
     audit_severity: warn
     override_allowed: true
 
+  # NOTE: id intentionally retained as `workers-kimi-pinned` even though the
+  # pinned model below is sonnet, not kimi-k3. The pin-loader
+  # (_load_model_pins_from_yaml in scripts/lib/dispatch_cli.py) hard-keys on
+  # this exact string (`elif cid == "workers-kimi-pinned"`) — renaming the id
+  # drops the pin back to its default.
   - id: workers-kimi-pinned
     rule: require_route
     required_route:
       role: [T1, T2, T3]
-      model: kimi-k3
+      model: sonnet
     reason: >-
-      Build-worker terminals default to kimi-k3 via the kimi CLI OAuth lane
-      (operator directive 2026-07-23, worker-provider-kimi-flip-decision):
-      kimi is proven agentic (--yolo + -w execute tools, #1210) and the
-      subscription-flat OAuth quota keeps cost predictable. Sonnet remains
-      available as an explicit operator override; Opus is reserved for T0.
-      No automatic claude/sonnet fallback — a routing miss fails loud.
+      Build-worker terminals (T1/T2/T3) default to Sonnet (operator directive
+      2026-07-24, kimi-quota-exhausted): the kimi CLI OAuth quota is spent
+      fleet-wide, so the kimi-k3 pin failed loud on every build dispatch
+      against kimi-via-cli-only. Reverted to the Sonnet default until the kimi
+      quota resets (drain-to-reset). Opus stays reserved for the T0
+      orchestrator role. This value-flip is the tactical step; the durable
+      reshape to a free, model-agnostic per-dispatch provider choice (soft
+      default, no escape-hatch) is track worker-provider-free-choice.
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
