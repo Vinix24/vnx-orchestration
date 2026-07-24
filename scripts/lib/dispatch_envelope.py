@@ -1163,6 +1163,10 @@ class ProviderAdapter:
                 # longer deadline (e.g. stage_spec_bundle's 3600s default) was previously
                 # silently capped short (memory: provider-lane-900s-deadline-kills-builds).
                 total_deadline=float(plan.deadline_seconds),
+                # OI-801: thread the plan's base_ref into the fabrication
+                # guard's commit-aware worktree check (a seeded base like a
+                # fixture branch must not read origin/main as the merge-base).
+                base_ref=plan.base_ref or "origin/main",
             )
         except BrokenPipeError as exc:
             return _AdapterResult(

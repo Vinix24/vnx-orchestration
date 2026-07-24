@@ -508,6 +508,7 @@ class TestSpawnKimiSubprocess(unittest.TestCase):
 
 def _spawn_kimi_with_events(
     events: list, returncode: int = 0, cwd=None, event_writer=None,
+    base_ref=None,
 ) -> KimiSpawnResult:
     """Run spawn_kimi with a real-pipe-backed fake process emitting the given events.
 
@@ -540,7 +541,7 @@ def _spawn_kimi_with_events(
             mock_start.return_value = (fake_proc, None)
             result = spawn_kimi(
                 "prompt", dispatch_id="d1", terminal_id="T1", cwd=cwd,
-                event_writer=event_writer,
+                event_writer=event_writer, base_ref=base_ref,
             )
     finally:
         writer_thread.join(timeout=5)
@@ -1060,6 +1061,22 @@ class TestWorktreeHasChanges(unittest.TestCase):
     exercised against a real git repo, not a mocked subprocess, per the "tests
     run real code" convention."""
 
+    @staticmethod
+    def _git(cwd: str, *args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test",
+             *args],
+            cwd=cwd, check=True, capture_output=True,
+        )
+
+    @classmethod
+    def _init_repo_with_base(cls, tmp: str, base_ref: str = "main") -> None:
+        """Init a repo with one initial commit on *base_ref* (the merge base)."""
+        cls._git(tmp, "init", "-q", "-b", base_ref)
+        Path(tmp, "seed.txt").write_text("seed")
+        cls._git(tmp, "add", "seed.txt")
+        cls._git(tmp, "commit", "-q", "-m", "initial")
+
     def test_clean_worktree_returns_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
@@ -1074,6 +1091,46 @@ class TestWorktreeHasChanges(unittest.TestCase):
     def test_non_git_directory_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(_worktree_has_changes(Path(tmp)))
+
+    # --- OI-801: commit-aware fabrication guard ---
+
+    def test_committed_work_ahead_of_base_returns_true(self) -> None:
+        """REGRESSION (OI-801): a worker that COMMITTED its work leaves a clean
+        `git status`, yet must count as real work — this was the false-failure
+        that rejected dispatches #1222/#1223."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            self._git(tmp, "checkout", "-q", "-b", "dispatch/work")
+            Path(tmp, "deliverable.py").write_text("print('done')\n")
+            self._git(tmp, "add", "deliverable.py")
+            self._git(tmp, "commit", "-q", "-m", "worker deliverable")
+            self.assertIs(_worktree_has_changes(Path(tmp), base_ref="main"), True)
+
+    def test_clean_tree_no_commits_ahead_returns_false(self) -> None:
+        """SAFETY: commits exist (the base) but NOTHING is ahead of it and the
+        tree is clean — a genuine no-op must still read as fabrication."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            self._git(tmp, "checkout", "-q", "-b", "dispatch/noop")
+            self.assertIs(_worktree_has_changes(Path(tmp), base_ref="main"), False)
+
+    def test_uncommitted_edit_on_committed_branch_returns_true(self) -> None:
+        """Uncommitted-only edit (no commit) still counts — existing behavior
+        preserved on top of the commit-aware path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            Path(tmp, "seed.txt").write_text("edited")
+            self.assertIs(_worktree_has_changes(Path(tmp), base_ref="main"), True)
+
+    def test_unresolvable_base_ref_returns_none(self) -> None:
+        """A failed commit-check must NOT turn into a false accept or a false
+        reject: base ref that does not resolve -> None (cannot verify -> the
+        caller skips the invariant)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            self.assertIsNone(
+                _worktree_has_changes(Path(tmp), base_ref="origin/nonexistent")
+            )
 
 
 class TestFabricationInvariant(unittest.TestCase):
@@ -1208,6 +1265,48 @@ class TestKimiFabricationInvariantEndToEnd(unittest.TestCase):
         result = _spawn_kimi_with_events(self._TOOL_CALL_EVENTS, cwd=None)
         self.assertIsNone(result.error)
         self.assertEqual(result.returncode, 0)
+
+    @staticmethod
+    def _git(cwd: str, *args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test",
+             *args],
+            cwd=cwd, check=True, capture_output=True,
+        )
+
+    def test_tool_calls_with_committed_work_passes(self) -> None:
+        """END-TO-END REGRESSION (OI-801): clean `git status` but COMMITTED work
+        ahead of base — the guard must NOT fire (the #1222/#1223 false-failure)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._git(tmp, "init", "-q", "-b", "main")
+            Path(tmp, "seed.txt").write_text("seed")
+            self._git(tmp, "add", "seed.txt")
+            self._git(tmp, "commit", "-q", "-m", "initial")
+            self._git(tmp, "checkout", "-q", "-b", "dispatch/work")
+            Path(tmp, "deliverable.py").write_text("print('done')\n")
+            self._git(tmp, "add", "deliverable.py")
+            self._git(tmp, "commit", "-q", "-m", "worker deliverable")
+            result = _spawn_kimi_with_events(
+                self._TOOL_CALL_EVENTS, cwd=tmp, base_ref="main",
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_tool_calls_no_commits_ahead_still_fails_loud(self) -> None:
+        """END-TO-END SAFETY: branch with zero commits ahead of base and a clean
+        tree — the fabrication guard MUST still fire."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._git(tmp, "init", "-q", "-b", "main")
+            Path(tmp, "seed.txt").write_text("seed")
+            self._git(tmp, "add", "seed.txt")
+            self._git(tmp, "commit", "-q", "-m", "initial")
+            self._git(tmp, "checkout", "-q", "-b", "dispatch/noop")
+            result = _spawn_kimi_with_events(
+                self._TOOL_CALL_EVENTS, cwd=tmp, base_ref="main",
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

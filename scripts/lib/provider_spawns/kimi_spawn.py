@@ -377,17 +377,17 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
     return cmd
 
 
-def _worktree_has_changes(worktree: Any) -> Optional[bool]:
-    """Return True/False for uncommitted git changes in *worktree*, or None if unknown.
+def _run_invariant_git(worktree: Any, args: list) -> Optional[subprocess.CompletedProcess]:
+    """Run a fabrication-invariant git command; None on timeout/OS-level failure.
 
-    None means the check itself could not be performed (git missing, *worktree*
-    is not a git repo, or the command timed out) — callers must treat that as
-    "cannot verify" and skip the fabrication-invariant rather than treating an
-    inability to check as evidence of fabrication.
+    A non-zero exit is NOT collapsed to None here — some checks (e.g. an unborn
+    HEAD) carry a definitive answer in their exit code, so the caller inspects
+    ``returncode`` itself. None is reserved for "the command never ran"
+    (git missing, timeout), the true cannot-verify case.
     """
     try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain"],
+        return subprocess.run(
+            ["git", *args],
             cwd=str(worktree),
             capture_output=True,
             text=True,
@@ -395,17 +395,85 @@ def _worktree_has_changes(worktree: Any) -> Optional[bool]:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning(
-            "kimi_spawn: fabrication-invariant git status failed for %s (skipping check): %s",
-            worktree, exc,
+            "kimi_spawn: fabrication-invariant git %s failed for %s (skipping check): %s",
+            args[0], worktree, exc,
         )
         return None
-    if proc.returncode != 0:
+
+
+def _worktree_has_changes(worktree: Any, base_ref: str = "origin/main") -> Optional[bool]:
+    """Return True/False for real work in *worktree*, or None if unknown.
+
+    COMMIT-AWARE (OI-801): True when EITHER
+      - ``git status --porcelain`` is non-empty (uncommitted / untracked work), OR
+      - HEAD carries COMMITTED work ahead of *base_ref* — merge-base +
+        ``git rev-list --count <merge_base>..HEAD`` > 0, mirroring
+        ``phantom_guard.compute_worktree_diff``. A worker that committed its
+        work (the normal, correct behavior) leaves a clean ``git status`` and
+        must NOT be misread as fabrication.
+    False only when BOTH are empty (genuine no-op — still fabrication).
+
+    None means the check itself could not be performed (git missing, *worktree*
+    is not a git repo, the base ref does not resolve, or a command timed out)
+    — callers must treat that as "cannot verify" and skip the
+    fabrication-invariant rather than treating an inability to check as
+    evidence of fabrication. One exception: an UNBORN HEAD (no commits at
+    all) on an otherwise clean tree is a definitive "no work", not a
+    cannot-verify, so it returns False.
+    """
+    status = _run_invariant_git(worktree, ["status", "--porcelain"])
+    if status is None:
+        return None
+    if status.returncode != 0:
         logger.warning(
             "kimi_spawn: fabrication-invariant git status exited %d for %s (skipping check): %s",
-            proc.returncode, worktree, (proc.stderr or "")[:200],
+            status.returncode, worktree, (status.stderr or "")[:200],
         )
         return None
-    return bool(proc.stdout.strip())
+    if status.stdout.strip():
+        return True
+
+    # Clean tree — committed work can still be present ahead of base_ref.
+    head = _run_invariant_git(worktree, ["rev-parse", "--verify", "HEAD"])
+    if head is None:
+        return None
+    if head.returncode != 0:
+        # Unborn HEAD: zero commits and a clean tree — a definitive no-op.
+        return False
+
+    base = (base_ref or "").strip() or "origin/main"
+    merge_base = _run_invariant_git(worktree, ["merge-base", base, "HEAD"])
+    if merge_base is None:
+        return None
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        # Base ref unresolvable / unrelated histories — cannot verify.
+        logger.warning(
+            "kimi_spawn: fabrication-invariant git merge-base vs %s exited %d for %s "
+            "(skipping check): %s",
+            base, merge_base.returncode, worktree, (merge_base.stderr or "")[:200],
+        )
+        return None
+
+    ahead = _run_invariant_git(
+        worktree, ["rev-list", "--count", f"{merge_base.stdout.strip()}..HEAD"],
+    )
+    if ahead is None:
+        return None
+    if ahead.returncode != 0:
+        logger.warning(
+            "kimi_spawn: fabrication-invariant git rev-list exited %d for %s (skipping check): %s",
+            ahead.returncode, worktree, (ahead.stderr or "")[:200],
+        )
+        return None
+    try:
+        return int(ahead.stdout.strip()) > 0
+    except ValueError:
+        logger.warning(
+            "kimi_spawn: fabrication-invariant rev-list count unparseable for %s "
+            "(skipping check): %r",
+            worktree, ahead.stdout.strip()[:100],
+        )
+        return None
 
 
 # Inherited venv-activation vars that point Python at a FOREIGN site-packages.
@@ -599,6 +667,7 @@ def _finalize_kimi_result(
     raw_samples: Optional[list] = None,
     saw_tool_calls: bool = False,
     worktree: Optional[Any] = None,
+    base_ref: str = "origin/main",
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult.
 
@@ -622,7 +691,7 @@ def _finalize_kimi_result(
 
     worktree_unchanged = False
     if saw_tool_calls and worktree is not None:
-        worktree_unchanged = _worktree_has_changes(worktree) is False
+        worktree_unchanged = _worktree_has_changes(worktree, base_ref=base_ref) is False
 
     if errors_captured:
         error: Optional[str] = "\n".join(errors_captured)
@@ -686,6 +755,7 @@ def spawn_kimi(
     chunk_timeout: float = 1200.0,
     total_deadline: float = 900.0,
     event_store: Optional[Any] = None,
+    base_ref: Optional[str] = None,
     **kwargs: Any,
 ) -> KimiSpawnResult:
     """Spawn ``kimi --print --output-format stream-json --yolo -p <prompt>``.
@@ -787,4 +857,5 @@ def spawn_kimi(
         raw_samples=raw_samples,
         saw_tool_calls=saw_tool_calls,
         worktree=cwd,
+        base_ref=(base_ref or "").strip() or "origin/main",
     )
