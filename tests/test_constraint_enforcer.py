@@ -105,8 +105,9 @@ class TestT0OpusOnly:
 
 
 # ---------------------------------------------------------------------------
-# workers-kimi-pinned — require_route role=[T1,T2,T3] model=kimi-k3
-# (worker-provider-kimi-flip, 2026-07-23 — renamed from workers-sonnet-pinned)
+# workers-kimi-pinned — require_route role=[T1,T2,T3] model=sonnet
+# (id retained from worker-provider-kimi-flip, 2026-07-23; value reverted to
+# sonnet 2026-07-24 — kimi CLI OAuth quota exhausted fleet-wide)
 # ---------------------------------------------------------------------------
 
 class TestWorkersKimiPinned:
@@ -116,16 +117,18 @@ class TestWorkersKimiPinned:
             real_enforcer.enforce(terminal_id="T1", model="claude-opus-4-8")
         assert "workers-kimi-pinned" in caplog.text
 
-    def test_t2_with_kimi_k3_allowed(self, real_enforcer: ConstraintEnforcer, caplog):
+    def test_t2_with_kimi_k3_now_warns(self, real_enforcer: ConstraintEnforcer, caplog):
+        """kimi-k3 was the pinned model pre-revert (worker-provider-kimi-flip,
+        2026-07-23); post-revert (kimi-quota-exhausted, 2026-07-24) it's a
+        deviation from the sonnet pin and warns."""
         with caplog.at_level("WARNING"):
             real_enforcer.enforce(provider="kimi", terminal_id="T2", model="kimi-k3")
-        assert "workers-kimi-pinned" not in caplog.text
-
-    def test_t2_with_sonnet_now_warns(self, real_enforcer: ConstraintEnforcer, caplog):
-        """Sonnet was the pinned model pre-flip; it's now a deviation that warns."""
-        with caplog.at_level("WARNING"):
-            real_enforcer.enforce(terminal_id="T2", model="claude-sonnet-4-6")
         assert "workers-kimi-pinned" in caplog.text
+
+    def test_t2_with_sonnet_allowed(self, real_enforcer: ConstraintEnforcer, caplog):
+        with caplog.at_level("WARNING"):
+            real_enforcer.enforce(terminal_id="T2", model="sonnet")
+        assert "workers-kimi-pinned" not in caplog.text
 
     def test_t3_with_haiku_warns(self, real_enforcer: ConstraintEnforcer, caplog):
         with caplog.at_level("WARNING"):
@@ -353,12 +356,11 @@ class TestRoute1Requirements:
         assert any(v.code == "workers-kimi-pinned" and v.override_applied for v in violations)
         assert "overridden" in caplog.text
 
-    def test_clean_dispatch_unaffected(self):
-        """A genuinely clean T1 dispatch post worker-provider-kimi-flip (2026-07-23)
-        requests the pinned kimi-k3 model — previously this asserted provider=claude
-        model=sonnet was clean, which is no longer true (sonnet now deviates from
-        workers-kimi-pinned and produces a warn; see test_clean_dispatch_claude_sonnet
-        below for that case)."""
+    def test_kimi_k3_now_warns_post_revert(self):
+        """kimi-k3 was the pinned model under worker-provider-kimi-flip (2026-07-23);
+        after the kimi-quota-exhausted revert (2026-07-24) it deviates from the
+        sonnet pin and produces exactly one warn-severity violation — not
+        blocking, and not silently swallowed."""
         violations = check_constraints(
             provider="kimi",
             model="kimi-k3",
@@ -366,12 +368,12 @@ class TestRoute1Requirements:
             via="cli",
             check_registry=True,
         )
-        assert violations == []
+        assert not any(v.severity == "blocking" for v in violations)
+        assert any(v.code == "workers-kimi-pinned" and v.severity == "warn" for v in violations)
 
-    def test_clean_dispatch_claude_sonnet_now_warns(self):
-        """provider=claude, model=sonnet on T1 deviates from the kimi-k3 pin
-        (workers-kimi-pinned) and produces exactly one warn-severity violation —
-        not blocking, and not silently swallowed."""
+    def test_clean_dispatch_claude_sonnet(self):
+        """A genuinely clean T1 dispatch post kimi-quota-exhausted revert
+        (2026-07-24) requests the pinned sonnet model."""
         violations = check_constraints(
             provider="claude",
             model="sonnet",
@@ -379,8 +381,7 @@ class TestRoute1Requirements:
             via="cli",
             check_registry=True,
         )
-        assert not any(v.severity == "blocking" for v in violations)
-        assert any(v.code == "workers-kimi-pinned" and v.severity == "warn" for v in violations)
+        assert violations == []
 
     def test_model_not_in_current_registry_blocks(self):
         violations = check_constraints(

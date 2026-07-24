@@ -53,9 +53,11 @@ constraints:
     audit_severity: warn
     override_allowed: true
 
-  # id intentionally retained as `workers-kimi-pinned` across this value-flip:
-  # the pin-loader (_load_model_pins_from_yaml() in scripts/lib/dispatch_cli.py)
-  # hard-keys on this exact string; renaming it drops the pin back to default.
+  # NOTE: id intentionally retained as `workers-kimi-pinned` even though the
+  # pinned model below is sonnet, not kimi-k3. The pin-loader
+  # (_load_model_pins_from_yaml in scripts/lib/dispatch_cli.py) hard-keys on
+  # this exact string (`elif cid == "workers-kimi-pinned"`) — renaming the id
+  # drops the pin back to its default.
   - id: workers-kimi-pinned
     rule: require_route
     required_route:
@@ -65,9 +67,9 @@ constraints:
       Build-worker terminals (T1/T2/T3) default to Sonnet (operator directive
       2026-07-24, kimi-quota-exhausted): the kimi CLI OAuth quota is spent
       fleet-wide, so the kimi-k3 pin failed loud on every build dispatch
-      against kimi-via-cli-only. Reverted to the Sonnet default until the
-      kimi quota resets (drain-to-reset). Opus stays reserved for T0
-      (t0-opus-only). This value-flip is the tactical step; the durable
+      against kimi-via-cli-only. Reverted to the Sonnet default until the kimi
+      quota resets (drain-to-reset). Opus stays reserved for the T0
+      orchestrator role. This value-flip is the tactical step; the durable
       reshape to a free, model-agnostic per-dispatch provider choice (soft
       default, no escape-hatch) is track worker-provider-free-choice.
     enforcement: code_warn
