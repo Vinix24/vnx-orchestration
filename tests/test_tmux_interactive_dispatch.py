@@ -4466,5 +4466,183 @@ class TestCompletionHardeningP12(_LaneTestCase):
         self.assertEqual(len(matches), 0, "Non-matching pending receipt must not be returned")
 
 
+class TestWorkerRoleExport(_LaneTestCase):
+    """Spike E3 gap closure: _spawn_session exports VNX_WORKER_ROLE into the pane env."""
+
+    def _new_session_cmd(self, fake: FakeTmux) -> list:
+        cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertTrue(cmds, "new-session was not invoked")
+        return cmds[0]
+
+    def test_role_exported_in_new_session(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, role="backend-developer")
+
+        self.assertTrue(result.success, result.failure_reason)
+        ns_cmd = self._new_session_cmd(fake)
+        self.assertIn("-e", ns_cmd)
+        self.assertIn("VNX_WORKER_ROLE=backend-developer", ns_cmd)
+        # Existing exports are preserved.
+        self.assertIn(f"VNX_CURRENT_DISPATCH_ID={self.DISPATCH_ID}", ns_cmd)
+
+    def test_role_absent_when_none(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, role=None)
+
+        self.assertTrue(result.success, result.failure_reason)
+        ns_cmd = self._new_session_cmd(fake)
+        self.assertNotIn("VNX_WORKER_ROLE", " ".join(ns_cmd))
+
+
+class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
+    """Worktree-allocation seam: the worker-scope PreToolUse hook is registered
+    in the fresh worktree's .claude/settings.local.json before the session spawns."""
+
+    def test_write_hook_settings_fresh_worktree(self):
+        from tmux_interactive_dispatch import (
+            _WORKER_SCOPE_HOOK_COMMAND,
+            _write_worker_scope_hook_settings,
+        )
+
+        wt = self.state_dir / "wt-fresh"
+        wt.mkdir()
+        settings_path = _write_worker_scope_hook_settings(wt)
+
+        self.assertEqual(settings_path, wt / ".claude" / "settings.local.json")
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        pre = data["hooks"]["PreToolUse"]
+        self.assertEqual(len(pre), 1)
+        entry = pre[0]
+        self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit")
+        self.assertEqual(entry["hooks"][0]["type"], "command")
+        self.assertEqual(entry["hooks"][0]["command"], _WORKER_SCOPE_HOOK_COMMAND)
+        # The command resolves the hook from the worktree it fires in (cwd-based
+        # discovery), same pattern as the existing spawn-blocker hooks.
+        self.assertIn("git rev-parse --show-toplevel", entry["hooks"][0]["command"])
+        self.assertIn(
+            "scripts/hooks/pretooluse_worker_scope_enforce.sh",
+            entry["hooks"][0]["command"],
+        )
+
+    def test_write_hook_settings_merges_existing_and_is_idempotent(self):
+        from tmux_interactive_dispatch import _write_worker_scope_hook_settings
+
+        wt = self.state_dir / "wt-merge"
+        (wt / ".claude").mkdir(parents=True)
+        settings_path = wt / ".claude" / "settings.local.json"
+        existing = {
+            "someOtherKey": True,
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}
+                ],
+                "SessionStart": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "s"}]}
+                ],
+            },
+        }
+        settings_path.write_text(json.dumps(existing), encoding="utf-8")
+
+        _write_worker_scope_hook_settings(wt)
+        _write_worker_scope_hook_settings(wt)  # second run must not duplicate
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertTrue(data["someOtherKey"])
+        self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
+        pre = data["hooks"]["PreToolUse"]
+        self.assertEqual(len(pre), 2, "existing entry preserved + exactly one hook entry")
+        ours = [
+            e
+            for e in pre
+            if any("worker_scope_enforce" in h.get("command", "") for h in e["hooks"])
+        ]
+        self.assertEqual(len(ours), 1, "hook must be registered exactly once (idempotent)")
+
+    def test_write_hook_settings_corrupt_file_raises(self):
+        from tmux_interactive_dispatch import _write_worker_scope_hook_settings
+
+        wt = self.state_dir / "wt-corrupt"
+        (wt / ".claude").mkdir(parents=True)
+        (wt / ".claude" / "settings.local.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(Exception):
+            _write_worker_scope_hook_settings(wt)
+
+    def test_dispatch_writes_hook_settings_into_allocated_worktree(self):
+        """End-to-end at the allocation seam: an isolated-worktree dispatch leaves
+        the hook registration in the worktree's .claude/settings.local.json."""
+        wt = self.state_dir / "wt-allocated"
+        wt.mkdir()
+        handle = WorktreeHandle(
+            path=wt,
+            branch="dispatch/test",
+            base_sha="0" * 40,
+            base_ref="origin/main",
+            dispatch_id=self.DISPATCH_ID,
+        )
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        autopr_ok = MagicMock(ok=True, reason=None)
+        with (
+            patch("tmux_interactive_dispatch.allocate", return_value=handle),
+            patch("tmux_interactive_dispatch.classify", return_value="clean"),
+            patch(
+                "tmux_interactive_dispatch.reap",
+                return_value=ReapResult(removed=True),
+            ),
+            patch.object(lane, "_enforce_pr_exists", return_value=autopr_ok),
+        ):
+            result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertTrue(result.success, result.failure_reason)
+        settings_path = wt / ".claude" / "settings.local.json"
+        self.assertTrue(
+            settings_path.exists(),
+            "worktree allocation must register the worker-scope hook settings",
+        )
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        commands = [
+            h.get("command", "")
+            for e in data["hooks"]["PreToolUse"]
+            for h in e.get("hooks", [])
+        ]
+        self.assertTrue(
+            any("pretooluse_worker_scope_enforce.sh" in c for c in commands),
+            f"hook command not found in written settings: {commands}",
+        )
+
+    def test_dispatch_hook_settings_write_failure_does_not_abort(self):
+        """Best-effort wiring: a failing settings write must never abort the dispatch."""
+        wt = self.state_dir / "wt-failwrite"
+        wt.mkdir()
+        handle = WorktreeHandle(
+            path=wt,
+            branch="dispatch/test",
+            base_sha="0" * 40,
+            base_ref="origin/main",
+            dispatch_id=self.DISPATCH_ID,
+        )
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        autopr_ok = MagicMock(ok=True, reason=None)
+        with (
+            patch("tmux_interactive_dispatch.allocate", return_value=handle),
+            patch("tmux_interactive_dispatch.classify", return_value="clean"),
+            patch(
+                "tmux_interactive_dispatch.reap",
+                return_value=ReapResult(removed=True),
+            ),
+            patch.object(lane, "_enforce_pr_exists", return_value=autopr_ok),
+            patch(
+                "tmux_interactive_dispatch._write_worker_scope_hook_settings",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertTrue(result.success, result.failure_reason)
+
+
 if __name__ == "__main__":
     unittest.main()

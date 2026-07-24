@@ -302,6 +302,85 @@ def _sanitize_session_name(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default OFF)
+# ---------------------------------------------------------------------------
+
+# Command resolves the hook relative to the worktree it fires in (git rev-parse
+# returns the worktree root there) — same pattern as the existing spawn-blocker
+# hooks in .claude/settings.json.
+_WORKER_SCOPE_HOOK_COMMAND = (
+    "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+    "/scripts/hooks/pretooluse_worker_scope_enforce.sh\"'"
+)
+_WORKER_SCOPE_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit"
+
+
+def _worker_scope_hook_entry() -> dict:
+    """The settings.json PreToolUse entry registering the worker-scope hook."""
+    return {
+        "matcher": _WORKER_SCOPE_HOOK_MATCHER,
+        "hooks": [
+            {
+                "type": "command",
+                "command": _WORKER_SCOPE_HOOK_COMMAND,
+                "timeout": 5000,
+            }
+        ],
+    }
+
+
+def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
+    """Register the worker-scope PreToolUse enforcement hook in a dispatch worktree.
+
+    Writes/merges ``.claude/settings.local.json`` (gitignored; spike-proven to be
+    honored via cwd-based discovery and to live-reload — see
+    docs/investigations/spike-worker-scope-hook-feasibility.md E1/E2) rather than
+    the git-tracked ``.claude/settings.json``, so the worktree's git status stays
+    clean and the worker can never accidentally commit the registration.
+
+    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` (default OFF),
+    so registering it unconditionally is a guaranteed no-op until the fleet-wide
+    flip happens as a separate human-gated decision.
+
+    Idempotent: an identical hook command is never registered twice. Existing
+    unrelated keys and hook entries in the file are preserved.
+
+    Returns the settings file path written.
+    """
+    settings_path = worktree_root / ".claude" / "settings.local.json"
+    data: dict = {}
+    if settings_path.exists():
+        # A corrupt existing file must not be silently clobbered — surface it to
+        # the caller (which treats the whole write as best-effort).
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"worker-scope hook settings: {settings_path} is not a JSON object"
+            )
+
+    hooks = data.setdefault("hooks", {})
+    pre_tool_use = hooks.setdefault("PreToolUse", [])
+
+    already_registered = any(
+        isinstance(entry, dict)
+        and any(
+            isinstance(hook, dict)
+            and hook.get("command") == _WORKER_SCOPE_HOOK_COMMAND
+            for hook in entry.get("hooks", [])
+        )
+        for entry in pre_tool_use
+    )
+    if not already_registered:
+        pre_tool_use.append(_worker_scope_hook_entry())
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = settings_path.with_suffix(settings_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_path, settings_path)
+    return settings_path
+
+
+# ---------------------------------------------------------------------------
 # Core lane
 # ---------------------------------------------------------------------------
 class TmuxInteractiveDispatch:
@@ -1007,6 +1086,7 @@ class TmuxInteractiveDispatch:
         cwd: Path,
         dispatch_id: str = "",
         session_uuid: "str | None" = None,
+        role: "str | None" = None,
     ) -> "tuple[str, str] | None":
         """Create a detached session; return (pane_id, window_id) or None.
 
@@ -1017,12 +1097,19 @@ class TmuxInteractiveDispatch:
 
         When ``session_uuid`` is provided it is exported as ``VNX_CLAUDE_SESSION_ID``
         so the SessionStart hook can verify the pre-assigned id took (F1.1).
+
+        When ``role`` is provided it is exported as ``VNX_WORKER_ROLE`` so the
+        worker-scope PreToolUse enforcement hook
+        (scripts/hooks/pretooluse_worker_scope_enforce.py) can resolve which
+        role's permission profile to enforce (spike E3 gap).
         """
         args = ["new-session", "-d", "-s", session, "-c", str(cwd)]
         if dispatch_id:
             args += ["-e", f"VNX_CURRENT_DISPATCH_ID={dispatch_id}"]
         if session_uuid:
             args += ["-e", f"VNX_CLAUDE_SESSION_ID={session_uuid}"]
+        if role:
+            args += ["-e", f"VNX_WORKER_ROLE={role}"]
         args += ["-P", "-F", "#{pane_id}"]
         res = self._runner.run(args)
         if res.returncode != 0:
@@ -1936,6 +2023,23 @@ class TmuxInteractiveDispatch:
                     worktree_path=str(worktree_handle.path) if worktree_handle else None,
                 )
 
+            if worktree_handle is not None:
+                # Worker-scope PreToolUse enforcement hook (gated ON by
+                # VNX_ENFORCE_WORKER_PERMISSIONS, default OFF; spike E1/E2):
+                # register the hook in the fresh worktree BEFORE the tmux session
+                # spawns so cwd-based settings discovery has it from the first
+                # tool call. Best-effort: the hook is fail-open anyway, so a
+                # failed write must never abort the dispatch.
+                try:
+                    _write_worker_scope_hook_settings(Path(cwd))
+                except Exception as exc:  # noqa: BLE001 - hook wiring is best-effort
+                    logger.warning(
+                        "interactive: worker-scope hook settings write failed "
+                        "for %s: %s",
+                        dispatch_id,
+                        exc,
+                    )
+
         # Per-dispatch hook signal dir: the SessionStart / UserPromptSubmit / Stop
         # hooks (guarded by VNX_TMUX_SIGNAL_DIR + VNX_DISPATCH_ID) drop sentinels
         # here. Best-effort: if mkdtemp fails the lane silently degrades to the
@@ -2031,7 +2135,9 @@ class TmuxInteractiveDispatch:
         window_id: "str | None" = None
         try:
             # 1. Spawn detached session
-            spawned = self._spawn_session(session, cwd, dispatch_id, session_uuid=session_uuid)
+            spawned = self._spawn_session(
+                session, cwd, dispatch_id, session_uuid=session_uuid, role=role
+            )
             if spawned is None:
                 self._emit_event(
                     "interactive_spawn_failed",
