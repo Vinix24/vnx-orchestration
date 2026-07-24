@@ -43,9 +43,20 @@ the reason a legitimate tool call is refused.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger("pretooluse_worker_scope_enforce")
+if not logger.handlers:
+    # Hook contract: stdout carries only the decision JSON — logs go to stderr.
+    _stderr_handler = logging.StreamHandler(sys.stderr)
+    _stderr_handler.setFormatter(
+        logging.Formatter("%(name)s: %(levelname)s: %(message)s")
+    )
+    logger.addHandler(_stderr_handler)
+    logger.setLevel(logging.WARNING)
 
 _SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "lib"
 if str(_SCRIPTS_LIB) not in sys.path:
@@ -152,11 +163,19 @@ def _emit_audit(tool_name: object, decision: str, reason: "str | None") -> None:
                 or "(unset)",
             },
         )
-    except Exception:  # noqa: BLE001 - audit trail must never block or crash the hook
-        pass
+    except Exception:  # audit trail must never block or crash the hook
+        logger.warning(
+            "worker-scope audit append failed for tool %r (decision=%s); "
+            "the %s audit event was NOT written",
+            tool_name,
+            decision,
+            "worker_scope_block",
+            exc_info=True,
+        )
 
 
 def main() -> None:
+    tool_name_ctx: object = None
     try:
         raw = sys.stdin.read()
         try:
@@ -165,13 +184,19 @@ def main() -> None:
             return
         if not isinstance(payload, dict):
             return
+        tool_name_ctx = payload.get("tool_name")
 
         decision, reason = evaluate(payload)
 
         if decision == "block":
             sys.stdout.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
-            _emit_audit(payload.get("tool_name"), decision, reason)
-    except Exception:  # noqa: BLE001 - absolute fail-open, never crash the hook
+            _emit_audit(tool_name_ctx, decision, reason)
+    except Exception:  # absolute fail-open, never crash the hook
+        logger.exception(
+            "worker-scope hook failed unexpectedly for tool %r; failing open "
+            "with an implicit allow decision",
+            tool_name_ctx,
+        )
         return
 
 
