@@ -22,12 +22,6 @@ _SCRIPTS_LIB = Path(__file__).resolve().parent
 if str(_SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_LIB))
 
-try:
-    from project_root import resolve_project_root
-    _PROJECT_ROOT = resolve_project_root(__file__)
-except (ImportError, RuntimeError):
-    _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
 logger = logging.getLogger(__name__)
 
 # The fake default stamped by writers that never resolved a real role. The
@@ -39,7 +33,8 @@ def _resolve_db_path(state_dir: Optional[Path] = None) -> Optional[Path]:
     """Locate quality_intelligence.db — same resolution as intelligence_backfill.
 
     Order: explicit state_dir → VNX_STATE_DIR env → canonical vnx_paths
-    resolver → repo-local .vnx-data/state last resort. Never raises.
+    resolver. If none of those resolve to an existing DB, return None
+    (fail-open — no repo-local guess). Never raises.
     """
     try:
         if state_dir is not None:
@@ -61,9 +56,6 @@ def _resolve_db_path(state_dir: Optional[Path] = None) -> Optional[Path]:
                 "dispatch_identity: vnx_paths canonical resolver unavailable",
                 exc_info=True,
             )
-        candidate = _PROJECT_ROOT / ".vnx-data" / "state" / "quality_intelligence.db"
-        if candidate.exists():
-            return candidate
     except Exception:
         logger.debug("dispatch_identity: db path resolution failed", exc_info=True)
     return None
