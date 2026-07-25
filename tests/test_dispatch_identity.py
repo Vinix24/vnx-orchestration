@@ -1,0 +1,103 @@
+"""test_dispatch_identity.py — tests for the dispatch_identity role resolver.
+
+Receipt-quality track PR-1: role propagation from dispatch_metadata
+(quality_intelligence.db) into the v2 receipt emit. FAIL-OPEN contract:
+resolver errors return None, never raise.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
+
+import dispatch_identity
+from dispatch_identity import resolve_dispatch_role
+
+
+def _make_db(state_dir: Path, rows):
+    """Create a minimal quality_intelligence.db with dispatch_metadata rows."""
+    db_path = state_dir / "quality_intelligence.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE dispatch_metadata ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " dispatch_id TEXT NOT NULL,"
+        " project_id TEXT NOT NULL,"
+        " role TEXT"
+        ")"
+    )
+    for dispatch_id, project_id, role in rows:
+        conn.execute(
+            "INSERT INTO dispatch_metadata (dispatch_id, project_id, role) VALUES (?, ?, ?)",
+            (dispatch_id, project_id, role),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_resolve_real_role_from_db(tmp_path):
+    _make_db(tmp_path, [("disp-1", "vnx-dev", "debugger")])
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) == "debugger"
+
+
+def test_resolve_latest_row_wins(tmp_path):
+    # Composite key per ADR-007, ORDER BY id DESC LIMIT 1.
+    _make_db(tmp_path, [("disp-1", "vnx-dev", "reviewer"), ("disp-1", "vnx-dev", "debugger")])
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) == "debugger"
+
+
+def test_resolve_respects_project_id_composite_key(tmp_path):
+    _make_db(tmp_path, [("disp-1", "other-project", "debugger")])
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_backend_developer_returns_none(tmp_path):
+    # The fake default must not be propagated into the receipt trail.
+    _make_db(tmp_path, [("disp-1", "vnx-dev", "backend-developer")])
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_null_or_empty_role_returns_none(tmp_path):
+    _make_db(tmp_path, [("disp-1", "vnx-dev", None), ("disp-2", "vnx-dev", "  ")])
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+    assert resolve_dispatch_role("disp-2", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_missing_row_returns_none(tmp_path):
+    _make_db(tmp_path, [("disp-1", "vnx-dev", "debugger")])
+    assert resolve_dispatch_role("disp-absent", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_table_missing_fails_open(tmp_path):
+    # DB exists but dispatch_metadata table does not → None, no raise.
+    conn = sqlite3.connect(str(tmp_path / "quality_intelligence.db"))
+    conn.execute("CREATE TABLE something_else (id INTEGER)")
+    conn.commit()
+    conn.close()
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_db_missing_fails_open(tmp_path, monkeypatch):
+    # No resolvable DB anywhere → None, no raise.
+    monkeypatch.setattr(dispatch_identity, "_resolve_db_path", lambda state_dir=None: None)
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_query_error_fails_open(tmp_path, monkeypatch):
+    # A connect/query blow-up must degrade to None, never propagate.
+    monkeypatch.setattr(
+        dispatch_identity.sqlite3, "connect",
+        lambda *a, **k: (_ for _ in ()).throw(sqlite3.Error("boom")),
+    )
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_empty_identifiers_return_none(tmp_path):
+    assert resolve_dispatch_role("", "vnx-dev", state_dir=tmp_path) is None
+    assert resolve_dispatch_role("disp-1", "", state_dir=tmp_path) is None

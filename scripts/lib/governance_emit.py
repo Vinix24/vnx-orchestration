@@ -89,6 +89,8 @@ def emit_dispatch_receipt(
     injection_reconstructs: Optional[bool] = None,
     verification: Optional[Dict[str, Any]] = None,
     warnings: Optional[List[Dict[str, Any]]] = None,
+    role: Optional[str] = None,
+    receipt_kind: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -128,6 +130,13 @@ def emit_dispatch_receipt(
     provided, so callers that do not yet compute it keep a byte-identical
     receipt shape.
 
+    ``role`` / ``receipt_kind``: receipt-quality track PR-1 — dispatch identity
+    propagated from ``dispatch_metadata`` (via
+    ``dispatch_identity.resolve_dispatch_role``) by the caller. Stamped
+    unconditionally (like ``status``): ``None`` when the caller could not
+    resolve a real role, so the ledger records "identity was not resolvable"
+    instead of silently omitting the field.
+
     ``warnings``: ADR-035 §6.1 — raw ``{code, severity, message}`` entries.
     Classified (side-effect-free) via ``classify_receipt_v2_warnings``
     before the receipt is validated, then committed (open-items promotion,
@@ -152,6 +161,11 @@ def emit_dispatch_receipt(
         "terminal_id": terminal_id,
         "provider": provider,
         "model": model,
+        # receipt-quality PR-1: dispatch identity — stamped unconditionally
+        # (like status) so the ledger distinguishes "unresolved" (null) from
+        # "pre-feature" (field absent).
+        "role": role,
+        "receipt_kind": receipt_kind,
         "status": status,
         # ADR-035 §3.2.1/§7.1 (r2 BLOCKING-1): stamped unconditionally, never
         # keyed on status — task_complete marks "reached a terminal outcome",

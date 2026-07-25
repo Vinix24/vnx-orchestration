@@ -572,6 +572,26 @@ def _govern(
         receipt_path = ndjson_path
     else:
         try:
+            # receipt-quality PR-1: resolve dispatch identity (role) from
+            # dispatch_metadata just before the emit. FAIL-OPEN — a resolver
+            # error must never break receipt emission.
+            try:
+                from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+                _project_id = getattr(spec, "project_id", None)
+                if not _project_id:
+                    from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+                    _project_id = _resolve_project_id()
+                _role = resolve_dispatch_role(
+                    spec.dispatch_id, _project_id, state_dir=spec.state_dir,
+                )
+            except Exception:  # noqa: BLE001 — identity join is fail-open
+                logger.debug(
+                    "envelope._govern: role resolution failed open dispatch=%s",
+                    spec.dispatch_id,
+                    exc_info=True,
+                )
+                _role = None
+            _role = _role or "identity_unresolved"
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=spec.dispatch_id,
                 terminal_id=spec.terminal_id,
@@ -598,6 +618,8 @@ def _govern(
                 # on disk (emit_unified_report ran above), so extract
                 # verification{} from it via the shared regex extractor.
                 verification=_verification_from_report(report_path),
+                role=_role,
+                receipt_kind="dispatch",
             )
         except Exception as exc:
             raise EnvelopeGovernError(
