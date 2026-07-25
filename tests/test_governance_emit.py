@@ -431,3 +431,32 @@ def test_unified_report_includes_findings(tmp_data):
     path = emit_unified_report(**kwargs)
     assert "Something smells" in path.read_text()
     assert "WARNING" in path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Receipt-quality PR-1 — role + receipt_kind propagation
+# ---------------------------------------------------------------------------
+
+def test_emit_stamps_role_and_receipt_kind(tmp_state):
+    kwargs = _base_receipt_kwargs(tmp_state)
+    kwargs["role"] = "reviewer"
+    kwargs["receipt_kind"] = "dispatch"
+    emit_dispatch_receipt(**kwargs)
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert data["role"] == "reviewer"
+    assert data["receipt_kind"] == "dispatch"
+
+
+def test_emit_defaults_none_when_absent(tmp_state):
+    # Omitting the params still emits a valid receipt with role/receipt_kind
+    # stamped as null (unconditional, like status) — no crash.
+    emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
+    assert data["role"] is None
+    assert data["receipt_kind"] is None
+
+
+def test_idempotency_fields_unchanged():
+    from append_receipt_internals.idempotency import IDEMPOTENCY_FIELDS
+    assert "role" not in IDEMPOTENCY_FIELDS
+    assert "receipt_kind" not in IDEMPOTENCY_FIELDS
