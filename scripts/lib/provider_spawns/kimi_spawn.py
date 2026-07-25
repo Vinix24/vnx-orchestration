@@ -377,35 +377,84 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
     return cmd
 
 
-def _worktree_has_changes(worktree: Any) -> Optional[bool]:
-    """Return True/False for uncommitted git changes in *worktree*, or None if unknown.
+def _worktree_has_changes(worktree: Any, base_ref: str = "origin/main") -> Optional[bool]:
+    """Return True/False for REAL git work in *worktree*, or None if unknown.
 
-    None means the check itself could not be performed (git missing, *worktree*
-    is not a git repo, or the command timed out) — callers must treat that as
-    "cannot verify" and skip the fabrication-invariant rather than treating an
-    inability to check as evidence of fabrication.
+    True  — uncommitted/untracked changes (non-empty ``git status --porcelain``),
+            OR committed work whose TREE differs from the merge-base with
+            *base_ref* (the normal fix-forward: worker committed and pushed).
+    False — clean tree AND either no commits at all (unborn HEAD) or a committed
+            tree identical to the merge-base (genuine no-op, ``--allow-empty``
+            commit, or revert-back-to-base — all fabrication).
+    None  — the check itself could not be performed (git missing, *worktree* is
+            not a git repo, timeout, or unresolvable *base_ref*) — callers must
+            treat that as "cannot verify" and skip the fabrication-invariant
+            rather than treating an inability to check as evidence of
+            fabrication.
+
+    The committed-work half mirrors ``phantom_guard.compute_worktree_diff``: it
+    compares TREES (``git diff --quiet <merge-base> HEAD``), never commit COUNT,
+    so an empty commit or a commit reverting to the base tree cannot bypass the
+    guard.
     """
-    try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(worktree),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
-            "kimi_spawn: fabrication-invariant git status failed for %s (skipping check): %s",
-            worktree, exc,
-        )
+    wt = str(worktree)
+
+    def _git(args: list) -> Optional[subprocess.CompletedProcess]:
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=wt, capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "kimi_spawn: fabrication-invariant git %s failed for %s (skipping check): %s",
+                args[0] if args else "?", wt, exc,
+            )
+            return None
+
+    # 1. Uncommitted / untracked work.
+    status = _git(["status", "--porcelain"])
+    if status is None:
         return None
-    if proc.returncode != 0:
+    if status.returncode != 0:
         logger.warning(
             "kimi_spawn: fabrication-invariant git status exited %d for %s (skipping check): %s",
-            proc.returncode, worktree, (proc.stderr or "")[:200],
+            status.returncode, wt, (status.stderr or "")[:200],
         )
         return None
-    return bool(proc.stdout.strip())
+    if status.stdout.strip():
+        return True
+
+    # 2. Clean tree — committed work? Unborn HEAD means zero commits AND a clean
+    #    tree: a genuine no-op (still fabrication), not an unverifiable state.
+    head = _git(["rev-parse", "--verify", "HEAD"])
+    if head is None:
+        return None
+    if head.returncode != 0:
+        return False
+
+    # 3. Tree-diff against the merge-base with base_ref. TREE comparison, not
+    #    commit count: an empty commit or revert-to-base yields an identical
+    #    tree and therefore counts as NO work.
+    merge_base = _git(["merge-base", base_ref, "HEAD"])
+    if merge_base is None or merge_base.returncode != 0 or not merge_base.stdout.strip():
+        logger.warning(
+            "kimi_spawn: fabrication-invariant could not resolve merge-base of %s and HEAD for %s "
+            "(skipping check): %s",
+            base_ref, wt, ((merge_base.stderr or "")[:200] if merge_base is not None else "git error"),
+        )
+        return None
+    diff = _git(["diff", "--quiet", merge_base.stdout.strip(), "HEAD"])
+    if diff is None:
+        return None
+    if diff.returncode == 0:
+        return False  # trees identical → no real work
+    if diff.returncode == 1:
+        return True  # tree differs → real committed work
+    logger.warning(
+        "kimi_spawn: fabrication-invariant git diff exited %d for %s (skipping check): %s",
+        diff.returncode, wt, (diff.stderr or "")[:200],
+    )
+    return None
 
 
 # Inherited venv-activation vars that point Python at a FOREIGN site-packages.

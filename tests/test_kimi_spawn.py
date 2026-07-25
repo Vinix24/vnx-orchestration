@@ -1060,6 +1060,31 @@ class TestWorktreeHasChanges(unittest.TestCase):
     exercised against a real git repo, not a mocked subprocess, per the "tests
     run real code" convention."""
 
+    _GIT_ENV = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+
+    @classmethod
+    def _git(cls, tmp: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args], cwd=tmp, check=True, capture_output=True, text=True, env=cls._GIT_ENV,
+        )
+
+    @classmethod
+    def _init_repo_with_base(cls, tmp: str) -> None:
+        """Init a repo with one base commit and an origin/main ref pinned to it,
+        so the committed-work half of the guard has a resolvable base_ref."""
+        cls._git(tmp, "init", "-q")
+        Path(tmp, "base.txt").write_text("base\n")
+        cls._git(tmp, "add", "base.txt")
+        cls._git(tmp, "commit", "-q", "-m", "base")
+        sha = cls._git(tmp, "rev-parse", "HEAD").stdout.strip()
+        cls._git(tmp, "update-ref", "refs/remotes/origin/main", sha)
+
     def test_clean_worktree_returns_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
@@ -1073,6 +1098,52 @@ class TestWorktreeHasChanges(unittest.TestCase):
 
     def test_non_git_directory_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(_worktree_has_changes(Path(tmp)))
+
+    def test_committed_real_change_returns_true(self) -> None:
+        """A commit with actual file changes ahead of base is real work — the
+        normal fix-forward path the old status-only guard false-failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            Path(tmp, "fix.py").write_text("print('fixed')\n")
+            self._git(tmp, "add", "fix.py")
+            self._git(tmp, "commit", "-q", "-m", "real fix")
+            self.assertIs(_worktree_has_changes(Path(tmp)), True)
+
+    def test_empty_commit_ahead_of_base_returns_false(self) -> None:
+        """`git commit --allow-empty` ahead of base with a clean tree is NOT
+        work — the commit-count bypass (codex finding on #1224) stays closed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            self._git(tmp, "commit", "-q", "--allow-empty", "-m", "fake work")
+            self.assertIs(_worktree_has_changes(Path(tmp)), False)
+
+    def test_clean_tree_no_commits_returns_false(self) -> None:
+        """Unborn HEAD + clean tree: a genuine no-op is still fabrication."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._git(tmp, "init", "-q")
+            self.assertIs(_worktree_has_changes(Path(tmp)), False)
+
+    def test_uncommitted_edit_returns_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            Path(tmp, "base.txt").write_text("edited\n")
+            self.assertIs(_worktree_has_changes(Path(tmp)), True)
+
+    def test_untracked_file_returns_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._init_repo_with_base(tmp)
+            Path(tmp, "untracked.txt").write_text("new\n")
+            self.assertIs(_worktree_has_changes(Path(tmp)), True)
+
+    def test_unresolvable_base_ref_returns_none(self) -> None:
+        """Committed repo with no resolvable base_ref → None → caller skips the
+        invariant rather than false-rejecting."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._git(tmp, "init", "-q")
+            Path(tmp, "a.txt").write_text("a\n")
+            self._git(tmp, "add", "a.txt")
+            self._git(tmp, "commit", "-q", "-m", "only commit")
             self.assertIsNone(_worktree_has_changes(Path(tmp)))
 
 
@@ -1125,6 +1196,55 @@ class TestFabricationInvariant(unittest.TestCase):
             )
         self.assertIsNone(result.error)
         self.assertEqual(result.returncode, 0)
+
+    def test_tool_calls_with_real_commit_passes(self) -> None:
+        """Guard-path end-to-end against a REAL repo: a committed real change
+        ahead of base must NOT trip the fabrication invariant."""
+        with tempfile.TemporaryDirectory() as tmp:
+            TestWorktreeHasChanges._init_repo_with_base(tmp)
+            Path(tmp, "fix.py").write_text("print('fixed')\n")
+            TestWorktreeHasChanges._git(tmp, "add", "fix.py")
+            TestWorktreeHasChanges._git(tmp, "commit", "-q", "-m", "real fix")
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="Done, fix committed.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path(tmp),
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_tool_calls_empty_commit_still_fails(self) -> None:
+        """Guard-path end-to-end against a REAL repo: an empty commit ahead of
+        base is still fabrication — the invariant MUST fire."""
+        with tempfile.TemporaryDirectory() as tmp:
+            TestWorktreeHasChanges._init_repo_with_base(tmp)
+            TestWorktreeHasChanges._git(tmp, "commit", "-q", "--allow-empty", "-m", "fake work")
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path(tmp),
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
 
     def test_no_worktree_skips_check_gracefully(self) -> None:
         with patch("provider_spawns.kimi_spawn._worktree_has_changes") as mock_check:
