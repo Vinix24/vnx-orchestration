@@ -47,6 +47,49 @@ logger = logging.getLogger(__name__)
 # since the tmux dispatch.sh sets PYTHONPATH to scripts/lib only (not scripts/).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 
+# The fake default stamped by writers that never resolved a real role. The
+# receipt trail must never propagate it (mirrors dispatch_identity).
+_FAKE_DEFAULT_ROLE = "backend-developer"
+
+# Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
+# backend-developer default (receipt-quality track).
+_IDENTITY_UNRESOLVED = "identity_unresolved"
+
+
+def _resolve_govern_role(spec: "GovernSpec") -> str:
+    """Resolve the dispatch's real role for govern-emitted receipts/frontmatter.
+
+    Receipt-quality PR-2: propagate dispatch identity into the GOVERN-
+    SYNTHESIZED emit path via the same resolver PR-1 added for the v2 emit
+    path (``dispatch_identity.resolve_dispatch_role``).
+
+    Order:
+      1. ``spec.role`` when genuinely set (never the fake default).
+      2. ``dispatch_metadata`` via the PR-1 resolver, keyed on
+         ``(dispatch_id, project_id)`` per ADR-007.
+      3. ``"identity_unresolved"``.
+
+    FAIL-OPEN: never raises — receipt/report emission must not break on the
+    identity join.
+    """
+    spec_role = (spec.role or "").strip()
+    if spec_role and spec_role != _FAKE_DEFAULT_ROLE:
+        return spec_role
+    resolved: Optional[str] = None
+    try:
+        from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+        from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+        resolved = resolve_dispatch_role(
+            spec.dispatch_id, _resolve_project_id(), state_dir=spec.state_dir,
+        )
+    except Exception:  # noqa: BLE001 — identity join is fail-open
+        logger.debug(
+            "govern: role resolution failed open dispatch=%s",
+            spec.dispatch_id, exc_info=True,
+        )
+        resolved = None
+    return resolved or _IDENTITY_UNRESOLVED
+
 
 # ---------------------------------------------------------------------------
 # Receipt dedup — authored > synthesized, newest timestamp wins within tier
@@ -132,6 +175,9 @@ def ensure_receipt(
     receipts_file = spec.state_dir / "t0_receipts.ndjson"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # receipt-quality PR-2: dispatch identity on the govern-synthesized emit
+    # path — real role from spec/dispatch_metadata, else identity_unresolved
+    # (fail-open; never the fake backend-developer default).
     synthesized_receipt: dict = {
         "event_type": "subprocess_completion",
         "dispatch_id": spec.dispatch_id,
@@ -148,6 +194,8 @@ def ensure_receipt(
         "sub_provider": "anthropic",
         "model": spec.model or "unknown",
         "lane": lane,
+        "role": _resolve_govern_role(spec),
+        "receipt_kind": "dispatch",
     }
     # ADR-012 worker-permission enforcement audit marker (only when flag ON).
     if worker_permission_enforcement_enabled():
@@ -190,6 +238,8 @@ class GovernSpec:
     # with a vnx-plan-verdict fence — it intentionally lacks the standard contract
     # headings (## Changes / ## Verification / ## Open Items).  govern() must not
     # synthesize over it: synthesis strips the fence and breaks parse_verdict.
+    # receipt-quality PR-2: a genuinely-set spec role also threads through into
+    # govern-emitted receipts and report frontmatter (see _resolve_govern_role).
     role: Optional[str] = None
 
 
@@ -489,7 +539,9 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         "model": _model,
         "terminal_id": spec.terminal_id,
         "pool_id": "interactive",
-        "role": "backend-developer",
+        # receipt-quality PR-2: resolved dispatch identity, not the hardcoded
+        # fake default the converter would otherwise drop/misread.
+        "role": _resolve_govern_role(spec),
         "task_class": "implementation",
         "pr_id": spec.pr_id or "none",
         "duration_seconds": float(raw.duration_seconds),

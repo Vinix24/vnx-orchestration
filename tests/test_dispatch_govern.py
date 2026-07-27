@@ -938,6 +938,136 @@ def test_ensure_receipt_idempotent(tmp_data, tmp_state):
 
 
 # ---------------------------------------------------------------------------
+# Receipt-quality PR-2 — role + receipt_kind on the govern-synthesized path
+# ---------------------------------------------------------------------------
+
+def _make_metadata_db(state_dir: Path, rows):
+    """Create a minimal quality_intelligence.db with dispatch_metadata rows."""
+    import sqlite3
+    conn = sqlite3.connect(str(state_dir / "quality_intelligence.db"))
+    conn.execute(
+        "CREATE TABLE dispatch_metadata ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " dispatch_id TEXT NOT NULL,"
+        " project_id TEXT NOT NULL,"
+        " role TEXT"
+        ")"
+    )
+    for dispatch_id, project_id, role in rows:
+        conn.execute(
+            "INSERT INTO dispatch_metadata (dispatch_id, project_id, role) VALUES (?, ?, ?)",
+            (dispatch_id, project_id, role),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _fire_ensure_receipt(spec, tmp_state):
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    assert receipts_file.exists(), "ensure_receipt must create t0_receipts.ndjson"
+    return json.loads(receipts_file.read_text().splitlines()[0])
+
+
+def test_ensure_receipt_propagates_real_role_from_metadata(tmp_data, tmp_state, monkeypatch):
+    """A govern-synthesized receipt carries the real (non-backend-developer) role
+    from dispatch_metadata when the DB has one for that dispatch."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "debugger")])
+
+    spec = _make_spec(tmp_data, tmp_state)
+    receipt = _fire_ensure_receipt(spec, tmp_state)
+
+    assert receipt["role"] == "debugger"
+    assert receipt["receipt_kind"] == "dispatch"
+
+
+def test_ensure_receipt_identity_unresolved_when_no_metadata(tmp_data, tmp_state, monkeypatch):
+    """No metadata row -> identity_unresolved, NEVER unknown/backend-developer."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+
+    spec = _make_spec(tmp_data, tmp_state)
+    receipt = _fire_ensure_receipt(spec, tmp_state)
+
+    assert receipt["role"] == "identity_unresolved"
+    assert receipt["role"] not in ("unknown", "backend-developer")
+    assert receipt["receipt_kind"] == "dispatch"
+
+
+def test_ensure_receipt_spec_role_threads_through(tmp_data, tmp_state):
+    """A genuinely-set spec role (e.g. plan-reviewer) wins over the DB join."""
+    spec = _make_spec(tmp_data, tmp_state)
+    spec.role = "plan-reviewer"
+    receipt = _fire_ensure_receipt(spec, tmp_state)
+
+    assert receipt["role"] == "plan-reviewer"
+    assert receipt["receipt_kind"] == "dispatch"
+
+
+def test_ensure_receipt_fake_default_spec_role_falls_through(tmp_data, tmp_state, monkeypatch):
+    """A spec role of the fake default is NOT propagated — resolver takes over."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "reviewer")])
+
+    spec = _make_spec(tmp_data, tmp_state)
+    spec.role = "backend-developer"
+    receipt = _fire_ensure_receipt(spec, tmp_state)
+
+    assert receipt["role"] == "reviewer"
+
+
+def test_govern_synthesized_frontmatter_role_from_metadata(tmp_data, tmp_state, monkeypatch):
+    """The govern-emitted report frontmatter stamps the resolved role, not the
+    hardcoded backend-developer default."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "debugger")])
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit; timeout. Body synthesized."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.report_path is not None
+    from dispatch_govern import _split_yaml_frontmatter
+    fm, _body = _split_yaml_frontmatter(
+        Path(outcome.report_path).read_text(encoding="utf-8")
+    )
+    assert fm.get("role") == "debugger"
+
+
+def test_govern_synthesized_frontmatter_identity_unresolved(tmp_data, tmp_state, monkeypatch):
+    """Unresolved identity stamps identity_unresolved in frontmatter — never the
+    fake backend-developer hardcode."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit; timeout. Body synthesized."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.report_path is not None
+    from dispatch_govern import _split_yaml_frontmatter
+    fm, _body = _split_yaml_frontmatter(
+        Path(outcome.report_path).read_text(encoding="utf-8")
+    )
+    assert fm.get("role") == "identity_unresolved"
+
+
+# ---------------------------------------------------------------------------
 # govern() + ensure_receipt integration — timeout path appends synthesized receipt
 # ---------------------------------------------------------------------------
 
