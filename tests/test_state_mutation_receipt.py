@@ -232,6 +232,7 @@ def test_non_state_mutation_idempotency_key_unchanged() -> None:
         "event_type": "task_complete",
         "terminal": "T1",
         "source": "pytest",
+        "receipt_kind": "test",
         "dispatch_id": "DISP-001",
     }
 

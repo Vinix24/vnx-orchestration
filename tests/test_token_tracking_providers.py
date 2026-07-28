@@ -179,6 +179,7 @@ def _build_receipt(terminal: str = "T1", event_type: str = "task_complete") -> d
         "terminal": terminal,
         "status": "success",
         "source": "pytest",
+        "receipt_kind": "test",
     }
 
 

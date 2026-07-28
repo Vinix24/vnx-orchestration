@@ -994,6 +994,7 @@ class TmuxInteractiveDispatch:
             _TS_SENTINEL = "__VNX_TS_PLACEHOLDER__"
             receipt_dict = {
                 "event_type": "subprocess_completion",
+                "receipt_kind": "dispatch",
                 "dispatch_id": dispatch_id,
                 "terminal": label,
                 "terminal_id": label,

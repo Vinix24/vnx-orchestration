@@ -468,6 +468,9 @@ class ReportParser:
         receipt = {
             'event_type': _event_type,  # Primary field for structured processing
             'event': _event_type,  # Legacy compatibility field
+            # Receipt-quality PR-3: report-derived receipts are dispatch-lane
+            # outcomes (closed-set kind; role propagates via PR-1/2 lanes).
+            'receipt_kind': 'dispatch',
             'timestamp': datetime.utcnow().isoformat(),  # FIX: Use UTC, not local time
             'terminal': metadata.get('terminal', 'unknown'),
             'track': metadata.get('track'),  # Include track field for terminal routing

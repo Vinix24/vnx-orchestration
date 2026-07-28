@@ -518,6 +518,7 @@ def test_t21_path1_and_path2_concurrent_writes_never_fork(tmp_path, monkeypatch)
                 provider="claude",
                 model="claude-sonnet-5",
                 pr_id=None,
+                receipt_kind="dispatch",
                 status="success",
                 completion_pct=100,
                 risk=0.0,

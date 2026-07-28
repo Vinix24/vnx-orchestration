@@ -91,6 +91,7 @@ class GateResultParserMixin:
         from review_gate_manager import emit_governance_receipt
         emit_governance_receipt(
             "review_gate_result",
+            receipt_kind="review_gate",
             status=status, terminal="T0", pr_id=pr_id, branch=branch,
             gate="claude_github_optional", summary=summary,
             advisory_findings=[f.to_dict() for f in receipt.advisory_findings],
@@ -204,6 +205,7 @@ class GateResultParserMixin:
         from review_gate_manager import emit_governance_receipt
         emit_governance_receipt(
             "review_gate_result",
+            receipt_kind="review_gate",
             status=status, terminal="T0", pr_number=pr_number,
             pr_id=pr_id, branch=branch, gate=gate, summary=summary,
             advisory_findings=payload["advisory_findings"],

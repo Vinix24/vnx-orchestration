@@ -431,6 +431,7 @@ class TestReceiptMandateId:
             provider="kimi",
             model="kimi-k2",
             pr_id=None,
+            receipt_kind="dispatch",
             status="success",
             completion_pct=100,
             risk=0.0,

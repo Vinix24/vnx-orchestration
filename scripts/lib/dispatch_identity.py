@@ -28,6 +28,34 @@ logger = logging.getLogger(__name__)
 # trail must stop propagating it — treated as "no real role".
 _FAKE_DEFAULT_ROLE = "backend-developer"
 
+# Receipt-quality PR-3 (plan §3b): the authoritative closed set of
+# ``receipt_kind`` values. Stamped per-emitter from the emitter's own
+# knowledge — never derived from ``role``, never reusing ``task_class``.
+RECEIPT_KINDS = frozenset({
+    "build",
+    "doc",
+    "test",
+    "review_gate",
+    "panel_seat",
+    "state_mutation",
+    "sub_dispatch",
+    "dispatch",
+})
+
+
+def validate_receipt_kind(receipt_kind: Optional[str]) -> str:
+    """Emit-time lint (PR-3: warn -> raise). Every emitted receipt MUST carry
+    a ``receipt_kind`` from the closed set; a missing or out-of-vocab value
+    hard-fails the emit. Returns the validated kind. Raises ValueError.
+    """
+    if receipt_kind not in RECEIPT_KINDS:
+        raise ValueError(
+            f"Invalid receipt_kind {receipt_kind!r}. Must be one of "
+            f"{sorted(RECEIPT_KINDS)} (receipt-quality §3b closed set; "
+            "emit-time lint raises)."
+        )
+    return receipt_kind
+
 
 def _resolve_db_path(state_dir: Optional[Path] = None) -> Optional[Path]:
     """Locate quality_intelligence.db — same resolution as intelligence_backfill.

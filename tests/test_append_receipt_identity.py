@@ -84,6 +84,7 @@ def _build_receipt(index: int = 1) -> dict:
         "terminal": "T1",
         "status": "success",
         "source": "pytest",
+        "receipt_kind": "test",
     }
 
 

@@ -153,6 +153,7 @@ def _emit_receipt(
         kwargs["dispatch_id"] = dispatch_id
     return emit_governance_receipt(
         "pr_merged",
+        receipt_kind="state_mutation",
         status="success",
         terminal="T0",
         source="pr_merge",

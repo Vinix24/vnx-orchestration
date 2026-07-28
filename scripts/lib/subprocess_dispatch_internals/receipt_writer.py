@@ -164,6 +164,7 @@ def _build_receipt_payload(
     receipt = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_type": "subprocess_completion",
+        "receipt_kind": "dispatch",
         "dispatch_id": dispatch_id,
         "terminal": terminal_id,
         "terminal_id": terminal_id,

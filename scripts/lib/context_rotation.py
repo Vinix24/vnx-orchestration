@@ -749,6 +749,7 @@ def _emit_continuation_receipt(
     """
     receipt = {
         "event_type": "context_rotation_continuation",
+        "receipt_kind": "state_mutation",
         "terminal": terminal,
         "dispatch_id": dispatch_id,
         "handover_path": handoff_path,

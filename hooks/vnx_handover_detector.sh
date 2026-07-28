@@ -51,6 +51,7 @@ RECEIPT_JSON=$(cat <<RECEIPT_EOF
 {
   "event_type": "context_rotation",
   "event": "context_rotation",
+  "receipt_kind": "state_mutation",
   "terminal": "$TERMINAL",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)",
   "source": "vnx_rotation",

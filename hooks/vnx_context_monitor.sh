@@ -66,7 +66,7 @@ _emit_context_pressure() {
     dispatch_id="${dispatch_id:-unknown}"
   fi
   local event
-  event=$(printf '{"event_type":"context_pressure","terminal":"%s","dispatch_id":"%s","context_used_pct":%d,"context_remaining_pct":%d,"phase":"%s","timestamp":"%s"}' \
+  event=$(printf '{"event_type":"context_pressure","receipt_kind":"state_mutation","terminal":"%s","dispatch_id":"%s","context_used_pct":%d,"context_remaining_pct":%d,"phase":"%s","timestamp":"%s"}' \
     "$TERMINAL" "$dispatch_id" "$used_pct" "$remaining_pct" "$phase" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
   python3 "$VNX_DATA_DIR/../.claude/vnx-system/scripts/append_receipt.py" \
     --receipt "$event" 2>/dev/null || true

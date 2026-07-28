@@ -149,6 +149,7 @@ class RoadmapManager:
         self._save_state(state)
         emit_governance_receipt(
             "roadmap_transition",
+            receipt_kind="state_mutation",
             status="success",
             action="init",
             project_id=self.project_id,
@@ -227,6 +228,7 @@ class RoadmapManager:
         self._save_state(state)
         emit_governance_receipt(
             "roadmap_transition",
+            receipt_kind="state_mutation",
             status="success",
             action="load_feature",
             project_id=self.project_id,
@@ -362,6 +364,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         emit_governance_receipt(
             "drift_fixup_inserted",
+            receipt_kind="state_mutation",
             status="success",
             feature_id=fixup_id,
             plan_path=str(plan_path),
@@ -460,6 +463,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
         self._save_state(state)
         emit_governance_receipt(
             "closure_verification_result",
+            receipt_kind="review_gate",
             status="success" if result["verdict"] == "pass" else "blocked",
             feature_id=current_id,
             verifier_result=result,
@@ -537,6 +541,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         emit_governance_receipt(
             "roadmap_human_approval",
+            receipt_kind="state_mutation",
             status="success",
             action="approve",
             project_id=self.project_id,
@@ -577,6 +582,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
                 self._consume_approval_token(current_id)
                 emit_governance_receipt(
                     "roadmap_human_approval",
+                    receipt_kind="state_mutation",
                     status="success",
                     action="consumed",
                     project_id=self.project_id,
@@ -605,7 +611,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
             state["blocked_reason"] = None
             state["updated_at"] = utc_now_iso()
             self._save_state(state)
-            emit_governance_receipt("roadmap_transition", status="success", action="advance_complete", project_id=self.project_id, merged_features=sorted(merged))
+            emit_governance_receipt("roadmap_transition", receipt_kind="state_mutation", status="success", action="advance_complete", project_id=self.project_id, merged_features=sorted(merged))
             return {"advanced": False, "reason": "no_remaining_features"}
 
         self.load_feature(next_feature["feature_id"])
@@ -630,6 +636,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
         if not next_pr:
             emit_governance_receipt(
                 "roadmap_dispatch_step",
+                receipt_kind="sub_dispatch",
                 status="no_ready_pr",
                 project_id=self.project_id,
                 feature_id=current_id,
@@ -664,6 +671,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         emit_governance_receipt(
             "roadmap_dispatch_step",
+            receipt_kind="sub_dispatch",
             status="success",
             project_id=self.project_id,
             feature_id=current_id,
@@ -821,6 +829,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         emit_governance_receipt(
             "track_reconcile_advisory",
+            receipt_kind="state_mutation",
             status="success",
             project_id=self.project_id,
             track_count=len(results),

@@ -539,6 +539,7 @@ def _persist_result(
 
     emit_governance_receipt(
         "codex_final_gate",
+        receipt_kind="review_gate",
         status=receipt.verdict,
         terminal="T0",
         pr_id=contract.pr_id,

@@ -168,7 +168,7 @@ if [[ -f "$CTX_FILE" ]]; then
 fi
 
 CONTINUATION_RECEIPT=$(printf \
-  '{"event_type":"context_rotation_continuation","terminal":"%s","dispatch_id":"%s","handover_path":"%s","skill":"%s","context_used_pct_at_rotation":%d,"timestamp":"%s"}' \
+  '{"event_type":"context_rotation_continuation","receipt_kind":"state_mutation","terminal":"%s","dispatch_id":"%s","handover_path":"%s","skill":"%s","context_used_pct_at_rotation":%d,"timestamp":"%s"}' \
   "$TERMINAL" "${DISPATCH_ID:-unknown}" "$HANDOVER_PATH" "${SKILL:-none}" \
   "$CONTEXT_USED_PCT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
 

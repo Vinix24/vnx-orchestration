@@ -247,6 +247,9 @@ def build_receipt_from_report(
     # append_receipt_payload()'s rolling cache deduplicate same-cycle runs.
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
+        # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes;
+        # role propagation for this path lands in PR-4 (kind-only here).
+        "receipt_kind": "dispatch",
         "task_id": merged.get("task_id", "unknown"),
         "terminal": merged.get("terminal", "unknown"),
         "provider": merged.get("provider", "unknown"),

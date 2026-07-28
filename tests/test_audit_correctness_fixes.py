@@ -172,7 +172,7 @@ class TestC6MissingTimestampDistinctKeys:
     idempotency keys so the second is not silently dropped."""
 
     def _receipt_no_ts(self, extra: dict | None = None) -> dict:
-        base = {"event_type": "task_complete", "status": "success", "source": "pytest"}
+        base = {"event_type": "task_complete", "status": "success", "source": "pytest", "receipt_kind": "test"}
         if extra:
             base.update(extra)
         return base
