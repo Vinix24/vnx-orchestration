@@ -56,6 +56,8 @@ def _base_receipt_kwargs(state_dir):
         token_usage={"input": 100, "output": 50, "cache_hit": 0},
         cost_usd=None,
         state_dir=state_dir,
+        # Receipt-quality PR-3: receipt_kind is required at emit (lint raise).
+        receipt_kind="dispatch",
     )
 
 
@@ -440,20 +442,19 @@ def test_unified_report_includes_findings(tmp_data):
 def test_emit_stamps_role_and_receipt_kind(tmp_state):
     kwargs = _base_receipt_kwargs(tmp_state)
     kwargs["role"] = "reviewer"
-    kwargs["receipt_kind"] = "dispatch"
     emit_dispatch_receipt(**kwargs)
     data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
     assert data["role"] == "reviewer"
     assert data["receipt_kind"] == "dispatch"
 
 
-def test_emit_defaults_none_when_absent(tmp_state):
-    # Omitting the params still emits a valid receipt with role/receipt_kind
-    # stamped as null (unconditional, like status) — no crash.
+def test_emit_role_defaults_none_when_absent(tmp_state):
+    # Omitting role still emits a valid receipt with role stamped as null
+    # (unconditional, like status) — no crash. receipt_kind stays required.
     emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
     data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip())
     assert data["role"] is None
-    assert data["receipt_kind"] is None
+    assert data["receipt_kind"] == "dispatch"
 
 
 def test_idempotency_fields_unchanged():

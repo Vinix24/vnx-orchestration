@@ -121,6 +121,7 @@ class GateRequestHandlerMixin:
             requested.append(payload)
             emit_governance_receipt(
                 "review_gate_request",
+                receipt_kind="review_gate",
                 status=payload["status"],
                 terminal="T0",
                 pr_number=pr_number,
@@ -269,6 +270,7 @@ class GateRequestHandlerMixin:
 
         emit_governance_receipt(
             "review_gate_request",
+            receipt_kind="review_gate",
             status=payload["status"],
             terminal="T0",
             pr_id=contract.pr_id,
@@ -423,6 +425,7 @@ class GateRequestHandlerMixin:
 
         emit_governance_receipt(
             "review_gate_request",
+            receipt_kind="review_gate",
             status=state,
             terminal="T0",
             pr_id=contract.pr_id,
@@ -655,6 +658,7 @@ class GateRequestHandlerMixin:
 
         emit_governance_receipt(
             "review_gate_request",
+            receipt_kind="review_gate",
             status=status,
             terminal="T0",
             pr_id=contract.pr_id,

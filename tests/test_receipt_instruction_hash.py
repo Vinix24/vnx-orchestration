@@ -67,6 +67,7 @@ def _make_receipt(terminal: str = "T1", **extra) -> dict:
         "terminal": terminal,
         "status": "success",
         "source": "pytest",
+        "receipt_kind": "test",
     }
     base.update(extra)
     return base
@@ -448,6 +449,7 @@ def test_task_complete_still_persists_quality_advisory_and_cqs(ar, tmp_path):
         "terminal": "T1",
         "status": "success",
         "source": "pytest",
+        "receipt_kind": "test",
     }
 
     fake_cqs = {

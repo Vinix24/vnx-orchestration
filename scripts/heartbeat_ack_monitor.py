@@ -648,6 +648,7 @@ class HeartbeatACKMonitor:
         receipt = {
             'event_type': 'task_timeout',
             'event': 'task_timeout',
+            'receipt_kind': 'dispatch',
             'dispatch_id': dispatch_info['dispatch_id'],
             'task_id': dispatch_info['task_id'],
             'terminal': dispatch_info['terminal'],

@@ -120,6 +120,7 @@ def _record_corrective_receipt(
         append_receipt_payload(
             {
                 "event_type": "subprocess_completion",
+                "receipt_kind": "dispatch",
                 "dispatch_id": dispatch_id,
                 "status": "failed",
                 "autopr_rejected": True,

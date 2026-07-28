@@ -27,6 +27,7 @@ def emit_state_mutation(
     receipt: Dict[str, Any] = {
         "timestamp": _utc_now_iso(),
         "event_type": "state_mutation",
+        "receipt_kind": "state_mutation",
         "terminal": "T0",
         "source": "vnx_state",
         "file": file,

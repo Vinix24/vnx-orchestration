@@ -37,6 +37,7 @@ def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP
         "event_type": event_type,
         "terminal": "T1",
         "source": "pytest",
+        "receipt_kind": "test",
         "dispatch_id": dispatch_id,
     }
 
@@ -65,6 +66,7 @@ def test_dispatch_promoted_event_triggers_rebuild(tmp_path: Path) -> None:
         "event_type": "dispatch_promoted",
         "terminal": "T0",
         "source": "pytest",
+        "receipt_kind": "test",
     }
 
     with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
@@ -150,6 +152,7 @@ def test_event_type_forwarded_to_helper_for_dispatch_promoted(tmp_path: Path) ->
         "event_type": "dispatch_promoted",
         "terminal": "T0",
         "source": "pytest",
+        "receipt_kind": "test",
     }
 
     with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:

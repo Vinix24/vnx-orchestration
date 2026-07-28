@@ -1205,6 +1205,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.emit_receipt:
             emit_governance_receipt(
                 "closure_verification_result",
+                receipt_kind="review_gate",
                 status="success" if result["verdict"] == "pass" else "blocked",
                 branch=branch,
                 verification_mode=args.mode,

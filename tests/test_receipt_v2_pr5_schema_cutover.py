@@ -110,7 +110,7 @@ def test_t10_git_ref_present_path1_after_trim(tmp_path):
     receipts_path = tmp_path / "t0_receipts.ndjson"
     governance_emit.emit_dispatch_receipt(
         dispatch_id="t10-path1", terminal_id="T1", provider="claude",
-        model="claude-sonnet-5", pr_id=None, status="success",
+        model="claude-sonnet-5", pr_id=None, receipt_kind="dispatch", status="success",
         completion_pct=100, risk=0.0, findings=[], duration_seconds=1.0,
         token_usage={"input": 1, "output": 1}, cost_usd=None,
         state_dir=receipts_path.parent,
@@ -135,6 +135,7 @@ def test_t11_v2_receipt_no_session_object_session_id_present(tmp_path):
         "terminal": "T1",
         "status": "success",
         "source": "pytest",
+        "receipt_kind": "test",
         # Skip real git resolution -- T11 is about session{}, not provenance.
         "provenance": {
             "git_ref": "HEAD", "branch": "test", "is_dirty": False,
@@ -175,7 +176,7 @@ def test_t11_path1_never_had_session_object(tmp_path):
     receipts_path = tmp_path / "t0_receipts.ndjson"
     governance_emit.emit_dispatch_receipt(
         dispatch_id="t11-path1", terminal_id="T1", provider="claude",
-        model="claude-sonnet-5", pr_id=None, status="success",
+        model="claude-sonnet-5", pr_id=None, receipt_kind="dispatch", status="success",
         completion_pct=100, risk=0.0, findings=[], duration_seconds=1.0,
         token_usage={"input": 1, "output": 1}, cost_usd=None,
         state_dir=receipts_path.parent,
@@ -211,7 +212,7 @@ def test_t27_path1_schema_v2_never_carries_legacy_fields(tmp_path):
     receipts_path = tmp_path / "t0_receipts.ndjson"
     governance_emit.emit_dispatch_receipt(
         dispatch_id="t27-path1", terminal_id="T1", provider="claude",
-        model="claude-sonnet-5", pr_id=None, status="success",
+        model="claude-sonnet-5", pr_id=None, receipt_kind="dispatch", status="success",
         completion_pct=100, risk=0.0, findings=[], duration_seconds=1.0,
         token_usage={"input": 1, "output": 1}, cost_usd=None,
         state_dir=receipts_path.parent,

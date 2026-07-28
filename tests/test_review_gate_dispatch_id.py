@@ -308,6 +308,7 @@ def test_emit_governance_receipt_with_dispatch_id_routes_to_t0_receipts(review_e
 
     _emit_real(
         "review_gate_request",
+        receipt_kind="review_gate",
         dispatch_id="abc-123",
         gate="gemini_review",
         pr_id="99",
@@ -319,6 +320,7 @@ def test_emit_governance_receipt_with_dispatch_id_routes_to_t0_receipts(review_e
     assert len(lines) == 1, "exactly one receipt line expected"
     stored = json.loads(lines[0])
     assert stored["event_type"] == "review_gate_request"
+    assert stored["receipt_kind"] == "review_gate", "receipt_kind must be stamped (PR-3 closed set)"
     assert stored["dispatch_id"] == "abc-123", "dispatch_id must be preserved in the persisted JSON line"
 
     # With a real dispatch_id, should_route_to_gate_stream() returns False.

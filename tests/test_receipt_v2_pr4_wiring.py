@@ -68,6 +68,7 @@ def _path1_emit(receipts_path: Path, *, status: str, verification=None, dispatch
         provider="claude",
         model="claude-sonnet-5",
         pr_id=None,
+        receipt_kind="dispatch",
         status=status,
         completion_pct=100 if status == "success" else 0,
         risk=0.0,
@@ -190,7 +191,7 @@ def test_t6_path1_dropped_null_reason_rejected(tmp_path):
     with pytest.raises(RuntimeError):
         governance_emit.emit_dispatch_receipt(
             dispatch_id="t6-path1", terminal_id="T1", provider="claude",
-            model="claude-sonnet-5", pr_id=None, status="success",
+            model="claude-sonnet-5", pr_id=None, receipt_kind="dispatch", status="success",
             completion_pct=100, risk=0.0, findings=[], duration_seconds=1.0,
             token_usage={"input": 1, "output": 1}, cost_usd=None,
             state_dir=receipts_path.parent,
@@ -236,7 +237,7 @@ def test_t22_path1_rejects_illegal_warnings(tmp_path, bad_entry):
     with pytest.raises((AppendReceiptError, RuntimeError)):
         governance_emit.emit_dispatch_receipt(
             dispatch_id="t22-path1", terminal_id="T1", provider="claude",
-            model="claude-sonnet-5", pr_id=None, status="success",
+            model="claude-sonnet-5", pr_id=None, receipt_kind="dispatch", status="success",
             completion_pct=100, risk=0.0, findings=[], duration_seconds=1.0,
             token_usage={"input": 1, "output": 1}, cost_usd=None,
             state_dir=receipts_path.parent,
@@ -374,7 +375,7 @@ def test_t23_path1_nondocs_path_forces_investigate(tmp_path):
     receipts_path = tmp_path / "t0_receipts.ndjson"
     governance_emit.emit_dispatch_receipt(
         dispatch_id="t23-path1", terminal_id="T1", provider="claude",
-        model="claude-sonnet-5", pr_id=None, status="success",
+        model="claude-sonnet-5", pr_id=None, receipt_kind="dispatch", status="success",
         completion_pct=100, risk=0.0, findings=[], duration_seconds=1.0,
         token_usage={"input": 1, "output": 1}, cost_usd=None,
         state_dir=receipts_path.parent,

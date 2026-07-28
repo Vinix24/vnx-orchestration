@@ -43,6 +43,7 @@ from append_receipt_internals.receipt_finalize import (
     commit_receipt_v2_fields,
 )
 from append_receipt_internals.validation import _validate_receipt
+from dispatch_identity import validate_receipt_kind
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +131,16 @@ def emit_dispatch_receipt(
     provided, so callers that do not yet compute it keep a byte-identical
     receipt shape.
 
-    ``role`` / ``receipt_kind``: receipt-quality track PR-1 — dispatch identity
+    ``role`` / ``receipt_kind``: receipt-quality track — dispatch identity
     propagated from ``dispatch_metadata`` (via
-    ``dispatch_identity.resolve_dispatch_role``) by the caller. Stamped
-    unconditionally (like ``status``): ``None`` when the caller could not
-    resolve a real role, so the ledger records "identity was not resolvable"
-    instead of silently omitting the field.
+    ``dispatch_identity.resolve_dispatch_role``) by the caller. ``role`` is
+    stamped unconditionally (like ``status``): ``None`` when the caller could
+    not resolve a real role, so the ledger records "identity was not
+    resolvable" instead of silently omitting the field. ``receipt_kind`` is
+    REQUIRED as of PR-3 (emit-time lint warn -> raise): it must be a member
+    of the ``dispatch_identity.RECEIPT_KINDS`` closed set, stamped from the
+    emitter's own knowledge; a missing or out-of-vocab value raises
+    ValueError before anything is written.
 
     ``warnings``: ADR-035 §6.1 — raw ``{code, severity, message}`` entries.
     Classified (side-effect-free) via ``classify_receipt_v2_warnings``
@@ -146,10 +151,14 @@ def emit_dispatch_receipt(
     stamped when provided.
 
     Raises:
-        ValueError: provider field doesn't match required pattern
+        ValueError: provider field doesn't match required pattern, or
+            receipt_kind missing / outside the closed set (PR-3 lint raise)
         RuntimeError: write failed
     """
     _validate_provider(provider)
+    # Receipt-quality PR-3: emit-time lint flipped warn -> raise now that
+    # every emit site is tagged (plan §3b). Hard-fail before any write.
+    receipt_kind = validate_receipt_kind(receipt_kind)
 
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

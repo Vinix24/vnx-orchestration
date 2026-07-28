@@ -38,6 +38,7 @@ def _base_receipt_kwargs(state_dir):
         token_usage={"input": 50, "output": 20},
         cost_usd=0.0,
         state_dir=state_dir,
+        receipt_kind="dispatch",
     )
 
 

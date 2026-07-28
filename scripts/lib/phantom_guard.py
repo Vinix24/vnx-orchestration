@@ -333,6 +333,7 @@ def record_phantom_if_any(
             append_receipt_payload(
                 {
                     "event_type": "subprocess_completion",
+                    "receipt_kind": "dispatch",
                     "dispatch_id": dispatch_id,
                     "status": "failed",
                     "phantom_rejected": True,
@@ -376,6 +377,7 @@ def record_guard_error(
         append_receipt_payload(
             {
                 "event_type": "phantom_guard_error",
+                "receipt_kind": "dispatch",
                 "dispatch_id": dispatch_id,
                 "status": "guard_error",
                 "guard_error": str(error),
