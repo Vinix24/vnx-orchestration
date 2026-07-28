@@ -164,6 +164,29 @@ def build_plan_review_instruction_fileref(
     )
 
 
+def build_generic_fileref_instruction(doc_path: str, report_path: str) -> str:
+    """Render a generic (NON-plan-review) file-ref instruction for the claude/tmux lane.
+
+    OI-811: ``_make_default_dispatcher`` is reused by callers whose instruction is NOT a
+    plan review — e.g. the deliberation panel's diverge/contrarian/verify/synthesis
+    stages. Wrapping their prompt in ``build_plan_review_instruction_fileref`` (which
+    tells the worker "you are an independent plan reviewer... review the IMPLEMENTATION
+    PLAN") caused a plan-reviewer-role worker to correctly reject the file as not a plan,
+    corrupting the panel stage. This variant carries the file-ref benefit (short
+    instruction string, avoids the bracketed-paste ingestion timeout on a large prompt)
+    WITHOUT the plan-review framing — the worker is simply told to follow the referenced
+    instruction and write its response to ``report_path``.
+    """
+    return (
+        f"Read your complete instruction from this file:\n\n"
+        f"  {doc_path}\n\n"
+        "Follow it in full.\n\n"
+        f"REPORT FILE (MANDATORY): Write your complete response to this exact file path:\n\n"
+        f"  {report_path}\n\n"
+        "Do NOT write to any other path. The caller reads only that file."
+    )
+
+
 def _strip_trailing_commas(text: str) -> str:
     """Remove a trailing comma immediately before a closing ``}``/``]`` (a recurring
     codex/glm flake: ``{"a": 1,}``)."""
@@ -416,6 +439,7 @@ def _resolve_data_dir(data_dir: Optional[str]) -> Path:
 
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
+    *, role: str = "plan-reviewer",
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -428,6 +452,13 @@ def _make_default_dispatcher(
                            NOT provider_dispatch (refuses claude), NOT headless `claude -p`
                            (bills API credits post-cutover).
       kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
+
+    ``role``: OI-811 — this factory is reused by callers whose instruction is NOT a plan
+    review (e.g. the deliberation panel's diverge/contrarian/verify/synthesis stages).
+    Defaults to "plan-reviewer" for backward compatibility with ``run_panel``. A caller
+    with a different role gets the generic (non-plan-framed) file-ref instruction on the
+    claude/tmux lane, and that role is stamped on both lanes' ``--role`` so govern() and
+    the phantom-guard evaluate it correctly instead of being told it is a plan review.
     """
     base = _resolve_data_dir(data_dir)
 
@@ -470,18 +501,26 @@ def _make_default_dispatcher(
                     _tmp_doc_path = fh.name
 
                 # Short instruction: rubric + verdict contract + explicit report-path directive.
-                # No 50k doc body — the worker reads it from _tmp_doc_path.
-                claude_instruction = build_plan_review_instruction_fileref(
-                    doc_path=_tmp_doc_path,
-                    track_id="<see file>",
-                    report_path=report_path_str,
-                )
+                # No 50k doc body — the worker reads it from _tmp_doc_path. A non-plan-review
+                # caller (OI-811) gets the generic file-ref framing instead — never told it is
+                # reviewing an IMPLEMENTATION PLAN.
+                if role == "plan-reviewer":
+                    claude_instruction = build_plan_review_instruction_fileref(
+                        doc_path=_tmp_doc_path,
+                        track_id="<see file>",
+                        report_path=report_path_str,
+                    )
+                else:
+                    claude_instruction = build_generic_fileref_instruction(
+                        doc_path=_tmp_doc_path,
+                        report_path=report_path_str,
+                    )
 
                 cmd = [
                     sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
                     "--dispatch-id", dispatch_id,
                     "--model", model_arg,
-                    "--role", "plan-reviewer",
+                    "--role", role,
                     "--instruction", claude_instruction,
                     "--deadline-seconds", str(timeout_seconds),
                     # A plan review is READ-ONLY (reads the doc file, writes a verdict report) —
@@ -506,7 +545,7 @@ def _make_default_dispatcher(
                     "--terminal-id", "plan-gate",
                     "--dispatch-id", dispatch_id,
                     "--model", model_arg,
-                    "--role", "plan-reviewer",
+                    "--role", role,
                     "--instruction", instruction,
                     "--no-auto-commit",
                 ]

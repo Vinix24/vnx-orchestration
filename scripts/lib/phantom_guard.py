@@ -50,7 +50,13 @@ _LOG = logging.getLogger(__name__)
 
 # SSOT for review roles — kept in sync with the kimi-routing predicate (item C). A reviewer's
 # job is a verdict, not a diff, so it is never a phantom for "no changes".
-REVIEW_ROLES = frozenset({"plan-reviewer", "code-reviewer", "security-reviewer", "reviewer"})
+# "deliberation-panelist" (OI-811, the vnx panel's diverge/contrarian/verify/synthesis
+# stage worker) belongs here for the same reason: it produces analysis/prose, not a code
+# diff, so an empty worktree diff is expected, never evidence of fabrication.
+REVIEW_ROLES = frozenset({
+    "plan-reviewer", "code-reviewer", "security-reviewer", "reviewer",
+    "deliberation-panelist",
+})
 
 # SSOT for review/analysis task_class values — a second key onto the same exemption for callers
 # that route by task_class rather than a REVIEW_ROLES-matching role string. "research_structured"

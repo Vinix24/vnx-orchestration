@@ -882,6 +882,99 @@ def test_claude_lane_dispatcher_writes_temp_file_and_cleans_up(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# OI-811: _make_default_dispatcher is reused by non-plan-review callers (the vnx
+# deliberation panel). A caller-supplied ``role`` must (a) route the claude/tmux lane
+# through the GENERIC file-ref instruction, never the "you are an independent plan
+# reviewer... review the IMPLEMENTATION PLAN" framing, and (b) be stamped as --role on
+# both the claude/tmux lane and the provider lane so govern()/phantom-guard evaluate the
+# dispatch under its real role instead of a hardcoded plan-reviewer.
+# --------------------------------------------------------------------------
+
+def test_default_role_is_still_plan_reviewer_for_backward_compat(tmp_path):
+    """run_panel's own dispatcher (no role kwarg) must keep routing as plan-reviewer."""
+    import unittest.mock as mock
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value=_make_report_with_fence("pass")):
+            dispatcher("claude", "opus", "some plan text", "plan-gate-feat-x-opus-abc123")
+
+    assert len(seen_cmds) == 1
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--role") + 1] == "plan-reviewer"
+    instr = cmd[cmd.index("--instruction") + 1]
+    assert "independent plan reviewer" in instr.lower()
+
+
+def test_non_plan_role_claude_lane_uses_generic_instruction_not_plan_framing(tmp_path):
+    """A caller with role != 'plan-reviewer' must not have its instruction wrapped as an
+    'independent plan reviewer... IMPLEMENTATION PLAN' review — that framing caused a
+    plan-reviewer-role worker to correctly reject a non-plan artifact ('this is not a
+    plan'), corrupting the deliberation panel's stage output."""
+    import unittest.mock as mock
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60, role="deliberation-panelist")
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher(
+                "claude", "sonnet",
+                "You are one seat on a deliberation panel. QUESTION: audit src/",
+                "panel-sweep-diverge-0-abc123",
+            )
+
+    assert len(seen_cmds) == 1
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--role") + 1] == "deliberation-panelist"
+    instr = cmd[cmd.index("--instruction") + 1]
+    assert "independent plan reviewer" not in instr.lower()
+    assert "implementation plan" not in instr.lower()
+    # the file-ref benefit (short instruction, doc read from disk) is preserved
+    assert "Read your complete instruction from this file" in instr
+
+
+def test_non_plan_role_provider_lane_passes_role_through(tmp_path):
+    """kimi/glm/deepseek dispatches for a non-plan-review caller must also carry the
+    real role, not a hardcoded 'plan-reviewer' — the provider lane inlines the
+    instruction unchanged either way (no plan-framing risk there), but the role tag
+    still feeds govern()/phantom-guard/receipts."""
+    import unittest.mock as mock
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60, role="deliberation-panelist")
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher("kimi", "kimi-k3", "some panel prompt", "panel-sweep-diverge-1-def456")
+
+    assert len(seen_cmds) == 1
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--role") + 1] == "deliberation-panelist"
+    assert cmd[cmd.index("--instruction") + 1] == "some panel prompt"
+
+
+# --------------------------------------------------------------------------
 # scoped-spawn fix (2026-07-14): tmux_interactive_dispatch.dispatch()'s D2.2 scoping
 # precondition (tmux_interactive_dispatch.py, "D2.2 scoping precondition" -- fail-closed:
 # a working_tree_only dispatch is refused unless the env carries VNX_WORKER_SCOPED=1 or

@@ -10,6 +10,16 @@ def test_review_role_is_never_phantom():
     assert not v.is_phantom
 
 
+def test_deliberation_panelist_role_is_never_phantom():
+    # OI-811: a panel stage's deliverable (diverge/contrarian/verify/synthesis
+    # analysis) is prose, not a code diff — a real dispatch with real tokens and no
+    # worktree diff is expected, never evidence of fabrication.
+    v = pg.phantom_guard(
+        status="done", worktree_diff="", token_usage=4321, role="deliberation-panelist",
+    )
+    assert not v.is_phantom
+
+
 def test_non_completion_status_is_not_phantom():
     v = pg.phantom_guard(status="failed", worktree_diff="", token_usage=None, role="backend-developer")
     assert not v.is_phantom
