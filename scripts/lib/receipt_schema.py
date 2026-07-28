@@ -1,0 +1,228 @@
+"""receipt_schema.py — codified receipt-shape contracts (receipt-quality PR-B0).
+
+Two receipt shapes are written into the canonical ledger today, and until now
+both were assembled as ad-hoc ``Dict`` literals at the emit sites:
+
+  - ``ReceiptV2`` — the governance-enriched dispatch receipt
+    (``schema_version: 2``) emitted by
+    ``governance_emit.emit_dispatch_receipt`` (ADR-035, Path 1).
+  - ``SynthesizedLaneReceipt`` — the lane-synthesized fallback completion
+    receipt emitted by ``dispatch_govern.ensure_receipt`` when the worker
+    never produced one (F1 guarantee).
+
+This module codifies each shape ONCE as a typed dataclass so later
+receipt-quality PRs (B1-B4) add typed fields instead of dict keys.
+
+Hard contracts:
+
+  - ``to_dict()`` is BYTE-COMPATIBLE with the pre-PR-B0 literal construction:
+    same field insertion order (the ledger writer serializes with
+    ``json.dumps(..., sort_keys=False)``), same unconditional-vs-conditional
+    stamping semantics (``role``/``pr_id``/``report_path``/``events_path``/
+    ``cost_usd`` are stamped even when ``None``; ``permission_enforcement``/
+    ``mandate_id`` are omitted when falsy; the remaining optional fields are
+    omitted only when ``None``).
+  - The ``receipt_kind`` closed-set lint (receipt-quality PR-3,
+    ``dispatch_identity.validate_receipt_kind``) is folded into each
+    contract's ``__post_init__`` — constructing a receipt object with a
+    missing/out-of-vocab kind raises ValueError before anything is written.
+  - This PR adds NO new receipt fields (that is B1-B4) and does not touch
+    ``IDEMPOTENCY_FIELDS``.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Sibling scripts/lib modules must resolve even when a caller imports this
+# module by path without scripts/lib already on sys.path (mirrors
+# governance_emit.py / dispatch_identity.py).
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from dispatch_identity import validate_receipt_kind  # noqa: E402
+
+
+def _utc_now_iso() -> str:
+    """Ledger timestamp format used by both emit paths (``%Y-%m-%dT%H:%M:%SZ``)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass
+class ReceiptV2:
+    """The ADR-035 v2 dispatch receipt emitted by ``governance_emit``.
+
+    Field set derived from the actual pre-PR-B0 emit site
+    (``governance_emit.emit_dispatch_receipt``) — not from documentation.
+
+    Unconditionally stamped (serialized even when ``None``, so the ledger
+    distinguishes "unresolved" (null) from "pre-feature" (field absent)):
+    ``role``, ``pr_id``, ``report_path``, ``events_path``, ``cost_usd``.
+
+    Conditionally stamped (omitted from the serialized dict):
+    ``permission_enforcement`` and ``mandate_id`` when falsy (matches the
+    pre-PR-B0 truthiness guard); ``final_prompt_path``,
+    ``final_prompt_sha256``, ``injection_reconstructs``, ``verification`` and
+    ``warnings`` when ``None``.
+    """
+
+    dispatch_id: str
+    terminal_id: str
+    provider: str
+    model: str
+    status: str
+    completion_pct: int
+    risk: float
+    findings: List[Dict[str, Any]]
+    duration_seconds: float
+    token_usage: Dict[str, int]
+    receipt_kind: str
+    # Unconditionally stamped, None-able.
+    role: Optional[str] = None
+    pr_id: Optional[str] = None
+    report_path: Optional[str] = None
+    events_path: Optional[str] = None
+    cost_usd: Optional[float] = None
+    # Stamped from the contract's own defaults; overridable for tests.
+    event_type: str = "task_complete"
+    schema_version: int = 2
+    timestamp: Optional[str] = None  # None -> stamped with now at construction
+    # Conditionally stamped.
+    permission_enforcement: Optional[str] = None
+    mandate_id: Optional[str] = None
+    final_prompt_path: Optional[str] = None
+    final_prompt_sha256: Optional[str] = None
+    injection_reconstructs: Optional[bool] = None
+    verification: Optional[Dict[str, Any]] = None
+    warnings: Optional[List[Dict[str, Any]]] = None
+
+    def __post_init__(self) -> None:
+        # Receipt-quality PR-3: the closed-set lint lives in the contract now
+        # — an invalid kind fails construction, before any write.
+        self.receipt_kind = validate_receipt_kind(self.receipt_kind)
+        # Same normalization the pre-PR-B0 literal applied at build time.
+        self.duration_seconds = round(float(self.duration_seconds), 3)
+        if self.timestamp is None:
+            self.timestamp = _utc_now_iso()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to the ledger dict, byte-compatible with the pre-PR-B0
+        literal construction in ``governance_emit.emit_dispatch_receipt``
+        (same insertion order; the writer uses ``sort_keys=False``).
+        """
+        receipt: Dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "dispatch_id": self.dispatch_id,
+            "terminal_id": self.terminal_id,
+            "provider": self.provider,
+            "model": self.model,
+            "role": self.role,
+            "receipt_kind": self.receipt_kind,
+            "status": self.status,
+            "event_type": self.event_type,
+            "completion_pct": self.completion_pct,
+            "risk": self.risk,
+            "duration_seconds": self.duration_seconds,
+            "token_usage": self.token_usage,
+            "cost_usd": self.cost_usd,
+            "findings": self.findings,
+            "pr_id": self.pr_id,
+            "report_path": self.report_path,
+            "events_path": self.events_path,
+            "timestamp": self.timestamp,
+        }
+        # Conditional stamps — same guards as the pre-PR-B0 emit site:
+        # truthiness for permission_enforcement / mandate_id, is-not-None for
+        # the rest.
+        if self.permission_enforcement:
+            receipt["permission_enforcement"] = self.permission_enforcement
+        if self.mandate_id:
+            receipt["mandate_id"] = self.mandate_id
+        if self.final_prompt_path is not None:
+            receipt["final_prompt_path"] = self.final_prompt_path
+        if self.final_prompt_sha256 is not None:
+            receipt["final_prompt_sha256"] = self.final_prompt_sha256
+        if self.injection_reconstructs is not None:
+            receipt["injection_reconstructs"] = self.injection_reconstructs
+        if self.verification is not None:
+            receipt["verification"] = self.verification
+        if self.warnings is not None:
+            receipt["warnings"] = self.warnings
+        return receipt
+
+
+@dataclass
+class SynthesizedLaneReceipt:
+    """The govern-synthesized fallback completion receipt (F1 guarantee)
+    emitted by ``dispatch_govern.ensure_receipt`` when the worker never
+    produced a receipt before the deadline.
+
+    Field set derived from the actual pre-PR-B0 emit site. Distinct from
+    ``ReceiptV2``: this is a ``subprocess_completion`` event with no
+    ``schema_version`` stamp, dual ``terminal``/``terminal_id`` keys, and the
+    ``tmux_interactive_lane_synthesized`` source marker
+    ``dedup_completion_receipts`` relies on to prefer worker-authored
+    receipts on readback.
+    """
+
+    dispatch_id: str
+    terminal_id: str
+    model: str
+    lane: str
+    failure_reason: Optional[str]
+    contract_status: str
+    permission_enforcement: str
+    role: Optional[str] = None
+    receipt_kind: str = "dispatch"
+    event_type: str = "subprocess_completion"
+    status: str = "failed"
+    source: str = "tmux_interactive_lane_synthesized"
+    synthesized: bool = True
+    provider: str = "claude"
+    sub_provider: str = "anthropic"
+    timestamp: Optional[str] = None  # None -> stamped with now at construction
+    # Conditionally stamped (is-not-None).
+    worker_permission_enforcement: Optional[str] = None
+    report_path: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.receipt_kind = validate_receipt_kind(self.receipt_kind)
+        if self.timestamp is None:
+            self.timestamp = _utc_now_iso()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to the ledger dict, byte-compatible with the pre-PR-B0
+        literal construction in ``dispatch_govern.ensure_receipt``.
+        """
+        receipt: Dict[str, Any] = {
+            "event_type": self.event_type,
+            "dispatch_id": self.dispatch_id,
+            "terminal": self.terminal_id,
+            "terminal_id": self.terminal_id,
+            "status": self.status,
+            "source": self.source,
+            "synthesized": self.synthesized,
+            "failure_reason": self.failure_reason,
+            "contract_status": self.contract_status,
+            "permission_enforcement": self.permission_enforcement,
+            "timestamp": self.timestamp,
+            "provider": self.provider,
+            "sub_provider": self.sub_provider,
+            "model": self.model,
+            "lane": self.lane,
+            "role": self.role,
+            "receipt_kind": self.receipt_kind,
+        }
+        if self.worker_permission_enforcement is not None:
+            receipt["worker_permission_enforcement"] = self.worker_permission_enforcement
+        if self.report_path is not None:
+            receipt["report_path"] = self.report_path
+        return receipt
+
+
+__all__ = ["ReceiptV2", "SynthesizedLaneReceipt"]

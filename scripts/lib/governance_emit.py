@@ -22,7 +22,6 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +42,7 @@ from append_receipt_internals.receipt_finalize import (
     commit_receipt_v2_fields,
 )
 from append_receipt_internals.validation import _validate_receipt
-from dispatch_identity import validate_receipt_kind
+from receipt_schema import ReceiptV2
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +95,10 @@ def emit_dispatch_receipt(
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
     uses.
+
+    The receipt shape itself is codified in ``receipt_schema.ReceiptV2``
+    (receipt-quality PR-B0) — construction validates ``receipt_kind`` and
+    ``to_dict()`` serializes byte-compatibly with the historical literal.
 
     Returns the receipt file path on success.
 
@@ -156,58 +159,41 @@ def emit_dispatch_receipt(
         RuntimeError: write failed
     """
     _validate_provider(provider)
-    # Receipt-quality PR-3: emit-time lint flipped warn -> raise now that
-    # every emit site is tagged (plan §3b). Hard-fail before any write.
-    receipt_kind = validate_receipt_kind(receipt_kind)
 
-    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    receipt: Dict[str, Any] = {
-        # ADR-035 §9 PR-5 (HIGH-6): stamped atomically with the trimmed v2
-        # shape in this same PR — never separately from the shape change.
-        "schema_version": 2,
-        "dispatch_id": dispatch_id,
-        "terminal_id": terminal_id,
-        "provider": provider,
-        "model": model,
-        # receipt-quality PR-1: dispatch identity — stamped unconditionally
-        # (like status) so the ledger distinguishes "unresolved" (null) from
-        # "pre-feature" (field absent).
-        "role": role,
-        "receipt_kind": receipt_kind,
-        "status": status,
-        # ADR-035 §3.2.1/§7.1 (r2 BLOCKING-1): stamped unconditionally, never
-        # keyed on status — task_complete marks "reached a terminal outcome",
-        # status carries which outcome (matches outcome_signals.py's
-        # task_complete-plus-status convention). This is the one field Path 1
-        # must add to survive contact with the shared validator below, which
-        # it has never faced before this PR.
-        "event_type": "task_complete",
-        "completion_pct": completion_pct,
-        "risk": risk,
-        "duration_seconds": round(float(duration_seconds), 3),
-        "token_usage": token_usage,
-        "cost_usd": cost_usd,
-        "findings": findings,
-        "pr_id": pr_id,
-        "report_path": report_path,
-        "events_path": events_path,
-        "timestamp": now_ts,
-    }
-    if permission_enforcement:
-        receipt["permission_enforcement"] = permission_enforcement
-    if mandate_id:
-        receipt["mandate_id"] = mandate_id
-    if final_prompt_path is not None:
-        receipt["final_prompt_path"] = final_prompt_path
-    if final_prompt_sha256 is not None:
-        receipt["final_prompt_sha256"] = final_prompt_sha256
-    if injection_reconstructs is not None:
-        receipt["injection_reconstructs"] = injection_reconstructs
-    if verification is not None:
-        receipt["verification"] = verification
-    if warnings is not None:
-        receipt["warnings"] = warnings
+    # Receipt-quality PR-B0: the v2 receipt shape is codified in
+    # receipt_schema.ReceiptV2 — the contract validates receipt_kind
+    # (receipt-quality PR-3 closed-set lint, warn -> raise: hard-fail before
+    # any write), normalizes duration_seconds, stamps schema_version /
+    # event_type=task_complete (ADR-035 §3.2.1/§7.1 r2 BLOCKING-1: never
+    # keyed on status) / timestamp, and serializes byte-compatibly with the
+    # pre-PR-B0 literal (same field order, same conditional-stamp guards).
+    # role stays stamped unconditionally (receipt-quality PR-1): None marks
+    # "identity was not resolvable" vs a pre-feature absent field.
+    receipt = ReceiptV2(
+        dispatch_id=dispatch_id,
+        terminal_id=terminal_id,
+        provider=provider,
+        model=model,
+        status=status,
+        completion_pct=completion_pct,
+        risk=risk,
+        findings=findings,
+        duration_seconds=duration_seconds,
+        token_usage=token_usage,
+        cost_usd=cost_usd,
+        pr_id=pr_id,
+        role=role,
+        receipt_kind=receipt_kind,
+        report_path=report_path,
+        events_path=events_path,
+        permission_enforcement=permission_enforcement,
+        mandate_id=mandate_id,
+        final_prompt_path=final_prompt_path,
+        final_prompt_sha256=final_prompt_sha256,
+        injection_reconstructs=injection_reconstructs,
+        verification=verification,
+        warnings=warnings,
+    ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
