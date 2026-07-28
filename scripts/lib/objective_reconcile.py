@@ -643,6 +643,27 @@ def run_reconcile(
 
     total_tracks = len(reconcile_results)
 
+    # ------------------------------------------------------------------ step 2b
+    # Dispatch-outcome recompute (receipt-quality PR-B3) — same cadence as the
+    # derived-status refresh above. Best-effort; failure never blocks the
+    # track-close pipeline below. The abandoned sweep is not a separate pass:
+    # it is one branch of the same per-dispatch classify_outcome() this call
+    # already runs for every dispatch in the project.
+    # ------------------------------------------------------------------ step 2b
+    dispatch_outcomes_summary: Dict[str, Any] = {"closed": 0, "total": 0, "error": None}
+    try:
+        import dispatch_outcome_classifier  # noqa: PLC0415
+        outcome_results = dispatch_outcome_classifier.reconcile_all_dispatch_outcomes(
+            state_dir, state_dir.parent, project_id, repo_root=repo_root,
+        )
+        dispatch_outcomes_summary["total"] = len(outcome_results)
+        dispatch_outcomes_summary["closed"] = sum(
+            1 for r in outcome_results if r.get("outcome") is not None
+        )
+    except Exception as exc:  # noqa: BLE001 — advisory sweep, never blocks reconcile
+        log.debug("dispatch-outcome recompute non-fatal: %s", exc)
+        dispatch_outcomes_summary["error"] = str(exc)
+
     # ------------------------------------------------------------------ step 3
     # Nomination: non-empty pr_ref + declared phase not in {done, parked}.
     # Re-close guard: skip tracks reopened from done→active when pr_ref
@@ -719,6 +740,7 @@ def run_reconcile(
             "started_at": started_at, "finished_at": _now_utc(),
             "evidence_source_health": {"gh": gh_health},
             "provenance": provenance,
+            "dispatch_outcomes": dispatch_outcomes_summary,
             "counts": counts,
             "per_track": per_track,
         }
@@ -843,6 +865,7 @@ def run_reconcile(
         "finished_at": finished_at,
         "evidence_source_health": {"gh": gh_health},
         "provenance": provenance,
+        "dispatch_outcomes": dispatch_outcomes_summary,
         "counts": counts,
         "per_track": per_track,
     }
