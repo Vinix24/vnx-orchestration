@@ -91,6 +91,11 @@ class _AdapterResult:
     error: Optional[str] = None
     timed_out: bool = False
     event_writer_failures: int = 0
+    # receipt-quality PR-B1: claude session_id (from the init event), threaded
+    # through to emit_dispatch_receipt so it can backfill token_usage from the
+    # local transcript when the spawn itself reported none. None for adapters
+    # with no session concept (e.g. codex).
+    session_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +236,7 @@ class ClaudeSubprocessAdapter:
                 status="failure",
                 token_usage=token_usage,
                 error=result.error,
+                session_id=result.session_id,
             )
         if result.timed_out:
             return _AdapterResult(
@@ -239,6 +245,7 @@ class ClaudeSubprocessAdapter:
                 status="timeout",
                 token_usage=token_usage,
                 timed_out=True,
+                session_id=result.session_id,
             )
         if result.stopped_early:
             return _AdapterResult(
@@ -246,6 +253,7 @@ class ClaudeSubprocessAdapter:
                 completion_text=(result.completion_text or ""),
                 status="success",
                 token_usage=token_usage,
+                session_id=result.session_id,
             )
         status = "success" if result.returncode == 0 else "failure"
         return _AdapterResult(
@@ -253,6 +261,7 @@ class ClaudeSubprocessAdapter:
             completion_text=(result.completion_text or ""),
             status=status,
             token_usage=token_usage,
+            session_id=result.session_id,
         )
 
 
@@ -620,6 +629,7 @@ def _govern(
                 verification=_verification_from_report(report_path),
                 role=_role,
                 receipt_kind="dispatch",
+                session_id=adapter_result.session_id,
             )
         except Exception as exc:
             raise EnvelopeGovernError(

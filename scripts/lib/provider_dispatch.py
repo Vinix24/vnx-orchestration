@@ -717,6 +717,11 @@ def _emit_governance(
                 },
                 role=_role,
                 receipt_kind="dispatch",
+                # receipt-quality PR-B1: threaded through so the claude-lane
+                # benchmark exemption path (the only route that reaches this
+                # provider="claude" case) can backfill token_usage from the
+                # local transcript. No-op for every other provider.
+                session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
