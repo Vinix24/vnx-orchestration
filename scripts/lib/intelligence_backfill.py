@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-intelligence_backfill.py — retroactive scope_tags population for quality_intelligence.db.
+intelligence_backfill.py — retroactive backfills for quality_intelligence.db.
 
-Updates success_patterns and antipatterns where category is NULL or empty,
-based on keyword matching in title+description. Safe to re-run (idempotent
-because it only touches rows with empty category).
+1. scope_tags: updates success_patterns and antipatterns where category is
+   NULL or empty, based on keyword matching in title+description.
+2. dispatch_metadata.role (receipt-quality PR-4): fills rows whose role is
+   NULL/empty or the fake ``backend-developer`` default with a genuine
+   receipt-carried role from t0_receipts.ndjson; rows without a derivable
+   role stay NULL (the emit-side resolver stamps ``identity_unresolved``).
+
+Safe to re-run (idempotent — each pass only touches still-unfilled rows).
 
 Usage:
     python3 scripts/lib/intelligence_backfill.py [--db PATH] [--dry-run]
@@ -12,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -23,6 +29,18 @@ from typing import Dict, List, Optional, Tuple
 _SCRIPTS_LIB = Path(__file__).resolve().parent
 if str(_SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_LIB))
+
+try:
+    # Receipt-quality PR-4: capture-gap role backfill for dispatch_metadata.
+    from dispatch_identity import _FAKE_DEFAULT_ROLE, normalize_role
+except Exception:  # pragma: no cover - sibling module available in-tree
+    _FAKE_DEFAULT_ROLE = "backend-developer"
+
+    def normalize_role(role):  # type: ignore[no-redef]
+        if not role:
+            return None
+        role = str(role).strip()
+        return None if (not role or role == _FAKE_DEFAULT_ROLE) else role
 
 try:
     from project_root import resolve_project_root
@@ -103,6 +121,95 @@ def backfill_table(
     return checked, updated
 
 
+def _load_receipt_roles(receipts_file: Path) -> Dict[str, str]:
+    """Latest genuine role per dispatch_id from t0_receipts.ndjson.
+
+    Receipt-quality PR-4: post-PR-1 receipts carry the resolved dispatch role.
+    Only genuine roles are collected (``identity_unresolved`` / fake / empty
+    excluded). Later lines win (append order). Fail-open: unreadable or
+    malformed lines are skipped.
+    """
+    roles: Dict[str, str] = {}
+    try:
+        lines = receipts_file.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        logger.warning("role backfill: cannot read receipts %s: %s", receipts_file, exc)
+        return roles
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        dispatch_id = rec.get("dispatch_id")
+        role = normalize_role(rec.get("role"))
+        if role == "identity_unresolved":
+            role = None
+        if dispatch_id and role:
+            roles[str(dispatch_id)] = role
+    return roles
+
+
+def backfill_dispatch_metadata_roles(
+    conn: sqlite3.Connection,
+    receipts_file: Optional[Path],
+    *,
+    dry_run: bool = False,
+) -> Tuple[int, int]:
+    """Backfill dispatch_metadata.role for rows with NULL/empty/fake role.
+
+    Genuine source: the receipt-carried role in t0_receipts.ndjson (PR-1+).
+    Rows without a derivable genuine role are left NULL — the emit-side
+    resolver stamps ``identity_unresolved`` for them. Idempotent: once a real
+    role is stamped the row no longer matches the selection.
+
+    Returns (checked, updated) counts.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id, dispatch_id FROM dispatch_metadata "
+            "WHERE role IS NULL OR role = '' OR role = ?",
+            (_FAKE_DEFAULT_ROLE,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("backfill_dispatch_metadata_roles: query failed: %s", exc)
+        return 0, 0
+
+    receipt_roles = _load_receipt_roles(receipts_file) if receipts_file else {}
+    checked = len(rows)
+    updated = 0
+
+    for row_id, dispatch_id in rows:
+        role = receipt_roles.get(dispatch_id)
+        if not role:
+            continue
+        if not dry_run:
+            try:
+                conn.execute(
+                    "UPDATE dispatch_metadata SET role = ? WHERE id = ?",
+                    (role, row_id),
+                )
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "backfill_dispatch_metadata_roles: update failed for id=%s: %s",
+                    row_id, exc,
+                )
+                continue
+        updated += 1
+
+    if not dry_run and updated > 0:
+        try:
+            conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("backfill_dispatch_metadata_roles: commit failed: %s", exc)
+
+    return checked, updated
+
+
 def run_backfill(db_path: Path, *, dry_run: bool = False) -> Dict[str, Dict[str, int]]:
     """Run the full backfill and return a per-table summary dict."""
     if not db_path.exists():
@@ -121,6 +228,20 @@ def run_backfill(db_path: Path, *, dry_run: bool = False) -> Dict[str, Dict[str,
                 "backfill %s: checked=%d updated=%d dry_run=%s",
                 table, checked, updated, dry_run,
             )
+        # Receipt-quality PR-4: dispatch_metadata role capture-gap backfill.
+        # Receipts live next to the DB in the state dir; absent file simply
+        # yields zero updates (rows stay NULL -> identity_unresolved at emit).
+        receipts_file = db_path.parent / "t0_receipts.ndjson"
+        checked, updated = backfill_dispatch_metadata_roles(
+            conn,
+            receipts_file if receipts_file.exists() else None,
+            dry_run=dry_run,
+        )
+        results["dispatch_metadata.role"] = {"checked": checked, "updated": updated}
+        logger.info(
+            "backfill dispatch_metadata.role: checked=%d updated=%d dry_run=%s",
+            checked, updated, dry_run,
+        )
     finally:
         conn.close()
 

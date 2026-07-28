@@ -178,6 +178,34 @@ def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str
         return None
 
 
+def _resolve_report_role(
+    dispatch_id: str, merged: Dict[str, Any], state_dir: Optional[Path]
+) -> str:
+    """Resolve the dispatch's real role from dispatch_metadata (PR-4).
+
+    FAIL-OPEN contract (mirrors PR-1/PR-2): any resolution error, missing DB,
+    missing row, null/empty role, or the fake ``backend-developer`` default
+    degrades to ``identity_unresolved`` — never ``unknown``, never the fake
+    literal, never raises.
+    """
+    role: Optional[str] = None
+    try:
+        from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+        project_id = merged.get("project_id") or None
+        if not project_id:
+            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+            project_id = _resolve_project_id()
+        role = resolve_dispatch_role(dispatch_id, project_id, state_dir=state_dir)
+    except Exception:  # noqa: BLE001 — identity join is fail-open
+        logger.debug(
+            "report_to_receipt_converter: role resolution failed open dispatch=%s",
+            dispatch_id,
+            exc_info=True,
+        )
+        role = None
+    return role or "identity_unresolved"
+
+
 def build_receipt_from_report(
     report_path: Path, text: str, *, state_dir: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
@@ -247,9 +275,12 @@ def build_receipt_from_report(
     # append_receipt_payload()'s rolling cache deduplicate same-cycle runs.
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
-        # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes;
-        # role propagation for this path lands in PR-4 (kind-only here).
+        # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes
+        # (closed-set receipt_kind; the emit-time lint raises on untagged).
         "receipt_kind": "dispatch",
+        # Receipt-quality PR-4: real role from dispatch_metadata via the
+        # resolver; fail-open to identity_unresolved (never unknown / fake).
+        "role": _resolve_report_role(dispatch_id, merged, state_dir),
         "task_id": merged.get("task_id", "unknown"),
         "terminal": merged.get("terminal", "unknown"),
         "provider": merged.get("provider", "unknown"),

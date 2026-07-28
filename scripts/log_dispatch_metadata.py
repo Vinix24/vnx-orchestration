@@ -19,6 +19,14 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+try:
+    # Receipt-quality PR-4: normalize the fake backend-developer default to
+    # NULL at write time (resolver stamps identity_unresolved at emit).
+    from dispatch_identity import normalize_role as _normalize_role
+except Exception:  # pragma: no cover - sibling module available in-tree
+    def _normalize_role(role):
+        return role or None
+
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
@@ -96,7 +104,7 @@ def main():
             return 1
     now_iso = datetime.utcnow().isoformat()
     _dispatch_vals = (
-        args.role or None,
+        _normalize_role(args.role),
         args.skill_name or None,
         args.gate or None,
         args.cognition,
@@ -123,9 +131,12 @@ def main():
             args.dispatch_id, args.terminal, args.track,
             *_dispatch_vals, now_iso, project_id_val,
         ))
+        # role=COALESCE(?, role): a re-call without a role (or with the fake
+        # default, normalized to NULL above) must not null an existing real
+        # role; a genuine new role still overwrites (PR-4 capture-gap fix).
         cur.execute("""
             UPDATE dispatch_metadata SET
-                terminal=?, track=?, role=?, skill_name=?, gate=?,
+                terminal=?, track=?, role=COALESCE(?, role), skill_name=?, gate=?,
                 cognition=?, priority=?, pr_id=?,
                 pattern_count=?, prevention_rule_count=?, intelligence_json=?,
                 instruction_char_count=?, context_file_count=?, target_open_items=?
@@ -148,7 +159,7 @@ def main():
         ))
         cur.execute("""
             UPDATE dispatch_metadata SET
-                terminal=?, track=?, role=?, skill_name=?, gate=?,
+                terminal=?, track=?, role=COALESCE(?, role), skill_name=?, gate=?,
                 cognition=?, priority=?, pr_id=?,
                 pattern_count=?, prevention_rule_count=?, intelligence_json=?,
                 instruction_char_count=?, context_file_count=?, target_open_items=?

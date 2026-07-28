@@ -499,6 +499,22 @@ def _record_provider_metadata(
         from dispatch_metadata_db import upsert_dispatch_provider_row  # noqa: PLC0415
         db_path = Path(state_dir) / "quality_intelligence.db"
         terminal = getattr(args, "terminal_id", "") or ""
+        # Receipt-quality PR-4: capture-gap backfill at metadata-WRITE time.
+        # Derive a genuine role: normalize the fake backend-developer default
+        # away, then recover from the instruction's "Role:" header. Where no
+        # real role is derivable, leave null — the resolver stamps
+        # identity_unresolved at emit.
+        role = getattr(args, "role", None)
+        try:
+            from dispatch_identity import (  # noqa: PLC0415
+                extract_role_from_instruction,
+                normalize_role,
+            )
+            role = normalize_role(role) or extract_role_from_instruction(
+                getattr(args, "instruction", "") or ""
+            )
+        except Exception:  # noqa: BLE001 — role derivation is non-fatal
+            role = role or None
         upsert_dispatch_provider_row(
             db_path,
             dispatch_id=args.dispatch_id,
@@ -506,7 +522,7 @@ def _record_provider_metadata(
             provider=provider,
             model=model_used or None,
             track=_TERMINAL_TRACK.get(terminal, "headless"),
-            role=getattr(args, "role", None),
+            role=role,
             gate=getattr(args, "gate", None) or None,
             pr_id=getattr(args, "pr_id", None),
             outcome_status=status,

@@ -16,7 +16,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 import dispatch_identity
-from dispatch_identity import resolve_dispatch_role
+from dispatch_identity import (
+    extract_role_from_instruction,
+    normalize_role,
+    resolve_dispatch_role,
+)
 
 
 def _make_db(state_dir: Path, rows):
@@ -101,3 +105,34 @@ def test_resolve_query_error_fails_open(tmp_path, monkeypatch):
 def test_resolve_empty_identifiers_return_none(tmp_path):
     assert resolve_dispatch_role("", "vnx-dev", state_dir=tmp_path) is None
     assert resolve_dispatch_role("disp-1", "", state_dir=tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# PR-4 write-time helpers: normalize_role / extract_role_from_instruction
+# ---------------------------------------------------------------------------
+
+def test_normalize_role_strips_and_keeps_real_role():
+    assert normalize_role("quality-engineer") == "quality-engineer"
+    assert normalize_role("  debugger  ") == "debugger"
+
+
+def test_normalize_role_fake_default_returns_none():
+    # The fake backend-developer default must never be persisted.
+    assert normalize_role("backend-developer") is None
+
+
+def test_normalize_role_empty_or_none_returns_none():
+    assert normalize_role(None) is None
+    assert normalize_role("") is None
+    assert normalize_role("   ") is None
+
+
+def test_extract_role_from_instruction_header():
+    assert extract_role_from_instruction("Role: debugger\n\nDo the thing") == "debugger"
+    assert extract_role_from_instruction("# Dispatch\nRole: quality-engineer\nBody") == "quality-engineer"
+
+
+def test_extract_role_from_instruction_absent_returns_none():
+    assert extract_role_from_instruction("no header here") is None
+    assert extract_role_from_instruction("") is None
+    assert extract_role_from_instruction(None) is None
