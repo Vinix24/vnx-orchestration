@@ -55,6 +55,7 @@ def _make_spec(data_dir: Path, state_dir: Path, **kwargs) -> GovernSpec:
         pr_id=kwargs.get("pr_id"),
         base_sha=kwargs.get("base_sha"),
         worktree_path=kwargs.get("worktree_path"),
+        role=kwargs.get("role"),
     )
 
 
@@ -198,6 +199,81 @@ def test_govern_authored_preserves_worker_body(tmp_data, tmp_state, monkeypatch)
     assert "## Open Items" in content
     # Worker's specific text content must be preserved.
     assert "Implemented the feature correctly" in content
+
+
+# ---------------------------------------------------------------------------
+# OI-811: freeform-role reports (deliberation-panelist) — free-form panel-stage
+# analysis, no ## Changes/## Verification headings and no plan-verdict fence. Must be
+# accepted as authored (never synthesized-over) and must skip the standard report-body
+# contract, the same way plan-reviewer already does.
+# ---------------------------------------------------------------------------
+
+def test_govern_deliberation_panelist_report_accepted_as_authored_without_fence(
+    tmp_data, tmp_state, monkeypatch,
+):
+    """A deliberation-panelist report has NEITHER the standard contract headings NOR a
+    vnx-plan-verdict fence — it is free-form panel analysis. It must still be accepted
+    as authored (not synthesized-over, which would replace it with an empty git-diff
+    body since a panel dispatch produces no commit)."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    panel_body = (
+        "You are the SYNTHESISER on a deliberation panel (codebase sweep).\n\n"
+        "CONSENSUS: the auth module has a real vulnerability at auth.py:42.\n"
+        "CONTESTED: whether the fix requires a migration.\n"
+    )
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(panel_body, encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, role="deliberation-panelist")
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert "auth.py:42" in content
+
+
+def test_govern_deliberation_panelist_empty_report_falls_through_to_synthesis(
+    tmp_data, tmp_state, monkeypatch,
+):
+    """An empty deliberation-panelist report (the seat produced nothing) must NOT be
+    accepted as authored — it falls through to synthesis like any other empty report."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text("   \n", encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, role="deliberation-panelist")
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status != "authored"
+
+
+def test_govern_deliberation_panelist_skips_standard_contract_validation(
+    tmp_data, tmp_state, monkeypatch,
+):
+    """A deliberation-panelist authored body — which by design lacks ## Changes/##
+    Verification/## Open Items — must not be flagged 'violated' by the standard
+    report-body contract, even in enforce mode."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_CONTRACT_VALIDATE", "enforce")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text("Terse panel analysis with no standard headings.\n", encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, role="deliberation-panelist")
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
 
 
 def test_govern_authored_not_double_stamped(tmp_data, tmp_state, monkeypatch):

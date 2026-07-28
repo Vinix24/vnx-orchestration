@@ -27,8 +27,8 @@ def test_seats_filters_to_requested_roster(tmp_path, monkeypatch):
     panel = _load_panel_cli()
     calls = {}
 
-    def fake_dispatcher_factory(data_dir, timeout):
-        calls["dispatcher_factory"] = {"data_dir": data_dir, "timeout": timeout}
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        calls["dispatcher_factory"] = {"data_dir": data_dir, "timeout": timeout, "role": role}
         return lambda provider, model, prompt, dispatch_id: "ok"
 
     def fake_run_deliberation(*args, **kwargs):
@@ -52,12 +52,13 @@ def test_seats_filters_to_requested_roster(tmp_path, monkeypatch):
         ("codex", "gpt-5.5"),
         ("claude", "sonnet"),
     ]
+    assert calls["dispatcher_factory"]["role"] == "deliberation-panelist"
 
 
 def test_unknown_seat_errors_without_dispatch(tmp_path, monkeypatch, capsys):
     panel = _load_panel_cli()
 
-    def fail_dispatcher_factory(data_dir, timeout):
+    def fail_dispatcher_factory(data_dir, timeout, role=None):
         raise AssertionError("dispatcher must not be built for invalid --seats")
 
     monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fail_dispatcher_factory)
@@ -81,7 +82,7 @@ def test_default_omits_roster_kwarg_to_preserve_full_fleet_path(tmp_path, monkey
     panel = _load_panel_cli()
     calls = {}
 
-    def fake_dispatcher_factory(data_dir, timeout):
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
         return lambda provider, model, prompt, dispatch_id: "ok"
 
     def fake_run_deliberation(*args, **kwargs):
@@ -100,3 +101,26 @@ def test_default_omits_roster_kwarg_to_preserve_full_fleet_path(tmp_path, monkey
 
     assert rc == 0
     assert "roster" not in calls["run_deliberation"]["kwargs"]
+
+
+def test_dispatcher_factory_receives_non_plan_reviewer_role(tmp_path, monkeypatch):
+    """OI-811: panel.py must not dispatch its stage prompts under the plan-reviewer role —
+    that framing caused a plan-reviewer-role worker to reject a non-plan panel artifact."""
+    panel = _load_panel_cli()
+    calls = {}
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        calls["role"] = role
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    def fake_run_deliberation(*args, **kwargs):
+        return _FakeResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main(["sweep", "audit src/", "--out", str(tmp_path / "report.md")])
+
+    assert rc == 0
+    assert calls["role"] == "deliberation-panelist"
+    assert calls["role"] != "plan-reviewer"

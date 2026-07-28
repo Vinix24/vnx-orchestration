@@ -33,6 +33,23 @@ class _Recorder:
         return [c["prompt"] for c in self.calls if f"-{stage}-" in c["did"]]
 
 
+class _HugeRecorder:
+    """Fake dispatcher: returns a HUGE fixed reply for every call (so digest/contrarian/
+    factcheck all balloon like a live cascading-verbatim run would) while still recording
+    every (provider, prompt, did) so a test can inspect the ACTUAL prompt built for a
+    later stage."""
+    def __init__(self, size=50_000):
+        self.calls = []
+        self.size = size
+
+    def __call__(self, provider, model, prompt, did):
+        self.calls.append({"provider": provider, "prompt": prompt, "did": did})
+        return "H" * self.size
+
+    def stage_prompts(self, stage: str):
+        return [c["prompt"] for c in self.calls if f"-{stage}-" in c["did"]]
+
+
 ROSTER = [("codex", "gpt-5.5"), ("kimi", "k2"), ("claude", "sonnet")]
 
 
@@ -209,3 +226,152 @@ class TestReportBackstop:
             clipped = dp._clip(text_past_old_limit, "contrarian", limit=dp._REPORT_BACKSTOP)
         assert len(clipped) == 20_000  # far past the old 6000-char cut, still passed whole
         assert not caplog.records
+
+
+class TestStageDistillation:
+    """OI-809 (BLOCKER): each downstream stage must carry a BOUNDED distillate of prior
+    stages, not the full verbatim material re-embedded at every hop — and the stage
+    instruction must survive regardless of how large prior stages were."""
+
+    def test_distill_passes_small_text_whole_and_silent(self, caplog):
+        small = "y" * 500
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            out = dp._distill(small, "contrarian", limit=6000)
+        assert out == small
+        assert not caplog.records
+
+    def test_distill_bounds_and_warns_on_large_text(self, caplog):
+        big = "x" * 20_000
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            out = dp._distill(big, "contrarian", limit=6000)
+        assert len(out) < 6100  # bounded to the limit (+ short truncation notice)
+        warnings = [r for r in caplog.records if "distillate" in r.message]
+        assert warnings, "distillation trim must emit a loud warning, never fail silently"
+        assert "contrarian" in warnings[0].message
+        assert "VNX_PANEL_DISTILLATE_BUDGET" in warnings[0].message
+
+    def test_default_distillate_budget_is_much_smaller_than_report_backstop(self):
+        """The distillate budget is a per-hop carry-forward cap, not the generous
+        single-report backstop — it must be meaningfully smaller so cascading across
+        3 downstream stages does not reproduce the old blow-up."""
+        assert dp._DISTILLATE_BUDGET < dp._REPORT_BACKSTOP
+
+    def test_distillate_budget_env_var_override(self):
+        lib_dir = str(REPO_ROOT / "scripts" / "lib")
+        code = (
+            f"import sys; sys.path.insert(0, {lib_dir!r}); import deliberation_panel as dp; "
+            "print(dp._DISTILLATE_BUDGET)"
+        )
+        env = {**os.environ, "VNX_PANEL_DISTILLATE_BUDGET": "999"}
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
+        )
+        assert result.stdout.strip() == "999"
+
+    def test_synthesis_prompt_bounded_and_instruction_survives_huge_prior_stages(self):
+        """The exact OI-809 failure mode: every stage returns a HUGE report (as a live
+        cascading-verbatim run would produce). The synthesis stage's prompt must (a)
+        still contain its own instruction/ask, (b) stay far smaller than the old
+        3x-full-blob cascade, and (c) place the instruction BEFORE the bulky context so
+        a tail-truncation downstream can only ever cut context, never the task."""
+        rec = _HugeRecorder(size=50_000)
+        dp.run_deliberation("sweep", "audit src/", dispatcher=rec, roster=ROSTER, max_workers=3)
+        synth_prompts = rec.stage_prompts("synth")
+        assert len(synth_prompts) == 1
+        synth_prompt = synth_prompts[0]
+
+        # (a) the synthesis instruction/ask is present, not truncated away
+        assert "SYNTHESISER" in synth_prompt
+        assert "Produce" in synth_prompt and "CONSENSUS" in synth_prompt
+
+        # (b) carried-forward material is DISTILLED (bounded), not the raw huge blobs —
+        # the old cascading-verbatim approach would put ~3 x 50_000 = 150_000+ chars of
+        # digest/contrarian/factcheck into this single prompt.
+        assert len(synth_prompt) < 30_000, (
+            f"synth prompt is {len(synth_prompt)} chars — prior-stage material was not "
+            "bounded before being carried into this stage"
+        )
+
+        # (c) instruction precedes the bulky context
+        instr_pos = synth_prompt.index("SYNTHESISER")
+        context_pos = synth_prompt.index("H" * 100)
+        assert instr_pos < context_pos
+
+    def test_instruction_survives_a_simulated_downstream_tail_truncation(self):
+        """Even if some layer downstream of this module applies its own fixed-length cut
+        (the lane, or a future backstop), the now-bounded prompt's instruction — sitting
+        at the front — must survive a truncation that would have destroyed it under the
+        old (instruction-last) layout."""
+        rec = _HugeRecorder(size=50_000)
+        dp.run_deliberation("sweep", "audit src/", dispatcher=rec, roster=ROSTER, max_workers=3)
+        synth_prompt = rec.stage_prompts("synth")[0]
+        simulated_cut = synth_prompt[:40_000]
+        assert "SYNTHESISER" in simulated_cut
+        assert "Produce" in simulated_cut
+
+
+class TestCoverageAwareDegradation:
+    """OI-810 (warn): a failed/empty seat must yield explicit degraded coverage, never a
+    phantom full-coverage render."""
+
+    def test_failed_seat_recorded_as_degraded_coverage(self):
+        def flaky(provider, model, prompt, did):
+            if provider == "kimi":
+                return ""  # the glm-harness class of failure: fast exit, no text
+            return f"ok-{provider}"
+
+        res = dp.run_deliberation("sweep", "q", dispatcher=flaky, roster=ROSTER, max_workers=3)
+        assert len(res.present_lenses) == 2
+        assert len(res.failed_seats) == 1
+        assert res.failed_seats[0]["provider"] == "kimi"
+        assert "2/3" in res.coverage
+        assert "kimi" in res.coverage
+
+    def test_all_seats_present_reports_full_coverage_without_failed_note(self):
+        rec = _Recorder()
+        res = dp.run_deliberation("sweep", "q", dispatcher=rec, roster=ROSTER, max_workers=3)
+        assert res.failed_seats == []
+        assert len(res.present_lenses) == 3
+        assert res.coverage == "3/3 lenses present"
+
+    def test_report_surfaces_degraded_coverage_not_phantom_full(self):
+        def flaky(provider, model, prompt, did):
+            if provider == "kimi":
+                return ""
+            return f"ok-{provider}"
+
+        res = dp.run_deliberation("sweep", "q", dispatcher=flaky, roster=ROSTER, max_workers=3)
+        report = res.to_report()
+        assert "Coverage" in report
+        assert "2/3" in report
+        assert "SEAT FAILED" in report  # the dead seat is rendered loudly, not silently
+
+    def test_digest_excludes_failed_seats_from_downstream_stages(self):
+        rec_calls = []
+
+        def mixed(provider, model, prompt, did):
+            rec_calls.append({"provider": provider, "prompt": prompt, "did": did})
+            if provider == "kimi" and "-diverge-" in did:
+                raise RuntimeError("kimi down")
+            return f"<<{provider}>>"
+
+        dp.run_deliberation("sweep", "q", dispatcher=mixed, roster=ROSTER, max_workers=3)
+        contra_prompts = [c["prompt"] for c in rec_calls if "-contrarian-" in c["did"]]
+        assert len(contra_prompts) == 1
+        prompt = contra_prompts[0]
+        # the failed kimi seat's fan-out entry (its raw error text) must not leak into the
+        # digest as if it were real analysis — but the coverage note (which names the
+        # failed seat so the seat reasons about the true present-lens set) is expected.
+        assert "dispatch error" not in prompt
+        assert "PANEL COVERAGE" in prompt and "kimi" in prompt
+
+    def test_logs_a_loud_warning_on_degraded_coverage(self, caplog):
+        def flaky(provider, model, prompt, did):
+            if provider == "kimi":
+                return ""
+            return f"ok-{provider}"
+
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            dp.run_deliberation("sweep", "q", dispatcher=flaky, roster=ROSTER, max_workers=3)
+        warnings = [r for r in caplog.records if "usable report" in r.message]
+        assert warnings, "a failed seat must be logged loudly, never silently"

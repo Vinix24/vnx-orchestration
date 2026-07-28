@@ -124,11 +124,28 @@ class DeliberationResult:
     contrarian: str = ""
     factcheck: str = ""
     synthesis: str = ""
+    # Coverage bookkeeping (OI-810): which lenses actually produced a real report vs
+    # silently degraded. Populated by run_deliberation right after the fan-out completes.
+    present_lenses: List[str] = field(default_factory=list)
+    failed_seats: List[Dict[str, str]] = field(default_factory=list)  # {provider, lens}
+
+    @property
+    def coverage(self) -> str:
+        """Human-readable coverage summary, e.g. "3/5 lenses present; glm-harness
+        (alternative-approaches lens) failed". A dead seat must never be rendered as if
+        it silently contributed to the panel (OI-810) — this is the explicit signal."""
+        total = len(self.fan_out)
+        present = len(self.present_lenses)
+        if not self.failed_seats:
+            return f"{present}/{total} lenses present"
+        failed = ", ".join(f"{s['provider']} ({s['lens']})" for s in self.failed_seats)
+        return f"{present}/{total} lenses present; {failed} failed"
 
     def to_report(self) -> str:
         lines = [
             f"# Deliberation panel — {self.mode}",
             f"\n**Question:** {self.question}\n",
+            f"**Coverage:** {self.coverage}\n",
             "## Synthesis (cited)\n",
             self.synthesis or "_(no synthesis)_",
             "\n---\n## Contrarian / red-team\n",
@@ -138,7 +155,8 @@ class DeliberationResult:
             "\n---\n## Divergent views (fan-out)\n",
         ]
         for fo in self.fan_out:
-            lines.append(f"\n### {fo['provider']} — lens: {fo['lens']}\n")
+            failed_tag = " — **[SEAT FAILED — no report]**" if _is_error(fo["text"]) else ""
+            lines.append(f"\n### {fo['provider']} — lens: {fo['lens']}{failed_tag}\n")
             lines.append(fo["text"] or "_(empty)_")
         return "\n".join(lines)
 
@@ -180,6 +198,54 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
         text = _clip(text, fo.get("provider", "?"), limit)
         parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text}")
     return "\n\n".join(parts)
+
+
+# Per-hop budget for carrying an EARLIER stage's already-substantial output INTO a LATER
+# stage's prompt (OI-809). Distinct from _REPORT_BACKSTOP: that bounds one seat's raw
+# report once, generously, against a pathological runaway. This bounds what gets
+# RE-EMBEDDED at every downstream stage transition. Without it, the full fan-out digest
+# (up to 5 seats x _REPORT_BACKSTOP each) plus the contrarian output plus the verify
+# output all get re-embedded VERBATIM into the synthesis prompt — ~85% duplicated
+# material, observed live as 2216- and 3751-line prompts — until a fixed-length cut
+# (here or downstream in the dispatch lane) trims the prompt mid-sentence BEFORE the
+# stage instruction, so the seat receives corrupted context with its task missing.
+_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_DISTILLATE_BUDGET", "6000"))
+
+
+def _distill(text: str, tag: str, limit: int = _DISTILLATE_BUDGET) -> str:
+    """Bound prior-stage material before a downstream stage's prompt carries it forward.
+
+    Applied at every stage transition (diverge->contrarian->verify->synthesis) so the
+    prompt stays bounded regardless of how many hops a piece of text has already passed
+    through — the cascading-verbatim growth is exactly the OI-809 bug. Trimming is always
+    logged loudly, never silent (same discipline as _clip)."""
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    logger.warning(
+        "panel distillate: %s trimmed to %d chars for the downstream stage (was %d) — "
+        "raise VNX_PANEL_DISTILLATE_BUDGET if this loses signal",
+        tag, limit, len(t),
+    )
+    return t[:limit] + f"\n…[{tag} truncated to fit the downstream-stage budget]"
+
+
+def _stage_prompt(instruction: str, context_sections: List[Tuple[str, str]], reminder: str) -> str:
+    """Assemble a downstream-stage prompt with the INSTRUCTION FIRST and the (already
+    distilled/bounded) prior-stage context AFTER.
+
+    A fixed-length truncation applied anywhere downstream of this function — this
+    module's own backstop or the dispatch lane's — can then only ever cut into the
+    context tail, never the instruction the seat must follow. The old layout embedded
+    the instruction LAST, after the full verbatim prior-stage material, so a truncation
+    upstream of the seat cut the instruction away entirely and the seat received corrupt
+    context with no task (OI-809). The trailing reminder is a resilience bonus, never
+    load-bearing, since the real instruction already led."""
+    parts = [instruction]
+    for label, text in context_sections:
+        parts.append(f"\n--- {label} ---\n{text}\n--- END {label} ---")
+    parts.append(f"\n{reminder}")
+    return "\n".join(parts)
 
 
 def run_deliberation(
@@ -225,16 +291,42 @@ def run_deliberation(
     order = {p: i for i, (p, _) in enumerate(roster)}
     result.fan_out.sort(key=lambda fo: order.get(fo["provider"], 99))
 
-    digest = _digest(result.fan_out)
+    # Coverage bookkeeping (OI-810): a failed/empty seat must never silently look like a
+    # contributing lens. Exclude it from what downstream stages see, and record it so the
+    # result/report say so explicitly.
+    present_fan_out = [fo for fo in result.fan_out if not _is_error(fo["text"])]
+    failed_fan_out = [fo for fo in result.fan_out if _is_error(fo["text"])]
+    result.present_lenses = [fo["lens"] for fo in present_fan_out]
+    result.failed_seats = [{"provider": fo["provider"], "lens": fo["lens"]} for fo in failed_fan_out]
+    if failed_fan_out:
+        logger.warning(
+            "panel: %d/%d seats produced no usable report (%s) — %s",
+            len(failed_fan_out), len(result.fan_out),
+            ", ".join(f"{fo['provider']} ({fo['lens']})" for fo in failed_fan_out),
+            result.coverage,
+        )
+
+    digest = _digest(present_fan_out)
+    coverage_note = (
+        f"PANEL COVERAGE: {result.coverage}. Reason only from the lenses that actually "
+        "responded — a failed seat contributed NOTHING; do not assume its perspective is "
+        "represented.\n"
+    ) if failed_fan_out else ""
 
     # ── Stage 2: CONTRARIAN (one red-team seat — the strongest reasoner) ──────
-    contra_prompt = (
+    # Instruction FIRST, bounded distillate of stage 1 AFTER (OI-809) — a downstream
+    # truncation can then only cut into the (already bounded) context, never the task.
+    contra_instruction = (
         f"You are the RED TEAM on a deliberation panel ({spec.description}).\n"
-        f"QUESTION: {question}\n{ctx_block}\n"
-        f"The panel said:\n{digest}\n\n"
-        f"Attack the emerging consensus. Focus on: {spec.contrarian_focus}. "
+        f"QUESTION: {question}\n{ctx_block}\n{coverage_note}"
+        f"Attack the emerging consensus below. Focus on: {spec.contrarian_focus}. "
         "Name what everyone MISSED, steelman the dissent, and flag any claim stated as fact "
         "without evidence. Do not be agreeable. Terse, concrete."
+    )
+    contra_prompt = _stage_prompt(
+        contra_instruction,
+        [("The panel said (fan-out digest, distilled)", _distill(digest, "fan-out digest"))],
+        reminder=f"Reminder: attack the consensus above. Focus: {spec.contrarian_focus}.",
     )
     result.contrarian = _first_ok(
         dispatcher, _ordered_seats(roster, ("codex", "deepseek-harness", "claude")),
@@ -242,13 +334,21 @@ def run_deliberation(
     )
 
     # ── Stage 3: VERIFY (adversarial factcheck of the top claims) ────────────
-    verify_prompt = (
+    verify_instruction = (
         f"You are the VERIFY pass on a deliberation panel ({spec.description}).\n"
-        f"QUESTION: {question}\n{ctx_block}\n"
-        f"Panel findings:\n{digest}\n\nRed-team:\n{_clip(result.contrarian, 'contrarian')}\n\n"
-        f"Take the TOP 5 concrete claims across the above and adversarially verify each against "
-        f"{spec.verify_target}. Mark each: CONFIRMED / REFUTED / UNVERIFIABLE, with the specific "
-        "evidence (file:line or source). Default to REFUTED/UNVERIFIABLE when evidence is thin."
+        f"QUESTION: {question}\n{ctx_block}\n{coverage_note}"
+        "Take the TOP 5 concrete claims across the panel findings and red-team output below "
+        f"and adversarially verify each against {spec.verify_target}. Mark each: CONFIRMED / "
+        "REFUTED / UNVERIFIABLE, with the specific evidence (file:line or source). Default to "
+        "REFUTED/UNVERIFIABLE when evidence is thin."
+    )
+    verify_prompt = _stage_prompt(
+        verify_instruction,
+        [
+            ("Panel findings", _distill(digest, "fan-out digest")),
+            ("Red-team", _distill(result.contrarian, "contrarian")),
+        ],
+        reminder=f"Reminder: verify the TOP 5 claims above against {spec.verify_target}.",
     )
     result.factcheck = _first_ok(
         dispatcher, _ordered_seats(roster, ("codex", "kimi", "claude")),
@@ -256,14 +356,21 @@ def run_deliberation(
     )
 
     # ── Stage 4: SYNTHESIS (one cited report) ────────────────────────────────
-    synth_prompt = (
+    synth_instruction = (
         f"You are the SYNTHESISER on a deliberation panel ({spec.description}).\n"
-        f"QUESTION: {question}\n{ctx_block}\n"
-        f"Divergent views:\n{digest}\n\nRed-team:\n{_clip(result.contrarian, 'contrarian')}\n\n"
-        f"Verification:\n{_clip(result.factcheck, 'verify')}\n\n"
+        f"QUESTION: {question}\n{ctx_block}\n{coverage_note}"
         f"Produce {spec.synth_goal}. Structure: CONSENSUS (verified), CONTESTED (surviving "
         "dissent), VERIFIED CLAIMS (ranked, with evidence), OPEN QUESTIONS. Dedupe. Cite "
         "file:line / sources. Do not invent agreement that isn't there."
+    )
+    synth_prompt = _stage_prompt(
+        synth_instruction,
+        [
+            ("Divergent views", _distill(digest, "fan-out digest")),
+            ("Red-team", _distill(result.contrarian, "contrarian")),
+            ("Verification", _distill(result.factcheck, "verify")),
+        ],
+        reminder=f"Reminder: produce {spec.synth_goal}. Do not invent agreement that isn't there.",
     )
     result.synthesis = _first_ok(
         dispatcher, _ordered_seats(roster, ("claude", "codex", "kimi")),

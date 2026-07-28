@@ -54,6 +54,18 @@ _FAKE_DEFAULT_ROLE = "backend-developer"
 # backend-developer default (receipt-quality track).
 _IDENTITY_UNRESOLVED = "identity_unresolved"
 
+# The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
+_PLAN_REVIEWER_ROLE = "plan-reviewer"
+
+# Roles whose worker output is a free-form review/analysis, never a standard
+# ## Changes / ## Verification report — govern() must not run the report-body contract
+# over these, nor synthesize over an authored body (synthesis summarizes a git diff;
+# these roles produce no diff by design). "plan-reviewer" additionally requires the
+# vnx-plan-verdict fence (see _govern_impl); other freeform roles just require non-empty
+# authored text. "deliberation-panelist" is the vnx panel's diverge/contrarian/verify/
+# synthesis stage worker (OI-811) — free-form panel analysis, no verdict fence.
+_FREEFORM_ROLES = frozenset({_PLAN_REVIEWER_ROLE, "deliberation-panelist"})
+
 
 def _resolve_govern_role(spec: "GovernSpec") -> str:
     """Resolve the dispatch's real role for govern-emitted receipts/frontmatter.
@@ -435,7 +447,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             # trigger synthesis, which strips the fence and breaks parse_verdict in the
             # plan-gate panel.  Accept the report as authored when it is non-empty and
             # contains the verdict fence opener; do not overwrite it with a git-diff body.
-            if spec.role == "plan-reviewer":
+            if spec.role == _PLAN_REVIEWER_ROLE:
                 _verdict_marker = "```vnx-plan-verdict"
                 if candidate.strip() and _verdict_marker in candidate:
                     body = candidate
@@ -450,6 +462,25 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
                         "govern: plan-reviewer report exists but has no verdict fence for"
                         " dispatch=%s — synthesizing (parse_error will surface to panel)",
                         dispatch_id,
+                    )
+            elif spec.role in _FREEFORM_ROLES:
+                # e.g. deliberation-panelist (OI-811): the diverge/contrarian/verify/
+                # synthesis stage worker writes free-form panel analysis — no
+                # ## Changes/## Verification headings, and no plan-verdict fence either.
+                # Accept any non-empty authored text as-is.
+                if candidate.strip():
+                    body = candidate
+                    contract_status = "authored"
+                    logger.info(
+                        "govern: %s report accepted as authored for dispatch=%s"
+                        " (free-form role, standard contract validation skipped)",
+                        spec.role, dispatch_id,
+                    )
+                else:
+                    logger.info(
+                        "govern: %s report exists but is empty for dispatch=%s —"
+                        " synthesizing",
+                        spec.role, dispatch_id,
                     )
             else:
                 bv = validate_body(candidate, pr_id=spec.pr_id)
@@ -472,12 +503,13 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         contract_status = "synthesized"
 
     # -- c. Validate final body — applies to BOTH authored and synthesized ----
-    # plan-reviewer authored bodies skip standard contract validation: the reviewer
-    # writes a free-form analysis + verdict fence, not a ## Changes / ## Verification
-    # report.  Applying validate_body would always flag it as "violated" and (under
-    # enforce mode) block the emit.  Since the fence check already ran in step (a),
-    # accept the authored body as-is and skip the heading scan entirely.
-    if spec.role == "plan-reviewer" and contract_status == "authored":
+    # plan-reviewer (and other freeform-role, e.g. deliberation-panelist) authored
+    # bodies skip standard contract validation: the worker writes a free-form
+    # analysis, not a ## Changes / ## Verification report.  Applying validate_body
+    # would always flag it as "violated" and (under enforce mode) block the emit.
+    # Since the freeform check already ran in step (a), accept the authored body
+    # as-is and skip the heading scan entirely.
+    if spec.role in _FREEFORM_ROLES and contract_status == "authored":
         final_bv = None  # type: ignore[assignment]
     else:
         final_bv = validate_body(body, pr_id=spec.pr_id)

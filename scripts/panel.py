@@ -83,7 +83,13 @@ def main(argv: "list[str] | None" = None) -> int:
     # → no cited synthesis (sales-copilot T0, 2026-07-10). unified_reports_dir().parent IS
     # that data_dir, so the write-path and read-path agree.
     data_dir = str(_resolve_reports_dir().parent)
-    dispatcher = _make_default_dispatcher(data_dir, args.timeout)
+    # role="deliberation-panelist" (OI-811): _make_default_dispatcher defaults to
+    # "plan-reviewer" for its original run_panel caller. A diverge/contrarian/verify/
+    # synthesis prompt is NOT a plan review — tagging it plan-reviewer wrapped it in
+    # "you are an independent plan reviewer... review the IMPLEMENTATION PLAN" framing,
+    # which a plan-reviewer-role worker correctly rejected as not a plan, corrupting the
+    # panel stage.
+    dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="deliberation-panelist")
 
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:
