@@ -759,3 +759,55 @@ class TestClaudeAdapterCapturesCompletionText:
         assert adapter_result.completion_text == "def foo(): pass", (
             f"Expected 'def foo(): pass', got {adapter_result.completion_text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# receipt-quality PR-B2 fix-forward (Finding C): _govern() aggregates
+# PreToolUse-hook tool-call signals (toolcall_signals.py) onto the receipt
+# for the claude/subprocess-adapter lane, mirroring the wiring
+# provider_dispatch._emit_governance already had
+# (tests/test_receipt_v2_pr_b2_wiring.py) and the tmux-interactive lane's
+# worker-authored receipt now also has
+# (tests/test_toolcall_signals_tmux_lane_wiring.py).
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeEnvelopeToolcallSignals:
+    def _run(self, spec, claude_result):
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec)
+
+        with patch("provider_spawns.claude_spawn.spawn_claude", return_value=claude_result), \
+             patch("governance_emit.emit_unified_report", mock_report), \
+             patch("governance_emit.emit_dispatch_receipt", mock_receipt):
+            result = run_envelope(spec, lane="claude-subprocess")
+
+        return result, mock_receipt
+
+    def test_toolcall_signals_aggregated_onto_receipt(self, spec_claude, monkeypatch, tmp_path):
+        from toolcall_signals import record_toolcall_event
+
+        signal_dir = tmp_path / "tmux-signal"
+        record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
+        record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "claude -p x"}}, blocked=True)
+        record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "pytest"}}, blocked=False)
+        record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "pytest"}}, blocked=False)
+        monkeypatch.setenv("VNX_TMUX_SIGNAL_DIR", str(signal_dir))
+
+        claude_result = _FakeClaudeResult(returncode=0)
+        _, mock_receipt = self._run(spec_claude, claude_result)
+
+        mock_receipt.assert_called_once()
+        assert mock_receipt.call_args[1]["tool_call_count"] == 4
+        assert mock_receipt.call_args[1]["tool_call_failures"] == 1
+        assert mock_receipt.call_args[1]["tool_call_retries"] == 1
+
+    def test_toolcall_signals_absent_when_signal_dir_unset(self, spec_claude, monkeypatch):
+        monkeypatch.delenv("VNX_TMUX_SIGNAL_DIR", raising=False)
+
+        claude_result = _FakeClaudeResult(returncode=0)
+        _, mock_receipt = self._run(spec_claude, claude_result)
+
+        mock_receipt.assert_called_once()
+        assert mock_receipt.call_args[1]["tool_call_count"] is None
+        assert mock_receipt.call_args[1]["tool_call_failures"] is None
+        assert mock_receipt.call_args[1]["tool_call_retries"] is None

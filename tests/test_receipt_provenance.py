@@ -28,6 +28,7 @@ VNX_ROOT = TESTS_DIR.parent
 SCRIPTS_LIB = VNX_ROOT / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
+import receipt_provenance
 from receipt_provenance import (
     CHAIN_STATUS_BROKEN,
     CHAIN_STATUS_COMPLETE,
@@ -995,7 +996,29 @@ class TestReconcileCommitProvenanceDispatchMetadataPrId:
         conn.commit()
 
         assert result["pr_id_linked"] == 1
-        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "#412"
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "412"
+        conn.close()
+
+    def test_stores_bare_numeric_pr_id_not_hash_prefixed(self, tmp_path):
+        """Codex-gate Finding B (fix-forward, PR #1235): dispatch_metadata.pr_id
+        must be the BARE numeric PR id, not "#412" -- prior-round-intelligence
+        consumers (prior_round_injector.py) build
+        review_gates/results/pr-{pr_id}-{gate}.json paths from this value
+        verbatim, and a "#"-prefixed value never matches a bare-numeric-keyed
+        path. Distinct from tracks.pr_ref (test_links_pr_ref_from_squash_merge
+        above), which legitimately keeps the "#"-prefixed display format."""
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "test-proj", self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        stored = _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID)
+        assert stored == "412"
+        assert not stored.startswith("#")
         conn.close()
 
     def test_idempotent_second_reconcile_is_noop(self, tmp_path):
@@ -1011,7 +1034,7 @@ class TestReconcileCommitProvenanceDispatchMetadataPrId:
 
         assert first["pr_id_linked"] == 1
         assert second["pr_id_linked"] == 0
-        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "#412"
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "412"
         conn.close()
 
     def test_never_overwrites_existing_pr_id(self, tmp_path):
@@ -1073,4 +1096,110 @@ class TestReconcileCommitProvenanceDispatchMetadataPrId:
         assert result["pr_id_linked"] == 0
         assert _read_pr_id(state_dir, "other-proj", self.DISPATCH_ID) is None
         conn.close()
+        conn.close()
+
+    def test_explicit_project_id_bypasses_ambiguous_lookup(self, tmp_path, monkeypatch):
+        """Codex-gate Finding A (fix-forward, PR #1235): when the caller already
+        knows its own project_id (the reconciliation loop operates on a
+        per-project store), reconcile_commit_provenance uses it directly for
+        the dispatch_metadata.pr_id backfill instead of re-resolving by
+        dispatch_id alone -- a lookup that cannot disambiguate a same-
+        dispatch_id row under a different project_id (ADR-007 composite key).
+        Proven here by making the fallback resolver raise: if it were called
+        despite project_id being supplied, this test would fail loudly rather
+        than silently passing on the resolver's own (also-correct) answer."""
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "test-proj", self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        def _must_not_be_called(*_args, **_kwargs):
+            raise AssertionError(
+                "_resolve_dispatch_project_id must not be called when the "
+                "caller already supplied project_id"
+            )
+        monkeypatch.setattr(receipt_provenance, "_resolve_dispatch_project_id", _must_not_be_called)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10, project_id="test-proj")
+        conn.commit()
+
+        assert result["pr_id_linked"] == 1
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "412"
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# receipt-quality PR-B2 fix-forward (Finding A) — _resolve_dispatch_project_id
+# must be ADR-007 composite-safe: a dispatch_id colliding across more than one
+# project_id (dispatches is UNIQUE(dispatch_id, project_id), so this is a
+# legitimate multi-tenant state, not corruption) must abstain (None) rather
+# than resolve an arbitrary/first row and let a downstream composite-scoped
+# UPDATE stamp the wrong tenant's dispatch_metadata.pr_id.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveDispatchProjectIdCompositeSafety:
+    def _make_conn(self, tmp_path):
+        """Minimal dispatches table with the ADR-007 composite-unique key
+        (mirrors schemas/runtime_coordination_v10.sql), independent of
+        _make_project's legacy single-column-UNIQUE(dispatch_id) table (which
+        cannot represent the collision this test exercises at all)."""
+        db_path = tmp_path / "rc.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                state TEXT NOT NULL DEFAULT 'queued',
+                UNIQUE(dispatch_id, project_id)
+            )
+            """
+        )
+        conn.commit()
+        return conn
+
+    def test_unambiguous_single_project_resolves(self, tmp_path):
+        conn = self._make_conn(tmp_path)
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id) VALUES (?, ?)",
+            ("dispatch-x", "proj-a"),
+        )
+        conn.commit()
+
+        assert receipt_provenance._resolve_dispatch_project_id(conn, "dispatch-x") == "proj-a"
+        conn.close()
+
+    def test_cross_tenant_collision_abstains(self, tmp_path):
+        conn = self._make_conn(tmp_path)
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id) VALUES (?, ?)",
+            ("dispatch-x", "proj-a"),
+        )
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id) VALUES (?, ?)",
+            ("dispatch-x", "proj-b"),
+        )
+        conn.commit()
+
+        assert receipt_provenance._resolve_dispatch_project_id(conn, "dispatch-x") is None
+        conn.close()
+
+    def test_no_matching_row_returns_none(self, tmp_path):
+        conn = self._make_conn(tmp_path)
+        assert receipt_provenance._resolve_dispatch_project_id(conn, "nonexistent") is None
+        conn.close()
+
+    def test_missing_project_id_column_returns_none(self, tmp_path):
+        db_path = tmp_path / "rc-legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE dispatches (id INTEGER PRIMARY KEY AUTOINCREMENT, dispatch_id TEXT NOT NULL UNIQUE)"
+        )
+        conn.execute("INSERT INTO dispatches (dispatch_id) VALUES (?)", ("dispatch-x",))
+        conn.commit()
+
+        assert receipt_provenance._resolve_dispatch_project_id(conn, "dispatch-x") is None
         conn.close()

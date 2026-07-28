@@ -568,16 +568,28 @@ def _resolve_dispatch_project_id(state_conn: sqlite3.Connection, dispatch_id: st
 
     Kept independent from ``_link_pr_to_track``'s own project_id resolution
     (rather than refactored into it) to avoid touching that already-tested path.
-    Returns None when the column is absent or no row matches — callers must
-    treat that as "cannot scope a composite-keyed write", never default to a
-    guessed tenant.
+    Returns None when the column is absent, no row matches, OR more than one
+    DISTINCT project_id matches — callers must treat that as "cannot scope a
+    composite-keyed write", never default to a guessed tenant.
+
+    ADR-007: ``dispatches`` is composite-unique on ``(dispatch_id,
+    project_id)``, so the same ``dispatch_id`` can legitimately exist under
+    multiple tenants. A plain ``SELECT ... WHERE dispatch_id = ?`` (pre-fix)
+    would silently resolve an arbitrary row and let the caller stamp the
+    wrong tenant's ``dispatch_metadata.pr_id``. Only unambiguous
+    (single-tenant) matches resolve here; a cross-tenant collision abstains
+    rather than guesses. Prefer callers that already know their own
+    ``project_id`` (passed explicitly) over this lookup — see
+    ``reconcile_commit_provenance``'s ``project_id`` parameter.
     """
     if not _has_column(state_conn, "dispatches", "project_id"):
         return None
-    row = state_conn.execute(
-        "SELECT project_id FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-    ).fetchone()
-    return row[0] if row else None
+    rows = state_conn.execute(
+        "SELECT DISTINCT project_id FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    return rows[0][0]
 
 
 def _link_pr_to_dispatch_metadata(
@@ -594,6 +606,15 @@ def _link_pr_to_dispatch_metadata(
     already present is never overwritten (first writer wins) — matches
     ``dispatch_metadata_db.upsert_dispatch_provider_row``'s COALESCE semantics
     for the same column. Returns True only when a row was actually updated.
+
+    Stores the BARE numeric PR id (``str(pr_number)``, no leading ``#``) —
+    matching the existing convention prior-round-intelligence consumers
+    (e.g. ``prior_round_injector.py``) rely on to build
+    ``review_gates/results/pr-{pr_id}-{gate}.json`` paths. A ``#``-prefixed
+    value would never match those bare-numeric-keyed paths, silently
+    disabling prior-round findings for backfilled rows. Distinct from
+    ``tracks.pr_ref`` (``_link_pr_to_track`` above), which legitimately keeps
+    the ``#``-prefixed display format for its own, unrelated column.
     """
     if not _has_column(qi_conn, "dispatch_metadata", "pr_id"):
         return False
@@ -602,7 +623,7 @@ def _link_pr_to_dispatch_metadata(
             "UPDATE dispatch_metadata SET pr_id = ? "
             "WHERE project_id = ? AND dispatch_id = ? "
             "AND (pr_id IS NULL OR pr_id = '')",
-            (f"#{pr_number}", project_id, dispatch_id),
+            (str(pr_number), project_id, dispatch_id),
         )
         return cur.rowcount > 0
     except sqlite3.Error:
@@ -614,6 +635,7 @@ def reconcile_commit_provenance(
     conn: sqlite3.Connection,
     *,
     max_commits: int = 300,
+    project_id: Optional[str] = None,
 ) -> Dict[str, int]:
     """Close the dispatch->commit link: scan recent git commits for a ``Dispatch-ID:`` trace token
     and register each commit's SHA against its dispatch_id in the provenance_registry.
@@ -631,6 +653,16 @@ def reconcile_commit_provenance(
     quality_intelligence.db, alongside runtime_coordination.db under the same state dir).
     Fill-once (never overwrites an existing pr_id) and independent of the tracks.pr_ref step —
     a dispatch with no track_id still gets its dispatch_metadata.pr_id stamped.
+
+    ``project_id``: ADR-007 composite-safety (fix-forward, Finding A). Callers that already
+    operate on a per-project store (``objective_reconcile.run_reconcile``,
+    ``scripts/reconcile_provenance.py``) know their own ``project_id`` up front — pass it here
+    so the ``dispatch_metadata.pr_id`` backfill uses it directly instead of re-resolving by
+    ``dispatch_id`` alone (a lookup that cannot distinguish which tenant a colliding
+    ``dispatch_id`` belongs to under the ``dispatches`` table's ``(dispatch_id, project_id)``
+    composite-unique key). When omitted (back-compat), falls back to
+    ``_resolve_dispatch_project_id``, which itself abstains (returns None, no stamp) on any
+    cross-tenant ``dispatch_id`` collision rather than guessing.
     """
     try:
         from trace_token_validator import extract_trace_tokens  # noqa: PLC0415
@@ -720,9 +752,16 @@ def reconcile_commit_provenance(
 
                 if qi_conn is not None:
                     try:
-                        project_id = _resolve_dispatch_project_id(state_conn, dispatch_id)
-                        if project_id and _link_pr_to_dispatch_metadata(
-                            qi_conn, project_id, dispatch_id, pr_number
+                        # Finding A: prefer the caller-supplied project_id (the
+                        # reconciliation loop's own tenant scope) over
+                        # re-resolving by dispatch_id alone — a lookup that
+                        # cannot disambiguate a cross-tenant dispatch_id
+                        # collision under the ADR-007 composite-unique key.
+                        _dispatch_pid = project_id or _resolve_dispatch_project_id(
+                            state_conn, dispatch_id
+                        )
+                        if _dispatch_pid and _link_pr_to_dispatch_metadata(
+                            qi_conn, _dispatch_pid, dispatch_id, pr_number
                         ):
                             pr_id_linked += 1
                     except Exception as exc:  # noqa: BLE001
