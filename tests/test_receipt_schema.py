@@ -234,6 +234,43 @@ def test_receipt_v2_receipt_kind_missing_raises():
 
 
 # ---------------------------------------------------------------------------
+# receipt-quality PR-B2: tool-call signal fields (additive, conditionally
+# stamped like final_prompt_path/verification/warnings — omitted when None)
+# ---------------------------------------------------------------------------
+
+def test_receipt_v2_toolcall_fields_omitted_when_absent():
+    """Minimal kwargs (no toolcall fields passed) stays byte-identical to the
+    pre-PR-B2 shape — proven separately by the roundtrip tests above."""
+    receipt = ReceiptV2(**_v2_kwargs_minimal()).to_dict()
+    for key in ("tool_call_count", "tool_call_failures", "tool_call_retries"):
+        assert key not in receipt
+
+
+def test_receipt_v2_toolcall_fields_stamped_when_provided():
+    kw = _v2_kwargs_minimal()
+    kw["tool_call_count"] = 5
+    kw["tool_call_failures"] = 1
+    kw["tool_call_retries"] = 2
+    receipt = ReceiptV2(**kw).to_dict()
+    assert receipt["tool_call_count"] == 5
+    assert receipt["tool_call_failures"] == 1
+    assert receipt["tool_call_retries"] == 2
+
+
+def test_receipt_v2_toolcall_zero_is_stamped_not_omitted():
+    """0 is a real observation ('confirmed zero'), distinct from None
+    ('no signal log') -- must not be treated as falsy-omit."""
+    kw = _v2_kwargs_minimal()
+    kw["tool_call_count"] = 0
+    kw["tool_call_failures"] = 0
+    kw["tool_call_retries"] = 0
+    receipt = ReceiptV2(**kw).to_dict()
+    assert receipt["tool_call_count"] == 0
+    assert receipt["tool_call_failures"] == 0
+    assert receipt["tool_call_retries"] == 0
+
+
+# ---------------------------------------------------------------------------
 # SynthesizedLaneReceipt round-trip
 # ---------------------------------------------------------------------------
 

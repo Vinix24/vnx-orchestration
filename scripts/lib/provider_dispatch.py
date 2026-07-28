@@ -672,6 +672,24 @@ def _emit_governance(
         _role = None
     _role = _role or "identity_unresolved"
 
+    # receipt-quality PR-B2: aggregate PreToolUse-hook tool-call signals for
+    # this dispatch (scripts/lib/toolcall_signals.py). FAIL-OPEN — an
+    # aggregation error or absent signal log must never break receipt
+    # emission; each field simply stays None (omitted by ReceiptV2).
+    _toolcall_signals: Dict[str, int] = {}
+    try:
+        _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+        if _signal_dir:
+            from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+            _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
+    except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
+        logger.debug(
+            "_emit_governance: toolcall signal aggregation failed dispatch=%s (non-fatal)",
+            getattr(args, "dispatch_id", "?"),
+            exc_info=True,
+        )
+        _toolcall_signals = {}
+
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
             receipt_path = emit_dispatch_receipt(
@@ -721,7 +739,21 @@ def _emit_governance(
                 # benchmark exemption path (the only route that reaches this
                 # provider="claude" case) can backfill token_usage from the
                 # local transcript. No-op for every other provider.
-                session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+                # OI-819 (codex PR-B1 review, Finding 2): prefer the
+                # authoritative init-event session_id off the spawn result
+                # (dispatch_envelope.py already does this for its own
+                # emit_dispatch_receipt call) — args.session_id/VNX_SESSION_ID
+                # can silently no-op or harvest an unrelated transcript.
+                # getattr() stays None-safe for result objects with no
+                # session_id concept (non-claude providers; _ClaudeResult).
+                session_id=(
+                    getattr(result, "session_id", None)
+                    or getattr(args, "session_id", None)
+                    or os.environ.get("VNX_SESSION_ID")
+                ),
+                tool_call_count=_toolcall_signals.get("tool_call_count"),
+                tool_call_failures=_toolcall_signals.get("tool_call_failures"),
+                tool_call_retries=_toolcall_signals.get("tool_call_retries"),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break

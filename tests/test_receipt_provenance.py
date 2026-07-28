@@ -937,4 +937,140 @@ class TestReconcileCommitProvenanceTrackLinkage:
             (self.DISPATCH_ID,),
         ).fetchone()
         assert reg["commit_sha"] is not None
+
+
+# ---------------------------------------------------------------------------
+# receipt-quality PR-B2 — dispatch_metadata.pr_id backfill (sibling of
+# tracks.pr_ref, a different database: quality_intelligence.db)
+# ---------------------------------------------------------------------------
+
+
+def _make_qi_dispatch_metadata(state_dir, project_id, dispatch_id, pr_id=None):
+    """Minimal quality_intelligence.db with just the dispatch_metadata columns
+    reconcile_commit_provenance's pr_id backfill touches (mirrors the
+    hand-rolled _add_track_layer helper's minimal-schema style above)."""
+    qi_db = state_dir / "quality_intelligence.db"
+    conn = sqlite3.connect(str(qi_db))
+    conn.execute(
+        """
+        CREATE TABLE dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            pr_id TEXT,
+            UNIQUE(project_id, dispatch_id)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO dispatch_metadata (dispatch_id, project_id, pr_id) VALUES (?, ?, ?)",
+        (dispatch_id, project_id, pr_id),
+    )
+    conn.commit()
+    conn.close()
+    return qi_db
+
+
+def _read_pr_id(state_dir, project_id, dispatch_id):
+    conn = sqlite3.connect(str(state_dir / "quality_intelligence.db"))
+    row = conn.execute(
+        "SELECT pr_id FROM dispatch_metadata WHERE project_id = ? AND dispatch_id = ?",
+        (project_id, dispatch_id),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+class TestReconcileCommitProvenanceDispatchMetadataPrId:
+    DISPATCH_ID = "20260728-rq-b2-provenance-prid"
+
+    def test_fills_empty_pr_id_from_commit(self, tmp_path):
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "test-proj", self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_id_linked"] == 1
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "#412"
+        conn.close()
+
+    def test_idempotent_second_reconcile_is_noop(self, tmp_path):
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "test-proj", self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        first = reconcile_commit_provenance(repo, conn, max_commits=10)
+        second = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert first["pr_id_linked"] == 1
+        assert second["pr_id_linked"] == 0
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "#412"
+        conn.close()
+
+    def test_never_overwrites_existing_pr_id(self, tmp_path):
+        """Fill-once: a pr_id already present is never clobbered by a later
+        commit referencing a different PR number."""
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "test-proj", self.DISPATCH_ID, pr_id="#100")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_id_linked"] == 0
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) == "#100"
+        conn.close()
+
+    def test_no_pr_number_leaves_pr_id_null(self, tmp_path):
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "test-proj", self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_id_linked"] == 0
+        assert _read_pr_id(state_dir, "test-proj", self.DISPATCH_ID) is None
+        conn.close()
+
+    def test_missing_qi_db_is_noop_not_fatal(self, tmp_path):
+        """No quality_intelligence.db at all (project never bootstrapped it) --
+        the RC-side pr_ref linkage must keep working exactly as before."""
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        assert not (state_dir / "quality_intelligence.db").exists()
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_id_linked"] == 0
+        assert result["pr_ref_linked"] == 1
+        conn.close()
+
+    def test_wrong_project_id_row_is_noop(self, tmp_path):
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _make_qi_dispatch_metadata(state_dir, "other-proj", self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["pr_id_linked"] == 0
+        assert _read_pr_id(state_dir, "other-proj", self.DISPATCH_ID) is None
+        conn.close()
         conn.close()

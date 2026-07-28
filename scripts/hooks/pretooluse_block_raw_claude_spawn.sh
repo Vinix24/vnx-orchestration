@@ -64,5 +64,18 @@ if [[ "$DECISION" == "block" ]]; then
   printf '{"decision":"block","reason":"Worker-dispatch moet via scripts/lib/subprocess_dispatch.py of provider_dispatch.py (governed, emit receipt). Rauwe claude -p/--dangerously-skip-permissions, kimi --print/-p, en codex exec bypassen de governance receipt-trail. Gebruik: python3 scripts/lib/provider_dispatch.py --provider <claude|kimi|codex> <dispatch_id>"}\n'
 fi
 
+# ── Tool-call signal aggregation (receipt-quality PR-B2, additive) ───────────
+# Best-effort record of this invocation for later receipt-time aggregation
+# (scripts/lib/toolcall_signals.py). No-op unless this is a dispatch that
+# exports VNX_TMUX_SIGNAL_DIR (same scoping as tmux_signal_stop_receipt.sh).
+# Never affects the decision above; writes to /dev/null so nothing leaks into
+# the hook's stdout (which Claude Code treats as the block/allow payload).
+if [[ -n "${VNX_TMUX_SIGNAL_DIR:-}" ]]; then
+  _TOOLCALL_BLOCKED=0
+  [[ "$DECISION" == "block" ]] && _TOOLCALL_BLOCKED=1
+  printf '%s' "$INPUT" | python3 "${HOOK_DIR}/../lib/toolcall_signals.py" \
+    --signal-dir "$VNX_TMUX_SIGNAL_DIR" --blocked "$_TOOLCALL_BLOCKED" >/dev/null 2>&1 || true
+fi
+
 # Exit 0 always — block/allow is communicated via JSON stdout, not exit code
 exit 0
