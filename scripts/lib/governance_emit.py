@@ -91,6 +91,7 @@ def emit_dispatch_receipt(
     warnings: Optional[List[Dict[str, Any]]] = None,
     role: Optional[str] = None,
     receipt_kind: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -145,6 +146,15 @@ def emit_dispatch_receipt(
     emitter's own knowledge; a missing or out-of-vocab value raises
     ValueError before anything is written.
 
+    ``session_id``: receipt-quality PR-B1 — when the caller-supplied
+    ``token_usage`` is empty or explicitly marked ``unavailable`` (the claude
+    subscription lane has no live usage API) and ``provider`` is ``claude``,
+    the local Claude Code session transcript
+    (``~/.claude/projects/*/<session_id>.jsonl``) is harvested via
+    ``token_harvest.harvest_session_tokens`` and used instead. Fail-open: any
+    harvest problem (no session_id, no transcript, kimi/other providers)
+    leaves ``token_usage`` exactly as the caller supplied it.
+
     ``warnings``: ADR-035 §6.1 — raw ``{code, severity, message}`` entries.
     Classified (side-effect-free) via ``classify_receipt_v2_warnings``
     before the receipt is validated, then committed (open-items promotion,
@@ -159,6 +169,24 @@ def emit_dispatch_receipt(
         RuntimeError: write failed
     """
     _validate_provider(provider)
+
+    # Receipt-quality PR-B1: backfill token_usage for the claude lane from the
+    # local Claude Code session transcript when the caller has nothing usable
+    # (no live usage API on the subscription lane). Only ever tightens the
+    # data — a caller-supplied real token_usage is never overwritten, and any
+    # harvest failure (no session_id, no transcript, non-claude providers)
+    # leaves token_usage exactly as passed in.
+    if provider == "claude" and session_id and (not token_usage or token_usage.get("unavailable")):
+        try:
+            from token_harvest import harvest_session_tokens  # noqa: PLC0415
+            harvested = harvest_session_tokens(session_id)
+            if harvested and not harvested.get("unavailable"):
+                token_usage = harvested
+        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
+            logger.debug(
+                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
+                dispatch_id, session_id, exc,
+            )
 
     # Receipt-quality PR-B0: the v2 receipt shape is codified in
     # receipt_schema.ReceiptV2 — the contract validates receipt_kind
