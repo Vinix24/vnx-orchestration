@@ -27,7 +27,6 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -173,35 +172,29 @@ def ensure_receipt(
         return
 
     receipts_file = spec.state_dir / "t0_receipts.ndjson"
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # receipt-quality PR-2: dispatch identity on the govern-synthesized emit
     # path — real role from spec/dispatch_metadata, else identity_unresolved
     # (fail-open; never the fake backend-developer default).
-    synthesized_receipt: dict = {
-        "event_type": "subprocess_completion",
-        "dispatch_id": spec.dispatch_id,
-        "terminal": spec.terminal_id,
-        "terminal_id": spec.terminal_id,
-        "status": "failed",
-        "source": "tmux_interactive_lane_synthesized",
-        "synthesized": True,
-        "failure_reason": raw.failure_reason,
-        "contract_status": contract_status,
-        "permission_enforcement": permission_enforcement,
-        "timestamp": ts,
-        "provider": "claude",
-        "sub_provider": "anthropic",
-        "model": spec.model or "unknown",
-        "lane": lane,
-        "role": _resolve_govern_role(spec),
-        "receipt_kind": "dispatch",
-    }
+    # receipt-quality PR-B0: the shape is codified in
+    # receipt_schema.SynthesizedLaneReceipt; to_dict() serializes
+    # byte-compatibly with the pre-PR-B0 literal.
+    from receipt_schema import SynthesizedLaneReceipt  # noqa: PLC0415
+
     # ADR-012 worker-permission enforcement audit marker (only when flag ON).
-    if worker_permission_enforcement_enabled():
-        synthesized_receipt["worker_permission_enforcement"] = "enforced"
-    if report_path is not None:
-        synthesized_receipt["report_path"] = str(report_path)
+    worker_enforcement = "enforced" if worker_permission_enforcement_enabled() else None
+    synthesized_receipt = SynthesizedLaneReceipt(
+        dispatch_id=spec.dispatch_id,
+        terminal_id=spec.terminal_id,
+        model=spec.model or "unknown",
+        lane=lane,
+        failure_reason=raw.failure_reason,
+        contract_status=contract_status,
+        permission_enforcement=permission_enforcement,
+        role=_resolve_govern_role(spec),
+        worker_permission_enforcement=worker_enforcement,
+        report_path=str(report_path) if report_path is not None else None,
+    ).to_dict()
 
     try:
         if _SCRIPTS_DIR not in sys.path:

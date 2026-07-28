@@ -227,12 +227,24 @@ class TestGovernanceEmitTimestamp:
     """H-1: emit_dispatch_receipt must use a single datetime.now() call."""
 
     def test_single_timestamp_call(self):
-        """now_ts and recorded_ts must derive from the same datetime.now() call."""
-        mod = __import__("governance_emit")
-        source = inspect.getsource(mod.emit_dispatch_receipt)
-        now_calls = re.findall(r"datetime\.now\(", source)
+        """The receipt timestamp must derive from a single datetime.now() call.
+
+        Receipt-quality PR-B0 moved timestamp stamping into the
+        ``receipt_schema`` contract (``ReceiptV2.__post_init__`` stamps via
+        the module-level ``_utc_now_iso`` helper); the single-call invariant
+        is now pinned at that seam. ``emit_dispatch_receipt`` delegates to
+        the contract and must not re-introduce its own datetime.now() call.
+        """
+        schema_mod = __import__("receipt_schema")
+        schema_source = inspect.getsource(schema_mod)
+        now_calls = re.findall(r"datetime\.now\(", schema_source)
         assert len(now_calls) == 1, (
-            f"emit_dispatch_receipt must call datetime.now() exactly once, found {len(now_calls)}"
+            f"receipt_schema must call datetime.now() exactly once, found {len(now_calls)}"
+        )
+        emit_mod = __import__("governance_emit")
+        emit_source = inspect.getsource(emit_mod.emit_dispatch_receipt)
+        assert not re.findall(r"datetime\.now\(", emit_source), (
+            "emit_dispatch_receipt must delegate timestamping to receipt_schema.ReceiptV2"
         )
 
     def test_recorded_ts_equals_now_ts(self):
