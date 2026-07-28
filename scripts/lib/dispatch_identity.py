@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,6 +28,34 @@ logger = logging.getLogger(__name__)
 # The fake default stamped by writers that never resolved a real role. The
 # trail must stop propagating it — treated as "no real role".
 _FAKE_DEFAULT_ROLE = "backend-developer"
+
+# Receipt-quality PR-4: instruction-header source used by the write-time
+# capture-gap backfill (mirrors subprocess_dispatch._ROLE_HEADER_RE).
+_ROLE_HEADER_RE = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
+
+
+def normalize_role(role: Optional[str]) -> Optional[str]:
+    """Normalize a write-time role value.
+
+    Returns the stripped role, or None when the value is empty/None or the
+    fake ``backend-developer`` default. Writers must persist NULL instead of
+    the fake literal so the emit-side resolver stamps ``identity_unresolved``
+    rather than propagating a fabricated identity.
+    """
+    if not role:
+        return None
+    role = str(role).strip()
+    if not role or role == _FAKE_DEFAULT_ROLE:
+        return None
+    return role
+
+
+def extract_role_from_instruction(instruction: Optional[str]) -> Optional[str]:
+    """Return the role from a ``Role: <name>`` header in the instruction, or None."""
+    if not instruction:
+        return None
+    m = _ROLE_HEADER_RE.search(instruction)
+    return m.group(1) if m else None
 
 # Receipt-quality PR-3 (plan §3b): the authoritative closed set of
 # ``receipt_kind`` values. Stamped per-emitter from the emitter's own

@@ -533,6 +533,99 @@ class TestContractValidation:
 
 
 # ---------------------------------------------------------------------------
+# Part 7b: dispatch identity propagation (receipt-quality PR-4)
+# ---------------------------------------------------------------------------
+
+class TestIdentityPropagation:
+    """Converter receipts carry the real role from dispatch_metadata via
+    dispatch_identity.resolve_dispatch_role; fail-open to identity_unresolved
+    (never "unknown", never the fake backend-developer literal).
+    """
+
+    def _make_metadata_db(self, state_dir: Path, rows) -> None:
+        import sqlite3
+        db_path = state_dir / "quality_intelligence.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE dispatch_metadata ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " dispatch_id TEXT NOT NULL,"
+            " project_id TEXT NOT NULL,"
+            " role TEXT"
+            ")"
+        )
+        for dispatch_id, project_id, role in rows:
+            conn.execute(
+                "INSERT INTO dispatch_metadata (dispatch_id, project_id, role) VALUES (?, ?, ?)",
+                (dispatch_id, project_id, role),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_receipt_carries_real_role_when_db_has_one(self, tmp_path, state_dir):
+        dispatch_id = "20260728-pr4-real-role"
+        self._make_metadata_db(state_dir, [(dispatch_id, "vnx-dev", "debugger")])
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, project_id="vnx-dev")
+
+        result = convert_report_to_receipt(
+            report, receipts_file=str(state_dir / "t0_receipts.ndjson")
+        )
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["role"] == "debugger"
+        assert r["receipt_kind"] == "dispatch"
+
+    def test_receipt_stamps_identity_unresolved_when_no_metadata(self, tmp_path, state_dir):
+        dispatch_id = "20260728-pr4-unresolved"
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+
+        result = convert_report_to_receipt(
+            report, receipts_file=str(state_dir / "t0_receipts.ndjson")
+        )
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["role"] == "identity_unresolved"
+        assert r["role"] != "unknown"
+
+    def test_receipt_never_propagates_fake_default(self, tmp_path, state_dir):
+        dispatch_id = "20260728-pr4-fake-default"
+        self._make_metadata_db(state_dir, [(dispatch_id, "vnx-dev", "backend-developer")])
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, project_id="vnx-dev")
+
+        result = convert_report_to_receipt(
+            report, receipts_file=str(state_dir / "t0_receipts.ndjson")
+        )
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["role"] == "identity_unresolved"
+
+    def test_role_resolution_error_fails_open(self, tmp_path, state_dir, monkeypatch):
+        import dispatch_identity
+        monkeypatch.setattr(
+            dispatch_identity,
+            "resolve_dispatch_role",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        dispatch_id = "20260728-pr4-failopen"
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, project_id="vnx-dev")
+
+        result = convert_report_to_receipt(
+            report, receipts_file=str(state_dir / "t0_receipts.ndjson")
+        )
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["role"] == "identity_unresolved"
+
+
+# ---------------------------------------------------------------------------
 # Part 8: smart_router strategy-tag detection (PR-SR-FIX-1)
 # ---------------------------------------------------------------------------
 

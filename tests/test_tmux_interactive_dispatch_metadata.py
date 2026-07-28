@@ -97,7 +97,7 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
         receipt={"status": "done"},
         duration_seconds=1.0,
         model="sonnet",
-        role="backend-developer",
+        role="quality-engineer",
         pr_id="42",
         session_id=session_id,
     )
@@ -108,7 +108,7 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
     assert row is not None
     assert row["provider"] == "claude"
     assert row["model"] == "sonnet"
-    assert row["role"] == "backend-developer"
+    assert row["role"] == "quality-engineer"
     assert row["terminal"] == "T1"
     assert row["track"] == "A"
     assert row["gate"] is None
@@ -117,6 +117,31 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
     assert row["outcome_report_path"] == str(fake_govern.report_path)
     assert row["project_id"] == "vnx-dev"
     assert row["session_id"] == session_id
+
+
+def test_metadata_fake_default_role_normalized_to_null(tmp_path, monkeypatch, fake_govern):
+    """Receipt-quality PR-4: the fake backend-developer default is NEVER stored
+    verbatim — the writer normalizes it to NULL so the emit-side resolver
+    stamps identity_unresolved (new contract; supersedes the old
+    store-the-fake-literal behaviour)."""
+    monkeypatch.setenv("VNX_TMUX_SESSION_ID", "1")
+    state_dir = _bootstrap_state(tmp_path)
+    lane = _make_lane(state_dir)
+
+    lane._govern_report(
+        dispatch_id="20260628-tmux-meta-fake",
+        terminal_id="T1",
+        instruction="do the thing",
+        receipt={"status": "done"},
+        duration_seconds=1.0,
+        model="sonnet",
+        role="backend-developer",
+    )
+
+    db = state_dir / "quality_intelligence.db"
+    row = _read_row(db, "20260628-tmux-meta-fake")
+    assert row is not None
+    assert row["role"] is None
 
 
 def test_metadata_row_not_written_when_flag_unset(tmp_path, monkeypatch, fake_govern):

@@ -41,6 +41,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Receipt-quality PR-4: write-time role normalization (fake backend-developer
+# default -> NULL). Imported defensively; degradation keeps prior behaviour.
+try:
+    from dispatch_identity import normalize_role as _normalize_role  # noqa: E402
+except Exception:  # pragma: no cover - sibling module available in-tree
+    _normalize_role = None  # type: ignore[assignment]
+
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
@@ -141,6 +148,16 @@ def upsert_dispatch_provider_row(
         raise ValueError("upsert_dispatch_provider_row: terminal is required")
     if not (provider or "").strip():
         raise ValueError("upsert_dispatch_provider_row: provider is required")
+
+    # Receipt-quality PR-4: never persist the fake backend-developer default —
+    # normalize it to NULL at write time so the emit-side resolver stamps
+    # identity_unresolved instead of propagating a fabricated identity. The
+    # UPDATE's COALESCE then also stops a fake/empty role from nulling an
+    # existing real role.
+    if _normalize_role is not None:
+        role = _normalize_role(role)
+    else:
+        role = role or None
 
     db_path = Path(db_path)
     if not db_path.exists():
