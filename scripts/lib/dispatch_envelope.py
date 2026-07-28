@@ -601,6 +601,29 @@ def _govern(
                 )
                 _role = None
             _role = _role or "identity_unresolved"
+
+            # receipt-quality PR-B2 fix-forward (Finding C): aggregate
+            # PreToolUse-hook tool-call signals for this dispatch
+            # (toolcall_signals.py), mirroring provider_dispatch._emit_
+            # governance's wiring so the claude/subprocess-adapter lane also
+            # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
+            # FAIL-OPEN — an aggregation error or absent signal log must
+            # never break receipt emission; each field simply stays None
+            # (omitted by ReceiptV2).
+            _toolcall_signals: Dict[str, int] = {}
+            try:
+                _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+                if _signal_dir:
+                    from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+                    _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
+            except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
+                logger.debug(
+                    "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
+                    spec.dispatch_id,
+                    exc_info=True,
+                )
+                _toolcall_signals = {}
+
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=spec.dispatch_id,
                 terminal_id=spec.terminal_id,
@@ -630,6 +653,9 @@ def _govern(
                 role=_role,
                 receipt_kind="dispatch",
                 session_id=adapter_result.session_id,
+                tool_call_count=_toolcall_signals.get("tool_call_count"),
+                tool_call_failures=_toolcall_signals.get("tool_call_failures"),
+                tool_call_retries=_toolcall_signals.get("tool_call_retries"),
             )
         except Exception as exc:
             raise EnvelopeGovernError(

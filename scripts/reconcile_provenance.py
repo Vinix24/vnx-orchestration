@@ -80,7 +80,13 @@ def main(argv: "list[str] | None" = None) -> int:
             print(json.dumps(result) if args.json else
                   "reconcile_provenance: provenance_registry table missing — nothing to do")
             return EXIT_OK
-        result = reconcile_commit_provenance(repo_root, conn, max_commits=args.max_commits)
+        # Finding A (ADR-007 composite-safety): project_id is already resolved
+        # above for this per-project store — pass it through so the
+        # dispatch_metadata.pr_id backfill never falls back to an ambiguous
+        # dispatch_id-only lookup.
+        result = reconcile_commit_provenance(
+            repo_root, conn, max_commits=args.max_commits, project_id=project_id,
+        )
         conn.commit()
     finally:
         conn.close()

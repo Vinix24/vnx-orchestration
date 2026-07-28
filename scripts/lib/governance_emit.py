@@ -92,6 +92,9 @@ def emit_dispatch_receipt(
     role: Optional[str] = None,
     receipt_kind: Optional[str] = None,
     session_id: Optional[str] = None,
+    tool_call_count: Optional[int] = None,
+    tool_call_failures: Optional[int] = None,
+    tool_call_retries: Optional[int] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -163,6 +166,12 @@ def emit_dispatch_receipt(
     (fix-r1) — exactly like Path 2 (``append_receipt_payload``). Only
     stamped when provided.
 
+    ``tool_call_count`` / ``tool_call_failures`` / ``tool_call_retries``:
+    receipt-quality PR-B2 — PreToolUse-hook signal counts for this dispatch,
+    aggregated by the caller via ``toolcall_signals.aggregate_toolcall_
+    signals``. Only stamped when provided (None omits the field — no signal
+    log means no observation, not "confirmed zero calls").
+
     Raises:
         ValueError: provider field doesn't match required pattern, or
             receipt_kind missing / outside the closed set (PR-3 lint raise)
@@ -221,6 +230,9 @@ def emit_dispatch_receipt(
         injection_reconstructs=injection_reconstructs,
         verification=verification,
         warnings=warnings,
+        tool_call_count=tool_call_count,
+        tool_call_failures=tool_call_failures,
+        tool_call_retries=tool_call_retries,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"

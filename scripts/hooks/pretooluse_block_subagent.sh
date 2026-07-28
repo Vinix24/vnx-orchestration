@@ -15,6 +15,9 @@
 
 set -euo pipefail
 
+# Resolve hook directory for the tool-call signal recorder (scripts/lib/).
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ── Read hook payload ─────────────────────────────────────────────────────────
 INPUT="$(cat)"
 
@@ -31,6 +34,17 @@ fi
 
 # ── Emit block decision ──────────────────────────────────────────────────────
 printf '{"decision":"block","reason":"Subagents (Task tool) are disabled in this project. Route work through governed VNX lanes: tmux-spawn (scripts/lib/tmux_interactive_dispatch.py) or provider_dispatch.py — these emit receipts. See T0 CLAUDE.md worker-dispatch policy."}\n'
+
+# ── Tool-call signal aggregation (receipt-quality PR-B2, additive) ───────────
+# Every Task call reaching this point was just blocked above. Best-effort
+# record for later receipt-time aggregation (scripts/lib/toolcall_signals.py).
+# No-op unless this is a dispatch that exports VNX_TMUX_SIGNAL_DIR (same
+# scoping as tmux_signal_stop_receipt.sh). Writes to /dev/null so nothing
+# leaks into stdout (Claude Code treats hook stdout as the decision payload).
+if [[ -n "${VNX_TMUX_SIGNAL_DIR:-}" ]]; then
+  printf '%s' "$INPUT" | python3 "${HOOK_DIR}/../lib/toolcall_signals.py" \
+    --signal-dir "$VNX_TMUX_SIGNAL_DIR" --blocked 1 >/dev/null 2>&1 || true
+fi
 
 # Exit 0 always — block/allow is communicated via JSON stdout, not exit code
 exit 0

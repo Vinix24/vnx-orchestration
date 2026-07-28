@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -242,6 +243,41 @@ def _enrich_cqs(enriched: Dict[str, Any], state_dir: Path) -> None:
         _emit("WARN", "cqs_calculation_failed", error=str(exc))
 
 
+def _enrich_toolcall_signals(enriched: Dict[str, Any]) -> None:
+    """receipt-quality PR-B2 fix-forward (Finding C): aggregate PreToolUse-hook
+    tool-call signals (scripts/lib/toolcall_signals.py) onto the tmux-interactive
+    lane's worker-authored completion receipt.
+
+    This is the Path-2 write (append_receipt_payload, used by the tmux-spawn
+    lane's own ``append_receipt.py`` completion call) — a distinct code path
+    from ``governance_emit.emit_dispatch_receipt`` (Path 1, ReceiptV2), which
+    already aggregates signals for the provider/subprocess lanes. Reads the
+    same ``VNX_TMUX_SIGNAL_DIR`` the PreToolUse hooks wrote to, inherited from
+    this worker's own process environment (the tmux lane exports it into the
+    pane's shell before the worker session starts).
+
+    FAIL-OPEN: an aggregation error or absent signal log must never break
+    receipt enrichment. Uses ``setdefault`` so a caller-supplied value (e.g. a
+    replay/backfill receipt that already carries these fields) is never
+    overwritten. Fields stay unset (omitted from the ledger line) when no
+    signal log exists — distinct from "confirmed zero tool calls", matching
+    ReceiptV2's None-omission contract for the same fields on the other paths.
+    """
+    try:
+        signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+        if not signal_dir:
+            return
+        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+        signals = aggregate_toolcall_signals(signal_dir)
+        if not signals:
+            return
+        enriched.setdefault("tool_call_count", signals["tool_call_count"])
+        enriched.setdefault("tool_call_failures", signals["tool_call_failures"])
+        enriched.setdefault("tool_call_retries", signals["tool_call_retries"])
+    except Exception as exc:  # noqa: BLE001 — observability signal must never break receipt append
+        _emit("WARN", "toolcall_signal_enrichment_failed", error=str(exc))
+
+
 def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path] = None) -> Dict[str, Any]:
     """Enrich completion receipts with provenance, session, and terminal snapshot.
 
@@ -265,6 +301,7 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     _enrich_session_metadata(enriched, state_dir)
     _enrich_provenance_linkage(enriched, state_dir)
     _enrich_terminal_snapshot(enriched, state_dir)
+    _enrich_toolcall_signals(enriched)
 
     if _is_subprocess_intermediate_completion(receipt):
         return enriched

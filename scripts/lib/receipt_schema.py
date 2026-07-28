@@ -26,8 +26,10 @@ Hard contracts:
     ``dispatch_identity.validate_receipt_kind``) is folded into each
     contract's ``__post_init__`` — constructing a receipt object with a
     missing/out-of-vocab kind raises ValueError before anything is written.
-  - This PR adds NO new receipt fields (that is B1-B4) and does not touch
-    ``IDEMPOTENCY_FIELDS``.
+  - PR-B0 itself added NO new receipt fields and did not touch
+    ``IDEMPOTENCY_FIELDS``. Later receipt-quality PRs (B2+) add typed,
+    conditionally-stamped fields on top of this contract -- additive only,
+    still never touching ``IDEMPOTENCY_FIELDS``.
 """
 
 from __future__ import annotations
@@ -100,6 +102,13 @@ class ReceiptV2:
     injection_reconstructs: Optional[bool] = None
     verification: Optional[Dict[str, Any]] = None
     warnings: Optional[List[Dict[str, Any]]] = None
+    # receipt-quality PR-B2: PreToolUse-hook tool-call signals, aggregated by
+    # toolcall_signals.aggregate_toolcall_signals() from the per-dispatch
+    # tmux-signal-dir NDJSON log. None (omitted) when no signal log exists for
+    # this dispatch -- distinct from "confirmed zero tool calls".
+    tool_call_count: Optional[int] = None
+    tool_call_failures: Optional[int] = None
+    tool_call_retries: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -153,6 +162,12 @@ class ReceiptV2:
             receipt["verification"] = self.verification
         if self.warnings is not None:
             receipt["warnings"] = self.warnings
+        if self.tool_call_count is not None:
+            receipt["tool_call_count"] = self.tool_call_count
+        if self.tool_call_failures is not None:
+            receipt["tool_call_failures"] = self.tool_call_failures
+        if self.tool_call_retries is not None:
+            receipt["tool_call_retries"] = self.tool_call_retries
         return receipt
 
 

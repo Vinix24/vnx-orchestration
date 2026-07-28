@@ -608,7 +608,11 @@ def run_reconcile(
         prov_conn = sqlite3.connect(str(db_path), timeout=10.0)
         prov_conn.row_factory = sqlite3.Row
         try:
-            provenance = reconcile_commit_provenance(repo_root, prov_conn)
+            # Finding A (ADR-007 composite-safety): this reconcile pipeline
+            # already operates on a single project_id's per-project store —
+            # pass it through so the dispatch_metadata.pr_id backfill never
+            # falls back to an ambiguous dispatch_id-only lookup.
+            provenance = reconcile_commit_provenance(repo_root, prov_conn, project_id=project_id)
         finally:
             prov_conn.close()
     except Exception as exc:  # noqa: BLE001

@@ -563,11 +563,79 @@ def _link_pr_to_track(
     return True
 
 
+def _resolve_dispatch_project_id(state_conn: sqlite3.Connection, dispatch_id: str) -> Optional[str]:
+    """Resolve ``project_id`` for ``dispatch_id`` from the RC ``dispatches`` table.
+
+    Kept independent from ``_link_pr_to_track``'s own project_id resolution
+    (rather than refactored into it) to avoid touching that already-tested path.
+    Returns None when the column is absent, no row matches, OR more than one
+    DISTINCT project_id matches — callers must treat that as "cannot scope a
+    composite-keyed write", never default to a guessed tenant.
+
+    ADR-007: ``dispatches`` is composite-unique on ``(dispatch_id,
+    project_id)``, so the same ``dispatch_id`` can legitimately exist under
+    multiple tenants. A plain ``SELECT ... WHERE dispatch_id = ?`` (pre-fix)
+    would silently resolve an arbitrary row and let the caller stamp the
+    wrong tenant's ``dispatch_metadata.pr_id``. Only unambiguous
+    (single-tenant) matches resolve here; a cross-tenant collision abstains
+    rather than guesses. Prefer callers that already know their own
+    ``project_id`` (passed explicitly) over this lookup — see
+    ``reconcile_commit_provenance``'s ``project_id`` parameter.
+    """
+    if not _has_column(state_conn, "dispatches", "project_id"):
+        return None
+    rows = state_conn.execute(
+        "SELECT DISTINCT project_id FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    return rows[0][0]
+
+
+def _link_pr_to_dispatch_metadata(
+    qi_conn: sqlite3.Connection,
+    project_id: str,
+    dispatch_id: str,
+    pr_number: int,
+) -> bool:
+    """Fill-once: stamp ``dispatch_metadata.pr_id`` (quality_intelligence.db)
+    for this dispatch when currently empty.
+
+    Sibling of ``rework_attribution._persist_parent``'s fill-once contract for
+    the other dormant ``dispatch_metadata`` column. Idempotent: a ``pr_id``
+    already present is never overwritten (first writer wins) — matches
+    ``dispatch_metadata_db.upsert_dispatch_provider_row``'s COALESCE semantics
+    for the same column. Returns True only when a row was actually updated.
+
+    Stores the BARE numeric PR id (``str(pr_number)``, no leading ``#``) —
+    matching the existing convention prior-round-intelligence consumers
+    (e.g. ``prior_round_injector.py``) rely on to build
+    ``review_gates/results/pr-{pr_id}-{gate}.json`` paths. A ``#``-prefixed
+    value would never match those bare-numeric-keyed paths, silently
+    disabling prior-round findings for backfilled rows. Distinct from
+    ``tracks.pr_ref`` (``_link_pr_to_track`` above), which legitimately keeps
+    the ``#``-prefixed display format for its own, unrelated column.
+    """
+    if not _has_column(qi_conn, "dispatch_metadata", "pr_id"):
+        return False
+    try:
+        cur = qi_conn.execute(
+            "UPDATE dispatch_metadata SET pr_id = ? "
+            "WHERE project_id = ? AND dispatch_id = ? "
+            "AND (pr_id IS NULL OR pr_id = '')",
+            (str(pr_number), project_id, dispatch_id),
+        )
+        return cur.rowcount > 0
+    except sqlite3.Error:
+        return False
+
+
 def reconcile_commit_provenance(
     repo_root: "str | Path",
     conn: sqlite3.Connection,
     *,
     max_commits: int = 300,
+    project_id: Optional[str] = None,
 ) -> Dict[str, int]:
     """Close the dispatch->commit link: scan recent git commits for a ``Dispatch-ID:`` trace token
     and register each commit's SHA against its dispatch_id in the provenance_registry.
@@ -579,6 +647,22 @@ def reconcile_commit_provenance(
     D2 extension: commits that carry a PR number (``(#NNN)``) and resolve to a dispatch with a
     ``track_id`` also upsert that PR onto ``tracks.pr_ref`` in the project state store. This
     step is order-independent with D1: if ``track_id`` is absent/NULL, the PR-link is skipped.
+
+    receipt-quality PR-B2 extension: the same discovered ``(dispatch_id, pr_number)`` pair also
+    fills the sibling dormant column ``dispatch_metadata.pr_id`` (a different database,
+    quality_intelligence.db, alongside runtime_coordination.db under the same state dir).
+    Fill-once (never overwrites an existing pr_id) and independent of the tracks.pr_ref step —
+    a dispatch with no track_id still gets its dispatch_metadata.pr_id stamped.
+
+    ``project_id``: ADR-007 composite-safety (fix-forward, Finding A). Callers that already
+    operate on a per-project store (``objective_reconcile.run_reconcile``,
+    ``scripts/reconcile_provenance.py``) know their own ``project_id`` up front — pass it here
+    so the ``dispatch_metadata.pr_id`` backfill uses it directly instead of re-resolving by
+    ``dispatch_id`` alone (a lookup that cannot distinguish which tenant a colliding
+    ``dispatch_id`` belongs to under the ``dispatches`` table's ``(dispatch_id, project_id)``
+    composite-unique key). When omitted (back-compat), falls back to
+    ``_resolve_dispatch_project_id``, which itself abstains (returns None, no stamp) on any
+    cross-tenant ``dispatch_id`` collision rather than guessing.
     """
     try:
         from trace_token_validator import extract_trace_tokens  # noqa: PLC0415
@@ -596,26 +680,48 @@ def reconcile_commit_provenance(
     if result.returncode != 0:
         return {"scanned": 0, "linked": 0}
 
+    # Resolve the state dir once; both DB connections below hang off it.
+    # Failure here is non-fatal — provenance reconciliation must keep working
+    # exactly as before, just without the pr_ref/pr_id linking steps.
+    state_dir: Optional[Path] = None
+    try:
+        from vnx_paths import resolve_state_dir  # noqa: PLC0415
+        state_dir = resolve_state_dir(repo_root)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not resolve state dir for pr linking: %s", exc)
+        state_dir = None
+
     # Open the project state DB once for the optional track.pr_ref upsert. If the
     # supplied ``conn`` already targets that DB, reuse it to avoid a second connection
     # (and the resulting lock contention in single-threaded callers). Failures here
     # are non-fatal: provenance reconciliation must keep working exactly as before.
     state_conn: Optional[sqlite3.Connection] = None
     state_conn_borrowed = False
-    try:
-        from vnx_paths import resolve_state_dir  # noqa: PLC0415
-        state_dir = resolve_state_dir(repo_root)
-        state_db = (state_dir / "runtime_coordination.db").resolve()
-        if _connection_targets_db(conn, state_db):
-            state_conn = conn
-            state_conn_borrowed = True
-        else:
-            state_conn = sqlite3.connect(str(state_db), timeout=10.0)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("could not open project state db for pr_ref linking: %s", exc)
-        state_conn = None
+    # receipt-quality PR-B2: quality_intelligence.db lives beside
+    # runtime_coordination.db under the same state dir — always a fresh
+    # connection (dispatch_metadata is never the registry's own DB).
+    qi_conn: Optional[sqlite3.Connection] = None
+    if state_dir is not None:
+        try:
+            state_db = (state_dir / "runtime_coordination.db").resolve()
+            if _connection_targets_db(conn, state_db):
+                state_conn = conn
+                state_conn_borrowed = True
+            else:
+                state_conn = sqlite3.connect(str(state_db), timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not open project state db for pr_ref linking: %s", exc)
+            state_conn = None
 
-    scanned = linked = pr_ref_linked = 0
+        try:
+            qi_db = (state_dir / "quality_intelligence.db").resolve()
+            if qi_db.exists():
+                qi_conn = sqlite3.connect(str(qi_db), timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not open quality_intelligence.db for pr_id linking: %s", exc)
+            qi_conn = None
+
+    scanned = linked = pr_ref_linked = pr_id_linked = 0
     try:
         for entry in result.stdout.split("\x1e"):
             entry = entry.strip()
@@ -643,6 +749,23 @@ def reconcile_commit_provenance(
                         pr_ref_linked += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("pr_ref linking failed for %s: %s", dispatch_id, exc)
+
+                if qi_conn is not None:
+                    try:
+                        # Finding A: prefer the caller-supplied project_id (the
+                        # reconciliation loop's own tenant scope) over
+                        # re-resolving by dispatch_id alone — a lookup that
+                        # cannot disambiguate a cross-tenant dispatch_id
+                        # collision under the ADR-007 composite-unique key.
+                        _dispatch_pid = project_id or _resolve_dispatch_project_id(
+                            state_conn, dispatch_id
+                        )
+                        if _dispatch_pid and _link_pr_to_dispatch_metadata(
+                            qi_conn, _dispatch_pid, dispatch_id, pr_number
+                        ):
+                            pr_id_linked += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("pr_id linking failed for %s: %s", dispatch_id, exc)
     finally:
         if state_conn is not None and not state_conn_borrowed:
             try:
@@ -650,8 +773,19 @@ def reconcile_commit_provenance(
                 state_conn.close()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("failed to commit/close project state db: %s", exc)
+        if qi_conn is not None:
+            try:
+                qi_conn.commit()
+                qi_conn.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("failed to commit/close quality_intelligence db: %s", exc)
 
-    return {"scanned": scanned, "linked": linked, "pr_ref_linked": pr_ref_linked}
+    return {
+        "scanned": scanned,
+        "linked": linked,
+        "pr_ref_linked": pr_ref_linked,
+        "pr_id_linked": pr_id_linked,
+    }
 
 
 def get_provenance_link(
