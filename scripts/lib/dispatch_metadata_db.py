@@ -26,15 +26,17 @@ Design notes:
     row written by the dispatcher path is never clobbered. The follow-up UPDATE
     stamps provider/model authoritatively and fills outcome/report_path/role/gate/pr_id
     only when not already set (COALESCE), so concurrent writers converge.
-  - Column-guarded: each optional column (provider, model, project_id, …) is checked
-    via PRAGMA table_info before use so the code is safe on legacy DBs that predate
-    the migration.
+  - Column-guarded: every optional column (provider, model, project_id, …) is
+    checked in one ``PRAGMA table_info`` call before use so the code is safe on
+    legacy DBs that predate the migration, and a lock-contended run only pays
+    the schema-probe's lock wait once instead of once per column.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -47,14 +49,6 @@ try:
     from dispatch_identity import normalize_role as _normalize_role  # noqa: E402
 except Exception:  # pragma: no cover - sibling module available in-tree
     _normalize_role = None  # type: ignore[assignment]
-
-
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    try:
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    except sqlite3.Error:
-        return False
-    return any(row[1] == column for row in rows)
 
 
 def _resolve_project_id(explicit: Optional[str], db_path: Optional[Path] = None) -> str:
@@ -145,13 +139,20 @@ def upsert_dispatch_provider_row(
                may omit it.
         session_id: Pre-assigned worker session UUID (F1.1). Stamped when the
                ``session_id`` column exists. Optional — ignored when absent/None.
-        timeout: Seconds to wait for a sqlite lock before giving up (passed
-               straight through to ``sqlite3.connect``, which uses it for every
-               statement on the connection, not just the initial connect —
-               see https://docs.python.org/3/library/sqlite3.html#sqlite3.connect).
-               Defaults to sqlite3's own driver default so existing callers keep
-               byte-for-byte the same wait behaviour. A caller whose write must
-               never delay its critical path (e.g. the tmux lane's best-effort
+        timeout: Total seconds to wait for sqlite locks before giving up on the
+               whole write. Passed to ``sqlite3.connect`` as the initial busy
+               timeout, then re-armed via ``PRAGMA busy_timeout`` before every
+               later statement to the seconds *remaining* against a single
+               deadline — sqlite3's own busy-timeout is per statement (see
+               https://docs.python.org/3/library/sqlite3.html#sqlite3.connect),
+               so without re-arming, a connection issuing several statements
+               (schema probe, INSERT, UPDATE) could each independently wait up
+               to the full ``timeout`` and the cumulative stall would be a
+               multiple of it — exactly the stall this parameter exists to
+               bound. Defaults to sqlite3's own driver default so existing
+               callers keep the same single-statement wait behaviour they had
+               before this parameter existed. A caller whose write must never
+               delay its critical path (e.g. the tmux lane's best-effort
                stamp) should pass a short explicit value instead.
 
     Raises:
@@ -183,16 +184,44 @@ def upsert_dispatch_provider_row(
     now_iso = datetime.now(timezone.utc).isoformat()
     completed_at = now_iso if outcome_status else None
 
+    # A single wall-clock deadline for the whole call. ``sqlite3``'s busy
+    # timeout is per statement, not per connection lifetime, so without
+    # re-arming it before every later statement to the seconds *remaining*,
+    # a schema probe + INSERT + UPDATE could each burn a fresh ``timeout``
+    # window under contention — turning a "give up after timeout" contract
+    # into "give up after up to 3x timeout". See DEFAULT_LOCK_TIMEOUT_SECONDS
+    # docs above and the timeout= docstring for the measurement behind this.
+    deadline = time.monotonic() + timeout
+
+    def _rearm_busy_timeout(conn: sqlite3.Connection) -> bool:
+        """Reset the connection's busy timeout to the seconds left on the
+        deadline. Returns False (without touching the connection) once the
+        deadline has already passed — the caller must give up immediately."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        conn.execute(f"PRAGMA busy_timeout = {int(remaining * 1000)}")
+        return True
+
     conn = None
     try:
         conn = sqlite3.connect(str(db_path), timeout=timeout)
-        has_provider = _has_column(conn, "dispatch_metadata", "provider")
-        has_model = _has_column(conn, "dispatch_metadata", "model")
-        has_project = _has_column(conn, "dispatch_metadata", "project_id")
-        has_report_path = _has_column(conn, "dispatch_metadata", "outcome_report_path")
-        has_outcome = _has_column(conn, "dispatch_metadata", "outcome_status")
-        has_completed = _has_column(conn, "dispatch_metadata", "completed_at")
-        has_session_id = _has_column(conn, "dispatch_metadata", "session_id")
+        if not _rearm_busy_timeout(conn):
+            logger.debug(
+                "upsert_dispatch_provider_row: deadline exhausted before schema probe "
+                "for dispatch=%s — skipping", dispatch_id,
+            )
+            return False
+        table_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
+        }
+        has_provider = "provider" in table_cols
+        has_model = "model" in table_cols
+        has_project = "project_id" in table_cols
+        has_report_path = "outcome_report_path" in table_cols
+        has_outcome = "outcome_status" in table_cols
+        has_completed = "completed_at" in table_cols
+        has_session_id = "session_id" in table_cols
 
         # Tenant-stamp only when the column exists (old column-less stores are
         # left untouched). Fail-closed: an unresolvable tenant logs + skips the
@@ -222,6 +251,12 @@ def upsert_dispatch_provider_row(
             insert_cols.append("project_id")
             insert_vals.append(resolved_project_id)
         placeholders = ", ".join("?" for _ in insert_cols)
+        if not _rearm_busy_timeout(conn):
+            logger.debug(
+                "upsert_dispatch_provider_row: deadline exhausted before INSERT "
+                "for dispatch=%s — skipping", dispatch_id,
+            )
+            return False
         conn.execute(
             f"INSERT OR IGNORE INTO dispatch_metadata ({', '.join(insert_cols)}) "
             f"VALUES ({placeholders})",
@@ -255,6 +290,13 @@ def upsert_dispatch_provider_row(
         if completed_at and has_completed:
             set_clauses.append("completed_at = COALESCE(completed_at, ?)")
             params.append(completed_at)
+
+        if not _rearm_busy_timeout(conn):
+            logger.debug(
+                "upsert_dispatch_provider_row: deadline exhausted before UPDATE "
+                "for dispatch=%s — skipping", dispatch_id,
+            )
+            return False
 
         # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
         if has_project:
