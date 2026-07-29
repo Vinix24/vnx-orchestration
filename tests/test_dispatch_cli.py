@@ -55,6 +55,7 @@ from dispatch_spec import (
     Provider,
     Reject,
     ValidatedSpec,
+    validate,
 )
 
 
@@ -1238,6 +1239,126 @@ def test_load_model_pins_unreadable_yaml_fails_loud_and_falls_back(tmp_path, cap
     assert pins["T0"] == ModelPin(model="opus", semantics="floor")
     assert any("model-pins YAML unreadable" in rec.message for rec in caplog.records), (
         "unreadable YAML must log loudly, not silently fall back"
+    )
+
+
+# ---------------------------------------------------------------------------
+# worker-provider-free-choice PR-2 — door coercion honors ModelPin.semantics
+#
+# These call build_runtime_snapshot() directly (bypassing compile_plan/D4, which
+# still unconditionally coerces to the pin until PR-3) so the assertions target
+# exactly what PR-2 controls: the model fed into the constraint check. A
+# blocking kimi-via-cli-only verdict is the observable proxy for "effective_model
+# resolved to kimi-k3"; its absence proves the requested claude model won instead
+# (constraint_enforcer's kimi-substring guard fires on ANY non-kimi provider
+# carrying a kimi-branded model, so this proxy is exact, not approximate).
+# ---------------------------------------------------------------------------
+
+def _write_default_semantics_workers_pin_yaml(providers_dir: Path) -> None:
+    """A fabricated SSOT where workers-kimi-pinned carries pin_semantics: default.
+
+    The real provider_constraints.yaml stays 'floor' throughout PR-2 (see
+    test_load_model_pins_reads_floor_semantics_from_real_yaml) -- the 'default'
+    branch in dispatch_cli's coercion is only reachable via a fixture like this.
+    """
+    import yaml as _yaml
+    providers_dir.mkdir(parents=True, exist_ok=True)
+    (providers_dir / "provider_constraints.yaml").write_text(_yaml.safe_dump({
+        "version": 1,
+        "constraints": [
+            {
+                "id": "workers-kimi-pinned",
+                "rule": "require_route",
+                "required_route": {"role": ["T1", "T2", "T3"], "model": "kimi-k3"},
+                "pin_semantics": "default",
+            },
+        ],
+    }))
+
+
+def test_build_runtime_snapshot_floor_ignores_explicit_differing_model(tmp_path):
+    """'floor' is today's behavior verbatim: spec.model is ignored and the pin
+    always wins, even when spec.model is an explicit, differing claude model.
+    Uses the REAL (non-fabricated) SSOT, which declares floor throughout PR-2."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Floor coercion\n\nExplicit sonnet must be ignored under the floor pin.\n",
+        staging_id="20260729-staging-floor-explicit",
+        dispatch_id="20260729-floor-explicit-diff",
+        provider="claude",
+        target_slot="T1",
+        model="sonnet",
+    )
+    spec = load_spec(spec_file)
+    vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+    assert not isinstance(vspec, Reject)
+
+    snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
+
+    assert snapshot.model_pins["T1"] == ModelPin(model="kimi-k3", semantics="floor")
+    kimi_blocks = [v for v in snapshot.constraint_verdicts if v.code == "kimi-via-cli-only"]
+    assert kimi_blocks and kimi_blocks[0].severity == "blocking", (
+        "floor semantics must ignore the explicit differing spec.model (sonnet) and "
+        "feed the pinned kimi-k3 into the constraint check, exactly like before PR-2"
+    )
+
+
+def test_build_runtime_snapshot_default_semantics_spec_model_wins(tmp_path):
+    """Under a fabricated 'default' pin, an explicit spec.model wins over the pin:
+    the constraint check runs against the REQUESTED model, so kimi-via-cli-only
+    never fires even though T1 carries a kimi-k3 pin."""
+    providers_dir = tmp_path / "lib" / "providers"
+    _write_default_semantics_workers_pin_yaml(providers_dir)
+
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Default semantics\n\nExplicit sonnet must win over the kimi-k3 pin.\n",
+        staging_id="20260729-staging-default-wins",
+        dispatch_id="20260729-default-wins",
+        provider="claude",
+        target_slot="T1",
+        model="sonnet",
+    )
+    spec = load_spec(spec_file)
+    vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+    assert not isinstance(vspec, Reject)
+
+    with patch("dispatch_cli._LIB_DIR", tmp_path / "lib"):
+        snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
+
+    assert snapshot.model_pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
+    assert not any(v.code == "kimi-via-cli-only" for v in snapshot.constraint_verdicts), (
+        "default semantics: spec.model (sonnet) must win over the kimi-k3 pin, so "
+        "the constraint check must never see kimi-k3 for this dispatch"
+    )
+
+
+def test_build_runtime_snapshot_default_semantics_fills_pin_when_model_absent(tmp_path):
+    """Under a fabricated 'default' pin, a spec that carries NO model at all still
+    gets the pin as a fallback -- 'default' is advisory, not 'no pin at all'."""
+    providers_dir = tmp_path / "lib" / "providers"
+    _write_default_semantics_workers_pin_yaml(providers_dir)
+
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Default semantics, no explicit model\n\nMust fall back to the pin.\n",
+        staging_id="20260729-staging-default-fallback",
+        dispatch_id="20260729-default-fallback",
+        provider="claude",
+        target_slot="T1",
+    )
+    spec = load_spec(spec_file)
+    vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+    assert not isinstance(vspec, Reject)
+
+    with patch("dispatch_cli._LIB_DIR", tmp_path / "lib"):
+        snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
+
+    assert snapshot.model_pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
+    kimi_blocks = [v for v in snapshot.constraint_verdicts if v.code == "kimi-via-cli-only"]
+    assert kimi_blocks and kimi_blocks[0].severity == "blocking", (
+        "no spec.model -> the pin (kimi-k3) must still be used as a fallback under "
+        "'default' semantics, tripping kimi-via-cli-only exactly like the floor case"
     )
 
 
