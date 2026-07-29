@@ -88,6 +88,12 @@ def main(argv: "list[str] | None" = None) -> int:
             repo_root, conn, max_commits=args.max_commits, project_id=project_id,
         )
         conn.commit()
+        # reconcile_commit_provenance computed linked_pending_commit BEFORE
+        # this commit (conn's implicit transaction was still open then) — now
+        # that conn.commit() has actually succeeded, those writes are
+        # durable. Report that, not the pre-commit snapshot (mirrors the
+        # same fix in objective_reconcile._run_provenance_sweep).
+        result["linked_pending_commit"] = 0
     finally:
         conn.close()
 

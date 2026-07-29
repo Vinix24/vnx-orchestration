@@ -164,12 +164,12 @@ def test_reconcile_ignores_tokenless_commits(tmp_path):
 
 
 def test_reconcile_bad_repo_is_fail_open(tmp_path):
-    # Not a git repo -> git log fails -> {scanned:0, linked:0}, never raises.
+    # Not a git repo -> git log fails -> zero counts, never raises.
     sd = _state_dir(tmp_path)
     conn = sqlite3.connect(sd / "runtime_coordination.db")
     result = reconcile_commit_provenance(tmp_path / "not-a-repo", conn, max_commits=50)
     conn.close()
-    assert result == {"scanned": 0, "linked": 0}
+    assert result == {"scanned": 0, "linked": 0, "linked_pending_commit": 0}
 
 
 if __name__ == "__main__":

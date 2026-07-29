@@ -663,11 +663,18 @@ def reconcile_commit_provenance(
     composite-unique key). When omitted (back-compat), falls back to
     ``_resolve_dispatch_project_id``, which itself abstains (returns None, no stamp) on any
     cross-tenant ``dispatch_id`` collision rather than guessing.
+
+    Durability of ``conn``: this function never commits or rolls back ``conn`` — it is
+    caller-owned (see the ``state_conn_borrowed`` handling below), so the caller decides the
+    transaction boundary. This means ``linked`` reflects register calls that did not raise,
+    not writes confirmed durable. The returned ``linked_pending_commit`` exposes that gap
+    directly (mirrors ``linked`` while ``conn.in_transaction`` is still True; 0 once the
+    caller has committed) — a caller must commit ``conn`` for ``linked`` to mean anything.
     """
     try:
         from trace_token_validator import extract_trace_tokens  # noqa: PLC0415
     except Exception:
-        return {"scanned": 0, "linked": 0}
+        return {"scanned": 0, "linked": 0, "linked_pending_commit": 0}
     try:
         # Null-record-separated SHA + full body, so multi-line commit bodies stay intact.
         result = subprocess.run(
@@ -676,9 +683,9 @@ def reconcile_commit_provenance(
             capture_output=True, text=True, timeout=20,
         )
     except (subprocess.SubprocessError, OSError):
-        return {"scanned": 0, "linked": 0}
+        return {"scanned": 0, "linked": 0, "linked_pending_commit": 0}
     if result.returncode != 0:
-        return {"scanned": 0, "linked": 0}
+        return {"scanned": 0, "linked": 0, "linked_pending_commit": 0}
 
     # Resolve the state dir once; both DB connections below hang off it.
     # Failure here is non-fatal — provenance reconciliation must keep working
@@ -780,9 +787,21 @@ def reconcile_commit_provenance(
             except Exception as exc:  # noqa: BLE001
                 logger.debug("failed to commit/close quality_intelligence db: %s", exc)
 
+    # ``linked`` counts calls to register_provenance_link that did not raise —
+    # it says nothing about whether those writes survive ``conn``'s eventual
+    # close(). ``conn`` is caller-owned (see the ``state_conn_borrowed`` guard
+    # above): this function never commits it, so at this point sqlite3's
+    # implicit transaction is still open for every write ``linked`` counts.
+    # ``linked_pending_commit`` makes that risk explicit instead of letting a
+    # caller — or a log line — read ``linked`` as already-durable. It mirrors
+    # ``linked`` whenever the transaction is still open (the historical bug:
+    # a caller that closes without committing loses exactly this many rows)
+    # and drops to 0 once the caller has committed (or nothing was written).
+    linked_pending_commit = linked if conn.in_transaction else 0
     return {
         "scanned": scanned,
         "linked": linked,
+        "linked_pending_commit": linked_pending_commit,
         "pr_ref_linked": pr_ref_linked,
         "pr_id_linked": pr_id_linked,
     }
