@@ -940,6 +940,75 @@ class TestReconcileCommitProvenanceTrackLinkage:
         assert reg["commit_sha"] is not None
 
 
+class TestReconcileCommitProvenanceLinkedPendingCommit:
+    """Provenance-chain PR-A (2026-07-29): ``linked`` must not claim durability
+    it hasn't earned. ``conn`` is caller-owned — this function never commits
+    it — so ``linked`` alone only means "the register call didn't raise", not
+    "this row survives conn.close()". ``linked_pending_commit`` makes the gap
+    visible instead of letting a caller (or a log line) read ``linked`` as
+    already-durable."""
+
+    DISPATCH_ID = "20260729-pending-commit-check"
+
+    def test_mirrors_linked_before_caller_commits(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(repo, f"feat(x): do thing\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+
+        assert result["linked"] == 1
+        # conn has NOT been committed yet: sqlite3's implicit transaction is
+        # still open, so the write is one dropped connection away from
+        # vanishing exactly like the historical objective_reconcile.py bug.
+        assert conn.in_transaction is True
+        assert result["linked_pending_commit"] == 1
+        conn.commit()
+        conn.close()
+
+    def test_zero_when_nothing_written(self, tmp_path):
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _commit(repo, "chore: unrelated commit with no trace token", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+
+        assert result["linked"] == 0
+        assert result["linked_pending_commit"] == 0
+        conn.close()
+
+    def test_zero_under_autocommit_because_nothing_is_actually_pending(self, tmp_path):
+        """linked_pending_commit must track real durability risk, not just
+        linked > 0. Under autocommit (isolation_level=None) every statement
+        commits immediately, so nothing is pending even though this function
+        itself never calls .commit()."""
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        conn.close()
+        auto_conn = sqlite3.connect(
+            str(state_dir / "runtime_coordination.db"), isolation_level=None
+        )
+        auto_conn.row_factory = sqlite3.Row
+        _seed_track(auto_conn, "T-002", "test-proj")
+        _seed_dispatch(auto_conn, self.DISPATCH_ID, "test-proj", "T-002")
+        _commit(repo, f"feat(y): do thing\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, auto_conn, max_commits=10)
+
+        assert result["linked"] == 1
+        assert auto_conn.in_transaction is False
+        assert result["linked_pending_commit"] == 0
+
+        # Prove it: close WITHOUT ever calling .commit() and the row survives.
+        auto_conn.close()
+        verify_conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        row = verify_conn.execute(
+            "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+            (self.DISPATCH_ID,),
+        ).fetchone()
+        assert row is not None and row[0] is not None
+        verify_conn.close()
+
+
 # ---------------------------------------------------------------------------
 # receipt-quality PR-B2 — dispatch_metadata.pr_id backfill (sibling of
 # tracks.pr_ref, a different database: quality_intelligence.db)

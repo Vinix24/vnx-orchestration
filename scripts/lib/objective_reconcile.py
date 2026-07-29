@@ -571,6 +571,53 @@ def _resolve_effective_repo_root() -> Path:
     return Path.cwd()
 
 
+def _run_provenance_sweep(
+    state_dir: Path, repo_root: Path, project_id: str,
+) -> Dict[str, int]:
+    """Scan recent commits for dispatch->commit provenance links.
+
+    Best-effort at the scan/link level, exactly as before: a git or SQL error
+    while reading/registering leaves ``provenance`` at the zero-default and is
+    logged at debug, never blocking the rest of ``run_reconcile``.
+
+    A COMMIT failure is a different class of problem. ``reconcile_commit_provenance``
+    writes into ``prov_conn`` under sqlite3's implicit transaction — those rows are
+    invisible outside this call until ``commit()`` succeeds. Folding a commit failure
+    into the same debug-level catch-all would repeat the exact bug this function
+    fixes: reporting non-zero ``linked`` counts for edges that never survived. So a
+    commit failure is logged loudly (``log.error``) and the returned counts fall
+    back to the zero-default rather than the pre-commit ``result``.
+    """
+    provenance: Dict[str, int] = {"scanned": 0, "linked": 0}
+    try:
+        from receipt_provenance import reconcile_commit_provenance  # noqa: PLC0415
+        db_path = state_dir / track_reconciler.DB_FILENAME
+        prov_conn = sqlite3.connect(str(db_path), timeout=10.0)
+        prov_conn.row_factory = sqlite3.Row
+        try:
+            # Finding A (ADR-007 composite-safety): this reconcile pipeline
+            # already operates on a single project_id's per-project store —
+            # pass it through so the dispatch_metadata.pr_id backfill never
+            # falls back to an ambiguous dispatch_id-only lookup.
+            result = reconcile_commit_provenance(repo_root, prov_conn, project_id=project_id)
+            try:
+                prov_conn.commit()
+            except sqlite3.Error:
+                log.error(
+                    "provenance sweep: commit failed — %d scanned/%d linked "
+                    "edge(s) rolled back, not counted",
+                    result.get("scanned", 0), result.get("linked", 0),
+                    exc_info=True,
+                )
+            else:
+                provenance = result
+        finally:
+            prov_conn.close()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("provenance sweep non-fatal: %s", exc)
+    return provenance
+
+
 def run_reconcile(
     state_dir: Path,
     project_id: str,
@@ -601,22 +648,7 @@ def run_reconcile(
     # ------------------------------------------------------------------ step 1
     # Provenance sweep — best-effort; never blocks the rest.
     # ------------------------------------------------------------------ step 1
-    provenance: Dict[str, int] = {"scanned": 0, "linked": 0}
-    try:
-        from receipt_provenance import reconcile_commit_provenance  # noqa: PLC0415
-        db_path = state_dir / track_reconciler.DB_FILENAME
-        prov_conn = sqlite3.connect(str(db_path), timeout=10.0)
-        prov_conn.row_factory = sqlite3.Row
-        try:
-            # Finding A (ADR-007 composite-safety): this reconcile pipeline
-            # already operates on a single project_id's per-project store —
-            # pass it through so the dispatch_metadata.pr_id backfill never
-            # falls back to an ambiguous dispatch_id-only lookup.
-            provenance = reconcile_commit_provenance(repo_root, prov_conn, project_id=project_id)
-        finally:
-            prov_conn.close()
-    except Exception as exc:  # noqa: BLE001
-        log.debug("provenance sweep non-fatal: %s", exc)
+    provenance = _run_provenance_sweep(state_dir, repo_root, project_id)
 
     # ------------------------------------------------------------------ step 2
     # Derived refresh — persists derived_status for every track.

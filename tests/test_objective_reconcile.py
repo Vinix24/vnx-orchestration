@@ -1344,3 +1344,149 @@ def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monke
     # if repo_root were dropped and the CWD-git-root roadmap read instead).
     ev = real_close_evidence(str(sd), "T-dry", PROJECT_ID, repo_root=Path(str(repo)).resolve())
     assert ev["pr_merged"] is True
+
+
+# ---------------------------------------------------------------------------
+# _run_provenance_sweep — commit-survives-close regression (PR-A, 2026-07-29)
+#
+# Root cause: objective_reconcile.py opened a connection, let
+# reconcile_commit_provenance write hundreds of rows into it, and closed the
+# connection without ever calling commit(). sqlite3's default isolation_level
+# opens an implicit transaction on the first DML; close() without commit()
+# rolls it back. Every automated provenance sweep since 2026-07-04 (#996) was
+# silently a no-op. See claudedocs/provenance-chain-root-cause-20260729.md.
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+from runtime_coordination import init_schema as _rc_init_schema  # noqa: E402
+
+_GIT_ENV_TEMPLATE = {
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+
+def _make_git_project(tmp_path: Path):
+    """Real git repo + a state_dir with the provenance_registry schema (v6) applied."""
+    repo = tmp_path / "prov-repo"
+    repo.mkdir()
+    env = dict(_GIT_ENV_TEMPLATE, HOME=str(tmp_path))
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    state_dir = tmp_path / "prov-state"
+    _rc_init_schema(state_dir)
+    return repo, state_dir, env
+
+
+def _git_commit_with_dispatch_id(
+    repo: Path, dispatch_id: str, env: Dict[str, str], *, message: str = "feat(x): thing",
+) -> None:
+    i = len(list(repo.glob("*.txt")))
+    f = repo / f"f{i}.txt"
+    f.write_text(str(i))
+    subprocess.run(["git", "add", str(f)], cwd=repo, env=env, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", f"{message}\n\nDispatch-ID: {dispatch_id}"],
+        cwd=repo, env=env, check=True,
+    )
+
+
+class TestRunProvenanceSweepCommitSurvivesClose:
+    """Regression test: red without prov_conn.commit(), green with it."""
+
+    def test_provenance_write_survives_connection_close(self, tmp_path):
+        repo, state_dir, env = _make_git_project(tmp_path)
+        dispatch_id = "20260729-survives-close-check"
+        _git_commit_with_dispatch_id(repo, dispatch_id, env)
+
+        result = objective_reconcile._run_provenance_sweep(state_dir, repo, PROJECT_ID)
+        assert result["linked"] == 1
+
+        # Re-open a FRESH connection: proves the row survives close(), not
+        # merely that it was visible within the still-open transaction that
+        # wrote it (which the old, buggy code would also have shown).
+        verify_conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        row = verify_conn.execute(
+            "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+        verify_conn.close()
+        assert row is not None
+        assert row[0] is not None
+
+    def test_multiple_commits_all_survive(self, tmp_path):
+        repo, state_dir, env = _make_git_project(tmp_path)
+        dispatch_ids = [f"20260729-survives-{i}" for i in range(3)]
+        for dispatch_id in dispatch_ids:
+            _git_commit_with_dispatch_id(repo, dispatch_id, env)
+
+        result = objective_reconcile._run_provenance_sweep(state_dir, repo, PROJECT_ID)
+        assert result["linked"] == 3
+
+        verify_conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        rows = verify_conn.execute(
+            "SELECT dispatch_id FROM provenance_registry WHERE commit_sha IS NOT NULL"
+        ).fetchall()
+        verify_conn.close()
+        assert {r[0] for r in rows} == set(dispatch_ids)
+
+
+class TestRunProvenanceSweepCommitFailureIsLoud:
+    """A commit failure must be visible (log.error), not swallowed at debug
+    alongside ordinary non-fatal scan errors — and the returned counts must
+    not claim durability that a failed commit rolled back."""
+
+    def test_commit_failure_logs_error_and_zeroes_counts(self, tmp_path, monkeypatch, caplog):
+        repo, state_dir, env = _make_git_project(tmp_path)
+        dispatch_id = "20260729-commit-failure-check"
+        _git_commit_with_dispatch_id(repo, dispatch_id, env)
+
+        # sqlite3.Connection is an immutable builtin type — instance/class
+        # attributes can't be monkeypatched directly. Subclass it and make
+        # objective_reconcile's own sqlite3.connect() hand out that subclass,
+        # so only the connection this call opens has a broken commit().
+        class _CommitFailsConnection(sqlite3.Connection):
+            def commit(self):
+                raise sqlite3.OperationalError("simulated disk I/O error")
+
+        real_connect = sqlite3.connect
+
+        def _connect_with_broken_commit(*args, **kwargs):
+            kwargs["factory"] = _CommitFailsConnection
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(objective_reconcile.sqlite3, "connect", _connect_with_broken_commit)
+
+        with caplog.at_level(logging.DEBUG, logger="objective_reconcile"):
+            result = objective_reconcile._run_provenance_sweep(state_dir, repo, PROJECT_ID)
+
+        # Commit failed -> nothing durable, so the counts must not lie.
+        assert result == {"scanned": 0, "linked": 0}
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, "a failed commit must be logged loudly, not swallowed at debug"
+        assert "commit failed" in error_records[0].getMessage()
+
+        # And it must not have been double-logged at debug-only either — the
+        # loud path replaces the silent one for this failure, it doesn't also
+        # fall through to the generic "provenance sweep non-fatal" catch.
+        debug_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.DEBUG
+        ]
+        assert not any("non-fatal" in m for m in debug_msgs)
+
+    def test_ordinary_scan_error_stays_quiet_and_non_fatal(self, tmp_path, caplog):
+        # A state_dir whose parent doesn't exist makes sqlite3.connect() raise
+        # before reconcile_commit_provenance ever runs — the pre-existing
+        # "best-effort, never blocks the rest" contract for scan-level
+        # failures must be unchanged: quiet (debug only), zero result.
+        missing_state_dir = tmp_path / "does-not-exist" / "state"
+        repo = tmp_path / "some-repo"
+        repo.mkdir()
+
+        with caplog.at_level(logging.DEBUG, logger="objective_reconcile"):
+            result = objective_reconcile._run_provenance_sweep(missing_state_dir, repo, PROJECT_ID)
+
+        assert result == {"scanned": 0, "linked": 0}
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not error_records, "an ordinary scan miss must stay non-fatal, not escalate to error"
