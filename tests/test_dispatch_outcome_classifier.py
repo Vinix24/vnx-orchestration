@@ -134,6 +134,55 @@ def _mark_active(data_dir: Path, dispatch_id: str) -> None:
     (d / "manifest.json").write_text(json.dumps({"terminal": "T1"}), encoding="utf-8")
 
 
+def _write_receipt_full(state_dir: Path, dispatch_id: str, status: str, *, project_id) -> None:
+    """Like _write_receipt but stamps (or omits) project_id explicitly."""
+    path = state_dir / doc.RECEIPTS_FILENAME
+    rec: dict = {"event_type": "subprocess_completion", "receipt_kind": "dispatch",
+                 "dispatch_id": dispatch_id, "status": status}
+    if project_id is not _OMIT:
+        rec["project_id"] = project_id
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
+_OMIT = object()
+
+
+def _create_provenance_registry_table(state_dir: Path) -> None:
+    conn = sqlite3.connect(str(state_dir / doc.RC_DB_FILENAME))
+    conn.execute("""
+        CREATE TABLE provenance_registry (
+            dispatch_id     TEXT NOT NULL,
+            receipt_id      TEXT,
+            commit_sha      TEXT,
+            pr_number       INTEGER,
+            feature_plan_pr TEXT,
+            trace_token     TEXT,
+            chain_status    TEXT NOT NULL DEFAULT 'incomplete',
+            gaps_json       TEXT DEFAULT '[]',
+            registered_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            verified_at     TEXT,
+            verified_by     TEXT,
+            PRIMARY KEY (dispatch_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _insert_provenance_row(
+    state_dir: Path, dispatch_id: str, *, pr_number: int | None = None,
+    commit_sha: str | None = None,
+) -> None:
+    conn = sqlite3.connect(str(state_dir / doc.RC_DB_FILENAME))
+    conn.execute(
+        "INSERT INTO provenance_registry (dispatch_id, pr_number, commit_sha) VALUES (?, ?, ?)",
+        (dispatch_id, pr_number, commit_sha),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # 1. Each enum state derives from the right raw evidence (pure classify_outcome)
 # ---------------------------------------------------------------------------
@@ -630,3 +679,169 @@ def test_outcome_status_column_never_written(tmp_path, monkeypatch):
     ).fetchone()
     conn.close()
     assert row[0] is None, "B3 must never write dispatch_metadata.outcome_status"
+
+
+# ---------------------------------------------------------------------------
+# Laag 1 (OI-824): population = dispatches ∪ receipts keys, project-scoped
+# ---------------------------------------------------------------------------
+
+def test_receipt_belongs_to_project_explicit_match_and_mismatch():
+    assert doc._receipt_belongs_to_project({"project_id": "p1"}, "p1") is True
+    assert doc._receipt_belongs_to_project({"project_id": "p1"}, "p2") is False
+
+
+def test_receipt_belongs_to_project_none_defaults_to_legacy_vnx_dev():
+    # A receipt with no project_id field predates project-id stamping —
+    # treated as the legacy default project, never silently dropped or
+    # silently assigned to every project.
+    assert doc._receipt_belongs_to_project({}, "vnx-dev") is True
+    assert doc._receipt_belongs_to_project({"project_id": None}, "vnx-dev") is True
+    assert doc._receipt_belongs_to_project({}, "some-other-project") is False
+
+
+def test_reconcile_all_includes_receipt_only_dispatch_not_in_dispatches_table(tmp_path, monkeypatch):
+    """The core Laag 1 fix: a real tmux-lane build dispatch that never got a
+    ``dispatches`` row (the deliverable-queue only tracks planning stubs)
+    must still be classified, sourced purely from its receipt."""
+    state_dir, data_dir = _build_state(tmp_path)
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
+
+    # A deliverable stub IS in the dispatches table (unrelated to the build).
+    _insert_dispatch(state_dir, "dlv-stub", project_id="vnx-dev", state="active",
+                      created_at=(NOW - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+    # A real build dispatch is ONLY in the receipts ledger.
+    _write_receipt_full(state_dir, "20260728-real-build-sonnet", "done", project_id="vnx-dev")
+
+    results = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, "vnx-dev", now=NOW)
+    by_id = {r["dispatch_id"]: r["outcome"] for r in results}
+
+    assert "20260728-real-build-sonnet" in by_id, "receipt-only dispatch must enter the population"
+    assert by_id["20260728-real-build-sonnet"] == "completed-no-pr"
+    assert by_id["dlv-stub"] == "abandoned"
+
+
+def test_reconcile_all_receipt_population_is_project_scoped(tmp_path, monkeypatch):
+    """A receipt stamped for a DIFFERENT project must never enter this
+    project's population (ADR-007)."""
+    state_dir, data_dir = _build_state(tmp_path)
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
+
+    _write_receipt_full(state_dir, "other-tenant-dispatch", "done", project_id="tenant-b")
+    _write_receipt_full(state_dir, "this-tenant-dispatch", "done", project_id="vnx-dev")
+
+    results = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, "vnx-dev", now=NOW)
+    ids = {r["dispatch_id"] for r in results}
+    assert "this-tenant-dispatch" in ids
+    assert "other-tenant-dispatch" not in ids
+
+
+def test_reconcile_all_legacy_unstamped_receipt_joins_default_project(tmp_path, monkeypatch):
+    state_dir, data_dir = _build_state(tmp_path)
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
+
+    _write_receipt_full(state_dir, "legacy-no-project-id", "done", project_id=_OMIT)
+
+    results = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, "vnx-dev", now=NOW)
+    by_id = {r["dispatch_id"]: r["outcome"] for r in results}
+    assert by_id.get("legacy-no-project-id") == "completed-no-pr"
+
+    results_other = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, "some-other-project", now=NOW)
+    assert "legacy-no-project-id" not in {r["dispatch_id"] for r in results_other}
+
+
+def test_reconcile_all_degrades_to_receipts_only_when_dispatches_db_missing(tmp_path, monkeypatch):
+    """A missing/unreadable runtime_coordination.db must not blank the whole
+    population — the receipts ledger is a fully independent source."""
+    data_dir = tmp_path / ".vnx-data"
+    state_dir = data_dir / "state"
+    state_dir.mkdir(parents=True)
+    (data_dir / "dispatches" / "active").mkdir(parents=True)
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
+
+    _write_receipt_full(state_dir, "receipts-only-dispatch", "done", project_id="vnx-dev")
+
+    results = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, "vnx-dev", now=NOW)
+    by_id = {r["dispatch_id"]: r["outcome"] for r in results}
+    assert by_id.get("receipts-only-dispatch") == "completed-no-pr"
+
+
+def test_reconcile_all_returns_empty_when_no_dispatches_and_no_receipts(tmp_path):
+    state_dir, data_dir = _build_state(tmp_path)
+    results = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, PROJECT_ID, now=NOW)
+    assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Laag 2 (OI-824): PR-linkage via provenance_registry.pr_number, additive to
+# dispatch_metadata.pr_id
+# ---------------------------------------------------------------------------
+
+def test_provenance_pr_number_resolves_merged_pr_without_dispatch_metadata(tmp_path):
+    """The tmux-lane build case: dispatch_metadata has no row at all (build
+    dispatches never write there), but provenance_registry's commit-scan-
+    derived pr_number is enough on its own — no merged_pr_numbers cross-check
+    needed, since a git-log-derived pr_number is already proof the commit is
+    on main."""
+    state_dir, data_dir = _build_state(tmp_path)
+    _create_provenance_registry_table(state_dir)
+    _insert_provenance_row(state_dir, "d-build", pr_number=1235, commit_sha="abc123")
+
+    ev = doc.load_evidence(state_dir, data_dir, PROJECT_ID, "d-build", now=NOW)
+    assert ev.pr_merged is True
+    assert ev.pr_id == "1235"
+    assert doc.classify_outcome(ev) == "merged-PR"
+
+
+def test_provenance_pr_number_absent_table_is_noop(tmp_path):
+    state_dir, data_dir = _build_state(tmp_path)
+    # No provenance_registry table at all (older DB / test fixture).
+    ev = doc.load_evidence(state_dir, data_dir, PROJECT_ID, "d-no-provenance", now=NOW)
+    assert ev.pr_merged is False
+
+
+def test_provenance_pr_number_row_with_null_pr_number_is_no_evidence(tmp_path):
+    state_dir, data_dir = _build_state(tmp_path)
+    _create_provenance_registry_table(state_dir)
+    _insert_provenance_row(state_dir, "d-incomplete", pr_number=None)
+
+    ev = doc.load_evidence(state_dir, data_dir, PROJECT_ID, "d-incomplete", now=NOW)
+    assert ev.pr_merged is False
+
+
+def test_dispatch_metadata_pr_id_complements_provenance_not_replaced(tmp_path, monkeypatch):
+    """Both sources present: dispatch_metadata.pr_id already resolves
+    pr_merged=True — provenance_registry must not be needed/consulted to
+    override an already-resolved evidence chain."""
+    state_dir, data_dir = _build_state(tmp_path)
+    _create_provenance_registry_table(state_dir)
+    _insert_metadata(state_dir, "d-both", pr_id="42")
+    _insert_provenance_row(state_dir, "d-both", pr_number=999)  # different PR, must not win
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset({42}))
+
+    ev = doc.load_evidence(state_dir, data_dir, PROJECT_ID, "d-both", now=NOW)
+    assert ev.pr_merged is True
+    assert ev.pr_id == "42", "dispatch_metadata.pr_id must not be overwritten by provenance_registry"
+
+
+def test_provenance_pr_number_ambiguity_guard_ignores_cross_project_dispatch_id(tmp_path):
+    """ADR-007: provenance_registry has no project_id column of its own. A
+    dispatch_id that ``dispatches`` maps to a DIFFERENT tenant must not leak
+    its PR evidence into this project's classification."""
+    state_dir, data_dir = _build_state(tmp_path)
+    _create_provenance_registry_table(state_dir)
+    _insert_dispatch(state_dir, "shared-id", project_id="tenant-other", state="completed")
+    _insert_provenance_row(state_dir, "shared-id", pr_number=555)
+
+    ev = doc.load_evidence(state_dir, data_dir, "tenant-mine", "shared-id", now=NOW)
+    assert ev.pr_merged is False, "cross-tenant dispatch_id collision must not leak PR evidence"
+
+
+def test_provenance_pr_number_not_ambiguous_when_absent_from_dispatches_table(tmp_path):
+    """The common case: a build dispatch_id absent from `dispatches`
+    entirely (Laag 1) is not ambiguous — provenance evidence still applies."""
+    state_dir, data_dir = _build_state(tmp_path)
+    _create_provenance_registry_table(state_dir)
+    _insert_provenance_row(state_dir, "build-only-id", pr_number=1237)
+
+    ev = doc.load_evidence(state_dir, data_dir, PROJECT_ID, "build-only-id", now=NOW)
+    assert ev.pr_merged is True
