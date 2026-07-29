@@ -180,6 +180,7 @@ def _link_pr_args(
     *prs: str,
     project_id: str = PROJECT_ID,
     json: bool = False,
+    delivery: str = "partial",
 ) -> argparse.Namespace:
     return argparse.Namespace(
         state_dir=str(state_dir),
@@ -187,7 +188,28 @@ def _link_pr_args(
         track_id=track_id,
         pr=list(prs),
         json=json,
+        delivery=delivery,
     )
+
+
+def _pr_delivery(state_dir: Path, track_id: str, pr_number: int, project_id: str = PROJECT_ID):
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    row = conn.execute(
+        "SELECT delivery_kind FROM track_pr_delivery "
+        "WHERE project_id = ? AND track_id = ? AND pr_number = ?",
+        (project_id, track_id, pr_number),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def _apply_migration_0032(state_dir: Path) -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    schema_migration.apply_script_if_below(
+        conn, 32, (_MIGRATIONS / "0032_track_pr_delivery.sql").read_text(encoding="utf-8")
+    )
+    conn.commit()
+    conn.close()
 
 
 def _close_args(
@@ -258,6 +280,71 @@ def test_link_pr_wrong_project_id_does_not_write(tmp_path):
     )
     assert rc == 1
     assert _pr_ref(sd, "T", PROJECT_ID) == ""
+
+
+# ---------------------------------------------------------------------------
+# link-pr --delivery — OI-829 fail-closed auto-close gate
+# ---------------------------------------------------------------------------
+
+def test_link_pr_defaults_to_partial_delivery(tmp_path):
+    """No --delivery flag -> 'partial' is recorded (fail-closed default)."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+
+    rc = planning_cli.cmd_objective_link_pr(_link_pr_args(sd, "T", "#500"))
+    assert rc == 0
+    assert _pr_delivery(sd, "T", 500) == "partial"
+
+
+def test_link_pr_explicit_complete_delivery(tmp_path):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+
+    rc = planning_cli.cmd_objective_link_pr(
+        _link_pr_args(sd, "T", "#501", delivery="complete")
+    )
+    assert rc == 0
+    assert _pr_delivery(sd, "T", 501) == "complete"
+
+
+def test_link_pr_upgrades_already_present_pr_to_complete(tmp_path):
+    """Re-linking an already-present PR with a different --delivery updates the
+    existing row instead of being rejected as a no-op (upgrade workflow)."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#502"
+    )
+    rc1 = planning_cli.cmd_objective_link_pr(
+        _link_pr_args(sd, "T", "#502", delivery="partial")
+    )
+    assert rc1 == 0
+    assert _pr_delivery(sd, "T", 502) == "partial"
+
+    # Same PR, already present -> pr_ref unchanged (noop_no_change) but the
+    # delivery marking is still upgraded to 'complete'.
+    rc2 = planning_cli.cmd_objective_link_pr(
+        _link_pr_args(sd, "T", "#502", delivery="complete")
+    )
+    assert rc2 == 0
+    assert _pr_ref(sd, "T") == "#502"
+    assert _pr_delivery(sd, "T", 502) == "complete"
+
+
+def test_link_pr_delivery_missing_migration_warns_not_crashes(tmp_path, capsys):
+    """DB without migration 0032 applied: link-pr must not crash. It records
+    pr_ref as usual and surfaces a plain warning instead of silently dropping
+    the delivery marking."""
+    sd = _build_db(tmp_path)  # deliberately NOT applying 0032
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+
+    rc = planning_cli.cmd_objective_link_pr(_link_pr_args(sd, "T", "#503", delivery="complete"))
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#503"
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "track_pr_delivery" in out
 
 
 # ---------------------------------------------------------------------------

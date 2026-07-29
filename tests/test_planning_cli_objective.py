@@ -210,3 +210,130 @@ def test_objective_show_json_includes_open_items(seeded_state, capsys):
     data = json.loads(capsys.readouterr().out)
     assert len(data["open_items"]) == 1
     assert data["open_items"][0]["oi_id"] == "gate:pre_merge_gate:d-1"
+
+
+# ---------------------------------------------------------------------------
+# objective show — pr_delivery visibility (OI-829)
+# ---------------------------------------------------------------------------
+
+def _apply_migration_0032(state_dir: Path) -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    schema_migration.apply_script_if_below(
+        conn, 32, (_MIGRATIONS / "0032_track_pr_delivery.sql").read_text(encoding="utf-8")
+    )
+    conn.commit()
+    conn.close()
+
+
+def _set_delivery(state_dir: Path, track_id: str, pr_number: int, kind: str, project_id: str = "vnx-dev") -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?,?,?,?,?)",
+        (project_id, track_id, pr_number, kind, "operator"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_objective_show_displays_pr_delivery_status(seeded_state, capsys):
+    """#1221 partial, #1239 partial style breakdown must be readable from `show`."""
+    _apply_migration_0032(seeded_state)
+    tracks_lib.update_authored_fields(
+        seeded_state, "feat-a", "vnx-dev", pr_ref="#1221,#1239", actor="operator",
+    )
+    _set_delivery(seeded_state, "feat-a", 1221, "partial")
+    _set_delivery(seeded_state, "feat-a", 1239, "partial")
+
+    rc = planning_cli.main([
+        "objective", "show", "feat-a", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "delivery :" in out
+    assert "#1221 partial" in out
+    assert "#1239 partial" in out
+
+
+def test_objective_show_json_includes_pr_delivery(seeded_state, capsys):
+    _apply_migration_0032(seeded_state)
+    tracks_lib.update_authored_fields(
+        seeded_state, "feat-a", "vnx-dev", pr_ref="#1221,#1239", actor="operator",
+    )
+    _set_delivery(seeded_state, "feat-a", 1239, "complete")
+
+    rc = planning_cli.main([
+        "objective", "show", "feat-a", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state), "--json",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    by_pr = {e["pr_number"]: e["delivery_kind"] for e in data["pr_delivery"]}
+    assert by_pr == {1221: "unmarked", 1239: "complete"}
+
+
+def test_objective_show_unmarked_when_no_delivery_row(seeded_state, capsys):
+    """pr_ref set but no track_pr_delivery row at all -> shown as 'unmarked', never as done."""
+    _apply_migration_0032(seeded_state)
+    tracks_lib.update_authored_fields(
+        seeded_state, "feat-c", "vnx-dev", pr_ref="#999", actor="operator",
+    )
+
+    rc = planning_cli.main([
+        "objective", "show", "feat-c", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "#999 unmarked" in out
+
+
+def test_objective_show_no_pr_ref_shows_no_linked_prs(seeded_state, capsys):
+    _apply_migration_0032(seeded_state)
+    rc = planning_cli.main([
+        "objective", "show", "feat-c", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "delivery : (no linked PRs)" in out
+
+
+def test_objective_show_raises_on_unknown_delivery_kind(seeded_state):
+    """An unrecognized delivery_kind on an existing row must fail loudly, never
+    read as 'not complete' silently (mirrors close_track_if_done)."""
+    _apply_migration_0032(seeded_state)
+    tracks_lib.update_authored_fields(
+        seeded_state, "feat-a", "vnx-dev", pr_ref="#777", actor="operator",
+    )
+    conn = sqlite3.connect(str(seeded_state / "runtime_coordination.db"))
+    conn.execute("PRAGMA ignore_check_constraints = 1")
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?,?,?,?,?)",
+        ("vnx-dev", "feat-a", 777, "bogus", "test"),
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="unrecognized delivery_kind"):
+        planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(seeded_state),
+        ])
+
+
+def test_objective_show_no_table_gracefully_shows_unmarked(seeded_state, capsys):
+    """DB without migration 0032 applied: show must not crash — pr_delivery
+    degrades to empty/'unmarked', matching the migration-not-applied fallback."""
+    tracks_lib.update_authored_fields(
+        seeded_state, "feat-c", "vnx-dev", pr_ref="#888", actor="operator",
+    )
+    rc = planning_cli.main([
+        "objective", "show", "feat-c", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "#888 unmarked" in out
