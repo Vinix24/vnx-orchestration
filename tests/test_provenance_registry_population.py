@@ -245,6 +245,55 @@ def test_reconcile_links_commit_sha_from_trace_token(tmp_path):
     assert row is not None and row[0] == expected_sha
 
 
+def test_reconcile_captures_all_dispatch_id_trailers_in_squashed_commit(tmp_path):
+    """A squash-merged fix-forward commit carries 2+ ``Dispatch-ID:`` trailers
+    (this codebase's own common pattern — an original commit plus one or more
+    fix-forward commits, squashed into one PR). Every trailer must get its
+    own provenance_registry row, not just the first (OI-824 B3 audit: this
+    under-capture silently starved provenance_registry.pr_number for every
+    fix-forward dispatch squashed alongside another commit)."""
+    sd = _state_dir(tmp_path)
+    repo = _git_repo_with_commit(
+        tmp_path,
+        "feat(x): do thing (#1235)\n\n"
+        "Dispatch-ID: 20260728-rq-b2-toolsignals-metadata-sonnet\n\n"
+        "* fix(x): fix-forward round\n\n"
+        "Dispatch-ID: 20260728-rq-b2-fixforward-sonnet\n",
+    )
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    result = reconcile_commit_provenance(repo, conn, max_commits=10)
+    conn.commit()
+    rows = conn.execute(
+        "SELECT dispatch_id, pr_number, commit_sha FROM provenance_registry ORDER BY dispatch_id"
+    ).fetchall()
+    conn.close()
+
+    assert result["linked"] == 2
+    assert {r[0] for r in rows} == {
+        "20260728-rq-b2-toolsignals-metadata-sonnet",
+        "20260728-rq-b2-fixforward-sonnet",
+    }
+    assert all(r[1] == 1235 for r in rows)
+    assert len({r[2] for r in rows}) == 1  # same commit_sha for both
+
+
+def test_reconcile_single_trailer_commit_registers_once(tmp_path):
+    """Backward-compat: a single-trailer commit still registers exactly one
+    row (no accidental double-registration from the multi-trailer scan)."""
+    sd = _state_dir(tmp_path)
+    repo = _git_repo_with_commit(
+        tmp_path, "feat(x): do thing (#42)\n\nDispatch-ID: 20260628-120000-solo\n",
+    )
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    result = reconcile_commit_provenance(repo, conn, max_commits=10)
+    conn.commit()
+    n = conn.execute("SELECT COUNT(*) FROM provenance_registry").fetchone()[0]
+    conn.close()
+
+    assert result["linked"] == 1
+    assert n == 1
+
+
 def test_reconcile_ignores_tokenless_commits(tmp_path):
     sd = _state_dir(tmp_path)
     repo = _git_repo_with_commit(tmp_path, "chore: no token here\n")
