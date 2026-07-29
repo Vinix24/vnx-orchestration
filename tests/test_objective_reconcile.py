@@ -1430,6 +1430,26 @@ class TestRunProvenanceSweepCommitSurvivesClose:
         verify_conn.close()
         assert {r[0] for r in rows} == set(dispatch_ids)
 
+    def test_linked_pending_commit_is_zero_after_successful_sweep(self, tmp_path):
+        """PR-A fix-forward: reconcile_commit_provenance computes
+        ``linked_pending_commit`` BEFORE ``_run_provenance_sweep``'s own
+        ``prov_conn.commit()`` runs — at that point prov_conn.in_transaction
+        is still True, so the raw value mirrors ``linked`` regardless of
+        whether the commit that follows actually succeeds. Once
+        _run_provenance_sweep's commit has succeeded, the rows ARE durable
+        and the caller-visible count must say so (0), not echo the
+        pre-commit snapshot — anything else is exactly the "non-zero pending
+        after a successful commit" lie linked_pending_commit exists to rule
+        out."""
+        repo, state_dir, env = _make_git_project(tmp_path)
+        dispatch_id = "20260729-pending-after-commit-check"
+        _git_commit_with_dispatch_id(repo, dispatch_id, env)
+
+        result = objective_reconcile._run_provenance_sweep(state_dir, repo, PROJECT_ID)
+
+        assert result["linked"] == 1
+        assert result["linked_pending_commit"] == 0
+
 
 class TestRunProvenanceSweepCommitFailureIsLoud:
     """A commit failure must be visible (log.error), not swallowed at debug
@@ -1465,6 +1485,20 @@ class TestRunProvenanceSweepCommitFailureIsLoud:
         error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert error_records, "a failed commit must be logged loudly, not swallowed at debug"
         assert "commit failed" in error_records[0].getMessage()
+
+        # The zeroed counts are the SHAPE of the claim; prove the substance
+        # too — _run_provenance_sweep's own prov_conn is already closed by
+        # the time it returns (its finally: block closes it regardless of
+        # commit outcome). Open a fresh connection and confirm the row the
+        # broken commit() claimed to roll back is actually gone, not just
+        # that the returned dict said zero.
+        verify_conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        row = verify_conn.execute(
+            "SELECT commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+        verify_conn.close()
+        assert row is None, "a failed commit must not leave the row behind after close()"
 
         # And it must not have been double-logged at debug-only either — the
         # loud path replaces the silent one for this failure, it doesn't also

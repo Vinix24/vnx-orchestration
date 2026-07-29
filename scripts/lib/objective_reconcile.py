@@ -610,6 +610,16 @@ def _run_provenance_sweep(
                     exc_info=True,
                 )
             else:
+                # ``result["linked_pending_commit"]`` was computed by
+                # reconcile_commit_provenance BEFORE this commit — it mirrors
+                # ``linked`` because prov_conn's implicit transaction was
+                # still open at that point. Now that prov_conn.commit() has
+                # actually succeeded, every one of those writes is durable:
+                # the caller-visible count must reflect that, not the
+                # pre-commit snapshot, or it repeats the exact "non-zero
+                # pending after a successful commit" lie this field exists
+                # to prevent.
+                result["linked_pending_commit"] = 0
                 provenance = result
         finally:
             prov_conn.close()
