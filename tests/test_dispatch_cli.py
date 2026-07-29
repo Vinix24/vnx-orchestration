@@ -43,6 +43,7 @@ from providers.constraint_enforcer import (
 from dispatch_plan import (
     ConstraintVerdict,
     ExecutionPlan,
+    ModelPin,
     RuntimeSnapshot,
     compile_plan,
 )
@@ -120,7 +121,12 @@ def _clean_snapshot(*, staging_promoted: bool = True) -> RuntimeSnapshot:
         staging_promoted=staging_promoted,
         target_health={"ephemeral": "healthy", "T1": "healthy"},
         target_capable={"ephemeral": True, "T1": True},
-        model_pins={"T0": "opus", "T1": "sonnet", "T2": "sonnet", "T3": "sonnet"},
+        model_pins={
+            "T0": ModelPin(model="opus", semantics="floor"),
+            "T1": ModelPin(model="sonnet", semantics="floor"),
+            "T2": ModelPin(model="sonnet", semantics="floor"),
+            "T3": ModelPin(model="sonnet", semantics="floor"),
+        },
     )
 
 
@@ -1106,12 +1112,14 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_default_model_pins_flip_workers_to_kimi_k3():
-    """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus."""
+    """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus.
+    worker-provider-free-choice PR-1: pins now carry explicit floor semantics —
+    ModelPin, not a bare string."""
     assert _DEFAULT_MODEL_PINS == {
-        "T0": "opus",
-        "T1": "kimi-k3",
-        "T2": "kimi-k3",
-        "T3": "kimi-k3",
+        "T0": ModelPin(model="opus", semantics="floor"),
+        "T1": ModelPin(model="kimi-k3", semantics="floor"),
+        "T2": ModelPin(model="kimi-k3", semantics="floor"),
+        "T3": ModelPin(model="kimi-k3", semantics="floor"),
     }
 
 
@@ -1119,12 +1127,13 @@ def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
     """_load_model_pins_from_yaml() matches the RENAMED constraint id
     (workers-kimi-pinned, not workers-sonnet-pinned) and loads its
     required_route.model (kimi-k3) for T1/T2/T3 from the real
-    provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only."""
+    provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only.
+    Both constraints declare pin_semantics: floor in the SSOT (PR-1)."""
     pins = _load_model_pins_from_yaml()
-    assert pins["T0"] == "claude-opus-4-8"
-    assert pins["T1"] == "kimi-k3"
-    assert pins["T2"] == "kimi-k3"
-    assert pins["T3"] == "kimi-k3"
+    assert pins["T0"] == ModelPin(model="claude-opus-4-8", semantics="floor")
+    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="floor")
+    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="floor")
+    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="floor")
 
 
 def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
@@ -1147,9 +1156,89 @@ def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
     }))
     with patch("dispatch_cli._LIB_DIR", tmp_path):
         pins = _load_model_pins_from_yaml()
-    assert pins["T1"] == "kimi-k3", "stale workers-sonnet-pinned id must not override the default pin"
-    assert pins["T2"] == "kimi-k3"
-    assert pins["T3"] == "kimi-k3"
+    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="floor"), (
+        "stale workers-sonnet-pinned id must not override the default pin"
+    )
+    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="floor")
+    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="floor")
+
+
+# ---------------------------------------------------------------------------
+# worker-provider-free-choice PR-1 — ModelPin contract tests
+# ---------------------------------------------------------------------------
+
+def test_load_model_pins_reads_floor_semantics_from_real_yaml():
+    """Both t0-opus-only and workers-kimi-pinned declare pin_semantics: floor in the
+    real SSOT; PR-1 only introduces the contract, it does not flip anything to default."""
+    pins = _load_model_pins_from_yaml()
+    assert pins["T0"].semantics == "floor"
+    assert pins["T1"].semantics == "floor"
+    assert pins["T2"].semantics == "floor"
+    assert pins["T3"].semantics == "floor"
+
+
+def test_load_model_pins_missing_pin_semantics_reads_as_floor(tmp_path):
+    """A present constraint that has not been migrated to carry pin_semantics must
+    never silently soften to 'default' — it reads as 'floor'."""
+    import yaml as _yaml
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "provider_constraints.yaml").write_text(_yaml.safe_dump({
+        "version": 1,
+        "constraints": [
+            {
+                "id": "t0-opus-only",
+                "rule": "require_route",
+                "required_route": {"role": "T0", "model": "claude-opus-4-8"},
+                # pin_semantics intentionally absent
+            },
+        ],
+    }))
+    with patch("dispatch_cli._LIB_DIR", tmp_path):
+        pins = _load_model_pins_from_yaml()
+    assert pins["T0"] == ModelPin(model="claude-opus-4-8", semantics="floor")
+
+
+def test_load_model_pins_unknown_semantics_fails_loud(tmp_path):
+    """An unrecognized pin_semantics value is a config-authoring error and must never
+    be silently interpreted as 'floor' or 'default' — it raises instead of falling back."""
+    import yaml as _yaml
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "provider_constraints.yaml").write_text(_yaml.safe_dump({
+        "version": 1,
+        "constraints": [
+            {
+                "id": "t0-opus-only",
+                "rule": "require_route",
+                "required_route": {"role": "T0", "model": "claude-opus-4-8"},
+                "pin_semantics": "sometimes",
+            },
+        ],
+    }))
+    with patch("dispatch_cli._LIB_DIR", tmp_path):
+        with pytest.raises(ValueError, match="pin_semantics"):
+            _load_model_pins_from_yaml()
+
+
+def test_load_model_pins_unreadable_yaml_fails_loud_and_falls_back(tmp_path, caplog):
+    """Missing/unreadable YAML is a read failure, not a config-authoring error: it
+    logs loudly (observable, unlike the old silent bare-except) AND still returns the
+    fallback, which itself carries explicit floor semantics."""
+    import logging
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    # No provider_constraints.yaml written at all -> FileNotFoundError on open()
+
+    with patch("dispatch_cli._LIB_DIR", tmp_path):
+        with caplog.at_level(logging.ERROR):
+            pins = _load_model_pins_from_yaml()
+
+    assert pins == _DEFAULT_MODEL_PINS
+    assert pins["T0"] == ModelPin(model="opus", semantics="floor")
+    assert any("model-pins YAML unreadable" in rec.message for rec in caplog.records), (
+        "unreadable YAML must log loudly, not silently fall back"
+    )
 
 
 def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatch, capsys):

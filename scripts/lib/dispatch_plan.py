@@ -38,12 +38,29 @@ class ConstraintVerdict:
 
 
 @dataclass(frozen=True)
+class ModelPin:
+    """A model pin carrying enforcement semantics, not just a model name.
+
+    floor:   coercive — spec.model is ignored, the pin always wins (today's
+             behavior for both t0-opus-only and workers-kimi-pinned).
+    default: advisory — spec.model wins when the caller set one; the pin is
+             only used as a fallback when spec.model is absent.
+
+    worker-provider-free-choice PR-1: this type only carries the contract.
+    D4 below still ignores `semantics` and always coerces to the pin
+    (gedragsneutraal) — honoring `semantics` is PR-3's job.
+    """
+    model: str
+    semantics: str  # "floor" | "default"
+
+
+@dataclass(frozen=True)
 class RuntimeSnapshot:
     constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
     staging_promoted: bool = False
     target_health: Mapping[str, str] = field(default_factory=dict)    # target_id -> "healthy"|"unhealthy"|"offline"
     target_capable: Mapping[str, bool] = field(default_factory=dict)  # target_id -> capability match
-    model_pins: Mapping[str, str] = field(default_factory=dict)       # target_slot -> pinned model
+    model_pins: Mapping[str, ModelPin] = field(default_factory=dict)  # target_slot -> pin (model + semantics)
     claude_serial_enabled: bool = True
 
 
@@ -195,7 +212,8 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # rather than silently falling back to sonnet (kimi-only, no fallback policy).
     target_slot = spec.target_slot
     if is_claude_lane:
-        pinned = snapshot.model_pins.get(target_slot)
+        pin = snapshot.model_pins.get(target_slot)
+        pinned = pin.model if pin is not None else None
         requested = spec.model
         if pinned:
             if requested and requested != pinned:
