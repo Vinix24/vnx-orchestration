@@ -15,8 +15,6 @@ import sqlite3
 import sys
 from pathlib import Path
 
-import pytest
-
 _ROOT = Path(__file__).resolve().parent.parent
 _LIB = _ROOT / "scripts" / "lib"
 _SCRIPTS = _ROOT / "scripts"
@@ -590,9 +588,13 @@ def test_oi829_no_pr_ref_at_all_gate_not_applicable(tmp_path):
     assert result["applied"] is True
 
 
-def test_oi829_unknown_delivery_kind_raises_loud(tmp_path):
+def test_oi829_unknown_delivery_kind_fails_closed_no_raise(tmp_path, caplog):
     """An existing track_pr_delivery row with an unrecognized delivery_kind must
-    raise loudly on read, never silently be treated as 'not complete'."""
+    never silently be treated as 'not complete' -- but it must also never escape
+    close_track_if_done as an exception (the fail-closed fix-forward: the caller
+    loop in objective_reconcile.py has no per-track try/except, so a raise here
+    would abort every remaining candidate in a sweep). It logs ERROR with full
+    context and returns noop_incomplete_delivery / applied=False instead."""
     sd = _build_db(tmp_path)
     tracks_lib.create_track(
         sd, "T-bad-delivery", PROJECT_ID, title="bad delivery", goal_state="y",
@@ -609,10 +611,87 @@ def test_oi829_unknown_delivery_kind_raises_loud(tmp_path):
     conn.close()
 
     evidence = {"pr_ref": "#900", "verified_at": "2026-07-29T12:00:00Z"}
-    with pytest.raises(RuntimeError, match="unrecognized delivery_kind"):
-        track_reconciler.close_track_if_done(
+    with caplog.at_level("ERROR", logger="track_reconciler"):
+        result = track_reconciler.close_track_if_done(
             sd, "T-bad-delivery", PROJECT_ID, actor="system", evidence=evidence,
         )
+
+    assert result["action"] == "noop_incomplete_delivery"
+    assert result["applied"] is False
+    assert _phase(sd, "T-bad-delivery") == "active"  # no write
+
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert error_records, "expected an ERROR log record for the unrecognized delivery_kind"
+    msg = error_records[0].getMessage()
+    assert PROJECT_ID in msg
+    assert "T-bad-delivery" in msg
+    assert "900" in msg
+    assert "bogus" in msg
+
+
+def test_oi829_corrupt_row_does_not_abort_sweep_over_other_candidates(tmp_path):
+    """Reproduces the fix-forward finding directly: a sweep over multiple confirmed
+    candidates (mirroring objective_reconcile.py's per-candidate loop, which has no
+    per-track try/except) must not let one corrupt delivery_kind row stop the other
+    candidates from being processed."""
+    sd = _build_db(tmp_path)
+
+    # Candidate 1: corrupt delivery_kind -> must fail closed, not raise.
+    tracks_lib.create_track(
+        sd, "T-sweep-bad", PROJECT_ID, title="sweep bad", goal_state="y",
+        phase="active", pr_ref="#901",
+    )
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute("PRAGMA ignore_check_constraints = 1")
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?,?,?,?,?)",
+        (PROJECT_ID, "T-sweep-bad", 901, "corrupted", "test"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Candidate 2: clean, complete delivery -> must close normally.
+    tracks_lib.create_track(
+        sd, "T-sweep-good", PROJECT_ID, title="sweep good", goal_state="y",
+        phase="active", pr_ref="#902",
+    )
+    _set_delivery(sd, "T-sweep-good", 902, "complete")
+
+    candidates = [
+        {
+            "track_id": "T-sweep-bad",
+            "evidence": {"pr_ref": "#901", "verified_at": "2026-07-29T12:00:00Z"},
+        },
+        {
+            "track_id": "T-sweep-good",
+            "evidence": {
+                "pr_ref": "#902",
+                "pr_results": [
+                    {"number": 902, "state": "MERGED", "mergedAt": "2026-07-29T10:00:00Z"},
+                ],
+                "verified_at": "2026-07-29T12:00:00Z",
+            },
+        },
+    ]
+
+    # No try/except around the call -- mirrors the real sweep loop. If the fix
+    # regresses back to raising, this loop itself raises and the test fails
+    # with an escaped exception rather than an assertion mismatch.
+    results = {}
+    for cand in candidates:
+        results[cand["track_id"]] = track_reconciler.close_track_if_done(
+            sd, cand["track_id"], PROJECT_ID, actor="system",
+            approval_id="auto-reconcile-sweep-test", evidence=cand["evidence"],
+        )
+
+    assert results["T-sweep-bad"]["action"] == "noop_incomplete_delivery"
+    assert results["T-sweep-bad"]["applied"] is False
+    assert _phase(sd, "T-sweep-bad") == "active"
+
+    assert results["T-sweep-good"]["action"] == "closed"
+    assert results["T-sweep-good"]["applied"] is True
+    assert _phase(sd, "T-sweep-good") == "done"
 
 
 def test_oi829_evidence_none_path_closes_unchanged_without_any_marking(tmp_path):

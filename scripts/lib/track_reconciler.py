@@ -831,8 +831,10 @@ def close_track_if_done(
           — this is not staleness, it's an incomplete delivery, so it gets
           its own action value rather than 'stale_candidate'. A track with no
           pr_ref at all has nothing to gate on and is unaffected. An
-          unrecognized delivery_kind on an existing row raises RuntimeError
-          rather than being treated as absent.
+          unrecognized delivery_kind on an existing row is logged at ERROR
+          (project_id, track_id, pr_number, the value) and fails closed with
+          action='noop_incomplete_delivery' — loud but non-escaping, so one
+          corrupt row cannot abort a reconcile sweep over other candidates.
     Any mismatch on (a)-(d) returns action='stale_candidate', applied=False,
     BEFORE reconcile_track — so a stale candidate causes zero DB writes,
     derived_status included. (e) uses its own action value but the same
@@ -1024,7 +1026,11 @@ def close_track_if_done(
             # staleness). A track with no pr_ref at all (closing on dispatch-
             # completion evidence, not PR evidence) has nothing to gate on and
             # is unaffected. An unrecognized delivery_kind on an existing row
-            # must never read as "not complete" silently — it raises loudly.
+            # must never read as "not complete" silently — it is logged at
+            # ERROR and fails closed (noop_incomplete_delivery), but must not
+            # raise: this function is called per-candidate from a sweep loop
+            # with no per-track try/except, so an escaping exception would
+            # abort every remaining candidate behind the corrupt row.
             parsed_pns_for_delivery = _parse_pr_numbers(current_pr_ref)
             if parsed_pns_for_delivery:
                 try:
@@ -1040,11 +1046,21 @@ def close_track_if_done(
                 for row in delivery_rows:
                     kind = row["delivery_kind"]
                     if kind not in ("partial", "complete"):
-                        raise RuntimeError(
-                            f"track_pr_delivery: unrecognized delivery_kind {kind!r} for "
-                            f"project_id={project_id!r} track_id={track_id!r} "
-                            f"pr_number={row['pr_number']!r}"
+                        log.error(
+                            "track_pr_delivery: unrecognized delivery_kind %r for "
+                            "project_id=%r track_id=%r pr_number=%r — failing closed "
+                            "(noop_incomplete_delivery), not raising: this runs inside a "
+                            "sweep loop with no per-track try/except",
+                            kind, project_id, track_id, row["pr_number"],
                         )
+                        return {
+                            "track_id": track_id,
+                            "project_id": project_id,
+                            "declared_phase": track_row["phase"] if track_row else None,
+                            "derived_status": None,
+                            "action": "noop_incomplete_delivery",
+                            "applied": False,
+                        }
                     delivery_by_pr[int(row["pr_number"])] = kind
 
                 has_complete_delivery = any(
