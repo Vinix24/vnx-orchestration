@@ -22,6 +22,14 @@
 #   audit_severity   blocking | warn | info
 #   override_allowed bool; when true operator may bypass via env flag
 #                    VNX_OVERRIDE_<UPPERCASED_ID_WITH_UNDERSCORES>=1
+#   pin_semantics    floor | default; only meaningful on require_route constraints
+#                    consumed as a model pin (t0-opus-only, workers-kimi-pinned).
+#                    floor = coercive, spec.model is ignored, the pin always wins.
+#                    default = advisory, spec.model wins when the caller set one.
+#                    Missing on a present constraint reads as floor (never silently
+#                    softens); an unrecognized value fails loud at load time
+#                    (worker-provider-free-choice PR-1, scripts/lib/dispatch_cli.py
+#                    _load_model_pins_from_yaml).
 
 version: 1
 
@@ -52,6 +60,7 @@ constraints:
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
+    pin_semantics: floor
 
   # NOTE: id intentionally retained as `workers-kimi-pinned`. The pin-loader
   # (_load_model_pins_from_yaml in scripts/lib/dispatch_cli.py) hard-keys on
@@ -76,6 +85,7 @@ constraints:
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
+    pin_semantics: floor
 
   - id: no-anthropic-sdk
     rule: forbid_import

@@ -23,6 +23,7 @@ from dispatch_internal import is_valid_instruction_hash, issue_permit, require_p
 from dispatch_plan import (
     ConstraintVerdict,
     ExecutionPlan,
+    ModelPin,
     RuntimeSnapshot,
     compile_plan,
 )
@@ -255,7 +256,8 @@ class TestBlockingConstraint:
 class TestModelTierPin:
     def test_t0_pinned_to_opus(self, tmp_path: Path) -> None:
         vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T0", tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot(model_pins={"T0": "opus"}))
+        snapshot = _healthy_snapshot(model_pins={"T0": ModelPin(model="opus", semantics="floor")})
+        plan = compile_plan(vspec, snapshot)
         assert isinstance(plan, ExecutionPlan)
         assert plan.model == "opus"
         assert not any("model-tier" in w for w in plan.warnings)
@@ -264,14 +266,16 @@ class TestModelTierPin:
         vspec = _make_vspec(
             provider=Provider.CLAUDE, target_slot="T0", model="sonnet", tmp_path=tmp_path
         )
-        plan = compile_plan(vspec, _healthy_snapshot(model_pins={"T0": "opus"}))
+        snapshot = _healthy_snapshot(model_pins={"T0": ModelPin(model="opus", semantics="floor")})
+        plan = compile_plan(vspec, snapshot)
         assert isinstance(plan, ExecutionPlan)
         assert plan.model == "opus"
         assert any("model-tier" in w for w in plan.warnings)
 
     def test_t1_pinned_to_sonnet(self, tmp_path: Path) -> None:
         vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot(model_pins={"T1": "sonnet"}))
+        snapshot = _healthy_snapshot(model_pins={"T1": ModelPin(model="sonnet", semantics="floor")})
+        plan = compile_plan(vspec, snapshot)
         assert isinstance(plan, ExecutionPlan)
         assert plan.model == "sonnet"
 

@@ -38,6 +38,7 @@ from dispatch_spec import (  # noqa: E402
 from dispatch_plan import (  # noqa: E402
     ConstraintVerdict,
     ExecutionPlan,
+    ModelPin,
     RuntimeSnapshot,
     compile_plan,
 )
@@ -230,11 +231,11 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
 # P1-#3: model pins from SSOT
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL_PINS: dict[str, str] = {
-    "T0": "opus",
-    "T1": "kimi-k3",
-    "T2": "kimi-k3",
-    "T3": "kimi-k3",
+_DEFAULT_MODEL_PINS: dict[str, ModelPin] = {
+    "T0": ModelPin(model="opus", semantics="floor"),
+    "T1": ModelPin(model="kimi-k3", semantics="floor"),
+    "T2": ModelPin(model="kimi-k3", semantics="floor"),
+    "T3": ModelPin(model="kimi-k3", semantics="floor"),
 }
 
 # worker-claude-override (escape-hatch-worker-claude, 2026-07-23): gated, audited
@@ -250,33 +251,65 @@ WORKER_CLAUDE_OVERRIDE_ENV = "VNX_OVERRIDE_WORKER_CLAUDE"
 WORKER_CLAUDE_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_WORKER_CLAUDE_REASON"
 
 
-def _load_model_pins_from_yaml() -> dict[str, str]:
-    """Load T0/T1/T2/T3 model pins from provider_constraints.yaml SSOT.
+_KNOWN_PIN_SEMANTICS = frozenset({"floor", "default"})
 
-    Falls back to DEFAULT_MODEL_PINS on any read/parse error (never raises).
+
+def _load_model_pins_from_yaml() -> dict[str, ModelPin]:
+    """Load T0/T1/T2/T3 model pins (with pin semantics) from provider_constraints.yaml SSOT.
+
+    Read/parse failures (missing file, invalid YAML, unsupported schema version) are NOT
+    silently swallowed: they are logged loudly and fall back to _DEFAULT_MODEL_PINS, which
+    itself carries explicit semantics — the fallback reproduces the intended pin state, it
+    never silently softens it (dispatch_cli-part of OI-826).
+
+    An unrecognized `pin_semantics` value on a present constraint is a config-authoring
+    error, not a read failure, and is a categorically different case: it is NEVER silently
+    interpreted as `floor` or `default` and is NOT caught here — it propagates so the
+    dispatch fails loud (caught by run_dispatch's outer runtime-error handler).
     """
     yaml_path = _LIB_DIR / "providers" / "provider_constraints.yaml"
     try:
         import yaml  # noqa: PLC0415
         with yaml_path.open(encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
-        if not isinstance(data, dict) or data.get("version") != 1:
-            return dict(_DEFAULT_MODEL_PINS)
-        pins: dict[str, str] = {}
-        for constraint in (data.get("constraints") or []):
-            cid = str(constraint.get("id", ""))
-            required = constraint.get("required_route") or {}
-            model = required.get("model")
-            if not model:
-                continue
-            if cid == "t0-opus-only":
-                pins["T0"] = str(model)
-            elif cid == "workers-kimi-pinned":
-                for slot in ("T1", "T2", "T3"):
-                    pins[slot] = str(model)
-        return {**_DEFAULT_MODEL_PINS, **pins}
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "[dispatch_cli] model-pins YAML unreadable at %s (%s) — falling back to "
+            "_DEFAULT_MODEL_PINS",
+            yaml_path, exc,
+        )
         return dict(_DEFAULT_MODEL_PINS)
+
+    if not isinstance(data, dict) or data.get("version") != 1:
+        logger.error(
+            "[dispatch_cli] model-pins YAML at %s has a missing/unsupported version "
+            "(expected 1) — falling back to _DEFAULT_MODEL_PINS",
+            yaml_path,
+        )
+        return dict(_DEFAULT_MODEL_PINS)
+
+    pins: dict[str, ModelPin] = {}
+    for constraint in (data.get("constraints") or []):
+        cid = str(constraint.get("id", ""))
+        required = constraint.get("required_route") or {}
+        model = required.get("model")
+        if not model:
+            continue
+        # Missing pin_semantics on a present constraint reads as "floor" — a
+        # not-yet-migrated constraint must never silently soften.
+        semantics = constraint.get("pin_semantics", "floor")
+        if semantics not in _KNOWN_PIN_SEMANTICS:
+            raise ValueError(
+                f"provider_constraints.yaml constraint {cid!r} has unknown "
+                f"pin_semantics {semantics!r} (expected 'floor' or 'default')"
+            )
+        pin = ModelPin(model=str(model), semantics=semantics)
+        if cid == "t0-opus-only":
+            pins["T0"] = pin
+        elif cid == "workers-kimi-pinned":
+            for slot in ("T1", "T2", "T3"):
+                pins[slot] = pin
+    return {**_DEFAULT_MODEL_PINS, **pins}
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +663,11 @@ def build_runtime_snapshot(
     via = _via_for_provider(provider_value, sub_provider)
 
     # P1-#3: model_pins from SSOT
-    model_pins = _load_model_pins_from_yaml()
+    model_pin_specs = _load_model_pins_from_yaml()  # dict[str, ModelPin]
+    # Legacy string-valued view for the effective_model computation below — this PR
+    # (worker-provider-free-choice PR-1) only changes the contract type, not the
+    # coercion behavior; PR-2 replaces this computation to honor pin.semantics.
+    model_pins = {slot: pin.model for slot, pin in model_pin_specs.items()}
 
     # P0-1: effective model — same computation compile_plan uses in D4
     #
@@ -830,12 +867,12 @@ def build_runtime_snapshot(
 
     # worker-claude-override: strip the kimi-k3 pin for THIS dispatch's snapshot
     # only, so compile_plan's D4 resolves the requested claude model instead of the
-    # pin. The loaded model_pins dict itself is never mutated; every dispatch that
-    # does not carry the override still sees the full pins (kimi stays default).
-    snapshot_model_pins = model_pins
+    # pin. The loaded model_pin_specs dict itself is never mutated; every dispatch
+    # that does not carry the override still sees the full pins (kimi stays default).
+    snapshot_model_pins = model_pin_specs
     if worker_claude_override_reason is not None:
         snapshot_model_pins = {
-            slot: pin for slot, pin in model_pins.items() if slot != spec.target_slot
+            slot: pin for slot, pin in model_pin_specs.items() if slot != spec.target_slot
         }
 
     return RuntimeSnapshot(
