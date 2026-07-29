@@ -80,6 +80,27 @@ def _hold_exclusive_lock(db_path: Path, hold_seconds: float, acquired: threading
     conn.close()
 
 
+def _hold_shared_lock(db_path: Path, hold_seconds: float, acquired: threading.Event) -> None:
+    """Hold a SHARED (read) lock on ``db_path`` for ``hold_seconds`` on a side
+    connection — released well after the writer's INSERT/UPDATE phase.
+
+    A SHARED lock coexists with another connection's RESERVED lock (the one
+    ``upsert_dispatch_provider_row`` holds for its own BEGIN IMMEDIATE /
+    INSERT / UPDATE), so none of those steps contend against it. Only the
+    final ``commit()`` — which must upgrade the writer's own lock to
+    EXCLUSIVE — conflicts with a live SHARED holder. This isolates the exact
+    seam PR-B's third round fixes: commit() contending on its own, with the
+    write phase before it having gone through clean.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.execute("BEGIN")
+    conn.execute("SELECT COUNT(*) FROM dispatch_metadata").fetchone()
+    acquired.set()
+    time.sleep(hold_seconds)
+    conn.rollback()  # read-only transaction — nothing to commit, just release SHARED
+    conn.close()
+
+
 def _read_row(db: Path, dispatch_id: str):
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
@@ -228,6 +249,56 @@ def test_tmux_lane_metadata_stamp_bounds_wait_under_lock(tmp_path, monkeypatch, 
     # The stamp genuinely lost the race against the lock — confirms the test
     # exercised real contention rather than a no-op.
     row = _read_row(db, "20260729-lock-tmux-1")
+    assert row is None
+
+
+def test_commit_bounded_when_it_is_the_statement_that_contends(tmp_path):
+    """Codex-gate BLOCK on PR #1241's second fix: the schema probe / BEGIN /
+    INSERT / UPDATE all had their own deadline-checked re-arm, but commit()
+    did not — it silently inherited whichever busy_timeout the UPDATE step
+    last armed, so a commit that contends on its own could reuse a window
+    instead of being bounded by what's actually left on the deadline.
+
+    Holds a SHARED lock through the write phase (see ``_hold_shared_lock``)
+    so BEGIN IMMEDIATE / INSERT / UPDATE all complete without waiting at
+    all, and only ``commit()`` — which needs to upgrade to EXCLUSIVE — hits
+    the lock. The total wall-clock must stay bounded by ``timeout``, not by
+    the lock's ``lock_hold_seconds``.
+    """
+    db = _bootstrap_state(tmp_path)
+    lock_hold_seconds = 1.5
+    short_timeout = 0.5
+    acquired = threading.Event()
+    holder = threading.Thread(
+        target=_hold_shared_lock, args=(db, lock_hold_seconds, acquired)
+    )
+    holder.start()
+    try:
+        assert acquired.wait(timeout=2.0), "lock holder never acquired its lock"
+
+        start = time.perf_counter()
+        result = upsert_dispatch_provider_row(
+            db,
+            dispatch_id="lock-commit-1",
+            terminal="T1",
+            provider="claude",
+            timeout=short_timeout,
+        )
+        elapsed = time.perf_counter() - start
+
+        assert result is False, "commit must be skipped (fail-open), not raise"
+        # Bounded near short_timeout, not anywhere near the 1.5s lock hold —
+        # this is the assertion that catches a commit() with no deadline
+        # check of its own re-inheriting a stale, too-generous window.
+        assert elapsed < 1.2, (
+            f"expected a bounded wait near {short_timeout}s, got {elapsed:.3f}s"
+        )
+    finally:
+        holder.join(timeout=5)
+
+    # A bailed commit must leave no partial row behind — the INSERT/UPDATE
+    # ran inside the same transaction the bail rolled back.
+    row = _read_row(db, "lock-commit-1")
     assert row is None
 
 
