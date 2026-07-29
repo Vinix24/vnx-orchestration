@@ -56,7 +56,7 @@ CENTRAL_DB_TABLES: Dict[str, bool] = {
         "session_analytics", "snippet_metadata", "sqlite_sequence",
         "success_patterns", "tag_combinations", "terminal_leases",
         "track_dependencies", "track_open_items", "track_phase_history",
-        "tracks", "vnx_code_quality", "worker_pool_membership",
+        "track_pr_delivery", "tracks", "vnx_code_quality", "worker_pool_membership",
         "worker_pools", "worker_states",
     )
 }
