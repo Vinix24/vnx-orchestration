@@ -15,6 +15,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parent.parent
 _LIB = _ROOT / "scripts" / "lib"
 _SCRIPTS = _ROOT / "scripts"
@@ -85,6 +87,7 @@ def _build_db(tmp_path: Path) -> Path:
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
+        (32, "0032_track_pr_delivery.sql"),
     ):
         schema_migration.apply_script_if_below(
             conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
@@ -93,6 +96,19 @@ def _build_db(tmp_path: Path) -> Path:
 
     conn.close()
     return state_dir
+
+
+def _set_delivery(
+    state_dir: Path, track_id: str, pr_number: int, kind: str, *, set_by: str = "operator"
+) -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?,?,?,?,?)",
+        (PROJECT_ID, track_id, pr_number, kind, set_by),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _seed_done_track(state_dir: Path, track_id: str, *, phase: str) -> None:
@@ -355,6 +371,8 @@ def test_evidence_with_pr_results_closes_without_local_derived_done(tmp_path):
         sd, "T-ev-pr", PROJECT_ID, title="ev pr", goal_state="y", phase="active", pr_ref="#777"
     )
     # No local merge evidence of any kind.
+    # #777 is the whole plan (single PR) -> mark it 'complete' for the OI-829 gate.
+    _set_delivery(sd, "T-ev-pr", 777, "complete")
 
     evidence = {
         "pr_ref": "#777",
@@ -413,6 +431,8 @@ def test_evidence_closed_sibling_with_policy_closes(tmp_path):
         sd, "T-cs-flag", PROJECT_ID, title="cs with flag", goal_state="y",
         phase="active", pr_ref="#802,#803",
     )
+    # #802 is the merged PR that actually ships the plan -> mark it 'complete'.
+    _set_delivery(sd, "T-cs-flag", 802, "complete")
 
     # Snapshot WITH allow_closed_siblings=True.
     evidence = {
@@ -465,3 +485,161 @@ def test_mid_walk_failure_leaves_intermediate_and_is_resumable(tmp_path, monkeyp
     )
     assert result2["action"] == "closed"
     assert _phase(sd, "T-q2") == "done"
+
+
+# ---------------------------------------------------------------------------
+# OI-829: delivery completeness — fail-closed auto-close gate.
+# ---------------------------------------------------------------------------
+
+def test_oi829_regression_two_merged_prs_no_delivery_marking_stays_open(tmp_path):
+    """Reproduces the worker-provider-free-choice bug: phase=active, pr_ref
+    '#1221,#1239', both merged via gh evidence, zero open blockers, NO
+    track_pr_delivery rows at all. Pre-fix this closed on PR-1 of 5 merging;
+    post-fix it must stay open with action='noop_incomplete_delivery' and
+    cause zero DB writes (phase and derived_status both untouched)."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "worker-provider-free-choice", PROJECT_ID, title="wpfc", goal_state="y",
+        phase="active", pr_ref="#1221,#1239",
+    )
+    # Deliberately NO _set_delivery calls — this is the bug scenario.
+
+    evidence = {
+        "pr_ref": "#1221,#1239",
+        "pr_results": [
+            {"number": 1221, "state": "MERGED", "mergedAt": "2026-07-24T10:00:00Z"},
+            {"number": 1239, "state": "MERGED", "mergedAt": "2026-07-29T10:00:00Z"},
+        ],
+        "verified_at": "2026-07-29T12:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "worker-provider-free-choice", PROJECT_ID, actor="system",
+        approval_id="auto-reconcile-test", evidence=evidence,
+    )
+    assert result["action"] == "noop_incomplete_delivery"
+    assert result["applied"] is False
+    assert _phase(sd, "worker-provider-free-choice") == "active"  # no write
+    assert _derived_status(sd, "worker-provider-free-choice") is None  # reconcile_track not called
+
+
+def test_oi829_one_pr_marked_complete_closes(tmp_path):
+    """Same shape as the regression above, but #1239 is marked delivery_kind='complete'
+    (the PR that ships the rest of the plan) -> the gate passes and the track closes."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-delivery-complete", PROJECT_ID, title="wpfc-2", goal_state="y",
+        phase="active", pr_ref="#1221,#1239",
+    )
+    _set_delivery(sd, "T-delivery-complete", 1221, "partial")
+    _set_delivery(sd, "T-delivery-complete", 1239, "complete")
+
+    evidence = {
+        "pr_ref": "#1221,#1239",
+        "pr_results": [
+            {"number": 1221, "state": "MERGED", "mergedAt": "2026-07-24T10:00:00Z"},
+            {"number": 1239, "state": "MERGED", "mergedAt": "2026-07-29T10:00:00Z"},
+        ],
+        "verified_at": "2026-07-29T12:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-delivery-complete", PROJECT_ID, actor="system",
+        approval_id="auto-reconcile-test", evidence=evidence,
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert _phase(sd, "T-delivery-complete") == "done"
+
+
+def test_oi829_only_partial_markings_noop_incomplete_delivery(tmp_path):
+    """Every linked PR marked -- but only 'partial' -> still fails closed."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-all-partial", PROJECT_ID, title="all partial", goal_state="y",
+        phase="active", pr_ref="#1221,#1239",
+    )
+    _set_delivery(sd, "T-all-partial", 1221, "partial")
+    _set_delivery(sd, "T-all-partial", 1239, "partial")
+
+    evidence = {
+        "pr_ref": "#1221,#1239",
+        "pr_results": [
+            {"number": 1221, "state": "MERGED", "mergedAt": "2026-07-24T10:00:00Z"},
+            {"number": 1239, "state": "MERGED", "mergedAt": "2026-07-29T10:00:00Z"},
+        ],
+        "verified_at": "2026-07-29T12:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-all-partial", PROJECT_ID, actor="system", evidence=evidence,
+    )
+    assert result["action"] == "noop_incomplete_delivery"
+    assert result["applied"] is False
+    assert _phase(sd, "T-all-partial") == "active"
+
+
+def test_oi829_no_pr_ref_at_all_gate_not_applicable(tmp_path):
+    """A track with no pr_ref at all closes on dispatch-completion evidence alone --
+    there is nothing to gate on, so the delivery check must not block it."""
+    sd = _build_db(tmp_path)
+    _seed_done_track(sd, "T-no-pr", phase="active")  # no pr_ref
+
+    evidence = {"pr_ref": None, "verified_at": "2026-07-29T12:00:00Z"}
+    result = track_reconciler.close_track_if_done(
+        sd, "T-no-pr", PROJECT_ID, actor="system", approval_id="X", evidence=evidence,
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+
+
+def test_oi829_unknown_delivery_kind_raises_loud(tmp_path):
+    """An existing track_pr_delivery row with an unrecognized delivery_kind must
+    raise loudly on read, never silently be treated as 'not complete'."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-bad-delivery", PROJECT_ID, title="bad delivery", goal_state="y",
+        phase="active", pr_ref="#900",
+    )
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute("PRAGMA ignore_check_constraints = 1")
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?,?,?,?,?)",
+        (PROJECT_ID, "T-bad-delivery", 900, "bogus", "test"),
+    )
+    conn.commit()
+    conn.close()
+
+    evidence = {"pr_ref": "#900", "verified_at": "2026-07-29T12:00:00Z"}
+    with pytest.raises(RuntimeError, match="unrecognized delivery_kind"):
+        track_reconciler.close_track_if_done(
+            sd, "T-bad-delivery", PROJECT_ID, actor="system", evidence=evidence,
+        )
+
+
+def test_oi829_evidence_none_path_closes_unchanged_without_any_marking(tmp_path):
+    """The evidence=None (human `vnx objective close`) path is byte-for-byte
+    unchanged: no delivery marking exists, pr_ref is set, and it still closes."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-manual-close", PROJECT_ID, title="manual close", goal_state="y",
+        phase="active", pr_ref="#1221,#1239",
+    )
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track) VALUES (?,?,?,?)",
+        ("D-T-manual-close", PROJECT_ID, "completed", "T-manual-close"),
+    )
+    conn.execute(
+        "INSERT INTO coordination_events "
+        "(event_id, event_type, entity_type, entity_id, occurred_at, project_id) "
+        "VALUES ('ev-manual-close','pr_merged','dispatch',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?)",
+        ("D-T-manual-close", PROJECT_ID),
+    )
+    conn.commit()
+    conn.close()
+
+    result = track_reconciler.close_track_if_done(
+        sd, "T-manual-close", PROJECT_ID, actor="operator", approval_id="MANUAL-1",
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert _phase(sd, "T-manual-close") == "done"

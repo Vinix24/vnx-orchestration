@@ -819,10 +819,24 @@ def close_track_if_done(
     Fresh DB read checks:
       (a) track's pr_ref unchanged vs evidence['pr_ref'],
       (b) no unresolved blocker OI (link_type='blocks' AND resolved_at IS NULL),
-      (c) declared phase still eligible (queued/active; parked only with include_parked).
-    Any mismatch returns action='stale_candidate', applied=False, BEFORE
-    reconcile_track — so a stale candidate causes zero DB writes, derived_status
-    included.
+      (c) declared phase still eligible (queued/active; parked only with include_parked),
+      (d) gh evidence authority (dependency/merge/closed-sibling checks — only
+          when evidence['pr_results'] is non-empty),
+      (e) delivery completeness — OI-829 fail-closed auto-close: when the
+          fresh pr_ref parses to >=1 PR number, at least one of them must be
+          marked delivery_kind='complete' in track_pr_delivery for this
+          (project_id, track_id). A merged PR alone is not evidence the whole
+          plan shipped. Absence of any 'complete' marking (or only 'partial'
+          markings) returns action='noop_incomplete_delivery', applied=False
+          — this is not staleness, it's an incomplete delivery, so it gets
+          its own action value rather than 'stale_candidate'. A track with no
+          pr_ref at all has nothing to gate on and is unaffected. An
+          unrecognized delivery_kind on an existing row raises RuntimeError
+          rather than being treated as absent.
+    Any mismatch on (a)-(d) returns action='stale_candidate', applied=False,
+    BEFORE reconcile_track — so a stale candidate causes zero DB writes,
+    derived_status included. (e) uses its own action value but the same
+    zero-writes-before-reconcile_track placement.
 
     When evidence is None (human objective-close path), no revalidation is done
     and the flow is byte-for-byte identical to the pre-revalidation behaviour:
@@ -845,6 +859,8 @@ def close_track_if_done(
       noop_already_closed   declared already 'done'
       rejected_parked       declared='parked' and include_parked=False
       stale_candidate       revalidation mismatch (evidence path only); no write
+      noop_incomplete_delivery  no linked PR marked delivery_kind='complete'
+                                (evidence path only); no write
       rejected_no_path      no legal phase-graph path from declared to 'done'
       rejected_not_found    track deleted during walk
       rejected_walk_failed  transition failed mid-walk; declared_phase=stop-phase
@@ -996,6 +1012,54 @@ def close_track_if_done(
                     }
 
                 _skip_derived_gate = True
+
+            # (e) delivery completeness — OI-829 fail-closed auto-close gate.
+            # A merged PR is not evidence the track's whole plan shipped
+            # (worker-provider-free-choice closed after PR-1 of 5 merged). When
+            # the fresh pr_ref parses to >=1 PR number, at least one of them
+            # must be marked delivery_kind='complete' in track_pr_delivery.
+            # Absence of any 'complete' marking — including no rows at all, or
+            # the table not yet migrated — fails closed with its own action
+            # value (not 'stale_candidate': this is an incomplete delivery, not
+            # staleness). A track with no pr_ref at all (closing on dispatch-
+            # completion evidence, not PR evidence) has nothing to gate on and
+            # is unaffected. An unrecognized delivery_kind on an existing row
+            # must never read as "not complete" silently — it raises loudly.
+            parsed_pns_for_delivery = _parse_pr_numbers(current_pr_ref)
+            if parsed_pns_for_delivery:
+                try:
+                    delivery_rows = conn.execute(
+                        "SELECT pr_number, delivery_kind FROM track_pr_delivery "
+                        "WHERE track_id=? AND project_id=?",
+                        (track_id, project_id),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    delivery_rows = []  # migration 0032 not yet applied to this DB
+
+                delivery_by_pr: Dict[int, str] = {}
+                for row in delivery_rows:
+                    kind = row["delivery_kind"]
+                    if kind not in ("partial", "complete"):
+                        raise RuntimeError(
+                            f"track_pr_delivery: unrecognized delivery_kind {kind!r} for "
+                            f"project_id={project_id!r} track_id={track_id!r} "
+                            f"pr_number={row['pr_number']!r}"
+                        )
+                    delivery_by_pr[int(row["pr_number"])] = kind
+
+                has_complete_delivery = any(
+                    delivery_by_pr.get(pn) == "complete"
+                    for pn in parsed_pns_for_delivery
+                )
+                if not has_complete_delivery:
+                    return {
+                        "track_id": track_id,
+                        "project_id": project_id,
+                        "declared_phase": track_row["phase"] if track_row else None,
+                        "derived_status": None,
+                        "action": "noop_incomplete_delivery",
+                        "applied": False,
+                    }
         finally:
             conn.close()
 
