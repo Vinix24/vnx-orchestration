@@ -125,6 +125,11 @@ _SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 # tmux lane borrows it so T1/T2/T3 dispatches land in tracks A/B/C.
 _TERMINAL_TRACK = {"T1": "A", "T2": "B", "T3": "C"}
 
+# The metadata stamp fires on every claude-lane dispatch (not flag-gated), so a
+# contended sqlite3 default (5s) can now stall every dispatch behind a lock.
+# Short-circuit fast: this is a best-effort write the sweep re-derives later.
+_METADATA_STAMP_LOCK_TIMEOUT_SECONDS = 0.5
+
 # Allowlist for extra_flags tokens: long flags (--foo, --foo=bar, --foo=bar.baz-qux),
 # short flags (-f), and short flags with values (-f val treated as two tokens).
 # Rejects shell metacharacters, subshell expansion, backticks, semicolons, etc.
@@ -642,20 +647,23 @@ class TmuxInteractiveDispatch:
     ) -> None:
         """Best-effort dispatch_metadata row for the leaseless tmux lane.
 
-        Flag-gated by ``VNX_TMUX_SESSION_ID`` (truthy values: "1"/"true");
-        default OFF preserves the lane's legacy behaviour (no row written).
-        Uses the shared writer's COALESCE/INSERT-OR-IGNORE pattern so re-calls
-        are idempotent and never clobber a richer provider-lane row.
+        Every claude-lane dispatch gets a row — this used to be flag-gated by
+        ``VNX_TMUX_SESSION_ID`` (default OFF), which meant regular build
+        dispatches never wrote one and the merge-side pr_id backfill
+        (``receipt_provenance._link_pr_to_dispatch_metadata``) had no row to
+        fill in for them. Uses the shared writer's COALESCE/INSERT-OR-IGNORE
+        pattern so re-calls are idempotent and never clobber a richer
+        provider-lane row.
 
         ``session_id``: the pre-assigned worker session UUID (F1.1), stamped only
         when the column exists and a non-empty value is provided.
 
         Fail-open: any error is logged at DEBUG and swallowed; the write must
-        never block, delay, or fail the dispatch.
+        never block, delay, or fail the dispatch. The sqlite lock-wait is
+        bounded to ``_METADATA_STAMP_LOCK_TIMEOUT_SECONDS`` for the same
+        reason — a contended DB must not stall the dispatch for the driver's
+        default 5s.
         """
-        if os.environ.get("VNX_TMUX_SESSION_ID", "").strip().lower() not in ("1", "true"):
-            return
-
         if _upsert_dispatch_metadata is None:
             logger.debug(
                 "interactive: dispatch_metadata writer unavailable for dispatch=%s",
@@ -681,6 +689,7 @@ class TmuxInteractiveDispatch:
                 outcome_status=outcome_status,
                 report_path=str(report_path) if report_path else None,
                 session_id=session_id,
+                timeout=_METADATA_STAMP_LOCK_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 — metadata stamp is best-effort; must never block dispatch
             logger.debug(

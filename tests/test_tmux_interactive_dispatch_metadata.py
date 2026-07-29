@@ -2,9 +2,11 @@
 """Tests for leaseless tmux lane dispatch_metadata stamping (F1.1 metadata slice).
 
 Covers:
-- With VNX_TMUX_SESSION_ID=1, _govern_report stamps a dispatch_metadata row
-  carrying provider='claude', role, model, terminal, track, outcome_status.
-- With the flag unset, no row is written (legacy behaviour preserved).
+- _govern_report always stamps a dispatch_metadata row carrying
+  provider='claude', role, model, terminal, track, outcome_status — the
+  VNX_TMUX_SESSION_ID gate that used to skip this write by default (and left
+  regular build dispatches with no row for the merge-side pr_id backfill to
+  fill in) was removed (provenance seams PR-B, 2026-07-29).
 - The metadata stamp is fail-open: a writer exception is swallowed and the
   dispatch/govern path returns normally.
 """
@@ -85,6 +87,8 @@ def fake_govern():
 
 
 def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fake_govern):
+    """The (unrelated, still-live) session-linkage flag must not interfere with
+    the always-on metadata stamp — setting it produces the exact same row."""
     monkeypatch.setenv("VNX_TMUX_SESSION_ID", "1")
     state_dir = _bootstrap_state(tmp_path)
     lane = _make_lane(state_dir)
@@ -144,7 +148,12 @@ def test_metadata_fake_default_role_normalized_to_null(tmp_path, monkeypatch, fa
     assert row["role"] is None
 
 
-def test_metadata_row_not_written_when_flag_unset(tmp_path, monkeypatch, fake_govern):
+def test_metadata_row_written_when_flag_unset(tmp_path, monkeypatch, fake_govern):
+    """Provenance seams PR-B (2026-07-29): the metadata stamp used to be
+    flag-gated by VNX_TMUX_SESSION_ID (default OFF), so regular build
+    dispatches never got a dispatch_metadata row and the merge-side pr_id
+    backfill had nothing to fill in. The gate is gone — this must now write
+    a row even with the flag unset."""
     monkeypatch.delenv("VNX_TMUX_SESSION_ID", raising=False)
     state_dir = _bootstrap_state(tmp_path)
     lane = _make_lane(state_dir)
@@ -161,7 +170,9 @@ def test_metadata_row_not_written_when_flag_unset(tmp_path, monkeypatch, fake_go
 
     db = state_dir / "quality_intelligence.db"
     row = _read_row(db, "20260628-tmux-meta-0")
-    assert row is None
+    assert row is not None
+    assert row["provider"] == "claude"
+    assert row["model"] == "sonnet"
 
 
 def test_metadata_stamp_fail_open_swallows_writer_error(

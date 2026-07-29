@@ -41,6 +41,7 @@ from receipt_provenance import (
     find_commits_by_dispatch,
     find_receipts_by_dispatch,
     get_provenance_link,
+    resolve_receipt_id,
     validate_receipt_provenance,
 )
 from runtime_coordination import _append_event, _now_utc
@@ -257,8 +258,14 @@ def verify_dispatch_provenance(
     # Layer 4: Cross-layer consistency
     if link and receipts:
         if link.receipt_id:
+            # resolve_receipt_id mirrors the same fallback the registry write
+            # uses (receipt_provenance.resolve_receipt_id): a lane-synthesized
+            # receipt with no run_id/task_id registers under a synthetic
+            # dispatch_id+event_type id, and this comparison set must be
+            # derived the same way or every such dispatch would show a false
+            # GAP_BROKEN_CHAIN here.
             receipt_ids = {
-                r.get("run_id") or r.get("task_id") for r in receipts
+                resolve_receipt_id(r) for r in receipts
             }
             if link.receipt_id not in receipt_ids:
                 findings.append(VerificationFinding(

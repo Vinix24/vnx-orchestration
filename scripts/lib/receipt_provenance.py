@@ -465,6 +465,34 @@ def _extract_pr_number(message: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+def resolve_receipt_id(receipt: Dict[str, Any]) -> Optional[str]:
+    """Return a receipt's identity: its real ``run_id``/``task_id``, or a stable
+    synthetic fallback when neither is present.
+
+    Lane-synthesized completion receipts (e.g. the tmux lane's
+    ``subprocess_completion`` event) carry ``run_id=None, task_id=None`` — left
+    as-is, ``provenance_registry.receipt_id`` stays NULL for every one of
+    them and ``_calculate_chain_status``'s ``has_receipt`` check can never
+    pass, regardless of how complete the rest of the chain is.
+
+    The fallback is derived from ``dispatch_id`` + ``event_type`` — both
+    stable, already-present fields — so reprocessing the same receipt
+    (retries, backfills) always yields the same id rather than a fresh one
+    each time. A real ``run_id``/``task_id`` always takes priority over the
+    fallback. Returns None when even ``dispatch_id`` or ``event_type`` is
+    missing — there is nothing stable left to derive an id from.
+    """
+    real_id = str(receipt.get("run_id") or receipt.get("task_id") or "").strip()
+    if real_id:
+        return real_id
+
+    dispatch_id = str(receipt.get("dispatch_id") or "").strip()
+    event_type = str(receipt.get("event_type") or receipt.get("event") or "").strip()
+    if not dispatch_id or not event_type:
+        return None
+    return f"synthetic:{dispatch_id}:{event_type}"
+
+
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     """Best-effort column existence probe (tolerates missing table/locked DB)."""
     try:
@@ -690,10 +718,27 @@ def reconcile_commit_provenance(
     # Resolve the state dir once; both DB connections below hang off it.
     # Failure here is non-fatal — provenance reconciliation must keep working
     # exactly as before, just without the pr_ref/pr_id linking steps.
+    #
+    # Prefer the central per-project store (ADR-026) when project_id is known:
+    # resolve_state_dir(repo_root) always returns the repo-local
+    # ``.vnx-data/state`` regardless of where this project's real state
+    # actually lives, so on a central-store deployment it points at a DB that
+    # was never created and the pr_ref/pr_id linking steps silently no-op in
+    # every caller, including the manual CLI. A central-store miss (dev
+    # checkout, no project_id, or the DB just doesn't exist there) falls back
+    # to the old repo-local resolution unchanged.
     state_dir: Optional[Path] = None
     try:
-        from vnx_paths import resolve_state_dir  # noqa: PLC0415
-        state_dir = resolve_state_dir(repo_root)
+        from vnx_paths import resolve_central_data_dir, resolve_state_dir  # noqa: PLC0415
+        if project_id:
+            try:
+                central_state_dir = (resolve_central_data_dir(project_id) / "state").resolve()
+                if (central_state_dir / "runtime_coordination.db").exists():
+                    state_dir = central_state_dir
+            except (ValueError, OSError) as exc:
+                logger.debug("central state dir resolution failed for pr linking: %s", exc)
+        if state_dir is None:
+            state_dir = resolve_state_dir(repo_root)
     except Exception as exc:  # noqa: BLE001
         logger.debug("could not resolve state dir for pr linking: %s", exc)
         state_dir = None
@@ -743,13 +788,19 @@ def reconcile_commit_provenance(
             dispatch_id = tokens.preferred or tokens.legacy_dispatch
             if not dispatch_id:
                 continue
+            # Extracted before the register call (not after) so the registry
+            # row itself carries pr_number — the append-time path can never
+            # supply it (the PR doesn't exist yet when the receipt is
+            # written), so this git-scan is the only source of a real one.
+            pr_number = _extract_pr_number(body)
             try:
-                register_provenance_link(conn, dispatch_id=dispatch_id, commit_sha=sha)
+                register_provenance_link(
+                    conn, dispatch_id=dispatch_id, commit_sha=sha, pr_number=pr_number,
+                )
                 linked += 1
             except sqlite3.Error:
                 continue
 
-            pr_number = _extract_pr_number(body)
             if pr_number is not None and state_conn is not None:
                 try:
                     if _link_pr_to_track(state_conn, dispatch_id, pr_number):
