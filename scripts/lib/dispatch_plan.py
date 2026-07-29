@@ -46,9 +46,8 @@ class ModelPin:
     default: advisory — spec.model wins when the caller set one; the pin is
              only used as a fallback when spec.model is absent.
 
-    worker-provider-free-choice PR-1: this type only carries the contract.
-    D4 below still ignores `semantics` and always coerces to the pin
-    (gedragsneutraal) — honoring `semantics` is PR-3's job.
+    worker-provider-free-choice PR-1 added this type; PR-3 wired D4 to honour
+    the semantics field.
     """
     model: str
     semantics: str  # "floor" | "default"
@@ -202,26 +201,42 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
 
     # D4 — model tier; warn-only pins are NOT a Reject
     #
+    # worker-provider-free-choice PR-3: D4 honours ModelPin.semantics.
+    #   floor:   the pin always wins (coercive — today's behaviour for all slots).
+    #   default: spec.model wins when the caller set one; the pin is the fallback
+    #            when spec.model is absent.
+    #
     # worker-provider-kimi-flip (20260723): snapshot.model_pins now resolves T1/T2/T3
     # to "kimi-k3". This branch only runs when is_claude_lane is True (explicit
     # provider=claude). The "sonnet" fallback below deliberately stays a valid Claude
     # model name — it is the no-pin-found default for the claude lane specifically,
     # not a worker-role default. When a pin IS found for a claude-lane T1/T2/T3
-    # (pinned="kimi-k3"), `model = pinned` intentionally yields a non-Claude label;
-    # the D3 registry/constraint gate upstream rejects that combination fail-loud
-    # rather than silently falling back to sonnet (kimi-only, no fallback policy).
+    # (pinned="kimi-k3") with floor semantics, `model = pinned` intentionally yields
+    # a non-Claude label; the D3 registry/constraint gate upstream rejects that
+    # combination fail-loud rather than silently falling back to sonnet (kimi-only,
+    # no fallback policy).
     target_slot = spec.target_slot
     if is_claude_lane:
         pin = snapshot.model_pins.get(target_slot)
         pinned = pin.model if pin is not None else None
         requested = spec.model
         if pinned:
-            if requested and requested != pinned:
+            if pin.semantics == "default" and requested and requested != pinned:
+                # Default semantics: the caller's explicit model choice wins.
+                warnings.append(
+                    f"model-tier: requested {requested} over pinned {pinned}"
+                    f" for {target_slot} (default semantics — request honoured)"
+                )
+                model = requested
+            elif requested and requested != pinned:
+                # Floor semantics (or unrecognised — treat as floor): the pin wins.
                 warnings.append(
                     f"model-tier: requested {requested}, pinned {pinned}"
-                    f" for {target_slot} (override-able)"
+                    f" for {target_slot} (floor semantics — pin honoured)"
                 )
-            model = pinned
+                model = pinned
+            else:
+                model = pinned
         else:
             model = requested or "sonnet"
     else:

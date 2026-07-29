@@ -279,6 +279,60 @@ class TestModelTierPin:
         assert isinstance(plan, ExecutionPlan)
         assert plan.model == "sonnet"
 
+    # -- wpfc PR-3: D4 honours pin.semantics ---------------------------------
+
+    def test_floor_pin_ignores_explicit_model(self, tmp_path: Path) -> None:
+        """floor semantics: the pin always wins, even against an explicit spec.model."""
+        vspec = _make_vspec(
+            provider=Provider.CLAUDE, target_slot="T1", model="sonnet", tmp_path=tmp_path,
+        )
+        snapshot = _healthy_snapshot(
+            model_pins={"T1": ModelPin(model="kimi-k3", semantics="floor")},
+        )
+        plan = compile_plan(vspec, snapshot)
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.model == "kimi-k3", "floor pin must ignore the explicit model request"
+        assert any("floor semantics" in w for w in plan.warnings)
+
+    def test_default_pin_honours_explicit_model(self, tmp_path: Path) -> None:
+        """default semantics: spec.model wins when the caller set one."""
+        vspec = _make_vspec(
+            provider=Provider.CLAUDE, target_slot="T1", model="sonnet", tmp_path=tmp_path,
+        )
+        snapshot = _healthy_snapshot(
+            model_pins={"T1": ModelPin(model="kimi-k3", semantics="default")},
+        )
+        plan = compile_plan(vspec, snapshot)
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.model == "sonnet", "default pin must honour the explicit model request"
+        assert any("default semantics" in w for w in plan.warnings)
+
+    def test_default_pin_falls_back_when_no_model_requested(self, tmp_path: Path) -> None:
+        """default semantics: when spec.model is absent, the pin is the fallback."""
+        vspec = _make_vspec(
+            provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path,
+        )
+        snapshot = _healthy_snapshot(
+            model_pins={"T1": ModelPin(model="kimi-k3", semantics="default")},
+        )
+        plan = compile_plan(vspec, snapshot)
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.model == "kimi-k3", "default pin must be the fallback when no model is requested"
+        assert not any("model-tier" in w for w in plan.warnings)
+
+    def test_default_pin_silent_when_request_matches_pin(self, tmp_path: Path) -> None:
+        """default semantics: no warning when the request matches the pinned model."""
+        vspec = _make_vspec(
+            provider=Provider.CLAUDE, target_slot="T1", model="sonnet", tmp_path=tmp_path,
+        )
+        snapshot = _healthy_snapshot(
+            model_pins={"T1": ModelPin(model="sonnet", semantics="default")},
+        )
+        plan = compile_plan(vspec, snapshot)
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.model == "sonnet"
+        assert not any("model-tier" in w for w in plan.warnings)
+
 
 # ---------------------------------------------------------------------------
 # test_isolation_always_worktree
