@@ -119,6 +119,7 @@ def _build_db(tmp_path: Path) -> Path:
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
+        (32, "0032_track_pr_delivery.sql"),
     ):
         schema_migration.apply_script_if_below(
             conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
@@ -127,6 +128,25 @@ def _build_db(tmp_path: Path) -> Path:
 
     conn.close()
     return state_dir
+
+
+def _set_delivery(
+    state_dir: Path, track_id: str, pr_number: int, kind: str, *, set_by: str = "operator"
+) -> None:
+    """Mark a linked PR's delivery_kind ('partial'|'complete') — OI-829 close-gate.
+
+    Tests below that assert an evidence-based close succeeds must mark at least
+    one linked PR 'complete', or close_track_if_done's fail-closed delivery gate
+    (added for OI-829) rejects with action='noop_incomplete_delivery' instead.
+    """
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?,?,?,?,?)",
+        (PROJECT_ID, track_id, pr_number, kind, set_by),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _seed_track(
@@ -316,6 +336,7 @@ def test_apply_mode_confirmed_closes_and_records_actor(tmp_path, monkeypatch):
     _seed_track(sd, "T-apply", phase="active", pr_ref="#200")
     # No local merge evidence: no dispatch, no pr_merged.ndjson, no coordination events.
     # gh pr view is the sole authority.
+    _set_delivery(sd, "T-apply", 200, "complete")  # OI-829 gate: #200 ships the whole plan
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -394,6 +415,7 @@ def test_closed_sibling_with_flag_and_merged_confirms(tmp_path, monkeypatch):
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-sib2", phase="active", pr_ref="#500,#501")
     # No local merge evidence: gh evidence (MERGED+CLOSED sibling) is the authority.
+    _set_delivery(sd, "T-sib2", 500, "complete")  # OI-829 gate: #500 is the merged PR
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -554,6 +576,7 @@ def test_apply_closes_on_gh_evidence_only(tmp_path, monkeypatch):
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-gh-only", phase="active", pr_ref="#1001")
     # Intentionally no local merge evidence of any kind.
+    _set_delivery(sd, "T-gh-only", 1001, "complete")  # OI-829 gate: #1001 ships the plan
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -684,6 +707,7 @@ def test_reopened_track_changed_prref_eligible_and_closes(tmp_path, monkeypatch)
     tracks_lib.update_authored_fields(
         sd, "T-rearmed", PROJECT_ID, pr_ref="#1201", actor="operator",
     )
+    _set_delivery(sd, "T-rearmed", 1201, "complete")  # OI-829 gate: #1201 ships the plan
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -836,6 +860,7 @@ def test_stamp_roundtrip_prref_with_pipe_changed_rearmed(tmp_path, monkeypatch):
     _do_reopen_with_stamp(sd, "T-rt3", "#1400 | #1401")
     # Update pr_ref — re-arms the track for auto-close
     tracks_lib.update_authored_fields(sd, "T-rt3", PROJECT_ID, pr_ref="#1402", actor="operator")
+    _set_delivery(sd, "T-rt3", 1402, "complete")  # OI-829 gate: #1402 ships the plan
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",
@@ -888,6 +913,7 @@ def test_stamp_roundtrip_empty_prref_unchanged_guarded(tmp_path, monkeypatch):
     # But to nominate it, we must set a non-empty pr_ref.
     # Set pr_ref to a new value → different from '' → re-armed.
     tracks_lib.update_authored_fields(sd, "T-rt5", PROJECT_ID, pr_ref="#2000", actor="operator")
+    _set_delivery(sd, "T-rt5", 2000, "complete")  # OI-829 gate: #2000 ships the plan
 
     monkeypatch.setattr(
         objective_reconcile.subprocess, "run",

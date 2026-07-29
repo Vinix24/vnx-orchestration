@@ -294,11 +294,19 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     deps = _dependencies_for(state_dir, args.track_id, project_id)
     open_items = tracks_lib.get_linked_open_items(state_dir, args.track_id, project_id)
 
+    conn = _db_conn(state_dir)
+    try:
+        pr_delivery = _load_pr_delivery(conn, project_id, args.track_id)
+    finally:
+        conn.close()
+    delivery_entries = _pr_delivery_breakdown(track.get("pr_ref"), pr_delivery)
+
     if args.json:
         out = dict(track)
         out["depends_on"] = deps
         out["open_items"] = open_items
         out["lane_hint"] = _lane_hint_of(track)
+        out["pr_delivery"] = delivery_entries
         print(json.dumps(out, indent=2, default=str))
         return 0
 
@@ -310,6 +318,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  lane_hint: {_lane_hint_of(track)}")
     print(f"  next_up  : {bool(track.get('next_up'))}")
     print(f"  pr_ref   : {track.get('pr_ref') or '-'}")
+    print(f"  delivery : {_format_pr_delivery(delivery_entries)}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
     print(f"  depends  : {', '.join(deps) if deps else '(none)'}")
     if open_items:
@@ -727,15 +736,56 @@ def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Option
     return new_ref, added, already
 
 
+def _write_pr_delivery(
+    conn: sqlite3.Connection,
+    project_id: str,
+    track_id: str,
+    pr_numbers: list[int],
+    kind: str,
+    *,
+    set_by: str,
+) -> bool:
+    """Upsert delivery_kind for each PR — OI-829 fail-closed auto-close gate.
+
+    Re-linking an already-present PR with a different --delivery value updates
+    the existing row (e.g. upgrading '#1239' from 'partial' to 'complete' once
+    it's confirmed to ship the whole plan), rather than being rejected as a
+    duplicate.
+
+    Returns False (no write attempted) when migration 0032 hasn't been applied
+    to this DB yet — the caller must surface this to the operator rather than
+    silently claim the delivery marking was recorded.
+    """
+    if not _has_table(conn, "track_pr_delivery"):
+        return False
+    for n in pr_numbers:
+        conn.execute(
+            "INSERT INTO track_pr_delivery "
+            "(project_id, track_id, pr_number, delivery_kind, set_by, set_at) "
+            "VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')) "
+            "ON CONFLICT(project_id, track_id, pr_number) DO UPDATE SET "
+            "delivery_kind=excluded.delivery_kind, set_by=excluded.set_by, "
+            "set_at=excluded.set_at",
+            (project_id, track_id, n, kind, set_by),
+        )
+    return True
+
+
 def cmd_objective_link_pr(args: argparse.Namespace) -> int:
     """Manually link PR ref(s) to a track (retroactive/override; audited).
 
     Accepts comma-separated or repeated PR arguments. Normalizes each to #NNN,
     deduplicates against the track's existing pr_ref, and preserves order.
+
+    --delivery {partial,complete} (default: partial — fail-closed) is recorded
+    in track_pr_delivery for every PR referenced in THIS call, whether newly
+    added to pr_ref or already present (so a follow-up call can upgrade an
+    already-linked PR from 'partial' to 'complete').
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     track_id = args.track_id
+    delivery_kind = getattr(args, "delivery", "partial")
 
     track = tracks_lib.get_track(state_dir, track_id, project_id)
     if track is None:
@@ -757,7 +807,19 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         )
         return 2
 
+    touched_prs = sorted({int(ref.lstrip("#")) for ref in (added + already)})
+
     if new_ref == (existing or ""):
+        # pr_ref itself is unchanged, but the delivery marking is still an
+        # explicit operator assertion — write/upgrade it regardless.
+        conn = _db_conn(state_dir)
+        try:
+            delivery_written = _write_pr_delivery(
+                conn, project_id, track_id, touched_prs, delivery_kind, set_by="operator"
+            )
+            conn.commit()
+        finally:
+            conn.close()
         if args.json:
             print(json.dumps({
                 "track_id": track_id,
@@ -765,13 +827,22 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
                 "pr_ref": new_ref,
                 "added": added,
                 "already_present": already,
+                "delivery": delivery_kind,
+                "delivery_written": delivery_written,
                 "action": "noop_no_change",
                 "applied": False,
             }, indent=2, default=str))
         else:
             print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
             print(f"  pr_ref: {new_ref}")
-            print(f"  all provided PR refs already present; no change made.\n")
+            if delivery_written:
+                print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
+            else:
+                print(
+                    "  WARNING: delivery not recorded — migration 0032 "
+                    "(track_pr_delivery) not applied to this DB yet."
+                )
+            print(f"  all provided PR refs already present; no pr_ref change made.\n")
         return 0
 
     # ADR-007: write is scoped to (track_id, project_id).
@@ -780,6 +851,9 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         conn.execute(
             "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
             (new_ref, track_id, project_id),
+        )
+        delivery_written = _write_pr_delivery(
+            conn, project_id, track_id, touched_prs, delivery_kind, set_by="operator"
         )
         conn.commit()
     finally:
@@ -792,7 +866,7 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         track_id,
         project_id,
         "operator",
-        {"added": added, "already_present": already, "pr_ref": new_ref},
+        {"added": added, "already_present": already, "pr_ref": new_ref, "delivery": delivery_kind},
     )
 
     if args.json:
@@ -802,6 +876,8 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
             "pr_ref": new_ref,
             "added": added,
             "already_present": already,
+            "delivery": delivery_kind,
+            "delivery_written": delivery_written,
             "action": "linked",
             "applied": True,
         }, indent=2, default=str))
@@ -812,6 +888,13 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
             print(f"  + added: {', '.join(added)}")
         if already:
             print(f"  = already present: {', '.join(already)}")
+        if delivery_written:
+            print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
+        else:
+            print(
+                "  WARNING: delivery not recorded — migration 0032 "
+                "(track_pr_delivery) not applied to this DB yet."
+            )
         print()
     return 0
 
@@ -1462,6 +1545,56 @@ def _has_table(conn: sqlite3.Connection, table: str) -> bool:
     return bool(conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone())
+
+
+def _load_pr_delivery(conn: sqlite3.Connection, project_id: str, track_id: str) -> dict[int, str]:
+    """Load {pr_number: delivery_kind} for (project_id, track_id) from track_pr_delivery.
+
+    Fails loudly (RuntimeError) on an unrecognized delivery_kind — absence of a
+    'complete' marking must never silently read as evidence of completion
+    (OI-829, mirrors track_reconciler.close_track_if_done). Returns {} when
+    migration 0032 hasn't been applied yet (no such table).
+    """
+    if not _has_table(conn, "track_pr_delivery"):
+        return {}
+    rows = conn.execute(
+        "SELECT pr_number, delivery_kind FROM track_pr_delivery "
+        "WHERE project_id = ? AND track_id = ?",
+        (project_id, track_id),
+    ).fetchall()
+    result: dict[int, str] = {}
+    for row in rows:
+        kind = row["delivery_kind"]
+        if kind not in ("partial", "complete"):
+            raise RuntimeError(
+                f"track_pr_delivery: unrecognized delivery_kind {kind!r} for "
+                f"project_id={project_id!r} track_id={track_id!r} pr_number={row['pr_number']!r}"
+            )
+        result[int(row["pr_number"])] = kind
+    return result
+
+
+def _pr_delivery_breakdown(pr_ref: Optional[str], delivery: dict[int, str]) -> list[dict[str, Any]]:
+    """Parse a pr_ref string ('#1221,#1239') into per-PR delivery entries,
+    preserving order. PRs with no track_pr_delivery row show as 'unmarked'."""
+    entries: list[dict[str, Any]] = []
+    for tok in str(pr_ref or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            n = int(tok.lstrip("#"))
+        except ValueError:
+            entries.append({"pr_number": tok, "delivery_kind": "unmarked"})
+            continue
+        entries.append({"pr_number": n, "delivery_kind": delivery.get(n, "unmarked")})
+    return entries
+
+
+def _format_pr_delivery(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return "(no linked PRs)"
+    return ", ".join(f"#{e['pr_number']} {e['delivery_kind']}" for e in entries)
 
 
 def _append_coordination_event(
@@ -2283,6 +2416,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_link_pr.add_argument(
         "pr", nargs="+",
         help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_link_pr.add_argument(
+        "--delivery", choices=("partial", "complete"), default="partial",
+        help="delivery_kind for the linked PR(s): 'partial' ships a slice of the "
+             "plan, 'complete' ships the whole thing (default: partial — fail-closed; "
+             "OI-829 auto-close requires >=1 linked PR marked 'complete')",
     )
     p_link_pr.set_defaults(func=cmd_objective_link_pr)
 
