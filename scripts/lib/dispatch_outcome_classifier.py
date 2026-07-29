@@ -126,6 +126,13 @@ CLOSED_OUTCOMES: FrozenSet[str] = frozenset({
 DEFAULT_ABANDONED_WINDOW_HOURS = 24.0
 ENV_ABANDONED_WINDOW_HOURS = "VNX_ABANDONED_WINDOW_HOURS"
 
+# A receipt with no project_id field predates project-id stamping and is
+# treated as this legacy default project — mirrors the same "vnx-dev"
+# fallback already established in receipt_provenance.py / receipt_query.py
+# (e.g. receipt_query.DEFAULT_PROJECT_ID), never silently dropped or
+# silently assigned to every project (Laag 1, OI-824).
+_LEGACY_RECEIPT_PROJECT_ID = "vnx-dev"
+
 # Deterministic base mapping (hard requirement, re-plan-gate finding 4):
 # expired -> deadline-kill always; dead_letter -> provider-error unless a
 # more specific captured reason is present.
@@ -338,6 +345,35 @@ def load_receipts_index(state_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
     return index
 
 
+def _receipt_belongs_to_project(rec: Dict[str, Any], project_id: str) -> bool:
+    rec_project_id = rec.get("project_id")
+    if rec_project_id is None:
+        return project_id == _LEGACY_RECEIPT_PROJECT_ID
+    return rec_project_id == project_id
+
+
+def _receipt_dispatch_ids_for_project(
+    receipts_index: Dict[str, List[Dict[str, Any]]], project_id: str,
+) -> FrozenSet[str]:
+    """Dispatch-ids whose receipts belong to ``project_id`` (Laag 1, OI-824).
+
+    ``dispatches`` (runtime_coordination.db) is the deliverable-QUEUE
+    (``scripts/planning_cli.py``'s only non-migration writer), not an
+    execution log — measured on the central store, it holds only
+    deliverable stubs, while every real tmux-lane build dispatch's only
+    trace is its receipt. The receipts ledger is per the module docstring
+    itself already "the ledger"; this is what makes it usable as a
+    population SOURCE (unioned with ``dispatches`` in
+    :func:`reconcile_all_dispatch_outcomes`), not just an evidence lookup
+    for a dispatch_id already known some other way.
+    """
+    ids = set()
+    for dispatch_id, receipts in receipts_index.items():
+        if any(_receipt_belongs_to_project(rec, project_id) for rec in receipts):
+            ids.add(dispatch_id)
+    return frozenset(ids)
+
+
 def _classify_receipts(
     receipts: Optional[List[Dict[str, Any]]],
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -422,6 +458,70 @@ def _load_dispatch_metadata_row(
         return None
 
 
+def _dispatch_id_belongs_to_other_project(
+    rc_conn: sqlite3.Connection, dispatch_id: str, project_id: str,
+) -> bool:
+    """ADR-007 ambiguity guard for ``provenance_registry`` (schema v6), which
+    has no ``project_id`` column of its own (PK is ``dispatch_id`` alone) —
+    unlike ``dispatches``, composite-unique on ``(dispatch_id, project_id)``.
+    A dispatch_id that collides across two tenants could otherwise leak PR
+    evidence cross-project. Mirrors ``receipt_provenance._resolve_dispatch_
+    project_id``'s own "abstain on ambiguity" precedent: True only when
+    ``dispatches`` has this dispatch_id under a DIFFERENT project_id than
+    the one being classified. A dispatch_id absent from ``dispatches``
+    entirely (the common case for tmux-lane build dispatches — Laag 1) is
+    NOT ambiguous and returns False.
+    """
+    try:
+        rows = rc_conn.execute(
+            "SELECT DISTINCT project_id FROM dispatches WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        logger.debug("dispatch_outcome_classifier: ambiguity guard query failed: %s", exc)
+        return False
+    others = {r["project_id"] for r in rows if r["project_id"] != project_id}
+    return bool(others)
+
+
+def _load_provenance_pr_number(
+    rc_conn: sqlite3.Connection, dispatch_id: str, project_id: str,
+) -> Optional[int]:
+    """``provenance_registry.pr_number`` (runtime_coordination.db, schema v6)
+    — populated by ``reconcile_commit_provenance``'s git-log scan, which only
+    ever sees commits already reachable from the scanned ref. A non-NULL
+    ``pr_number`` here is therefore direct evidence the PR's commit is on
+    main — unlike ``dispatch_metadata.pr_id`` (which can be stamped before a
+    PR actually merges), it needs no cross-check against the separately
+    tracked "confirmed merged" set (``_load_merged_pr_numbers``).
+
+    Complements ``dispatch_metadata.pr_id``, which only covers dispatches
+    whose PR was known at staging time (review/gate dispatches) — tmux-lane
+    build dispatches never write there (OI-824 Laag 2), so this is their
+    only PR-linkage path. Table/column absence (older DB, test fixtures) and
+    a cross-project dispatch_id collision (ADR-007) are both treated as "no
+    evidence", never an error.
+    """
+    if not _has_col(rc_conn, "provenance_registry", "pr_number"):
+        return None
+    if _dispatch_id_belongs_to_other_project(rc_conn, dispatch_id, project_id):
+        return None
+    try:
+        row = rc_conn.execute(
+            "SELECT pr_number FROM provenance_registry WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.debug(
+            "dispatch_outcome_classifier: provenance_registry lookup failed for %s: %s",
+            dispatch_id, exc,
+        )
+        return None
+    if row is None or row["pr_number"] is None:
+        return None
+    return int(row["pr_number"])
+
+
 def _find_superseding_child(
     qi_conn: sqlite3.Connection,
     dispatch_id: str,
@@ -472,6 +572,7 @@ def load_evidence(
     evidence = DispatchOutcomeEvidence(dispatch_id=dispatch_id, project_id=project_id)
 
     rc_conn = _open_ro(state_dir / RC_DB_FILENAME)
+    provenance_pr_number: Optional[int] = None
     if rc_conn is not None:
         try:
             row = _load_dispatch_row(rc_conn, dispatch_id, project_id)
@@ -480,6 +581,7 @@ def load_evidence(
                 evidence.track = row["track"]
                 evidence.created_at = row["created_at"]
                 evidence.age_hours = _age_hours(row["created_at"], now)
+            provenance_pr_number = _load_provenance_pr_number(rc_conn, dispatch_id, project_id)
         finally:
             rc_conn.close()
 
@@ -509,6 +611,18 @@ def load_evidence(
             )
         finally:
             qi_conn.close()
+
+    # Laag 2 (OI-824): provenance_registry complements dispatch_metadata.pr_id
+    # rather than replacing it — dispatch_metadata covers review/gate
+    # dispatches whose PR was known at staging time; provenance_registry
+    # covers build dispatches whose PR is only known once their commit lands
+    # on main (the tmux lane never writes dispatch_metadata.pr_id at all).
+    # Never overwrites an already-resolved pr_merged/pr_id from the first
+    # source.
+    if not evidence.pr_merged and provenance_pr_number is not None:
+        evidence.pr_merged = True
+        if evidence.pr_id is None:
+            evidence.pr_id = str(provenance_pr_number)
 
     receipts = (
         receipts_index.get(dispatch_id)
@@ -663,29 +777,44 @@ def reconcile_all_dispatch_outcomes(
     fires naturally for any dispatch whose evidence matches its 3 conditions,
     with no separate sweep function needed.
 
+    Population (Laag 1, OI-824): ``dispatches`` (runtime_coordination.db) is
+    the deliverable-QUEUE, not an execution log — measured on the central
+    store it holds only deliverable stubs, while every real tmux-lane build
+    dispatch's only trace is its receipt. The population is therefore the
+    UNION of ``dispatches``' dispatch_ids with the receipts-ledger's own
+    dispatch_ids (project-scoped — see :func:`_receipt_dispatch_ids_for_
+    project`), not ``dispatches`` alone. A missing/unreadable
+    ``runtime_coordination.db`` degrades to receipts-only (still classifies
+    real work) rather than returning empty, since the receipts ledger is a
+    fully independent source.
+
     Bounded: receipts file and merged-PR set are each loaded ONCE and shared
     across every dispatch in this project, not per-dispatch.
     """
     now = now or datetime.now(timezone.utc)
     results: List[Dict[str, Any]] = []
 
+    dispatch_ids_from_table: List[str] = []
     rc_conn = _open_ro(state_dir / RC_DB_FILENAME)
-    if rc_conn is None:
-        return results
-    try:
-        rows = rc_conn.execute(
-            "SELECT DISTINCT dispatch_id FROM dispatches WHERE project_id = ? "
-            "ORDER BY dispatch_id ASC",
-            (project_id,),
-        ).fetchall()
-        dispatch_ids = [r["dispatch_id"] for r in rows]
-    except sqlite3.Error as exc:
-        logger.warning("dispatch_outcome_classifier: dispatch_id scan failed: %s", exc)
-        return results
-    finally:
-        rc_conn.close()
+    if rc_conn is not None:
+        try:
+            rows = rc_conn.execute(
+                "SELECT DISTINCT dispatch_id FROM dispatches WHERE project_id = ? "
+                "ORDER BY dispatch_id ASC",
+                (project_id,),
+            ).fetchall()
+            dispatch_ids_from_table = [r["dispatch_id"] for r in rows]
+        except sqlite3.Error as exc:
+            logger.warning("dispatch_outcome_classifier: dispatch_id scan failed: %s", exc)
+        finally:
+            rc_conn.close()
 
     receipts_index = load_receipts_index(state_dir)
+    receipt_dispatch_ids = _receipt_dispatch_ids_for_project(receipts_index, project_id)
+    dispatch_ids = sorted(set(dispatch_ids_from_table) | receipt_dispatch_ids)
+    if not dispatch_ids:
+        return results
+
     merged_pr_numbers = _load_merged_pr_numbers(state_dir, repo_root)
 
     qi_db = state_dir / QI_DB_FILENAME

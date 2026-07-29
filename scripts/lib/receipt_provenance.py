@@ -785,45 +785,63 @@ def reconcile_commit_provenance(
                 continue
             scanned += 1
             tokens = extract_trace_tokens(body)
-            dispatch_id = tokens.preferred or tokens.legacy_dispatch
-            if not dispatch_id:
+            # A squash-merged fix-forward commit (this codebase's own common
+            # pattern: an original dispatch's commit plus one or more
+            # fix-forward dispatches' commits, squashed into one PR on merge)
+            # carries multiple ``Dispatch-ID:`` trailers in its body.
+            # ``tokens.preferred``/``tokens.legacy_dispatch`` are
+            # ``.search()``-based (first match only) by design for
+            # commit-message VALIDATION, where one canonical token is all
+            # that's required — left untouched here. This local scan instead
+            # captures EVERY trailer so each contributing dispatch gets its
+            # own provenance_registry row, not just the first-named one
+            # (OI-824 B3 audit: this under-capture was silently starving
+            # provenance_registry.pr_number for every fix-forward dispatch
+            # squashed alongside another commit).
+            dispatch_ids = PREFERRED_RE.findall(body)
+            if not dispatch_ids and tokens.legacy_dispatch:
+                dispatch_ids = [tokens.legacy_dispatch]
+            if not dispatch_ids:
                 continue
+            seen_ids: Set[str] = set()
+            dispatch_ids = [d for d in dispatch_ids if not (d in seen_ids or seen_ids.add(d))]
             # Extracted before the register call (not after) so the registry
             # row itself carries pr_number — the append-time path can never
             # supply it (the PR doesn't exist yet when the receipt is
             # written), so this git-scan is the only source of a real one.
             pr_number = _extract_pr_number(body)
-            try:
-                register_provenance_link(
-                    conn, dispatch_id=dispatch_id, commit_sha=sha, pr_number=pr_number,
-                )
-                linked += 1
-            except sqlite3.Error:
-                continue
-
-            if pr_number is not None and state_conn is not None:
+            for dispatch_id in dispatch_ids:
                 try:
-                    if _link_pr_to_track(state_conn, dispatch_id, pr_number):
-                        pr_ref_linked += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("pr_ref linking failed for %s: %s", dispatch_id, exc)
+                    register_provenance_link(
+                        conn, dispatch_id=dispatch_id, commit_sha=sha, pr_number=pr_number,
+                    )
+                    linked += 1
+                except sqlite3.Error:
+                    continue
 
-                if qi_conn is not None:
+                if pr_number is not None and state_conn is not None:
                     try:
-                        # Finding A: prefer the caller-supplied project_id (the
-                        # reconciliation loop's own tenant scope) over
-                        # re-resolving by dispatch_id alone — a lookup that
-                        # cannot disambiguate a cross-tenant dispatch_id
-                        # collision under the ADR-007 composite-unique key.
-                        _dispatch_pid = project_id or _resolve_dispatch_project_id(
-                            state_conn, dispatch_id
-                        )
-                        if _dispatch_pid and _link_pr_to_dispatch_metadata(
-                            qi_conn, _dispatch_pid, dispatch_id, pr_number
-                        ):
-                            pr_id_linked += 1
+                        if _link_pr_to_track(state_conn, dispatch_id, pr_number):
+                            pr_ref_linked += 1
                     except Exception as exc:  # noqa: BLE001
-                        logger.debug("pr_id linking failed for %s: %s", dispatch_id, exc)
+                        logger.debug("pr_ref linking failed for %s: %s", dispatch_id, exc)
+
+                    if qi_conn is not None:
+                        try:
+                            # Finding A: prefer the caller-supplied project_id (the
+                            # reconciliation loop's own tenant scope) over
+                            # re-resolving by dispatch_id alone — a lookup that
+                            # cannot disambiguate a cross-tenant dispatch_id
+                            # collision under the ADR-007 composite-unique key.
+                            _dispatch_pid = project_id or _resolve_dispatch_project_id(
+                                state_conn, dispatch_id
+                            )
+                            if _dispatch_pid and _link_pr_to_dispatch_metadata(
+                                qi_conn, _dispatch_pid, dispatch_id, pr_number
+                            ):
+                                pr_id_linked += 1
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("pr_id linking failed for %s: %s", dispatch_id, exc)
     finally:
         if state_conn is not None and not state_conn_borrowed:
             try:
