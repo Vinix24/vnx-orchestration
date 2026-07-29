@@ -112,6 +112,99 @@ def test_missing_db_is_fail_open(tmp_path):
     enrichment._register_provenance_link({"dispatch_id": "D-y", "run_id": "r"}, sd)  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# Seam 3 (provenance seams PR-B, 2026-07-29): tmux-lane subprocess_completion
+# receipts carry run_id=None, task_id=None. Without a fallback,
+# provenance_registry.receipt_id stayed NULL for every one of them and
+# _calculate_chain_status's has_receipt check could never pass, no matter
+# how complete the rest of the chain was.
+# ---------------------------------------------------------------------------
+
+def test_register_falls_back_to_synthetic_receipt_id_when_run_and_task_id_absent(tmp_path):
+    sd = _state_dir(tmp_path)
+    receipt = {
+        "dispatch_id": "D-tmux-1",
+        "event_type": "subprocess_completion",
+        "run_id": None,
+        "task_id": None,
+    }
+    enrichment._register_provenance_link(receipt, sd)
+
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    row = conn.execute(
+        "SELECT receipt_id FROM provenance_registry WHERE dispatch_id = ?",
+        ("D-tmux-1",),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "synthetic:D-tmux-1:subprocess_completion"
+
+
+def test_synthetic_receipt_id_fallback_is_stable_across_reprocessing(tmp_path):
+    """The same receipt processed twice (retry, backfill sweep) must resolve
+    to the same fallback id and leave exactly one registry row, not two."""
+    sd = _state_dir(tmp_path)
+    receipt = {"dispatch_id": "D-tmux-2", "event_type": "subprocess_completion"}
+
+    enrichment._register_provenance_link(dict(receipt), sd)
+    enrichment._register_provenance_link(dict(receipt), sd)
+
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    rows = conn.execute(
+        "SELECT receipt_id FROM provenance_registry WHERE dispatch_id = ?",
+        ("D-tmux-2",),
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "synthetic:D-tmux-2:subprocess_completion"
+
+
+def test_real_receipt_id_takes_priority_over_synthetic_fallback(tmp_path):
+    sd = _state_dir(tmp_path)
+    receipt = {
+        "dispatch_id": "D-real",
+        "event_type": "subprocess_completion",
+        "run_id": "run-real-1",
+    }
+    enrichment._register_provenance_link(receipt, sd)
+
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    row = conn.execute(
+        "SELECT receipt_id FROM provenance_registry WHERE dispatch_id = ?",
+        ("D-real",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "run-real-1"
+
+
+def test_receipt_id_fallback_lets_chain_reach_complete(tmp_path):
+    """End-to-end: a lane-synthesized receipt (no run_id/task_id) registers
+    with the synthetic fallback, and once the merge-side commit scan fills
+    commit_sha, chain_status reaches 'complete' -- unreachable before this
+    fix because has_receipt could never be True for such a dispatch."""
+    sd = _state_dir(tmp_path)
+    dispatch_id = "20260729-seam3-complete"
+    receipt = {"dispatch_id": dispatch_id, "event_type": "subprocess_completion"}
+    enrichment._register_provenance_link(receipt, sd)
+
+    repo = _git_repo_with_commit(
+        tmp_path, f"feat: thing\n\nDispatch-ID: {dispatch_id}\n",
+    )
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    reconcile_commit_provenance(repo, conn, max_commits=50)
+    conn.commit()
+    row = conn.execute(
+        "SELECT chain_status, receipt_id, commit_sha FROM provenance_registry WHERE dispatch_id = ?",
+        (dispatch_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row[1] == f"synthetic:{dispatch_id}:subprocess_completion"
+    assert row[2] is not None
+    assert row[0] == "complete"
+
+
 def _git_repo_with_commit(tmp_path, body: str) -> Path:
     """Init a throwaway git repo and create one commit with the given message body. Returns repo path."""
     repo = tmp_path / "repo"

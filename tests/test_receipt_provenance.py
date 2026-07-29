@@ -939,6 +939,124 @@ class TestReconcileCommitProvenanceTrackLinkage:
         ).fetchone()
         assert reg["commit_sha"] is not None
 
+    def test_pr_number_registered_on_registry_row(self, tmp_path):
+        """Seam 1 (provenance seams PR-B, 2026-07-29): pr_number was extracted
+        from the commit body but never passed to register_provenance_link,
+        so provenance_registry.pr_number stayed NULL on 0/536 rows even
+        though tracks.pr_ref and dispatch_metadata.pr_id (separate
+        downstream consumers of the same extraction) were correctly
+        populated. This is the only path that can ever supply a real
+        pr_number -- the append-time receipt path always sees None, because
+        the PR doesn't exist yet when the receipt is written."""
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(repo, f"feat(x): do thing (#412)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["linked"] == 1
+        reg = conn.execute(
+            "SELECT pr_number FROM provenance_registry WHERE dispatch_id = ?",
+            (self.DISPATCH_ID,),
+        ).fetchone()
+        assert reg["pr_number"] == 412
+        conn.close()
+
+
+class TestReconcileCommitProvenanceCentralStateDir:
+    """Seam 2 (provenance seams PR-B, 2026-07-29): reconcile_commit_provenance's
+    internal state_dir resolution (used only for the pr_ref/pr_id linking
+    steps) hardcoded vnx_paths.resolve_state_dir(repo_root) -- the repo-local
+    ``.vnx-data/state``. On a central-store deployment (ADR-026) that
+    directory is never created; the real state lives at
+    ``~/.vnx-data/<project_id>/state``. The pre-fix code silently dropped
+    the pr_ref/pr_id linking steps on every central-store project, which is
+    the deployment this fabric actually runs in.
+    """
+
+    DISPATCH_ID = "20260729-seam2-central-store"
+
+    def _make_project_with_central_home(self, tmp_path, project_id, monkeypatch):
+        """Mirrors _make_project, but the state dir lives at the central
+        per-project location under an isolated HOME, and the repo gets no
+        .vnx-data/state at all -- proving the fix actually resolved the
+        central store rather than the fallback silently no-op'ing against a
+        nonexistent repo-local path."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        env = {
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(home),
+        }
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+
+        state_dir = home / ".vnx-data" / project_id / "state"
+        init_schema(state_dir)
+        with get_connection(state_dir) as c:
+            if not _has_col(c, "dispatches", "project_id"):
+                c.execute(
+                    "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+                )
+            c.commit()
+        _add_track_layer(state_dir)
+
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        conn.row_factory = sqlite3.Row
+        return repo, state_dir, conn, env
+
+    def test_prefers_central_store_when_it_exists(self, tmp_path, monkeypatch):
+        project_id = "seam2-central-proj"
+        repo, state_dir, conn, env = self._make_project_with_central_home(
+            tmp_path, project_id, monkeypatch,
+        )
+        _seed_track(conn, "T-001", project_id)
+        _seed_dispatch(conn, self.DISPATCH_ID, project_id, "T-001")
+        _make_qi_dispatch_metadata(state_dir, project_id, self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#900)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        # No .vnx-data/state anywhere under the repo: the pre-fix
+        # resolve_state_dir(repo_root) call resolves to a directory that was
+        # never created, so opening a connection against it fails and both
+        # linking steps silently no-op.
+        assert not (repo / ".vnx-data").exists()
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10, project_id=project_id)
+        conn.commit()
+
+        assert result["linked"] == 1
+        assert result["pr_ref_linked"] == 1
+        assert result["pr_id_linked"] == 1
+        assert _read_pr_id(state_dir, project_id, self.DISPATCH_ID) == "900"
+        conn.close()
+
+    def test_ignores_central_store_without_project_id(self, tmp_path, monkeypatch):
+        """No project_id supplied: must behave exactly as before the fix
+        (repo-local resolution only), even though a central store exists."""
+        project_id = "seam2-central-proj-2"
+        repo, state_dir, conn, env = self._make_project_with_central_home(
+            tmp_path, project_id, monkeypatch,
+        )
+        _seed_track(conn, "T-001", project_id)
+        _seed_dispatch(conn, self.DISPATCH_ID, project_id, "T-001")
+        _make_qi_dispatch_metadata(state_dir, project_id, self.DISPATCH_ID)
+        _commit(repo, f"feat(x): do thing (#901)\n\nDispatch-ID: {self.DISPATCH_ID}", env)
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)  # no project_id
+        conn.commit()
+
+        assert result["linked"] == 1
+        assert result["pr_ref_linked"] == 0
+        assert result["pr_id_linked"] == 0
+        conn.close()
+
 
 class TestReconcileCommitProvenanceLinkedPendingCommit:
     """Provenance-chain PR-A (2026-07-29): ``linked`` must not claim durability

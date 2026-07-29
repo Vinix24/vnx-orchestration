@@ -642,10 +642,13 @@ class TmuxInteractiveDispatch:
     ) -> None:
         """Best-effort dispatch_metadata row for the leaseless tmux lane.
 
-        Flag-gated by ``VNX_TMUX_SESSION_ID`` (truthy values: "1"/"true");
-        default OFF preserves the lane's legacy behaviour (no row written).
-        Uses the shared writer's COALESCE/INSERT-OR-IGNORE pattern so re-calls
-        are idempotent and never clobber a richer provider-lane row.
+        Every claude-lane dispatch gets a row — this used to be flag-gated by
+        ``VNX_TMUX_SESSION_ID`` (default OFF), which meant regular build
+        dispatches never wrote one and the merge-side pr_id backfill
+        (``receipt_provenance._link_pr_to_dispatch_metadata``) had no row to
+        fill in for them. Uses the shared writer's COALESCE/INSERT-OR-IGNORE
+        pattern so re-calls are idempotent and never clobber a richer
+        provider-lane row.
 
         ``session_id``: the pre-assigned worker session UUID (F1.1), stamped only
         when the column exists and a non-empty value is provided.
@@ -653,9 +656,6 @@ class TmuxInteractiveDispatch:
         Fail-open: any error is logged at DEBUG and swallowed; the write must
         never block, delay, or fail the dispatch.
         """
-        if os.environ.get("VNX_TMUX_SESSION_ID", "").strip().lower() not in ("1", "true"):
-            return
-
         if _upsert_dispatch_metadata is None:
             logger.debug(
                 "interactive: dispatch_metadata writer unavailable for dispatch=%s",

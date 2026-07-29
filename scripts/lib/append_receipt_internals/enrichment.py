@@ -98,8 +98,8 @@ def _register_provenance_link(enriched: Dict[str, Any], state_dir: Path) -> None
         return
     try:
         import sqlite3 as _sqlite3
-        from receipt_provenance import register_provenance_link  # noqa: PLC0415
-        receipt_id = str(enriched.get("run_id") or enriched.get("task_id") or "") or None
+        from receipt_provenance import register_provenance_link, resolve_receipt_id  # noqa: PLC0415
+        receipt_id = resolve_receipt_id(enriched)
         pr_number = enriched.get("pr_number")
         try:
             pr_number = int(pr_number) if pr_number is not None else None

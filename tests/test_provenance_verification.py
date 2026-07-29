@@ -304,6 +304,46 @@ class TestVerifyDispatchProvenance:
 
 
 # ============================================================================
+# Synthetic receipt_id cross-check (provenance seams PR-B, seam 3 companion)
+# ============================================================================
+
+class TestSyntheticReceiptIdCrossCheck:
+    """The registry's synthetic receipt_id fallback (receipt_provenance.
+    resolve_receipt_id) must not trip the Layer-4 cross-check below, which
+    independently recomputes the "actual receipt ids" set from raw
+    receipts. If that recomputation only looked at run_id/task_id (the old
+    logic), every synthetic-fallback dispatch would show a false
+    GAP_BROKEN_CHAIN 'registry receipt_id not found in receipts' error."""
+
+    def test_synthetic_fallback_receipt_id_is_not_a_broken_chain(self, conn, receipts_path):
+        did = "20260329-180606-synthetic-B"
+
+        register_provenance_link(
+            conn,
+            dispatch_id=did,
+            receipt_id=f"synthetic:{did}:subprocess_completion",
+            commit_sha="abc123def456",
+        )
+        conn.commit()
+
+        receipt = _make_receipt(
+            dispatch_id=did,
+            event_type="subprocess_completion",
+            run_id=None,
+            task_id=None,
+        )
+        _write_receipts(receipts_path, [receipt])
+
+        with patch("provenance_verification.find_commits_by_dispatch", return_value=["abc123def456"]):
+            result = verify_dispatch_provenance(conn, did, receipts_path)
+
+        error_findings = [f for f in result.findings if f.severity == "error"]
+        assert error_findings == []
+        assert result.verdict != VERDICT_FAIL
+        assert result.chain_status == CHAIN_STATUS_COMPLETE
+
+
+# ============================================================================
 # Verification recording tests
 # ============================================================================
 
