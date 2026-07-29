@@ -664,25 +664,21 @@ def build_runtime_snapshot(
 
     # P1-#3: model_pins from SSOT
     model_pin_specs = _load_model_pins_from_yaml()  # dict[str, ModelPin]
-    # Legacy string-valued view for the effective_model computation below — this PR
-    # (worker-provider-free-choice PR-1) only changes the contract type, not the
-    # coercion behavior; PR-2 replaces this computation to honor pin.semantics.
-    model_pins = {slot: pin.model for slot, pin in model_pin_specs.items()}
 
     # P0-1: effective model — same computation compile_plan uses in D4
     #
-    # worker-provider-kimi-flip (20260723): model_pins now resolves T1/T2/T3 to
+    # worker-provider-kimi-flip (20260723): model_pin_specs now resolves T1/T2/T3 to
     # "kimi-k3" (workers-kimi-pinned). The "sonnet" fallback below is intentionally
     # UNCHANGED — it only fires when is_claude_lane is True (an explicit provider=
     # claude override, or a non-standard target_slot with no pin) and spec.model was
     # not given; it must stay a valid Claude model name. If an explicit claude
-    # override lands on T1/T2/T3, model_pins.get() returns "kimi-k3" (a non-Claude
-    # label) which correctly fails the check_registry gate below (model-not-in-
-    # current-registry, blocking) instead of silently dispatching sonnet — matching
-    # the "kimi-only, no fallback" policy (fail loud, never a silent claude rescue).
-    # The ONLY sanctioned way past that reject is the gated, audited operator
-    # escape-hatch directly below (worker-claude-override); everything else about
-    # the default path is unchanged.
+    # override lands on T1/T2/T3 under a `floor` pin, the resolved model is
+    # "kimi-k3" (a non-Claude label) which correctly fails the check_registry gate
+    # below (model-not-in-current-registry, blocking) instead of silently
+    # dispatching sonnet — matching the "kimi-only, no fallback" policy (fail loud,
+    # never a silent claude rescue). The ONLY sanctioned way past that reject is
+    # the gated, audited operator escape-hatch directly below (worker-claude-
+    # override); everything else about the default path is unchanged.
     is_claude_lane = spec.provider == Provider.CLAUDE
 
     # worker-claude-override gate (escape-hatch-worker-claude): evaluate the
@@ -724,7 +720,19 @@ def build_runtime_snapshot(
             # bypass of the constraint engine.
             effective_model = spec.model or "sonnet"
         else:
-            effective_model = model_pins.get(spec.target_slot) or spec.model or "sonnet"
+            # worker-provider-free-choice PR-2: honor ModelPin.semantics instead of
+            # always coercing to the pin. "floor" is today's behavior verbatim —
+            # spec.model is ignored, the pin always wins. "default" is advisory —
+            # spec.model wins when set, the pin only fills in when spec carries no
+            # model at all. The `or "sonnet"` tail stays the last-resort fallback
+            # on both branches.
+            pin = model_pin_specs.get(spec.target_slot)
+            if pin is None:
+                effective_model = spec.model or "sonnet"
+            elif pin.semantics == "floor":
+                effective_model = pin.model or "sonnet"
+            else:  # "default" — loader fails loud on any other value at load time
+                effective_model = spec.model or pin.model or "sonnet"
     else:
         effective_model = spec.model or "default"
 
