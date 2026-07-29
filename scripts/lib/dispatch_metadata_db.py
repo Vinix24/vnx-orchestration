@@ -109,6 +109,12 @@ def _log_tenant_stamp_skip(
         logger.debug("skip_metrics append failed (non-fatal)", exc_info=True)
 
 
+#: sqlite3.connect's own built-in default when no ``timeout=`` is passed —
+#: named here so callers that need the historical (unbounded-for-practical-
+#: purposes) wait can say so explicitly instead of relying on an unlabeled 5.0.
+DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
+
+
 def upsert_dispatch_provider_row(
     db_path: Path | str,
     *,
@@ -124,11 +130,13 @@ def upsert_dispatch_provider_row(
     report_path: Optional[str] = None,
     project_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
 ) -> bool:
     """Create-if-absent and provider/model-stamp a ``dispatch_metadata`` row.
 
     Returns ``True`` when a row was written/updated, ``False`` when the write was
-    skipped (DB missing) or a sqlite error was swallowed.
+    skipped (DB missing, the sqlite lock-wait timed out, or another sqlite error
+    was swallowed).
 
     Args:
         model: The AI model string used (e.g. "claude-sonnet-4-6", "codex",
@@ -137,6 +145,14 @@ def upsert_dispatch_provider_row(
                may omit it.
         session_id: Pre-assigned worker session UUID (F1.1). Stamped when the
                ``session_id`` column exists. Optional — ignored when absent/None.
+        timeout: Seconds to wait for a sqlite lock before giving up (passed
+               straight through to ``sqlite3.connect``, which uses it for every
+               statement on the connection, not just the initial connect —
+               see https://docs.python.org/3/library/sqlite3.html#sqlite3.connect).
+               Defaults to sqlite3's own driver default so existing callers keep
+               byte-for-byte the same wait behaviour. A caller whose write must
+               never delay its critical path (e.g. the tmux lane's best-effort
+               stamp) should pass a short explicit value instead.
 
     Raises:
         ValueError: ``dispatch_id``, ``terminal``, or ``provider`` is empty —
@@ -169,7 +185,7 @@ def upsert_dispatch_provider_row(
 
     conn = None
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=timeout)
         has_provider = _has_column(conn, "dispatch_metadata", "provider")
         has_model = _has_column(conn, "dispatch_metadata", "model")
         has_project = _has_column(conn, "dispatch_metadata", "project_id")
