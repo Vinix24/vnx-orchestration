@@ -38,6 +38,65 @@ ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
 SeverityLevel = Literal["blocker", "warn", "info"]
 ItemStatus = Literal["open", "done", "deferred", "wontfix"]
 
+# ---------------------------------------------------------------------------
+# Acceptance-criterion rejection guard (2026-07-30 mission-control cleanup)
+# ---------------------------------------------------------------------------
+# Gate-steps and acceptance criteria that describe SUCCESS are not open items.
+# Examples of titles that describe a passing check, not a problem:
+#   "pytest tests/... -v groen"
+#   "codex gate green"
+#   "CI green"
+#   "manual smoke: ..."
+#   "Migration apply"
+# The 2026-07-30 cleanup closed 94 such items; 87 came from a single-day
+# T0 session.  This guard blocks the CLI `add` command (unless --force) and
+# raises ValueError from `add_item_programmatic`.  Callers that genuinely
+# need to track a gate-failure can phrase the title as a problem.
+_ACCEPTANCE_CRITERION_PATTERNS = [
+    re.compile(
+        r'(?:pytest|npm run test(?::unit)?).*\bgroen\b',
+        re.IGNORECASE,
+    ),
+    re.compile(r'check \+ build \+ test:unit.*\bgroen\b', re.IGNORECASE),
+    re.compile(r'gh pr checks.*\bgroen\b', re.IGNORECASE),
+    re.compile(r'\bcodex gate green\b', re.IGNORECASE),
+    re.compile(r'\bgemini gate green\b', re.IGNORECASE),
+    re.compile(r'^CI green$', re.IGNORECASE),
+    re.compile(r'^manual smoke:', re.IGNORECASE),
+    re.compile(r'^Migration apply', re.IGNORECASE),
+    re.compile(
+        r'codex-\s*\+\s*gemini-gate.*(?:passed|completed)',
+        re.IGNORECASE,
+    ),
+]
+
+_REJECTION_MESSAGE = (
+    "REJECTED: title describes a successful acceptance-criterion or gate-step,"
+    " not a problem. Open items track risks, blockers, and warnings — not"
+    " check-off steps that passed. If the step genuinely FAILED, rephrase the"
+    " title as a problem statement (e.g. \"codex gate FAILED: 3 findings"
+    " in …\"). Use --force to bypass this guard."
+)
+
+
+def is_acceptance_criterion(title: str) -> bool:
+    """Return True if *title* describes a passing gate step or check-off,
+    not a problem that needs tracking."""
+    for pattern in _ACCEPTANCE_CRITERION_PATTERNS:
+        if pattern.search(title):
+            return True
+    return False
+
+
+def _validate_title_not_acceptance_criterion(title: str,
+                                             force: bool = False) -> None:
+    """Raise ValueError if *title* looks like an acceptance-criterion check-off
+    rather than a problem statement.  *force* bypasses the guard."""
+    if force:
+        return
+    if is_acceptance_criterion(title):
+        raise ValueError(_REJECTION_MESSAGE)
+
 
 def _env_flag(name: str) -> Optional[bool]:
     value = os.environ.get(name)
@@ -146,9 +205,14 @@ def add_item_programmatic(
 
     Uses fcntl.flock on a dedicated lock file for concurrent terminal safety.
 
+    Raises:
+        ValueError: if *title* describes a passing acceptance criterion rather
+                    than a problem.  Callers must rephrase as a problem statement.
+
     Returns:
         (item_id, created): item_id is existing or new, created is False if deduplicated.
     """
+    _validate_title_not_acceptance_criterion(title)
     with _with_items_lock():
         data = load_items()
 
@@ -196,6 +260,9 @@ def add_item_programmatic(
 
 def add_item(args):
     """Add new open item"""
+    _validate_title_not_acceptance_criterion(
+        args.title, force=getattr(args, 'force', False)
+    )
     with _with_items_lock():
         data = load_items()
 
@@ -828,6 +895,8 @@ def main():
     add_parser.add_argument('--pr', help='Associated PR ID')
     add_parser.add_argument('--report', help='Origin report path')
     add_parser.add_argument('--details', help='Additional details')
+    add_parser.add_argument('--force', action='store_true', default=False,
+                            help='Bypass acceptance-criterion rejection guard')
 
     # Close command
     close_parser = subparsers.add_parser('close', help='Close item as done')
@@ -927,7 +996,11 @@ def main():
     if args.command == 'list':
         list_items(args)
     elif args.command == 'add':
-        add_item(args)
+        try:
+            add_item(args)
+        except ValueError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            return 1
     elif args.command == 'close':
         close_item(args)
     elif args.command == 'defer':
