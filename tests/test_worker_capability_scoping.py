@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """Tests for worker capability scoping.
 
-Per operator decision (2026-07-05): tmux-spawn workers run in an isolated
-per-dispatch worktree, so the scoped allow-list only stalls autonomous builds
-on prompts for un-allow-listed ops. The default is now the blanket
-``--dangerously-skip-permissions``; the scoped posture (WITHOUT
-``--dangerously-skip-permissions`` and WITHOUT ambient MCP, while remaining a
-fully functional code worker: Read/Write/Edit/Bash/Glob/Grep + git) is opt-in
-via ``VNX_WORKER_SCOPED=1``.
+Per operator decision (2026-07-30): a detached worker with no scoping and no
+blanket skip-permissions has no TTY to answer a permission prompt for any
+tool absent from its role's allow-list — it just stalls forever with no
+receipt. The scoped posture (WITHOUT ``--dangerously-skip-permissions`` and
+WITHOUT ambient MCP, while remaining a fully functional code worker:
+Read/Write/Edit/Bash/Glob/Grep + git) is now the default; the blanket
+``--dangerously-skip-permissions`` posture is opt-out via
+``VNX_WORKER_SCOPED=0``.
 
 Covers:
   1. generate_claude_settings(default_profile) yields the code-worker allow-list
   2. build_claude_scope_args() — empty MCP, acceptEdits, allow/deny lists, no skip flag
-  3. SubprocessAdapter.deliver() spawn argv: blanket skip-permissions by default,
-     scoped (empty MCP, no skip-permissions) opt-in via VNX_WORKER_SCOPED=1
+  3. SubprocessAdapter.deliver() spawn argv: scoped (empty MCP, no
+     skip-permissions) by default, blanket skip-permissions opt-out via
+     VNX_WORKER_SCOPED=0
   4. resolve_worker_profile() fallback for unknown / empty roles
-  5. VNX_WORKER_SCOPED=1 feature flag opts into the scoped posture
-  6. tmux _default_launch_command() detached spawn is blanket by default (skip
-     flag present); VNX_WORKER_SCOPED=1 opts into the scoped posture
+  5. VNX_WORKER_SCOPED=0 feature flag opts out of the scoped posture
+  6. tmux _default_launch_command() detached spawn is scoped by default (no
+     skip flag); VNX_WORKER_SCOPED=0 opts out into the blanket skip-permissions
+     posture
   7. negative-path: empty profile yields a still-valid scope argv
 """
 
@@ -176,7 +179,7 @@ class TestResolveWorkerProfile:
 # ---------------------------------------------------------------------------
 
 class TestDeliverSpawnArgv:
-    def test_argv_has_skip_permissions_by_default(self):
+    def test_argv_is_scoped_by_default(self):
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
@@ -185,7 +188,20 @@ class TestDeliverSpawnArgv:
 
         assert cmd[0] == "claude"
         assert "-p" in cmd
-        assert SKIP_FLAG in cmd, "blanket skip-permissions is the default worker posture"
+        assert SKIP_FLAG not in cmd, "scoped is the default worker posture"
+        assert "--strict-mcp-config" in cmd
+
+    def test_argv_has_skip_permissions_when_explicitly_disabled(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
+        adapter = SubprocessAdapter()
+        proc = _make_alive_process()
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            adapter.deliver("T1", "dispatch-cap-1b", instruction="do work")
+        cmd = mock_popen.call_args[0][0]
+
+        assert cmd[0] == "claude"
+        assert "-p" in cmd
+        assert SKIP_FLAG in cmd, "VNX_WORKER_SCOPED=0 must opt back out to blanket skip-permissions"
         assert "--strict-mcp-config" not in cmd
 
     def test_argv_keeps_functional_code_worker_tools_when_scoped(self, monkeypatch):
@@ -237,12 +253,12 @@ class TestDeliverSpawnArgv:
 # ---------------------------------------------------------------------------
 
 class TestTmuxDetachedSpawn:
-    def test_detached_default_is_blanket(self):
+    def test_detached_default_is_scoped(self):
         cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG in cmd
-        assert "--strict-mcp-config" not in cmd
-        assert "--permission-mode acceptEdits" not in cmd
-        assert '{"mcpServers":{}}' not in cmd
+        assert SKIP_FLAG not in cmd
+        assert "--strict-mcp-config" in cmd
+        assert "--permission-mode acceptEdits" in cmd
+        assert '{"mcpServers":{}}' in cmd
 
     def test_attached_run_unchanged(self):
         cmd = _default_launch_command("sonnet", skip_permissions=False)
@@ -256,15 +272,21 @@ class TestTmuxDetachedSpawn:
         assert SKIP_FLAG not in cmd
         assert "--strict-mcp-config" in cmd
 
+    def test_detached_flag_off_opts_out_to_blanket(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        assert SKIP_FLAG in cmd
+        assert "--strict-mcp-config" not in cmd
+
 
 # ---------------------------------------------------------------------------
 # 6. feature flag helper
 # ---------------------------------------------------------------------------
 
 class TestWorkerScopedEnabled:
-    def test_default_off(self, monkeypatch):
+    def test_default_on(self, monkeypatch):
         monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-        assert worker_scoped_enabled() is False
+        assert worker_scoped_enabled() is True
 
     @pytest.mark.parametrize("val", ["0", "false", "no", "off", "OFF", "False"])
     def test_falsey_values_disable(self, monkeypatch, val):
@@ -282,10 +304,18 @@ class TestWorkerScopedEnabled:
 # ---------------------------------------------------------------------------
 
 class TestTmuxDetachedNoStall:
-    """Detached worker gets the blanket skip flag by default so it can proceed
-    without TTY prompts; VNX_WORKER_SCOPED=1 opts into --allowedTools instead."""
+    """Detached worker gets --allowedTools by default so a role's allow-list
+    actually binds instead of stalling on an un-allow-listed tool prompt with
+    no TTY to answer it; VNX_WORKER_SCOPED=0 opts back into the blanket skip
+    flag instead."""
 
-    def test_detached_spawn_has_skip_permissions_by_default(self):
+    def test_detached_spawn_has_allowed_tools_by_default(self):
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        assert SKIP_FLAG not in cmd
+        assert "--allowedTools" in cmd
+
+    def test_detached_spawn_has_skip_permissions_when_explicitly_disabled(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
         cmd = _default_launch_command("sonnet", skip_permissions=True)
         assert SKIP_FLAG in cmd
         assert "--allowedTools" not in cmd
@@ -582,6 +612,28 @@ class TestBuildToolchainAllowlistCoverage:
         assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed), (
             f"missing from scoped tmux spawn --allowedTools: {BUILD_TOOLCHAIN_PATTERNS - allowed}"
         )
+
+    def test_default_env_unknown_role_gets_full_code_worker_toolset_not_empty(self, monkeypatch):
+        # An unknown role (e.g. "technical-writer", which has no profile in
+        # .vnx/worker_permissions.yaml) must NOT be left tool-less once scoping
+        # is on by default — resolve_worker_profile()'s fallback to
+        # default_code_worker_profile() must still reach the spawned argv,
+        # chmod/rm/mkdir included. No env override: this is the bare default.
+        monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+        monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+        import shlex as _shlex
+        cmd = _default_launch_command(
+            "sonnet", skip_permissions=True, role="technical-writer"
+        )
+        assert SKIP_FLAG not in cmd
+        tokens = _shlex.split(cmd)
+        idx = tokens.index("--allowedTools")
+        allowed = set(tokens[idx + 1].split(","))
+        assert allowed, "unknown role must not yield an empty allow-list"
+        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed), (
+            f"missing from unknown-role default toolset: {BUILD_TOOLCHAIN_PATTERNS - allowed}"
+        )
+        assert "Bash(chmod:*)" in allowed
 
     def test_enforcement_flag_also_covers_build_toolchain(self, monkeypatch):
         # VNX_ENFORCE_WORKER_PERMISSIONS=1 (ADR-012) is the other flag that

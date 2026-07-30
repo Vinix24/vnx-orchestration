@@ -46,8 +46,8 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
         )
 
     def worker_scoped_enabled() -> bool:  # type: ignore[misc]
-        return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
-            "1", "true", "yes", "on",
+        return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() not in (
+            "0", "false", "no", "off",
         )
 
 # Providers whose spawn handlers exist.
