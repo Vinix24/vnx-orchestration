@@ -144,8 +144,10 @@ class ConversationAnalyzer:
         except Exception:
             try:
                 self.conn.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_exc:
+                log("ERROR", f"  Rollback failed for {metrics.session_id[:8]}...: "
+                             f"{rollback_exc} — connection may be left in a broken "
+                             f"state for the next session's write")
             log("ERROR", f"  Atomic write failed for {metrics.session_id[:8]}..., "
                          f"rolling back both session_analytics and intelligence rows")
             raise

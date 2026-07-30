@@ -1247,7 +1247,9 @@ class TestAtomicWrites:
             store_failed = True
             try:
                 analyzer.conn.rollback()
-            except Exception:
+            except Exception:  # vnx-silent-except: in-memory sqlite3 rollback() cannot itself
+                # raise here (no broken-connection scenario is under test); kept only for
+                # structural parity with the production atomic-write pattern this test exercises.
                 pass
 
         assert store_failed is True, "Expected _store_session to fail"
