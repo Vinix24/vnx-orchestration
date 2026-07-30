@@ -1058,6 +1058,85 @@ class TestReconcileCommitProvenanceCentralStateDir:
         conn.close()
 
 
+class TestReconcileCommitProvenanceTransactionNarrowing:
+    """OI-851 (PR-3): reconcile_commit_provenance used to open qi_conn once
+    and only commit it in the `finally` block after the ENTIRE git-log scan
+    completed -- holding qi_conn's write transaction open across every
+    remaining commit in the scan, not just the write that opened it. The fix
+    commits qi_conn (and state_conn, when it is not the caller's borrowed
+    `conn`) after each git-log entry's writes instead.
+
+    This spies on `_link_pr_to_dispatch_metadata` and records
+    `qi_conn.in_transaction` at the moment each call STARTS (before it does
+    its own write). Under the pre-fix code, commit 0's write leaves
+    qi_conn.in_transaction True until the whole scan finishes, so the second
+    and third calls would observe True. Under the fix, the first commit's
+    transaction is closed out before the second commit is even scanned, so
+    every call observes False.
+    """
+
+    def _make_qi_db_with_rows(self, state_dir, project_id, dispatch_ids):
+        qi_db = state_dir / "quality_intelligence.db"
+        qi_conn = sqlite3.connect(str(qi_db))
+        qi_conn.execute(
+            """
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                pr_id TEXT,
+                UNIQUE(project_id, dispatch_id)
+            )
+            """
+        )
+        for dispatch_id in dispatch_ids:
+            qi_conn.execute(
+                "INSERT INTO dispatch_metadata (dispatch_id, project_id, pr_id) "
+                "VALUES (?, ?, NULL)",
+                (dispatch_id, project_id),
+            )
+        qi_conn.commit()
+        qi_conn.close()
+
+    def test_qi_conn_transaction_not_held_across_scan(self, tmp_path, monkeypatch):
+        repo, state_dir, conn, env = _make_project(tmp_path)
+        project_id = "test-proj"
+        _seed_track(conn, "T-001", project_id)
+        dispatch_ids = [f"20260730-txn-narrow-{i}" for i in range(3)]
+        for dispatch_id in dispatch_ids:
+            _seed_dispatch(conn, dispatch_id, project_id, "T-001")
+        self._make_qi_db_with_rows(state_dir, project_id, dispatch_ids)
+        for i, dispatch_id in enumerate(dispatch_ids):
+            _commit(
+                repo,
+                f"feat(x): thing {i} (#{500 + i})\n\nDispatch-ID: {dispatch_id}",
+                env,
+            )
+
+        seen_in_transaction = []
+        real_fn = receipt_provenance._link_pr_to_dispatch_metadata
+
+        def _spy(qi_conn, pid, dispatch_id, pr_number):
+            seen_in_transaction.append(qi_conn.in_transaction)
+            return real_fn(qi_conn, pid, dispatch_id, pr_number)
+
+        monkeypatch.setattr(receipt_provenance, "_link_pr_to_dispatch_metadata", _spy)
+
+        result = reconcile_commit_provenance(
+            repo, conn, max_commits=10, project_id=project_id,
+        )
+        conn.commit()
+
+        assert result["pr_id_linked"] == 3
+        assert len(seen_in_transaction) == 3
+        assert seen_in_transaction == [False, False, False], (
+            "qi_conn's write transaction from an earlier commit was still "
+            "open when a later commit's write started -- the transaction is "
+            "being held across the scan instead of committed per entry"
+        )
+        conn.close()
+
+
 class TestReconcileCommitProvenanceLinkedPendingCommit:
     """Provenance-chain PR-A (2026-07-29): ``linked`` must not claim durability
     it hasn't earned. ``conn`` is caller-owned — this function never commits

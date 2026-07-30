@@ -682,6 +682,14 @@ def reconcile_commit_provenance(
     Fill-once (never overwrites an existing pr_id) and independent of the tracks.pr_ref step —
     a dispatch with no track_id still gets its dispatch_metadata.pr_id stamped.
 
+    OI-851 (PR-3): the ``state_conn``/``qi_conn`` write transaction commits after each git-log
+    entry is processed, not once at the end of the whole scan — see the comment at the bottom of
+    the scan loop. This bounds how long another writer against ``runtime_coordination.db`` or
+    ``quality_intelligence.db`` can be blocked to "one commit's worth of linking writes" instead
+    of "the entire ``max_commits``-sized scan". ``conn`` itself is unaffected (see "Durability of
+    conn" below) — this is scoped to the two connections this function opens for the optional
+    pr_ref/pr_id linking steps.
+
     ``project_id``: ADR-007 composite-safety (fix-forward, Finding A). Callers that already
     operate on a per-project store (``objective_reconcile.run_reconcile``,
     ``scripts/reconcile_provenance.py``) know their own ``project_id`` up front — pass it here
@@ -842,6 +850,29 @@ def reconcile_commit_provenance(
                                 pr_id_linked += 1
                         except Exception as exc:  # noqa: BLE001
                             logger.debug("pr_id linking failed for %s: %s", dispatch_id, exc)
+
+            # OI-851 (PR-3): commit state_conn/qi_conn's write transaction here,
+            # per git-log entry, instead of leaving it open until the `finally`
+            # below runs — that used to hold the lock across the ENTIRE scan
+            # (up to `max_commits` entries). ``state_conn`` is skipped while
+            # borrowed (== ``conn``): this function never commits ``conn`` (see
+            # the durability note in the docstring), so a borrowed connection's
+            # transaction boundary stays the caller's to decide, exactly as
+            # before. ``qi_conn`` is never borrowed (always a fresh connection,
+            # see the comment above where it's opened) so it always commits
+            # here. A commit failure is non-fatal — logged at debug and the
+            # scan continues — matching this function's existing best-effort
+            # contract for the pr_ref/pr_id linking steps.
+            if state_conn is not None and not state_conn_borrowed:
+                try:
+                    state_conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("failed to commit project state db mid-scan: %s", exc)
+            if qi_conn is not None:
+                try:
+                    qi_conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("failed to commit quality_intelligence db mid-scan: %s", exc)
     finally:
         if state_conn is not None and not state_conn_borrowed:
             try:
