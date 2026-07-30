@@ -158,6 +158,17 @@ for the **QI-write-tier** (`dispatch_metadata`, `adrs`):
 Composite-key rule (Decision rule 2) is unchanged and verified present:
 `dispatch_metadata UNIQUE(project_id, dispatch_id)`, `adrs PK(adr_id, project_id)`.
 
+## Implementation note — 2026-07-30 (session_analytics closes a composite-key gap)
+
+`quality_intelligence.db`'s `session_analytics` table (written by the conversation analyzer, `scripts/conversation_analyzer/runner.py`) carried a single-column `UNIQUE(session_id)` — one of the residual non-conforming tables this ADR's §Consequences anticipates. OI-853/OI-855 (#1248) brought it into the Decision's pattern:
+
+- `project_id TEXT NOT NULL` added with **no default** (the QI-write-tier posture from the 2026-06-24 amendment above, not the legacy `DEFAULT 'vnx-dev'` bridge), via migration v29.
+- `UNIQUE(session_id)` replaced with composite `UNIQUE(project_id, session_id)`.
+- The writer resolves `project_id` via `resolve_stamp_project_id` and fails closed (`TenantUnresolved` skips that one session's write) rather than guessing — matching rule 2 of the 2026-06-24 amendment.
+- `_migrate_v29`'s re-run guard reads `PRAGMA index_list`/`index_info` (column-set comparison) instead of comparing literal DDL text, so it does not falsely re-trigger a rebuild against an already-migrated table, and the rebuild replays every pre-existing index by name rather than a hardcoded subset.
+
+See `skills/intelligence-engineer/references/quality-intelligence-schema.md` for the current column list.
+
 ## Cross-references
 
 - ADR-009 — Schema-first migrations via PRAGMA introspection (the implementation discipline that keeps this ADR enforceable across future migrations)

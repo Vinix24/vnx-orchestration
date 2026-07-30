@@ -48,6 +48,9 @@ T0 reads "what's next" from the tracks layer, not by hand-parsing ROADMAP.yaml.
 
 ROADMAP.yaml is the authored input (human-only). Tracks are its queryable projection, seeded by `scripts/seed_tracks_from_roadmap.py` -- idempotent, dry-run by default, `--apply` to write. The planning kanban dashboard lives at `/operator/planning`.
 
+**Planning (prioritize, break a feature into deliverables, run the plan-gate):** the `horizon` skill.
+**Querying existing objectives:** the CLI below (`vnx objective list`/`show`).
+
 **Query the tracks layer:**
 
 ```bash
