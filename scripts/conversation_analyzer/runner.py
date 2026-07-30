@@ -18,6 +18,17 @@ from .deep_analyzer import DeepAnalyzer
 from .generator import DigestGenerator
 from . import intelligence_bridge
 
+# Deliberately NOT fatal at import: dry-run and parse-only entry points on
+# ConversationAnalyzer never touch _resolve_project_id and should not break
+# on an unrelated import failure. The sentinel below only matters to the one
+# method (_resolve_project_id) that enforces the ADR-007 tenant guarantee —
+# it raises there, at call time, instead of guessing a project_id.
+try:
+    from project_scope import resolve_stamp_project_id, TenantUnresolved
+except ImportError:
+    resolve_stamp_project_id = None  # type: ignore[assignment]
+    TenantUnresolved = RuntimeError  # type: ignore[assignment,misc]
+
 
 def _get_claude_projects_dir() -> Path:
     """Late-bind CLAUDE_PROJECTS_DIR to support test patching via the package namespace."""
@@ -113,8 +124,6 @@ class ConversationAnalyzer:
                      f"err={flags.has_error_recovery} ctx={flags.has_context_reset} "
                      f"refactor={flags.has_large_refactor} test={flags.has_test_cycle}")
 
-        self.bridge_session_to_intelligence(metrics, flags)
-
         deep_result = None
         suggestions = []
         if deep_allowed and self.deep.should_deep_analyze(metrics, flags):
@@ -125,7 +134,24 @@ class ConversationAnalyzer:
                     sg["session_id"] = metrics.session_id
                 suggestions = deep_result.get("suggestions", [])
 
-        self._store_session(metrics, flags, deep_result)
+        # Single transaction over both writes (ADR-007 atomicity):
+        # _store_session first so a failing INSERT does not leave orphan
+        # intelligence rows from bridge_session_to_intelligence.
+        try:
+            self._store_session(metrics, flags, deep_result)
+            self.bridge_session_to_intelligence(metrics, flags)
+            self.conn.commit()
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception as rollback_exc:
+                log("ERROR", f"  Rollback failed for {metrics.session_id[:8]}...: "
+                             f"{rollback_exc} — connection may be left in a broken "
+                             f"state for the next session's write")
+            log("ERROR", f"  Atomic write failed for {metrics.session_id[:8]}..., "
+                         f"rolling back both session_analytics and intelligence rows")
+            raise
+
         log("SUCCESS", f"  Stored: {metrics.session_id[:8]}... "
                         f"tokens={metrics.total_output_tokens:,}")
 
@@ -144,10 +170,11 @@ class ConversationAnalyzer:
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
                        deep_result: Optional[dict]):
+        project_id = self._resolve_project_id()
         cur = self.conn.cursor()
         cur.execute("""
             INSERT OR REPLACE INTO session_analytics (
-                session_id, project_path, terminal, session_date,
+                session_id, project_id, project_path, terminal, session_date,
                 total_input_tokens, total_output_tokens,
                 cache_creation_tokens, cache_read_tokens,
                 tool_calls_total, tool_read_count, tool_edit_count,
@@ -160,9 +187,9 @@ class ConversationAnalyzer:
                 deep_analysis_json, deep_analysis_model, deep_analysis_at,
                 file_size_bytes, analyzer_version, session_model, dispatch_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            metrics.session_id, metrics.project_path, metrics.terminal,
+            metrics.session_id, project_id, metrics.project_path, metrics.terminal,
             metrics.session_date,
             metrics.total_input_tokens, metrics.total_output_tokens,
             metrics.cache_creation_tokens, metrics.cache_read_tokens,
@@ -183,7 +210,41 @@ class ConversationAnalyzer:
             metrics.session_model or "unknown",
             metrics.dispatch_id or None,
         ))
-        self.conn.commit()
+
+    def _resolve_project_id(self) -> str:
+        """Resolve the project_id for tenant-scoped writes, fail-closed (ADR-007).
+
+        Delegates to ``resolve_stamp_project_id(db_path=...)``, which already
+        weighs {DB-path layout, ``.vnx-project-id`` marker, ``VNX_PROJECT_ID``
+        env} as co-sources that must agree. There is no ``'vnx-dev'`` default:
+        ADR-007 explicitly rejects a stamped default as "a sentinel for
+        legitimate rows", and this analyzer runs against every VNX project,
+        not just this one — a guessed identity here would let another
+        tenant's sessions land in the wrong project's key space under the
+        ``UNIQUE (project_id, session_id)`` constraint.
+
+        Deliberately does NOT retry with a bare ``resolve_stamp_project_id()``
+        (env-only) on ``TenantUnresolved``: when the db_path-anchored call
+        raises because its sources conflict (path/marker disagree with env),
+        a retry that checks env alone would silently pick the env value and
+        paper over that conflict — the exact contamination this guard exists
+        to catch. Any ``TenantUnresolved`` propagates so the caller
+        (``analyze_session``) aborts and rolls back that one session's write;
+        the run continues with the next session.
+
+        A missing ``project_scope`` module (import failure) is treated the
+        same way — raised here at call time rather than made fatal at module
+        import. Other ``ConversationAnalyzer`` entry points (dry-run, parsing
+        only) never reach this method and should not be broken by an
+        unrelated import error; only the write path that actually needs the
+        tenant guarantee pays for enforcing it.
+        """
+        if resolve_stamp_project_id is None:
+            raise TenantUnresolved(
+                "project_scope module is unavailable (import failed); "
+                "refusing to stamp a guessed project_id (ADR-007)"
+            )
+        return resolve_stamp_project_id(db_path=str(self.db_path))
 
     def _store_suggestions(self, suggestions: List[dict], digest_id: str):
         if not suggestions:
@@ -235,6 +296,9 @@ class ConversationAnalyzer:
         sessions = self.find_unanalyzed_sessions(project_filter, terminal_filter,
                                                   diagnostics=dry_run)
         log("INFO", f"Found {len(sessions)} unanalyzed sessions")
+
+        # Inform the deep analyzer of the backlog size for the billing guard.
+        self.deep.set_session_backlog(len(sessions))
 
         if not sessions:
             log("INFO", "Nothing to analyze")

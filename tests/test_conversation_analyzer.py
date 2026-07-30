@@ -59,7 +59,8 @@ def _create_schema(conn: sqlite3.Connection):
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS session_analytics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
             project_path TEXT NOT NULL,
             terminal TEXT,
             session_date DATE NOT NULL,
@@ -89,10 +90,11 @@ def _create_schema(conn: sqlite3.Connection):
             deep_analysis_model TEXT,
             deep_analysis_at DATETIME,
             session_model TEXT DEFAULT 'unknown',
+            dispatch_id TEXT,
             file_size_bytes INTEGER,
             analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             analyzer_version TEXT DEFAULT '1.0.0',
-            dispatch_id TEXT
+            UNIQUE (project_id, session_id)
         );
         CREATE TABLE IF NOT EXISTS improvement_suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -396,6 +398,7 @@ class TestStorage:
 
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
         analyzer.conn = conn
+        analyzer.db_path = Path(tempfile.mktemp(suffix=".db"))
 
         metrics = SessionMetrics(
             session_id="test-session-001",
@@ -411,7 +414,8 @@ class TestStorage:
         )
         flags = SessionFlags(primary_activity="coding")
 
-        analyzer._store_session(metrics, flags, None)
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
 
         cur = conn.cursor()
         cur.execute("SELECT * FROM session_analytics WHERE session_id = 'test-session-001'")
@@ -431,8 +435,8 @@ class TestStorage:
 
         # Insert a known session
         conn.execute(
-            "INSERT INTO session_analytics (session_id, project_path, session_date) "
-            "VALUES ('known-id', '/test', '2026-03-02')")
+            "INSERT INTO session_analytics (session_id, project_id, project_path, session_date) "
+            "VALUES ('known-id', 'vnx-dev', '/test', '2026-03-02')")
         conn.commit()
 
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
@@ -665,6 +669,7 @@ class TestModelExtraction:
 
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
         analyzer.conn = conn
+        analyzer.db_path = Path(tempfile.mktemp(suffix=".db"))
 
         metrics = SessionMetrics(
             session_id="model-test-001",
@@ -674,7 +679,8 @@ class TestModelExtraction:
             session_model="claude-opus",
         )
         flags = SessionFlags(primary_activity="coding")
-        analyzer._store_session(metrics, flags, None)
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
 
         cur = conn.cursor()
         cur.execute("SELECT session_model FROM session_analytics WHERE session_id = 'model-test-001'")
@@ -697,23 +703,23 @@ class TestSessionBrief:
 
         today = datetime.now().strftime("%Y-%m-%d")
         sessions = [
-            ("s1", "/test", "T1", today, 5000, 2000, 100, 900, 10, "coding", 0, "claude-opus", 25.0),
-            ("s2", "/test", "T1", today, 6000, 3000, 200, 1800, 15, "refactoring", 0, "claude-opus", 30.0),
-            ("s3", "/test", "T2", today, 3000, 1500, 50, 500, 8, "research", 1, "claude-sonnet", 15.0),
-            ("s4", "/test", "T1", today, 4000, 1800, 80, 700, 12, "coding", 0, "claude-opus", 20.0),
-            ("s5", "/test", "T2", today, 2500, 1000, 40, 400, 6, "research", 0, "claude-sonnet", 10.0),
-            ("s6", "/test", "T1", today, 7000, 4000, 150, 1200, 20, "coding", 1, "claude-opus", 35.0),
+            ("s1", "vnx-dev", "/test", "T1", today, 5000, 2000, 100, 900, 10, "coding", 0, "claude-opus", 25.0),
+            ("s2", "vnx-dev", "/test", "T1", today, 6000, 3000, 200, 1800, 15, "refactoring", 0, "claude-opus", 30.0),
+            ("s3", "vnx-dev", "/test", "T2", today, 3000, 1500, 50, 500, 8, "research", 1, "claude-sonnet", 15.0),
+            ("s4", "vnx-dev", "/test", "T1", today, 4000, 1800, 80, 700, 12, "coding", 0, "claude-opus", 20.0),
+            ("s5", "vnx-dev", "/test", "T2", today, 2500, 1000, 40, 400, 6, "research", 0, "claude-sonnet", 10.0),
+            ("s6", "vnx-dev", "/test", "T1", today, 7000, 4000, 150, 1200, 20, "coding", 1, "claude-opus", 35.0),
         ]
 
         for s in sessions:
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     total_input_tokens, total_output_tokens,
                     cache_creation_tokens, cache_read_tokens,
                     tool_calls_total, primary_activity,
                     has_error_recovery, session_model, duration_minutes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, s)
         conn.commit()
         return conn
@@ -741,9 +747,9 @@ class TestSessionBrief:
         for i, has_err in enumerate([1, 1, 0]):
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     primary_activity, has_error_recovery, session_model
-                ) VALUES (?, '/test', 'T2', ?, 'coding', ?, 'claude-sonnet')
+                ) VALUES (?, 'vnx-dev', '/test', 'T2', ?, 'coding', ?, 'claude-sonnet')
             """, (f"err-test-{i}", today, has_err))
         conn.commit()
 
@@ -815,20 +821,20 @@ class TestSuggestedEdits:
         for i in range(6):
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     total_output_tokens, cache_read_tokens, cache_creation_tokens,
                     primary_activity, has_error_recovery, session_model
-                ) VALUES (?, '/test', 'T1', ?, 50000, 900, 100, 'coding', ?, 'claude-opus')
+                ) VALUES (?, 'vnx-dev', '/test', 'T1', ?, 50000, 900, 100, 'coding', ?, 'claude-opus')
             """, (f"opus-{i}", today, 1 if i == 0 else 0))
 
         # 5 sonnet coding sessions (2 success, 3 error)
         for i in range(5):
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     total_output_tokens, cache_read_tokens, cache_creation_tokens,
                     primary_activity, has_error_recovery, session_model
-                ) VALUES (?, '/test', 'T2', ?, 30000, 400, 100, 'coding', ?, 'claude-sonnet')
+                ) VALUES (?, 'vnx-dev', '/test', 'T2', ?, 30000, 400, 100, 'coding', ?, 'claude-sonnet')
             """, (f"sonnet-{i}", today, 0 if i < 2 else 1))
         conn.commit()
 
@@ -1147,6 +1153,248 @@ class TestBridgeSessionToIntelligence:
 
         count = analyzer.conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Atomicity: session_analytics + intelligence bridge in one transaction
+# ---------------------------------------------------------------------------
+
+class TestAtomicWrites:
+    """session_analytics and intelligence writes must be atomic."""
+
+    def test_session_stored_before_bridge(self):
+        """_store_session is called before bridge_session_to_intelligence.
+
+        The INSERT into session_analytics runs first. When the bridge fails
+        mid-write, the ABORT-level rollback undoes both writes — no orphan
+        session_analytics row remains. The bridge catches its own exceptions
+        internally and does not re-raise; the caller's commit() commits an
+        empty transaction.
+        """
+        analyzer = _make_analyzer_with_intel_db()
+
+        # Install a trigger that makes the first intelligence INSERT fail
+        # after session_analytics has already been written. This simulates
+        # the bridge failing mid-write.
+        analyzer.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS _test_force_bridge_fail
+            BEFORE INSERT ON success_patterns
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated bridge failure');
+            END
+        """)
+
+        metrics = SessionMetrics(
+            session_id="atomic-test-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags(has_test_cycle=True)
+
+        # Simulate the atomic write pattern from analyze_session.
+        # The bridge catches its own exception; no exception propagates.
+        # The ABORT inside the trigger rolls back the implicit transaction
+        # that includes the _store_session INSERT.
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+        analyzer.conn.commit()
+
+        # Verify: neither write landed — the ABORT rolled back everything.
+        sa_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM session_analytics WHERE session_id = 'atomic-test-001'"
+        ).fetchone()[0]
+        sp_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM success_patterns"
+        ).fetchone()[0]
+
+        assert sa_rows == 0, (
+            f"session_analytics has {sa_rows} row(s) — "
+            "INSERT survived the bridge-triggered ABORT"
+        )
+        assert sp_rows == 0, (
+            f"success_patterns has {sp_rows} row(s) — "
+            "bridge wrote despite trigger"
+        )
+
+    def test_no_orphan_intelligence_on_session_failure(self):
+        """When session_analytics INSERT fails, no intelligence rows are written.
+
+        The bridge is called AFTER _store_session. If _store_session raises,
+        the bridge code is never reached at all — structural atomicity without
+        needing a transaction rollback.
+        """
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(
+            session_id="orphan-test-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags(has_test_cycle=True)
+
+        # Drop the session_analytics table to force _store_session to fail.
+        analyzer.conn.execute("DROP TABLE IF EXISTS session_analytics")
+
+        store_failed = False
+        try:
+            with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+                analyzer._store_session(metrics, flags, None)
+            analyzer.bridge_session_to_intelligence(metrics, flags)
+            analyzer.conn.commit()
+        except Exception:
+            store_failed = True
+            try:
+                analyzer.conn.rollback()
+            except Exception:  # vnx-silent-except: in-memory sqlite3 rollback() cannot itself
+                # raise here (no broken-connection scenario is under test); kept only for
+                # structural parity with the production atomic-write pattern this test exercises.
+                pass
+
+        assert store_failed is True, "Expected _store_session to fail"
+
+        # Recreate session_analytics to query intelligence tables (which share
+        # the same in-memory DB but were never reached).
+        _create_schema(analyzer.conn)
+        _create_intelligence_schema(analyzer.conn)
+
+        sp_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM success_patterns"
+        ).fetchone()[0]
+        ap_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM antipatterns"
+        ).fetchone()[0]
+
+        assert sp_rows == 0, (
+            f"success_patterns has {sp_rows} orphan row(s) — "
+            "bridge ran despite _store_session failure"
+        )
+        assert ap_rows == 0, (
+            f"antipatterns has {ap_rows} orphan row(s) — "
+            "bridge ran despite _store_session failure"
+        )
+
+    def test_project_id_populated_on_insert(self):
+        """New rows carry the resolved project_id when a tenant is configured.
+
+        The analyzer's db_path here is a bare tempfile (no .vnx-data/<pid>/state
+        layout, no .vnx-project-id marker), so VNX_PROJECT_ID env is the only
+        available tenant source.
+        """
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(
+            session_id="pid-test-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags()
+
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
+            analyzer.conn.commit()
+
+        row = analyzer.conn.execute(
+            "SELECT project_id FROM session_analytics WHERE session_id = 'pid-test-001'"
+        ).fetchone()
+        assert row is not None, "Row was not inserted"
+        pid = row[0]
+        assert pid is not None, "project_id is NULL"
+        assert pid != "", "project_id is empty string"
+        assert pid == "vnx-dev", f"Expected 'vnx-dev', got {pid!r}"
+
+    def test_resolve_project_id_raises_when_unresolvable(self):
+        """No default: an unresolvable tenant raises rather than stamping 'vnx-dev'.
+
+        ADR-007 rejects a hardcoded default as "a sentinel for legitimate
+        rows" — this analyzer runs against every VNX project (sales-copilot,
+        seocrawler-v2, mission-control, ...), so a guessed identity here would
+        let another tenant's sessions collide under the
+        UNIQUE (project_id, session_id) constraint.
+        """
+        from project_scope import TenantUnresolved
+
+        analyzer = _make_analyzer_with_intel_db()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_PROJECT_ID", None)
+            with pytest.raises(TenantUnresolved):
+                analyzer._resolve_project_id()
+
+    def test_store_session_raises_and_writes_nothing_when_tenant_unresolved(self):
+        """_store_session must not insert a row when project_id can't resolve."""
+        from project_scope import TenantUnresolved
+
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(
+            session_id="unresolved-tenant-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_PROJECT_ID", None)
+            with pytest.raises(TenantUnresolved):
+                analyzer._store_session(metrics, flags, None)
+
+        count = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM session_analytics "
+            "WHERE session_id = 'unresolved-tenant-001'"
+        ).fetchone()[0]
+        assert count == 0, "row was inserted despite an unresolved project_id"
+
+    def test_resolve_project_id_raises_when_project_scope_missing(self):
+        """A project_scope import failure must not degrade to a guessed default.
+
+        Simulates the module-level ``except ImportError`` path by clearing the
+        cached reference on the runner module — the call-time raise is the
+        deliberate choice (see _resolve_project_id docstring): other
+        ConversationAnalyzer entry points that never call this method (dry-run,
+        parsing-only) should not be broken by an unrelated import error.
+        """
+        import conversation_analyzer.runner as runner_module
+        from project_scope import TenantUnresolved
+
+        analyzer = _make_analyzer_with_intel_db()
+        original = runner_module.resolve_stamp_project_id
+        runner_module.resolve_stamp_project_id = None
+        try:
+            with pytest.raises(TenantUnresolved):
+                analyzer._resolve_project_id()
+        finally:
+            runner_module.resolve_stamp_project_id = original
+
+    def test_resolve_project_id_conflict_does_not_fall_back_to_env(self, tmp_path):
+        """A path/env conflict must raise, never silently resolve to env.
+
+        Regression test for the fix-forward on PR #1248: _resolve_project_id
+        used to retry a bare, env-only resolve_stamp_project_id() whenever the
+        db_path-anchored call raised TenantUnresolved — including when that
+        raise came from a genuine SOURCE CONFLICT (db path says one tenant,
+        VNX_PROJECT_ID says another), not just "no source at all". That retry
+        silently returned the env value, papering over exactly the
+        cross-tenant contamination this guard exists to catch.
+        """
+        from project_scope import TenantUnresolved
+
+        db_dir = tmp_path / ".vnx-data" / "mission-control" / "state"
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / "quality_intelligence.db"
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _create_schema(conn)
+        _create_intelligence_schema(conn)
+
+        analyzer = ConversationAnalyzer(db_path)
+        analyzer.conn = conn
+
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            with pytest.raises(TenantUnresolved):
+                analyzer._resolve_project_id()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Optional
 from .models import (
     SessionMetrics, SessionFlags,
     LLM_STRATEGY, OLLAMA_MODEL,
+    AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
     log,
 )
@@ -21,6 +22,14 @@ class DeepAnalyzer:
     ANALYSIS_CATEGORIES = [
         "prompt", "hook", "template", "skill", "workflow", "architecture"
     ]
+
+    # Ollama availability probe: probed once per process, cached for the
+    # lifetime of the class. None = not probed yet, True/False = result.
+    _ollama_probed: Optional[bool] = None
+
+    # Claude-auto guard: set by the runner before processing sessions to
+    # inform the billing guard of the backlog size.
+    _session_backlog: int = 0
 
     SYSTEM_PROMPT = """You are a VNX orchestration system analyst. Analyze this Claude Code session summary and extract actionable improvement suggestions.
 
@@ -68,8 +77,21 @@ Respond with valid JSON:
 
         result_text = None
 
-        if LLM_STRATEGY in ("auto", "claude-only"):
+        # Billing guard: in "auto" mode, refuse the claude path when the
+        # session backlog exceeds the threshold. "claude-only" bypasses
+        # the guard — the operator explicitly opted in to metered spend.
+        if LLM_STRATEGY == "claude-only":
             result_text = self._try_claude_max(prompt)
+        elif LLM_STRATEGY == "auto":
+            if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
+                result_text = self._try_claude_max(prompt)
+            else:
+                if self._session_backlog > 0:
+                    log("WARNING",
+                        f"auto: skipping claude path — {self._session_backlog} "
+                        f"session backlog exceeds AUTO_CLAUSE_MAX_SESSIONS "
+                        f"({AUTO_CLAUSE_MAX_SESSIONS}). "
+                        f"Use VNX_ANALYZER_LLM=claude-only to override.")
 
         if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
             result_text = self._try_ollama(prompt)
@@ -79,6 +101,61 @@ Respond with valid JSON:
             return None
 
         return self._parse_response(result_text)
+
+    @classmethod
+    def set_session_backlog(cls, count: int):
+        """Inform the billing guard of the unanalyzed session count.
+
+        Called by the runner before processing begins. When LLM_STRATEGY is
+        "auto" and the count exceeds AUTO_CLAUSE_MAX_SESSIONS, the claude
+        path is refused to prevent metered-spend landmines.
+        """
+        cls._session_backlog = count
+
+    @classmethod
+    def _probe_ollama(cls) -> bool:
+        """Probe whether Ollama is available with a usable model.
+
+        Issues one GET /api/tags with a 3s timeout. Result is cached for the
+        process lifetime — this runs at most once, regardless of session count.
+        Returns False when the server is unreachable, has no models, or the
+        configured OLLAMA_MODEL is absent.
+        """
+        if cls._ollama_probed is not None:
+            return cls._ollama_probed
+
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "http://localhost:11434/api/tags",
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                models = body.get("models", [])
+                if not models:
+                    log("WARNING", "Ollama server reachable but has zero models installed; "
+                                   "deep analysis will be skipped for this run")
+                    cls._ollama_probed = False
+                    return False
+                model_names = {m.get("name", "") for m in models}
+                if OLLAMA_MODEL not in model_names:
+                    log("WARNING",
+                        f"Ollama model '{OLLAMA_MODEL}' not found in installed models "
+                        f"({', '.join(sorted(model_names)[:5])}"
+                        f"{'...' if len(model_names) > 5 else ''}); "
+                        f"deep analysis will be skipped for this run")
+                    cls._ollama_probed = False
+                    return False
+                log("INFO", f"Ollama probe OK: model '{OLLAMA_MODEL}' available "
+                            f"({len(models)} model(s) installed)")
+                cls._ollama_probed = True
+                return True
+        except Exception as e:
+            log("WARNING", f"Ollama probe failed ({e}); "
+                           f"deep analysis will be skipped for this run")
+            cls._ollama_probed = False
+            return False
 
     def _build_session_summary(self, jsonl_path: Path,
                                metrics: SessionMetrics,
@@ -152,8 +229,10 @@ Respond with valid JSON:
             log("WARNING", f"Claude CLI error: {e}")
             return None
 
-    @staticmethod
-    def _try_ollama(prompt: str) -> Optional[str]:
+    @classmethod
+    def _try_ollama(cls, prompt: str) -> Optional[str]:
+        if not cls._probe_ollama():
+            return None
         try:
             import urllib.request
             payload = json.dumps({
