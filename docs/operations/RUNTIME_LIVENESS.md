@@ -149,19 +149,85 @@ The script resolves its own root as `$SCRIPT_DIR/../../../..` (four `cd ..` from
 
 **What it is / full doc**: four hooks registered under `SessionStart` in `.claude/settings.json`. No single doc narrates all four; this is the first place they're inventoried together.
 
-**Check command**:
+**Check command** — every command whose output appears in Measured below, in the order run, from this dispatch's worktree (`$VNX_TMUX_SIGNAL_DIR` resolved to its concrete value first):
 ```bash
+echo "=== 0. Hook wiring ==="
 cat .claude/settings.json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['hooks']['SessionStart'], indent=2))"
+
+echo "=== 1. session_reconcile_autoclose.sh guard + evidence ==="
+grep -n 'VNX_DISPATCH_ID' scripts/hooks/session_reconcile_autoclose.sh
+tail -3 /Users/vincentvandeth/Development/vnx-orchestration/.vnx-data/logs/objective_reconcile.log
+ls -la .vnx-data/logs/objective_reconcile.log 2>&1
+
+echo "=== 2. build_t0_state.py evidence (both artifacts) ==="
+ls -la .vnx-data/state/t0_state.json 2>&1
+ls -la .vnx-data/logs/build_t0_state.err 2>&1
+
+echo "=== 3. tmux_signal_session_ready.sh — resolved signal dir + contents ==="
+echo "VNX_TMUX_SIGNAL_DIR=$VNX_TMUX_SIGNAL_DIR"
+ls -la "$VNX_TMUX_SIGNAL_DIR"
+cat "$VNX_TMUX_SIGNAL_DIR/session_ready"
+cat "$VNX_TMUX_SIGNAL_DIR/session_id"
+
+echo "=== 4. hooks/sessionstart.sh — evidence-writing search ==="
+grep -n '>>\|tee\|mkdir\|\.log' hooks/sessionstart.sh
+echo "exit: $?"
 ```
 
-**Measured 2026-07-30** — which of the four leave evidence they ran, checked against *this session* (a tmux-spawn worker dispatch, `VNX_DISPATCH_ID=20260730-docs-liveness` set):
+**Measured 2026-07-30**, run verbatim from this dispatch's worktree (a tmux-spawn worker dispatch, `VNX_DISPATCH_ID=20260730-docs-sessionstart-entry`, `VNX_TMUX_SIGNAL_DIR=/var/folders/q5/n9hzhbvx3zv05t09g426yblh0000gn/T/vnx-tmux-sig-y255ufix`):
+```
+=== 0. Hook wiring ===
+[
+  {
+    "matcher": "",
+    "hooks": [{"type": "command", "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/session_reconcile_autoclose.sh\"'", "timeout": 5000}]
+  },
+  {
+    "matcher": "terminals/T0",
+    "hooks": [{"type": "command", "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); mkdir -p \"$ROOT/.vnx-data/logs\" 2>/dev/null; python3 \"$ROOT/scripts/build_t0_state.py\" --output \"$ROOT/.vnx-data/state/t0_state.json\" 2>\"$ROOT/.vnx-data/logs/build_t0_state.err\"; exit 0'"}]
+  },
+  {
+    "matcher": "",
+    "hooks": [{"type": "command", "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_session_ready.sh\"'", "timeout": 5000}]
+  },
+  {
+    "matcher": "",
+    "hooks": [{"type": "command", "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/hooks/sessionstart.sh\"'", "timeout": 5000}]
+  }
+]
+=== 1. session_reconcile_autoclose.sh guard + evidence ===
+24:# Scoped to the interactive session: fires ONLY when VNX_DISPATCH_ID is UNSET.
+25:# A tmux-spawn worker (VNX_DISPATCH_ID set) drains stdin and exits 0 — no-op.
+33:if [ -n "${VNX_DISPATCH_ID:-}" ]; then
+
+[2026-07-30T15:51:36Z] session-reconcile tick: mode=apply streak_met=no
+[2026-07-30T16:11:11Z] session-reconcile tick: mode=apply streak_met=no
+ls: .vnx-data/logs/objective_reconcile.log: No such file or directory
+=== 2. build_t0_state.py evidence (both artifacts) ===
+ls: .vnx-data/state/t0_state.json: No such file or directory
+ls: .vnx-data/logs/build_t0_state.err: No such file or directory
+=== 3. tmux_signal_session_ready.sh — resolved signal dir + contents ===
+VNX_TMUX_SIGNAL_DIR=/var/folders/q5/n9hzhbvx3zv05t09g426yblh0000gn/T/vnx-tmux-sig-y255ufix
+total 32
+drwx------@    6 vincentvandeth  staff    192 Jul 30 18:13 .
+drwx------@ 1144 vincentvandeth  staff  36608 Jul 30 18:13 ..
+-rw-r--r--@    1 vincentvandeth  staff     33 Jul 30 18:13 prompt_received
+-rw-r--r--@    1 vincentvandeth  staff     37 Jul 30 18:12 session_id
+-rw-r--r--@    1 vincentvandeth  staff     33 Jul 30 18:12 session_ready
+-rw-r--r--@    1 vincentvandeth  staff    770 Jul 30 18:14 toolcalls.ndjson
+20260730-docs-sessionstart-entry
+0a763e2c-5f04-4099-97f1-d63dd69b5110
+=== 4. hooks/sessionstart.sh — evidence-writing search ===
+exit: 1
+```
+(`grep` prints nothing and exits 1 when it finds zero matches — that exit code, not empty output alone, is the confirmation.)
 
 | # | Hook | Fires when | Evidence it left | Verdict |
 |---|---|---|---|---|
-| 1 | `scripts/hooks/session_reconcile_autoclose.sh` | `VNX_DISPATCH_ID` **unset** (interactive/operator session only) | `.vnx-data/logs/objective_reconcile.log` — **repo-root-relative**, so per-checkout, not central. In the main checkout: `tail -3` shows `[2026-07-30T13:50:23Z] session-reconcile tick: mode=apply streak_met=no`, file mtime 15:50 today. In *this* worktree: no-op by design (`VNX_DISPATCH_ID` is set), file absent. | Runs for interactive sessions; **no-op by design** for worker dispatches (explicit guard in the script, not a bug). |
-| 2 | `scripts/build_t0_state.py` (matcher: `terminals/T0`) | cwd matches `terminals/T0` | Would write `.vnx-data/state/t0_state.json` + `.vnx-data/logs/build_t0_state.err`. This session's cwd is a worktree, not `terminals/T0`, so it never fired here — `ls .vnx-data/state/t0_state.json` → not found in this worktree. | Matcher-scoped by design; not evaluated for a real T0 session in this pass. |
-| 3 | `scripts/hooks/tmux_signal_session_ready.sh` | `VNX_TMUX_SIGNAL_DIR` **and** `VNX_DISPATCH_ID` both set (tmux-spawn workers) | Confirmed fired for this exact session: `$VNX_TMUX_SIGNAL_DIR/session_ready` contains `20260730-docs-liveness`, `session_id` file present, both timestamped 15:50 today. | **Fired and left verifiable evidence**, self-confirmed in this run. |
-| 4 | `hooks/sessionstart.sh` | always (matcher `""`) | Pure read-and-print (builds a context banner from existing state files) — no `>`, `tee`, `mkdir`, or log write anywhere in the script (`grep -n '>>\|tee\|mkdir\|\.log' hooks/sessionstart.sh` → no matches). | Runs every session, but **leaves no persisted evidence** — the only way to confirm it ran is to have seen its banner in that session's own transcript. |
+| 1 | `scripts/hooks/session_reconcile_autoclose.sh` | `VNX_DISPATCH_ID` **unset** (interactive/operator session only) — guard at line 33 of the script, quoted above | `.vnx-data/logs/objective_reconcile.log` — **repo-root-relative**, so per-checkout, not central. Main checkout: `tail -3` shows two ticks, latest `16:11:11Z` today. This worktree: file absent (`ls` → "No such file or directory") because `VNX_DISPATCH_ID` is set here, matching the guard exactly. | Runs for interactive sessions; **no-op by design** for worker dispatches — confirmed against the script's own guard, not inferred. |
+| 2 | `scripts/build_t0_state.py` (matcher: `terminals/T0`) | cwd matches `terminals/T0` | Neither of the two artifacts it can leave exists in this worktree: `.vnx-data/state/t0_state.json` absent, and — per the hook command's own `2>"$ROOT/.vnx-data/logs/build_t0_state.err"` redirect — `.vnx-data/logs/build_t0_state.err` absent too, meaning the hook body never ran here (the matcher never fired), not merely that it ran cleanly. | Matcher-scoped by design; not evaluated for a real T0 session in this pass. |
+| 3 | `scripts/hooks/tmux_signal_session_ready.sh` | `VNX_TMUX_SIGNAL_DIR` **and** `VNX_DISPATCH_ID` both set (tmux-spawn workers) | Confirmed fired for this exact session: `$VNX_TMUX_SIGNAL_DIR/session_ready` (resolved above to `/var/folders/q5/n9hzhbvx3zv05t09g426yblh0000gn/T/vnx-tmux-sig-y255ufix/session_ready`) contains `20260730-docs-sessionstart-entry`, matching `VNX_DISPATCH_ID`; `session_id` present alongside it; both mtime 18:12 today. | **Fired and left verifiable evidence**, self-confirmed in this run. |
+| 4 | `hooks/sessionstart.sh` | always (matcher `""`) | Pure read-and-print (builds a context banner from existing state files) — `grep -n '>>\|tee\|mkdir\|\.log' hooks/sessionstart.sh` matches nothing and exits 1, confirming no `>`, `tee`, `mkdir`, or `.log` write anywhere in the script. | Runs every session, but **leaves no persisted evidence anywhere on disk**. Its liveness is not measurable from outside a session — the only way to confirm it ran is to have seen its banner in that session's own transcript, which is not a re-runnable check. Say so plainly rather than implying a check exists: for this one hook, there is nothing left to `ls`, `cat`, or `grep` after the fact. |
 
 **Verdict: all four are wired up; none are broken.** The variation is by design (context-scoped matchers/guards, not defects) — but #4 is structurally unverifiable after the fact, which is itself worth knowing before trusting "it always runs."
 
