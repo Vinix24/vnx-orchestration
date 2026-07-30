@@ -41,7 +41,7 @@ if _LIB_DIR not in sys.path:
 
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dispatch_flags import single_entry_enabled  # noqa: E402
-from dispatch_spec import _ID_RE, Provider  # noqa: E402
+from dispatch_spec import _ID_RE, Gate, Provider  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -85,6 +85,28 @@ def _canonical_provider(raw: Optional[str]) -> Provider:
     key = (raw or "").strip().lower()
     canonical = _PROVIDER_ALIASES.get(key, key)
     return Provider(canonical)
+
+
+def _canonical_gate(raw: Optional[str]) -> str:
+    """Validate a gate name against the closed ``Gate`` enum (OI-845).
+
+    An empty/blank value means "no gate assigned" and passes through as ``""`` —
+    the same "unset" convention ``stage_spec_bundle`` already uses for ``gate``.
+    Any non-empty value that is not a legal gate name raises ValueError naming
+    the invalid value and listing the valid ones, instead of silently writing
+    an unenforceable gate into the spec (a dispatch staged with ``gate="codex"``
+    previously wrote that string through unchecked and the gate simply never ran).
+    """
+    key = (raw or "").strip()
+    if not key:
+        return ""
+    try:
+        return Gate(key).value
+    except ValueError:
+        valid = ", ".join(sorted(g.value for g in Gate))
+        raise ValueError(
+            f"gate {key!r} is not a recognized gate name; valid gates are: {valid}"
+        ) from None
 
 
 def _data_dir(project_id: "Optional[str]" = None) -> Path:
@@ -184,7 +206,7 @@ def stage_spec_bundle(
         "instruction_file": str(instruction_file.resolve()),
         "role": role or "backend-developer",
         "target_slot": target_slot,
-        "gate": gate or "",
+        "gate": _canonical_gate(gate),
         "dispatch_paths": [
             {
                 "path": str(PurePosixPath(str(p["path"]))),

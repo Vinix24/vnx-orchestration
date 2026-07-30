@@ -408,6 +408,53 @@ def test_acquire_reraises_unexpected_oserror(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# test_holder_metadata_cleared_on_release (OI-844)
+# ---------------------------------------------------------------------------
+
+def test_holder_metadata_cleared_on_normal_release(tmp_path, monkeypatch):
+    """After a normal (no-exception) release, the slot lock file no longer
+    carries the released holder's pid/dispatch_id — it reads as unheld to
+    force_release() and any diagnostic reader, not as still-OCCUPIED."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+
+    with serialize_lane("claude-tmux", dispatch_id="metadata-clear-test"):
+        pass  # acquire then release normally
+
+    lock_file = tmp_path / "locks" / "claude-tmux-slot-0.lock"
+    assert lock_file.exists(), "lock file should still exist after release (only flock releases)"
+    content = lock_file.read_bytes()
+    assert content == b"", f"holder metadata not cleared on release: {content!r}"
+
+
+def test_holder_metadata_cleared_on_exception_release(tmp_path, monkeypatch):
+    """The error release path also clears holder metadata — not just the happy path."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+
+    with pytest.raises(RuntimeError, match="intentional test error"):
+        with serialize_lane("claude-tmux", dispatch_id="metadata-clear-exc-test"):
+            raise RuntimeError("intentional test error")
+
+    lock_file = tmp_path / "locks" / "claude-tmux-slot-0.lock"
+    content = lock_file.read_bytes()
+    assert content == b"", f"holder metadata not cleared on exception release: {content!r}"
+
+
+def test_force_release_after_clean_release_shows_no_prior_holder(tmp_path, monkeypatch, capsys):
+    """A released (metadata-cleared) slot must not still report the prior
+    holder's dispatch_id/pid to force_release — the measured bug this fix closes."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+
+    with serialize_lane("claude-tmux", dispatch_id="should-not-leak"):
+        pass
+
+    force_release("claude-tmux")
+    captured = capsys.readouterr()
+    assert "should-not-leak" not in captured.out, (
+        "force_release still reported a dispatch_id from a released slot"
+    )
+
+
+# ---------------------------------------------------------------------------
 # test_iso_now_is_timezone_aware
 # ---------------------------------------------------------------------------
 

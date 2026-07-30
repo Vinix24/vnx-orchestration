@@ -39,7 +39,11 @@ from pre_merge_gate import (
     CQS_THRESHOLD,
     DELETION_FILE_WARN,
     DELETION_FILE_HOLD,
+    PR_SIZE_WARN,
+    PR_SIZE_HOLD,
 )
+
+VNX_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +74,25 @@ def project_root(tmp_path):
     root.mkdir()
     (root / "tests").mkdir()
     return root
+
+
+def _stub_pr_size_go(monkeypatch):
+    """Stub check_pr_size to a fixed GO result.
+
+    check_pr_size now resolves a real git merge-base (OI-838); tests in this
+    module that exercise run_gate_checks orchestration/wiring (not PR-size
+    logic itself) use a bare non-git tmp_path project_root, so the real
+    implementation would correctly HOLD with "could not resolve a merge-base"
+    — noise for tests that aren't about PR size. See TestCheckPRSize for the
+    real git-backed coverage.
+    """
+    monkeypatch.setattr(
+        pre_merge_gate, "check_pr_size",
+        lambda project_root, **kw: {
+            "check": "pr_size", "status": "GO", "detail": "stubbed for this test",
+            "lines_added": 0, "lines_removed": 0, "lines_changed": 0,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +563,7 @@ class TestFabricFindingWiring:
     def test_go_resolves_finding_when_dispatch_resolved(
         self, state_dir, dispatch_dir, tmp_path, monkeypatch
     ):
+        _stub_pr_size_go(monkeypatch)
         (dispatch_dir / "active" / "d.md").write_text(
             "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-go\n"
         )
@@ -580,6 +604,7 @@ class TestFabricFindingWiring:
     ):
         """Defense in depth: even if the (already best-effort) bridge itself regressed and
         raised, run_gate_checks must still return its verdict rather than crash."""
+        _stub_pr_size_go(monkeypatch)
         (dispatch_dir / "active" / "d.md").write_text(
             "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-boom\n"
         )
@@ -601,8 +626,9 @@ class TestFabricFindingWiring:
 
 class TestRunGateChecks:
 
-    def test_all_go_verdict(self, state_dir, dispatch_dir, tmp_path):
+    def test_all_go_verdict(self, state_dir, dispatch_dir, tmp_path, monkeypatch):
         """When all checks pass, verdict is GO."""
+        _stub_pr_size_go(monkeypatch)
         result = run_gate_checks(
             pr_id="PR-6",
             project_root=tmp_path,
@@ -727,3 +753,73 @@ class TestStorageAndFormat:
         output = format_human_readable(result)
         assert "HOLD" in output
         assert "open_items" in output
+
+
+# ---------------------------------------------------------------------------
+# check_pr_size (OI-838): must measure the merge-base range, never the
+# working tree or an unrelated later commit on the base branch.
+# ---------------------------------------------------------------------------
+
+class TestCheckPRSize:
+    def test_reports_lines_matching_real_merged_pr(self):
+        """Regression pin for OI-838: measured against its own merge-base, the
+        reported count for a known merged PR (#1246) matches
+        `gh pr view 1246 --json additions,deletions` (110 additions, 0
+        deletions) — verified via `gh` against this exact commit pair.
+        """
+        result = check_pr_size(VNX_ROOT, base_ref="9e0813e2", head_ref="5ab8fe8c")
+        assert result["status"] == "GO"
+        assert result["lines_added"] == 110
+        assert result["lines_removed"] == 0
+        assert result["lines_changed"] == 110
+
+    def test_unresolvable_base_fails_loud_not_silent_go(self, tmp_path):
+        """No base branch resolvable locally -> HOLD with a clear reason, never a
+        silent GO carrying a wrong (working-tree-derived) line count."""
+        unresolvable = MagicMock(returncode=128, stdout="", stderr="fatal: bad revision")
+        with patch("pre_merge_gate.subprocess.run", return_value=unresolvable):
+            result = check_pr_size(tmp_path)
+        assert result["status"] == "HOLD"
+        assert result["lines_changed"] is None
+        assert "merge-base" in result["detail"]
+
+    def test_diff_failure_after_resolved_base_fails_loud(self, tmp_path):
+        """merge-base resolves but the numstat diff itself fails -> HOLD, not a
+        silently wrong number."""
+        merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
+        diff_fail = MagicMock(returncode=128, stdout="", stderr="fatal: bad object")
+        with patch("pre_merge_gate.subprocess.run", side_effect=[merge_base_ok, diff_fail]):
+            result = check_pr_size(tmp_path, base_ref="origin/main")
+        assert result["status"] == "HOLD"
+        assert result["lines_changed"] is None
+
+    def test_threshold_hold_uses_merge_base_range(self, tmp_path):
+        merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
+        big_diff = MagicMock(returncode=0, stdout=f"{PR_SIZE_HOLD + 1}\t0\tfile.py\n")
+        with patch("pre_merge_gate.subprocess.run", side_effect=[merge_base_ok, big_diff]):
+            result = check_pr_size(tmp_path, base_ref="origin/main")
+        assert result["status"] == "HOLD"
+        assert result["lines_changed"] == PR_SIZE_HOLD + 1
+
+    def test_small_diff_is_go(self, tmp_path):
+        merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
+        small_diff = MagicMock(returncode=0, stdout="5\t2\tfile.py\n")
+        with patch("pre_merge_gate.subprocess.run", side_effect=[merge_base_ok, small_diff]):
+            result = check_pr_size(tmp_path, base_ref="origin/main")
+        assert result["status"] == "GO"
+        assert result["lines_changed"] == 7
+
+    def test_falls_back_from_origin_main_to_origin_master(self, tmp_path):
+        """When origin/main isn't resolvable but origin/master is, the master
+        merge-base is used instead of failing."""
+        main_unresolvable = MagicMock(returncode=128, stdout="", stderr="unknown revision")
+        master_ok = MagicMock(returncode=0, stdout="def5678\n")
+        diff_ok = MagicMock(returncode=0, stdout="3\t1\tfile.py\n")
+        with patch(
+            "pre_merge_gate.subprocess.run",
+            side_effect=[main_unresolvable, master_ok, diff_ok],
+        ):
+            result = check_pr_size(tmp_path)
+        assert result["status"] == "GO"
+        assert result["lines_changed"] == 4
+        assert "origin/master" in result["detail"]

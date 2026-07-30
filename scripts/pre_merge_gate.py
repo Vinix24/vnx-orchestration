@@ -380,70 +380,129 @@ def check_quality_advisory(project_root: Path) -> Dict[str, Any]:
     }
 
 
-def check_pr_size(project_root: Path) -> Dict[str, Any]:
-    """Check PR diff size (lines added + removed)."""
+_PR_SIZE_BASE_CANDIDATES = ("origin/main", "origin/master")
+
+
+def _resolve_merge_base(project_root: Path, base_ref: str, head_ref: str) -> Optional[str]:
+    """Return the merge-base commit of base_ref and head_ref, or None if base_ref
+    is not resolvable locally (not fetched, unknown ref, etc.)."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--stat", "HEAD~1", "HEAD"],
+            ["git", "merge-base", base_ref, head_ref],
             cwd=str(project_root),
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return {
-                "check": "pr_size",
-                "status": "GO",
-                "detail": "could not compute diff stat",
-                "lines_changed": None,
-            }
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
 
-        # Parse numstat for precise line counts
-        numstat = subprocess.run(
-            ["git", "diff", "--numstat", "HEAD~1", "HEAD"],
+
+def _diff_numstat_totals(project_root: Path, base_ref: str, head_ref: str) -> Optional[tuple]:
+    """Return (lines_added, lines_removed) for base_ref..head_ref, or None on git failure."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--numstat", base_ref, head_ref],
             cwd=str(project_root),
             capture_output=True,
             text=True,
             timeout=10,
         )
-        total_added = 0
-        total_removed = 0
-        for line in numstat.stdout.strip().splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                try:
-                    total_added += int(parts[0])
-                    total_removed += int(parts[1])
-                except ValueError:
-                    pass  # binary files show "-"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    total_added = 0
+    total_removed = 0
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            try:
+                total_added += int(parts[0])
+                total_removed += int(parts[1])
+            except ValueError:
+                pass  # binary files show "-"
+    return total_added, total_removed
 
-        total = total_added + total_removed
 
-        if total > PR_SIZE_HOLD:
-            status = "HOLD"
-            detail = f"{total} lines changed (>{PR_SIZE_HOLD} hold threshold)"
-        elif total > PR_SIZE_WARN:
-            status = "GO"
-            detail = f"{total} lines changed (>{PR_SIZE_WARN} — large but not blocking)"
-        else:
-            status = "GO"
-            detail = f"{total} lines changed"
+def check_pr_size(
+    project_root: Path,
+    *,
+    base_ref: Optional[str] = None,
+    head_ref: str = "HEAD",
+) -> Dict[str, Any]:
+    """Check PR diff size (lines added + removed) against the merge-base with the base branch.
 
+    Measures merge_base(base_branch, head_ref)..head_ref — the range the PR actually
+    represents — never the working tree and never an unrelated commit that landed on
+    the base branch after this branch diverged (e.g. FEATURE_PLAN.md's background
+    regen noise). ``base_ref`` defaults to trying ``origin/main`` then
+    ``origin/master``; pass it explicitly to pin a specific base (e.g. in tests).
+
+    Fails loudly (status=HOLD, no line counts) when the merge-base cannot be
+    resolved, instead of silently falling back to a diff that produces a wrong
+    number.
+    """
+    candidates = (base_ref,) if base_ref else _PR_SIZE_BASE_CANDIDATES
+
+    resolved_base_ref = None
+    merge_base = None
+    for candidate in candidates:
+        merge_base = _resolve_merge_base(project_root, candidate, head_ref)
+        if merge_base is not None:
+            resolved_base_ref = candidate
+            break
+
+    if merge_base is None:
         return {
             "check": "pr_size",
-            "status": status,
-            "detail": detail,
-            "lines_added": total_added,
-            "lines_removed": total_removed,
-            "lines_changed": total,
-        }
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        return {
-            "check": "pr_size",
-            "status": "GO",
-            "detail": f"diff stat failed: {exc}",
+            "status": "HOLD",
+            "detail": (
+                f"could not resolve a merge-base for {head_ref!r}: none of "
+                f"{list(candidates)!r} are available locally — fetch the base "
+                "branch before running this gate"
+            ),
+            "lines_added": None,
+            "lines_removed": None,
             "lines_changed": None,
         }
+
+    totals = _diff_numstat_totals(project_root, merge_base, head_ref)
+    if totals is None:
+        return {
+            "check": "pr_size",
+            "status": "HOLD",
+            "detail": f"git diff --numstat {merge_base[:12]}..{head_ref} failed",
+            "lines_added": None,
+            "lines_removed": None,
+            "lines_changed": None,
+        }
+
+    total_added, total_removed = totals
+    total = total_added + total_removed
+
+    if total > PR_SIZE_HOLD:
+        status = "HOLD"
+        detail = f"{total} lines changed vs {resolved_base_ref} (>{PR_SIZE_HOLD} hold threshold)"
+    elif total > PR_SIZE_WARN:
+        status = "GO"
+        detail = f"{total} lines changed vs {resolved_base_ref} (>{PR_SIZE_WARN} — large but not blocking)"
+    else:
+        status = "GO"
+        detail = f"{total} lines changed vs {resolved_base_ref}"
+
+    return {
+        "check": "pr_size",
+        "status": status,
+        "detail": detail,
+        "lines_added": total_added,
+        "lines_removed": total_removed,
+        "lines_changed": total,
+    }
 
 
 def check_artifacts(

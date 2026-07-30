@@ -76,6 +76,37 @@ def test_stage_normalizes_legacy_provider_alias(tmp_path):
     assert payload["provider"] == "codex"
 
 
+# --- gate validation (OI-845): gate is a closed set, same pattern as provider ---
+
+def test_stage_rejects_unknown_gate_name(tmp_path):
+    # "codex" is not a real gate ("codex_gate" is) — this reproduced the incident:
+    # a dispatch staged with gate="codex" silently never ran any gate.
+    with pytest.raises(ValueError, match="codex"):
+        _stage(tmp_path, gate="codex")
+
+
+def test_stage_rejects_unknown_gate_lists_valid_names(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _stage(tmp_path, gate="not-a-real-gate")
+    message = str(excinfo.value)
+    for valid in ("gemini_review", "codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"):
+        assert valid in message
+
+
+@pytest.mark.parametrize(
+    "valid_gate",
+    ["gemini_review", "codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"],
+)
+def test_stage_accepts_every_canonical_gate_name(tmp_path, valid_gate):
+    payload = json.loads(_stage(tmp_path, gate=valid_gate).read_text(encoding="utf-8"))
+    assert payload["gate"] == valid_gate
+
+
+def test_stage_accepts_empty_gate_as_unset(tmp_path):
+    payload = json.loads(_stage(tmp_path, gate="").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
 # --- symlink escape: refused at WRITE time, not just read (defense-in-depth) ---
 
 def test_stage_refuses_symlinked_pending_root_escape(tmp_path):

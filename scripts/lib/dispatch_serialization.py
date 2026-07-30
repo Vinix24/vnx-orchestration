@@ -98,6 +98,19 @@ def _slot_glob_pattern(serialization_class: str) -> str:
     return f"{serialization_class}-slot-*.lock"
 
 
+def _clear_holder_metadata(fd: int) -> None:
+    """Clear the holder metadata written at acquire time (OI-844).
+
+    Called on every release path (normal and exception) before the flock is
+    released, so a freed slot reads as FREE — no pid/dispatch_id/timestamp —
+    to force_release() and any diagnostic reader, instead of still showing the
+    prior holder as OCCUPIED. Does not touch the lock itself: the flock is the
+    sole ownership mechanism and is released separately right after this call.
+    """
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+
+
 def _describe_holder(lock_path: Path) -> str:
     try:
         raw = lock_path.read_text(encoding="utf-8")
@@ -250,6 +263,7 @@ def serialize_lane(
         try:
             yield
         finally:
+            _clear_holder_metadata(fds[idx])
             fcntl.flock(fds[idx], fcntl.LOCK_UN)
     finally:
         for fd in fds:
