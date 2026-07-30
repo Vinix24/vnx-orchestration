@@ -10,7 +10,9 @@
 #       >  VNX_ADAPTER=subprocess  (env)  >  default: tmux
 #
 # All variables from bin/vnx (VNX_HOME, VNX_DATA_DIR, VNX_STATE_DIR,
-# VNX_DISPATCH_DIR, log, err) are available when this runs.
+# VNX_DISPATCH_DIR, VNX_PYTHON, log, err) are available when this runs.
+# Fallback keeps this file safe if ever sourced outside bin/vnx directly.
+VNX_PYTHON="${VNX_PYTHON:-python3}"
 
 # Single-source routing predicate (vnx_single_entry_enabled). Sourced RELATIVE to this file
 # (not VNX_HOME) so it resolves even under a test/stub VNX_HOME; the helper itself falls back
@@ -24,7 +26,7 @@ _d_parse_header() {
   # Parse [[TARGET:TX]], Role:, Gate:, Feature:, Adapter: from the dispatch file header.
   # Outputs: TERMINAL ROLE GATE FEATURE ADAPTER (tab-separated)
   local file="$1"
-  python3 -c "
+  "$VNX_PYTHON" -c "
 import re, sys
 
 path = '$file'
@@ -60,7 +62,7 @@ print(f'{target}\t{role}\t{gate}\t{feature}\t{adapter}')
 _d_check_terminal_idle() {
   # Returns 0 if terminal is idle (not leased), 1 otherwise.
   local terminal="$1"
-  python3 -c "
+  "$VNX_PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$VNX_HOME/scripts/lib')
 try:
@@ -81,7 +83,7 @@ _d_generate_dispatch_id() {
   # Generate a unique dispatch ID based on timestamp + slug + track.
   local slug="$1"
   local track="${2:-A}"
-  python3 -c "
+  "$VNX_PYTHON" -c "
 import sys
 sys.path.insert(0, '$VNX_HOME/scripts/lib')
 try:
@@ -241,7 +243,7 @@ HELP
     fi
     log "[dispatch] force-release-lock: class=$force_release_class"
     PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
-      python3 "$dispatch_cli_script" --force-release-lock "$force_release_class"
+      "$VNX_PYTHON" "$dispatch_cli_script" --force-release-lock "$force_release_class"
     return $?
   fi
 
@@ -279,7 +281,7 @@ HELP
 
   # P1-#7: no trailing colon (avoids CWD on sys.path when PYTHONPATH is unset)
   PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
+    "$VNX_PYTHON" "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
   return $?
 }
 
@@ -572,7 +574,7 @@ HELP
     # DEFAULT lane: subscription-preserving ephemeral tmux-spawn.
     # Leaseless — pass the resolved terminal as the worker label for audit parity.
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    python3 "$dispatch_script" \
+    "$VNX_PYTHON" "$dispatch_script" \
       --dispatch-id "$dispatch_id" \
       --instruction "$instruction" \
       --model "$model_override" \
@@ -584,7 +586,7 @@ HELP
     local _ar_flag=()
     [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    python3 "$dispatch_script" \
+    "$VNX_PYTHON" "$dispatch_script" \
       --terminal-id "$terminal" \
       --dispatch-id "$dispatch_id" \
       --instruction "$instruction" \
