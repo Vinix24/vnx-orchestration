@@ -158,6 +158,12 @@ mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
     fi
 
     # Streak is still computed + logged for observability (no longer gates the flip).
+    # PIPESTATUS[0] (captured immediately, before any other command can
+    # overwrite it) is vnx_run_bounded's own status — the `if pipeline; then`
+    # branch below only reflects the trailing python filter's exit code, which
+    # would silently swallow a deadline kill of the reconcile-streak call
+    # itself (PR #1247 finding 1: a kill must never read the same as a
+    # normal outcome).
     STREAK_MET="?"
     if vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
         "$PY" "$CLI" objective reconcile-streak "${PID_ARGS[@]}" --json 2>/dev/null \
@@ -168,6 +174,10 @@ sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null; then
     else
         STREAK_MET="no"
     fi
+    STREAK_RC="${PIPESTATUS[0]}"
+    if [ "$STREAK_RC" -eq "$VNX_RUN_BOUNDED_DEADLINE" ]; then
+        echo "[$STAMP] session-reconcile: reconcile-streak KILLED at ${DEADLINE_SECS}s deadline — streak measurement incomplete (logged as streak_met=$STREAK_MET, not a real observation)" >>"$LOG" 2>&1
+    fi
 
     echo "[$STAMP] session-reconcile tick: mode=$MODE streak_met=$STREAK_MET interpreter=$PY pid=$SELF_PID" >>"$LOG" 2>&1
 
@@ -177,6 +187,17 @@ sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null; then
     else
         vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
             "$PY" "$CLI" objective reconcile "${PID_ARGS[@]}" --repo-root "$ROOT" >>"$LOG" 2>&1
+    fi
+    RECONCILE_RC=$?
+
+    # The fact this hook exists (OI-851/852) is that "killed because it hung"
+    # and "ran and failed" are different governance facts and must not land
+    # the same way in the log — see vnx_run_bounded.sh's header for why 124
+    # unambiguously means "the deadline fired," never "reconcile chose 124."
+    if [ "$RECONCILE_RC" -eq "$VNX_RUN_BOUNDED_DEADLINE" ]; then
+        echo "[$STAMP] session-reconcile: reconcile KILLED at ${DEADLINE_SECS}s deadline (mode=$MODE) — was still running, not a normal failure" >>"$LOG" 2>&1
+    elif [ "$RECONCILE_RC" -ne 0 ]; then
+        echo "[$STAMP] session-reconcile: reconcile FAILED (mode=$MODE) exit=$RECONCILE_RC" >>"$LOG" 2>&1
     fi
 
     vnx_flock_release
