@@ -6,7 +6,6 @@ description: >
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: [Read, Grep, Glob, Bash]
-paths: ["claudedocs/**"]
 ---
 
 # Control Centre — multi-project T0 supervisor

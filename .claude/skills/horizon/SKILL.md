@@ -12,7 +12,6 @@ description: >
   via the backward-compat alias in `.claude/skills/pm/SKILL.md`.)
 user-invocable: true
 allowed-tools: [Read, Grep, Glob, Bash]
-paths: [".vnx-data/**", "claudedocs/**", "ROADMAP.yaml"]
 ---
 
 # Horizon — strategic future-state owner

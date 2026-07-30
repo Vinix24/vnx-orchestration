@@ -8,7 +8,6 @@ description: >
   (`vnx horizon`, alias `vnx objective`); the repo FEATURE_PLAN.md is a generated generic
   example, not the source.
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
-paths: ["FEATURE_PLAN.md", "claudedocs/**"]
 ---
 
 # Planning Specialist
