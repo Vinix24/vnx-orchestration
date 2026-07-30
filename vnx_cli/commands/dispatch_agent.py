@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """vnx dispatch-agent — dispatch a task to a named agent."""
 
+import json
 import shutil
 import sys
 import uuid
@@ -104,6 +105,44 @@ def _infer_provider_for_model(model: str) -> str:
         "(gemini*), or pass a provider name directly "
         "(claude/codex/gemini/kimi/glm-harness/deepseek-harness/local-gemma)."
     )
+
+
+def _read_classified_failure_reason(dispatch_id: str, project_id: str) -> "str | None":
+    """Look up the classified failure_reason for ``dispatch_id`` in t0_receipts.ndjson.
+
+    Every delivery lane (tmux, subprocess, headless) already writes a classified
+    ``failure_reason`` onto the terminal receipt when a dispatch fails
+    (``dispatch_govern.py``, ``subprocess_dispatch_internals/receipt_writer.py``) —
+    this reads that back instead of inventing a new taxonomy, so a quota
+    exhaustion, a missing binary, and a spawn timeout surface as the distinct
+    reasons they actually are (OI-844) rather than one generic paragraph.
+
+    Best-effort: returns None on any lookup failure (missing file, unreadable
+    line, no matching receipt) so a receipts-read hiccup never masks or replaces
+    the underlying dispatch failure.
+    """
+    try:
+        from dispatch_bridge import _data_dir  # type: ignore[import]  # noqa: PLC0415
+        from receipt_verdict import HARD_FAILURE_STATUSES  # type: ignore[import]  # noqa: PLC0415
+
+        receipts_file = _data_dir(project_id) / "state" / "t0_receipts.ndjson"
+        reason = None
+        with receipts_file.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("dispatch_id") != dispatch_id:
+                    continue
+                if rec.get("status") in HARD_FAILURE_STATUSES and rec.get("failure_reason"):
+                    reason = rec["failure_reason"]
+        return reason
+    except Exception:  # noqa: BLE001 — best-effort; a lookup hiccup must never mask the failure
+        return None
 
 
 def _resolve_agent_config(
@@ -310,11 +349,15 @@ def vnx_dispatch_agent(args) -> int:
     print(f"status      : {status}")
 
     if not success:
-        print(
-            "\nDispatch failed. A common cause is a missing or unauthenticated worker CLI. "
-            "Run `vnx doctor` to check worker CLIs,\nand see the dispatch log under "
-            ".vnx-data/ for the classified failure reason.",
-            file=sys.stderr,
-        )
+        classified_reason = _read_classified_failure_reason(dispatch_id, project_id)
+        if classified_reason:
+            print(f"\nDispatch failed: {classified_reason}", file=sys.stderr)
+        else:
+            print(
+                "\nDispatch failed. A common cause is a missing or unauthenticated worker CLI. "
+                "Run `vnx doctor` to check worker CLIs,\nand see the dispatch log under "
+                ".vnx-data/ for the classified failure reason.",
+                file=sys.stderr,
+            )
 
     return 0 if success else 1

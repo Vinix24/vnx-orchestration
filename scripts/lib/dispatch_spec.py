@@ -35,6 +35,21 @@ class Provider(str, Enum):
     LOCAL_GEMMA       = "local-gemma"
 
 
+class Gate(str, Enum):
+    """CLOSED set — the ONLY legal review-gate names (OI-845).
+
+    Mirrors the gate names ``gate_recorder.py``/``gate_request_handler.py`` already
+    dispatch on; this is the canonical enum they lacked. An empty string means
+    "no gate assigned" and is handled separately by callers — it is not a member
+    here so ``Gate("")`` fails the same as any other unknown value.
+    """
+    GEMINI_REVIEW           = "gemini_review"
+    CODEX_GATE              = "codex_gate"
+    CLAUDE_GITHUB_OPTIONAL  = "claude_github_optional"
+    CI_GATE                 = "ci_gate"
+    WIRING_GATE             = "wiring_gate"
+
+
 class Isolation(str, Enum):
     WORKTREE = "worktree"  # the ONLY legal value in 1.0 — every worker spawn is isolated, fail-loud
 

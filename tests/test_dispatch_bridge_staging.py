@@ -76,6 +76,71 @@ def test_stage_normalizes_legacy_provider_alias(tmp_path):
     assert payload["provider"] == "codex"
 
 
+# --- gate validation (OI-845): gate is a closed set, same pattern as provider ---
+
+def test_stage_rejects_unknown_gate_name(tmp_path):
+    # "codex" is not a real gate ("codex_gate" is) — this reproduced the incident:
+    # a dispatch staged with gate="codex" silently never ran any gate.
+    with pytest.raises(ValueError, match="codex"):
+        _stage(tmp_path, gate="codex")
+
+
+def test_stage_rejects_unknown_gate_lists_valid_names(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _stage(tmp_path, gate="not-a-real-gate")
+    message = str(excinfo.value)
+    for valid in ("gemini_review", "codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"):
+        assert valid in message
+
+
+@pytest.mark.parametrize(
+    "valid_gate",
+    ["gemini_review", "codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"],
+)
+def test_stage_accepts_every_canonical_gate_name(tmp_path, valid_gate):
+    payload = json.loads(_stage(tmp_path, gate=valid_gate).read_text(encoding="utf-8"))
+    assert payload["gate"] == valid_gate
+
+
+def test_stage_accepts_empty_gate_as_unset(tmp_path):
+    payload = json.loads(_stage(tmp_path, gate="").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
+def test_stage_normalizes_planning_sentinel_to_empty_gate(tmp_path):
+    # "planning" is the literal string dispatch_create.sh:365-367 stamps as its
+    # no-gate default ("V8: No gate specified, defaulting to 'planning'") — that
+    # value flows dispatch_lifecycle.sh -> runtime_core_cli.py -> dispatch_broker.py
+    # (persisted into bundle.json) -> pool_worker_runner.py -> the door. No gate
+    # runner has ever matched "planning"; it must stage as an empty (unset) gate,
+    # not raise, or every dispatch created without an explicit --gate would REJECT
+    # at the door.
+    payload = json.loads(_stage(tmp_path, gate="planning").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
+def test_stage_normalizes_planning_sentinel_case_and_whitespace_insensitive(tmp_path):
+    payload = json.loads(_stage(tmp_path, gate="  Planning  ").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
+@pytest.mark.parametrize("sentinel", sorted(dispatch_bridge._LEGACY_PHASE_SENTINELS))
+def test_stage_normalizes_every_legacy_phase_sentinel_to_empty_gate(tmp_path, sentinel):
+    # Every member of _LEGACY_PHASE_SENTINELS is a lifecycle PHASE name leaking into
+    # the gate field (see dispatch_bridge._LEGACY_PHASE_SENTINELS docstring for the
+    # producer of each), not a real review gate. "implementation" is
+    # pr_queue_manager.py's `pr.get('gate', 'implementation')` default (lines
+    # 870/997/1638) — same class of defect as "planning", different word.
+    payload = json.loads(_stage(tmp_path, gate=sentinel).read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
+@pytest.mark.parametrize("sentinel", sorted(dispatch_bridge._LEGACY_PHASE_SENTINELS))
+def test_stage_normalizes_every_legacy_phase_sentinel_case_and_whitespace_insensitive(tmp_path, sentinel):
+    payload = json.loads(_stage(tmp_path, gate=f"  {sentinel.upper()}  ").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
 # --- symlink escape: refused at WRITE time, not just read (defense-in-depth) ---
 
 def test_stage_refuses_symlinked_pending_root_escape(tmp_path):
