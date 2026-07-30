@@ -133,6 +133,44 @@ strip_tenant_marker() {
 }
 
 # ---------------------------------------------------------------------------
+# lock_version_dir / unlock_version_dir — read-only enforcement for pinned versions
+# ---------------------------------------------------------------------------
+# After a successful install, pinned version dirs (vX.Y.Z) are made read-only so
+# no worker or script can accidentally write into the shared immutable code tree.
+# ``edge`` is always writable (a living checkout).  Idempotent re-runs of
+# clone_version temporarily unlock, write, then re-lock.
+#
+# Failure to lock is treated as a loud error, never a silent skip — a dir left
+# writable can silently absorb worker writes with zero signal (no git diff, no
+# failing test until a clean checkout).
+lock_version_dir() {
+  local version_dir="$1"
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "  [dry-run] chmod -R a-w ${version_dir}"
+    return 0
+  fi
+  if [ "$(basename "$version_dir")" = "edge" ]; then
+    return 0
+  fi
+  chmod -R a-w "$version_dir" 2>/dev/null || {
+    echo "[install-central] [x] Failed to make version dir read-only: ${version_dir}" >&2
+    return 1
+  }
+}
+
+unlock_version_dir() {
+  local version_dir="$1"
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "  [dry-run] chmod -R u+w ${version_dir}"
+    return 0
+  fi
+  if [ "$(basename "$version_dir")" = "edge" ]; then
+    return 0
+  fi
+  chmod -R u+w "$version_dir" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
 # check_prereqs — fail-fast on missing dependencies
 # ---------------------------------------------------------------------------
 check_prereqs() {
@@ -182,8 +220,11 @@ clone_version() {
     info "Version ${VERSION} already installed at ${version_dir} — skipping clone"
     # Idempotent: ensure the marker exists even on a pre-existing version dir
     # (e.g. cloned before this installer learned to write it).
+    # The dir may be read-only (locked) — unlock, write, re-lock.
+    unlock_version_dir "$version_dir"
     write_install_marker "$version_dir"
     strip_tenant_marker "$version_dir"
+    lock_version_dir "$version_dir" || die "Failed to lock version dir: ${version_dir}"
     return 0
   fi
 
@@ -211,6 +252,7 @@ clone_version() {
 
   write_install_marker "$version_dir"
   strip_tenant_marker "$version_dir"
+  lock_version_dir "$version_dir" || die "Failed to lock version dir: ${version_dir}"
   success "Cloned ${VERSION} to ${version_dir}"
 }
 
