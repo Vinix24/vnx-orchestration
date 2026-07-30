@@ -1234,6 +1234,30 @@ def _migrate_v28(conn: sqlite3.Connection) -> None:
     log('INFO', 'Migrated: created pattern_injection_outcome table + indexes (ADR-007, v28)')
 
 
+def _has_composite_unique(conn: sqlite3.Connection, table: str, columns: set[str]) -> bool:
+    """Return True if ``table`` has a UNIQUE index/constraint over exactly ``columns``.
+
+    Reads the constraint from SQLite's own PRAGMA structures (index_list +
+    index_info) instead of comparing sqlite_master.sql text. The DDL text is
+    order- and quoting-sensitive — SQLite happily stores
+    ``UNIQUE ("session_id", "project_id")`` for a table declared with
+    ``UNIQUE (project_id, session_id)``, so a literal-string guard never
+    matches its own output. PRAGMA index_info reports the column SET
+    regardless of declared order or quoting.
+    """
+    for idx in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        idx_name = idx[1]
+        is_unique = idx[2]
+        if not is_unique:
+            continue
+        idx_cols = {
+            r[2] for r in conn.execute(f"PRAGMA index_info({idx_name})").fetchall()
+        }
+        if idx_cols == columns:
+            return True
+    return False
+
+
 def _migrate_v29(conn: sqlite3.Connection) -> None:
     """V29: session_analytics project_id + composite UNIQUE (project_id, session_id).
 
@@ -1265,12 +1289,8 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
 
     # Idempotent guard: skip rebuild if composite UNIQUE already present.
-    tbl_sql = (conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_analytics'"
-    ).fetchone() or ("",))[0]
-    needs_rebuild = (
-        "UNIQUE (project_id, session_id)" not in tbl_sql
-        and "UNIQUE(project_id,session_id)" not in tbl_sql
+    needs_rebuild = not _has_composite_unique(
+        conn, "session_analytics", {"project_id", "session_id"}
     )
 
     if needs_rebuild:
@@ -1287,7 +1307,7 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
             CREATE TABLE _session_analytics_v29 (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
-                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                project_id TEXT NOT NULL,
                 project_path TEXT NOT NULL,
                 terminal TEXT,
                 session_date DATE NOT NULL,
