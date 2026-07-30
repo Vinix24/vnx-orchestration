@@ -27,7 +27,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 28
+HIGHEST_QI_VERSION = 29
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1234,6 +1234,172 @@ def _migrate_v28(conn: sqlite3.Connection) -> None:
     log('INFO', 'Migrated: created pattern_injection_outcome table + indexes (ADR-007, v28)')
 
 
+def _migrate_v29(conn: sqlite3.Connection) -> None:
+    """V29: session_analytics project_id + composite UNIQUE (project_id, session_id).
+
+    ADR-007: the original UNIQUE(session_id) constraint is single-tenant — two
+    projects with the same Claude-generated session_id would collide. Rebuild the
+    table with UNIQUE(project_id, session_id) so each tenant's rows are isolated.
+
+    Also adds project_id TEXT NOT NULL, context_reset_count, and dispatch_id columns
+    that were in the live DB but missing from the canonical schema.
+
+    Table recreation is the only SQLite-safe way to alter a UNIQUE constraint.
+    INSERT OR IGNORE preserves all existing rows (idempotent re-run guard: the
+    composite UNIQUE check in step 0 skips the rebuild when already correct).
+    """
+    # Step 0: Ensure project_id column exists before table recreation.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+    if "project_id" not in cols:
+        conn.execute(
+            "ALTER TABLE session_analytics ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+
+    # Ensure other missing columns exist (context_reset_count, dispatch_id).
+    if "context_reset_count" not in cols:
+        conn.execute(
+            "ALTER TABLE session_analytics ADD COLUMN context_reset_count INTEGER DEFAULT 0"
+        )
+    if "dispatch_id" not in cols:
+        conn.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
+
+    # Idempotent guard: skip rebuild if composite UNIQUE already present.
+    tbl_sql = (conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_analytics'"
+    ).fetchone() or ("",))[0]
+    needs_rebuild = (
+        "UNIQUE (project_id, session_id)" not in tbl_sql
+        and "UNIQUE(project_id,session_id)" not in tbl_sql
+    )
+
+    if needs_rebuild:
+        # Step 1: Drop the cost_per_dispatch view (references session_analytics).
+        conn.execute("DROP VIEW IF EXISTS cost_per_dispatch")
+
+        # Step 2: Build the column list from the live table.
+        cols_info = conn.execute("PRAGMA table_info(session_analytics)").fetchall()
+        col_names = [r[1] for r in cols_info]
+        non_id_cols = [c for c in col_names if c != "id"]
+
+        # Step 3: Create staging table with composite UNIQUE and copy data.
+        conn.execute("""
+            CREATE TABLE _session_analytics_v29 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                project_path TEXT NOT NULL,
+                terminal TEXT,
+                session_date DATE NOT NULL,
+                total_input_tokens INTEGER DEFAULT 0,
+                total_output_tokens INTEGER DEFAULT 0,
+                cache_creation_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                tool_calls_total INTEGER DEFAULT 0,
+                tool_read_count INTEGER DEFAULT 0,
+                tool_edit_count INTEGER DEFAULT 0,
+                tool_bash_count INTEGER DEFAULT 0,
+                tool_grep_count INTEGER DEFAULT 0,
+                tool_write_count INTEGER DEFAULT 0,
+                tool_task_count INTEGER DEFAULT 0,
+                tool_other_count INTEGER DEFAULT 0,
+                message_count INTEGER DEFAULT 0,
+                user_message_count INTEGER DEFAULT 0,
+                assistant_message_count INTEGER DEFAULT 0,
+                duration_minutes REAL,
+                has_error_recovery BOOLEAN DEFAULT FALSE,
+                has_context_reset BOOLEAN DEFAULT FALSE,
+                context_reset_count INTEGER DEFAULT 0,
+                has_large_refactor BOOLEAN DEFAULT FALSE,
+                has_test_cycle BOOLEAN DEFAULT FALSE,
+                primary_activity TEXT,
+                deep_analysis_json TEXT,
+                deep_analysis_model TEXT,
+                deep_analysis_at DATETIME,
+                session_model TEXT DEFAULT 'unknown',
+                dispatch_id TEXT,
+                file_size_bytes INTEGER,
+                analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                analyzer_version TEXT DEFAULT '1.0.0',
+                UNIQUE (project_id, session_id)
+            )
+        """)
+        # Copy only columns that exist in both source and destination.
+        dest_cols_info = conn.execute(
+            "PRAGMA table_info(_session_analytics_v29)"
+        ).fetchall()
+        dest_cols = {r[1] for r in dest_cols_info}
+        shared_cols = [c for c in non_id_cols if c in dest_cols]
+        shared_list = ", ".join(shared_cols)
+        conn.execute(
+            f"INSERT OR IGNORE INTO _session_analytics_v29 ({shared_list}) "
+            f"SELECT {shared_list} FROM session_analytics"
+        )
+
+        # Step 4: Swap the table.
+        conn.execute("DROP TABLE session_analytics")
+        conn.execute("ALTER TABLE _session_analytics_v29 RENAME TO session_analytics")
+        log('INFO', 'Migrated session_analytics: composite UNIQUE (project_id, session_id) (ADR-007)')
+
+        # Step 5: Recreate indexes (dropped with the old table).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_terminal "
+            "ON session_analytics (terminal, session_date DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_project "
+            "ON session_analytics (project_path, session_date DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_date "
+            "ON session_analytics (session_date DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_activity "
+            "ON session_analytics (primary_activity)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_model "
+            "ON session_analytics (session_model, session_date DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_dispatch "
+            "ON session_analytics (dispatch_id)"
+        )
+
+        # Step 6: Recreate the cost_per_dispatch view.
+        conn.execute("""
+            CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
+            SELECT
+                dm.dispatch_id,
+                dm.terminal,
+                dm.role,
+                dm.gate,
+                dm.outcome_status,
+                sa.session_model,
+                sa.total_input_tokens,
+                sa.total_output_tokens,
+                sa.tool_calls_total,
+                sa.duration_minutes,
+                dm.pattern_count,
+                dm.instruction_char_count
+            FROM dispatch_metadata dm
+            LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
+            WHERE dm.outcome_status IS NOT NULL
+        """)
+        log('INFO', 'Recreated session_analytics indexes + cost_per_dispatch view')
+
+    # Backfill NULL project_ids for any rows that predate the column addition.
+    null_count = conn.execute(
+        "SELECT COUNT(*) FROM session_analytics WHERE project_id IS NULL"
+    ).fetchone()[0]
+    if null_count > 0:
+        conn.execute(
+            "UPDATE session_analytics SET project_id = 'vnx-dev' WHERE project_id IS NULL"
+        )
+        log('INFO', f'Backfilled project_id for {null_count} legacy session_analytics rows')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1264,6 +1430,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     26: _migrate_v26,
     27: _migrate_v27,
     28: _migrate_v28,
+    29: _migrate_v29,
 }
 
 

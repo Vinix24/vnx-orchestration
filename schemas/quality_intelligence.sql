@@ -345,7 +345,8 @@ CREATE INDEX IF NOT EXISTS idx_rule_confidence ON prevention_rules (confidence D
 -- Session-level metrics extracted from Claude Code JSONL logs
 CREATE TABLE IF NOT EXISTS session_analytics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL UNIQUE,
+    session_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,  -- ADR-007: NO default; writers fail-closed via resolve_stamp_project_id
     project_path TEXT NOT NULL,
     terminal TEXT,
     session_date DATE NOT NULL,
@@ -375,6 +376,7 @@ CREATE TABLE IF NOT EXISTS session_analytics (
     -- Heuristic flags (phase 2: no LLM needed)
     has_error_recovery BOOLEAN DEFAULT FALSE,
     has_context_reset BOOLEAN DEFAULT FALSE,
+    context_reset_count INTEGER DEFAULT 0,
     has_large_refactor BOOLEAN DEFAULT FALSE,
     has_test_cycle BOOLEAN DEFAULT FALSE,
     primary_activity TEXT,
@@ -384,13 +386,16 @@ CREATE TABLE IF NOT EXISTS session_analytics (
     deep_analysis_model TEXT,
     deep_analysis_at DATETIME,
 
-    -- Model identification
+    -- Model identification + dispatch tracking
     session_model TEXT DEFAULT 'unknown',
+    dispatch_id TEXT,
 
     -- Metadata
     file_size_bytes INTEGER,
     analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    analyzer_version TEXT DEFAULT '1.0.0'
+    analyzer_version TEXT DEFAULT '1.0.0',
+
+    UNIQUE (project_id, session_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_terminal ON session_analytics (terminal, session_date DESC);
@@ -398,6 +403,7 @@ CREATE INDEX IF NOT EXISTS idx_session_project ON session_analytics (project_pat
 CREATE INDEX IF NOT EXISTS idx_session_date ON session_analytics (session_date DESC);
 CREATE INDEX IF NOT EXISTS idx_session_activity ON session_analytics (primary_activity);
 CREATE INDEX IF NOT EXISTS idx_session_model ON session_analytics (session_model, session_date DESC);
+CREATE INDEX IF NOT EXISTS idx_session_dispatch ON session_analytics (dispatch_id);
 
 -- Improvement suggestions extracted from session analysis
 CREATE TABLE IF NOT EXISTS improvement_suggestions (

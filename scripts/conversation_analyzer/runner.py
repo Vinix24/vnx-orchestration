@@ -18,6 +18,15 @@ from .deep_analyzer import DeepAnalyzer
 from .generator import DigestGenerator
 from . import intelligence_bridge
 
+# project_scope is imported at the call site to avoid circular imports
+# from the models module (which itself imports vnx_paths). We import the
+# specific function at the module level so it's available for testing.
+try:
+    from project_scope import resolve_stamp_project_id, TenantUnresolved
+except ImportError:
+    resolve_stamp_project_id = None  # type: ignore[assignment]
+    TenantUnresolved = RuntimeError  # type: ignore[assignment,misc]
+
 
 def _get_claude_projects_dir() -> Path:
     """Late-bind CLAUDE_PROJECTS_DIR to support test patching via the package namespace."""
@@ -113,8 +122,6 @@ class ConversationAnalyzer:
                      f"err={flags.has_error_recovery} ctx={flags.has_context_reset} "
                      f"refactor={flags.has_large_refactor} test={flags.has_test_cycle}")
 
-        self.bridge_session_to_intelligence(metrics, flags)
-
         deep_result = None
         suggestions = []
         if deep_allowed and self.deep.should_deep_analyze(metrics, flags):
@@ -125,7 +132,22 @@ class ConversationAnalyzer:
                     sg["session_id"] = metrics.session_id
                 suggestions = deep_result.get("suggestions", [])
 
-        self._store_session(metrics, flags, deep_result)
+        # Single transaction over both writes (ADR-007 atomicity):
+        # _store_session first so a failing INSERT does not leave orphan
+        # intelligence rows from bridge_session_to_intelligence.
+        try:
+            self._store_session(metrics, flags, deep_result)
+            self.bridge_session_to_intelligence(metrics, flags)
+            self.conn.commit()
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            log("ERROR", f"  Atomic write failed for {metrics.session_id[:8]}..., "
+                         f"rolling back both session_analytics and intelligence rows")
+            raise
+
         log("SUCCESS", f"  Stored: {metrics.session_id[:8]}... "
                         f"tokens={metrics.total_output_tokens:,}")
 
@@ -144,10 +166,11 @@ class ConversationAnalyzer:
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
                        deep_result: Optional[dict]):
+        project_id = self._resolve_project_id()
         cur = self.conn.cursor()
         cur.execute("""
             INSERT OR REPLACE INTO session_analytics (
-                session_id, project_path, terminal, session_date,
+                session_id, project_id, project_path, terminal, session_date,
                 total_input_tokens, total_output_tokens,
                 cache_creation_tokens, cache_read_tokens,
                 tool_calls_total, tool_read_count, tool_edit_count,
@@ -160,9 +183,9 @@ class ConversationAnalyzer:
                 deep_analysis_json, deep_analysis_model, deep_analysis_at,
                 file_size_bytes, analyzer_version, session_model, dispatch_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            metrics.session_id, metrics.project_path, metrics.terminal,
+            metrics.session_id, project_id, metrics.project_path, metrics.terminal,
             metrics.session_date,
             metrics.total_input_tokens, metrics.total_output_tokens,
             metrics.cache_creation_tokens, metrics.cache_read_tokens,
@@ -183,7 +206,26 @@ class ConversationAnalyzer:
             metrics.session_model or "unknown",
             metrics.dispatch_id or None,
         ))
-        self.conn.commit()
+
+    def _resolve_project_id(self) -> str:
+        """Resolve the project_id for tenant-scoped writes (ADR-007).
+
+        Sources from ``resolve_stamp_project_id`` with the DB path as authority.
+        Falls back to ``'vnx-dev'`` when no tenant source is configured, which is
+        the correct identity for the default single-tenant VNX installation.
+        """
+        if resolve_stamp_project_id is not None:
+            try:
+                return resolve_stamp_project_id(db_path=str(self.db_path))
+            except TenantUnresolved:
+                try:
+                    return resolve_stamp_project_id()
+                except TenantUnresolved:
+                    pass
+            except Exception:
+                pass
+        log("WARNING", "Could not resolve project_id; falling back to 'vnx-dev'")
+        return "vnx-dev"
 
     def _store_suggestions(self, suggestions: List[dict], digest_id: str):
         if not suggestions:
@@ -235,6 +277,9 @@ class ConversationAnalyzer:
         sessions = self.find_unanalyzed_sessions(project_filter, terminal_filter,
                                                   diagnostics=dry_run)
         log("INFO", f"Found {len(sessions)} unanalyzed sessions")
+
+        # Inform the deep analyzer of the backlog size for the billing guard.
+        self.deep.set_session_backlog(len(sessions))
 
         if not sessions:
             log("INFO", "Nothing to analyze")

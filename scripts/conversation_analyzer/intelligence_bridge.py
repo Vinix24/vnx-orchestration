@@ -167,7 +167,6 @@ def bridge_session_to_intelligence(conn: Any, metrics: SessionMetrics,
 
         antipatterns_written += _bridge_improvement_suggestions(conn, now)
 
-        conn.commit()
         log("INFO", f"  Bridge→intelligence: {patterns_written} success_patterns, "
                     f"{antipatterns_written} antipatterns")
 

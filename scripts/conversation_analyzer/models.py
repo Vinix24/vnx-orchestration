@@ -28,8 +28,15 @@ CLAUDE_PROJECTS_DIR = Path(
 )
 ANALYZER_VERSION = "1.1.0"
 
-LLM_STRATEGY = os.environ.get("VNX_ANALYZER_LLM", "auto")
+LLM_STRATEGY = os.environ.get("VNX_ANALYZER_LLM", "ollama-only")
 OLLAMA_MODEL = os.environ.get("VNX_OLLAMA_MODEL", "qwen2.5-coder:14b")
+
+# When LLM_STRATEGY="auto", refuse the claude path when the unanalyzed session
+# backlog exceeds this threshold. Protects against metered-spend landmines on
+# large backfills.  An operator can override with VNX_ANALYZER_LLM=claude-only.
+AUTO_CLAUSE_MAX_SESSIONS = int(
+    os.environ.get("VNX_ANALYZER_AUTO_MAX_SESSIONS", "50")
+)
 
 DEEP_THRESHOLD_TOKENS = 100_000
 DEEP_THRESHOLD_TOOLS = 100

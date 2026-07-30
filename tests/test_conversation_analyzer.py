@@ -59,7 +59,8 @@ def _create_schema(conn: sqlite3.Connection):
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS session_analytics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
             project_path TEXT NOT NULL,
             terminal TEXT,
             session_date DATE NOT NULL,
@@ -89,10 +90,11 @@ def _create_schema(conn: sqlite3.Connection):
             deep_analysis_model TEXT,
             deep_analysis_at DATETIME,
             session_model TEXT DEFAULT 'unknown',
+            dispatch_id TEXT,
             file_size_bytes INTEGER,
             analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             analyzer_version TEXT DEFAULT '1.0.0',
-            dispatch_id TEXT
+            UNIQUE (project_id, session_id)
         );
         CREATE TABLE IF NOT EXISTS improvement_suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -431,8 +433,8 @@ class TestStorage:
 
         # Insert a known session
         conn.execute(
-            "INSERT INTO session_analytics (session_id, project_path, session_date) "
-            "VALUES ('known-id', '/test', '2026-03-02')")
+            "INSERT INTO session_analytics (session_id, project_id, project_path, session_date) "
+            "VALUES ('known-id', 'vnx-dev', '/test', '2026-03-02')")
         conn.commit()
 
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
@@ -697,23 +699,23 @@ class TestSessionBrief:
 
         today = datetime.now().strftime("%Y-%m-%d")
         sessions = [
-            ("s1", "/test", "T1", today, 5000, 2000, 100, 900, 10, "coding", 0, "claude-opus", 25.0),
-            ("s2", "/test", "T1", today, 6000, 3000, 200, 1800, 15, "refactoring", 0, "claude-opus", 30.0),
-            ("s3", "/test", "T2", today, 3000, 1500, 50, 500, 8, "research", 1, "claude-sonnet", 15.0),
-            ("s4", "/test", "T1", today, 4000, 1800, 80, 700, 12, "coding", 0, "claude-opus", 20.0),
-            ("s5", "/test", "T2", today, 2500, 1000, 40, 400, 6, "research", 0, "claude-sonnet", 10.0),
-            ("s6", "/test", "T1", today, 7000, 4000, 150, 1200, 20, "coding", 1, "claude-opus", 35.0),
+            ("s1", "vnx-dev", "/test", "T1", today, 5000, 2000, 100, 900, 10, "coding", 0, "claude-opus", 25.0),
+            ("s2", "vnx-dev", "/test", "T1", today, 6000, 3000, 200, 1800, 15, "refactoring", 0, "claude-opus", 30.0),
+            ("s3", "vnx-dev", "/test", "T2", today, 3000, 1500, 50, 500, 8, "research", 1, "claude-sonnet", 15.0),
+            ("s4", "vnx-dev", "/test", "T1", today, 4000, 1800, 80, 700, 12, "coding", 0, "claude-opus", 20.0),
+            ("s5", "vnx-dev", "/test", "T2", today, 2500, 1000, 40, 400, 6, "research", 0, "claude-sonnet", 10.0),
+            ("s6", "vnx-dev", "/test", "T1", today, 7000, 4000, 150, 1200, 20, "coding", 1, "claude-opus", 35.0),
         ]
 
         for s in sessions:
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     total_input_tokens, total_output_tokens,
                     cache_creation_tokens, cache_read_tokens,
                     tool_calls_total, primary_activity,
                     has_error_recovery, session_model, duration_minutes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, s)
         conn.commit()
         return conn
@@ -741,9 +743,9 @@ class TestSessionBrief:
         for i, has_err in enumerate([1, 1, 0]):
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     primary_activity, has_error_recovery, session_model
-                ) VALUES (?, '/test', 'T2', ?, 'coding', ?, 'claude-sonnet')
+                ) VALUES (?, 'vnx-dev', '/test', 'T2', ?, 'coding', ?, 'claude-sonnet')
             """, (f"err-test-{i}", today, has_err))
         conn.commit()
 
@@ -815,20 +817,20 @@ class TestSuggestedEdits:
         for i in range(6):
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     total_output_tokens, cache_read_tokens, cache_creation_tokens,
                     primary_activity, has_error_recovery, session_model
-                ) VALUES (?, '/test', 'T1', ?, 50000, 900, 100, 'coding', ?, 'claude-opus')
+                ) VALUES (?, 'vnx-dev', '/test', 'T1', ?, 50000, 900, 100, 'coding', ?, 'claude-opus')
             """, (f"opus-{i}", today, 1 if i == 0 else 0))
 
         # 5 sonnet coding sessions (2 success, 3 error)
         for i in range(5):
             conn.execute("""
                 INSERT INTO session_analytics (
-                    session_id, project_path, terminal, session_date,
+                    session_id, project_id, project_path, terminal, session_date,
                     total_output_tokens, cache_read_tokens, cache_creation_tokens,
                     primary_activity, has_error_recovery, session_model
-                ) VALUES (?, '/test', 'T2', ?, 30000, 400, 100, 'coding', ?, 'claude-sonnet')
+                ) VALUES (?, 'vnx-dev', '/test', 'T2', ?, 30000, 400, 100, 'coding', ?, 'claude-sonnet')
             """, (f"sonnet-{i}", today, 0 if i < 2 else 1))
         conn.commit()
 
@@ -1147,6 +1149,147 @@ class TestBridgeSessionToIntelligence:
 
         count = analyzer.conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Atomicity: session_analytics + intelligence bridge in one transaction
+# ---------------------------------------------------------------------------
+
+class TestAtomicWrites:
+    """session_analytics and intelligence writes must be atomic."""
+
+    def test_session_stored_before_bridge(self):
+        """_store_session is called before bridge_session_to_intelligence.
+
+        The INSERT into session_analytics runs first. When the bridge fails
+        mid-write, the ABORT-level rollback undoes both writes — no orphan
+        session_analytics row remains. The bridge catches its own exceptions
+        internally and does not re-raise; the caller's commit() commits an
+        empty transaction.
+        """
+        analyzer = _make_analyzer_with_intel_db()
+
+        # Install a trigger that makes the first intelligence INSERT fail
+        # after session_analytics has already been written. This simulates
+        # the bridge failing mid-write.
+        analyzer.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS _test_force_bridge_fail
+            BEFORE INSERT ON success_patterns
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated bridge failure');
+            END
+        """)
+
+        metrics = SessionMetrics(
+            session_id="atomic-test-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags(has_test_cycle=True)
+
+        # Simulate the atomic write pattern from analyze_session.
+        # The bridge catches its own exception; no exception propagates.
+        # The ABORT inside the trigger rolls back the implicit transaction
+        # that includes the _store_session INSERT.
+        analyzer._store_session(metrics, flags, None)
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+        analyzer.conn.commit()
+
+        # Verify: neither write landed — the ABORT rolled back everything.
+        sa_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM session_analytics WHERE session_id = 'atomic-test-001'"
+        ).fetchone()[0]
+        sp_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM success_patterns"
+        ).fetchone()[0]
+
+        assert sa_rows == 0, (
+            f"session_analytics has {sa_rows} row(s) — "
+            "INSERT survived the bridge-triggered ABORT"
+        )
+        assert sp_rows == 0, (
+            f"success_patterns has {sp_rows} row(s) — "
+            "bridge wrote despite trigger"
+        )
+
+    def test_no_orphan_intelligence_on_session_failure(self):
+        """When session_analytics INSERT fails, no intelligence rows are written.
+
+        The bridge is called AFTER _store_session. If _store_session raises,
+        the bridge code is never reached at all — structural atomicity without
+        needing a transaction rollback.
+        """
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(
+            session_id="orphan-test-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags(has_test_cycle=True)
+
+        # Drop the session_analytics table to force _store_session to fail.
+        analyzer.conn.execute("DROP TABLE IF EXISTS session_analytics")
+
+        store_failed = False
+        try:
+            analyzer._store_session(metrics, flags, None)
+            analyzer.bridge_session_to_intelligence(metrics, flags)
+            analyzer.conn.commit()
+        except Exception:
+            store_failed = True
+            try:
+                analyzer.conn.rollback()
+            except Exception:
+                pass
+
+        assert store_failed is True, "Expected _store_session to fail"
+
+        # Recreate session_analytics to query intelligence tables (which share
+        # the same in-memory DB but were never reached).
+        _create_schema(analyzer.conn)
+        _create_intelligence_schema(analyzer.conn)
+
+        sp_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM success_patterns"
+        ).fetchone()[0]
+        ap_rows = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM antipatterns"
+        ).fetchone()[0]
+
+        assert sp_rows == 0, (
+            f"success_patterns has {sp_rows} orphan row(s) — "
+            "bridge ran despite _store_session failure"
+        )
+        assert ap_rows == 0, (
+            f"antipatterns has {ap_rows} orphan row(s) — "
+            "bridge ran despite _store_session failure"
+        )
+
+    def test_project_id_populated_on_insert(self):
+        """New rows have a non-NULL, non-empty project_id after _store_session."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(
+            session_id="pid-test-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags()
+
+        analyzer._store_session(metrics, flags, None)
+        analyzer.conn.commit()
+
+        row = analyzer.conn.execute(
+            "SELECT project_id FROM session_analytics WHERE session_id = 'pid-test-001'"
+        ).fetchone()
+        assert row is not None, "Row was not inserted"
+        pid = row[0]
+        assert pid is not None, "project_id is NULL"
+        assert pid != "", "project_id is empty string"
+        # With no VNX_PROJECT_ID set, the fallback is 'vnx-dev'
+        assert pid == "vnx-dev", f"Expected 'vnx-dev', got {pid!r}"
 
 
 if __name__ == "__main__":
