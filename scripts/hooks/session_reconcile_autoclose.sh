@@ -158,23 +158,37 @@ mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
     fi
 
     # Streak is still computed + logged for observability (no longer gates the flip).
-    # PIPESTATUS[0] (captured immediately, before any other command can
-    # overwrite it) is vnx_run_bounded's own status — the `if pipeline; then`
-    # branch below only reflects the trailing python filter's exit code, which
-    # would silently swallow a deadline kill of the reconcile-streak call
-    # itself (PR #1247 finding 1: a kill must never read the same as a
-    # normal outcome).
+    # PR #1247 fix-forward finding (codex gate, reproduced against this exact
+    # helper: streak_met=no captured_PIPESTATUS0=0 expected_deadline=124): bash
+    # resets PIPESTATUS after EVERY command, including plain assignments. The
+    # previous shape ran the pipeline as the `if` condition itself, then read
+    # PIPESTATUS[0] only after the then/else branch had already run an
+    # assignment — by that point PIPESTATUS described the assignment (always
+    # 0), never the pipeline. A killed streak call was silently indistinguishable
+    # from streak_met=no.
+    #
+    # Fix: run the pipeline as its own statement, then capture the WHOLE
+    # PIPESTATUS array on the very next line — before any other command can
+    # touch it, including the array assignment's own right-hand-side
+    # expansion, which reads PIPESTATUS as it stood immediately after the
+    # pipeline. Element 0 is vnx_run_bounded's own status (deadline sentinel
+    # or real exit code); element 1 is the trailing python filter's exit code
+    # (flip_criterion_met), which is what the old `if pipeline; then` branch
+    # actually keyed streak_met on.
     STREAK_MET="?"
-    if vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
+    vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
         "$PY" "$CLI" objective reconcile-streak "${PID_ARGS[@]}" --json 2>/dev/null \
         | "$PY" -c 'import sys,json;
 d=json.load(sys.stdin);
-sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null; then
+sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null
+    STREAK_PIPE_STATUS=("${PIPESTATUS[@]}")
+    STREAK_RC="${STREAK_PIPE_STATUS[0]}"
+    STREAK_FILTER_RC="${STREAK_PIPE_STATUS[1]}"
+    if [ "$STREAK_FILTER_RC" -eq 0 ]; then
         STREAK_MET="yes"
     else
         STREAK_MET="no"
     fi
-    STREAK_RC="${PIPESTATUS[0]}"
     if [ "$STREAK_RC" -eq "$VNX_RUN_BOUNDED_DEADLINE" ]; then
         echo "[$STAMP] session-reconcile: reconcile-streak KILLED at ${DEADLINE_SECS}s deadline — streak measurement incomplete (logged as streak_met=$STREAK_MET, not a real observation)" >>"$LOG" 2>&1
     fi
