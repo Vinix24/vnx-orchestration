@@ -464,9 +464,9 @@ def test_staging_binding_required(tmp_path, monkeypatch, capsys):
         "staging_id": staging_id,
         "instruction_file": str(instruction_file),
         "role": "backend-developer",
-        "target_slot": "T0",  # T1/T2/T3 unconditionally pin to kimi-k3 (workers-kimi-pinned);
-        # T0 stays a valid Claude model so the ADR-006-binding reject under test isn't
-        # masked by an unrelated kimi-via-cli-only reject firing first.
+        "target_slot": "T0",  # T1/T2/T3 default-pin to kimi-k3 (workers-kimi-pinned,
+        # pin_semantics=default since WPFC PR-4); explicit model on a worker slot
+        # overrules the default pin. T0 stays floor-pinned to opus (t0-opus-only).
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -593,10 +593,11 @@ def _make_bundle_spec(
         "role": "backend-developer",
         # T0 (not T1): these callers all use provider="claude" to exercise the
         # SDK-scan/claude-lane mechanics, unrelated to worker model routing. Since
-        # worker-provider-kimi-flip (2026-07-23), T1/T2/T3 unconditionally pin the
-        # claude lane's model to kimi-k3 (workers-kimi-pinned), which is not a valid
-        # Claude model and hard-rejects (model-not-in-current-registry). T0's pin
-        # (t0-opus-only -> claude-opus-4-8) stays a valid Claude model, so it's the
+        # WPFC PR-4, T1/T2/T3 carry a default pin to kimi-k3 (workers-kimi-pinned,
+        # pin_semantics=default) — an explicit model on a worker slot overrules it,
+        # but without one the pin fills in and hard-rejects (model-not-in-current-
+        # registry). T0's pin (t0-opus-only -> claude-opus-4-8) stays a valid Claude
+        # model with floor semantics, so it's the
         # clean slot for a generic "claude dispatch that should proceed" fixture.
         "target_slot": target_slot,
         "gate": "human-promoted",
@@ -1114,13 +1115,13 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 
 def test_default_model_pins_flip_workers_to_kimi_k3():
     """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus.
-    worker-provider-free-choice PR-1: pins now carry explicit floor semantics —
-    ModelPin, not a bare string."""
+    WPFC PR-4: worker pins carry default semantics (spec.model wins over the pin);
+    T0 stays floor (pin always wins). ModelPin, not a bare string."""
     assert _DEFAULT_MODEL_PINS == {
         "T0": ModelPin(model="opus", semantics="floor"),
-        "T1": ModelPin(model="kimi-k3", semantics="floor"),
-        "T2": ModelPin(model="kimi-k3", semantics="floor"),
-        "T3": ModelPin(model="kimi-k3", semantics="floor"),
+        "T1": ModelPin(model="kimi-k3", semantics="default"),
+        "T2": ModelPin(model="kimi-k3", semantics="default"),
+        "T3": ModelPin(model="kimi-k3", semantics="default"),
     }
 
 
@@ -1129,12 +1130,12 @@ def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
     (workers-kimi-pinned, not workers-sonnet-pinned) and loads its
     required_route.model (kimi-k3) for T1/T2/T3 from the real
     provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only.
-    Both constraints declare pin_semantics: floor in the SSOT (PR-1)."""
+    WPFC PR-4: workers carry pin_semantics: default; T0 stays floor."""
     pins = _load_model_pins_from_yaml()
     assert pins["T0"] == ModelPin(model="claude-opus-4-8", semantics="floor")
-    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="floor")
-    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="floor")
-    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="floor")
+    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
+    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="default")
+    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="default")
 
 
 def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
@@ -1157,25 +1158,26 @@ def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
     }))
     with patch("dispatch_cli._LIB_DIR", tmp_path):
         pins = _load_model_pins_from_yaml()
-    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="floor"), (
+    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="default"), (
         "stale workers-sonnet-pinned id must not override the default pin"
     )
-    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="floor")
-    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="floor")
+    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="default")
+    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="default")
 
 
 # ---------------------------------------------------------------------------
 # worker-provider-free-choice PR-1 — ModelPin contract tests
 # ---------------------------------------------------------------------------
 
-def test_load_model_pins_reads_floor_semantics_from_real_yaml():
-    """Both t0-opus-only and workers-kimi-pinned declare pin_semantics: floor in the
-    real SSOT; PR-1 only introduces the contract, it does not flip anything to default."""
+def test_load_model_pins_reads_semantics_from_real_yaml():
+    """WPFC PR-4: t0-opus-only stays floor; workers-kimi-pinned is now default.
+    The real SSOT carries both semantics — T0 floor (pin always wins), T1/T2/T3
+    default (spec.model wins over the pin when set)."""
     pins = _load_model_pins_from_yaml()
     assert pins["T0"].semantics == "floor"
-    assert pins["T1"].semantics == "floor"
-    assert pins["T2"].semantics == "floor"
-    assert pins["T3"].semantics == "floor"
+    assert pins["T1"].semantics == "default"
+    assert pins["T2"].semantics == "default"
+    assert pins["T3"].semantics == "default"
 
 
 def test_load_model_pins_missing_pin_semantics_reads_as_floor(tmp_path):
@@ -1257,9 +1259,9 @@ def test_load_model_pins_unreadable_yaml_fails_loud_and_falls_back(tmp_path, cap
 def _write_default_semantics_workers_pin_yaml(providers_dir: Path) -> None:
     """A fabricated SSOT where workers-kimi-pinned carries pin_semantics: default.
 
-    The real provider_constraints.yaml stays 'floor' throughout PR-2 (see
-    test_load_model_pins_reads_floor_semantics_from_real_yaml) -- the 'default'
-    branch in dispatch_cli's coercion is only reachable via a fixture like this.
+    The real provider_constraints.yaml also declares default for workers since WPFC
+    PR-4; this fixture remains so the default-semantics branch is independently
+    reachable regardless of the real YAML state.
     """
     import yaml as _yaml
     providers_dir.mkdir(parents=True, exist_ok=True)
@@ -1276,10 +1278,35 @@ def _write_default_semantics_workers_pin_yaml(providers_dir: Path) -> None:
     }))
 
 
+def _write_floor_semantics_workers_pin_yaml(providers_dir: Path) -> None:
+    """A fabricated SSOT where workers-kimi-pinned carries pin_semantics: floor.
+
+    Since WPFC PR-4 the real YAML declares default for workers; this fixture
+    keeps the floor-semantics branch reachable so the test can prove it still lives.
+    """
+    import yaml as _yaml
+    providers_dir.mkdir(parents=True, exist_ok=True)
+    (providers_dir / "provider_constraints.yaml").write_text(_yaml.safe_dump({
+        "version": 1,
+        "constraints": [
+            {
+                "id": "workers-kimi-pinned",
+                "rule": "require_route",
+                "required_route": {"role": ["T1", "T2", "T3"], "model": "kimi-k3"},
+                "pin_semantics": "floor",
+            },
+        ],
+    }))
+
+
 def test_build_runtime_snapshot_floor_ignores_explicit_differing_model(tmp_path):
-    """'floor' is today's behavior verbatim: spec.model is ignored and the pin
-    always wins, even when spec.model is an explicit, differing claude model.
-    Uses the REAL (non-fabricated) SSOT, which declares floor throughout PR-2."""
+    """'floor' behavior: spec.model is ignored and the pin always wins, even when
+    spec.model is an explicit, differing claude model. Since WPFC PR-4 flips the
+    real YAML to default for workers, this test fabricates a floor SSOT to keep
+    the floor branch reachable."""
+    providers_dir = tmp_path / "lib" / "providers"
+    _write_floor_semantics_workers_pin_yaml(providers_dir)
+
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Floor coercion\n\nExplicit sonnet must be ignored under the floor pin.\n",
@@ -1293,7 +1320,8 @@ def test_build_runtime_snapshot_floor_ignores_explicit_differing_model(tmp_path)
     vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
     assert not isinstance(vspec, Reject)
 
-    snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
+    with patch("dispatch_cli._LIB_DIR", tmp_path / "lib"):
+        snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
 
     assert snapshot.model_pins["T1"] == ModelPin(model="kimi-k3", semantics="floor")
     kimi_blocks = [v for v in snapshot.constraint_verdicts if v.code == "kimi-via-cli-only"]
@@ -1406,15 +1434,12 @@ def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatc
     assert "kimi-via-cli-only" in err
 
 
-def test_raw_opus_model_pin_now_rejects_explicit_claude_override(tmp_path, monkeypatch):
-    """worker-provider-kimi-flip (2026-07-23): the workers-kimi-pinned SSOT now resolves T1's
-    pin to "kimi-k3" regardless of the requested model. An explicit provider=claude override on
-    T1 (e.g. --model opus) is pinned to that same "kimi-k3" label, which is not a valid Claude
-    model — the registry gate (check_registry=True) correctly REJECTS it (blocking,
-    model-not-in-current-registry) instead of silently proceeding on a claude lane. This is the
-    intended "kimi-only, no fallback" behavior: there is no warn-and-proceed escape hatch left
-    for a claude override on a build-worker role. (Formerly this scenario pinned to
-    claude-sonnet-5 and proceeded under workers-sonnet-pinned — see git history.)"""
+def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, monkeypatch):
+    """WPFC PR-4: the workers-kimi-pinned constraint now carries pin_semantics: default.
+    An explicit provider=claude with model=opus on T1 (no override env) now routes to
+    opus on the claude tmux-subscription lane, with a warn that the default pin was
+    overruled. Before PR-4 the floor pin would have coerced opus -> kimi-k3 and
+    rejected; now the explicit model wins."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260713-staging-opus-pin"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -1443,14 +1468,145 @@ def test_raw_opus_model_pin_now_rejects_explicit_claude_override(tmp_path, monke
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, (
+        "default semantics: explicit model=opus on T1 must route to opus, not be rejected"
+    )
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "opus", (
+        f"default semantics: explicit spec.model (opus) must win, got {plan_arg.model!r}"
+    )
+    assert plan_arg.lane == "claude_tmux_subscription"
+    assert any("default semantics" in w for w in plan_arg.warnings), (
+        f"default pin overridden must produce a warn; warnings: {plan_arg.warnings}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# WPFC PR-4 — behavior tests: default semantics live, floor still works
+# ---------------------------------------------------------------------------
+
+
+def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monkeypatch):
+    """WPFC PR-4 core behavior: provider=claude, model=sonnet, target_slot=T1 routes
+    to sonnet on the claude tmux-subscription lane with NO env-var. A warn records
+    that the default kimi-k3 pin was overruled by the explicit model request.
+    Before PR-4 this was a hard reject unless VNX_OVERRIDE_WORKER_CLAUDE=1 +
+    VNX_OVERRIDE_WORKER_CLAUDE_REASON was set."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Default semantics\n\nExplicit sonnet on T1 must route.\n",
+        staging_id="20260730-staging-sonnet-default",
+        dispatch_id="20260730-sonnet-default",
+        provider="claude",
+        target_slot="T1",
+        model="sonnet",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    # No override env vars — the default pin itself yields to the explicit model
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, (
+        "default semantics: explicit model=sonnet on T1 must dispatch, not reject"
+    )
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "sonnet", (
+        f"explicit spec.model (sonnet) must win over the default kimi-k3 pin, "
+        f"got {plan_arg.model!r}"
+    )
+    assert plan_arg.lane == "claude_tmux_subscription"
+    assert any("default semantics" in w for w in plan_arg.warnings), (
+        f"default pin overridden must produce a warn; warnings: {plan_arg.warnings}"
+    )
+
+
+def test_default_semantics_no_model_on_t1_fills_pin_end_to_end(tmp_path, monkeypatch, capsys):
+    """Default semantics still fills the pin when the spec carries no model at all:
+    provider=claude, target_slot=T1, no explicit model → kimi-k3 fills in →
+    kimi-via-cli-only blocks. This is the half that must not change."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Default semantics, no explicit model\n\nPin must fill in.\n",
+        staging_id="20260730-staging-no-model-default",
+        dispatch_id="20260730-no-model-default",
+        provider="claude",
+        target_slot="T1",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
     with patch("dispatch_cli._execute_claude") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, (
-        "requested opus on T1 pins to kimi-k3 (workers-kimi-pinned) and must be rejected — "
-        "no silent claude fallback for a build-worker role"
+        "default semantics without explicit model: pin (kimi-k3) must fill in and "
+        "still hard-reject via kimi-via-cli-only"
     )
     mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
+
+
+def test_kimi_model_on_claude_lane_still_hard_rejected_end_to_end(tmp_path, monkeypatch, capsys):
+    """kimi-via-cli-only is a blocking constraint independent of pin semantics.
+    model=kimi-k3 on the claude lane must hard-reject regardless of default/floor.
+    This PR must not change this guard."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Kimi model on claude lane\n\nMust still be rejected.\n",
+        staging_id="20260730-staging-kimi-claude",
+        dispatch_id="20260730-kimi-claude",
+        provider="claude",
+        target_slot="T1",
+        model="kimi-k3",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude") as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "kimi model on claude lane must still hard-reject"
+    mock_execute.assert_not_called()
+    err = capsys.readouterr().err
+    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
+
+
+def test_t0_floor_semantics_coerces_explicit_model_to_opus(tmp_path, monkeypatch):
+    """T0 floor test: pin_semantics="floor" on t0-opus-only must ignore an explicit,
+    registry-valid spec.model (sonnet) and route opus. This proves the floor branch
+    still lives and was not accidentally removed by only testing the default branch."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# T0 floor coercion\n\nExplicit sonnet must be ignored.\n",
+        staging_id="20260730-staging-t0-floor",
+        dispatch_id="20260730-t0-floor",
+        provider="claude",
+        target_slot="T0",
+        model="sonnet",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, "T0 floor semantics: sonnet on T0 must be coerced to opus and dispatch"
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert "opus" in plan_arg.model, (
+        f"T0 floor semantics: explicit sonnet must be coerced to opus (got {plan_arg.model!r})"
+    )
+    assert any("floor semantics" in w for w in plan_arg.warnings), (
+        f"T0 floor pin must produce a floor-semantics warn; warnings: {plan_arg.warnings}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2355,9 +2511,11 @@ def test_worker_claude_override_without_reason_is_blocking_refusal(tmp_path, mon
 
 
 def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeypatch, capsys):
-    """DEFAULT INTACT: no override env + provider=claude + T1 => still hard-rejected
-    via the kimi-k3 registry failure (model-not-in-current-registry, blocking).
-    No silent claude fallback is ever introduced."""
+    """DEFAULT INTACT: no override env + provider=claude + T1 + no explicit model
+    => the default pin (kimi-k3) fills in and the constraint engine still hard-
+    rejects via kimi-via-cli-only. The default semantics only change the outcome
+    when the spec carries an explicit model; without one, the pin still does
+    its job exactly as before. No silent claude fallback is ever introduced."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# No override\n\nThis must keep hard-rejecting.\n",

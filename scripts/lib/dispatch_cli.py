@@ -233,9 +233,9 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
 
 _DEFAULT_MODEL_PINS: dict[str, ModelPin] = {
     "T0": ModelPin(model="opus", semantics="floor"),
-    "T1": ModelPin(model="kimi-k3", semantics="floor"),
-    "T2": ModelPin(model="kimi-k3", semantics="floor"),
-    "T3": ModelPin(model="kimi-k3", semantics="floor"),
+    "T1": ModelPin(model="kimi-k3", semantics="default"),
+    "T2": ModelPin(model="kimi-k3", semantics="default"),
+    "T3": ModelPin(model="kimi-k3", semantics="default"),
 }
 
 # worker-claude-override (escape-hatch-worker-claude, 2026-07-23): gated, audited
