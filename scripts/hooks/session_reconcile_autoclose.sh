@@ -35,15 +35,23 @@
 # or a parent `trap ... EXIT` — would release the instant the parent exits, while
 # the worker is still running. That is the exact bug being fixed here.
 #
-# The lock is a single FILE, acquired via `set -C` (noclobber): the `>` redirect
-# fails with EEXIST if the file already exists, so existence and content (our
-# pid) land in the SAME syscall. That matters here specifically because an
-# earlier mkdir-based design (mkdir the lock, THEN separately echo the pid into
-# it) had a real, measured race: a concurrent invocation could read the pid file
-# in the gap between "mkdir succeeded" and "pid written", see it empty, wrongly
-# conclude the lock was stale, and steal it out from under its rightful holder
-# — reproduced locally as 2-4 winners out of 8-10 concurrent runs. Binding
-# existence to content in one write removes that window entirely.
+# The lock is a kernel flock(2) mutex (scripts/lib/vnx_flock_lock.sh), not a
+# PID file: an earlier mkdir-based design (mkdir the lock, THEN separately
+# echo the pid into it) had a real, measured race in a concurrent invocation
+# reading the pid file in the gap between "mkdir succeeded" and "pid
+# written," seeing it empty, wrongly concluding the lock was stale, and
+# stealing it out from under its rightful holder — reproduced locally as 2-4
+# winners out of 8-10 concurrent runs. A follow-up PID-file + noclobber-write
+# design (existence and content bound in one syscall) fixed that specific
+# window, but its STALE-lock RECLAIM path reintroduced the identical race
+# class in a different shape: reclaiming required an `rm` followed by a
+# SEPARATE noclobber write, and two reclaimers could each pass the
+# `kill -0`-dead-holder check in the gap between another reclaimer's `rm` and
+# its own write, each then seeing their own write to the now-briefly-absent
+# path succeed (PR #1247 finding 1). flock(2) removes the category outright:
+# there is no "is the recorded holder dead" check to race at all — the
+# kernel atomically releases the lock the instant a dead holder's last fd
+# closes, so the very next non-blocking flock attempt simply succeeds.
 
 # Drain the hook's stdin JSON so the caller never blocks.
 cat >/dev/null 2>&1 || true
@@ -58,9 +66,14 @@ CLI="$ROOT/scripts/planning_cli.py"
 LOG_DIR="$ROOT/.vnx-data/logs"
 LOG="$LOG_DIR/objective_reconcile.log"
 LOCK_FILE="$ROOT/.vnx-data/locks/session_reconcile_autoclose.lock"
+LOCK_LIB="$ROOT/scripts/lib/vnx_flock_lock.sh"
+BOUND_LIB="$ROOT/scripts/lib/vnx_run_bounded.sh"
 
-# No CLI, nothing to do.
+# No CLI, or the shared libs this hook depends on are missing — nothing to
+# do (never risk running unlocked/unbounded because a lib failed to install).
 [ -f "$CLI" ] || exit 0
+[ -f "$LOCK_LIB" ] || exit 0
+[ -f "$BOUND_LIB" ] || exit 0
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 
@@ -86,55 +99,15 @@ mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
     # concurrent runs, nested exactly as below, before relying on it here.
     SELF_PID="$(exec sh -c 'echo $PPID' 2>/dev/null)"
 
-    _acquire_lock() {
-        if ( set -C; echo "$SELF_PID" >"$LOCK_FILE" ) 2>/dev/null; then
-            return 0
-        fi
-        local _held_pid=""
-        _held_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
-        if [ -n "$_held_pid" ] && kill -0 "$_held_pid" 2>/dev/null; then
-            return 1
-        fi
-        # Stale: the recorded holder is dead (or the file never got written
-        # before a crash). Reclaim. If a concurrent reclaimer wins the race
-        # between this rm and the mkdir-equivalent noclobber write below, our
-        # write simply fails (EEXIST) and we back off cleanly — noclobber's
-        # atomicity is what makes this safe, not the rm itself.
-        rm -f "$LOCK_FILE" 2>/dev/null
-        if ( set -C; echo "$SELF_PID" >"$LOCK_FILE" ) 2>/dev/null; then
-            return 0
-        fi
-        return 1
-    }
-
-    STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    if ! _acquire_lock; then
-        _busy_pid="$(cat "$LOCK_FILE" 2>/dev/null || echo '?')"
-        echo "[$STAMP] session-reconcile: lock held by pid=$_busy_pid — skipping (no work done)" >>"$LOG" 2>&1
-        exit 0
-    fi
-    # Released on any exit path of this subshell (normal completion, a bounded
-    # timeout below killing the reconcile call, or an error) — never on the
-    # parent's exit, since this trap belongs to the subshell's own process.
-    trap 'rm -f "$LOCK_FILE" 2>/dev/null' EXIT
-
-    # ── Bound the runtime (OI-851): the 2h12 hang held the lock the whole
-    # time because nothing bounded the reconcile call. `timeout`/`gtimeout` are
-    # both ABSENT on this machine (verified) — use them only when present, run
-    # direct otherwise. 900s comfortably exceeds a normal reconcile and kills a
-    # multi-hour hang.
-    TIMEOUT_CMD=""
-    if command -v timeout >/dev/null 2>&1; then
-        TIMEOUT_CMD="timeout 900"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        TIMEOUT_CMD="gtimeout 900"
-    fi
+    source "$LOCK_LIB"
+    source "$BOUND_LIB"
 
     # ── Interpreter resolution (OI-852, measured 2026-07-30) ─────────────────
     # /opt/homebrew/bin/python3 was relinked to a dependency-less 3.14 at 09:32
     # today. An interactive shell alias masks this; this detached background
     # context has no alias, so bare `python3` here resolves via PATH straight
-    # to the broken interpreter. Resolve once, use it at every call site below.
+    # to the broken interpreter. Resolve once, use it at every call site below
+    # (including the flock helper, which needs a working fcntl module).
     if [ -x "$ROOT/.venv/bin/python" ]; then
         PY="$ROOT/.venv/bin/python"
     elif [ -x "/opt/homebrew/opt/python@3.12/bin/python3.12" ]; then
@@ -142,6 +115,32 @@ mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
     else
         PY="python3"
     fi
+
+    # ── Bound the runtime (OI-851/852, measured 2026-07-30): the 2h12 hang
+    # held the lock the whole time because nothing bounded the reconcile call.
+    # `timeout`/`gtimeout` are both ABSENT on this machine (verified) — use
+    # them only when present, fall back to a manual watchdog otherwise (see
+    # scripts/lib/vnx_run_bounded.sh). 900s comfortably exceeds a normal
+    # reconcile and kills a multi-hour hang.
+    DEADLINE_SECS=900
+    TIMEOUT_BIN=""
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="timeout"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="gtimeout"
+    fi
+
+    STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! vnx_flock_acquire "$LOCK_FILE" "$SELF_PID" "$PY"; then
+        _busy_pid="$(cat "$LOCK_FILE" 2>/dev/null || echo '?')"
+        echo "[$STAMP] session-reconcile: lock held by pid=$_busy_pid — skipping (no work done)" >>"$LOG" 2>&1
+        exit 0
+    fi
+    # FD 200 (opened inside vnx_flock_acquire) IS the lock: the kernel
+    # releases it the instant this subshell's last reference to that fd
+    # closes, on ANY exit path (normal completion, the watchdog above killing
+    # a hung reconcile, or a crash) — no trap required for release. Closed
+    # explicitly via vnx_flock_release at the bottom once all work is done.
 
     # Resolve project_id the same way the CLI does (git remote / .vnx-project-id),
     # falling back to the reconcile default. Empty is fine — the CLI resolves it.
@@ -160,7 +159,8 @@ mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 
     # Streak is still computed + logged for observability (no longer gates the flip).
     STREAK_MET="?"
-    if $TIMEOUT_CMD "$PY" "$CLI" objective reconcile-streak "${PID_ARGS[@]}" --json 2>/dev/null \
+    if vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
+        "$PY" "$CLI" objective reconcile-streak "${PID_ARGS[@]}" --json 2>/dev/null \
         | "$PY" -c 'import sys,json;
 d=json.load(sys.stdin);
 sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null; then
@@ -172,10 +172,14 @@ sys.exit(0 if d.get("flip_criterion_met") else 1)' 2>/dev/null; then
     echo "[$STAMP] session-reconcile tick: mode=$MODE streak_met=$STREAK_MET interpreter=$PY pid=$SELF_PID" >>"$LOG" 2>&1
 
     if [ "$MODE" = "apply" ]; then
-        $TIMEOUT_CMD "$PY" "$CLI" objective reconcile "${PID_ARGS[@]}" --apply --repo-root "$ROOT" >>"$LOG" 2>&1
+        vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
+            "$PY" "$CLI" objective reconcile "${PID_ARGS[@]}" --apply --repo-root "$ROOT" >>"$LOG" 2>&1
     else
-        $TIMEOUT_CMD "$PY" "$CLI" objective reconcile "${PID_ARGS[@]}" --repo-root "$ROOT" >>"$LOG" 2>&1
+        vnx_run_bounded "$TIMEOUT_BIN" "$DEADLINE_SECS" "$SELF_PID" \
+            "$PY" "$CLI" objective reconcile "${PID_ARGS[@]}" --repo-root "$ROOT" >>"$LOG" 2>&1
     fi
+
+    vnx_flock_release
 ) </dev/null >/dev/null 2>&1 &
 
 exit 0
