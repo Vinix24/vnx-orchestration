@@ -1,24 +1,32 @@
 # Event Streams
 
 **Status**: Active
-**Last Updated**: 2026-06-13
+**Last Updated**: 2026-07-30
 **Purpose**: Explain the lifecycle of per-terminal NDJSON event streams so that operators and future investigators don't misread an empty live file as a broken writer.
 
 ---
 
-## Per-dispatch ring buffer
+## Per-dispatch ring buffer — design vs. measured behavior
 
-`.vnx-data/events/T{n}.ndjson` is a **per-dispatch ring buffer**, not a long-running log.
-
-At the end of each subprocess-adapter dispatch, the live file is archived to:
+`.vnx-data/events/T{n}.ndjson` is *intended* as a **per-dispatch ring buffer**, not a long-running log. The intended lifecycle: at the end of each subprocess-adapter dispatch, the live file is archived to
 
 ```
 .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
 ```
 
-…and the live file is truncated to 0 bytes so the next dispatch starts from a clean slate.
+…and the live file is truncated to 0 bytes so the next dispatch starts from a clean slate. Both `event_store.clear(terminal_id, archive_dispatch_id=...)` call sites (`scripts/lib/subprocess_dispatch_internals/delivery.py:412`, in the delivery `finally` block, and `scripts/lib/subprocess_adapter.py:413`, at the next dispatch's spawn) implement this.
 
-If you're debugging "the live `T{n}.ndjson` file is empty", look in the archive directory instead — the events for the last completed dispatch are there, keyed by dispatch ID.
+**Correction (2026-07-30, measured, not designed):** the archive half works; the truncate half does not, reliably. On 2026-07-30, `T1.ndjson` accumulated events across *multiple* dispatches without an intervening truncation and reached ~19-20MB, which made provider-lane dispatches on that terminal die on a 300s chunk-read timeout. Proof: the archived rescue copy `.vnx-data/events/archive/T1/20260730-131817-oversized-rescue.ndjson` (17.4MB) contains events from two distinct dispatches —
+
+```bash
+grep -o '"dispatch_id":"[^"]*"' .vnx-data/events/archive/T1/20260730-131817-oversized-rescue.ndjson | sort -u
+# "dispatch_id":"20260730-sfp2-analyzer-chain"
+# "dispatch_id":"20260730-sfp4-diagnostics"
+```
+
+— i.e. the file was never truncated between those two dispatches, contradicting the "next dispatch starts from a clean slate" claim above. The `event_store.clear()` call in `delivery.py`'s `finally` block is wrapped in a bare `try/except Exception` that logs at `DEBUG` only (not `WARNING`/`ERROR`), so a failing truncation (e.g. a lock/permission issue on the live file) is invisible unless someone is already tailing debug logs. The 19-20MB files currently sitting in the archive under an `oversized-rescue` name are the result of manual intervention, not an automated recovery — no `oversized_rescue` mechanism exists in `scripts/` (`grep -rl oversized_rescue scripts/` returns nothing). Root cause not fixed by this dispatch (docs-only); see `docs/operations/RUNTIME_LIVENESS.md` for the recheck command and current live-file sizes.
+
+If you're debugging "the live `T{n}.ndjson` file is empty", look in the archive directory instead — the events for the last completed dispatch are there, keyed by dispatch ID. If instead the live file is unexpectedly large, that is now a known, unfixed defect (above), not a misreading.
 
 ## Which terminals produce this stream
 
