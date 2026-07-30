@@ -96,9 +96,17 @@ def _canonical_gate(raw: Optional[str]) -> str:
     the invalid value and listing the valid ones, instead of silently writing
     an unenforceable gate into the spec (a dispatch staged with ``gate="codex"``
     previously wrote that string through unchecked and the gate simply never ran).
+
+    ``"planning"`` is special-cased to the same empty-gate sentinel: it is the
+    literal string ``dispatch_create.sh:365-367`` (V8's ``_pdp_extract_dispatch_metadata``)
+    stamps whenever no gate was specified ("V8: No gate specified, defaulting to
+    'planning'"). No gate runner (``gate_runner.py``, ``gate_recorder.py``,
+    ``gate_request_handler.py``, ``review_gate_manager.py``) has ever matched on
+    ``"planning"`` — it is a no-gate marker produced by one layer and consumed by
+    none, not a real gate, so it must not be added to the closed ``Gate`` enum.
     """
     key = (raw or "").strip()
-    if not key:
+    if not key or key.lower() == "planning":
         return ""
     try:
         return Gate(key).value

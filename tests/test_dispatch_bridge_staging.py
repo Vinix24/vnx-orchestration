@@ -107,6 +107,23 @@ def test_stage_accepts_empty_gate_as_unset(tmp_path):
     assert payload["gate"] == ""
 
 
+def test_stage_normalizes_planning_sentinel_to_empty_gate(tmp_path):
+    # "planning" is the literal string dispatch_create.sh:365-367 stamps as its
+    # no-gate default ("V8: No gate specified, defaulting to 'planning'") — that
+    # value flows dispatch_lifecycle.sh -> runtime_core_cli.py -> dispatch_broker.py
+    # (persisted into bundle.json) -> pool_worker_runner.py -> the door. No gate
+    # runner has ever matched "planning"; it must stage as an empty (unset) gate,
+    # not raise, or every dispatch created without an explicit --gate would REJECT
+    # at the door.
+    payload = json.loads(_stage(tmp_path, gate="planning").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
+def test_stage_normalizes_planning_sentinel_case_and_whitespace_insensitive(tmp_path):
+    payload = json.loads(_stage(tmp_path, gate="  Planning  ").read_text(encoding="utf-8"))
+    assert payload["gate"] == ""
+
+
 # --- symlink escape: refused at WRITE time, not just read (defense-in-depth) ---
 
 def test_stage_refuses_symlinked_pending_root_escape(tmp_path):
