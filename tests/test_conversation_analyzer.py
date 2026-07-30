@@ -398,6 +398,7 @@ class TestStorage:
 
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
         analyzer.conn = conn
+        analyzer.db_path = Path(tempfile.mktemp(suffix=".db"))
 
         metrics = SessionMetrics(
             session_id="test-session-001",
@@ -413,7 +414,8 @@ class TestStorage:
         )
         flags = SessionFlags(primary_activity="coding")
 
-        analyzer._store_session(metrics, flags, None)
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
 
         cur = conn.cursor()
         cur.execute("SELECT * FROM session_analytics WHERE session_id = 'test-session-001'")
@@ -667,6 +669,7 @@ class TestModelExtraction:
 
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
         analyzer.conn = conn
+        analyzer.db_path = Path(tempfile.mktemp(suffix=".db"))
 
         metrics = SessionMetrics(
             session_id="model-test-001",
@@ -676,7 +679,8 @@ class TestModelExtraction:
             session_model="claude-opus",
         )
         flags = SessionFlags(primary_activity="coding")
-        analyzer._store_session(metrics, flags, None)
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
 
         cur = conn.cursor()
         cur.execute("SELECT session_model FROM session_analytics WHERE session_id = 'model-test-001'")
@@ -1192,7 +1196,8 @@ class TestAtomicWrites:
         # The bridge catches its own exception; no exception propagates.
         # The ABORT inside the trigger rolls back the implicit transaction
         # that includes the _store_session INSERT.
-        analyzer._store_session(metrics, flags, None)
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
         analyzer.bridge_session_to_intelligence(metrics, flags)
         analyzer.conn.commit()
 
@@ -1234,7 +1239,8 @@ class TestAtomicWrites:
 
         store_failed = False
         try:
-            analyzer._store_session(metrics, flags, None)
+            with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+                analyzer._store_session(metrics, flags, None)
             analyzer.bridge_session_to_intelligence(metrics, flags)
             analyzer.conn.commit()
         except Exception:
@@ -1268,7 +1274,12 @@ class TestAtomicWrites:
         )
 
     def test_project_id_populated_on_insert(self):
-        """New rows have a non-NULL, non-empty project_id after _store_session."""
+        """New rows carry the resolved project_id when a tenant is configured.
+
+        The analyzer's db_path here is a bare tempfile (no .vnx-data/<pid>/state
+        layout, no .vnx-project-id marker), so VNX_PROJECT_ID env is the only
+        available tenant source.
+        """
         analyzer = _make_analyzer_with_intel_db()
         metrics = SessionMetrics(
             session_id="pid-test-001",
@@ -1278,8 +1289,9 @@ class TestAtomicWrites:
         )
         flags = SessionFlags()
 
-        analyzer._store_session(metrics, flags, None)
-        analyzer.conn.commit()
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            analyzer._store_session(metrics, flags, None)
+            analyzer.conn.commit()
 
         row = analyzer.conn.execute(
             "SELECT project_id FROM session_analytics WHERE session_id = 'pid-test-001'"
@@ -1288,8 +1300,99 @@ class TestAtomicWrites:
         pid = row[0]
         assert pid is not None, "project_id is NULL"
         assert pid != "", "project_id is empty string"
-        # With no VNX_PROJECT_ID set, the fallback is 'vnx-dev'
         assert pid == "vnx-dev", f"Expected 'vnx-dev', got {pid!r}"
+
+    def test_resolve_project_id_raises_when_unresolvable(self):
+        """No default: an unresolvable tenant raises rather than stamping 'vnx-dev'.
+
+        ADR-007 rejects a hardcoded default as "a sentinel for legitimate
+        rows" — this analyzer runs against every VNX project (sales-copilot,
+        seocrawler-v2, mission-control, ...), so a guessed identity here would
+        let another tenant's sessions collide under the
+        UNIQUE (project_id, session_id) constraint.
+        """
+        from project_scope import TenantUnresolved
+
+        analyzer = _make_analyzer_with_intel_db()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_PROJECT_ID", None)
+            with pytest.raises(TenantUnresolved):
+                analyzer._resolve_project_id()
+
+    def test_store_session_raises_and_writes_nothing_when_tenant_unresolved(self):
+        """_store_session must not insert a row when project_id can't resolve."""
+        from project_scope import TenantUnresolved
+
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(
+            session_id="unresolved-tenant-001",
+            project_path="/test",
+            terminal="T1",
+            session_date="2026-03-04",
+        )
+        flags = SessionFlags()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_PROJECT_ID", None)
+            with pytest.raises(TenantUnresolved):
+                analyzer._store_session(metrics, flags, None)
+
+        count = analyzer.conn.execute(
+            "SELECT COUNT(*) FROM session_analytics "
+            "WHERE session_id = 'unresolved-tenant-001'"
+        ).fetchone()[0]
+        assert count == 0, "row was inserted despite an unresolved project_id"
+
+    def test_resolve_project_id_raises_when_project_scope_missing(self):
+        """A project_scope import failure must not degrade to a guessed default.
+
+        Simulates the module-level ``except ImportError`` path by clearing the
+        cached reference on the runner module — the call-time raise is the
+        deliberate choice (see _resolve_project_id docstring): other
+        ConversationAnalyzer entry points that never call this method (dry-run,
+        parsing-only) should not be broken by an unrelated import error.
+        """
+        import conversation_analyzer.runner as runner_module
+        from project_scope import TenantUnresolved
+
+        analyzer = _make_analyzer_with_intel_db()
+        original = runner_module.resolve_stamp_project_id
+        runner_module.resolve_stamp_project_id = None
+        try:
+            with pytest.raises(TenantUnresolved):
+                analyzer._resolve_project_id()
+        finally:
+            runner_module.resolve_stamp_project_id = original
+
+    def test_resolve_project_id_conflict_does_not_fall_back_to_env(self, tmp_path):
+        """A path/env conflict must raise, never silently resolve to env.
+
+        Regression test for the fix-forward on PR #1248: _resolve_project_id
+        used to retry a bare, env-only resolve_stamp_project_id() whenever the
+        db_path-anchored call raised TenantUnresolved — including when that
+        raise came from a genuine SOURCE CONFLICT (db path says one tenant,
+        VNX_PROJECT_ID says another), not just "no source at all". That retry
+        silently returned the env value, papering over exactly the
+        cross-tenant contamination this guard exists to catch.
+        """
+        from project_scope import TenantUnresolved
+
+        db_dir = tmp_path / ".vnx-data" / "mission-control" / "state"
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / "quality_intelligence.db"
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _create_schema(conn)
+        _create_intelligence_schema(conn)
+
+        analyzer = ConversationAnalyzer(db_path)
+        analyzer.conn = conn
+
+        with patch.dict(os.environ, {"VNX_PROJECT_ID": "vnx-dev"}):
+            with pytest.raises(TenantUnresolved):
+                analyzer._resolve_project_id()
 
 
 if __name__ == "__main__":

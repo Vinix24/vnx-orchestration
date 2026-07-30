@@ -18,9 +18,11 @@ from .deep_analyzer import DeepAnalyzer
 from .generator import DigestGenerator
 from . import intelligence_bridge
 
-# project_scope is imported at the call site to avoid circular imports
-# from the models module (which itself imports vnx_paths). We import the
-# specific function at the module level so it's available for testing.
+# Deliberately NOT fatal at import: dry-run and parse-only entry points on
+# ConversationAnalyzer never touch _resolve_project_id and should not break
+# on an unrelated import failure. The sentinel below only matters to the one
+# method (_resolve_project_id) that enforces the ADR-007 tenant guarantee —
+# it raises there, at call time, instead of guessing a project_id.
 try:
     from project_scope import resolve_stamp_project_id, TenantUnresolved
 except ImportError:
@@ -208,24 +210,39 @@ class ConversationAnalyzer:
         ))
 
     def _resolve_project_id(self) -> str:
-        """Resolve the project_id for tenant-scoped writes (ADR-007).
+        """Resolve the project_id for tenant-scoped writes, fail-closed (ADR-007).
 
-        Sources from ``resolve_stamp_project_id`` with the DB path as authority.
-        Falls back to ``'vnx-dev'`` when no tenant source is configured, which is
-        the correct identity for the default single-tenant VNX installation.
+        Delegates to ``resolve_stamp_project_id(db_path=...)``, which already
+        weighs {DB-path layout, ``.vnx-project-id`` marker, ``VNX_PROJECT_ID``
+        env} as co-sources that must agree. There is no ``'vnx-dev'`` default:
+        ADR-007 explicitly rejects a stamped default as "a sentinel for
+        legitimate rows", and this analyzer runs against every VNX project,
+        not just this one — a guessed identity here would let another
+        tenant's sessions land in the wrong project's key space under the
+        ``UNIQUE (project_id, session_id)`` constraint.
+
+        Deliberately does NOT retry with a bare ``resolve_stamp_project_id()``
+        (env-only) on ``TenantUnresolved``: when the db_path-anchored call
+        raises because its sources conflict (path/marker disagree with env),
+        a retry that checks env alone would silently pick the env value and
+        paper over that conflict — the exact contamination this guard exists
+        to catch. Any ``TenantUnresolved`` propagates so the caller
+        (``analyze_session``) aborts and rolls back that one session's write;
+        the run continues with the next session.
+
+        A missing ``project_scope`` module (import failure) is treated the
+        same way — raised here at call time rather than made fatal at module
+        import. Other ``ConversationAnalyzer`` entry points (dry-run, parsing
+        only) never reach this method and should not be broken by an
+        unrelated import error; only the write path that actually needs the
+        tenant guarantee pays for enforcing it.
         """
-        if resolve_stamp_project_id is not None:
-            try:
-                return resolve_stamp_project_id(db_path=str(self.db_path))
-            except TenantUnresolved:
-                try:
-                    return resolve_stamp_project_id()
-                except TenantUnresolved:
-                    pass
-            except Exception:
-                pass
-        log("WARNING", "Could not resolve project_id; falling back to 'vnx-dev'")
-        return "vnx-dev"
+        if resolve_stamp_project_id is None:
+            raise TenantUnresolved(
+                "project_scope module is unavailable (import failed); "
+                "refusing to stamp a guessed project_id (ADR-007)"
+            )
+        return resolve_stamp_project_id(db_path=str(self.db_path))
 
     def _store_suggestions(self, suggestions: List[dict], digest_id: str):
         if not suggestions:
