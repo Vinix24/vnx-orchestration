@@ -85,7 +85,7 @@ constraints:
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
-    pin_semantics: floor
+    pin_semantics: default
 
   - id: no-anthropic-sdk
     rule: forbid_import
