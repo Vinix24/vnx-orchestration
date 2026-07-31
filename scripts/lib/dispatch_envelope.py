@@ -460,6 +460,59 @@ def _resolve_fix_forward_diff(
     return pushed_diff if pushed_diff.strip() else own_diff
 
 
+def _resolve_phantom_diff(
+    dispatch_id: str,
+    *,
+    base_ref: str = "origin/main",
+    wt_path: Path,
+    repo: Path,
+) -> Optional[str]:
+    """Resolve the phantom-guard diff for the provider lane.
+
+    Prefers the pushed branch diff (durable, survives dispatch teardown) over
+    the live worktree diff (ephemeral, torn down in the finally block). Falls
+    back through each source; returns None when ALL sources are unresolvable so
+    the guard abstains instead of false-rejecting.
+    """
+    from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
+    from phantom_guard import compute_branch_diff, compute_worktree_diff  # noqa: PLC0415
+
+    branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+
+    # Check whether the worker pushed its branch. ``git worktree add -b`` may
+    # set upstream=origin/main implicitly, so ``@{upstream}`` alone is not a
+    # reliable signal — ask the remote whether the branch actually exists.
+    has_upstream = False
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch],
+            cwd=str(repo), capture_output=True, text=True, timeout=15,
+        )
+        # git ls-remote exits 0 even when the ref doesn't exist; non-empty
+        # stdout means the branch IS on the remote.
+        has_upstream = proc.returncode == 0 and bool(proc.stdout.strip())
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: upstream check failed for branch=%s dispatch=%s (%s)",
+            branch, dispatch_id, exc,
+        )
+
+    if has_upstream:
+        try:
+            return compute_branch_diff(f"origin/{branch}", base_ref=base_ref, repo=repo)
+        except Exception as exc:
+            logger.warning(
+                "_resolve_phantom_diff: branch diff failed for origin/%s dispatch=%s (%s)",
+                branch, dispatch_id, exc,
+            )
+
+    # Fall back to worktree diff — last chance before the teardown deletes it
+    try:
+        return compute_worktree_diff(wt_path, base_ref=base_ref)
+    except Exception:
+        return None
+
+
 def _unknown_verification() -> Dict[str, Any]:
     """ADR-035 §3.1.1 fallback: an explicit 'we don't know' beats the
     current silent absence — used when no report is on disk to extract from."""
@@ -1372,15 +1425,21 @@ def run_envelope_plan(
         start = datetime.now(timezone.utc)
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path)
         end = datetime.now(timezone.utc)
-        # F1 (codex): capture the worker's diff from the LIVE worktree BEFORE the teardown below —
-        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id> branch, so
-        # the phantom-guard inside _govern could not otherwise resolve the provider lane's diff and
-        # would abstain, letting the exact kimi/glm/deepseek phantom slip through.
+        # F1 (codex): capture the worker's diff BEFORE the teardown below —
+        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id>
+        # branch, so the phantom-guard inside _govern could not otherwise resolve the
+        # provider lane's diff and would abstain, letting the exact kimi/glm/deepseek
+        # phantom slip through.
+        # Prefer the pushed branch (survives teardown → more durable evidence) over the
+        # live worktree diff (ephemeral, torn down in the finally block). When the worker
+        # pushed its branch, the branch diff is the more reliable evidence.
         try:
-            from phantom_guard import compute_worktree_diff  # noqa: PLC0415
-            # F3 (codex): use the plan's actual base_ref, not a hardcoded origin/main — a seeded /
-            # non-main base would make an empty worker run look non-empty and let a phantom pass.
-            _phantom_diff = compute_worktree_diff(wt_path, base_ref=plan.base_ref or "origin/main")
+            _phantom_diff = _resolve_phantom_diff(
+                plan.dispatch_id,
+                base_ref=plan.base_ref or "origin/main",
+                wt_path=wt_path,
+                repo=_consumer_project_root,
+            )
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
     finally:
