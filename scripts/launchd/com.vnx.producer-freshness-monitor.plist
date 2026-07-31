@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.producer-freshness-monitor</string>
+  <!--
+    Daily producer-freshness sweep. Replace __VNX_REPO_ROOT__ with the repo
+    checkout path at install time (same placeholder pattern as
+    com.vnx.nightly-intelligence-pipeline.plist), e.g.:
+
+      sed "s|__VNX_REPO_ROOT__|$HOME/Development/vnx-orchestration|g" \
+        com.vnx.producer-freshness-monitor.plist > ~/Library/LaunchAgents/
+      launchctl load -w ~/Library/LaunchAgents/com.vnx.producer-freshness-monitor.plist
+
+    The sweep's own exit status is captured back into job_exits.ndjson by the
+    launchd harvest inside the next run — the monitor's scheduling failures
+    are visible in the same stream it maintains. Its heartbeat is watched by
+    the independent hooks/monitor_tripwire.sh (bash + find only).
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd __VNX_REPO_ROOT__ &amp;&amp; exec python3 scripts/producer_freshness_monitor.py</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>6</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/vnx-producer-freshness.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-producer-freshness.err</string>
+</dict>
+</plist>

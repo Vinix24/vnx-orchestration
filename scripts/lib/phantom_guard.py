@@ -96,6 +96,44 @@ def phantom_guard(
     task_class: Optional[str] = None,
     read_only: Optional[bool] = None,
 ) -> PhantomVerdict:
+    """Public guard entry — pure decision PLUS an observe-only counter.
+
+    The guard-fired counter (guard_stats) records every evaluation so a guard
+    that sits at 100% not-fired for weeks is visible instead of vanishing
+    into logger.debug. The recording NEVER alters the verdict: it wraps the
+    return value, it does not touch the decision. A counter failure is
+    swallowed inside guard_stats and cannot break the guard.
+    """
+    verdict = _phantom_guard_decision(
+        status=status,
+        worktree_diff=worktree_diff,
+        token_usage=token_usage,
+        role=role,
+        task_class=task_class,
+        read_only=read_only,
+    )
+    try:
+        import guard_stats  # noqa: PLC0415
+
+        guard_stats.record_guard_evaluation(
+            "phantom_guard",
+            verdict.is_phantom,
+            detail={"status": status, "role": role, "task_class": task_class},
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only: never break the guard on the counter
+        _LOG.warning("phantom_guard: guard-fired counter failed (verdict unchanged): %s", exc)
+    return verdict
+
+
+def _phantom_guard_decision(
+    *,
+    status: Optional[str],
+    worktree_diff: Optional[str],
+    token_usage: Optional[int] = None,
+    role: Optional[str] = None,
+    task_class: Optional[str] = None,
+    read_only: Optional[bool] = None,
+) -> PhantomVerdict:
     """Pure decision. See module docstring for the rule. worktree_diff is the REAL diff of the
     worker's worktree/branch (caller-computed), NOT the receipt's main-repo provenance."""
     if read_only:
