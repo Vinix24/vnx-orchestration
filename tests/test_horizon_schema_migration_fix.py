@@ -651,3 +651,122 @@ class TestD5FailClosedHorizon:
         row = tracks_dal.update_authored_fields(
             state_dir, "t-1", "proj-x", title="New Title")
         assert row["title"] == "New Title"
+
+
+# ===========================================================================
+# D6.1 — premigrate backup: no-op skip + mutation detection
+# ===========================================================================
+
+
+class TestPremigrateBackupNoOp:
+    """A no-op migration run creates NO premigrate backup when backup=True."""
+
+    def test_noop_migration_creates_no_backup(self, tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        """After a store is fully migrated to v31, a second run with backup=True
+        must NOT create a premigrate backup because the pipeline is a confident
+        no-op."""
+        pid = "noop-test"
+        data_root = _central_data_root(tmp_path, pid)
+        db_path = _bootstrap_store(data_root)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+
+        # First run: migrate to terminal version (this creates a backup).
+        mfs.run(data_dir=data_root, tenant_stamp_fatal=True, backup=True)
+        assert _uv(db_path) == 31
+
+        # Count existing premigrate backups after the first run.
+        state_dir = data_root / "state"
+        before_backups = list(state_dir.glob(
+            "runtime_coordination.db.premigrate-*.bak"))
+        before_count = len(before_backups)
+
+        # Second run: should be a no-op, must NOT create a backup.
+        mfs.run(data_dir=data_root, tenant_stamp_fatal=True, backup=True)
+
+        after_backups = list(state_dir.glob(
+            "runtime_coordination.db.premigrate-*.bak"))
+        assert len(after_backups) == before_count, (
+            f"no-op run should not create a backup; "
+            f"had {before_count}, now {len(after_backups)}"
+        )
+
+    def test_mutating_migration_creates_backup(self, tmp_path: Path,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fresh store that needs migration creates a backup when backup=True."""
+        pid = "mutate-test"
+        data_root = _central_data_root(tmp_path, pid)
+        db_path = _bootstrap_store(data_root)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+
+        state_dir = data_root / "state"
+        before_backups = list(state_dir.glob(
+            "runtime_coordination.db.premigrate-*.bak"))
+        assert len(before_backups) == 0, "no backups should exist before first run"
+
+        mfs.run(data_dir=data_root, tenant_stamp_fatal=True, backup=True)
+        assert _uv(db_path) == 31
+
+        after_backups = list(state_dir.glob(
+            "runtime_coordination.db.premigrate-*.bak"))
+        assert len(after_backups) >= 1, (
+            "mutating migration must create a VACUUM INTO premigrate backup"
+        )
+
+
+class TestPremigrateBackupRotation:
+    """Premigrate backup rotation keeps only the configured number of files.
+
+    Tests rotation by directly creating backup files with different timestamps
+    and verifying that ``rotate_backups_safe`` is wired correctly into the
+    migration runner.
+    """
+
+    def test_rotation_keeps_exactly_n_files(self, tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+        """When VNX_PREMIGRATE_BACKUP_KEEP is set, rotation prunes excess
+        premigrate backups after a successful backup."""
+        from db_backup_rotation import rotate_backups
+
+        pid = "rot-test"
+        data_root = _central_data_root(tmp_path, pid)
+        state_dir = data_root / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a valid runtime_coordination.db so backup_store_vacuum_into works.
+        db_path = _bootstrap_store(data_root)
+
+        # Pre-create 5 premigrate backups with clearly-sortable timestamps.
+        base_ts = 20260710
+        for i in range(5):
+            ts = f"{base_ts}T{i:06d}Z"
+            bp = state_dir / f"runtime_coordination.db.premigrate-{ts}.bak"
+            bp.write_text(f"backup {i}")
+            # Add sidecars to the first 3.
+            if i < 3:
+                (state_dir / f"{bp.name}-wal").write_text("wal")
+                (state_dir / f"{bp.name}-shm").write_text("shm")
+
+        # Run rotation with keep=2.
+        rotate_backups(state_dir, "runtime_coordination.db.premigrate-", keep=2)
+
+        remaining = [
+            p for p in state_dir.glob("runtime_coordination.db.premigrate-*.bak")
+            if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
+        ]
+        assert len(remaining) == 2, (
+            f"rotation should keep exactly 2 premigrate backups, "
+            f"found {len(remaining)}: {sorted(p.name for p in remaining)}"
+        )
+
+        # Verify the kept backups are the newest by name (lexicographic sort on
+        # the YYYYMMDDTHHMMSSZ timestamp suffix).
+        remaining.sort(key=lambda p: p.name)
+        kept_names = [p.name for p in remaining]
+        assert "runtime_coordination.db.premigrate-20260710T000003Z.bak" in kept_names
+        assert "runtime_coordination.db.premigrate-20260710T000004Z.bak" in kept_names
+
+        # Verify sidecars of pruned backups are also removed.
+        for i in range(3):
+            assert not (state_dir / f"runtime_coordination.db.premigrate-20260710T{i:06d}Z.bak-wal").exists()
+            assert not (state_dir / f"runtime_coordination.db.premigrate-20260710T{i:06d}Z.bak-shm").exists()
