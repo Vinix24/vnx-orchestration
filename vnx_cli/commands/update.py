@@ -16,6 +16,12 @@ from pathlib import Path
 
 from vnx_cli._reexec import PIN_FILE_NAME, _PIN_RE, _normalize_version
 
+# Late import: vnx_version_ro lives in the engine tree (scripts/lib/), not in
+# the pip CLI tree, so we import it inside the functions that need it rather
+# than at module level.  This keeps the pip CLI importable without the engine
+# on sys.path and without a try/except wrapper.
+_VNX_VERSION_RO_MODULE = "vnx_version_ro"
+
 
 VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration.git"
 DEFAULT_KEEP_LAST = 3
@@ -136,10 +142,19 @@ def _fetch_version(
 
     if target_dir.is_dir():
         print(f"Pulling {target} in {target_dir}...")
-        subprocess.run(
-            ["git", "-C", str(target_dir), "pull", "--ff-only"],
-            check=True,
-        )
+        from vnx_cli import _engine as _eng2
+        _eng2.ensure_engine_on_path()
+        from vnx_version_ro import writeable_version_dir as _wvd
+        with _wvd(target_dir):
+            subprocess.run(
+                ["git", "-C", str(target_dir), "pull", "--ff-only"],
+                check=True,
+            )
+            # Strip and marker happen inside the context so the dir is
+            # writable for both.  _write_install_marker has its own inner
+            # context manager that is a no-op when already writable.
+            _strip_tenant_marker(target_dir)
+            _write_install_marker(target_dir, audit_log=audit_log)
     else:
         ref = "main" if target == "edge" else target
         print(f"Cloning {VNX_GIT_REMOTE} (ref={ref}) -> {target_dir}...")
@@ -148,14 +163,14 @@ def _fetch_version(
              VNX_GIT_REMOTE, str(target_dir)],
             check=True,
         )
+        _strip_tenant_marker(target_dir)
+        _write_install_marker(target_dir, audit_log=audit_log)
+        # Lock the freshly cloned pinned version dir (edge stays writable).
+        from vnx_cli import _engine as _eng3
+        _eng3.ensure_engine_on_path()
+        from vnx_version_ro import make_readonly as _mkro
+        _mkro(target_dir)
 
-    # The installed engine tree must be TENANT-NEUTRAL. The repo tracks its own
-    # `.vnx-project-id = vnx-dev`, so a clone/pull drags that marker into the shared
-    # version dir. In central-install mode the door's CWD is this tree; a stray marker
-    # there makes CWD-based project_id resolution return `vnx-dev` for EVERY consumer
-    # (the fleet-wide misroute/hard-reject class). Strip it after every fetch.
-    _strip_tenant_marker(target_dir)
-    _write_install_marker(target_dir, audit_log=audit_log)
     return target_dir
 
 
@@ -198,13 +213,15 @@ def _write_install_marker(version_dir: Path, audit_log: "Path | None" = None) ->
     from vnx_cli import _engine
     _engine.ensure_engine_on_path()
     from atomic_io import atomic_write_text
+    from vnx_version_ro import writeable_version_dir
 
-    atomic_write_text(version_dir / INSTALL_MODE_MARKER, f"{INSTALL_MODE_VALUE}\n")
-    _emit_audit_event(
-        "central_install_marker_written",
-        {"version_dir": str(version_dir)},
-        audit_log=audit_log,
-    )
+    with writeable_version_dir(version_dir):
+        atomic_write_text(version_dir / INSTALL_MODE_MARKER, f"{INSTALL_MODE_VALUE}\n")
+        _emit_audit_event(
+            "central_install_marker_written",
+            {"version_dir": str(version_dir)},
+            audit_log=audit_log,
+        )
 
 
 def _is_under_versions(root: Path, version_dir: Path) -> bool:
@@ -481,6 +498,10 @@ def _prune_old_versions(
                 audit_log=audit_log,
             )
             print(f"Pruning: {version_dir}")
+            from vnx_cli import _engine as _eng4
+            _eng4.ensure_engine_on_path()
+            from vnx_version_ro import make_writable as _mkw
+            _mkw(version_dir)
             shutil.rmtree(version_dir)
 
 
