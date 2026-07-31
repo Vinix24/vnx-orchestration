@@ -91,16 +91,75 @@ _VERDICT_CONTRACT = (
 # The plan doc is untrusted input inlined into each panelist's instruction. Two guards:
 #  - a doc must not be able to inject its own verdict fence (verdict spoofing);
 #  - a doc must not blow argv past ARG_MAX when passed as --instruction.
-MAX_DOC_CHARS = 60000
+#
+# DEFAULT_MAX_DOC_CHARS derivation (OI-858-class visibility fix, 2026-07-31): the previous
+# 60_000 was a 10x-too-conservative guess. Measured on this platform (macOS):
+# `getconf ARG_MAX` = 1_048_576 bytes — the ceiling execve() enforces on the COMBINED argv +
+# inherited-environment size for the provider_dispatch.py subprocess this doc is inlined
+# into (the claude/tmux lane instead writes the doc to a temp file and never inlines it, so
+# this cap only bites the kimi/glm/deepseek/codex provider lanes). Budget:
+#   - this module's own wrapper text (rubric + verdict contract + track/report boilerplate)
+#     measures ~1.2k chars around the doc body — negligible;
+#   - the subprocess's inherited environment measured ~3.7KB on this dev machine; budgeted
+#     here at a generous 150_000 bytes so the cap stays safe on much heavier CI/dev
+#     environments too;
+#   - the remaining ~898_000-byte margin is divided by 2 (not 1) bytes/char as a safety
+#     factor for non-ASCII plan-doc content (typographic quotes, em-dashes, arrows), which
+#     costs more than 1 byte/char in UTF-8, rather than assuming pure-ASCII.
+# That yields ~449k chars of headroom; DEFAULT_MAX_DOC_CHARS is set to a round 400_000 —
+# 6.7x the previous cap, comfortably inside the computed margin even under the pessimistic
+# 2-bytes/char assumption (400_000 * 2 = 800_000 doc bytes + 150_000 overhead = 950_000,
+# still ~98KB under ARG_MAX). Overridable via VNX_PLAN_GATE_MAX_DOC_CHARS (same pattern as
+# VNX_PANEL_RETRY) for an exceptional oversized plan.
+DEFAULT_MAX_DOC_CHARS = 400_000
+MAX_DOC_CHARS = DEFAULT_MAX_DOC_CHARS  # the no-override default; effective cap is _max_doc_chars()
+
+
+def _max_doc_chars() -> int:
+    """Effective plan-doc truncation cap: ``VNX_PLAN_GATE_MAX_DOC_CHARS`` override, default
+    ``DEFAULT_MAX_DOC_CHARS``. A malformed or non-positive value falls back to the default —
+    same override pattern as ``_panel_retry_count``."""
+    raw = os.environ.get("VNX_PLAN_GATE_MAX_DOC_CHARS", "").strip()
+    if not raw:
+        return DEFAULT_MAX_DOC_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_DOC_CHARS
+    return value if value > 0 else DEFAULT_MAX_DOC_CHARS
 
 
 def _sanitize_doc(doc_text: str) -> str:
     # Neutralize any embedded verdict fence so a plan doc cannot spoof a PASS: a space
     # after the backticks breaks the exact ```vnx-plan-verdict opener parse_verdict matches.
     safe = doc_text.replace("```" + VERDICT_FENCE, "``` " + VERDICT_FENCE + " (neutralized)")
-    if len(safe) > MAX_DOC_CHARS:
-        safe = safe[:MAX_DOC_CHARS] + f"\n\n[... plan doc truncated at {MAX_DOC_CHARS} chars for the gate ...]"
+    limit = _max_doc_chars()
+    if len(safe) > limit:
+        safe = safe[:limit] + f"\n\n[... plan doc truncated at {limit} chars for the gate ...]"
     return safe
+
+
+def _doc_truncation_info(doc_text: str) -> Dict[str, Any]:
+    """Whether ``_sanitize_doc`` will truncate this doc when inlined into a panelist
+    instruction, and by how much.
+
+    Mirrors ``_sanitize_doc``'s length check EXACTLY (same verdict-fence neutralization,
+    same effective cap) so the info reported here can never drift from what actually gets
+    truncated. This is the fix for the silent-partial-read defect: a gate that only reads
+    part of its input must say so in the verdict it hands back, not just in the panelist's
+    own prompt — see ``run_panel``, which attaches this to the top-level result and folds a
+    note into the summary rationale whenever ``truncated`` is True.
+    """
+    safe = doc_text.replace("```" + VERDICT_FENCE, "``` " + VERDICT_FENCE + " (neutralized)")
+    limit = _max_doc_chars()
+    original_chars = len(safe)
+    truncated = original_chars > limit
+    return {
+        "truncated": truncated,
+        "original_chars": original_chars,
+        "kept_chars": min(original_chars, limit),
+        "limit_chars": limit,
+    }
 
 
 _RUBRIC = (
@@ -637,6 +696,7 @@ def run_panel(
     panel = panel or DEFAULT_PANEL
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, timeout_seconds)
     doc_text = Path(doc_path).read_text(encoding="utf-8")
+    doc_truncation = _doc_truncation_info(doc_text)
     instruction = build_plan_review_instruction(doc_text, track_id)
 
     retries = _panel_retry_count()
@@ -657,10 +717,27 @@ def run_panel(
         results.append(result)
 
     summary = apply_panel_rule(results)
+    if doc_truncation["truncated"]:
+        # The gate must never certify a verdict while silently hiding that it only read
+        # PART of the plan — fold an explicit, quantified note into the rationale (the one
+        # field every consumer — CLI text, --json, callers reading result["summary"]) already
+        # surfaces, alongside the structured detail below for a caller that wants the exact
+        # counts.
+        pct = 100.0 * doc_truncation["kept_chars"] / doc_truncation["original_chars"]
+        summary = {
+            **summary,
+            "rationale": (
+                summary["rationale"]
+                + f"; PLAN DOC TRUNCATED: gate read {doc_truncation['kept_chars']} of "
+                f"{doc_truncation['original_chars']} chars ({pct:.1f}%) — verdict may be "
+                "based on an incomplete plan"
+            ),
+        }
     return {
         "track_id": track_id,
         "project_id": project_id,
         "decision": summary["decision"],
         "summary": summary,
         "panelists": [r.__dict__ for r in results],
+        "doc_truncation": doc_truncation,
     }

@@ -645,6 +645,100 @@ def test_sanitize_doc_caps_huge_doc():
     assert "truncated" in out
 
 
+# --------------------------------------------------------------------------
+# doc-truncation VISIBILITY (a gate that reads only part of its input must say
+# so in the verdict, not just in the panelist's own prompt) + the raised,
+# platform-measured ARG_MAX-derived cap, with an env override.
+# --------------------------------------------------------------------------
+
+def test_max_doc_chars_default_is_400k(monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
+    assert pgp._max_doc_chars() == 400_000 == pgp.DEFAULT_MAX_DOC_CHARS
+
+
+def test_max_doc_chars_honors_env_override(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "12345")
+    assert pgp._max_doc_chars() == 12345
+
+
+def test_max_doc_chars_malformed_or_non_positive_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "not-a-number")
+    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "0")
+    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "-1")
+    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
+
+
+def test_doc_truncation_info_reports_no_truncation_for_small_doc(monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
+    small = "## Problem\n## Approach\n"
+    info = pgp._doc_truncation_info(small)
+    assert info == {
+        "truncated": False,
+        "original_chars": len(small),
+        "kept_chars": len(small),
+        "limit_chars": pgp.DEFAULT_MAX_DOC_CHARS,
+    }
+
+
+def test_doc_truncation_info_reports_exact_counts_when_truncated(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "100")
+    doc = "y" * 250
+    info = pgp._doc_truncation_info(doc)
+    assert info == {
+        "truncated": True,
+        "original_chars": 250,
+        "kept_chars": 100,
+        "limit_chars": 100,
+    }
+
+
+def test_run_panel_surfaces_doc_truncation_in_result_and_rationale(tmp_path, monkeypatch):
+    """The core visibility fix: a truncated doc must show up in the RESULT the operator
+    reads (top-level ``doc_truncation`` key, for --json and any programmatic caller) AND
+    in the human-readable summary rationale (so a truncation can never be missed just by
+    reading the one-line verdict) — never silently only in the panelist's own prompt."""
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "200")
+    doc = tmp_path / "plan.md"
+    doc.write_text("z" * 500, encoding="utf-8")
+
+    out = pgp.run_panel(
+        doc,
+        track_id="feat-trunc",
+        project_id="p1",
+        panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+        dispatcher=lambda provider, model_arg, instruction, dispatch_id: _make_report_with_fence("pass"),
+    )
+
+    assert out["doc_truncation"] == {
+        "truncated": True,
+        "original_chars": 500,
+        "kept_chars": 200,
+        "limit_chars": 200,
+    }
+    assert "PLAN DOC TRUNCATED" in out["summary"]["rationale"]
+    assert "200 of 500 chars" in out["summary"]["rationale"]
+    # the decision itself is untouched by truncation-visibility — only the disclosure is added
+    assert out["decision"] == "PASS"
+
+
+def test_run_panel_no_truncation_note_when_doc_fits(tmp_path, monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    out = pgp.run_panel(
+        doc,
+        track_id="feat-fits",
+        project_id="p1",
+        panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+        dispatcher=lambda provider, model_arg, instruction, dispatch_id: _make_report_with_fence("pass"),
+    )
+    assert out["doc_truncation"]["truncated"] is False
+    assert "TRUNCATED" not in out["summary"]["rationale"]
+
+
 def test_rule_empty_panel_is_not_pass():
     # a misconfigured empty panel must never fall through to PASS (kimi finding 8)
     d = pgp.apply_panel_rule([])
