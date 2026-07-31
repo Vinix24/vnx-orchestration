@@ -244,5 +244,31 @@ class TestStateDirResolution(unittest.TestCase):
         self.assertTrue(str(result).endswith(os.path.join(".vnx-data", "state")))
 
 
+class TestDeadlineFallback(_Base):
+    """When dispatch-spec.json is corrupt or unreadable, log a warning and fall back to 900s."""
+
+    def test_corrupt_spec_logs_warning_falls_back_to_900(self):
+        """Invalid JSON in dispatch-spec.json -> warning logged, fallback to 900s, delivery proceeds."""
+        self._queue("d-corrupt")
+        self._bundle("d-corrupt", instr="# deadline test")
+        corrupt_spec = self.dd / "d-corrupt" / "dispatch-spec.json"
+        corrupt_spec.write_text("{bad json", encoding="utf-8")
+
+        with self.assertLogs("pool_worker_runner", level="WARNING") as log_ctx:
+            with patch("pool_worker_runner._deliver_claude", return_value=EXIT_OK) as m:
+                result = self._run()
+
+        self.assertEqual(result, EXIT_OK)
+        m.assert_called_once()
+        self.assertEqual(
+            m.call_args.kwargs.get("deadline_seconds"), 900,
+            "Corrupt spec must fall back to default 900s deadline",
+        )
+        self.assertTrue(
+            any("Failed to read deadline_seconds" in msg for msg in log_ctx.output),
+            f"Expected warning about spec read failure in: {log_ctx.output}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,6 +59,7 @@ class EnvelopeSpec:
     pr_id: Optional[str]
     state_dir: Path
     data_dir: Path
+    deadline_seconds: int = 900
 
 
 @dataclass
@@ -209,6 +210,7 @@ class ClaudeSubprocessAdapter:
                 event_writer=event_writer,
                 cwd=cwd,
                 role=spec.role,
+                total_deadline=float(spec.deadline_seconds),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
@@ -709,6 +711,7 @@ def _govern(
                 tool_call_count=_toolcall_signals.get("tool_call_count"),
                 tool_call_failures=_toolcall_signals.get("tool_call_failures"),
                 tool_call_retries=_toolcall_signals.get("tool_call_retries"),
+                deadline_seconds=spec.deadline_seconds,
             )
         except Exception as exc:
             raise EnvelopeGovernError(
@@ -815,6 +818,7 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         pr_id=spec.pr_id,
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
+        deadline_seconds=spec.deadline_seconds,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify raw+injections reconstruct it
@@ -1071,6 +1075,7 @@ class ProviderAdapter:
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
                     cwd=cwd,
+                    total_deadline=float(plan.deadline_seconds),
                 )
             except BrokenPipeError as exc:
                 return _AdapterResult(
@@ -1134,6 +1139,7 @@ class ProviderAdapter:
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
                     cwd=cwd,
+                    total_deadline=float(plan.deadline_seconds),
                 )
             except BrokenPipeError as exc:
                 return _AdapterResult(
@@ -1354,6 +1360,7 @@ def run_envelope_plan(
         pr_id=None,
         state_dir=state_dir,
         data_dir=data_dir,
+        deadline_seconds=plan.deadline_seconds,
     )
 
     enriched_instruction = _prepare(spec)
@@ -1367,6 +1374,7 @@ def run_envelope_plan(
         pr_id=spec.pr_id,
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
+        deadline_seconds=spec.deadline_seconds,
     )
 
     # INTEGRITY — the bundle dir is the pending/<id>/ that hosts instruction.md.
@@ -1529,6 +1537,7 @@ def run_envelope_headless_plan(
         pr_id=None,
         state_dir=state_dir,
         data_dir=data_dir,
+        deadline_seconds=plan.deadline_seconds,
     )
 
     enriched_instruction = _prepare(spec)
@@ -1542,6 +1551,7 @@ def run_envelope_headless_plan(
         pr_id=spec.pr_id,
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
+        deadline_seconds=spec.deadline_seconds,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify reconstruction
