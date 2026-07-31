@@ -784,7 +784,11 @@ def _emit_governance(
         try:
             event_store.clear(args.terminal_id)
         except Exception as _clr_exc:
-            logger.debug("_emit_governance: event_store.clear failed (non-fatal): %s", _clr_exc)
+            logger.warning(
+                "_emit_governance: event_store.clear failed for dispatch=%s (non-fatal): %s",
+                getattr(args, "dispatch_id", "?"),
+                _clr_exc,
+            )
 
     frontmatter = _build_frontmatter(
         args, provider, model_used, result, duration, token_usage, cost_usd,
@@ -1139,6 +1143,7 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         _emit_governance(args, "claude", args.model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
+        _event_store_safety_net(event_store, args)
         _finish_provider_worktree(args.dispatch_id, isolation_worktree)
 
 
@@ -1340,6 +1345,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
+        _event_store_safety_net(event_store, args)
         return 1
     start_time = datetime.now(timezone.utc)
     try:
@@ -1770,6 +1776,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
+        _event_store_safety_net(event_store, args)
         return 1
     start_time = datetime.now(timezone.utc)
     try:
@@ -1875,6 +1882,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
+        _event_store_safety_net(event_store, args)
         return 1
     start_time = datetime.now(timezone.utc)
     try:
@@ -1980,7 +1988,18 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
 
     model = resolve_harness_model(args.model if args.model != "sonnet" else None)
     enriched_instruction = _enrich_instruction(args)
-    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        _event_store_safety_net(event_store, args)
+        return 1
     # start_time already set at top of function (before the missing-key guard).
     try:
         result = spawn_deepseek_harness(
@@ -2032,7 +2051,18 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
 
     model = resolve_harness_model(args.model if args.model != "sonnet" else None)
     enriched_instruction = _enrich_instruction(args)
-    isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    try:
+        isolation_worktree, worker_cwd = _prepare_provider_workdir(args)
+    except RuntimeError as _wt_exc:
+        if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
+            raise
+        logger.error(
+            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "for %s: %s - aborting dispatch; no shared-checkout fallback",
+            args.dispatch_id, _wt_exc,
+        )
+        _event_store_safety_net(event_store, args)
+        return 1
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_glm_harness(
@@ -2098,6 +2128,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
+        _event_store_safety_net(event_store, args)
         return 1
     start_time = datetime.now(timezone.utc)
     try:
