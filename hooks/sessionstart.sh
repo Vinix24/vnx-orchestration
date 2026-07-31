@@ -138,7 +138,8 @@ case "$TERMINAL" in
     fi
 
     ADDITIONAL_CONTEXT="T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
-Available skills: @t0-orchestrator @architect @planner
+Core skills: @t0-orchestrator @horizon @planner @architect @panel @fabric-reference
+Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
 Use /t0-orchestrator for orchestration decisions and receipt processing
 
 Terminals:
@@ -146,7 +147,7 @@ $(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
 ${T0_OPEN_ITEMS:-No open items data}
 
 CRITICAL: After every completion receipt, check quality advisory + open items before proceeding.
-Skills must NOT use @ prefix in Role field. Check .vnx/skills/skills.yaml for valid skills.${T0_SKILL_BODY:+
+Skills must NOT use @ prefix in Role field. Skill registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer).${T0_SKILL_BODY:+
 
 ---
 $T0_SKILL_BODY}"

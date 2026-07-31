@@ -79,7 +79,8 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 - All dispatches go through the single-entry door `vnx dispatch <pending-id>`, which decides the lane. Calling a lane script directly is a side door (rollback only: `VNX_DISPATCH_LEGACY=1`).
 - Source vs. consumer: the door above (`bin/vnx dispatch <id>`) is the fabric source repo's form. In a pip-installed consumer repo (no `bin/`), the equivalent governed door is `vnx dispatch-agent --agent <name>` (it routes through the same `deliver_via_door` bridge); `vnx pool` replaces `bin/vnx pool`.
 - Provider→lane (hard): `claude`/Opus/Sonnet route via the tmux-spawn lane (`scripts/lib/tmux_interactive_dispatch.py`, interactive, subscription-preserving) — NEVER `provider_dispatch`, NEVER `claude -p`. `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
-- Default worker: kimi-k3 (via `provider_dispatch.py`, kimi-only, no fallback — worker-provider-kimi-flip, 2026-07-23). Stage build dispatches with `provider="kimi", model="kimi-k3"` explicitly. For complex reasoning: `--model sonnet` (claude) with `VNX_OVERRIDE_WORKERS_KIMI_PINNED=1`. T0 stays Opus (`t0-opus-only`).
+- Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). kimi-k3 is only the default when the spec carries no explicit model — no override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
+- `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason (`dispatch_cli.py:691-705`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
 ## Crash Recovery (on-demand only)
@@ -102,7 +103,7 @@ Project files describe the project; the fabric describes itself. A repo's `CLAUD
 ## Runtime Policy
 
 - T0 runtime is Claude Opus only.
-- `T1` and `T2` are manually kimi-k3-pinned (worker-provider-kimi-flip, 2026-07-23); do not assume runtime `/model` switching works.
+- `T1`/`T2`/`T3` build-worker provider and model are a free per-dispatch choice (worker-provider-free-choice). kimi-k3 fills in only when the dispatch spec carries no explicit model. Do not assume runtime `/model` switching works.
 - `T3` is a Claude review/certification terminal and must be treated as modal-sensitive after `/clear`.
 - Tri-file support (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) is fleet-wide, including T0 (deliberate,
   as of the provider-agnostic role sync): an orchestrator session may run under Claude
