@@ -475,11 +475,69 @@ def _resolve_phantom_diff(
     the live worktree diff (ephemeral, torn down in the finally block). Falls
     back through each source; returns None when ALL sources are unresolvable so
     the guard abstains instead of false-rejecting.
+
+    OI-870: reads the actual branch from the worktree (``git -C <wt_path>
+    rev-parse --abbrev-ref HEAD``) instead of deriving it from dispatch_id.
+    A fix-forward dispatch pushes onto a pre-existing PR branch, not its own
+    ``dispatch/<id>`` branch — deriving the branch name from dispatch_id misses
+    the real push target.
+
+    OI-869: detects a self-referencing base_ref (where base_ref resolves to the
+    same commit as the branch head, producing a zero-diff-by-definition) and
+    falls back to ``origin/main`` as the effective comparison base.
     """
     from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
     from phantom_guard import compute_branch_diff, compute_worktree_diff  # noqa: PLC0415
 
-    branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+    # OI-870: read the actual branch from the worktree itself. A fix-forward
+    # dispatch may have checked out a different branch (the PR's head branch)
+    # and pushed onto that instead of its own dispatch/<id> branch.
+    try:
+        wt_branch = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if wt_branch.returncode == 0 and wt_branch.stdout.strip():
+            branch = wt_branch.stdout.strip()
+        else:
+            branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: could not read branch from worktree dispatch=%s (%s) "
+            "— falling back to dispatch-id-derived name",
+            dispatch_id, exc,
+        )
+        branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+
+    # OI-869: detect a self-referencing base_ref. When base_ref resolves to the
+    # same commit as the branch head (because the worker pushed onto the same
+    # branch that base_ref names), the diff is zero by definition — "diff
+    # against yourself" is not evidence of a phantom. Fall back to origin/main
+    # as the effective comparison base.
+    effective_base_ref = base_ref
+    try:
+        head_sha = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        base_sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", base_ref],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        if head_sha and base_sha and head_sha == base_sha:
+            logger.warning(
+                "_resolve_phantom_diff: base_ref %s resolves to the same commit "
+                "as branch head %s (%s) — self-referencing base, falling back "
+                "to origin/main dispatch=%s branch=%s",
+                base_ref, head_sha[:8], head_sha, dispatch_id, branch,
+            )
+            effective_base_ref = "origin/main"
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: self-ref check failed for base_ref=%s "
+            "dispatch=%s (%s) — using base_ref as-is",
+            base_ref, dispatch_id, exc,
+        )
 
     # Check whether the worker pushed its branch. ``git worktree add -b`` may
     # set upstream=origin/main implicitly, so ``@{upstream}`` alone is not a
@@ -501,7 +559,7 @@ def _resolve_phantom_diff(
 
     if has_upstream:
         try:
-            return compute_branch_diff(f"origin/{branch}", base_ref=base_ref, repo=repo)
+            return compute_branch_diff(f"origin/{branch}", base_ref=effective_base_ref, repo=repo)
         except Exception as exc:
             logger.warning(
                 "_resolve_phantom_diff: branch diff failed for origin/%s dispatch=%s (%s)",
@@ -510,7 +568,7 @@ def _resolve_phantom_diff(
 
     # Fall back to worktree diff — last chance before the teardown deletes it
     try:
-        return compute_worktree_diff(wt_path, base_ref=base_ref)
+        return compute_worktree_diff(wt_path, base_ref=effective_base_ref)
     except Exception:
         return None
 
