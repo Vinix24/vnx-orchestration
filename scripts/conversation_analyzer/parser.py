@@ -16,6 +16,13 @@ class SessionParser:
 
     DISPATCH_TABLE_RE = re.compile(r'\|\s*\*\*Dispatch-ID\*\*\s*\|\s*([^\|]+?)\s*\|')
     DISPATCH_HEADER_RE = re.compile(r'Dispatch-ID:\s*(\S+)')
+    # Placeholder pattern: <any-text> — template placeholders like <dispatch_id>
+    # must never be treated as real IDs.
+    PLACEHOLDER_RE = re.compile(r'^<[^>]+>$')
+    # Dispatch IDs always start with a date-prefix (YYYYMMDD-). This is the
+    # minimum validation that rejects template placeholders, empty strings,
+    # and free-form text while accepting all real dispatch ID formats.
+    VALID_DISPATCH_ID_RE = re.compile(r'^\d{8}-')
 
     @staticmethod
     def session_id_from_path(jsonl_path: Path) -> str:
@@ -115,6 +122,27 @@ class SessionParser:
                 metrics.tool_calls_total += 1
                 self._count_tool(metrics, block.get("name", ""))
 
+    @classmethod
+    def _validate_dispatch_id(cls, raw: str) -> Optional[str]:
+        """Validate and normalise an extracted dispatch_id candidate.
+
+        Returns the trimmed string when it looks like a real dispatch ID,
+        or None when the value is a template placeholder, empty, or
+        otherwise not a valid ID.
+        """
+        if not raw:
+            return None
+        candidate = raw.strip()
+        if not candidate:
+            return None
+        # Reject template placeholders: <dispatch_id>, <any-text>, etc.
+        if cls.PLACEHOLDER_RE.match(candidate):
+            return None
+        # Require the YYYYMMDD- date-prefix that every real dispatch ID carries.
+        if not cls.VALID_DISPATCH_ID_RE.match(candidate):
+            return None
+        return candidate
+
     def _process_user(self, record: dict, metrics: SessionMetrics):
         metrics.user_message_count += 1
         if not metrics.dispatch_id and metrics.user_message_count <= 3:
@@ -126,7 +154,9 @@ class SessionParser:
             if not m:
                 m = self.DISPATCH_HEADER_RE.search(text)
             if m:
-                metrics.dispatch_id = m.group(1).strip()
+                validated = self._validate_dispatch_id(m.group(1))
+                if validated:
+                    metrics.dispatch_id = validated
 
     @staticmethod
     def _parse_timestamp(ts_str: str) -> Optional[datetime]:
