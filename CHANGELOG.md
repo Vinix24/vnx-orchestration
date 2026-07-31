@@ -4,6 +4,45 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.4.0] — 2026-07-31
+
+The fourth minor (47 commits since 1.3.1). Headlines: the **ReceiptV2 schema contract with measured token capture** (claude-harness transcript harvest for all providers and a session `wire.jsonl` harvest for kimi), **worker-provider free choice shipped end-to-end** (ModelPin floor-vs-default semantics, workers default-pinned), the **producer-freshness monitor** that makes silent producer death visible within a day, the **door writing a dispatches row on acceptance**, provider-lane **failure classification with a dead-route registry**, **ringbuffer truncate on every teardown path**, phantom-guard **worktree-branch resolution**, and **coordination-lock hardening** (bounded retry + process-group cleanup).
+
+### Added
+
+- **ReceiptV2 schema contract + role/receipt_kind propagation (#1229–#1235, #1237)** — ReceiptV2 and SynthesizedLaneReceipt contracts codified; role + receipt_kind propagated into v2 emit and govern-synthesized receipts; receipt_kind stamped on all remaining emitters with lint flipped to raise; converter role resolver + write-time capture-gap backfill; token-capture from claude transcripts; tool-call signals + dispatch→PR/rework columns; closed-outcome-status via recompute.
+- **Measured token capture for the harness lanes (#1269, #1270)** — `token_usage` harvested for all claude-harness providers (OI-884) and measured kimi tokens harvested from the session `wire.jsonl`.
+- **Worker-provider free choice (#1239, #1240, #1244, #1245)** — ModelPin contract (behavior-neutral), door coercion honors `ModelPin.semantics`, D4 floor-vs-default branching, and the worker pin_semantics flip from floor to default.
+- **Producer-freshness monitor (#1267)** — silent producer failure becomes visible within a day.
+- **Door writes a dispatches row on acceptance (#1266, OI-847)** — accepted dispatches enter the register from the door.
+- **Provider-lane failure classification (#1264, OI-866/867)** — classified failure reasons + dead-route registry + dry-run reachability check.
+- **Ringbuffer truncate on all teardown paths (#1263, OI-858)** — with a hard upper bound.
+- **Worker-scope PreToolUse enforcement hook (#1223)** — worktree-wired, default OFF.
+- **Gated, audited operator escape-hatch (#1220)** — routes one build task back to claude.
+- **`deadline_seconds` threaded spec → spawn (#1259)**; **`requires_mcp` threaded through the plan boundary (#1268, OI-865)**.
+- **CI out-of-repo symlink guard (#1256)** — tests referencing code outside the repo are caught.
+- **Pinned version dirs read-only after install (#1255)**; **premigrate backup skipped on no-op runs + rotation on three mechanisms (#1258)**.
+
+### Changed
+
+- **Build-worker default stays kimi-k3** — a quota-exhaustion flip to sonnet (#1221) was reverted (#1222); the audited escape-hatch (#1220) is the supported claude route.
+
+### Fixed
+
+- **Phantom-guard worktree-branch resolution (#1253, #1262)** — prefers the pushed branch over the worktree diff in the provider lane and detects a self-referencing `base_ref`.
+- **Coordination-lock hardening (#1260)** — bounded lock retry + process-group cleanup on worktree teardown.
+- **Plan-gate doc truncation surfaced in the verdict (#1265)** — with the ARG_MAX-derived cap raised.
+- **Analyzer correctness (#1248, #1261)** — project_id, ollama fast-fail, billing guard, atomic writes; placeholder dispatch_id rejected and the token_usage chain closed.
+- **Billing classifier classifies the real dispatch population (#1243, OI-824)**; **fail-closed close-gate on incomplete delivery (#1242, OI-829)**.
+- **Provenance-chain seams closed (#1238, #1241, #1246)** — the automated sweep commits instead of silently rolling back; the four data-fill seams blocking the chain are closed; the receipt-provenance write transaction is narrowed.
+- **Deliberation-panel reliability (#1236, OI-809/810/811)**.
+- **kimi-spawn fabrication guard made commit-aware (#1225)** — tree-diff supersedes the earlier blind guard.
+- **T0 role modernised (#1257)** — free-per-dispatch pins, horizon planning, serial lane.
+- **OI acceptance-criterion guard landed in the source repo (#1254)**; **reconcile-hook interpreter anchor + singleton guard (#1247)**.
+- **Diagnostics hardening (#1249)** — gate-name validation, merge-base `pr_size`, holder metadata, classified failures.
+- **Skills paths: scoping dropped from horizon/planner/control-centre (#1250)**.
+- **Docs corrected (#1251)** — stale references for #1246/#1248/#1249/#1250 replaced; runtime-liveness inventory added.
+
 ## [1.3.1] — 2026-07-23
 
 Patch release. Headlines: **kimi-k3 is the default build-worker** for T1/T2/T3, the pip CLI **honors the `.vnx-version` pin via startup re-exec** (hardened against cwd-local `vnx_cli` shadowing), **`vnx release publish --tag`** cuts immutable central-store versions with pin-safe GC, the **deepseek-v4-flash migration** off the discontinued deepseek-chat, and **symlink-safe `vnx init` scaffold writes**.
