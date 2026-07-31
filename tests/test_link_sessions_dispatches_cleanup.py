@@ -409,3 +409,90 @@ class TestBackfillReceiptTokenUsage:
             lines = [json.loads(line) for line in f if line.strip()]
         assert lines[0] == kimi_original
         conn.close()
+
+    # OI-884: deepseek-harness / glm-harness run through the Claude Code
+    # harness and must be backfilled by the same set as the emit path.
+
+    def test_enriches_deepseek_harness_receipt_with_null_token_usage(self, tmp_path, monkeypatch):
+        """A deepseek-harness receipt with null token_usage gets populated."""
+        from link_sessions_dispatches import backfill_receipt_token_usage
+
+        conn = self._setup_db(tmp_path)
+        conn.execute("""
+            INSERT INTO session_analytics
+                (session_id, project_path, session_date, dispatch_id,
+                 total_input_tokens, total_output_tokens,
+                 cache_creation_tokens, cache_read_tokens)
+            VALUES ('sess-ds', '/project', '2026-07-31', '20260731-123456-ds',
+                    5000, 3200, 400, 1200)
+        """)
+        conn.commit()
+
+        state_dir = tmp_path / "state"
+        original = self._write_receipts(state_dir, [
+            {
+                "dispatch_id": "20260731-123456-ds",
+                "provider": "deepseek-harness",
+                "token_usage": None,
+                "status": "success",
+                "terminal_id": "T1",
+            },
+        ])
+
+        monkeypatch.setattr(
+            "link_sessions_dispatches.RECEIPTS_FILE", original)
+        monkeypatch.setattr(
+            "link_sessions_dispatches.STATE_DIR", state_dir)
+
+        enriched = backfill_receipt_token_usage(conn)
+        assert enriched == 1
+
+        with open(original, "r") as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+        assert lines[0]["token_usage"] == {
+            "input": 5000, "output": 3200,
+            "cache_creation_5m": 400, "cache_creation_1h": 0, "cache_read": 1200,
+        }
+        conn.close()
+
+    def test_enriches_glm_harness_receipt_with_null_token_usage(self, tmp_path, monkeypatch):
+        """A glm-harness receipt with null token_usage gets populated."""
+        from link_sessions_dispatches import backfill_receipt_token_usage
+
+        conn = self._setup_db(tmp_path)
+        conn.execute("""
+            INSERT INTO session_analytics
+                (session_id, project_path, session_date, dispatch_id,
+                 total_input_tokens, total_output_tokens,
+                 cache_creation_tokens, cache_read_tokens)
+            VALUES ('sess-glm', '/project', '2026-07-31', '20260731-123456-glm',
+                    7000, 2100, 300, 900)
+        """)
+        conn.commit()
+
+        state_dir = tmp_path / "state"
+        original = self._write_receipts(state_dir, [
+            {
+                "dispatch_id": "20260731-123456-glm",
+                "provider": "glm-harness",
+                "token_usage": None,
+                "status": "success",
+                "terminal_id": "T1",
+            },
+        ])
+
+        monkeypatch.setattr(
+            "link_sessions_dispatches.RECEIPTS_FILE", original)
+        monkeypatch.setattr(
+            "link_sessions_dispatches.STATE_DIR", state_dir)
+
+        enriched = backfill_receipt_token_usage(conn)
+        assert enriched == 1
+
+        with open(original, "r") as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+        assert lines[0]["token_usage"] == {
+            "input": 7000, "output": 2100,
+            "cache_creation_5m": 300, "cache_creation_1h": 0, "cache_read": 900,
+        }
+        conn.close()

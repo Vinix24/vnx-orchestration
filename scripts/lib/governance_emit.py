@@ -43,6 +43,7 @@ from append_receipt_internals.receipt_finalize import (
 )
 from append_receipt_internals.validation import _validate_receipt
 from receipt_schema import ReceiptV2
+from token_harvest import CLAUDE_HARNESS_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +154,11 @@ def emit_dispatch_receipt(
     ValueError before anything is written.
 
     ``session_id``: receipt-quality PR-B1 — when the caller-supplied
-    ``token_usage`` is empty or explicitly marked ``unavailable`` (the claude
-    subscription lane has no live usage API) and ``provider`` is ``claude``,
-    the local Claude Code session transcript
+    ``token_usage`` is empty or explicitly marked ``unavailable`` (the
+    subscription/harness lanes have no live usage API) and ``provider`` is a
+    member of ``token_harvest.CLAUDE_HARNESS_PROVIDERS`` (claude,
+    deepseek-harness, glm-harness — every lane that runs through the Claude
+    Code harness), the local Claude Code session transcript
     (``~/.claude/projects/*/<session_id>.jsonl``) is harvested via
     ``token_harvest.harvest_session_tokens`` and used instead. Fail-open: any
     harvest problem (no session_id, no transcript, kimi/other providers)
@@ -187,13 +190,13 @@ def emit_dispatch_receipt(
     """
     _validate_provider(provider)
 
-    # Receipt-quality PR-B1: backfill token_usage for the claude lane from the
-    # local Claude Code session transcript when the caller has nothing usable
-    # (no live usage API on the subscription lane). Only ever tightens the
-    # data — a caller-supplied real token_usage is never overwritten, and any
-    # harvest failure (no session_id, no transcript, non-claude providers)
+    # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
+    # from the local Claude Code session transcript when the caller has nothing
+    # usable (no live usage API on the subscription lane). Only ever tightens
+    # the data — a caller-supplied real token_usage is never overwritten, and
+    # any harvest failure (no session_id, no transcript, non-harness providers)
     # leaves token_usage exactly as passed in.
-    if provider == "claude" and session_id and (not token_usage or token_usage.get("unavailable")):
+    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
         try:
             from token_harvest import harvest_session_tokens  # noqa: PLC0415
             harvested = harvest_session_tokens(session_id)

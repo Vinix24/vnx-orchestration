@@ -17,10 +17,13 @@ rewrite carrying the message's own cumulative usage, so naive per-line
 summing would multiply-count every message by how many times it was
 redrawn.
 
-READ-ONLY: never writes, never raises. Kimi and other non-Claude-Code
-providers have no local transcript and always resolve to the ``unavailable``
-marker here — there is no kimi-token-capture in this module (kimi capture is
-a separate, out-of-scope change; see the receipt-quality plan §Phase B).
+READ-ONLY: never writes, never raises. Only the providers in
+``CLAUDE_HARNESS_PROVIDERS`` (claude, deepseek-harness, glm-harness) run
+through the Claude Code harness and leave a harvestable transcript; every
+other provider (kimi included) has no local transcript and always resolves to
+the ``unavailable`` marker here — there is no kimi-token-capture in this
+module (kimi capture is a separate, out-of-scope change; see the
+receipt-quality plan §Phase B).
 """
 
 from __future__ import annotations
@@ -33,6 +36,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# Providers whose dispatches run through the Claude Code harness and therefore
+# leave a local session transcript that ``harvest_session_tokens`` can read.
+# ``claude`` is the native lane; ``deepseek-harness`` and ``glm-harness`` run
+# through the same claude-CLI harness with a redirected ``ANTHROPIC_BASE_URL``,
+# so their receipts carry a different provider string but an identical
+# transcript. Kimi is deliberately absent: it has its own CLI and leaves no
+# Claude transcript — its token capture runs through a separate route.
+# A third harness provider only needs adding here; both consumers
+# (governance_emit, link_sessions_dispatches) import this same set.
+CLAUDE_HARNESS_PROVIDERS = frozenset({"claude", "deepseek-harness", "glm-harness"})
 
 # Shape matches receipt_schema.ReceiptV2.token_usage. Zeroed counters (rather
 # than an absent dict) plus an explicit ``unavailable`` flag mirrors the
@@ -182,4 +196,4 @@ def harvest_session_tokens(
     return totals
 
 
-__all__ = ["harvest_session_tokens"]
+__all__ = ["CLAUDE_HARNESS_PROVIDERS", "harvest_session_tokens"]

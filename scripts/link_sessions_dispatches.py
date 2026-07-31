@@ -19,8 +19,9 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
     from vnx_paths import ensure_env
     from report_findings_migration import ensure_report_findings_table
+    from token_harvest import CLAUDE_HARNESS_PROVIDERS
 except Exception as exc:
-    raise SystemExit(f"Failed to load vnx_paths or report_findings_migration: {exc}")
+    raise SystemExit(f"Failed to load vnx_paths, report_findings_migration, or token_harvest: {exc}")
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -151,12 +152,15 @@ def clean_polluted_dispatch_ids(conn: sqlite3.Connection) -> int:
 
 
 def backfill_receipt_token_usage(conn: sqlite3.Connection) -> int:
-    """Backfill ``token_usage`` in claude-lane receipts from session_analytics.
+    """Backfill ``token_usage`` in claude-harness receipts from session_analytics.
 
-    Walks ``t0_receipts.ndjson`` line by line.  For each claude-provider
-    receipt whose ``token_usage`` is null, empty, or marked unavailable,
-    looks up the matching row in ``session_analytics`` by ``dispatch_id``.
-    When token data is found, the receipt's ``token_usage`` is populated.
+    Walks ``t0_receipts.ndjson`` line by line.  For each receipt whose
+    provider is in ``token_harvest.CLAUDE_HARNESS_PROVIDERS`` (claude,
+    deepseek-harness, glm-harness — every lane that runs through the Claude
+    Code harness) and whose ``token_usage`` is null, empty, or marked
+    unavailable, looks up the matching row in ``session_analytics`` by
+    ``dispatch_id``. When token data is found, the receipt's ``token_usage``
+    is populated.
 
     Lines that need no enrichment pass through verbatim.  The rewritten
     file is staged in a ``.tmp`` sibling and atomically renamed on
@@ -211,7 +215,7 @@ def backfill_receipt_token_usage(conn: sqlite3.Connection) -> int:
                 token_usage = receipt.get("token_usage")
 
                 needs_backfill = (
-                    provider == "claude"
+                    provider in CLAUDE_HARNESS_PROVIDERS
                     and dispatch_id
                     and (
                         token_usage is None
