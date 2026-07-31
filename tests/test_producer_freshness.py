@@ -150,7 +150,14 @@ def _findings_by(report: dict, producer: str) -> dict:
 def test_real_config_loads() -> None:
     registry = pf.load_registry(REPO_ROOT / "configs" / "producer_freshness.yaml")
     names = [p["name"] for p in registry]
-    assert names == ["review_gate_requests", "review_gate_results", "dispatches_table", "governance_metrics"]
+    assert names == [
+        "review_gate_requests",
+        "review_gate_results",
+        # OI-876/OI-881: declared-gate obligations, grouped per gate key
+        "review_gate_obligations",
+        "dispatches_table",
+        "governance_metrics",
+    ]
 
 
 def test_sweep_finds_silent_review_gate_keys(fake_state: Path) -> None:

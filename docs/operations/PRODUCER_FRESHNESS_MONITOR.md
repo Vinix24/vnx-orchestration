@@ -22,6 +22,7 @@ de `dlv-`-producent terwijl de dispatch-deur sinds 16-07 niets meer schreef).
 | — | Sweep-CLI + heartbeat | `scripts/producer_freshness_monitor.py` |
 | — | Domme tripwire (bash + `find -mmin` only) | `hooks/monitor_tripwire.sh` |
 | — | Dagelijkse scheduling | `scripts/launchd/com.vnx.producer-freshness-monitor.plist` |
+| 5 | Gate-obligaties: declaratie ↔ bewijs (OI-876/OI-881) | `scripts/lib/gate_obligations.py` + `scripts/gate_obligation_runner.py` + `scripts/launchd/com.vnx.gate-obligation-runner.plist` |
 
 ## 1. Per-sleutel versheidsdiff
 
@@ -43,6 +44,30 @@ Output is NDJSON (`<state_dir>/producer_freshness.ndjson`): één
 `producer_freshness_sweep`-samenvatting plus één `producer_freshness_finding` per
 stille/missende sleutel. NDJSON houdt ADR-007 (composite UNIQUE/PK voor nieuwe
 centrale-DB-tabellen) buiten schot — de monitor opent geen centrale-DB-schrijfpad.
+
+## 1b. Gate-obligaties (OI-876/OI-881)
+
+De derde producentgroep in de registry, `review_gate_obligations`
+(type `gate_obligations`), toetst elke **gedeclareerde** gate aan een
+**daadwerkelijk resultaat** — de duurzame fix voor het incident van 31-07:
+
+1. **De deur registreert.** `dispatch_cli.run_dispatch` schrijft voor elke
+   geaccepteerde dispatch met `gate=<naam>` één obligatie
+   (`<state_dir>/review_gates/obligations/<dispatch_id>.json`, status
+   `pending`). Vóór deze fix overleefde `spec.gate` de `load_spec` niet — de
+   declaratie verdween zonder dat iets hem las.
+2. **De runner vervult.** `scripts/gate_obligation_runner.py` (launchd, elke
+   15 min) resolveert de PR van de dispatch (obligatie → `dispatch_metadata`
+   → `gh pr list --head dispatch/<id>`) en draait exact de gedeclareerde gate
+   via `review_gate_manager.request_and_execute`. Kan de gate niet draaien,
+   dan is dat een **luide, geregistreerde uitkomst**: request- én
+   result-record met status `not_executable` plus skip-rationale-audit.
+   Stilte is geen eindtoestand meer.
+3. **De monitor toetst per sleutel.** De scanner groepeert obligaties op
+   gate-naam: `last_seen` = de oudste nog-pendende declaratie (of, als alles
+   vervuld is, de nieuwste resolutie). Een declaratie zonder resultaat binnen
+   cadans → stale-finding voor díé gate — een levende zuster-gate maskeert een
+   dode niet meer (de les uit OI-881).
 
 ## 2. Exit-status-capture
 

@@ -48,6 +48,23 @@ producers:
       timestamp_field: timestamp
       label: dispatch_register events
 
+  # --- Review-gate obligations (OI-876/OI-881, 2026-07-31) -------------------
+  # One obligation per door-accepted dispatch that declares gate=<name>
+  # (scripts/lib/gate_obligations.py, written by the dispatch door; fulfilled
+  # by scripts/gate_obligation_runner.py). Key = gate name. A key goes stale
+  # when its OLDEST pending declaration exceeds cadence: a declared gate that
+  # produced no request/result record is a finding, per sleutel — a live
+  # sibling gate can no longer hide a dead one behind directory-level mtime.
+  - name: review_gate_obligations
+    type: gate_obligations
+    path: "{state_dir}/review_gates/obligations"
+    cadence_seconds: 86400
+    demand:
+      type: ndjson_events
+      path: "{state_dir}/dispatch_register.ndjson"
+      timestamp_field: timestamp
+      label: dispatch_register events
+
   # --- Dispatch producers in runtime_coordination.db -----------------------
   # Key = producer prefix of dispatch_id (text before the first '-').
   # expected_keys makes a producer that writes NOTHING visible: an absent
