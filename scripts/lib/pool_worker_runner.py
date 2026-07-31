@@ -209,7 +209,10 @@ def run(terminal_id: str, project_id: str, *,
             _spec_data = _json.loads(spec_path.read_text(encoding="utf-8"))
             deadline_seconds = int(_spec_data.get("deadline_seconds", 900))
         except Exception:
-            pass
+            logger.warning(
+                "Failed to read deadline_seconds from spec %s; falling back to 900s",
+                spec_path, exc_info=True,
+            )
 
     logger.info("Executing %r provider=%r role=%r model=%r deadline=%ds",
                 dispatch_id, provider, role, _model, deadline_seconds)
