@@ -130,6 +130,120 @@ def link_reports_to_dispatches(conn: sqlite3.Connection) -> int:
     return updated
 
 
+def clean_polluted_dispatch_ids(conn: sqlite3.Connection) -> int:
+    """NULL out session_analytics.dispatch_id where the literal placeholder
+    ``<dispatch_id>`` was stored instead of a real ID (OI-872).
+
+    Idempotent: only matches the exact literal; real dispatch IDs
+    (which always start with a date-prefix ``YYYYMMDD-``) are never
+    touched.  A second run is a no-op because the matching rows already
+    carry NULL.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE session_analytics SET dispatch_id = NULL "
+        "WHERE dispatch_id = '<dispatch_id>'"
+    )
+    cleaned = cur.rowcount
+    if cleaned:
+        conn.commit()
+    return cleaned
+
+
+def backfill_receipt_token_usage(conn: sqlite3.Connection) -> int:
+    """Backfill ``token_usage`` in claude-lane receipts from session_analytics.
+
+    Walks ``t0_receipts.ndjson`` line by line.  For each claude-provider
+    receipt whose ``token_usage`` is null, empty, or marked unavailable,
+    looks up the matching row in ``session_analytics`` by ``dispatch_id``.
+    When token data is found, the receipt's ``token_usage`` is populated.
+
+    Lines that need no enrichment pass through verbatim.  The rewritten
+    file is staged in a ``.tmp`` sibling and atomically renamed on
+    success, so a mid-write crash leaves the original file intact.
+
+    Returns the count of enriched receipts.
+    """
+    if not RECEIPTS_FILE.exists():
+        return 0
+
+    # Build a lookup: dispatch_id -> token_usage dict from session_analytics.
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT dispatch_id, total_input_tokens, total_output_tokens, "
+        "       cache_creation_tokens, cache_read_tokens "
+        "FROM session_analytics "
+        "WHERE dispatch_id IS NOT NULL"
+    )
+    session_tokens: dict[str, dict[str, int]] = {}
+    for row in cur.fetchall():
+        did, inp, out, cc, cr = row
+        if any(v is not None and v > 0 for v in (inp, out, cc, cr)):
+            session_tokens[did] = {
+                "input": int(inp or 0),
+                "output": int(out or 0),
+                "cache_creation_5m": int(cc or 0),
+                "cache_creation_1h": 0,
+                "cache_read": int(cr or 0),
+            }
+
+    if not session_tokens:
+        return 0
+
+    tmp_path = RECEIPTS_FILE.with_suffix(".ndjson.tmp")
+    enriched = 0
+
+    try:
+        with open(RECEIPTS_FILE, "r", encoding="utf-8", errors="replace") as fin, \
+             open(tmp_path, "w", encoding="utf-8") as fout:
+            for line in fin:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                try:
+                    receipt = json.loads(line_stripped)
+                except json.JSONDecodeError:
+                    fout.write(line_stripped + "\n")
+                    continue
+
+                provider = receipt.get("provider", "")
+                dispatch_id = receipt.get("dispatch_id", "")
+                token_usage = receipt.get("token_usage")
+
+                needs_backfill = (
+                    provider == "claude"
+                    and dispatch_id
+                    and (
+                        token_usage is None
+                        or (isinstance(token_usage, dict) and (
+                            token_usage.get("unavailable")
+                            or (token_usage.get("input", 0) == 0
+                                and token_usage.get("output", 0) == 0)
+                        ))
+                    )
+                    and dispatch_id in session_tokens
+                )
+
+                if needs_backfill:
+                    receipt["token_usage"] = session_tokens[dispatch_id]
+                    enriched += 1
+
+                fout.write(json.dumps(receipt, sort_keys=False, ensure_ascii=False) + "\n")
+
+        # Atomic rename.
+        import os as _os
+        _os.replace(tmp_path, RECEIPTS_FILE)
+    except Exception:
+        # Clean up the temp file on failure — never leave a partial.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    return enriched
+
+
 def main():
     if not DB_PATH.exists():
         print(f"ERROR: DB not found: {DB_PATH}")
@@ -144,14 +258,25 @@ def main():
 
     print("=== Nightly Session-Dispatch Linkage ===")
 
+    # Phase 1: Clean up placeholder-polluted dispatch_ids (OI-872).
+    cleaned = clean_polluted_dispatch_ids(conn)
+    print(f"  Placeholder dispatch_ids cleaned: {cleaned}")
+
+    # Phase 2: Link sessions to dispatches (bidirectional join).
     linked_sessions = link_sessions_to_dispatches(conn)
     print(f"  Sessions linked to dispatches: {linked_sessions}")
 
+    # Phase 3: Link receipt outcomes to dispatches.
     linked_receipts = link_receipts_to_dispatches(conn)
     print(f"  Receipt outcomes linked: {linked_receipts}")
 
+    # Phase 4: Link report findings to dispatches.
     linked_reports = link_reports_to_dispatches(conn)
     print(f"  Report findings linked: {linked_reports}")
+
+    # Phase 5: Backfill receipt token_usage from session_analytics (OI-872 chain closure).
+    enriched = backfill_receipt_token_usage(conn)
+    print(f"  Receipts enriched with token_usage: {enriched}")
 
     conn.close()
     print("Done.")
