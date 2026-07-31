@@ -267,6 +267,88 @@ def test_venv_node_modules_symlinks_skipped(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Gitignored paths — must not be reported
+# ---------------------------------------------------------------------------
+
+
+def test_gitignored_symlink_outside_not_reported(tmp_path: Path):
+    """A symlink inside a gitignored directory is NOT flagged — runtime noise."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+
+    (repo / ".gitignore").write_text(".vnx-data/\n")
+    _git_add_and_commit(repo)
+
+    outside = tmp_path / "external.py"
+    outside.write_text("external")
+
+    gitignored_dir = repo / ".vnx-data" / "worktrees" / "some-dispatch"
+    gitignored_dir.mkdir(parents=True)
+    symlink = gitignored_dir / "scripts" / "lib"
+    symlink.parent.mkdir()
+    symlink.symlink_to(outside)
+
+    result = _run_check(repo)
+    assert result.returncode == 0, (
+        f"Expected exit 0 (gitignored symlink skipped), got {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "OK" in result.stdout
+
+
+def test_gitignored_symlink_inside_not_reported(tmp_path: Path):
+    """A symlink inside a gitignored dir that points inside the repo is also skipped."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+
+    (repo / ".gitignore").write_text(".vnx-data/\n")
+    _git_add_and_commit(repo)
+
+    (repo / "real_target.py").write_text("real code")
+    _git_add_specific(repo, "real_target.py")
+
+    gitignored_dir = repo / ".vnx-data" / "worktrees" / "some-dispatch"
+    gitignored_dir.mkdir(parents=True)
+    symlink = gitignored_dir / "link.py"
+    symlink.symlink_to(repo / "real_target.py")
+
+    result = _run_check(repo)
+    assert result.returncode == 0, (
+        f"Expected exit 0 (gitignored symlink skipped), got {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "OK" in result.stdout
+
+
+def test_tracked_symlink_outside_still_detected_even_with_gitignore(tmp_path: Path):
+    """A tracked symlink (Signal 1) that points outside is STILL detected even
+    when a gitignore exists — ``git ls-files -s`` is the ground truth, not the
+    filesystem walk.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+
+    (repo / ".gitignore").write_text("*.pyc\n")
+    _git_add_and_commit(repo)
+
+    outside = tmp_path / "external.py"
+    outside.write_text("external")
+
+    symlink = repo / "external_link.py"
+    symlink.symlink_to(outside)
+
+    _git_add_and_commit(repo)
+
+    result = _run_check(repo)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "Signal 1" in result.stdout
+    assert "external_link.py" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Current tree — no false positives
 # ---------------------------------------------------------------------------
 

@@ -30,6 +30,32 @@ from pathlib import Path
 _SKIP_DIRS = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
 
 
+def _get_ignored_paths(paths: list[Path], repo_root: Path) -> set[Path]:
+    """Return the subset of *paths* that are git-ignored.
+
+    Uses ``git check-ignore`` in batch mode so we can prune entire subtrees
+    in one call per directory level.  Exit 1 ("nothing ignored") is normal and
+    means the returned set is empty.
+    """
+    if not paths:
+        return set()
+    result = subprocess.run(
+        ["git", "check-ignore", *[str(p) for p in paths]],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    # exit 0 = at least one matched, exit 1 = none matched, anything else = error.
+    if result.returncode not in (0, 1):
+        return set()
+    ignored: set[Path] = set()
+    for line in result.stdout.strip().split("\n"):
+        stripped = line.strip()
+        if stripped:
+            ignored.add(Path(stripped))
+    return ignored
+
+
 def get_repo_root() -> Path:
     """Return the absolute path of the git repository root."""
     result = subprocess.run(
@@ -117,12 +143,27 @@ def check_signal1_tracked_symlinks(repo_root: Path) -> list[str]:
 def get_working_tree_symlinks(repo_root: Path) -> list[Path]:
     """Return absolute paths of all symlinks on disk (not just tracked ones).
 
-    Skips directories known to contain build/packaging noise.
+    Signal 2 exists alongside Signal 1 because untracked symlinks (install
+    artifacts, build outputs, vendored tooling) can also reference code outside
+    the repo.  Git does not know about them, so ``git ls-files -s`` does not
+    see them — a filesystem walk is the only way to catch them.
+
+    Gitignored paths are skipped via ``git check-ignore`` so that ephemeral
+    runtime state (``.vnx-data/worktrees/`` and similar) does not drown the
+    output in noise.
     """
     symlinks: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(str(repo_root)):
         # Prune skipped directories in-place.
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+
+        # Batch-check which directory entries are gitignored and remove them
+        # from *dirnames* before os.walk descends into them.
+        if dirnames:
+            dir_paths = [Path(dirpath) / d for d in dirnames]
+            ignored_dirs = _get_ignored_paths(dir_paths, repo_root)
+            if ignored_dirs:
+                dirnames[:] = [d for d in dirnames if (Path(dirpath) / d) not in ignored_dirs]
 
         current = Path(dirpath)
         # Check directory entries (rare, but possible)
@@ -130,11 +171,15 @@ def get_working_tree_symlinks(repo_root: Path) -> list[Path]:
             entry = current / name
             if entry.is_symlink():
                 symlinks.append(entry)
-        # Check file entries
+        # Check file entries — filter gitignored files too (safety net for
+        # files in non-ignored directories that match an individual pattern).
         for name in filenames:
             entry = current / name
-            if entry.is_symlink():
-                symlinks.append(entry)
+            if not entry.is_symlink():
+                continue
+            if _get_ignored_paths([entry], repo_root):
+                continue
+            symlinks.append(entry)
 
     return symlinks
 
