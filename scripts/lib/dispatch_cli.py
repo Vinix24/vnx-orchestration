@@ -787,6 +787,37 @@ def _persist_dispatch_row(spec: DispatchSpec, *, state_dir: Path) -> None:
         logger.debug("[dispatch_cli] dispatch row persist skipped: %s", exc)
 
 
+def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """Best-effort: register the review-gate obligation for a door-accepted dispatch.
+
+    OI-876/OI-881: before this hook, ``spec.gate`` was read exactly once (by
+    ``load_spec``) and then never consumed — a dispatch could declare
+    ``gate=codex_gate`` and produce zero request/result records while looking
+    identical to one whose gate ran. The obligation record (one JSON file per
+    dispatch under ``state/review_gates/obligations/``) is what
+    ``scripts/gate_obligation_runner.py`` fulfils and what the producer
+    freshness monitor asserts per gate key: declaration without evidence
+    becomes visible instead of silent.
+
+    Never raises: bookkeeping must never block the door (same contract as
+    ``_persist_dispatch_row``).
+    """
+    gate = (spec.gate or "").strip()
+    if not gate:
+        return
+    try:
+        from gate_obligations import pr_number_from_pr_id, register_obligation
+        register_obligation(
+            state_dir,
+            dispatch_id=spec.dispatch_id,
+            gate=gate,
+            project_id=spec.project_id,
+            pr_number=pr_number_from_pr_id(spec.pr_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — door bookkeeping must never raise
+        logger.debug("[dispatch_cli] gate obligation register skipped: %s", exc)
+
+
 def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
     """Best-effort: attach spec.track_id to an EXISTING dispatches row (UPDATE-only).
 
@@ -1306,6 +1337,12 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             # (retry/fix-forward safe), state='proposed' (invisible to the
             # claim/stuck/ghost sweeps), best-effort — never blocks the door.
             _persist_dispatch_row(vspec.spec, state_dir=state_dir)
+
+            # OI-876/OI-881: a declared gate is an obligation, not decoration.
+            # Registered here — right after the dispatch is irrevocably
+            # accepted — so every accepted dispatch with gate=<name> has a
+            # checkable evidence trail from this point on.
+            _register_gate_obligation(vspec.spec, state_dir=state_dir)
 
             # TL-D1: export the resolved track_id alongside VNX_CURRENT_DISPATCH_ID and
             # persist it onto the dispatch tracker row so D2 can propagate it to

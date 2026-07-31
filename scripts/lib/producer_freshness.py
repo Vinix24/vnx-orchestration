@@ -198,9 +198,67 @@ def scan_sqlite(spec: Dict[str, Any], *, now: float) -> Dict[str, Optional[float
     return out
 
 
+def scan_gate_obligations(spec: Dict[str, Any], *, now: float) -> Dict[str, Optional[float]]:
+    """Group review-gate obligations by gate name (OI-876/OI-881).
+
+    An obligation is one JSON file per door-accepted dispatch that declared
+    ``gate=<name>`` (scripts/lib/gate_obligations.py). The key is the gate
+    name — per sleutel, never per directory, so one live gate cannot hide a
+    dead sibling.
+
+    Per-key ``last_seen`` semantics — declaration checked against evidence:
+
+      - if any obligation for the key is still ``pending``, last_seen = the
+        OLDEST pending declaration. A declared gate that produced no result
+        within cadence then reads as stale: exactly the 2026-07-31 incident
+        (nine dispatches declared codex_gate, zero ran, nothing noticed).
+      - otherwise last_seen = the NEWEST terminal resolution (fulfilled /
+        not_executable / failed) — loud non-execution counts as evidence.
+
+    An unreadable obligation raises ValueError so the caller records a
+    source_unreadable finding: a corrupted evidence trail must never read as
+    "nothing to do".
+    """
+    root = Path(spec["path"])
+    out: Dict[str, Optional[float]] = {}
+    if not root.is_dir():
+        return out
+    pending_oldest: Dict[str, float] = {}
+    resolved_newest: Dict[str, float] = {}
+    for entry in sorted(root.glob("*.json")):
+        if not entry.is_file():
+            continue
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"unreadable gate obligation {entry.name}: {exc}") from exc
+        if not isinstance(record, dict):
+            raise ValueError(f"gate obligation {entry.name} is not a JSON object")
+        key = str(record.get("gate") or entry.stem)
+        status = record.get("status", "pending")
+        if status == "pending":
+            ts = _parse_ts(record.get("declared_at"))
+            if ts is None:
+                ts = entry.stat().st_mtime
+            prev = pending_oldest.get(key)
+            if prev is None or ts < prev:
+                pending_oldest[key] = ts
+        else:
+            ts = _parse_ts(record.get("resolved_at"))
+            if ts is None:
+                ts = entry.stat().st_mtime
+            prev = resolved_newest.get(key)
+            if prev is None or ts > prev:
+                resolved_newest[key] = ts
+    for key in set(pending_oldest) | set(resolved_newest):
+        out[key] = pending_oldest.get(key, resolved_newest.get(key))
+    return out
+
+
 _SCANNERS: Dict[str, Callable[..., Dict[str, Optional[float]]]] = {
     "directory": scan_directory,
     "sqlite": scan_sqlite,
+    "gate_obligations": scan_gate_obligations,
 }
 
 
@@ -434,6 +492,7 @@ __all__ = [
     "load_registry",
     "scan_directory",
     "scan_sqlite",
+    "scan_gate_obligations",
     "count_demand_events",
     "evaluate_producer",
     "run_sweep",
