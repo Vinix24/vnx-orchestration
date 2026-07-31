@@ -30,7 +30,12 @@ sys.exit(0)
 """
 
 
-def _make_env(tmp_path: Path, *, header_adapter: str | None = None) -> dict:
+def _make_env(
+    tmp_path: Path,
+    *,
+    header_adapter: str | None = None,
+    header_requires_mcp: bool = False,
+) -> dict:
     """Build a fake VNX_HOME with stub delivery scripts + a pending dispatch file."""
     vnx_home = tmp_path / "vnx_home"
     lib = vnx_home / "scripts" / "lib"
@@ -47,6 +52,8 @@ def _make_env(tmp_path: Path, *, header_adapter: str | None = None) -> dict:
     header = "[[TARGET:T1]]\nRole: backend-developer\nGate: G1\nFeature: demo\n"
     if header_adapter is not None:
         header += f"Adapter: {header_adapter}\n"
+    if header_requires_mcp:
+        header += "Requires-MCP: true\n"
     df = dispatch_dir / "pending" / "demo.md"
     df.write_text(header + "\nDo the thing.\n")
 
@@ -203,6 +210,40 @@ def test_auto_route_yields_to_vnx_adapter_env(tmp_path):
     res = _run(e, vnx_adapter="tmux", extra_env={"VNX_AUTO_ROUTE": "1"})
     assert res.returncode == 0, res.stderr
     assert _lane(e)["lane"] == "tmux"
+
+
+# ---------------------------------------------------------------------------
+# OI-865 — requires_mcp forwarding (--requires-mcp flag + Requires-MCP: header)
+# ---------------------------------------------------------------------------
+
+def test_requires_mcp_flag_forwarded_to_tmux(tmp_path):
+    """--requires-mcp on the raw-file lane reaches the tmux CLI argv."""
+    e = _make_env(tmp_path)
+    res = _run(e, "--requires-mcp")
+    assert res.returncode == 0, res.stderr
+    rec = _lane(e)
+    assert rec["lane"] == "tmux"
+    assert "--requires-mcp" in rec["argv"], "tmux CLI must receive --requires-mcp"
+
+
+def test_requires_mcp_flag_forwarded_to_subprocess(tmp_path):
+    """--requires-mcp also reaches the opt-in subprocess lane argv."""
+    e = _make_env(tmp_path)
+    res = _run(e, "--requires-mcp", "--adapter", "subprocess")
+    assert res.returncode == 0, res.stderr
+    rec = _lane(e)
+    assert rec["lane"] == "subprocess"
+    assert "--requires-mcp" in rec["argv"], "subprocess CLI must receive --requires-mcp"
+
+
+def test_requires_mcp_header_forwarded(tmp_path):
+    """'Requires-MCP: true' in the dispatch file header is honoured without a flag."""
+    e = _make_env(tmp_path, header_requires_mcp=True)
+    res = _run(e)
+    assert res.returncode == 0, res.stderr
+    assert "--requires-mcp" in _lane(e)["argv"], (
+        "Requires-MCP: true header must forward --requires-mcp to the delivery script"
+    )
 
 
 if __name__ == "__main__":

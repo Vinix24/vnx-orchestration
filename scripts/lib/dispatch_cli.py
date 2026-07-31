@@ -223,6 +223,7 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
     print(f"  lane:         {plan.lane}")
     print(f"  target_id:    {plan.target_id}")
     print(f"  billing:      {plan.billing}")
+    print(f"  requires_mcp: {plan.requires_mcp}")
     print(f"  route_reason: {plan.route_reason}")
     for w in plan.warnings:
         print(f"  [WARN] {w}")
@@ -1170,6 +1171,7 @@ def _execute_claude(
         deadline_seconds=plan.deadline_seconds,
         base_ref=plan.base_ref,
         isolated_worktree=True,
+        requires_mcp=plan.requires_mcp,
     )
     return 0 if result.success else 1
 
