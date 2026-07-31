@@ -23,6 +23,11 @@ Every lane routes through ``provider_dispatch.py``, so the provider constraints 
 enforced by construction (kimi-via-cli-only, zai-via-openrouter-only,
 no-anthropic-sdk) and each panelist emits a governed report -> receipt: the gate
 that gates everything is itself in the audit trail.
+
+Per-seat verdicts are appended to ``.vnx-attest/plan-gate-seats.ndjson`` (the same
+append-only, hash-chained ledger pattern as the ``plan_gate_pass`` evidence record)
+so the effectiveness probe can see whether every seat responded and what each one
+said — previously only the final resolved record survived the run (OI-888).
 """
 from __future__ import annotations
 
@@ -34,12 +39,19 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
 TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
+
+# Per-seat verdict ledger (OI-888): one append-only, hash-chained record per
+# panelist per run, under the repo's .vnx-attest/ dir next to the plan_gate_pass
+# evidence ledger. Read by the plan-gate effectiveness probe.
+SEAT_LEDGER_RELPATH = ".vnx-attest/plan-gate-seats.ndjson"
+SEAT_RECORD_TYPE = "plan_gate_seat"
 
 # Claude is NOT a provider-lane provider — provider_dispatch refuses it. Claude lanes
 # route via the TMUX-SPAWN lane (interactive `claude` in an ephemeral isolated worktree),
@@ -371,6 +383,7 @@ def parse_verdict(report_text: str) -> Dict[str, Any]:
 class PanelistResult:
     label: str
     provider: str
+    model: str = ""                  # the model_arg the panelist was dispatched with
     verdict: str = "revise"          # pass | revise | block
     blocking_findings: List[str] = field(default_factory=list)
     rationale: str = ""
@@ -663,18 +676,95 @@ def _dispatch_one(
     """
     try:
         report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
-    except Exception as exc:  # dispatch / report-read failure -> no verdict
+    except Exception as exc:  # vnx-silent-except: dispatch/report-read failure -> no verdict, recorded as abstain
         return PanelistResult(
             label=member["label"], provider=member["provider"],
+            model=member.get("model_arg", ""),
             dispatched=False, error=str(exc), report_path=dispatch_id,
         )
     parsed = parse_verdict(report_text)
     return PanelistResult(
         label=member["label"], provider=member["provider"],
+        model=member.get("model_arg", ""),
         verdict=parsed["verdict"], blocking_findings=parsed["blocking_findings"],
         rationale=parsed["rationale"], parse_error=parsed["parse_error"],
         dispatched=True, report_path=dispatch_id,
     )
+
+
+def _find_repo_root(start: Path) -> Optional[Path]:
+    """Walk ``start`` and its parents for a ``.git`` marker (dir or file).
+
+    Subprocess-free mirror of ``project_root.resolve_project_root``'s git
+    resolution: a worktree's ``.git`` is a FILE, a normal checkout's is a
+    directory — ``exists()`` covers both. The canonical helper is not used here
+    because it shells out through ``subprocess.run``, which the dispatcher-env
+    tests mock and count (they assert exactly one subprocess call per panel).
+    """
+    for d in [start, *start.parents]:
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def _resolve_seat_ledger_path(data_dir: Optional[str]) -> Optional[Path]:
+    """Resolve the per-seat verdict ledger path, or ``None`` with no repo anchor.
+
+    The governed path (``planning_cli plan-gate run`` -> ``run_panel``) always
+    passes ``data_dir``; the repo root is resolved by the ``.git`` marker so the
+    seat ledger lands next to the ``plan-gates.ndjson`` evidence ledger under
+    ``.vnx-attest/``. A caller with no ``data_dir`` (e.g. a test injecting a
+    dispatcher) gets ``None`` and skips persistence unless it passes
+    ``seat_ledger_path`` explicitly (OI-888).
+    """
+    if not data_dir:
+        return None
+    root = _find_repo_root(Path(__file__).resolve().parent) or _find_repo_root(Path.cwd())
+    if root is None:
+        return None
+    return root / SEAT_LEDGER_RELPATH
+
+
+def _emit_seat_records(
+    results: List[PanelistResult],
+    *,
+    track_id: str,
+    project_id: str,
+    seat_ledger_path: Optional[Path],
+) -> None:
+    """Append one append-only, hash-chained ``plan_gate_seat`` record per panelist.
+
+    Best-effort and non-raising: seat persistence must never break the gate it
+    hangs off (same contract as ``plan_gate_evidence.emit_plan_gate_pass``). Each
+    record carries the panelist id, model, the effective verdict (``abstain`` for
+    a non-scoring lane), and whether a report was returned at all — the durable
+    per-seat signal the effectiveness probe reads. Previously nothing survived
+    beyond the single resolved ``plan_gate_pass`` record (OI-888).
+    """
+    if not seat_ledger_path or not results:
+        return
+    try:
+        from ndjson_hash_chain import append_chained_entry  # noqa: PLC0415
+        now = datetime.now(timezone.utc).isoformat()
+        for result in results:
+            effective_verdict = (
+                result.verdict
+                if (result.dispatched and not result.parse_error)
+                else "abstain"
+            )
+            append_chained_entry(seat_ledger_path, {
+                "type": SEAT_RECORD_TYPE,
+                "track_id": track_id,
+                "project_id": project_id,
+                "panelist_id": result.label,
+                "model": result.model,
+                "verdict": effective_verdict,
+                "responded": result.dispatched,
+                "parse_error": result.parse_error,
+                "run_at": now,
+            })
+    except Exception:  # vnx-silent-except: seat persistence must never break the gate
+        return
 
 
 def run_panel(
@@ -686,6 +776,7 @@ def run_panel(
     dispatcher: Optional[DispatcherFn] = None,
     data_dir: Optional[str] = None,
     timeout_seconds: int = 900,
+    seat_ledger_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run the plan-first panel over ``doc_path`` and return the verdict.
 
@@ -717,6 +808,11 @@ def run_panel(
         results.append(result)
 
     summary = apply_panel_rule(results)
+    if seat_ledger_path is None:
+        seat_ledger_path = _resolve_seat_ledger_path(data_dir)
+    _emit_seat_records(
+        results, track_id=track_id, project_id=project_id, seat_ledger_path=seat_ledger_path,
+    )
     if doc_truncation["truncated"]:
         # The gate must never certify a verdict while silently hiding that it only read
         # PART of the plan — fold an explicit, quantified note into the rationale (the one
