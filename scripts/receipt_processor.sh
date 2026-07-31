@@ -240,12 +240,19 @@ _psr_verify_contract() {
 }
 
 # Record pattern adoption signals for completed dispatches (non-fatal, A-5).
+# Non-fatal by contract, but NOT silent (OI-894): a failing adoption recording
+# zeroes the injection-effectiveness measurement, so failures log at WARN with
+# the captured stderr instead of vanishing behind 2>/dev/null.
 _psr_record_adoption() {
     local dispatch_id="$1" terminal="$2" report_path="$3" event_type="$4"
     [ -n "$dispatch_id" ] && [ "$event_type" = "task_complete" ] || return 0
-    python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
-        "$dispatch_id" "${terminal:-unknown}" "$report_path" 2>/dev/null \
-        || log "DEBUG" "Pattern adoption recording skipped (non-fatal)"
+    local adoption_output adoption_rc
+    adoption_output=$(python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
+        "$dispatch_id" "${terminal:-unknown}" "$report_path" 2>&1)
+    adoption_rc=$?
+    if [ $adoption_rc -ne 0 ]; then
+        log "WARN" "Pattern adoption recording failed for dispatch=$dispatch_id (rc=$adoption_rc): $(echo "$adoption_output" | tail -1 | head -c 200)"
+    fi
 }
 
 # Process a single report — orchestrates extracted sub-functions.
