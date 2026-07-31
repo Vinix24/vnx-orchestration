@@ -96,8 +96,8 @@ def kill_worktree_processes(wt_path: Path) -> int:
     for pgid in pgids:
         try:
             os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # Already gone — that's fine.
+        except (ProcessLookupError, PermissionError):
+            pass  # Already gone (or only a zombie left) — that's fine.
 
     logger.info(
         "kill_worktree_processes: signalled %d process group(s) for %s",

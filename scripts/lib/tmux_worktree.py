@@ -290,6 +290,26 @@ def reap(handle: WorktreeHandle, classification: str) -> ReapResult:
                 "continuing with worktree removal",
                 handle.dispatch_id, _proc_exc,
             )
+        # OI-877: also reap process groups recorded for this dispatch at spawn
+        # time.  A dispatch process whose repo-root resolved to the MAIN
+        # checkout has nothing open inside the worktree, so the lsof scan
+        # cannot see it — the recorded PGID is the only handle that still
+        # reaches it (even after it was reparented to launchd / PPID 1).  The
+        # worktree scan above stays; this is a second membership source, not
+        # a replacement.
+        try:
+            from dispatch_process_registry import (  # noqa: PLC0415
+                clear_dispatch_pgids,
+                kill_dispatch_pgids,
+            )
+            kill_dispatch_pgids(handle.dispatch_id, repo_root=root)
+            clear_dispatch_pgids(handle.dispatch_id, repo_root=root)
+        except Exception as _pgid_exc:
+            logger.warning(
+                "reap: pgid-based process cleanup failed for %s: %s — "
+                "continuing with worktree removal",
+                handle.dispatch_id, _pgid_exc,
+            )
 
     with _flock_context(root):
         if classification == "clean":

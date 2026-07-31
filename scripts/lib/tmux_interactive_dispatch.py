@@ -2321,6 +2321,49 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                 )
 
+            # OI-877: record the worker's process group(s) so teardown can find
+            # dispatch processes that escape the worktree (their repo-root
+            # resolves to the main checkout).  Capture at readiness — AFTER the
+            # SessionStart hooks have fired, so any hook-spawned background
+            # process is already a member of the captured groups and stays
+            # re-findable at teardown even after reparenting (PPID 1).  The
+            # pane shell's own group is excluded: only the worker's groups are
+            # recorded, never the dispatcher's.  Best-effort: a failed capture
+            # degrades to worktree-scan-only teardown.
+            if _ready and worktree_handle is not None:
+                try:
+                    from dispatch_process_registry import (  # noqa: PLC0415
+                        collect_descendant_pgids,
+                        record_dispatch_pgids,
+                    )
+                    _pane_pid_res = self._runner.run(
+                        ["display-message", "-p", "-t", pane_id, "#{pane_pid}"]
+                    )
+                    _pane_pid_str = (
+                        (_pane_pid_res.stdout or "").strip()
+                        if _pane_pid_res.returncode == 0
+                        else ""
+                    )
+                    if _pane_pid_str.isdigit():
+                        _pane_pid = int(_pane_pid_str)
+                        _worker_pgids = collect_descendant_pgids(_pane_pid)
+                        try:
+                            _worker_pgids.discard(os.getpgid(_pane_pid))
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        if _worker_pgids:
+                            record_dispatch_pgids(
+                                dispatch_id,
+                                sorted(_worker_pgids),
+                                repo_root=self._project_root,
+                            )
+                except Exception as _pgid_exc:
+                    logger.warning(
+                        "interactive: dispatch pgid capture failed for %s: %s",
+                        dispatch_id,
+                        _pgid_exc,
+                    )
+
             if attach:
                 self._attach(session)
 
