@@ -265,11 +265,31 @@ def reap(handle: WorktreeHandle, classification: str) -> ReapResult:
     pushed    → remove worktree + delete local branch (remote ref preserved)
     committed → remove worktree disk only; keep local branch
     dirty     → lock worktree in place; preserve everything
+
+    Before removing the worktree, kills any processes still running inside it
+    (OI-873): a SessionStart hook spawned from the worktree can survive the
+    dispatch and hold the coordination DB write lock.  Process cleanup runs
+    OUTSIDE the flock context so it never blocks concurrent allocations.
     """
     # Reconstruct repo_root: handle.path = root/.vnx-data/worktrees/dispatch-<id>
     root = handle.path.parent.parent.parent
     branch = handle.branch
     wt = handle.path
+
+    # OI-873: kill processes still running inside this worktree before removal.
+    # Only needed when the worktree WILL be removed (clean/pushed/committed);
+    # dirty worktrees are preserved — their processes may still be doing useful
+    # work and killing them would lose uncommitted state.
+    if classification in ("clean", "pushed", "committed"):
+        try:
+            from worktree_process_cleanup import kill_worktree_processes  # noqa: PLC0415
+            kill_worktree_processes(wt)
+        except Exception as _proc_exc:
+            logger.warning(
+                "reap: process cleanup failed for %s: %s — "
+                "continuing with worktree removal",
+                handle.dispatch_id, _proc_exc,
+            )
 
     with _flock_context(root):
         if classification == "clean":
