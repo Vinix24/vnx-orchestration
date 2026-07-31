@@ -55,6 +55,19 @@ dispatch_dir = resolve_dispatch_dir(caller_file=__file__)
 
 All functions accept `caller_file: str | None`. Passing `__file__` is strongly recommended — it anchors resolution to the script's own git repo, avoiding CWD surprises.
 
+> **Central-install caveat (2026-07-31):** the `caller_file=__file__` recommendation
+> holds for scripts that live INSIDE the project's own repo. It is **wrong for shared
+> library code under `scripts/lib/`**: in a central install that code physically lives
+> in the (read-only) `~/.vnx-system/versions/<v>/` tree, so step-1 git resolution
+> anchors to the keystone and `resolve_data_dir(caller_file=__file__)` returns
+> `~/.vnx-system/versions/<v>/.vnx-data` — every state write dies with `EACCES`
+> (this blocked every plan-gate fleet-wide). For data/state/dispatch dirs in
+> `scripts/lib/`, resolve the central store instead (`vnx_paths.resolve_paths()` /
+> `resolve_central_data_dir(project_id)`); the central-mode path gate
+> (`scripts/check_no_file_derived_data_paths.py`) blocks new
+> `resolve_*dir(caller_file=__file__)` occurrences there. `resolve_project_root`
+> (a REPO root, not a data dir) is unaffected by that gate.
+
 ### Return values
 
 | Function | Returns |

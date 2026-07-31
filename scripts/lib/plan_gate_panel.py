@@ -8,7 +8,8 @@ implementation. This module runs that panel:
                             each via provider_dispatch (governed: report -> receipt)
                        ->  parse each panelist's structured verdict
                        ->  apply the panel pass/fail rule (PM-SKILL)
-                       ->  PASS | REVISE | BLOCK
+                       ->  PASS | REVISE | BLOCK | INFRA_FAIL (0 readable verdicts —
+                           an infrastructure outcome, never a plan judgment)
 
 The caller (``planning_cli plan-gate run``) resolves the ``OI-PLAN-<track>``
 blocker on PASS, which — via ``track_reconciler`` — flips the track's
@@ -38,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -414,6 +416,10 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     the abstention is transparent, never silent.
 
     Over the SCORING (readable) lanes only:
+    - infra floor: ZERO readable verdicts is NOT a plan judgment — the plan was never
+      reviewed. That returns INFRA_FAIL (an infrastructure outcome, distinct from every
+      content verdict) so a fleet-wide lane breakage can never read as an inhoudelijk
+      REVISE ("revise the plan") for a plan no lane ever saw.
     - quorum: require >= 2 readable verdicts to certify (a single voice can't fold to PASS).
     - any BLOCK -> REVISE.
     - >= 2 REVISE -> REVISE.
@@ -433,6 +439,18 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     block = sum(1 for r in scoring if r.verdict == "block")
     revise = sum(1 for r in scoring if r.verdict == "revise")
     passes = sum(1 for r in scoring if r.verdict == "pass")
+
+    if not scoring:
+        # 0 of N readable: every lane failed to dispatch or produced an unreadable
+        # verdict. The plan was NOT reviewed — this is an infrastructure failure,
+        # not a plan verdict, and must never read as "revise the plan and re-run".
+        return _decision(
+            "INFRA_FAIL", block, revise, passes,
+            f"0 readable verdicts of {len(results)} — no lane produced a verdict, so "
+            "the plan was NOT reviewed. This is an infrastructure failure, not a plan "
+            "judgment: fix the lanes and re-run the gate"
+            f"{ns_note}",
+        )
 
     # Liveness quorum: a multi-member panel must keep >= 2 readable voices to certify, so a
     # degraded 3-panel with only one readable lane can't pass on a single voice. A DELIBERATE
@@ -485,12 +503,31 @@ def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optiona
 
 
 def _resolve_data_dir(data_dir: Optional[str]) -> Path:
-    """Resolve the data_dir the claude/tmux-lane report is written under and read back from.
+    """Resolve the data_dir the panel reports are written under and read back from.
 
-    A caller-supplied ``data_dir`` wins. When omitted, resolve via the SAME helper the
-    dispatch door itself uses (``project_root.resolve_data_dir``, invoked by
-    ``tmux_interactive_dispatch.py``'s ``_resolve_state_dir`` as
-    ``resolve_state_dir(caller_file=__file__).parent``) instead of degrading to ``None``.
+    Resolution order (matches the rest of the fabric):
+      1. A caller-supplied ``data_dir`` wins.
+      2. ``VNX_DATA_DIR`` — honored on the NORMAL path, and ONLY when
+         ``VNX_DATA_DIR_EXPLICIT=1`` is also set (the same two-key contract as
+         ``project_root.resolve_data_dir`` / ``vnx_paths.resolve_paths``). A bare
+         inherited ``VNX_DATA_DIR`` is pollution, not config: it is ignored with a
+         warning, never silently honored.
+      3. The central store for the ACTIVE project: ``~/.vnx-data/<project_id>`` via
+         ``project_root.resolve_project_id()`` (env > ``.vnx-project-id`` marker >
+         git remote) + ``project_root.resolve_central_data_dir()`` — the same store
+         ``provider_dispatch._resolve_data_dir`` writes the provider-lane reports to,
+         so the write path and ``_read_report``'s read-back base always agree.
+
+    The data dir must NEVER be derived from this module's own location: in a central
+    install ``__file__`` sits inside the read-only ``~/.vnx-system/versions/<v>/``
+    tree, so ``resolve_data_dir(caller_file=__file__)`` resolves the keystone and
+    every report write dies with EACCES (fleet-wide plan-gate block, 2026-07-31 —
+    latent since the lane existed; surfaced when pinned version dirs went read-only).
+
+    There is deliberately NO tempfile fallback: a gate report that must be read back
+    from a throwaway dir is a silent verdict loss, not a degradation. When no
+    project_id can be resolved this raises — loudly — instead of writing state the
+    gate will never find.
 
     A ``None`` base means ``_read_report``'s base-fallback path can never resolve the
     claude/tmux-lane report: unlike ``provider_dispatch``, that lane prints no ``Report:``
@@ -501,12 +538,32 @@ def _resolve_data_dir(data_dir: Optional[str]) -> Path:
         return Path(data_dir)
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
+
+    explicit_val = os.environ.get("VNX_DATA_DIR", "").strip()
+    if explicit_val:
+        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+            return Path(explicit_val).expanduser().resolve()
+        warnings.warn(
+            f"VNX_DATA_DIR env-var set ({explicit_val}) but VNX_DATA_DIR_EXPLICIT=1 "
+            "is required for it to be honored. Ignoring and resolving the central "
+            "store for the active project_id instead. "
+            "See https://github.com/Vinix24/vnx-orchestration/issues/225",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    from project_root import resolve_central_data_dir, resolve_project_id  # noqa: PLC0415
     try:
-        from project_root import resolve_data_dir  # noqa: PLC0415
-        return resolve_data_dir(caller_file=__file__)
-    except Exception:
-        # Not a git repo and no VNX_CANONICAL_ROOT — last-resort fallback, same as before.
-        return Path(os.environ.get("VNX_DATA_DIR") or tempfile.gettempdir())
+        project_id = resolve_project_id()
+    except Exception as exc:
+        raise RuntimeError(
+            "plan-gate panel: cannot resolve the active project_id, so there is no "
+            "central store to write panel reports to. Set VNX_PROJECT_ID, run from a "
+            "project with a .vnx-project-id marker, or pass data_dir explicitly. "
+            "(No tempfile fallback: a gate report written to a throwaway dir is a "
+            "silently lost verdict.)"
+        ) from exc
+    return resolve_central_data_dir(project_id)
 
 
 def _make_default_dispatcher(
@@ -782,7 +839,9 @@ def run_panel(
 
     ``dispatcher`` is injectable; when omitted the governed provider_dispatch
     dispatcher is used. Returns a dict with the overall ``decision``
-    (PASS|REVISE|BLOCK), the rule ``summary``, and per-panelist detail.
+    (PASS|REVISE|BLOCK, or INFRA_FAIL when no lane produced a readable verdict —
+    an infrastructure failure, not a plan judgment), the rule ``summary``, and
+    per-panelist detail.
     """
     panel = panel or DEFAULT_PANEL
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, timeout_seconds)

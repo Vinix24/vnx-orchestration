@@ -2141,6 +2141,18 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             f"resolved={resolved}; track derived_status={derived}."
         )
         return 0
+    if result["decision"] == "INFRA_FAIL":
+        # 0 readable verdicts: no lane reviewed the plan, so there is no plan
+        # judgment to act on. This is an infrastructure failure (exit 1, like the
+        # other infra errors above) — NOT a content REVISE. "Revise the plan and
+        # re-run" would send the operator to fix a plan no lane ever saw.
+        print(
+            "INFRA_FAIL — plan gate could not run: no lane produced a readable "
+            "verdict, so the plan was NOT reviewed. Fix the lanes (see the "
+            "per-panelist errors above) and re-run the gate. Track stays blocked.",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"{result['decision']} — plan gate NOT cleared; track stays blocked. "
         "Revise the plan and re-run."
