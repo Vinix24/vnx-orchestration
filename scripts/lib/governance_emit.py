@@ -96,6 +96,8 @@ def emit_dispatch_receipt(
     tool_call_failures: Optional[int] = None,
     tool_call_retries: Optional[int] = None,
     deadline_seconds: Optional[int] = None,
+    failure_reason: Optional[str] = None,
+    failure_class: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -173,6 +175,11 @@ def emit_dispatch_receipt(
     signals``. Only stamped when provided (None omits the field — no signal
     log means no observation, not "confirmed zero calls").
 
+    ``failure_reason`` / ``failure_class``: OI-866 failure classification —
+    stamped when the dispatch failed so the receipt carries a distinguishable
+    reason instead of a silent "(no error captured)" log line. Conditionally
+    stamped (omitted on success).
+
     Raises:
         ValueError: provider field doesn't match required pattern, or
             receipt_kind missing / outside the closed set (PR-3 lint raise)
@@ -235,6 +242,8 @@ def emit_dispatch_receipt(
         tool_call_failures=tool_call_failures,
         tool_call_retries=tool_call_retries,
         deadline_seconds=deadline_seconds,
+        failure_reason=failure_reason,
+        failure_class=failure_class,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"

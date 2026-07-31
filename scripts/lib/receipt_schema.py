@@ -115,6 +115,12 @@ class ReceiptV2:
     # or a longer spec-staged value like 3600s. Distinct from duration_seconds which
     # records wall-clock time.
     deadline_seconds: Optional[int] = None
+    # OI-866 failure classification: stamped when status != "success" (omitted on
+    # success so pre-feature receipts stay byte-identical).
+    # failure_class is a closed-set category (auth_rejected, empty_completion,
+    # timeout, model_error, unknown). failure_reason is the human-readable detail.
+    failure_reason: Optional[str] = None
+    failure_class: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -176,6 +182,12 @@ class ReceiptV2:
             receipt["tool_call_retries"] = self.tool_call_retries
         if self.deadline_seconds is not None:
             receipt["deadline_seconds"] = self.deadline_seconds
+        # OI-866: conditionally stamped — omitted on success so pre-feature
+        # receipts stay byte-identical.
+        if self.failure_reason is not None:
+            receipt["failure_reason"] = self.failure_reason
+        if self.failure_class is not None:
+            receipt["failure_class"] = self.failure_class
         return receipt
 
 

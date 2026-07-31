@@ -737,6 +737,29 @@ def _govern(
                 )
                 _toolcall_signals = {}
 
+            # OI-866: classify failure so the receipt carries a distinguishable
+            # failure_reason + failure_class instead of a silent
+            # "(no error captured)" log line.
+            _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
+            if adapter_result.status != "success":
+                try:
+                    from failure_classification import classify_failure  # noqa: PLC0415
+                    _classification = classify_failure(
+                        status=adapter_result.status,
+                        error=adapter_result.error,
+                        completion_text=adapter_result.completion_text,
+                        timed_out=adapter_result.timed_out,
+                        provider=spec.provider,
+                        duration_seconds=duration,
+                        returncode=adapter_result.returncode,
+                    )
+                except Exception:  # noqa: BLE001 — classification is best-effort
+                    logger.debug(
+                        "envelope._govern: failure classification failed dispatch=%s (non-fatal)",
+                        spec.dispatch_id,
+                        exc_info=True,
+                    )
+
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=spec.dispatch_id,
                 terminal_id=spec.terminal_id,
@@ -770,6 +793,8 @@ def _govern(
                 tool_call_failures=_toolcall_signals.get("tool_call_failures"),
                 tool_call_retries=_toolcall_signals.get("tool_call_retries"),
                 deadline_seconds=spec.deadline_seconds,
+                failure_reason=_classification.get("failure_reason"),
+                failure_class=_classification.get("failure_class"),
             )
         except Exception as exc:
             raise EnvelopeGovernError(

@@ -298,6 +298,9 @@ def _consume_litellm_stream(
     timed_out = False
     _event_writer_failures = 0
     last_token_usage: Optional[Dict[str, Any]] = None
+    # OI-866: capture the first error-type event so the spawn result.error
+    # carries a classified reason, not None ("no error captured").
+    first_error_event: Optional[Dict[str, Any]] = None
 
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
@@ -314,6 +317,9 @@ def _consume_litellm_stream(
             reason = ((canonical_event.data or {}).get("reason") or "").lower()
             if "timeout" in reason or "deadline" in reason:
                 timed_out = True
+            # Capture the first error event so the caller can classify it.
+            if first_error_event is None:
+                first_error_event = dict(canonical_event.data or {})
         elif evt_type == "usage_complete":
             usage = (canonical_event.data or {}).get("usage")
             if isinstance(usage, dict):
@@ -341,7 +347,7 @@ def _consume_litellm_stream(
                     logger.debug("spawn_litellm: kill after on_event=False failed: %s", _ke)
                 break
 
-    return "".join(completion_parts), events_written, timed_out, stopped_early, _event_writer_failures, last_token_usage
+    return "".join(completion_parts), events_written, timed_out, stopped_early, _event_writer_failures, last_token_usage, first_error_event
 
 
 def _finalize_litellm_result(
@@ -353,23 +359,43 @@ def _finalize_litellm_result(
     event_writer_failures: int = 0,
     error: Optional[str] = None,
     token_usage: Optional[Dict[str, Any]] = None,
+    first_error_event: Optional[Dict[str, Any]] = None,
 ) -> LiteLLMSpawnResult:
-    """Wait for process exit and return a LiteLLMSpawnResult."""
+    """Wait for process exit and return a LiteLLMSpawnResult.
+
+    When *error* is not already set by the caller, a non-zero exit code
+    combined with a runner-emitted error event (captured during stream
+    consumption) is used to derive a structured error string so the caller
+    can classify the failure (OI-866).
+    """
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
     rc = proc.returncode if proc.returncode is not None else 1
+
+    derived_error: Optional[str] = error
+    if derived_error is None and rc != 0 and first_error_event:
+        etype = first_error_event.get("error_type", "")
+        message = first_error_event.get("message", "")
+        status_code = first_error_event.get("status_code")
+        parts = [f"litellm/{etype}"]
+        if status_code is not None:
+            parts.append(f"HTTP {status_code}")
+        if message:
+            parts.append(message)
+        derived_error = ": ".join(parts)
+
     return LiteLLMSpawnResult(
-        returncode=rc if error is None else (rc if rc != 0 else 1),
+        returncode=rc if derived_error is None else (rc if rc != 0 else 1),
         completion_text=completion_text,
         events_written=events_written,
         session_id=None,
         timed_out=timed_out,
         stopped_early=stopped_early,
         event_writer_failures=event_writer_failures,
-        error=error,
+        error=derived_error,
         token_usage=token_usage,
     )
 
@@ -411,7 +437,7 @@ def _spawn_streaming(
         sub_provider=sub_provider,
         lane=lane,
     )
-    completion_text, events_written, timed_out, stopped_early, _ew_failures, token_usage = _consume_litellm_stream(
+    completion_text, events_written, timed_out, stopped_early, _ew_failures, token_usage, first_error_event = _consume_litellm_stream(
         proc=proc, host=host, on_event=on_event,
         health_monitor=health_monitor, event_writer=event_writer,
         terminal_id=terminal_id, dispatch_id=dispatch_id,
@@ -423,6 +449,7 @@ def _spawn_streaming(
         events_written=events_written, timed_out=timed_out,
         stopped_early=stopped_early, event_writer_failures=_ew_failures,
         token_usage=token_usage,
+        first_error_event=first_error_event,
     )
 
 
