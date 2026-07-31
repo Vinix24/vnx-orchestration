@@ -103,6 +103,23 @@ jobs:
           # ~/.vnx-data/<project>, in a central install). See #1023/#1024.
           python3 "$VNX_HOME/scripts/check_no_file_derived_data_paths.py" "$VNX_HOME"
 
+      - name: Out-of-repo symlink guard
+        run: |
+          set -euo pipefail
+          # Fail CI if any symlink (tracked or working-tree) resolves outside
+          # the repository root. Detects tests that reference code living in
+          # an external install — they'd pass locally but fail on a clean
+          # checkout. See dispatch/20260730-ci-out-of-repo-tests-h.
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check_out_of_repo_symlinks.py"
+
+      - name: Run out-of-repo symlink guard unit tests
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_ci_check_out_of_repo_symlinks.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_pytest_safe
+
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-latest
