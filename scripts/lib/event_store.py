@@ -81,6 +81,11 @@ class EventStore:
     def __init__(self, events_dir: Optional[Path] = None) -> None:
         self._events_dir = events_dir or _events_dir()
         self._sequences: Dict[str, int] = {}
+        # Last dispatch_id appended per terminal (OI-878). Used to detect a
+        # dispatch boundary on the write side so a live file that still holds a
+        # previous dispatch's events (because the end-of-dispatch teardown never
+        # ran) is archived + truncated before the new dispatch's events mix in.
+        self._boundary_terminal: Dict[str, str] = {}
 
     def _terminal_path(self, terminal: str) -> Path:
         return self._events_dir / f"{terminal}.ndjson"
@@ -89,6 +94,70 @@ class EventStore:
         seq = self._sequences.get(terminal, 0) + 1
         self._sequences[terminal] = seq
         return seq
+
+    def _rotate_at_dispatch_boundary(self, terminal: str, new_dispatch_id: str) -> None:
+        """Enforce the per-dispatch ring buffer on the write side (OI-878).
+
+        A new dispatch appending to a live file that still holds a PREVIOUS
+        dispatch's events means the teardown that should have archived + cleared
+        at the end of that dispatch never ran (the door's provider-lane envelope
+        path never calls ``_emit_governance``, so the END-of-dispatch archive is
+        skipped there; the adapter only clears at the START of the next dispatch).
+
+        When that happens, archive the previous dispatch's events under its own
+        dispatch_id and truncate the live file so the new dispatch starts a
+        fresh ring buffer.  This guarantees the archive entry exists under the
+        dispatch that produced the events, instead of the events being stranded
+        in the live file until a manual rescue.
+
+        Idempotent and cheap: the boundary is checked once per (store instance,
+        terminal, dispatch_id) via the in-memory tracker, and the live file is
+        re-read only when the boundary actually changes.  Never raises — a
+        rotation failure degrades to the pre-fix behavior (append to a mixed
+        stream) rather than breaking the event pipeline.
+        """
+        if not new_dispatch_id:
+            return
+        if self._boundary_terminal.get(terminal) == new_dispatch_id:
+            return
+        self._boundary_terminal[terminal] = new_dispatch_id
+
+        path = self._terminal_path(terminal)
+        if not path.exists():
+            return
+        try:
+            if path.stat().st_size == 0:
+                return
+        except OSError:
+            return
+        try:
+            last = self.last_event(terminal)
+        except Exception:  # vnx-silent-except: rotation is best-effort; a read failure must never break the append path
+            last = None
+        if last is None:
+            return
+        prev_dispatch_id = last.get("dispatch_id") or ""
+        if not prev_dispatch_id or prev_dispatch_id == new_dispatch_id:
+            return
+        try:
+            self.archive(terminal, prev_dispatch_id)
+            self.clear(terminal)
+            self._sequences.pop(terminal, None)
+            logger.warning(
+                "event_store: dispatch boundary %s -> %s — archived previous "
+                "dispatch events and cleared live file (end-teardown had not run)",
+                prev_dispatch_id,
+                new_dispatch_id,
+            )
+        except Exception:  # vnx-silent-except: rotation failure degrades to appending to the mixed stream rather than raising into the dispatch
+            logger.warning(
+                "event_store: dispatch boundary rotation failed for %s "
+                "(prev=%s new=%s) — previous events left in place",
+                terminal,
+                prev_dispatch_id,
+                new_dispatch_id,
+                exc_info=True,
+            )
 
     def append(
         self,
@@ -114,6 +183,19 @@ class EventStore:
         if isinstance(event, _CE):
             event.validate_shape()  # raises EventShapeError on schema violations
             effective_dispatch_id = dispatch_id if dispatch_id is not None else event.dispatch_id
+        else:
+            effective_dispatch_id = dispatch_id if dispatch_id is not None else event.get("dispatch_id", "")
+
+        # OI-878: enforce the per-dispatch ring-buffer boundary on the write
+        # side.  When a new dispatch's first event arrives and the live file
+        # still holds a PREVIOUS dispatch's events (the teardown that should
+        # have archived + cleared at the end of that dispatch never ran), archive
+        # the previous dispatch's events under its own dispatch_id and truncate
+        # the live file before appending. Runs BEFORE the envelope is built so a
+        # rotation's sequence reset is visible to this event's sequence number.
+        self._rotate_at_dispatch_boundary(terminal, effective_dispatch_id)
+
+        if isinstance(event, _CE):
             envelope: Dict[str, Any] = {
                 "type": event.event_type,
                 "timestamp": event.timestamp,
@@ -128,7 +210,6 @@ class EventStore:
                 "provider_meta": event.provider_meta,
             }
         else:
-            effective_dispatch_id = dispatch_id if dispatch_id is not None else event.get("dispatch_id", "")
             # Legacy dict path — default tier 2 (buffered) for backwards compat
             envelope = {
                 "type": event.get("type", "unknown"),
@@ -272,6 +353,7 @@ class EventStore:
 
         path = self._terminal_path(terminal)
         self._sequences.pop(terminal, None)
+        self._boundary_terminal.pop(terminal, None)
 
         # Remove any oversize flag file on clean teardown
         flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
