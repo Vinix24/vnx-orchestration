@@ -92,14 +92,23 @@ class TestCorruptStateLogsWarning(unittest.TestCase):
     """record_injection with a broken DB logs instead of crashing."""
 
     def test_corrupt_db_logs_warning(self) -> None:
-        """sqlite3.Error during injection audit write surfaces as log.warning."""
+        """A genuinely corrupt DB (non-lock sqlite error) logs, not crashes.
+
+        OI-880: only lock-busy errors are reclassified as CoordinationLockError.
+        A non-lock OperationalError (corrupt DB, no such table, ...) keeps the
+        existing swallow path, so a broken store still logs at WARNING instead
+        of taking the dispatch down.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             sel = _make_selector(tmp)
             result = _make_result()
 
             import runtime_coordination as _rc
             with (
-                patch.object(_rc, "get_connection", side_effect=sqlite3.OperationalError("db locked")),
+                patch.object(
+                    _rc, "get_connection",
+                    side_effect=sqlite3.OperationalError("database disk image is malformed"),
+                ),
                 self.assertLogs("intelligence_sources._recording", level="WARNING") as cm,
             ):
                 sel.record_injection(result)
@@ -112,9 +121,11 @@ class TestCorruptStateLogsWarning(unittest.TestCase):
         from contextlib import contextmanager
 
         @contextmanager
-        def _noop_conn(_state_dir):
+        def _noop_conn(_state_dir, timeout=10.0):
             conn = MagicMock(spec=sqlite3.Connection)
             conn.execute.return_value = MagicMock()
+            # PRAGMA table_info probe returns no rows → legacy insert path.
+            conn.execute.return_value.fetchall.return_value = []
             conn.commit.return_value = None
             yield conn
 

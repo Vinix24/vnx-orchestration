@@ -488,7 +488,13 @@ class IntelligenceSelector:
             return None
         event_type = "intelligence_injection" if result.items_injected > 0 else "intelligence_suppression"
         reason = f"injected {result.items_injected} items at {result.injection_point}" if result.items_injected > 0 else "no items met minimum thresholds"
-        from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, rearm_busy_timeout
+        # Classification lives in coordination_retry, not here: both writers
+        # (this one and _recording.record_injection_audit) must recognize the
+        # same lock-busy failures, and the helper owns that contract.  OI-880:
+        # SQLite's own "database is locked" OperationalError is the same lost
+        # lock race the deadline sentinel reports, so it must reach callers as
+        # CoordinationLockError too — not vanish into the generic except below.
+        from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
         deadline = deadline_for_timeout(DEFAULT_LOCK_TIMEOUT_SECONDS)
         try:
             with get_connection(state_dir, timeout=DEFAULT_LOCK_TIMEOUT_SECONDS) as conn:
@@ -500,6 +506,12 @@ class IntelligenceSelector:
         except CoordinationLockError:
             raise
         except Exception as exc:
+            if is_lock_timeout_error(exc):
+                raise CoordinationLockError(
+                    "Coordination DB write lock deadline exhausted — "
+                    "database is locked after busy_timeout; "
+                    "audit event NOT written"
+                ) from exc
             logger.warning("emit_event: failed to append coordination event for dispatch %s: %s", result.dispatch_id, exc)
             return None
 
