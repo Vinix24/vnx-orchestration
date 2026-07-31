@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 # Size warning threshold (10 MB per contract)
 _SIZE_WARNING_BYTES = 10 * 1024 * 1024
+# Hard upper bound (50 MB): auto-truncate with emergency archive to prevent
+# lane blockage when teardown never runs. Deliberately higher than the warning
+# threshold so the warning fires first and gives operators time to react.
+_SIZE_HARD_LIMIT_BYTES = 50 * 1024 * 1024
+# Flag file written alongside the oversize NDJSON to make the condition visible
+# to the dispatcher and the operator dashboard (ADR-005 observability).
+_OVERSIZE_FLAG_SUFFIX = ".oversize"
 
 
 def _events_dir() -> Path:
@@ -143,14 +150,57 @@ class EventStore:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-        # Size warning
+        # Size warning + oversize flag file so the condition is visible to the
+        # dispatcher dashboard (not just the log stream). Previously 36 warnings
+        # fired without any consumer (OI-858, Cluster E1).
         try:
-            if path.stat().st_size > _SIZE_WARNING_BYTES:
+            st = path.stat()
+            if st.st_size > _SIZE_WARNING_BYTES:
                 logger.warning(
                     "event_store: %s exceeds %d bytes — operator intervention recommended",
                     path,
                     _SIZE_WARNING_BYTES,
                 )
+                # Write a flag file so the dispatcher can surface this without
+                # tailing the log. The flag is terminal-scoped and lives next to
+                # the NDJSON file so it is visible in `vnx pool status`.
+                flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
+                flag_path.write_text(
+                    f"oversize:{terminal}:{st.st_size}:{datetime.now(timezone.utc).isoformat()}\n"
+                )
+        except OSError:
+            pass
+
+        # Hard upper bound: if the file has grown past the hard limit (50 MB),
+        # auto-truncate with an emergency archive so the lane doesn't block.
+        # This must work without any teardown — the write itself is the gate.
+        # The emergency archive uses a synthetic dispatch_id so the events are
+        # not lost, just moved out of the live stream.
+        try:
+            if path.stat().st_size > _SIZE_HARD_LIMIT_BYTES:
+                emergency_id = (
+                    f"emergency-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                )
+                logger.error(
+                    "event_store: HARD LIMIT (%d bytes) exceeded for %s — "
+                    "emergency archive+truncate to prevent lane blockage (OI-858)",
+                    _SIZE_HARD_LIMIT_BYTES,
+                    path,
+                )
+                try:
+                    self.archive(terminal, emergency_id)
+                except Exception as _arch_exc:
+                    logger.error(
+                        "event_store: emergency archive failed for %s: %s",
+                        terminal,
+                        _arch_exc,
+                    )
+                # clear() is called AFTER archive so the archive can read the
+                # full file before truncation. Pass no archive_dispatch_id —
+                # archive was just done above.
+                self.clear(terminal)
+                # Re-count sequences from 1 after emergency truncation
+                self._sequences.pop(terminal, None)
         except OSError:
             pass
 
@@ -215,13 +265,20 @@ class EventStore:
         are archived to .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
         before truncation.
 
-        Also resets the sequence counter.
+        Also resets the sequence counter and removes any oversize flag file.
         """
         if archive_dispatch_id:
             self.archive(terminal, archive_dispatch_id)
 
         path = self._terminal_path(terminal)
         self._sequences.pop(terminal, None)
+
+        # Remove any oversize flag file on clean teardown
+        flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
+        try:
+            flag_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
         if not path.exists():
             return
@@ -232,6 +289,18 @@ class EventStore:
                 f.truncate(0)
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def oversize_flags(self) -> list[Path]:
+        """Return paths to all oversize flag files currently present.
+
+        Each flag file indicates a terminal whose event file has exceeded the
+        soft warning threshold and has NOT been cleared since.  The dispatcher
+        can call this to surface the condition in ``vnx pool status`` without
+        tailing the log stream (OI-858 consumer).
+        """
+        if not self._events_dir.exists():
+            return []
+        return sorted(self._events_dir.glob(f"*{_OVERSIZE_FLAG_SUFFIX}"))
 
     def event_count(self, terminal: str) -> int:
         """Count events in the NDJSON file for a terminal."""
