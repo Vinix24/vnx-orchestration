@@ -55,3 +55,45 @@ def rearm_busy_timeout(conn: sqlite3.Connection, deadline: float) -> None:
 def deadline_for_timeout(timeout: float) -> float:
     """Return a monotonic deadline *timeout* seconds from now."""
     return time.monotonic() + timeout
+
+
+def is_lock_timeout_error(exc: BaseException) -> bool:
+    """Classify *exc* as a coordination lock-timeout failure (OI-880).
+
+    Two distinct failures surface when a coordination write loses the lock
+    race, and both must reach the caller as :exc:`CoordinationLockError`:
+
+    - the deadline sentinel that :func:`rearm_busy_timeout` raises once the
+      deadline has already passed, and
+    - the ``sqlite3.OperationalError`` SQLite itself raises when a statement
+      exhausts its ``busy_timeout`` while another connection still holds the
+      write lock (``database is locked``).  That error is what the call sites'
+      generic ``except Exception`` / ``except sqlite3.Error`` used to swallow at
+      WARNING — a silently lost audit event.
+
+    The classification is content-based, not type-only: ``OperationalError``
+    covers real bugs too (``no such table``, ``no such column``, ...) and those
+    must NOT be treated as lock contention.  Prefer the structured
+    ``sqlite_errorcode`` / ``sqlite_errorname`` attributes (Python 3.11+)
+    against SQLITE_BUSY / SQLITE_LOCKED — including extended codes via the
+    low-byte primary mask, mirroring ``migrate_future_system._is_busy_or_locked``
+    — and fall back to the message substring only when no error code is
+    attached (e.g. an exception constructed in a test).
+    """
+    if isinstance(exc, CoordinationLockError):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return True
+        if (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return True
+        # A structured code that is not BUSY/LOCKED is authoritative — the
+        # exception is definitively not a lock conflict, whatever its message
+        # says.  Falling through to the message check here would let a
+        # non-standard message flip a real bug into a lock timeout.
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
