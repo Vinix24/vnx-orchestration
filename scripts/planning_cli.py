@@ -2096,6 +2096,14 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             f"Plan gate: {result['decision']}  "
             f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
         )
+        trunc = result.get("doc_truncation") or {}
+        if trunc.get("truncated"):
+            pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
+            print(
+                f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
+                f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
+                "on an incomplete plan **"
+            )
         print(f"  {s['rationale']}")
         for p in result["panelists"]:
             mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
