@@ -95,6 +95,7 @@ def emit_dispatch_receipt(
     tool_call_count: Optional[int] = None,
     tool_call_failures: Optional[int] = None,
     tool_call_retries: Optional[int] = None,
+    deadline_seconds: Optional[int] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -233,6 +234,7 @@ def emit_dispatch_receipt(
         tool_call_count=tool_call_count,
         tool_call_failures=tool_call_failures,
         tool_call_retries=tool_call_retries,
+        deadline_seconds=deadline_seconds,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"

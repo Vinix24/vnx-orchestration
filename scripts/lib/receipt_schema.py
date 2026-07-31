@@ -109,6 +109,12 @@ class ReceiptV2:
     tool_call_count: Optional[int] = None
     tool_call_failures: Optional[int] = None
     tool_call_retries: Optional[int] = None
+    # deadline-passthrough: the deadline that was in effect when this dispatch ran.
+    # Stamped when known (omitted when None). When status=timeout and this field is
+    # present, an operator can see whether the deadline was 900s (hardcoded default)
+    # or a longer spec-staged value like 3600s. Distinct from duration_seconds which
+    # records wall-clock time.
+    deadline_seconds: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -168,6 +174,8 @@ class ReceiptV2:
             receipt["tool_call_failures"] = self.tool_call_failures
         if self.tool_call_retries is not None:
             receipt["tool_call_retries"] = self.tool_call_retries
+        if self.deadline_seconds is not None:
+            receipt["deadline_seconds"] = self.deadline_seconds
         return receipt
 
 

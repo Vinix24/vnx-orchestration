@@ -754,6 +754,7 @@ def _emit_governance(
                 tool_call_count=_toolcall_signals.get("tool_call_count"),
                 tool_call_failures=_toolcall_signals.get("tool_call_failures"),
                 tool_call_retries=_toolcall_signals.get("tool_call_retries"),
+                deadline_seconds=getattr(args, "deadline_seconds", None),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
@@ -1060,6 +1061,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--task-class", default="",
         help="Task class for mandate scope matching (mirrors --task-class in subprocess_dispatch).",
     )
+    parser.add_argument(
+        "--deadline-seconds", type=int, default=900,
+        help="Total deadline in seconds for the dispatch (default 900, matches spawn_claude default).",
+    )
     return parser
 
 
@@ -1097,9 +1102,9 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        total_deadline = float(os.environ.get("VNX_BENCH_CLAUDE_DEADLINE", "1800"))
+        total_deadline = float(os.environ.get("VNX_BENCH_CLAUDE_DEADLINE", str(args.deadline_seconds)))
     except (TypeError, ValueError):
-        total_deadline = 1800.0
+        total_deadline = float(args.deadline_seconds)
 
     start_time = datetime.now(timezone.utc)
     try:
@@ -1172,6 +1177,7 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
         gate=args.gate,
         dispatch_paths=dispatch_paths,
         pr_id=args.pr_id,
+        total_deadline=float(args.deadline_seconds),
     )
     end_time = datetime.now(timezone.utc)
 
@@ -1983,6 +1989,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
+            total_deadline=float(args.deadline_seconds),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -2035,6 +2042,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
             event_writer=event_store.append if event_store is not None else None,
+            total_deadline=float(args.deadline_seconds),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
