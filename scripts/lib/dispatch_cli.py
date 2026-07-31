@@ -292,7 +292,7 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
             body = ""
             try:
                 body = exc.read().decode("utf-8", errors="replace")[:200]
-            except Exception:
+            except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
                 pass
             if status in (401, 403):
                 print(
