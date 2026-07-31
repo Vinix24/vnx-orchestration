@@ -93,6 +93,13 @@ providers:
   deepseek:
     enabled: true
     api_key_env: DEEPSEEK_API_KEY
+    # OI-867: this is the litellm-proxy (:4141) route — DISABLED for dispatch
+    # because the proxy does not carry a valid DEEPSEEK_API_KEY.  The working
+    # DeepSeek route is deepseek_harness (below), which uses the Claude Code
+    # harness with its own API key (no proxy).  The m:n relationship note:
+    #   litellm:deepseek    -> proxy :4141 -> DeepSeek  = DISABLED (no key)
+    #   deepseek-harness    -> claude_harness_keyed     = WORKS (own key)
+    #   glm-harness/zai     -> proxy :4141 -> OpenRouter = WORKS (has key)
     models:
       deepseek-v4-pro:
         litellm_name: "deepseek/deepseek-v4-pro"
@@ -103,6 +110,7 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding-premium", "review", "analysis"]
+        dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
       deepseek-v4-flash:
         litellm_name: "deepseek/deepseek-v4-flash"
         cost_input_per_mtok: 0.14    # legacy "chat" model evolved
@@ -112,6 +120,46 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding", "review", "analysis"]
+        dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
+  deepseek_harness:
+    enabled: true
+    api_key_env: DEEPSEEK_API_KEY
+    # OI-867: the working DeepSeek route — claude_harness_keyed, uses its own
+    # API key via the Anthropic-compatible DeepSeek endpoint.  No proxy.
+    models:
+      deepseek-v4-pro:
+        litellm_name: ""
+        cli_model_arg: "deepseek-v4-pro"
+        cost_input_per_mtok: 0.435
+        cost_output_per_mtok: 0.87
+        max_tokens: 384000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+        dispatch_allowed: true
+      deepseek-v4-flash:
+        litellm_name: ""
+        cli_model_arg: "deepseek-v4-flash"
+        cost_input_per_mtok: 0.14
+        cost_output_per_mtok: 0.28
+        max_tokens: 384000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+        dispatch_allowed: true
+      deepseek-v4-pro-default:
+        litellm_name: ""
+        cli_model_arg: "deepseek-v4-pro"
+        cost_input_per_mtok: 0.435
+        cost_output_per_mtok: 0.87
+        max_tokens: 384000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+        dispatch_allowed: true
   moonshot:
     enabled: true
     api_key_env: MOONSHOT_API_KEY

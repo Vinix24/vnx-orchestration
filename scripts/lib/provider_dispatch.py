@@ -692,6 +692,35 @@ def _emit_governance(
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
+            # OI-866: classify failure so the receipt carries a distinguishable
+            # failure_reason + failure_class.
+            _fail_reason: Optional[str] = None
+            _fail_class: Optional[str] = None
+            if status != "success":
+                try:
+                    from failure_classification import classify_failure  # noqa: PLC0415
+                    _error = getattr(result, "error", None)
+                    _completion = getattr(result, "completion_text", None)
+                    _timed_out = getattr(result, "timed_out", False)
+                    _rc = getattr(result, "returncode", None)
+                    _classification = classify_failure(
+                        status=status,
+                        error=_error,
+                        completion_text=_completion,
+                        timed_out=_timed_out,
+                        provider=provider,
+                        duration_seconds=duration,
+                        returncode=_rc,
+                    )
+                    _fail_reason = _classification.get("failure_reason")
+                    _fail_class = _classification.get("failure_class")
+                except Exception:  # noqa: BLE001 — classification is best-effort
+                    logger.debug(
+                        "_emit_governance: failure classification failed dispatch=%s (non-fatal)",
+                        getattr(args, "dispatch_id", "?"),
+                        exc_info=True,
+                    )
+
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=args.dispatch_id,
                 terminal_id=args.terminal_id,
@@ -755,6 +784,8 @@ def _emit_governance(
                 tool_call_failures=_toolcall_signals.get("tool_call_failures"),
                 tool_call_retries=_toolcall_signals.get("tool_call_retries"),
                 deadline_seconds=getattr(args, "deadline_seconds", None),
+                failure_reason=_fail_reason,
+                failure_class=_fail_class,
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break

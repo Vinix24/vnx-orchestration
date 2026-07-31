@@ -227,6 +227,139 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
         print(f"  [WARN] {w}")
 
 
+def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
+    """Verify the selected lane's endpoint is reachable (OI-867).
+
+    Never fails the dry-run — always returns None.  Prints a [WARN] with
+    concrete evidence when the endpoint is unreachable or auth-rejected
+    so an operator can spot a dead route before approving the dispatch.
+
+    Checks performed:
+    - litellm-proxy lanes: HTTP GET http://127.0.0.1:4141/v1/models with
+      short timeout.  401/403 → hard warning (auth broken).  Connection
+      refused/timeout → soft warning (proxy may be down).
+    - deepseek-harness: HTTP GET to api.deepseek.com baseline check.
+    - Other lanes: skipped (no cheap endpoint check available; claude-tmux
+      has no network endpoint, codex/kimi have ephemeral auth).
+    """
+    import urllib.request
+    import urllib.error
+
+    provider_val = plan.provider.value
+    lane = plan.lane
+
+    # ── litellm proxy lanes (litellm:deepseek, litellm:zai, litellm:moonshot) ──
+    if lane == "provider" and (
+        provider_val.startswith("litellm:")
+        or provider_val in ("litellm",)
+    ):
+        proxy_url = os.environ.get(
+            "LITELLM_PROXY_BASE",
+            "http://127.0.0.1:4141",
+        )
+        models_url = f"{proxy_url.rstrip('/')}/v1/models"
+        try:
+            req = urllib.request.Request(models_url)
+            resp = urllib.request.urlopen(req, timeout=5)
+            body = resp.read().decode("utf-8", errors="replace")
+            # A 200 with an empty model list is suspicious but not a hard
+            # failure — the proxy may be warming up.
+            if resp.status == 200:
+                try:
+                    data = json.loads(body)
+                    model_count = len(data.get("data", []))
+                    if model_count == 0:
+                        print(
+                            f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
+                            f"from {models_url} — the lane may be stale. Evidence: "
+                            f"empty model list.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"[dispatch_cli] [reachability] litellm proxy OK: "
+                            f"{model_count} models at {models_url}",
+                            file=sys.stderr,
+                        )
+                except json.JSONDecodeError:
+                    print(
+                        f"[dispatch_cli] [WARN] litellm proxy response is not valid "
+                        f"JSON from {models_url} — response: {body[:200]}",
+                        file=sys.stderr,
+                    )
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")[:200]
+            except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
+                pass
+            if status in (401, 403):
+                print(
+                    f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
+                    f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
+                    f"The proxy API key is missing or invalid — ANY dispatch on this "
+                    f"lane will fail silently.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
+                    f"from {models_url}. Evidence: {body or str(exc)}",
+                    file=sys.stderr,
+                )
+        except (urllib.error.URLError, OSError) as exc:
+            print(
+                f"[dispatch_cli] [WARN] litellm proxy unreachable at "
+                f"{models_url} ({exc}). The lane may be down — dispatch will "
+                f"likely fail.",
+                file=sys.stderr,
+            )
+        return
+
+    # ── deepseek-harness lane ──
+    if lane == "provider" and provider_val in (
+        "deepseek-harness", "deepseek_harness",
+    ):
+        ds_url = "https://api.deepseek.com/v1/models"
+        try:
+            req = urllib.request.Request(ds_url)
+            urllib.request.urlopen(req, timeout=5)
+            print(
+                f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
+                file=sys.stderr,
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                print(
+                    f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
+                    f"(HTTP {exc.code}) at {ds_url}. The API key may be missing "
+                    f"or expired.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[dispatch_cli] [WARN] deepseek API returned HTTP "
+                    f"{exc.code} from {ds_url}.",
+                    file=sys.stderr,
+                )
+        except (urllib.error.URLError, OSError) as exc:
+            print(
+                f"[dispatch_cli] [WARN] deepseek API unreachable at "
+                f"{ds_url} ({exc}).",
+                file=sys.stderr,
+            )
+        return
+
+    # ── Claude tmux lane, codex, kimi, gemini — no cheap endpoint check ──
+    print(
+        f"[dispatch_cli] [reachability] lane={lane} — no cheap endpoint "
+        f"check available (lanes that don't go through a stable HTTP proxy "
+        f"are verified at spawn time).",
+        file=sys.stderr,
+    )
+
+
 # ---------------------------------------------------------------------------
 # P1-#3: model pins from SSOT
 # ---------------------------------------------------------------------------
@@ -1094,6 +1227,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
 
         if dry_run:
             _print_plan(plan, fp)
+            # OI-867: reachability check — verify the lane endpoint is
+            # responsive BEFORE the dispatch is approved.  Never fail-closed
+            # on a transient network hiccup; auth-rejection is a hard
+            # warning.  Provider lane availability is cheap to check (one
+            # HTTP call) and catches the exact class of silent failure that
+            # the 20260730-phantom-branch-fallback dispatch hit (litellm
+            # proxy 401 → 43ms dispatch death with no error trace).
+            _check_reachability(plan, vspec.spec)
             return 0
 
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
