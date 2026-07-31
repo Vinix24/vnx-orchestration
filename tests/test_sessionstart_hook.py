@@ -152,19 +152,28 @@ class TestHookContextContent:
         assert "@panel" in ctx
         assert "@fabric-reference" in ctx
 
-    def test_old_pin_language_is_absent(self, tmp_path):
-        """Sonnet-pinned language in the runtime guardrails section was
-        replaced with free-per-dispatch wording."""
-        project = _make_project(tmp_path)
-        skill_dir = project / ".claude" / "skills" / "t0-orchestrator"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(SKILL_BODY)
+    def test_old_pin_language_is_absent(self):
+        """Sonnet-pinned and VNX_OVERRIDE_WORKERS_KIMI_PINNED must not appear
+        in the T0 role or skill files after the free-per-dispatch
+        modernisation (PR #1257). Conversely, pin_semantics and the free
+        per-dispatch choice wording must be present.
 
-        out = _run_hook(project / ".claude" / "terminals" / "T0")
-        ctx = out["hookSpecificOutput"]["additionalContext"]
-        # The mock SKILL_BODY uses the old text, so this test only verifies
-        # the hook's own framing lines don't use stale language.
-        assert "Sonnet-pinned" not in ctx.split("UNIQUE-PLAYBOOK-MARKER")[0]
+        This test reads the real repo files, not a mock fixture — it fails
+        against origin/main where the old pin language still lives."""
+        skill_md = REPO / ".claude" / "skills" / "t0-orchestrator" / "SKILL.md"
+        role_md = REPO / ".claude" / "terminals" / "T0" / "role-orchestrator.md"
+
+        skill_text = skill_md.read_text()
+        role_text = role_md.read_text()
+        combined = skill_text + role_text
+
+        # Old pin language must be gone from both files.
+        assert "Sonnet-pinned" not in combined
+        assert "VNX_OVERRIDE_WORKERS_KIMI_PINNED" not in combined
+
+        # New pin semantics must be present.
+        assert "pin_semantics" in combined
+        assert "per-dispatch" in combined
 
 
 class TestNonVnxDirectory:
