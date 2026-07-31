@@ -491,14 +491,20 @@ def _resolve_phantom_diff(
         # git ls-remote exits 0 even when the ref doesn't exist; non-empty
         # stdout means the branch IS on the remote.
         has_upstream = proc.returncode == 0 and bool(proc.stdout.strip())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: upstream check failed for branch=%s dispatch=%s (%s)",
+            branch, dispatch_id, exc,
+        )
 
     if has_upstream:
         try:
             return compute_branch_diff(f"origin/{branch}", base_ref=base_ref, repo=repo)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "_resolve_phantom_diff: branch diff failed for origin/%s dispatch=%s (%s)",
+                branch, dispatch_id, exc,
+            )
 
     # Fall back to worktree diff — last chance before the teardown deletes it
     try:

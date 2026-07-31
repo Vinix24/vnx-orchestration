@@ -276,3 +276,135 @@ def test_both_sources_fail_returns_none(git_fixture, monkeypatch):
     )
 
     assert result is None, "both sources failed — guard must abstain, never false-reject"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: failing upstream check is logged (no longer silent)
+# ---------------------------------------------------------------------------
+
+
+def test_failing_upstream_check_is_logged(git_fixture, monkeypatch, caplog):
+    """When the git ls-remote upstream check raises, the exception is logged
+    with the dispatch_id and step context. The guard still falls through to
+    the worktree diff — behavior is unchanged, but the failure leaves a trace.
+    """
+    import logging
+
+    consumer_repo = git_fixture
+    dispatch_id = "20260730-branch-fallback-test5"
+
+    wt_path = _make_worktree(consumer_repo, dispatch_id)
+
+    # Make real work in the worktree (so the fallback returns it)
+    _run_git(wt_path, "config", "user.email", "test@example.com")
+    _run_git(wt_path, "config", "user.name", "Test")
+    (wt_path / "logged.py").write_text("# logged fallback\n", encoding="utf-8")
+    _run_git(wt_path, "add", "logged.py")
+    _run_git(wt_path, "commit", "-m", "logged worktree content")
+
+    # Make git ls-remote raise (simulates network error, timeout, or corrupt repo)
+    original_run = subprocess.run
+
+    def _failing_ls_remote(cmd, **kwargs):
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "ls-remote" in cmd_str and "--heads" in cmd_str:
+            raise subprocess.TimeoutExpired(cmd, 15)
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _failing_ls_remote)
+
+    with caplog.at_level(logging.WARNING):
+        result = envelope._resolve_phantom_diff(
+            dispatch_id,
+            base_ref="origin/main",
+            wt_path=wt_path,
+            repo=consumer_repo,
+        )
+
+    # Behavior: still falls through to worktree diff
+    assert result is not None
+    assert "logged.py" in result
+
+    # Audit trail: the failure was logged
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) >= 1, "upstream check failure must be logged"
+    upstream_warning = next(
+        (r for r in warnings if "upstream check failed" in r.message), None
+    )
+    assert upstream_warning is not None, (
+        "log message must identify the failing step (upstream check)"
+    )
+    assert dispatch_id in upstream_warning.message, (
+        "log message must include the dispatch_id"
+    )
+
+    # Cleanup
+    _run_git(consumer_repo, "worktree", "remove", str(wt_path), "--force")
+
+
+# ---------------------------------------------------------------------------
+# Test 6: branch-diff exception is logged (no longer silent)
+# ---------------------------------------------------------------------------
+
+
+def test_branch_diff_exception_is_logged(git_fixture, monkeypatch, caplog):
+    """When the branch has upstream but compute_branch_diff raises, the
+    exception is logged with dispatch_id and step context. The guard still
+    falls through to the worktree diff.
+    """
+    import logging
+
+    consumer_repo = git_fixture
+    dispatch_id = "20260730-branch-fallback-test6"
+
+    wt_path = _make_worktree(consumer_repo, dispatch_id)
+
+    # Make real work in the worktree (so the fallback returns it)
+    _run_git(wt_path, "config", "user.email", "test@example.com")
+    _run_git(wt_path, "config", "user.name", "Test")
+    (wt_path / "second_fallback.py").write_text("# second fallback\n", encoding="utf-8")
+    _run_git(wt_path, "add", "second_fallback.py")
+    _run_git(wt_path, "commit", "-m", "second fallback work")
+
+    # Stub: upstream check succeeds (branch exists), but branch diff raises
+    original_run = subprocess.run
+
+    def _stubbed_run(cmd, **kwargs):
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "ls-remote" in cmd_str and "--heads" in cmd_str:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="abc123\trefs/heads/dispatch/test\n", stderr="",
+            )
+        if "diff" in cmd_str and "origin/dispatch" in cmd_str:
+            raise subprocess.CalledProcessError(128, cmd, stderr="fatal: bad ref")
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _stubbed_run)
+
+    with caplog.at_level(logging.WARNING):
+        result = envelope._resolve_phantom_diff(
+            dispatch_id,
+            base_ref="origin/main",
+            wt_path=wt_path,
+            repo=consumer_repo,
+        )
+
+    # Behavior: still falls through to worktree diff
+    assert result is not None
+    assert "second_fallback.py" in result
+
+    # Audit trail: the branch-diff failure was logged
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) >= 1, "branch diff failure must be logged"
+    branch_warning = next(
+        (r for r in warnings if "branch diff failed" in r.message), None
+    )
+    assert branch_warning is not None, (
+        "log message must identify the failing step (branch diff)"
+    )
+    assert dispatch_id in branch_warning.message, (
+        "log message must include the dispatch_id"
+    )
+
+    # Cleanup
+    _run_git(consumer_repo, "worktree", "remove", str(wt_path), "--force")
