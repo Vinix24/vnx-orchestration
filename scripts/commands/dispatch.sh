@@ -319,6 +319,7 @@ cmd_dispatch() {
   local model_override="${VNX_MODEL:-sonnet}"
   local adapter_override=""
   local dry_run=0
+  local requires_mcp_cli=""
 
   if [ "$#" -eq 0 ]; then
     err "[dispatch] No dispatch file specified. Use: vnx dispatch <file.md>"
@@ -345,6 +346,8 @@ Options:
   --model <model>       Override model (default: sonnet)
   --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
                         Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
+  --requires-mcp        Preserve ambient MCP config (Requires-MCP: true header) instead
+                        of the force-empty scoped posture
   --dry-run             Show what would happen without dispatching
   -h, --help            Show this help
 
@@ -384,6 +387,8 @@ HELP
         adapter_override="$2"; shift 2 ;;
       --adapter=*)
         adapter_override="${1#*=}"; shift ;;
+      --requires-mcp)
+        requires_mcp_cli="--requires-mcp"; shift ;;
       --dry-run|-n)
         dry_run=1; shift ;;
       -h|--help)
@@ -403,6 +408,8 @@ Options:
   --model <model>       Override model (default: sonnet)
   --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
                         Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
+  --requires-mcp        Preserve ambient MCP config (Requires-MCP: true header) instead
+                        of the force-empty scoped posture
   --dry-run             Show what would happen without dispatching
   -h, --help            Show this help
 
@@ -514,6 +521,18 @@ HELP
   local dispatch_id
   dispatch_id=$(_d_generate_dispatch_id "$slug" "$track")
 
+  # Derive requires_mcp from the Requires-MCP: header (mirrors dispatch_deliver.sh's
+  # sed pattern), unless --requires-mcp was passed explicitly — the CLI flag wins.
+  local _requires_mcp="false"
+  if [ -z "$requires_mcp_cli" ]; then
+    _requires_mcp=$(sed -n 's/^Requires-MCP:[[:space:]]*//Ip' "$abs_file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    _requires_mcp="${_requires_mcp:-false}"
+  fi
+  local _mcp_flag=()
+  if [ "$_requires_mcp" = "true" ] || [ -n "$requires_mcp_cli" ]; then
+    _mcp_flag=(--requires-mcp)
+  fi
+
   log "[dispatch] File:       $(basename "$abs_file")"
   log "[dispatch] Terminal:   $terminal (Track $track)"
   log "[dispatch] Role:       ${role:-<none>}"
@@ -521,6 +540,7 @@ HELP
   log "[dispatch] Feature:    ${feature:-<none>}"
   log "[dispatch] Model:      $model_override"
   log "[dispatch] Adapter:    $adapter$([ "$adapter" = tmux ] && printf ' (default, subscription)' || printf ' (burst, paid)')"
+  log "[dispatch] Requires-MCP: $([ "${#_mcp_flag[@]}" -gt 0 ] && printf 'yes' || printf 'no')"
   log "[dispatch] DispatchID: $dispatch_id"
 
   if [ "$dry_run" -eq 1 ]; then
@@ -580,6 +600,7 @@ HELP
       --model "$model_override" \
       --worker-label "$terminal" \
       ${role:+--role "$role"} \
+      ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
       || exit_code=$?
   else
     # OPT-IN burst lane: paid headless SubprocessAdapter.
@@ -593,6 +614,7 @@ HELP
       --model "$model_override" \
       ${role:+--role "$role"} \
       ${_ar_flag[@]+"${_ar_flag[@]}"} \
+      ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
       || exit_code=$?
   fi
 

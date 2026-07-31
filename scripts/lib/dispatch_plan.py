@@ -94,6 +94,15 @@ class ExecutionPlan:
     role: Optional[str] = None          # carried from DispatchSpec for the phantom-guard review
                                         # exemption (codex P0.2 F2). NOT in digest() — advisory only,
                                         # must not perturb the permit fingerprint.
+    requires_mcp: bool = False          # OI-865: True keeps the worker's ambient MCP config instead
+                                        # of the force-empty scoped posture. Default False is the
+                                        # choice for a MISSING spec field: DispatchSpec.requires_mcp
+                                        # defaults to False and the tmux lane's dispatch() defaults to
+                                        # False, so a spec that omits the field lands on exactly the
+                                        # value today's code already uses — never silently "no MCP"
+                                        # for a dispatch that already gets MCP. It IS in digest():
+                                        # MCP access changes worker behavior, so a permit for a
+                                        # requires_mcp plan must not validate a force-empty plan.
 
     def digest(self) -> str:
         """Stable sha256 over the canonical, order-independent field set.
@@ -113,6 +122,7 @@ class ExecutionPlan:
             "isolation": self.isolation.value,
             "require_worktree": self.require_worktree,
             "seed_materialize": self.seed_materialize,
+            "requires_mcp": self.requires_mcp,
             "instruction_delivery": self.instruction_delivery,
             "report_contract": self.report_contract,
             "warmup": self.warmup,
@@ -298,6 +308,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         isolation=isolation,
         require_worktree=require_worktree,
         seed_materialize=seed_materialize,
+        requires_mcp=spec.requires_mcp,
         instruction_delivery=instruction_delivery,
         report_contract=report_contract,
         warmup=warmup,

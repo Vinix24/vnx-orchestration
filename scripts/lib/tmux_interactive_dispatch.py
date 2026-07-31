@@ -2756,6 +2756,11 @@ def main(argv: "list[str] | None" = None) -> int:
         help="spawn worker in the main repo checkout (opt-out of isolation)",
     )
     parser.add_argument("--base-ref", default="origin/main")
+    parser.add_argument(
+        "--requires-mcp", action="store_true", default=False, dest="requires_mcp",
+        help="Preserve ambient MCP config for this dispatch instead of the default "
+             "force-empty scoped posture (spec requires_mcp: true / Requires-MCP: true).",
+    )
     # ADR-006: staging→pending→promote gate enforcement.
     parser.add_argument(
         "--from-staging-id", default=None, dest="from_staging_id",
@@ -2804,6 +2809,7 @@ def main(argv: "list[str] | None" = None) -> int:
         isolated_worktree=args.isolated_worktree,
         base_ref=args.base_ref,
         working_tree_only=args.working_tree_only,
+        requires_mcp=args.requires_mcp,
     )
     print(json.dumps(result.__dict__, default=str))
     return 0 if result.success else 1
