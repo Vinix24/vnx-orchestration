@@ -1,4 +1,4 @@
-"""Tests for quality_intelligence.db backup rotation (VNX_DB_BACKUP_KEEP)."""
+"""Tests for database backup rotation — shared helper and quality_db_init delegation."""
 
 from __future__ import annotations
 
@@ -197,3 +197,113 @@ def test_rotate_helper_uses_filename_timestamp_not_mtime():
         for p in state_dir.glob(f"{qd._BACKUP_PREFIX}*"):
             p.unlink(missing_ok=True)
         state_dir.rmdir()
+
+
+# ---------------------------------------------------------------------------
+# Shared helper tests — db_backup_rotation.rotate_backups
+# ---------------------------------------------------------------------------
+
+
+from db_backup_rotation import parse_backup_keep, rotate_backups
+
+
+class TestRotateBackupsKeepsExactlyN:
+    """Rotation keeps exactly *keep* files, sorted by name-timestamp."""
+
+    def test_keeps_exactly_n_newest(self, tmp_path):
+        for i in range(5):
+            ts = f"20260710_{i:06d}"
+            (tmp_path / f"test.premigrate-{ts}.bak").write_text(f"backup {i}")
+        rotate_backups(tmp_path, "test.premigrate-", keep=3)
+        remaining = sorted(
+            p.name for p in tmp_path.glob("test.premigrate-*")
+            if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
+        )
+        assert len(remaining) == 3
+        # The timestamp suffix sorts lexicographically — newest (highest i) survive.
+        assert "test.premigrate-20260710_000004.bak" in remaining
+        assert "test.premigrate-20260710_000003.bak" in remaining
+        assert "test.premigrate-20260710_000002.bak" in remaining
+        # Oldest two are pruned.
+        assert not (tmp_path / "test.premigrate-20260710_000000.bak").exists()
+        assert not (tmp_path / "test.premigrate-20260710_000001.bak").exists()
+
+    def test_no_op_when_under_limit(self, tmp_path):
+        for i in range(2):
+            ts = f"20260710_{i:06d}"
+            (tmp_path / f"test.premigrate-{ts}.bak").write_text(f"backup {i}")
+        rotate_backups(tmp_path, "test.premigrate-", keep=3)
+        remaining = list(tmp_path.glob("test.premigrate-*"))
+        assert len(remaining) == 2
+
+
+class TestRotateBackupsSidecars:
+    """Rotation removes -wal and -shm sidecars alongside the pruned backup."""
+
+    def test_sidecars_pruned_with_main_file(self, tmp_path):
+        for i in range(4):
+            ts = f"20260710_{i:06d}"
+            bp = tmp_path / f"test.premigrate-{ts}.bak"
+            bp.write_text(f"backup {i}")
+            # Every backup gets both sidecars.
+            (tmp_path / f"test.premigrate-{ts}.bak-wal").write_text("wal")
+            (tmp_path / f"test.premigrate-{ts}.bak-shm").write_text("shm")
+
+        rotate_backups(tmp_path, "test.premigrate-", keep=2)
+
+        # Newest 2 survive with their sidecars.
+        assert (tmp_path / "test.premigrate-20260710_000003.bak").exists()
+        assert (tmp_path / "test.premigrate-20260710_000003.bak-wal").exists()
+        assert (tmp_path / "test.premigrate-20260710_000003.bak-shm").exists()
+        assert (tmp_path / "test.premigrate-20260710_000002.bak").exists()
+        assert (tmp_path / "test.premigrate-20260710_000002.bak-wal").exists()
+        assert (tmp_path / "test.premigrate-20260710_000002.bak-shm").exists()
+        # Oldest 2 are fully pruned (file + sidecars).
+        assert not (tmp_path / "test.premigrate-20260710_000000.bak").exists()
+        assert not (tmp_path / "test.premigrate-20260710_000000.bak-wal").exists()
+        assert not (tmp_path / "test.premigrate-20260710_000000.bak-shm").exists()
+        assert not (tmp_path / "test.premigrate-20260710_000001.bak").exists()
+        assert not (tmp_path / "test.premigrate-20260710_000001.bak-wal").exists()
+        assert not (tmp_path / "test.premigrate-20260710_000001.bak-shm").exists()
+
+
+class TestRotateBackupsErrorSafety:
+    """Rotation errors never delete the newest (just-created) backup."""
+
+    def test_error_keeps_newest_backup(self, tmp_path, monkeypatch):
+        """When rotation throws mid-way, the newest backup survives.
+
+        The newest backup by name is the one with the highest timestamp suffix.
+        We make one of the old backups un-deletable so rotation fails part-way.
+        The newest file must still exist afterward — rotation errors are
+        best-effort, not atomic.
+        """
+        for i in range(4):
+            ts = f"20260710_{i:06d}"
+            (tmp_path / f"test.premigrate-{ts}.bak").write_text(f"backup {i}")
+
+        newest = tmp_path / "test.premigrate-20260710_000003.bak"
+        oldest = tmp_path / "test.premigrate-20260710_000000.bak"
+
+        # Make one old backup undeletable by replacing it with a directory
+        # (Path.unlink on a directory raises IsADirectoryError on POSIX).
+        oldest.unlink()
+        oldest.mkdir()
+
+        # Rotation is best-effort — it shouldn't raise.
+        rotate_backups(tmp_path, "test.premigrate-", keep=2)
+
+        # The newest backup must ALWAYS survive, even when cleanup of an
+        # older backup fails.
+        assert newest.exists(), (
+            "newest backup was deleted despite rotation error — "
+            "never delete the just-made backup"
+        )
+
+    def test_parse_backup_keep_never_returns_zero(self):
+        """parse_backup_keep returns the default (3) when given 0 or negative."""
+        assert parse_backup_keep("0") == 3
+        assert parse_backup_keep("-1") == 3
+        assert parse_backup_keep(None) == 3
+        assert parse_backup_keep("invalid") == 3
+        assert parse_backup_keep("5") == 5
