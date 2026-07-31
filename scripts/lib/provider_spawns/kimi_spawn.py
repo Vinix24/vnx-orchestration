@@ -505,7 +505,7 @@ def _harvest_session_token_usage(
             try:
                 import shutil as _shutil
                 _shutil.rmtree(zip_path.parent, ignore_errors=True)
-            except Exception:  # noqa: BLE001 — cleanup must never raise
+            except Exception:  # vnx-silent-except: cleanup must never raise
                 pass
 
 
