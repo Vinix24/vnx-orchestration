@@ -126,6 +126,56 @@ class TestOtherTerminalsUnaffected:
         assert "UNIQUE-PLAYBOOK-MARKER-4f8e1c" not in ctx
 
 
+class TestHookContextContent:
+    """The hook's own text (not the injected skill body) carries references
+    that must stay current. These tests verify the corrected references
+    without coupling to the exact skill body content."""
+
+    def test_skills_registry_path_is_correct(self, tmp_path):
+        """Line 142 + line 150: both references point to skills/skills.yaml,
+        not the non-existent .vnx/skills/skills.yaml."""
+        project = _make_project(tmp_path)
+
+        out = _run_hook(project / ".claude" / "terminals" / "T0")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "skills/skills.yaml" in ctx
+        assert ".vnx/skills/skills.yaml" not in ctx
+
+    def test_core_skills_list_includes_horizon_panel_fabric_reference(self, tmp_path):
+        """Line 141: the core skills list includes the skills T0 actually
+        routes to: horizon, panel, fabric-reference (added 2026-07-31)."""
+        project = _make_project(tmp_path)
+
+        out = _run_hook(project / ".claude" / "terminals" / "T0")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "@horizon" in ctx
+        assert "@panel" in ctx
+        assert "@fabric-reference" in ctx
+
+    def test_old_pin_language_is_absent(self):
+        """Sonnet-pinned and VNX_OVERRIDE_WORKERS_KIMI_PINNED must not appear
+        in the T0 role or skill files after the free-per-dispatch
+        modernisation (PR #1257). Conversely, pin_semantics and the free
+        per-dispatch choice wording must be present.
+
+        This test reads the real repo files, not a mock fixture — it fails
+        against origin/main where the old pin language still lives."""
+        skill_md = REPO / ".claude" / "skills" / "t0-orchestrator" / "SKILL.md"
+        role_md = REPO / ".claude" / "terminals" / "T0" / "role-orchestrator.md"
+
+        skill_text = skill_md.read_text()
+        role_text = role_md.read_text()
+        combined = skill_text + role_text
+
+        # Old pin language must be gone from both files.
+        assert "Sonnet-pinned" not in combined
+        assert "VNX_OVERRIDE_WORKERS_KIMI_PINNED" not in combined
+
+        # New pin semantics must be present.
+        assert "pin_semantics" in combined
+        assert "per-dispatch" in combined
+
+
 class TestNonVnxDirectory:
     def test_exits_silently_outside_a_terminal_directory(self, tmp_path):
         r = subprocess.run(
