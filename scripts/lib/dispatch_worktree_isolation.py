@@ -209,6 +209,12 @@ def remove_dispatch_worktree(
 
     Called on both success and failure paths — the worker's pushed branch
     survives on origin; only the local working tree is removed.
+
+    Before removing the worktree, kills any processes still running inside it
+    (OI-873): a SessionStart hook spawned from the worktree can survive the
+    dispatch and hold the coordination DB write lock, blocking every fleet-wide
+    track write.  Process cleanup happens OUTSIDE the worktree lock so it never
+    blocks concurrent worktree creation.
     """
     root = _resolve_project_root(project_root)
     wt_path = _dispatch_worktree_dir(root, dispatch_id)
@@ -216,6 +222,20 @@ def remove_dispatch_worktree(
     if not wt_path.exists():
         log.debug("remove_dispatch_worktree: already absent: %s", wt_path)
         return
+
+    # OI-873: kill processes still running inside this worktree BEFORE
+    # attempting removal.  A zombie hook (bash + python child) will hold
+    # the coordination DB lock and its CWD under the worktree path;
+    # lsof +D catches both.
+    try:
+        from worktree_process_cleanup import kill_worktree_processes  # noqa: PLC0415
+        kill_worktree_processes(wt_path)
+    except Exception as _proc_exc:
+        log.warning(
+            "remove_dispatch_worktree: process cleanup failed for %s: %s — "
+            "continuing with worktree removal",
+            dispatch_id, _proc_exc,
+        )
 
     with _worktree_lock(root):
         try:
