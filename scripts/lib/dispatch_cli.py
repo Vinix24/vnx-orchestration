@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -565,17 +566,103 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
     )
 
 
+def _persist_dispatch_row(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """Best-effort: create the dispatches tracker row for a door-accepted dispatch.
+
+    The door is the single entry point for dispatches, yet historically never
+    wrote a row to dispatches (runtime_coordination.db) — only the deliverable
+    layer (planning_cli.py, `dlv-` ids) did. Three consumers read this table for
+    door dispatches and all silently no-op without a row:
+
+    1. ``_persist_track_id`` (UPDATE-only) — track linkage, symptom TL-D1;
+    2. ``dispatch_outcome_classifier.reconcile_all_dispatch_outcomes`` — reads
+       the dispatch-id population plus ``state``/``track``/``created_at`` here;
+    3. ``receipt_provenance._link_pr_to_track`` — reads ``track_id`` by
+       ``dispatch_id`` for the TL-D2 tracks.pr_ref auto-propagation on merge.
+
+    Called from run_dispatch AFTER validation + plan compile and BEFORE the lane
+    choice, so rejected dispatches never get a row and in-flight dispatches are
+    visible to live queries.
+
+    ``state='proposed'`` deliberately: 'queued' would be claimed by the worker
+    pool (its claim query keys on state='queued') and, without a staged pool
+    bundle, rot into timed_out/expired via the stuck sweep; the supervisor's
+    stuck/ghost sweeps key on claimed/delivering/accepted/running. 'proposed'
+    is invisible to all of those — the same state the deliverable layer uses.
+
+    Idempotent per ADR-007's composite UNIQUE(dispatch_id, project_id): a retry
+    or fix-forward with the same id finds the existing row and leaves it
+    untouched. Never raises: tracker bookkeeping must never block the door.
+    """
+    db_path = _tracks_db_path(state_dir)
+    if not db_path.exists():
+        return
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'"
+            ).fetchone() is None:
+                return
+            has_project = _has_col(conn, "dispatches", "project_id")
+            track_id = (spec.track_id or "").strip()
+            if track_id and not _has_col(conn, "dispatches", "track_id"):
+                conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
+                conn.commit()
+            # Idempotency: an existing row (retry / fix-forward / deliverable
+            # layer) is left untouched — never a second row, never a mutation.
+            if has_project:
+                existing = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                    (spec.dispatch_id, spec.project_id),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE dispatch_id = ?",
+                    (spec.dispatch_id,),
+                ).fetchone()
+            if existing is not None:
+                return
+            cols = ["dispatch_id"]
+            vals = [spec.dispatch_id]
+            if has_project:
+                cols.append("project_id")
+                vals.append(spec.project_id)
+            cols.append("state")
+            vals.append("proposed")
+            if track_id:
+                cols.append("track_id")
+                vals.append(track_id)
+            now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            )
+            for ts_col in ("created_at", "updated_at"):
+                if _has_col(conn, "dispatches", ts_col):
+                    cols.append(ts_col)
+                    vals.append(now)
+            placeholders = ", ".join("?" for _ in cols)
+            conn.execute(
+                f"INSERT INTO dispatches ({', '.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("[dispatch_cli] dispatch row persist skipped: %s", exc)
+
+
 def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
     """Best-effort: attach spec.track_id to an EXISTING dispatches row (UPDATE-only).
 
-    Never INSERTs. The dispatches table (runtime_coordination.db) is read by the
-    worker-pool claim query, the runtime reconciler, and the runtime supervisor's
-    stuck/ghost-dispatch sweeps, all keyed off `state`. Fabricating a row for the
-    leaseless claude-tmux lane (which has no pre-existing tracker row) risks
-    tripping those sweeps. D2 treats an absent/None track_id as a no-op, so a
-    dispatch with no pre-existing row is a safe, anticipated case here, not a
-    partial failure. Adds the track_id column additively (_has_col-guarded) when
-    missing. Never raises.
+    Never INSERTs — row creation is the door's job (``_persist_dispatch_row``,
+    invoked earlier in run_dispatch, right after validation + plan compile).
+    When that row exists this UPDATE stamps the track_id onto it; D2 treats an
+    absent/None track_id as a no-op, so a dispatch whose row could not be
+    created (e.g. no runtime_coordination.db yet) is a safe, anticipated case
+    here, not a partial failure. Adds the track_id column additively
+    (_has_col-guarded) when missing. Never raises.
     """
     track_id = (spec.track_id or "").strip()
     if not track_id:
@@ -1076,6 +1163,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                 )
             except Exception as exc:
                 logger.debug("[dispatch_cli] scout pre-pass skipped: %s", exc)
+
+            # The dispatch is irrevocably accepted here (validated, plan
+            # compiled): create its dispatches tracker row BEFORE the lane
+            # choice so _persist_track_id, reconcile_all_dispatch_outcomes and
+            # the TL-D2 pr_ref propagation all have a row to read. Idempotent
+            # (retry/fix-forward safe), state='proposed' (invisible to the
+            # claim/stuck/ghost sweeps), best-effort — never blocks the door.
+            _persist_dispatch_row(vspec.spec, state_dir=state_dir)
 
             # TL-D1: export the resolved track_id alongside VNX_CURRENT_DISPATCH_ID and
             # persist it onto the dispatch tracker row so D2 can propagate it to
