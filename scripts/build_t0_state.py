@@ -13,13 +13,20 @@ With --format brief: schema 1.0 backward-compat (t0_brief.json format)
 
 Schema 2.2 changes (fabric-freshness):
   - Additive, backward-compatible: a top-level ``track_freshness`` marker
-    {reconciled, tracks, drifted, drifted_tracks, reason, seconds, store}.
+    {derived_refreshed, tracks, drifted, drifted_tracks, reason, seconds,
+    store, last_reconcile_at, last_reconcile_age_hours, gh_health,
+    nominated_not_closed, autoclose_degraded, autoclose_reason}.
     Before projecting, the builder runs the advisory track reconciler against
     the central tracks SSOT and records declared-vs-derived drift here, so the
-    SessionStart snapshot carries its own freshness. A compact form
-    {reconciled, drifted, tracks, reason} is also surfaced in t0_index.json
-    (the always-loaded cold-start file). Consumers that predate 2.2 ignore the
-    new key (no removals/renames).
+    SessionStart snapshot carries its own freshness. ``derived_refreshed``
+    (renamed from ``reconciled``, which over-claimed) reports ONLY the
+    derived-status refresh. The auto-close reconciler's real health — last run
+    time/age, gh health, nominated-but-not-closed backlog, and the
+    ``autoclose_degraded`` boolean — is read from reconcile_summary.json, so a
+    downed auto-close reconciler is visible instead of reading as green. A
+    compact form {derived_refreshed, drifted, tracks, reason,
+    autoclose_degraded, autoclose_reason} is also surfaced in t0_index.json
+    (the always-loaded cold-start file).
 
 Schema 2.2 addition (OI-896, auto-dream reviews):
   - Additive, backward-compatible: a top-level ``dream_reviews`` section
@@ -1871,6 +1878,104 @@ def _resolve_tracks_store(state_dir: Path, project_id: str) -> Path:
     return state_dir
 
 
+# ---------------------------------------------------------------------------
+# Auto-close reconciler health (reconcile_summary.json)
+# ---------------------------------------------------------------------------
+
+_RECONCILE_SUMMARY_FILENAME = "reconcile_summary.json"
+
+# A full day without a single auto-close run means the reconciler is down. The
+# measured inter-run cadence is minutes (median ~8 min, p90 ~3.2 h over 443
+# observed gaps in reconcile_history.ndjson), so 24 h flags a dead reconciler
+# (the 31 h outage that motivated this work) with a wide margin against any
+# ordinary idle period.
+_AUTOCLOSE_STALE_HOURS = 24.0
+
+
+def _parse_reconcile_timestamp(value: Any) -> Optional[datetime]:
+    """Parse a reconcile_summary ``finished_at`` ISO string to an aware datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Read the auto-close reconciler's health from reconcile_summary.json.
+
+    Returns:
+      last_reconcile_at        — ``finished_at`` from the summary (ISO or None).
+      last_reconcile_age_hours — age of that run in hours (float or None).
+      gh_health                — ``evidence_source_health.gh`` (or None).
+      nominated_not_closed     — counts.nominated minus counts.closed.
+      autoclose_degraded       — True when auto-close is unhealthy.
+      autoclose_reason         — short human-readable reason.
+
+    Degraded means: gh is not "ok" (absent/auth_failed/timeout/unknown), OR the
+    last run has nominated-but-unverified tracks the reconciler could not
+    verify (unverified > 0 with nominated_not_closed > 0 — this is the stuck
+    backlog, distinct from guard-declined closes like stale_candidate which
+    keep nominated_not_closed > 0 on healthy runs), OR the last run is older
+    than _AUTOCLOSE_STALE_HOURS. A missing summary is itself a degraded signal:
+    it means the auto-close reconciler has never written a summary, and the
+    block is still emitted rather than omitted.
+    """
+    now = now or datetime.now(timezone.utc)
+    summary_path = store / _RECONCILE_SUMMARY_FILENAME
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {
+            "last_reconcile_at": None,
+            "last_reconcile_age_hours": None,
+            "gh_health": None,
+            "nominated_not_closed": None,
+            "autoclose_degraded": True,
+            "autoclose_reason": "no_reconcile_summary",
+        }
+
+    gh_health = (summary.get("evidence_source_health") or {}).get("gh")
+    counts = summary.get("counts") or {}
+    nominated = int(counts.get("nominated", 0) or 0)
+    closed = int(counts.get("closed", 0) or 0)
+    unverified = int(counts.get("unverified", 0) or 0)
+    nominated_not_closed = nominated - closed
+
+    finished_raw = summary.get("finished_at")
+    finished_dt = _parse_reconcile_timestamp(finished_raw)
+    if finished_dt is not None:
+        age_hours = round(max(0.0, (now - finished_dt).total_seconds() / 3600.0), 1)
+    else:
+        age_hours = None
+
+    gh_bad = gh_health != "ok"
+    stuck = unverified > 0 and nominated_not_closed > 0
+    stale = age_hours is not None and age_hours > _AUTOCLOSE_STALE_HOURS
+
+    if gh_bad:
+        reason = "gh_absent" if gh_health == "absent" else f"gh_{gh_health or 'unknown'}"
+    elif stuck:
+        reason = "nominated_not_closed"
+    elif stale:
+        reason = "stale"
+    else:
+        reason = "ok"
+
+    return {
+        "last_reconcile_at": finished_raw or None,
+        "last_reconcile_age_hours": age_hours,
+        "gh_health": gh_health,
+        "nominated_not_closed": nominated_not_closed,
+        "autoclose_degraded": gh_bad or stuck or stale,
+        "autoclose_reason": reason,
+    }
+
+
 def _reconcile_tracks_fresh(
     state_dir: Path, project_id: str, *, store: Optional[Path] = None
 ) -> Dict[str, Any]:
@@ -1899,13 +2004,20 @@ def _reconcile_tracks_fresh(
     degrades to a ``precondition_unmet`` marker (safe, never raises).
     """
     marker: Dict[str, Any] = {
-        "reconciled": False,
+        "derived_refreshed": False,
         "tracks": 0,
         "drifted": 0,
         "drifted_tracks": [],
         "reason": None,
         "seconds": 0.0,
         "store": None,
+        # Auto-close reconciler health (from reconcile_summary.json).
+        "last_reconcile_at": None,
+        "last_reconcile_age_hours": None,
+        "gh_health": None,
+        "nominated_not_closed": None,
+        "autoclose_degraded": False,
+        "autoclose_reason": None,
     }
     pid = (project_id or "").strip()
     if not pid:
@@ -1916,6 +2028,9 @@ def _reconcile_tracks_fresh(
     # canonical projection); otherwise resolve it here.
     store = store if store is not None else _resolve_tracks_store(state_dir, pid)
     marker["store"] = str(store)
+    # Auto-close health is independent of the derived-status refresh below:
+    # surface it even when that refresh degrades to precondition_unmet/error.
+    marker.update(_autoclose_health(store))
     t0 = time.monotonic()
     try:
         if str(_LIB_DIR) not in sys.path:
@@ -1936,7 +2051,7 @@ def _reconcile_tracks_fresh(
 
     drifted = [r for r in results if r.get("drifted")]
     marker.update(
-        reconciled=True,
+        derived_refreshed=True,
         tracks=len(results),
         drifted=len(drifted),
         drifted_tracks=[
@@ -2173,14 +2288,17 @@ def _track_freshness_summary(tf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     The full marker (with per-track drift detail) lives in the state doc; the
     index carries only the cheap orientation fields so a cold-start session sees
-    whether the projection is fresh and how many tracks drifted.
+    whether the projection is fresh, how many tracks drifted, and whether the
+    auto-close reconciler is degraded.
     """
     tf = tf or {}
     return {
-        "reconciled": bool(tf.get("reconciled", False)),
+        "derived_refreshed": bool(tf.get("derived_refreshed", False)),
         "drifted": tf.get("drifted", 0),
         "tracks": tf.get("tracks", 0),
         "reason": tf.get("reason"),
+        "autoclose_degraded": bool(tf.get("autoclose_degraded", False)),
+        "autoclose_reason": tf.get("autoclose_reason"),
     }
 
 
@@ -2385,10 +2503,11 @@ def _emit_health_beacon(
     """Emit HealthBeacon heartbeat (best-effort).
 
     Carries a compact track-freshness summary so reconcile health (e.g.
-    ``reconciled=False`` with an ``error:*`` reason) is observable on the
-    beacon, not only inside the projection. A benign skip
-    (``no_project_id``/``precondition_unmet``) is reported but does NOT flip the
-    beacon to ``fail`` — only a real build/write failure does.
+    ``derived_refreshed=False`` with an ``error:*`` reason, or a degraded
+    auto-close reconciler) is observable on the beacon, not only inside the
+    projection. A benign skip (``no_project_id``/``precondition_unmet``) is
+    reported but does NOT flip the beacon to ``fail`` — only a real build/write
+    failure does.
     """
     details: Dict[str, Any] = {
         "format": fmt,
@@ -2397,9 +2516,11 @@ def _emit_health_beacon(
     }
     if track_freshness is not None:
         details["track_freshness"] = {
-            "reconciled": bool(track_freshness.get("reconciled", False)),
+            "derived_refreshed": bool(track_freshness.get("derived_refreshed", False)),
             "drifted": track_freshness.get("drifted", 0),
             "reason": track_freshness.get("reason"),
+            "autoclose_degraded": bool(track_freshness.get("autoclose_degraded", False)),
+            "autoclose_reason": track_freshness.get("autoclose_reason"),
         }
     try:
         from health_beacon import HealthBeacon
