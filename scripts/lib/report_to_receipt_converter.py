@@ -181,7 +181,12 @@ def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str
 def _resolve_report_role(
     dispatch_id: str, merged: Dict[str, Any], state_dir: Optional[Path]
 ) -> str:
-    """Resolve the dispatch's real role from dispatch_metadata (PR-4).
+    """Resolve the dispatch's real role for the converter receipt.
+
+    W7 fix: the shared resolver prefers the report's OWN stamped ``role``
+    (frontmatter/body — the author's resolved identity) over the
+    dispatch_metadata join, matching every other emit path. The metadata join
+    remains the fallback for reports whose author never stamped a role.
 
     FAIL-OPEN contract (mirrors PR-1/PR-2): any resolution error, missing DB,
     missing row, null/empty role, or the fake ``backend-developer`` default
@@ -190,12 +195,14 @@ def _resolve_report_role(
     """
     role: Optional[str] = None
     try:
-        from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+        from dispatch_identity import resolve_effective_role  # noqa: PLC0415
         project_id = merged.get("project_id") or None
         if not project_id:
             from dispatch_cli import _resolve_project_id  # noqa: PLC0415
             project_id = _resolve_project_id()
-        role = resolve_dispatch_role(dispatch_id, project_id, state_dir=state_dir)
+        role = resolve_effective_role(
+            merged.get("role"), dispatch_id, project_id, state_dir=state_dir,
+        )
     except Exception:  # noqa: BLE001 — identity join is fail-open
         logger.debug(
             "report_to_receipt_converter: role resolution failed open dispatch=%s",

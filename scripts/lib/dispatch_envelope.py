@@ -821,17 +821,20 @@ def _govern(
             receipt_path = ndjson_path
         else:
             try:
-                # receipt-quality PR-1: resolve dispatch identity (role) from
-                # dispatch_metadata just before the emit. FAIL-OPEN — a resolver
-                # error must never break receipt emission.
+                # receipt-quality PR-1 + W7 fix: resolve dispatch identity
+                # (role) just before the emit. The shared resolver prefers the
+                # genuinely-set spec role (never the fake backend-developer
+                # default), falls back to dispatch_metadata, then stamps
+                # identity_unresolved. FAIL-OPEN — a resolver error must never
+                # break receipt emission.
                 try:
-                    from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+                    from dispatch_identity import resolve_effective_role  # noqa: PLC0415
                     _project_id = getattr(spec, "project_id", None)
                     if not _project_id:
                         from dispatch_cli import _resolve_project_id  # noqa: PLC0415
                         _project_id = _resolve_project_id()
-                    _role = resolve_dispatch_role(
-                        spec.dispatch_id, _project_id, state_dir=spec.state_dir,
+                    _role = resolve_effective_role(
+                        spec.role, spec.dispatch_id, _project_id, state_dir=spec.state_dir,
                     )
                 except Exception:  # noqa: BLE001 — identity join is fail-open
                     logger.debug(
@@ -839,8 +842,7 @@ def _govern(
                         spec.dispatch_id,
                         exc_info=True,
                     )
-                    _role = None
-                _role = _role or "identity_unresolved"
+                    _role = "identity_unresolved"
 
                 # receipt-quality PR-B2 fix-forward (Finding C): aggregate
                 # PreToolUse-hook tool-call signals for this dispatch
