@@ -139,9 +139,23 @@ $ bash skills/t0-orchestrator/scripts/dispatch_guard.sh
 Missing file: /Users/vincentvandeth/Development/vnx-orchestration/.vnx-data/worktrees/.vnx-data/state/t0_brief.json
 exit: 1
 ```
-The script resolves its own root as `$SCRIPT_DIR/../../../..` (four `cd ..` from `skills/t0-orchestrator/scripts/`), which assumes it always runs from the main checkout. Run from inside a nested worktree (as this dispatch did — worktrees live under `.vnx-data/worktrees/<id>/`), that traversal overshoots into the *worktrees* directory itself, producing a path with `.vnx-data` appearing twice and pointing nowhere real.
+The script resolved its own root as `$SCRIPT_DIR/../../../..` (four `cd ..` from `skills/t0-orchestrator/scripts/`), which assumes it always runs from the main checkout. Run from inside a nested worktree (as that dispatch did — worktrees live under `.vnx-data/worktrees/<id>/`), that traversal overshoots into the *worktrees* directory itself, producing a path with `.vnx-data` appearing twice and pointing nowhere real.
 
-**Verdict: reads a repo-local path that does not exist in this context, exit 1.** **BY DEFECT** — the relative-path assumption breaks specifically in the isolated-worktree topology every tmux-spawn dispatch runs in (`--isolated-worktree` is the documented default per §5), which is the majority of how dispatches execute today, not an edge case.
+**Verdict then: reads a repo-local path that does not exist in this context, exit 1.** **BY DEFECT** — the relative-path assumption breaks specifically in the isolated-worktree topology every tmux-spawn dispatch runs in (`--isolated-worktree` is the documented default per §5), which is the majority of how dispatches execute today, not an edge case.
+
+**Measured 2026-08-01** (after OI-859, direction B — the guard reads runtime state via `vnx status --json` / `vnx pool status --json`, not the repo-local brief):
+```
+$ bash skills/t0-orchestrator/scripts/dispatch_guard.sh; echo "exit: $?"
+GO: safe to dispatch
+Queue: pending=0 active=0 conflicts=0
+Terminals:
+T1=idle(128235s)
+T2=unknown(0s)
+T3=unknown(0s)
+Pool: current=0 queue_depth=0
+exit: 0
+```
+The root is now resolved via `git rev-parse --show-toplevel` (worktree-safe), the decision comes from the runtime CLI against the central store, and the divergence check was dropped (one source → nothing to diverge). **FIXED by OI-859.**
 
 ---
 
@@ -230,6 +244,8 @@ exit: 1
 | 4 | `hooks/sessionstart.sh` | always (matcher `""`) | Pure read-and-print (builds a context banner from existing state files) — `grep -n '>>\|tee\|mkdir\|\.log' hooks/sessionstart.sh` matches nothing and exits 1, confirming no `>`, `tee`, `mkdir`, or `.log` write anywhere in the script. | Runs every session, but **leaves no persisted evidence anywhere on disk**. Its liveness is not measurable from outside a session — the only way to confirm it ran is to have seen its banner in that session's own transcript, which is not a re-runnable check. Say so plainly rather than implying a check exists: for this one hook, there is nothing left to `ls`, `cat`, or `grep` after the fact. |
 
 **Verdict: all four are wired up; none are broken.** The variation is by design (context-scoped matchers/guards, not defects) — but #4 is structurally unverifiable after the fact, which is itself worth knowing before trusting "it always runs."
+
+**Updated 2026-08-01 (OI-859):** the T0 SessionStart hook no longer forces the repo-local path. It now delegates to `scripts/hooks/build_t0_state_hook.sh`, which resolves the CENTRAL state/logs dirs via `vnx_paths` (ADR-026) and uses an explicit interpreter (`$ROOT/.venv/bin/python` > pinned homebrew 3.12 > `python3`) instead of a bare `python3`. The build artifact now lands at `~/.vnx-data/<project>/state/t0_state.json` with stderr captured to `~/.vnx-data/<project>/logs/build_t0_state.err` — no `.vnx-data` split-brain.
 
 ---
 

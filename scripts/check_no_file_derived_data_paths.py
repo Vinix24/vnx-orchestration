@@ -179,10 +179,15 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 # plan-gate datadir dispatch, 2026-07-31); the sites below are grandfathered so
 # the gate can block NEW occurrences while each is migrated in follow-up work.
 # Assessment per site (kept deliberately, with rationale):
-#   - tmux_interactive_dispatch / staging_validator / lease_sweep: dispatch-door
-#     lane code with its own governed test surface; the door threads explicit
-#     dirs in the governed path and these fallbacks fire only on the un-threaded
-#     path. Migrating them belongs with the door owners, not the plan-gate fix.
+#   - tmux_interactive_dispatch: MIGRATED in OI-900 (#1308). _resolve_state_dir
+#     no longer feeds __file__ to the resolver; it honors the explicit
+#     VNX_DATA_DIR override and otherwise anchors on the invocation project root
+#     via vnx_paths.resolve_state_dir. Dropped from the list, as the gate
+#     requires of a migrated site.
+#   - staging_validator / lease_sweep: dispatch-door lane code with its own
+#     governed test surface; the door threads explicit dirs in the governed path
+#     and these fallbacks fire only on the un-threaded path. Migrating them
+#     belongs with the door owners, not the plan-gate fix.
 #   - worker_permission_relay: last-resort except-branch AFTER vnx_paths.ensure_env()
 #     (the VNX_HOME+marker-aware resolver) failed — mirrors the grandfathered
 #     defensive-fallback pattern above.
@@ -194,9 +199,6 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 # mkdirs events/ per dispatch — so it was fixed in the same dispatch instead of
 # grandfathered: it now mirrors provider_dispatch._resolve_data_dir.)
 GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
-    "scripts/lib/tmux_interactive_dispatch.py": {
-        "resolve_state_dir(caller_file=__file__)",
-    },
     "scripts/lib/staging_validator.py": {
         "resolve_data_dir(caller_file=__file__)",
     },

@@ -293,8 +293,8 @@ Options:
   --workers     Show live worker health (subprocess dispatches)
   --json        Machine-readable JSON (schema: vnx_status/1.0)
                 Keys: schema, focus, active_waves, open_prs, terminals,
-                      recent_decisions, queues, strategy_available,
-                      t0_state_available
+                      recent_decisions, queues, system_health,
+                      strategy_available, t0_state_available
   -h, --help    Show this help
 
 Examples:
