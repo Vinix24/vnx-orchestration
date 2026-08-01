@@ -9,7 +9,7 @@ Performs three linkage passes:
 """
 
 import json
-import re
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,9 +27,6 @@ PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 DB_PATH = STATE_DIR / "quality_intelligence.db"
 RECEIPTS_FILE = STATE_DIR / "t0_receipts.ndjson"
-
-DISPATCH_ID_RE = re.compile(r'\|\s*\*\*Dispatch-ID\*\*\s*\|\s*([^\|]+?)\s*\|')
-DISPATCH_HEADER_RE = re.compile(r'Dispatch-ID:\s*(\S+)')
 
 
 def link_sessions_to_dispatches(conn: sqlite3.Connection) -> int:
@@ -97,6 +94,8 @@ def link_receipts_to_dispatches(conn: sqlite3.Connection) -> int:
 
 def link_reports_to_dispatches(conn: sqlite3.Connection) -> int:
     """Extract dispatch_id from report files and update report_findings."""
+    from conversation_analyzer.parser import SessionParser  # noqa: PLC0415
+
     cur = conn.cursor()
     cur.execute("SELECT id, report_path FROM report_findings WHERE dispatch_id IS NULL")
     rows = cur.fetchall()
@@ -114,13 +113,13 @@ def link_reports_to_dispatches(conn: sqlite3.Connection) -> int:
         except OSError:
             continue
 
-        m = DISPATCH_ID_RE.search(content)
-        if not m:
-            m = DISPATCH_HEADER_RE.search(content)
-        if not m:
+        # Same OI-872 extraction as session parsing: first VALID dispatch ID in
+        # document order (skips template placeholders, strips trailing prose
+        # punctuation) instead of the old first-match-only regex.
+        dispatch_id = SessionParser._extract_dispatch_id(content)
+        if not dispatch_id:
             continue
 
-        dispatch_id = m.group(1).strip()
         cur.execute(
             "UPDATE report_findings SET dispatch_id = ? WHERE id = ?",
             (dispatch_id, row_id)
@@ -149,6 +148,82 @@ def clean_polluted_dispatch_ids(conn: sqlite3.Connection) -> int:
     if cleaned:
         conn.commit()
     return cleaned
+
+
+def backfill_session_dispatch_ids(conn: sqlite3.Connection) -> int:
+    """Re-parse transcripts of NULL-dispatch sessions and fill dispatch_id (OI-872).
+
+    The parser fix (conversation_analyzer/parser.py) recovers dispatch IDs from
+    sessions the old first-match-only extraction missed — the worker-context
+    template carries ``Dispatch-ID: <dispatch_id>`` before the Dispatch Metadata
+    footer with the real ID, so the old parser stopped at the rejected
+    placeholder and never reached the real ID. Rows already analyzed are NOT
+    re-processed by the nightly analyzer (it only imports new session_ids), so
+    this phase re-parses the existing NULL rows once using the fixed
+    ``SessionParser`` and fills ``dispatch_id``.
+
+    Only ever tightens data: a row that yields no valid ID (no dispatch text,
+    placeholder-only, T0 orchestration, bench-*) keeps NULL. Idempotent — rows
+    already linked are skipped.
+
+    Returns the count of sessions newly linked.
+    """
+    from conversation_analyzer.parser import SessionParser  # noqa: PLC0415
+
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT session_id, dispatch_id FROM session_analytics "
+        "WHERE dispatch_id IS NULL OR dispatch_id = ''"
+    )
+    pending_ids = {row[0] for row in cur.fetchall()}
+
+    # Also re-parse rows whose stored ID is polluted (trailing prose punctuation
+    # like "20260613-x." that the old regex captured, e.g. 2 benchmark-review
+    # sessions). The parser now strips such punctuation on extraction.
+    cur.execute(
+        "SELECT session_id, dispatch_id FROM session_analytics "
+        "WHERE dispatch_id IS NOT NULL AND dispatch_id != ''"
+    )
+    for session_id, stored in cur.fetchall():
+        if stored and SessionParser._validate_dispatch_id(stored) != stored:
+            pending_ids.add(session_id)
+
+    if not pending_ids:
+        return 0
+
+    # Index transcripts once: session_id -> jsonl path across ~/.claude/projects/*.
+    projects_dir = Path(
+        os.environ.get(
+            "CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")
+        )
+    )
+    transcript_by_session: dict[str, Path] = {}
+    if projects_dir.is_dir():
+        for jsonl in projects_dir.glob("*/*.jsonl"):
+            sid = jsonl.stem
+            if sid in pending_ids and sid not in transcript_by_session:
+                transcript_by_session[sid] = jsonl
+
+    if not transcript_by_session:
+        return 0
+
+    parser = SessionParser()
+    linked = 0
+    for session_id, jsonl_path in transcript_by_session.items():
+        try:
+            metrics, _ = parser.parse_file(jsonl_path)
+        except Exception as exc:  # noqa: BLE001 — a bad transcript must not abort the phase
+            print(f"  backfill_session_dispatch_ids: parse failed {session_id[:8]}...: {exc}")
+            continue
+        if metrics.dispatch_id:
+            cur.execute(
+                "UPDATE session_analytics SET dispatch_id = ? WHERE session_id = ?",
+                (metrics.dispatch_id, session_id),
+            )
+            linked += 1
+    if linked:
+        conn.commit()
+    return linked
 
 
 def backfill_receipt_token_usage(conn: sqlite3.Connection) -> int:
@@ -266,19 +341,24 @@ def main():
     cleaned = clean_polluted_dispatch_ids(conn)
     print(f"  Placeholder dispatch_ids cleaned: {cleaned}")
 
-    # Phase 2: Link sessions to dispatches (bidirectional join).
+    # Phase 2: Backfill dispatch_id for already-analyzed NULL sessions (OI-872
+    # parser fix recovery — the nightly analyzer only imports new sessions).
+    backfilled_dispatch_ids = backfill_session_dispatch_ids(conn)
+    print(f"  Session dispatch_ids backfilled from transcripts: {backfilled_dispatch_ids}")
+
+    # Phase 3: Link sessions to dispatches (bidirectional join).
     linked_sessions = link_sessions_to_dispatches(conn)
     print(f"  Sessions linked to dispatches: {linked_sessions}")
 
-    # Phase 3: Link receipt outcomes to dispatches.
+    # Phase 4: Link receipt outcomes to dispatches.
     linked_receipts = link_receipts_to_dispatches(conn)
     print(f"  Receipt outcomes linked: {linked_receipts}")
 
-    # Phase 4: Link report findings to dispatches.
+    # Phase 5: Link report findings to dispatches.
     linked_reports = link_reports_to_dispatches(conn)
     print(f"  Report findings linked: {linked_reports}")
 
-    # Phase 5: Backfill receipt token_usage from session_analytics (OI-872 chain closure).
+    # Phase 6: Backfill receipt token_usage from session_analytics (OI-872 chain closure).
     enriched = backfill_receipt_token_usage(conn)
     print(f"  Receipts enriched with token_usage: {enriched}")
 
