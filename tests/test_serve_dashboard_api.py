@@ -642,3 +642,31 @@ class TestOperatorSessions:
         assert result["degraded"] is True
         assert any("session store" in reason.lower() for reason in result["degraded_reasons"])
         assert result["data"] == []
+
+    def test_panes_failure_surfaces_degraded_reason(self) -> None:
+        """A tmux list-panes failure degrades busy/idle but sessions still list.
+
+        Matches the sessions-failure path: a failing probe must be observable,
+        not silent (sessobs #1076 residual, OI-558).
+        """
+        sessions_ok = ao.subprocess.CompletedProcess(
+            args=["tmux", "list-sessions"],
+            returncode=0,
+            stdout="vnx-demo\t1700000000\n",
+            stderr="",
+        )
+        panes_failed = ao.subprocess.CompletedProcess(
+            args=["tmux", "list-panes"],
+            returncode=1,
+            stdout="",
+            stderr="error",
+        )
+        with (
+            patch.object(ao.shutil, "which", return_value="/usr/bin/tmux"),
+            patch.object(ao.subprocess, "run", side_effect=[sessions_ok, panes_failed]),
+        ):
+            sessions, reasons = ao._list_tmux_sessions(datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        # Sessions still list (busy/idle classification degrades, not the list).
+        assert len(sessions) == 1
+        assert any("list-panes" in r for r in reasons)
