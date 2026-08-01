@@ -21,6 +21,13 @@ Schema 2.2 changes (fabric-freshness):
     (the always-loaded cold-start file). Consumers that predate 2.2 ignore the
     new key (no removals/renames).
 
+Schema 2.2 addition (OI-896, auto-dream reviews):
+  - Additive, backward-compatible: a top-level ``dream_reviews`` section
+    {available, pending_count, oldest_age_seconds, pending_reviews} surfacing
+    auto-dream (ADR-019) consolidation cycles awaiting mandatory T0 review.
+    Mirrored to t0_detail/dream_reviews.json. The zero-pending case is
+    explicitly reported so an absent review queue is as visible as a full one.
+
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
     FEATURE_PLAN.md fallback fields (current_pr/next_task/assigned_track/
@@ -596,6 +603,100 @@ def _build_human_gate_queue(state_dir: Path, project_id: str) -> List[Dict[str, 
             "created_at": row.get("created_at"),
         })
     return queue
+
+
+# ---------------------------------------------------------------------------
+# Auto-dream review queue (ADR-019 / OI-896)
+# ---------------------------------------------------------------------------
+#
+# ADR-019 §3 makes T0 review mandatory for every auto-dream consolidation
+# cycle in its first 30 days. The consolidator writes a pending-review.json
+# per completed cycle, but before this reader NOTHING in the fabric consumed
+# it (grep for list_pending_reviews hit only scripts/dream/ itself). A
+# mandatory human gate without a notification is skipped by construction.
+# This section surfaces the queue at every SessionStart — and the zero case
+# explicitly (pending_count: 0), because an absent review queue is as much a
+# signal as a populated one.
+
+def _resolve_dream_data_root(state_dir: Path) -> Path:
+    """Resolve the data root that owns the dream/ state subtree.
+
+    Central installs keep dream reviews under the central data root
+    (``~/.vnx-data/<project_id>/state/dream``); repo-local installs under
+    ``<data>/state/dream`` where ``state_dir`` is ``<data>/state``.
+    """
+    central = _central_state_dir_for(state_dir)
+    if central is not None:
+        return central.parent
+    return state_dir.parent if state_dir.name == "state" else state_dir
+
+
+def _build_dream_reviews(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """Pending auto-dream consolidation reviews awaiting T0 approval (OI-896).
+
+    Best-effort and never raises: an unavailable identity, an import failure,
+    or an unreadable review dir degrades to ``available=False`` with a visible
+    ``pending_count: 0`` rather than blocking SessionStart.
+
+    Returned shape:
+      - ``available``: True when the reader ran (even for a zero queue).
+      - ``pending_count``: number of cycles awaiting operator review.
+      - ``oldest_age_seconds``: age of the oldest waiting review, or None
+        when the queue is empty.
+      - ``pending_reviews``: per-cycle summary (cycle_id, input_count,
+        created_at, age_seconds).
+    """
+    empty: Dict[str, Any] = {
+        "available": False,
+        "pending_count": 0,
+        "oldest_age_seconds": None,
+        "pending_reviews": [],
+    }
+    pid = (project_id or "").strip()
+    if not pid:
+        return empty
+    try:
+        if str(_SCRIPT_DIR) not in sys.path:
+            sys.path.insert(0, str(_SCRIPT_DIR))
+        from dream.review_gate import list_pending_reviews
+    except Exception:
+        return empty
+    try:
+        pending = list_pending_reviews(pid, _resolve_dream_data_root(state_dir)) or []
+    except Exception:
+        return empty
+    if not pending:
+        return {**empty, "available": True}
+
+    now = _now_utc()
+    reviews: List[Dict[str, Any]] = []
+    oldest_age: Optional[float] = None
+    for r in pending:
+        created_raw = (r.get("created_at") or "").strip()
+        age: Optional[float] = None
+        if created_raw:
+            try:
+                dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age = max(0.0, (now - dt).total_seconds())
+            except ValueError:
+                age = None
+        reviews.append({
+            "cycle_id": r.get("cycle_id"),
+            "input_count": r.get("input_count"),
+            "created_at": created_raw,
+            "age_seconds": age,
+        })
+        if age is not None and (oldest_age is None or age > oldest_age):
+            oldest_age = age
+
+    return {
+        "available": True,
+        "pending_count": len(reviews),
+        "oldest_age_seconds": oldest_age,
+        "pending_reviews": reviews,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1890,6 +1991,7 @@ def build_t0_state(
     tracks = _build_tracks(state_dir)
     canonical_tracks = _build_tracks_from_db(tracks_store, project_id)  # R3.2/ADR-007: tenant-scoped (central SSOT)
     human_gate_queue = _build_human_gate_queue(tracks_store, project_id)  # proposed deliverables awaiting operator promote
+    dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -1919,6 +2021,7 @@ def build_t0_state(
         "track_freshness": track_freshness,
         "canonical_tracks": canonical_tracks,
         "human_gate_queue": human_gate_queue,
+        "dream_reviews": dream_reviews,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
         "open_items": open_items,
@@ -2017,6 +2120,7 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
     "dispatch_register_events": "dispatch_register",
     "active_chains": "active_chains",
     "intelligence": "intelligence",
+    "dream_reviews": "dream_reviews",
     # Phase 2 W-state-5: heavy strategic_state lives in a private state key
     # (``_strategic_state_heavy``) so it is excluded from t0_state.json/the
     # brief output but still mirrored to t0_detail/strategic_state.json.
