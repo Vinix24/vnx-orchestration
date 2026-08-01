@@ -69,6 +69,18 @@ def test_read_version_file_falls_back_when_no_version_file(tmp_path, monkeypatch
     assert _read_version_file() == __version__
 
 
+def test_read_version_file_reports_rolling_dir_by_name(tmp_path, monkeypatch):
+    """OI-892: a rolling dir (edge) whose VERSION lags is reported by its dir
+    name, never by a stale released version — it must not present itself as a
+    version it is not pinned to."""
+    import vnx_cli._engine as _engine
+    rolling = tmp_path / "edge"
+    rolling.mkdir()
+    (rolling / "VERSION").write_text("1.3.0\n", encoding="utf-8")  # stale
+    monkeypatch.setattr(_engine, "engine_root", lambda: rolling)
+    assert _read_version_file() == "edge"
+
+
 # ---------------------------------------------------------------------------
 # _read_pin
 # ---------------------------------------------------------------------------

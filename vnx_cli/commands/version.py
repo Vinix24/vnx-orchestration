@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from vnx_cli._reexec import _ROLLING_DIR_RE
+
 
 def _read_version_file() -> str:
     # Read the version from the RESOLVED engine's VERSION file, not the pip
@@ -15,9 +17,17 @@ def _read_version_file() -> str:
     # =1.1.0 while the dist-info is still ...-1.0.0); the metadata then lies.
     # The engine's VERSION file is authoritative for the code that actually
     # loads. Fall back to package metadata only if VERSION is unreadable.
+    #
+    # OI-892: a ROLLING dir (edge/latest) is reported by its dir NAME instead.
+    # Its VERSION file is a git-tracked checkout of main that can lag the
+    # released versions, so it would claim a version the rolling code is not
+    # pinned to. The dir name is the honest identity.
     try:
         from vnx_cli import _engine
-        version_file = _engine.engine_root() / "VERSION"
+        engine_root = _engine.engine_root()
+        if _ROLLING_DIR_RE.match(engine_root.name):
+            return engine_root.name
+        version_file = engine_root / "VERSION"
         if version_file.is_file():
             v = version_file.read_text(encoding="utf-8").strip()
             if v:
