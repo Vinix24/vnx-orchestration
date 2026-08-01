@@ -639,6 +639,77 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
         return _unknown_verification()
 
 
+def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optional[str]:
+    """Archive the live event stream under ``dispatch_id`` (end-of-dispatch teardown).
+
+    The envelope path previously never archived the per-dispatch ring buffer at
+    END-of-dispatch (OI-878 / OI-902): ``run_envelope_plan`` wrote events via the
+    SubprocessAdapter's internal EventStore but only the NEXT dispatch's write-side
+    boundary guard (EventStore.append, #1276) rotated the previous stream, so the
+    LAST dispatch in a series leaked its events into the live file.
+
+    Returns the archive path (str) when archived, else None.  Guards against
+    mislabeling: when the live file holds a DIFFERENT dispatch's events (this
+    dispatch never wrote to the stream — e.g. a pre-spawn failure), the file is
+    left untouched for the boundary guard of the next dispatch; archiving it here
+    would mislabel the previous dispatch's events under our id.
+
+    Best-effort — a failure never breaks the dispatch (mirrors the
+    ``_emit_governance`` archive contract in provider_dispatch).
+    """
+    if not terminal or not dispatch_id:
+        return None
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        store = EventStore()
+        last = store.last_event(terminal)
+        last_dispatch = (last or {}).get("dispatch_id") or ""
+        if last_dispatch and last_dispatch != dispatch_id:
+            logger.debug(
+                "envelope: end-dispatch archive skipped terminal=%s — live file "
+                "holds %r, not %s (left for the next dispatch's boundary guard)",
+                terminal, last_dispatch, dispatch_id,
+            )
+            return None
+        archived = store.archive(terminal, dispatch_id)
+        if archived is not None:
+            logger.info("envelope: end-dispatch archived %s -> %s", terminal, archived)
+        return str(archived) if archived is not None else None
+    except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
+        logger.warning(
+            "envelope: end-dispatch event archive failed terminal=%s dispatch=%s (non-fatal): %s",
+            terminal, dispatch_id, exc,
+        )
+        return None
+
+
+def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
+    """Truncate the live event stream after the receipt is written (end-of-dispatch).
+
+    Runs in a finally after the receipt emit so the live ``T{n}.ndjson`` is
+    truncated even when the fail-closed receipt write raises EnvelopeGovernError.
+    Only clears when the live file still holds THIS dispatch's events (or is
+    empty) — never wipes a different dispatch's stream. Best-effort; never raises.
+    """
+    if not terminal or not dispatch_id:
+        return
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        store = EventStore()
+        last = store.last_event(terminal)
+        last_dispatch = (last or {}).get("dispatch_id") or ""
+        if last_dispatch and last_dispatch != dispatch_id:
+            return
+        store.clear(terminal)
+    except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
+        logger.warning(
+            "envelope: end-dispatch event clear failed terminal=%s dispatch=%s (non-fatal): %s",
+            terminal, dispatch_id, exc,
+        )
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -662,6 +733,15 @@ def _govern(
     from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: PLC0415
 
     duration = (end_time - start_time).total_seconds()
+
+    # OI-878/OI-902: end-of-dispatch event archive. Archive the live event stream
+    # under THIS dispatch's id BEFORE the receipt so the receipt can carry
+    # events_path (parity with provider_dispatch._emit_governance); the clear
+    # runs in the finally below AFTER the receipt write. Without this the
+    # envelope path never rotated the ring buffer at end-of-dispatch — only the
+    # NEXT dispatch's write-side boundary guard did, so the LAST dispatch in a
+    # series leaked its events into the live file.
+    events_path = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
     # OI-903: on failure/timeout, a killed worker's partial report is preserved
@@ -687,134 +767,142 @@ def _govern(
             exc,
         )
 
-    # RECEIPT second — fail-closed, with idempotent dedup
+    # RECEIPT second — fail-closed, with idempotent dedup. The end-of-dispatch
+    # event clear runs in finally so the live stream is truncated even when the
+    # fail-closed receipt emit raises EnvelopeGovernError.
     receipt_path: Optional[Path] = None
-    ndjson_path = spec.state_dir / "t0_receipts.ndjson"
-    if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
-        logger.info(
-            "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
-            spec.dispatch_id,
-        )
-        receipt_path = ndjson_path
-    else:
-        try:
-            # receipt-quality PR-1: resolve dispatch identity (role) from
-            # dispatch_metadata just before the emit. FAIL-OPEN — a resolver
-            # error must never break receipt emission.
+    try:
+        ndjson_path = spec.state_dir / "t0_receipts.ndjson"
+        if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
+            logger.info(
+                "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
+                spec.dispatch_id,
+            )
+            receipt_path = ndjson_path
+        else:
             try:
-                from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
-                _project_id = getattr(spec, "project_id", None)
-                if not _project_id:
-                    from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-                    _project_id = _resolve_project_id()
-                _role = resolve_dispatch_role(
-                    spec.dispatch_id, _project_id, state_dir=spec.state_dir,
-                )
-            except Exception:  # noqa: BLE001 — identity join is fail-open
-                logger.debug(
-                    "envelope._govern: role resolution failed open dispatch=%s",
-                    spec.dispatch_id,
-                    exc_info=True,
-                )
-                _role = None
-            _role = _role or "identity_unresolved"
-
-            # receipt-quality PR-B2 fix-forward (Finding C): aggregate
-            # PreToolUse-hook tool-call signals for this dispatch
-            # (toolcall_signals.py), mirroring provider_dispatch._emit_
-            # governance's wiring so the claude/subprocess-adapter lane also
-            # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
-            # FAIL-OPEN — an aggregation error or absent signal log must
-            # never break receipt emission; each field simply stays None
-            # (omitted by ReceiptV2).
-            _toolcall_signals: Dict[str, int] = {}
-            try:
-                _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-                if _signal_dir:
-                    from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-                    _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-            except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-                logger.debug(
-                    "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-                    spec.dispatch_id,
-                    exc_info=True,
-                )
-                _toolcall_signals = {}
-
-            # OI-866: classify failure so the receipt carries a distinguishable
-            # failure_reason + failure_class instead of a silent
-            # "(no error captured)" log line.
-            _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
-            if adapter_result.status != "success":
+                # receipt-quality PR-1: resolve dispatch identity (role) from
+                # dispatch_metadata just before the emit. FAIL-OPEN — a resolver
+                # error must never break receipt emission.
                 try:
-                    from failure_classification import classify_failure  # noqa: PLC0415
-                    _classification = classify_failure(
-                        status=adapter_result.status,
-                        error=adapter_result.error,
-                        completion_text=adapter_result.completion_text,
-                        timed_out=adapter_result.timed_out,
-                        provider=spec.provider,
-                        duration_seconds=duration,
-                        returncode=adapter_result.returncode,
+                    from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+                    _project_id = getattr(spec, "project_id", None)
+                    if not _project_id:
+                        from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+                        _project_id = _resolve_project_id()
+                    _role = resolve_dispatch_role(
+                        spec.dispatch_id, _project_id, state_dir=spec.state_dir,
                     )
-                except Exception:  # noqa: BLE001 — classification is best-effort
+                except Exception:  # noqa: BLE001 — identity join is fail-open
                     logger.debug(
-                        "envelope._govern: failure classification failed dispatch=%s (non-fatal)",
+                        "envelope._govern: role resolution failed open dispatch=%s",
                         spec.dispatch_id,
                         exc_info=True,
                     )
+                    _role = None
+                _role = _role or "identity_unresolved"
 
-            receipt_path = emit_dispatch_receipt(
-                dispatch_id=spec.dispatch_id,
-                terminal_id=spec.terminal_id,
-                provider=spec.provider,
-                model=spec.model,
-                pr_id=spec.pr_id,
-                status=adapter_result.status,
-                completion_pct=100 if adapter_result.status == "success" else 0,
-                risk=0.0,
-                findings=[],
-                duration_seconds=duration,
-                token_usage=adapter_result.token_usage,
-                cost_usd=None,
-                state_dir=spec.state_dir,
-                report_path=str(report_path) if report_path else None,
-                final_prompt_path=getattr(integrity, "final_prompt_path", None),
-                final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
-                injection_reconstructs=(
-                    getattr(integrity, "injection_reconstructs", None)
-                    if integrity is not None
-                    else None
-                ),
-                # ADR-035 §3.1.1: envelope sub-path — the report is already
-                # on disk (emit_unified_report ran above), so extract
-                # verification{} from it via the shared regex extractor.
-                verification=_verification_from_report(report_path),
-                role=_role,
-                receipt_kind="dispatch",
-                session_id=adapter_result.session_id,
-                tool_call_count=_toolcall_signals.get("tool_call_count"),
-                tool_call_failures=_toolcall_signals.get("tool_call_failures"),
-                tool_call_retries=_toolcall_signals.get("tool_call_retries"),
-                deadline_seconds=spec.deadline_seconds,
-                failure_reason=_classification.get("failure_reason"),
-                failure_class=_classification.get("failure_class"),
-            )
-        except Exception as exc:
-            raise EnvelopeGovernError(
-                f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
-            ) from exc
+                # receipt-quality PR-B2 fix-forward (Finding C): aggregate
+                # PreToolUse-hook tool-call signals for this dispatch
+                # (toolcall_signals.py), mirroring provider_dispatch._emit_
+                # governance's wiring so the claude/subprocess-adapter lane also
+                # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
+                # FAIL-OPEN — an aggregation error or absent signal log must
+                # never break receipt emission; each field simply stays None
+                # (omitted by ReceiptV2).
+                _toolcall_signals: Dict[str, int] = {}
+                try:
+                    _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+                    if _signal_dir:
+                        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+                        _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
+                except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
+                    logger.debug(
+                        "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
+                        spec.dispatch_id,
+                        exc_info=True,
+                    )
+                    _toolcall_signals = {}
 
-        if receipt_path is None:
-            raise EnvelopeGovernError(
-                f"envelope._govern: receipt_path is None after emit "
-                f"(fail-closed) dispatch={spec.dispatch_id}"
-            )
-        if not receipt_path.exists():
-            raise EnvelopeGovernError(
-                f"envelope._govern: receipt file absent on disk after emit "
-                f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
-            )
+                # OI-866: classify failure so the receipt carries a distinguishable
+                # failure_reason + failure_class instead of a silent
+                # "(no error captured)" log line.
+                _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
+                if adapter_result.status != "success":
+                    try:
+                        from failure_classification import classify_failure  # noqa: PLC0415
+                        _classification = classify_failure(
+                            status=adapter_result.status,
+                            error=adapter_result.error,
+                            completion_text=adapter_result.completion_text,
+                            timed_out=adapter_result.timed_out,
+                            provider=spec.provider,
+                            duration_seconds=duration,
+                            returncode=adapter_result.returncode,
+                        )
+                    except Exception:  # noqa: BLE001 — classification is best-effort
+                        logger.debug(
+                            "envelope._govern: failure classification failed dispatch=%s (non-fatal)",
+                            spec.dispatch_id,
+                            exc_info=True,
+                        )
+
+                receipt_path = emit_dispatch_receipt(
+                    dispatch_id=spec.dispatch_id,
+                    terminal_id=spec.terminal_id,
+                    provider=spec.provider,
+                    model=spec.model,
+                    pr_id=spec.pr_id,
+                    status=adapter_result.status,
+                    completion_pct=100 if adapter_result.status == "success" else 0,
+                    risk=0.0,
+                    findings=[],
+                    duration_seconds=duration,
+                    token_usage=adapter_result.token_usage,
+                    cost_usd=None,
+                    state_dir=spec.state_dir,
+                    report_path=str(report_path) if report_path else None,
+                    events_path=events_path,
+                    final_prompt_path=getattr(integrity, "final_prompt_path", None),
+                    final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
+                    injection_reconstructs=(
+                        getattr(integrity, "injection_reconstructs", None)
+                        if integrity is not None
+                        else None
+                    ),
+                    # ADR-035 §3.1.1: envelope sub-path — the report is already
+                    # on disk (emit_unified_report ran above), so extract
+                    # verification{} from it via the shared regex extractor.
+                    verification=_verification_from_report(report_path),
+                    role=_role,
+                    receipt_kind="dispatch",
+                    session_id=adapter_result.session_id,
+                    tool_call_count=_toolcall_signals.get("tool_call_count"),
+                    tool_call_failures=_toolcall_signals.get("tool_call_failures"),
+                    tool_call_retries=_toolcall_signals.get("tool_call_retries"),
+                    deadline_seconds=spec.deadline_seconds,
+                    failure_reason=_classification.get("failure_reason"),
+                    failure_class=_classification.get("failure_class"),
+                )
+            except Exception as exc:
+                raise EnvelopeGovernError(
+                    f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
+                ) from exc
+
+            if receipt_path is None:
+                raise EnvelopeGovernError(
+                    f"envelope._govern: receipt_path is None after emit "
+                    f"(fail-closed) dispatch={spec.dispatch_id}"
+                )
+            if not receipt_path.exists():
+                raise EnvelopeGovernError(
+                    f"envelope._govern: receipt file absent on disk after emit "
+                    f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
+                )
+    finally:
+        # OI-878/OI-902: truncate the live event stream now that the archive
+        # (top of _govern) and the receipt write are complete. Best-effort.
+        _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
 
     if adapter_result.status != "success":
         # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
