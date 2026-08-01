@@ -102,7 +102,18 @@ def normalize_litellm_event(
 
     error_type = chunk.get("error_type")
     if error_type:
-        return make("error", {"error_type": error_type, "message": chunk.get("message", "")})
+        # OI-866: carry the HTTP status through to the canonical event so the
+        # spawn-result error string (and the receipt failure_reason it feeds)
+        # can name the status code instead of dropping it. The runner emits
+        # status_code for proxy/provider HTTP errors; normalizing it here is the
+        # only place the field survives the drainer.
+        data: Dict[str, Any] = {"error_type": error_type, "message": chunk.get("message", "")}
+        status_code = chunk.get("status_code")
+        if isinstance(status_code, str) and status_code.isdigit():
+            status_code = int(status_code)
+        if isinstance(status_code, int) and 100 <= status_code <= 599:
+            data["status_code"] = status_code
+        return make("error", data)
 
     if chunk.get("event_type") == "usage_complete":
         return make("usage_complete", {"usage": chunk.get("usage") or {}})
@@ -380,11 +391,22 @@ def _finalize_litellm_result(
         etype = first_error_event.get("error_type", "")
         message = first_error_event.get("message", "")
         status_code = first_error_event.get("status_code")
-        parts = [f"litellm/{etype}"]
+        reason = first_error_event.get("reason", "")
+        parts = []
+        if etype:
+            parts.append(f"litellm/{etype}")
         if status_code is not None:
             parts.append(f"HTTP {status_code}")
         if message:
             parts.append(message)
+        # OI-866: the drainer's synthetic error event (subprocess exited
+        # non-zero with no structured error) carries only a "reason" — without
+        # this fallback the derived error collapsed to the bare "litellm/" and
+        # the receipt classified it as unknown with no diagnostic content.
+        if not parts and reason:
+            parts.append(reason)
+        if not parts:
+            parts.append(f"runner exited with code {rc} and no error detail")
         derived_error = ": ".join(parts)
 
     return LiteLLMSpawnResult(

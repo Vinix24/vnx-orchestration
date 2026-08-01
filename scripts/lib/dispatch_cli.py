@@ -238,9 +238,12 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
 
     Checks performed:
     - litellm-proxy lanes: HTTP GET http://127.0.0.1:4141/v1/models with
-      short timeout.  401/403 → hard warning (auth broken).  Connection
+      short timeout.  Carries Authorization: Bearer $LITELLM_API_KEY when that
+      env is set (OI-893) so an auth-gated proxy is probed the way the lane
+      actually talks to it.  401/403 → hard warning (auth broken).  Connection
       refused/timeout → soft warning (proxy may be down).
-    - deepseek-harness: HTTP GET to api.deepseek.com baseline check.
+    - deepseek-harness: HTTP GET to api.deepseek.com/v1/models with
+      Authorization: Bearer $DEEPSEEK_API_KEY (OI-893).
     - Other lanes: skipped (no cheap endpoint check available; claude-tmux
       has no network endpoint, codex/kimi have ephemeral auth).
     """
@@ -260,8 +263,17 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
             "http://127.0.0.1:4141",
         )
         models_url = f"{proxy_url.rstrip('/')}/v1/models"
+        # OI-893: the probe must carry the proxy's Authorization header — an
+        # unauthenticated GET to an auth-gated /v1/models returns HTTP 401 by
+        # construction, so the OK branch would be unreachable whenever the proxy
+        # enforces a key. Add the header when LITELLM_API_KEY is present; when it
+        # is absent, the 401 the proxy returns is genuine and is reported as
+        # AUTH REJECTED with a "key not set" hint, never as an OK.
+        litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
         try:
             req = urllib.request.Request(models_url)
+            if litellm_key:
+                req.add_header("Authorization", f"Bearer {litellm_key}")
             resp = urllib.request.urlopen(req, timeout=5)
             body = resp.read().decode("utf-8", errors="replace")
             # A 200 with an empty model list is suspicious but not a hard
@@ -297,11 +309,20 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
             except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
                 pass
             if status in (401, 403):
+                if not litellm_key:
+                    auth_hint = (
+                        "LITELLM_API_KEY is not set — ANY dispatch on this "
+                        "lane will fail silently."
+                    )
+                else:
+                    auth_hint = (
+                        "The proxy API key (LITELLM_API_KEY) is missing or "
+                        "invalid — ANY dispatch on this lane will fail silently."
+                    )
                 print(
                     f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
                     f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
-                    f"The proxy API key is missing or invalid — ANY dispatch on this "
-                    f"lane will fail silently.",
+                    f"{auth_hint}",
                     file=sys.stderr,
                 )
             else:
@@ -324,8 +345,16 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
         "deepseek-harness", "deepseek_harness",
     ):
         ds_url = "https://api.deepseek.com/v1/models"
+        # OI-893: the probe must carry the API key. An unauthenticated GET to
+        # api.deepseek.com/v1/models returns HTTP 401 by construction, so the
+        # OK branch was unreachable. With DEEPSEEK_API_KEY set the probe now
+        # exercises the same auth the lane uses; when it is absent the 401 is
+        # genuine and is reported as AUTH REJECTED with a "key not set" hint.
+        ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         try:
             req = urllib.request.Request(ds_url)
+            if ds_key:
+                req.add_header("Authorization", f"Bearer {ds_key}")
             urllib.request.urlopen(req, timeout=5)
             print(
                 f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
@@ -333,10 +362,15 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
             )
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
+                if not ds_key:
+                    auth_hint = "DEEPSEEK_API_KEY is not set."
+                elif exc.code == 403:
+                    auth_hint = "the API key is missing permissions."
+                else:
+                    auth_hint = "the API key is missing, invalid, or expired."
                 print(
                     f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
-                    f"(HTTP {exc.code}) at {ds_url}. The API key may be missing "
-                    f"or expired.",
+                    f"(HTTP {exc.code}) at {ds_url}. {auth_hint}",
                     file=sys.stderr,
                 )
             else:
