@@ -53,8 +53,14 @@
 # kernel atomically releases the lock the instant a dead holder's last fd
 # closes, so the very next non-blocking flock attempt simply succeeds.
 
-# Drain the hook's stdin JSON so the caller never blocks.
-cat >/dev/null 2>&1 || true
+# Capture the hook payload (best-effort) so this session's id is known — the
+# detached reconcile worker below is bound to the session's lifetime, and the
+# SessionEnd hook (session_reconcile_cleanup.sh) uses that id to kill it when
+# the session ends (OI-873/OI-877 second defense line: a reconcile must never
+# outlive its session holding the coordination DB write lock).  `cat` returns
+# at EOF, so capturing never blocks the caller.  Parsing happens inside the
+# subshell with the resolved interpreter (jq is not guaranteed on this fleet).
+STDIN_JSON="$(cat 2>/dev/null)" || STDIN_JSON=""
 
 # ── Guard: skip tmux-spawn workers; only the interactive session ticks ───────
 if [ -n "${VNX_DISPATCH_ID:-}" ]; then
@@ -128,6 +134,48 @@ mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
         TIMEOUT_BIN="timeout"
     elif command -v gtimeout >/dev/null 2>&1; then
         TIMEOUT_BIN="gtimeout"
+    fi
+
+    # ── Session lifetime binding (OI-873/OI-877, second defense line) ────────
+    # Record this worker's own pid in a per-session marker so the SessionEnd
+    # hook can kill EXACTLY this worker's process tree when the session that
+    # fired it ends.  The kill releases this worker's flock (FD 200) with it,
+    # so a reconcile can never outlive its session and block fleet-wide DB
+    # writes.  The 900s deadline and the flock below stay — this is a third
+    # bound, not a replacement.
+    #
+    # Marker location: VNX_STATE_DIR via vnx_paths (ADR-026 SSOT — the central
+    # store, never a repo-local .vnx-data/state).  The harness exports
+    # VNX_STATE_DIR in every real session; fall back to the canonical resolver
+    # when it is absent.  No resolver and no env → no marker (fail-safe): the
+    # deadline + flock singleton still bound us, and SessionEnd has nothing to
+    # clean up.
+    SESSION_ID=""
+    if [ -n "$STDIN_JSON" ]; then
+        SESSION_ID="$(printf '%s' "$STDIN_JSON" | "$PY" -c 'import sys,json
+try:
+    d = json.load(sys.stdin)
+    print(d.get("session_id") or "")
+except Exception:
+    print("")' 2>/dev/null)"
+    fi
+    STATE_DIR="${VNX_STATE_DIR:-}"
+    if [ -z "$STATE_DIR" ] && [ -f "$ROOT/scripts/lib/vnx_paths.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$ROOT/scripts/lib/vnx_paths.sh"
+        STATE_DIR="${VNX_STATE_DIR:-}"
+    fi
+    MARKER=""
+    if [ -n "$SESSION_ID" ] && [ -n "$STATE_DIR" ]; then
+        SAFE_SID="$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9_-' '-')"
+        SESSION_RECONCILE_DIR="$STATE_DIR/session_reconcile"
+        mkdir -p "$SESSION_RECONCILE_DIR" 2>/dev/null || true
+        MARKER="$SESSION_RECONCILE_DIR/$SAFE_SID.pid"
+        printf '%s\n' "$SELF_PID" >"$MARKER" 2>/dev/null || true
+        # Remove the marker on ANY exit path of this worker — normal
+        # completion, the 900s deadline, or a lock-busy early exit — so the
+        # SessionEnd hook finds nothing to kill for a finished run.
+        trap 'rm -f "$MARKER"' EXIT
     fi
 
     STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

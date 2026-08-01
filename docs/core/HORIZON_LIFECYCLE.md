@@ -120,6 +120,15 @@ Two ticks run `reconcile --apply` so merged tracks close on their own:
   interactive operator session (it has keychain `gh` auth that a headless launchd
   context lacks). **Auto-close is ON by default** (`VNX_AUTO_CLOSE` defaults to `1`;
   opt out with `VNX_AUTO_CLOSE=0` → advisory CHECK).
+
+The SessionStart worker is **bound to the session's lifetime** (OI-873/OI-877):
+it records its pid in a per-session marker under `$VNX_STATE_DIR/session_reconcile/`
+(resolved via `vnx_paths` — the central store is the SSOT, never a repo-local
+`.vnx-data/state`), and the **SessionEnd hook**
+(`scripts/hooks/session_reconcile_cleanup.sh`) kills the worker's process tree when
+the session ends. A reconcile can therefore never outlive its session and hold the
+coordination DB write lock fleet-wide. The 900s runtime bound and the flock
+singleton stay as further backstops, not replacements.
 - **Supervisor tick** (`dispatcher_supervisor_ticks.sh`, `VNX_SUPERVISOR_MODE=unified`)
   — same policy, throttled by `VNX_OBJECTIVE_RECONCILE_INTERVAL`.
 
