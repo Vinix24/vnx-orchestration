@@ -40,7 +40,7 @@ _maybe_runtime_supervise() {
     local log_file="$VNX_LOGS_DIR/runtime_supervise.log"
     mkdir -p "$(dirname "$log_file")"
     python3 "$VNX_DIR/scripts/lib/runtime_supervise.py" >> "$log_file" 2>&1 || true
-    echo "$now" > "$state_file"
+    printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }
 
 # _maybe_auto_seed_tracks — flag-gated planning auto-seed tick.
@@ -110,7 +110,11 @@ _maybe_oi_bridge_tick() {
         printf '%s' "0" > "$fresh_file.tmp.$$" && mv -f "$fresh_file.tmp.$$" "$fresh_file"
         log "V-OI-BRIDGE WARN: OI bridge tick failed (exit $rc); see $log_file — reconcile-apply is gated this cycle until the next successful bridge run"
     fi
-    echo "$now" > "$state_file"
+    # OI-798: atomic tmp+rename for the timestamp marker too — same pattern as
+    # the freshness write above. A truncating echo> leaves a torn marker if the
+    # supervisor dies mid-write, which would delay the next bridge tick by a
+    # full interval (the throttle reads this file on every tick).
+    printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }
 
 # _maybe_objective_reconcile — throttled git-grounded reconcile tick (D4).
@@ -165,7 +169,7 @@ _maybe_objective_reconcile() {
         fi
     fi
     "${cmd[@]}" >> "$log_file" 2>&1 || true
-    echo "$now" > "$state_file"
+    printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }
 
 # _maybe_learning_cycle — throttled daily learning cycle tick (D3).
@@ -191,7 +195,7 @@ _maybe_learning_cycle() {
     local log_file="$VNX_LOGS_DIR/learning_cycle.log"
     mkdir -p "$(dirname "$log_file")"
     python3 "$VNX_DIR/scripts/learning_loop.py" run >> "$log_file" 2>&1 || true
-    echo "$now" > "$state_file"
+    printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }
 
 # _unified_supervisor_lease_sweep_tick — throttled lease_sweep tick (SUP-PR2).
@@ -214,6 +218,6 @@ _unified_supervisor_lease_sweep_tick() {
         mkdir -p "$VNX_LOGS_DIR" "$(dirname "$state_file")"
         python3 "$SCRIPT_DIR/lib/lease_sweep.py" \
             >> "$VNX_LOGS_DIR/lease_sweep.log" 2>&1 || true
-        echo "$now" > "$state_file"
+        printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
     fi
 }

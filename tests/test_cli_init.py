@@ -135,6 +135,29 @@ class TestVnxInitCli:
         assert rc == 0
         assert version_file.read_text().strip() == "v1.3.0"
 
+    def test_init_force_preserves_customized_settings(self, tmp_path):
+        # OI-695: settings.json is project-owned (custom env, permissions,
+        # hooks). `vnx init --force` must NOT clobber it with the scaffold
+        # template — same contract as the .vnx-version pin. Operators refresh
+        # the VNX-owned keys via `vnx regen-settings --merge`.
+        import json
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc == 0
+        settings_path = tmp_path / ".claude" / "settings.json"
+        custom = json.loads(settings_path.read_text(encoding="utf-8"))
+        custom.setdefault("env", {})["PYTHONPATH"] = "/custom/venv"
+        custom["permissions"]["allow"] = custom["permissions"]["allow"] + ["Bash(custom-tool)"]
+        custom["myCustomKey"] = "keep-me"
+        settings_path.write_text(json.dumps(custom, indent=2), encoding="utf-8")
+
+        rc = vnx_init(_args(tmp_path, force=True))
+        assert rc == 0
+        after = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert after.get("myCustomKey") == "keep-me", "project-owned key clobbered by --force"
+        assert after.get("env", {}).get("PYTHONPATH") == "/custom/venv"
+        assert "Bash(custom-tool)" in after["permissions"]["allow"]
+
     def test_init_force_without_set_version_never_writes_running_version(self, tmp_path):
         vnx_init(_args(tmp_path))
         version_file = tmp_path / ".vnx-version"

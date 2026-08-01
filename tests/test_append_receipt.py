@@ -136,6 +136,30 @@ def test_append_receipt_session_id_explicit_top_level_survives_enrichment(tmp_pa
     assert stored["session_id"] == "explicit-caller-session"
 
 
+def test_append_receipt_session_id_blank_replaced_by_resolved(tmp_path: Path):
+    """OI-796: a receipt that carries a BLANK top-level session_id must have
+    it REPLACED by the resolved session metadata, not preserved by
+    `setdefault`. `_enrich_session_metadata` used setdefault, so a null/blank
+    value survived enrichment unchanged. A blank must fall through to the
+    resolver (here: the CLAUDE_SESSION_ID env var)."""
+    receipt = _build_receipt(index=25)
+    receipt["session_id"] = ""
+
+    result = _run_append(
+        tmp_path,
+        json.dumps(receipt),
+        extra_env={"CLAUDE_SESSION_ID": "env-session-resolved-abc"},
+    )
+    assert result.returncode == 0
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert stored["session_id"] == "env-session-resolved-abc", (
+        f"blank session_id must be replaced by the resolved value, "
+        f"got {stored['session_id']!r}"
+    )
+
+
 def test_append_receipt_session_id_falls_back_to_gemini_current_file(tmp_path: Path, monkeypatch):
     receipt = _build_receipt(index=22)
 
