@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vnx_cli import _engine
 from vnx_cli.commands.doctor import (
     FAIL, PASS, WARN,
     _check_active_drain,
@@ -71,8 +72,10 @@ def _make_coordination_db(state_dir: Path, active_count: int = 0, schema_version
 # ---------------------------------------------------------------------------
 
 class TestEmbeddedMode:
-    def test_embedded_mode_detected(self, tmp_path):
+    def test_embedded_mode_detected(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
+        # Hermetic home: the operator's real ~/.vnx-system must not leak in.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
         embedded = project / ".claude" / "vnx-system" / "scripts"
         embedded.mkdir(parents=True)
 
@@ -82,8 +85,14 @@ class TestEmbeddedMode:
         assert "mode: embedded" in result.detail
         assert "vnx-system" in result.detail
 
-    def test_no_install_warns(self, tmp_path):
+    def test_no_install_warns(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+        # No central/embedded install AND no visible source/packaged engine
+        # tree: the dev-checkout repo root must not leak in as a source install.
+        empty_root = tmp_path / "empty-engine"
+        empty_root.mkdir()
+        monkeypatch.setattr(_engine, "engine_root", lambda: empty_root)
 
         result = _check_install_mode(project)
 
@@ -92,18 +101,20 @@ class TestEmbeddedMode:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: central-mode install detected with pin
+# Test 2: central-mode install detected with pin vs active
 # ---------------------------------------------------------------------------
 
 class TestCentralMode:
     def test_central_mode_detected(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
-        central = tmp_path / "home" / ".vnx-system" / "current"
-        central_scripts = central / "scripts"
-        central_scripts.mkdir(parents=True)
-        version_file = central / "VERSION"
-        version_file.write_text("1.0.0-rc2\n")
-        (central / ".vnx-install-mode").write_text("central\n")
+        # Project pin: the value `cat .vnx-version` shows.
+        (project / ".vnx-version").write_text("v1.0.0-rc2\n")
+        version_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.0.0-rc2"
+        (version_dir / "scripts").mkdir(parents=True)
+        (version_dir / "VERSION").write_text("1.0.0-rc2\n")
+        (version_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(version_dir)
 
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
@@ -111,8 +122,8 @@ class TestCentralMode:
 
         assert result.status == PASS
         assert "mode: central" in result.detail
-        assert "pin:" in result.detail
-        assert "1.0.0-rc2" in result.detail
+        assert "pin: v1.0.0-rc2" in result.detail
+        assert "active: v1.0.0-rc2" in result.detail
 
     def test_central_mode_pin_unset_when_no_version_file(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
@@ -126,41 +137,65 @@ class TestCentralMode:
 
         assert result.status == PASS
         assert "pin: unset" in result.detail
+        assert "active: current" in result.detail
 
     def test_central_mode_pin_error_on_read_failure(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
+        pin_file = project / ".vnx-version"
+        pin_file.write_text("1.0.0-rc2\n")
+        pin_file.chmod(0o000)
         central = tmp_path / "home" / ".vnx-system" / "current"
         (central / "scripts").mkdir(parents=True)
-        version_file = central / "VERSION"
-        version_file.write_text("1.0.0-rc2\n")
-        version_file.chmod(0o000)
+        (central / ".vnx-install-mode").write_text("central\n")
 
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
         try:
             result = _check_install_mode(project)
         finally:
-            version_file.chmod(0o644)
+            pin_file.chmod(0o644)
 
         assert result.status == WARN
         assert "pin: error" in result.detail
 
     def test_central_mode_error_pin_causes_strict_exit_1(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
+        pin_file = project / ".vnx-version"
+        pin_file.write_text("1.0.0-rc2\n")
+        pin_file.chmod(0o000)
         central = tmp_path / "home" / ".vnx-system" / "current"
         (central / "scripts").mkdir(parents=True)
-        version_file = central / "VERSION"
-        version_file.write_text("1.0.0-rc2\n")
-        version_file.chmod(0o000)
+        (central / ".vnx-install-mode").write_text("central\n")
 
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
         try:
             exit_code = vnx_doctor(_make_args(str(project), strict=True))
         finally:
-            version_file.chmod(0o644)
+            pin_file.chmod(0o644)
 
         assert exit_code == 1
+
+    def test_central_mode_pin_and_active_agree_with_pin_file(self, tmp_path, monkeypatch):
+        """OI-914: doctor's pin line and `cat .vnx-version` must agree. A
+        project pinning v1.4.0 while v1.4.1 is active is reported as BOTH —
+        the drift is visible, not silently reported as a single value that
+        matches neither."""
+        project = _make_project(tmp_path)
+        (project / ".vnx-version").write_text("v1.4.0\n")
+        active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.4.1"
+        (active_dir / "scripts").mkdir(parents=True)
+        (active_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(active_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(project)
+
+        assert result.status == PASS
+        assert "pin: v1.4.0" in result.detail
+        assert "active: v1.4.1" in result.detail
 
     def test_central_mode_missing_marker_warns(self, tmp_path, monkeypatch):
         """The active `current` resolves to a version dir with no
@@ -180,7 +215,8 @@ class TestCentralMode:
 
         assert result.status == WARN
         assert "mode: central" in result.detail
-        assert "pin: edge" in result.detail
+        assert "pin: unset" in result.detail
+        assert "active: edge" in result.detail
         assert "install-mode marker missing" in result.detail
 
     def test_central_mode_invalid_marker_content_warns(self, tmp_path, monkeypatch):
@@ -253,7 +289,7 @@ class TestSchemaVersions:
         project = _make_project(tmp_path)
         _make_coordination_db(project / ".vnx-data" / "state", schema_version=10)
 
-        results = _check_schema_versions(project)
+        results = _check_schema_versions(project / ".vnx-data")
 
         coord_check = next(r for r in results if "runtime_coordination" in r.name)
         assert coord_check.status == PASS
@@ -263,7 +299,7 @@ class TestSchemaVersions:
         project = _make_project(tmp_path)
         _make_coordination_db(project / ".vnx-data" / "state", schema_version=5)
 
-        results = _check_schema_versions(project)
+        results = _check_schema_versions(project / ".vnx-data")
 
         coord_check = next(r for r in results if "runtime_coordination" in r.name)
         assert coord_check.status == WARN
@@ -281,7 +317,7 @@ class TestSchemaVersions:
     def test_missing_db_warns_not_fails(self, tmp_path):
         project = _make_project(tmp_path)
 
-        results = _check_schema_versions(project)
+        results = _check_schema_versions(project / ".vnx-data")
 
         for r in results:
             assert r.status != FAIL
@@ -303,7 +339,7 @@ class TestSchemaVersions:
         conn.commit()
         conn.close()
 
-        results = _check_schema_versions(project)
+        results = _check_schema_versions(project / ".vnx-data")
 
         coord_check = next(r for r in results if "runtime_coordination" in r.name)
         assert coord_check.status == PASS
@@ -326,7 +362,7 @@ class TestSchemaVersions:
         conn.commit()
         conn.close()
 
-        results = _check_schema_versions(project)
+        results = _check_schema_versions(project / ".vnx-data")
 
         coord_check = next(r for r in results if "runtime_coordination" in r.name)
         assert coord_check.status == PASS
@@ -396,7 +432,7 @@ class TestSkillCoverage:
     def test_no_dispatches_passes(self, tmp_path):
         project = _make_project(tmp_path)
 
-        result = _check_skill_coverage(project)
+        result = _check_skill_coverage(project, project / ".vnx-data")
 
         assert result.status == PASS
 
@@ -405,7 +441,7 @@ class TestSkillCoverage:
         dispatch = project / ".vnx-data" / "dispatches" / "pending" / "test.md"
         dispatch.write_text("Role: backend-developer\n\nDo some work.\n")
 
-        result = _check_skill_coverage(project)
+        result = _check_skill_coverage(project, project / ".vnx-data")
 
         assert result.status == PASS
 
@@ -414,7 +450,7 @@ class TestSkillCoverage:
         dispatch = project / ".vnx-data" / "dispatches" / "pending" / "test.md"
         dispatch.write_text("Role: my-custom-nonexistent-skill\n\nDo some work.\n")
 
-        result = _check_skill_coverage(project)
+        result = _check_skill_coverage(project, project / ".vnx-data")
 
         assert result.status == WARN
         assert "my-custom-nonexistent-skill" in result.detail
@@ -427,7 +463,7 @@ class TestSkillCoverage:
         dispatch = project / ".vnx-data" / "dispatches" / "pending" / "test.md"
         dispatch.write_text("Role: my-custom-skill\n\nDo some work.\n")
 
-        result = _check_skill_coverage(project)
+        result = _check_skill_coverage(project, project / ".vnx-data")
 
         assert result.status == PASS
 
@@ -438,7 +474,7 @@ class TestSkillCoverage:
         dispatch.chmod(0o000)
 
         try:
-            result = _check_skill_coverage(project, strict=False)
+            result = _check_skill_coverage(project, project / ".vnx-data", strict=False)
         finally:
             dispatch.chmod(0o644)
 
@@ -452,7 +488,7 @@ class TestSkillCoverage:
         dispatch.chmod(0o000)
 
         try:
-            result = _check_skill_coverage(project, strict=True)
+            result = _check_skill_coverage(project, project / ".vnx-data", strict=True)
         finally:
             dispatch.chmod(0o644)
 
@@ -469,7 +505,7 @@ class TestActiveDrain:
         project = _make_project(tmp_path)
         _make_coordination_db(project / ".vnx-data" / "state", active_count=0)
 
-        result = _check_active_drain(project)
+        result = _check_active_drain(project / ".vnx-data")
 
         assert result.status == PASS
         assert "no active" in result.detail
@@ -478,7 +514,7 @@ class TestActiveDrain:
         project = _make_project(tmp_path)
         _make_coordination_db(project / ".vnx-data" / "state", active_count=3)
 
-        result = _check_active_drain(project)
+        result = _check_active_drain(project / ".vnx-data")
 
         assert result.status == WARN
         assert "3" in result.detail
@@ -487,7 +523,7 @@ class TestActiveDrain:
     def test_missing_db_passes(self, tmp_path):
         project = _make_project(tmp_path)
 
-        result = _check_active_drain(project)
+        result = _check_active_drain(project / ".vnx-data")
 
         assert result.status == PASS
 
