@@ -456,12 +456,50 @@ def test_resolve_data_dir_explicit_flag_honors_vnx_data_dir(tmp_path, monkeypatc
     assert result == (tmp_path / "override").resolve()
 
 
-def test_resolve_data_dir_default_project_id(monkeypatch):
-    """_resolve_data_dir defaults to project_id='vnx-dev' when VNX_PROJECT_ID unset."""
+def test_resolve_data_dir_marker_aware_no_vnx_project_id(tmp_path, monkeypatch):
+    """_resolve_data_dir must resolve the ACTIVE project from the .vnx-project-id
+    marker, never hardcode vnx-dev when VNX_PROJECT_ID is unset.
+
+    Regression for OI-900: the plan-gate panel runs provider_dispatch in a
+    subprocess that inherits no VNX_PROJECT_ID. With a mission-control marker in
+    the invocation CWD the old resolver returned ~/.vnx-data/vnx-dev — the
+    cross-project split that polluted the vnx-dev store with 21 mission-control
+    plan-gate receipts — while the event stream (event_store, marker-aware)
+    correctly landed in ~/.vnx-data/mission-control.
+    """
+    project = tmp_path / "mission-control"
+    project.mkdir()
+    (project / ".vnx-project-id").write_text("mission-control\n")
+
+    monkeypatch.chdir(project)
     monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
     monkeypatch.delenv("VNX_DATA_DIR", raising=False)
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
     result = provider_dispatch._resolve_data_dir()
 
-    assert result == Path.home() / ".vnx-data" / "vnx-dev"
+    expected = Path.home() / ".vnx-data" / "mission-control"
+    assert result == expected, (
+        f"Expected central store {expected}, got {result}. "
+        "OI-900: provider_dispatch must route reports/receipts to the ACTIVE "
+        "project's store, not the vnx-dev default."
+    )
+
+
+def test_resolve_data_dir_no_project_context_fails_closed(tmp_path, monkeypatch):
+    """With no VNX_PROJECT_ID and no resolvable project context, _resolve_data_dir
+    must raise instead of silently defaulting to vnx-dev (ADR-007 fail-closed).
+
+    The old hardcoded default could not distinguish 'the vnx-dev project' from
+    'no project context at all', so a stray headless run in a bare directory
+    contaminated the vnx-dev store (OI-900)."""
+    bare = tmp_path / "bare"
+    bare.mkdir()
+
+    monkeypatch.chdir(bare)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="Cannot resolve project_id"):
+        provider_dispatch._resolve_data_dir()

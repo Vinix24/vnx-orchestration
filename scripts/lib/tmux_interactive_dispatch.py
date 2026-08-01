@@ -2716,9 +2716,31 @@ class TmuxInteractiveDispatch:
 # CLI — single-shot dispatch entry point
 # ---------------------------------------------------------------------------
 def _resolve_state_dir() -> Path:
-    """Delegate to canonical project_root resolver; ensures lane and append_receipt share the same state dir."""
-    from project_root import resolve_state_dir
-    return resolve_state_dir(caller_file=__file__)
+    """Resolve the lane's runtime state dir, honoring the explicit override and
+    otherwise anchoring on the INVOCATION project root — never the lane code's
+    on-disk location.
+
+    In central-install mode the lane code lives under
+    ``~/.vnx-system/versions/<v>/scripts/lib/``. Deriving the state root from
+    ``__file__`` collapsed every plan-gate receipt/report into the version-dir's
+    local ``.vnx-data`` (OI-900) — a tree ``vnx update`` later pruned (OI-912),
+    destroying the audit trail.
+
+    Resolution order:
+      1. ``VNX_DATA_DIR_EXPLICIT=1`` + ``VNX_DATA_DIR`` — explicit override
+         (test isolation / CI / worktree isolation), same two-key contract as
+         ``project_root.resolve_state_dir``.
+      2. The invocation project root (VNX_PROJECT_ROOT shim > CWD git > lane
+         repo — the same chain as ``_resolve_invocation_project_root``) is the
+         operator's project, so its ``.vnx-data/state`` is the correct runtime
+         root and matches what ``append_receipt`` resolves from that context.
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    explicit_val = os.environ.get("VNX_DATA_DIR", "")
+    if explicit_flag and explicit_val:
+        return Path(explicit_val).expanduser().resolve() / "state"
+    from vnx_paths import resolve_state_dir as resolve_vnx_state_dir
+    return resolve_vnx_state_dir(_resolve_invocation_project_root())
 
 
 def _resolve_invocation_project_root() -> Path:
