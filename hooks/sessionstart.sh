@@ -121,7 +121,8 @@ case "$TERMINAL" in
     fi
 
     ADDITIONAL_CONTEXT="T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
-Core skills: @t0-orchestrator @horizon @planner @architect @panel @fabric-reference
+Model-invocable skills: @horizon @planner @panel @fabric-reference
+Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
 Use /t0-orchestrator for orchestration decisions and receipt processing
 

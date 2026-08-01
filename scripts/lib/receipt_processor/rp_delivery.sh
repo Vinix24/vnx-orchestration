@@ -117,6 +117,8 @@ _deliver_receipt_to_t0_pane() {
 
     local report_path="${_rf_report_path:-no-report}"
     local next_action
+    # _rf_status is module-scope, set by extract_receipt_fields() (rp_extract.sh).
+    # shellcheck disable=SC2154
     next_action=$(_drtp_get_next_action "$_rf_status")
     local footer_status="$_rf_status"
     [ "$footer_status" = "success" ] && footer_status="done"
@@ -250,7 +252,9 @@ send_receipt_to_t0() {
     mkdir -p "$RECEIPTS_PENDING_DIR" "$RECEIPTS_PROCESSED_DIR"
 
     # Write-first: persist before any delivery attempt (guarantees no data loss)
-    local pending_file="$RECEIPTS_PENDING_DIR/$(date +%s)-${terminal}-$RANDOM.json"
+    # SC2155: declare and assign separately so the $(date) exit status isn't masked.
+    local pending_file
+    pending_file="$RECEIPTS_PENDING_DIR/$(date +%s)-${terminal}-$RANDOM.json"
     printf '%s\n' "$receipt_json" > "$pending_file"
 
     if _deliver_receipt_to_t0_pane "$receipt_json" "$terminal"; then

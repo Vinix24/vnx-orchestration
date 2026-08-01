@@ -292,7 +292,10 @@ def check_templates(paths: Dict[str, str]) -> List[CheckResult]:
             results.append(CheckResult("template", FAIL, f"Missing template: {tmpl}"))
 
     skills_yaml = Path(paths.get("VNX_SKILLS_DIR", vnx_home / "skills")) / "skills.yaml"
-    if skills_yaml.exists():
+    # OI-660: a real, non-empty FILE is required — a zero-byte file (or a
+    # directory named skills.yaml) reports absent and falls through to the
+    # WARN/FAIL branches below instead of claiming 'present'.
+    if skills_yaml.is_file() and skills_yaml.stat().st_size > 0:
         results.append(CheckResult("template", PASS, "Skills registry present"))
     elif _is_standalone_dev(Path(paths["PROJECT_ROOT"]), vnx_home):
         results.append(CheckResult("template", WARN,

@@ -161,6 +161,20 @@ class TestTemplateChecks:
         failed = [r for r in results if r.status == FAIL]
         assert len(failed) >= 1
 
+    def test_zero_byte_skills_registry_reports_not_present(self, vnx_env):
+        """OI-660: a zero-byte skills.yaml must NOT report 'Skills registry
+        present' — it is corrupt, not a valid registry."""
+        skills_yaml = Path(vnx_env["VNX_SKILLS_DIR"]) / "skills.yaml"
+        skills_yaml.write_text("")
+
+        results = check_templates(vnx_env)
+        registry = [
+            r for r in results
+            if "skills.yaml" in r.message or "Skills registry" in r.message
+        ]
+        assert registry, "check_templates returned no skills-registry check"
+        assert registry[0].status != PASS, "zero-byte registry must not pass"
+
 
 # ---------------------------------------------------------------------------
 # Settings checks

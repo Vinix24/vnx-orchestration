@@ -225,6 +225,19 @@ class TestBootstrapSkills:
         shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
         assert (skills_dir / "skills.yaml").read_text() == shipped_registry.read_text()
 
+    def test_reseeds_zero_byte_registry_from_canon(self, vnx_env):
+        """OI-660: a zero-byte target skills.yaml is corrupt, not a mixed-file to
+        preserve — it must be re-seeded from shipped canon, not survive bootstrap."""
+        skills_dir = Path(vnx_env["PROJECT_ROOT"]) / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "skills.yaml").write_text("")
+
+        result = bootstrap_skills(vnx_env)
+        assert result.status == PASS
+
+        shipped_registry = Path(vnx_env["VNX_HOME"]) / "skills" / "skills.yaml"
+        assert (skills_dir / "skills.yaml").read_text() == shipped_registry.read_text()
+
     def test_refuses_registry_symlink_destination(self, vnx_env):
         """A target/skills.yaml symlink pointing outside the project must be
         refused, not followed and written through."""
