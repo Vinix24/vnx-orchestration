@@ -728,7 +728,15 @@ def _list_tmux_sessions(now: datetime) -> "tuple[list[dict], list[str]]":
         text=True,
         timeout=5,
     )
-    if panes_result.returncode == 0:
+    # A panes failure degrades only busy/idle classification — sessions still
+    # list. Surface it via degraded_reasons like the sessions failure path so a
+    # failing probe is observable, not silent (sessobs #1076 residual).
+    reasons: list[str] = []
+    if panes_result.returncode != 0:
+        reason = f"tmux list-panes failed (rc={panes_result.returncode})"
+        _logger.warning("session observability: %s", reason)
+        reasons.append(reason)
+    else:
         for line in panes_result.stdout.splitlines():
             parts = line.split("\t", 1)
             if len(parts) == 2:
@@ -757,7 +765,7 @@ def _list_tmux_sessions(now: datetime) -> "tuple[list[dict], list[str]]":
             "age_seconds": age_seconds,
         })
 
-    return sessions, []
+    return sessions, reasons
 
 
 def _load_session_store_entries() -> "dict[str, dict]":
