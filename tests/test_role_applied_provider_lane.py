@@ -21,6 +21,12 @@ These tests pin the contract:
      that path unchanged — the shared injector is not regressed.
   5. the envelope GOVERN path stamps role_applied / role_tier /
      role_not_applied_reason on the receipt.
+  6. (round-3 gate fix) only the RESOLVED, highest-priority source's content may
+     evidence role application — terminal fallback content must NOT stamp
+     role_applied=True when an existing agents/<role>/CLAUDE.md is absent from
+     the final prompt (RED on round-2 code).
+  7. the genuine positive case still returns True after the round-3 fix — the
+     probe is not made stricter until it never says yes (OI-893).
 """
 
 from __future__ import annotations
@@ -242,3 +248,51 @@ def test_envelope_receipt_stamps_role_applied_false(tmp_path):
     assert receipt.get("role_applied") is False
     assert receipt.get("role_tier") == "agents"
     assert receipt.get("role_not_applied_reason") is not None
+
+
+# ---------------------------------------------------------------------------
+# 6. round-3 gate fix: only the RESOLVED (highest-priority) source may evidence
+#    role application — a lower-priority tier's presence must not stamp True
+# ---------------------------------------------------------------------------
+
+
+def test_role_applied_false_when_resolved_source_absent_but_lower_tier_present():
+    """agents/quality-engineer/CLAUDE.md EXISTS but is absent from the final
+    prompt, while terminal-fallback (T1/CLAUDE.md) content IS present.
+    role_applied must be False.
+
+    RED on dispatch-20260801-w10 (round-2 code): the first pass accepted content
+    from ANY candidate, so the terminal fallback stamped role_applied=True even
+    though the role's own source never reached the worker — the exact
+    false-positive the round-3 gate flagged.
+    """
+    terminal_body = (REPO_ROOT / ".claude" / "terminals" / "T1" / "CLAUDE.md").read_text()
+    agents_body = (REPO_ROOT / "agents" / "quality-engineer" / "CLAUDE.md").read_text()
+    # Sanity: the two bodies are distinct, otherwise the test is vacuous.
+    assert "Quality Engineer Agent" in agents_body
+    assert "Backend Developer Agent" in terminal_body
+
+    final_prompt = f"{terminal_body}\n\n---\n\nimplement the change"
+
+    verdict = verify_role_applied(final_prompt, "T1", "quality-engineer")
+
+    assert verdict.role_applied is False
+    assert verdict.tier == "agents"
+    assert verdict.reason is not None
+    assert "absent from the final prompt" in verdict.reason
+    assert "terminal" in verdict.reason  # the lower-tier presence is recorded
+
+
+def test_role_applied_true_when_resolved_source_present():
+    """The genuine positive case still holds after the round-3 fix: when the
+    resolved (highest-priority) source's content IS in the final prompt,
+    role_applied must be True — the fix must not make the probe never say yes.
+    """
+    agents_body = (REPO_ROOT / "agents" / "quality-engineer" / "CLAUDE.md").read_text()
+    final_prompt = f"{agents_body}\n\n---\n\nimplement the change"
+
+    verdict = verify_role_applied(final_prompt, "T1", "quality-engineer")
+
+    assert verdict.role_applied is True
+    assert verdict.tier == "agents"
+    assert verdict.reason is None

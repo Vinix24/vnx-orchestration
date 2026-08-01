@@ -35,9 +35,12 @@ Candidate sources mirror what ``_inject_skill_context`` actually resolves:
   - ``skills``          — ``.claude/skills/<role>/CLAUDE.md`` (skill definition)
   - ``terminal``        — ``.claude/terminals/<terminal>/CLAUDE.md`` (terminal fallback)
 
-The first tier whose content is present wins. When no tier's content is present
-but a source exists, the verdict reports that tier with a "content absent"
-reason; when no source exists at all it reports ``tier="none"`` with why.
+The first EXISTING source in that order is the one the injector resolves; only
+that resolved source's content may evidence role application. When its content
+is absent from the prompt, the verdict is False even if a lower-priority
+source's content happens to be present (round-3 gate fix: terminal fallback
+content used to stamp role_applied=True while agents/<role>/CLAUDE.md was
+absent). When no source exists at all it reports ``tier="none"`` with why.
 """
 
 from __future__ import annotations
@@ -141,6 +144,29 @@ def _content_present(final_prompt: str, role_content: str) -> bool:
     return False
 
 
+def _lower_tier_present(
+    final_prompt: str,
+    candidates,
+    resolved_tier: str,
+) -> Optional[str]:
+    """Return the tier of the first lower-priority source whose content is in
+    *final_prompt*, or None.
+
+    Only sources strictly below *resolved_tier* in priority order count; the
+    resolved source itself is handled by the caller. Used to explain a
+    role_applied=False verdict when lower-tier content would have fooled a naive
+    "any tier present" check.
+    """
+    for tier, path in candidates:
+        if tier == resolved_tier:
+            continue
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            if content.strip() and _content_present(final_prompt, content):
+                return tier
+    return None
+
+
 def verify_role_applied(
     final_prompt: str,
     terminal_id: str,
@@ -164,44 +190,62 @@ def verify_role_applied(
         role_slug = (role or "").strip()
         candidates = list(_candidate_sources(terminal_id, role_slug, project_root))
 
-        # First pass: report the first tier whose content is actually present.
-        for tier, path in candidates:
-            if path.is_file():
-                content = path.read_text(encoding="utf-8", errors="ignore")
-                if _content_present(final_prompt, content):
-                    return RoleApplicationVerdict(
-                        role_applied=True,
-                        tier=tier,
-                        reason=None,
-                        source_path=str(path),
-                    )
+        # Resolve the source the injector would actually use: the FIRST existing
+        # candidate in priority order. Only that source's content may evidence
+        # role application. Content from a lower-priority tier must never carry
+        # the verdict when a higher-priority source exists but was not injected
+        # (round-3 gate fix: terminal fallback content used to stamp
+        # role_applied=True while agents/<role>/CLAUDE.md was absent).
+        resolved = next(
+            ((tier, path) for tier, path in candidates if path.is_file()),
+            None,
+        )
+        if resolved is None:
+            return RoleApplicationVerdict(
+                role_applied=False,
+                tier=TIER_NONE,
+                reason="no role source resolved (prompt_assembler/agents/skills/terminal)",
+                source_path=None,
+            )
 
-        # Second pass: no content matched. Report the resolved tier (first
-        # existing source) with an honest reason, or "none" when no source exists.
-        for tier, path in candidates:
-            if path.is_file():
-                content = path.read_text(encoding="utf-8", errors="ignore")
-                if not content.strip():
-                    return RoleApplicationVerdict(
-                        role_applied=False,
-                        tier=tier,
-                        reason="role source resolved but its content is empty",
-                        source_path=str(path),
-                    )
-                return RoleApplicationVerdict(
-                    role_applied=False,
-                    tier=tier,
-                    reason=(
-                        "role source resolved but its content is absent from the "
-                        "final prompt"
-                    ),
-                    source_path=str(path),
-                )
+        resolved_tier, resolved_path = resolved
+        content = resolved_path.read_text(encoding="utf-8", errors="ignore")
+        if not content.strip():
+            return RoleApplicationVerdict(
+                role_applied=False,
+                tier=resolved_tier,
+                reason="role source resolved but its content is empty",
+                source_path=str(resolved_path),
+            )
+
+        if _content_present(final_prompt, content):
+            return RoleApplicationVerdict(
+                role_applied=True,
+                tier=resolved_tier,
+                reason=None,
+                source_path=str(resolved_path),
+            )
+
+        # Resolved source content is absent. Record whether a lower-priority
+        # source's content IS present — that is the exact false-positive shape a
+        # naive "any tier present" check would have matched, and the reader
+        # should not have to guess which source it was. The boolean plus the
+        # resolved tier carry the verdict; the note only explains the failure
+        # mode, it is not a new status layer.
+        lower_tier = _lower_tier_present(final_prompt, candidates, resolved_tier)
+        reason = (
+            "role source resolved but its content is absent from the final prompt"
+        )
+        if lower_tier is not None:
+            reason += (
+                f"; lower-priority {lower_tier} content IS present but cannot "
+                "evidence role application when the resolved source is absent"
+            )
         return RoleApplicationVerdict(
             role_applied=False,
-            tier=TIER_NONE,
-            reason="no role source resolved (prompt_assembler/agents/skills/terminal)",
-            source_path=None,
+            tier=resolved_tier,
+            reason=reason,
+            source_path=str(resolved_path),
         )
     except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
         logger.warning("role_application: verify_role_applied failed (non-fatal): %s", exc)
