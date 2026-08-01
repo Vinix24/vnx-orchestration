@@ -100,6 +100,21 @@ vnx_orchestration = [
     "examples/**/*",
 ]
 
+# ---------------------------------------------------------------------------
+# pytest configuration
+# ---------------------------------------------------------------------------
+# F39 replay tests (tests/f39/test_replay_level{1,2,3}.py) shell out to a real
+# `claude -p` subprocess and start paid inference. A plain `pytest tests/` must
+# never do that, so they are gated behind the `replay` marker and deselected by
+# default via addopts. Run them explicitly:
+#     pytest -m replay tests/f39/ -v                  # full replay (inference)
+#     pytest -m replay tests/f39/ -v --dry-run        # validate fixtures only
+[tool.pytest.ini_options]
+markers = [
+    "replay: runs real claude -p inference (F39 replay suite). Opt in with -m replay.",
+]
+addopts = ["-m", "not replay"]
+
 # Exclude build artifacts, caches, and non-runtime content from the wheel.
 [tool.setuptools.exclude-package-data]
 vnx_orchestration = [
