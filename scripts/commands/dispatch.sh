@@ -563,7 +563,8 @@ HELP
   instruction=$(cat "$abs_file")
 
   # Move file to active/
-  local active_path="${VNX_DISPATCH_DIR}/active/$(basename "$abs_file")"
+  local active_path
+  active_path="${VNX_DISPATCH_DIR}/active/$(basename "$abs_file")"
   mkdir -p "${VNX_DISPATCH_DIR}/active"
   cp "$abs_file" "$active_path"
 
@@ -620,7 +621,8 @@ HELP
 
   if [ "$exit_code" -eq 0 ]; then
     # Move to completed/
-    local completed_path="${VNX_DISPATCH_DIR}/completed/$(basename "$abs_file")"
+    local completed_path
+    completed_path="${VNX_DISPATCH_DIR}/completed/$(basename "$abs_file")"
     mkdir -p "${VNX_DISPATCH_DIR}/completed"
     mv "$active_path" "$completed_path" 2>/dev/null || true
     log "[dispatch] Done — dispatch $dispatch_id completed (receipt: success)"
