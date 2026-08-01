@@ -324,10 +324,10 @@ def _prepare(spec: EnvelopeSpec) -> str:
     1. Repo-map layer on the RAW instruction (target-file extraction most
        accurate before any enrichment text is added).
     2. Role context + intelligence + full assembly via ``_inject_skill_context``
-       — the same injector the tmux/subprocess lanes use (dispatch-20260801-w10).
-       This closes the envelope-lane gap where the role's CLAUDE.md never reached
-       the worker. On injector failure the prompt falls back to a role label
-       header (mirrors tmux_interactive_dispatch._assemble_context).
+       — the shared lane-neutral injector used by every dispatch lane
+       (dispatch-20260801-w10). This closes the envelope-lane gap where the
+       role's CLAUDE.md never reached the worker. On injector failure the
+       prompt falls back to a role label header.
     """
     instruction = spec.instruction
 
@@ -341,7 +341,7 @@ def _prepare(spec: EnvelopeSpec) -> str:
         )
 
     try:
-        from subprocess_dispatch_internals.skill_injection import _inject_skill_context  # noqa: PLC0415
+        from skill_context import _inject_skill_context  # noqa: PLC0415
 
         dispatch_metadata: dict = {"dispatch_id": spec.dispatch_id}
         if spec.pr_id:

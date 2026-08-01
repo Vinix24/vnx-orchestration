@@ -249,7 +249,7 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
 
     # Layer 2: role context + intelligence + full assembly via the shared injector.
     try:
-        from subprocess_dispatch_internals.skill_injection import _inject_skill_context  # noqa: PLC0415
+        from skill_context import _inject_skill_context  # noqa: PLC0415
         dispatch_metadata: dict = {"dispatch_id": args.dispatch_id}
         dispatch_paths = _resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or "")
         if dispatch_paths:

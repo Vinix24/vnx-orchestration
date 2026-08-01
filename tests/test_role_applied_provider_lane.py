@@ -36,9 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 import dispatch_envelope
 import provider_dispatch
+import skill_context
 from dispatch_envelope import EnvelopeSpec, _AdapterResult
 from role_application import verify_role_applied
-from subprocess_dispatch_internals import skill_injection
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -84,7 +84,7 @@ def test_provider_lane_role_context_reaches_final_prompt(tmp_path):
     so no role context reached the worker at all.
     """
     args = _make_args("quality-engineer")
-    with patch.object(skill_injection, "_try_prompt_assembler", return_value=None):
+    with patch.object(skill_context, "_try_prompt_assembler", return_value=None):
         enriched = _enrich(args, tmp_path)
 
     agents_md = (REPO_ROOT / "agents" / "quality-engineer" / "CLAUDE.md").read_text()

@@ -71,7 +71,7 @@ def test_provider_without_equal_context_invokes_existing_enrichers(monkeypatch):
     )
     monkeypatch.setitem(
         sys.modules,
-        "subprocess_dispatch_internals.skill_injection",
+        "skill_context",
         SimpleNamespace(_inject_skill_context=inject_skill),
     )
     monkeypatch.delenv("VNX_BENCH_EQUAL_CONTEXT", raising=False)
