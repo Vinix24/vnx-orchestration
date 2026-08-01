@@ -83,6 +83,21 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 - `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason (`dispatch_cli.py:691-705`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
+**Role selection (hard):**
+
+- `backend-developer` is the sentinel default for "no role resolved" (`_FAKE_DEFAULT_ROLE`, `scripts/lib/dispatch_govern.py:51`) and is stripped from the receipt trail — never choose it out of convenience. Pick a role deliberately; if none fits, motivate that in the dispatch.
+- The role follows the work, not the terminal.
+
+| Work | Role |
+|---|---|
+| Test harness, CI coverage, flaky tests, test infrastructure | `quality-engineer` |
+| Module boundaries, data model, resolver identity, ADRs | `system-architect` |
+| Permission posture, auth, secrets, sandboxing | `security-engineer` |
+| Reproduces a finding, fact-finding | `research-analyst` |
+| Review of existing code without changing it | `code-reviewer` |
+| Runtime implementation in existing modules | `backend-developer` (deliberate choice) |
+| Dashboard and UI | `frontend-developer` |
+
 ## Crash Recovery (on-demand only)
 
 Follow the full procedure in the t0-orchestrator playbook §7 (Startup / recovery / runbooks), which points to `docs/core/DISPATCH_RULES.md` §10.
