@@ -43,6 +43,7 @@ from adapter_types import (
     SpawnResult,
     StopResult,
 )
+from _streaming_drainer import coerce_chunk_stall  # noqa: E402 — shared stall/deadline rule (OI-903)
 
 logger = logging.getLogger(__name__)
 
@@ -624,6 +625,11 @@ class SubprocessAdapter:
             total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
         except (KeyError, ValueError):
             pass
+        # OI-903: the chunk (stall) timeout must scale with the total deadline so a
+        # long deadline stays the binding constraint. Skipped when VNX_CHUNK_TIMEOUT
+        # is set explicitly — env overrides retain top precedence.
+        if "VNX_CHUNK_TIMEOUT" not in os.environ:
+            chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
         # Clear any prior timeout flag for this terminal
         self._timed_out.discard(terminal_id)
         process = self._processes.get(terminal_id)

@@ -43,6 +43,7 @@ from append_receipt_internals.receipt_finalize import (
 )
 from append_receipt_internals.validation import _validate_receipt
 from receipt_schema import ReceiptV2
+from report_body_contract import validate_body
 from token_harvest import CLAUDE_HARNESS_PROVIDERS
 
 logger = logging.getLogger(__name__)
@@ -351,6 +352,7 @@ def emit_unified_report(
     frontmatter: Optional[Dict[str, Any]] = None,
     body_override: Optional[str] = None,
     overwrite: bool = False,
+    preserve_partial: bool = False,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
@@ -366,6 +368,15 @@ def emit_unified_report(
     govern() passes overwrite=True for synthesized/violated bodies to replace
     stale placeholder files that would otherwise block idempotent early-return.
 
+    When *preserve_partial* is True (failure/timeout emitters) and the existing
+    report fails the report-body contract, the partial body is preserved under
+    ``<dispatch_id>.partial.md`` and the fresh structured report is written in its
+    place. OI-903: a worker SIGTERM'd mid-report leaves a partial file that would
+    otherwise block the idempotent early-return AND satisfy nothing — the
+    preserved sidecar makes the partial output retrievable while the canonical
+    report stays contract-compliant. An existing report that PASSES the contract
+    is never touched (idempotent early-return still applies).
+
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
     violations, do not raise).  Set VNX_SCHEMA_STRICT=1 to raise on violation.
@@ -378,7 +389,38 @@ def emit_unified_report(
 
     report_path = reports_dir / f"{dispatch_id}.md"
     if report_path.exists() and not overwrite:
-        return report_path
+        if preserve_partial:
+            try:
+                existing = report_path.read_text(encoding="utf-8", errors="replace")
+            except OSError as _read_exc:
+                logger.warning(
+                    "governance_emit: could not read existing report %s for partial check (%s); "
+                    "returning as-is",
+                    report_path, _read_exc,
+                )
+                return report_path
+            if not validate_body(existing).valid:
+                # Killed-worker artifact: preserve the partial output under a
+                # .partial.md sidecar so the work is retrievable, then let the
+                # fresh structured report (written below) take the canonical path.
+                partial_path = reports_dir / f"{dispatch_id}.partial.md"
+                try:
+                    os.replace(report_path, partial_path)
+                    logger.info(
+                        "governance_emit: preserved partial report dispatch=%s at %s",
+                        dispatch_id, partial_path,
+                    )
+                except OSError as _mv_exc:
+                    logger.warning(
+                        "governance_emit: could not preserve partial report %s as %s (%s); "
+                        "returning as-is",
+                        report_path, partial_path, _mv_exc,
+                    )
+                    return report_path
+            else:
+                return report_path
+        else:
+            return report_path
 
     if body_override is not None:
         body = body_override
