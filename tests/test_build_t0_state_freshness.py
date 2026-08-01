@@ -13,6 +13,7 @@ hot-path advisory reconcile that keeps the t0_state projection fresh:
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -229,6 +230,19 @@ def _t0_sessionstart_command() -> str:
     raise AssertionError("T0 SessionStart hook not found")
 
 
+def _t0_sessionstart_wrapper() -> str:
+    settings = json.loads((_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    for entry in settings["hooks"]["SessionStart"]:
+        if entry.get("matcher") == "terminals/T0":
+            command = entry["hooks"][0]["command"]
+            body = shlex.split(command)[2]
+            match = re.search(r"scripts/hooks/([\w._-]+\.sh)", body)
+            if not match:
+                raise AssertionError(f"T0 SessionStart hook does not delegate to a wrapper: {command}")
+            return (_ROOT / "scripts" / "hooks" / match.group(1)).read_text(encoding="utf-8")
+    raise AssertionError("T0 SessionStart hook not found")
+
+
 def test_sessionstart_hook_is_valid_bash_and_de_swallows():
     cmd = _t0_sessionstart_command()
     # 1) the whole command tokenizes (no unbalanced quotes)
@@ -238,9 +252,17 @@ def test_sessionstart_hook_is_valid_bash_and_de_swallows():
     body = shlex.split(cmd)[2]
     rc = subprocess.run(["bash", "-n", "-c", body], capture_output=True, text=True)
     assert rc.returncode == 0, f"hook body is not valid bash: {rc.stderr}"
-    # 3) the BUILDER's stderr is captured to a log (not /dev/null), and the hook
-    #    never blocks the session. (git/mkdir may still suppress their own noise.)
-    assert 'build_t0_state.py" --output' in body
-    assert 'build_t0_state.py" --output "$ROOT/.vnx-data/state/t0_state.json" 2>/dev/null' not in body
-    assert "build_t0_state.err" in body
-    assert "exit 0" in body
+    # 3) the hook delegates to a repo wrapper script that is itself valid bash.
+    wrapper = _t0_sessionstart_wrapper()
+    rc = subprocess.run(["bash", "-n", "-c", wrapper], capture_output=True, text=True)
+    assert rc.returncode == 0, f"wrapper is not valid bash: {rc.stderr}"
+    # 4) the BUILDER's stderr is captured to a log (not /dev/null), the output
+    #    lands in the CENTRAL store via the resolved $STATE (not the repo-local
+    #    .vnx-data split-brain, OI-859), an explicit interpreter is used, and
+    #    the hook never blocks.
+    assert 'build_t0_state.py" --output "$STATE/t0_state.json"' in wrapper
+    assert '"$ROOT/.vnx-data/state/t0_state.json"' not in wrapper
+    assert '2>"$LOG/build_t0_state.err"' in wrapper
+    assert "build_t0_state.err" in wrapper
+    assert "exit 0" in wrapper
+    assert ".venv/bin/python" in wrapper or "python3.12" in wrapper
