@@ -2123,6 +2123,22 @@ class TmuxInteractiveDispatch:
                 # failed write must never abort the dispatch.
                 try:
                     _write_worker_scope_hook_settings(Path(cwd))
+                    # OI-804 (ADR-005 audit gap): a successful state mutation —
+                    # the settings.local.json registration — emits a coordination
+                    # event so the write lands in the audit trail. Best-effort
+                    # like the write itself: an emit failure must never abort the
+                    # dispatch.
+                    self._emit_event(
+                        "hook_settings_written",
+                        dispatch_id=dispatch_id,
+                        label=label,
+                        reason="worker-scope PreToolUse hook registered in worktree",
+                        metadata={
+                            "settings_path": str(
+                                Path(cwd) / ".claude" / "settings.local.json"
+                            )
+                        },
+                    )
                 except Exception as exc:  # noqa: BLE001 - hook wiring is best-effort
                     logger.warning(
                         "interactive: worker-scope hook settings write failed "

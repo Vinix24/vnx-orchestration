@@ -4760,6 +4760,22 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
             any("pretooluse_worker_scope_enforce.sh" in c for c in commands),
             f"hook command not found in written settings: {commands}",
         )
+        # OI-804 (ADR-005 audit gap): the successful settings write must emit a
+        # hook_settings_written coordination event so the mutation is audited.
+        with get_connection(self.state_dir) as conn:
+            hook_events = get_events(
+                conn, entity_id=self.DISPATCH_ID, event_type="hook_settings_written"
+            )
+        self.assertTrue(
+            hook_events,
+            "successful worker-scope hook settings write must emit "
+            "hook_settings_written",
+        )
+        self.assertIn(
+            str(settings_path),
+            hook_events[0].get("metadata_json", ""),
+            "event metadata must record the settings path written",
+        )
 
     def test_dispatch_hook_settings_write_failure_does_not_abort(self):
         """Best-effort wiring: a failing settings write must never abort the dispatch."""
