@@ -928,6 +928,26 @@ def _via_for_provider(provider_value: str, sub_provider: Optional[str]) -> Optio
     return None
 
 
+def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
+    """Return the set of role names that exist in the agents/ registry.
+
+    A role is valid when ``<agents_dir>/<role>/CLAUDE.md`` exists — the same role
+    file the worker loads as its profile. Missing or unreadable registry → EMPTY
+    set, so compile_plan's OI-921 membership check rejects every role (fail-closed):
+    an undiscoverable registry must never silently accept an arbitrary role string.
+    """
+    try:
+        if not agents_dir.is_dir():
+            return frozenset()
+        return frozenset(
+            entry.name
+            for entry in agents_dir.iterdir()
+            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
+        )
+    except OSError:
+        return frozenset()
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -939,6 +959,7 @@ def build_runtime_snapshot(
     P0-1: instruction_text + check_registry=True (FAIL-CLOSED); effective model; SDK scan (warn via constraint engine).
     P0-2: staging binding verified via spec_file containment check.
     P1-#3: model_pins from provider_constraints.yaml SSOT.
+    OI-921: valid_roles discovered from the engine's agents/ registry (fail-closed).
     """
     from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
     from staging_validator import _exists_in_dir as _staging_exists  # noqa: PLC0415
@@ -1169,12 +1190,18 @@ def build_runtime_snapshot(
             slot: pin for slot, pin in model_pin_specs.items() if slot != spec.target_slot
         }
 
+    # OI-921: role-registry — the set of roles that exist in agents/ (the engine's
+    # repo root, resolved exactly as run_dispatch does for validate). Empty set when
+    # the registry is missing → compile_plan rejects every role (fail-closed).
+    valid_roles = _discover_valid_roles(_resolve_repo_root() / "agents")
+
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
         staging_promoted=staging_promoted,
         target_health=target_health,
         target_capable=target_capable,
         model_pins=snapshot_model_pins,
+        valid_roles=valid_roles,
     )
 
 
