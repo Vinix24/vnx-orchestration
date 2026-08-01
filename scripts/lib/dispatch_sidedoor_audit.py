@@ -107,6 +107,7 @@ _EXCLUDE_SUBSTR = (
     "/lane_adapter.py",                 # benchmark adapter
     "/benchmark/", "/benchmarks/",      # benchmark harnesses test the lanes directly
     "/provider_spawns/", "/providers/", # provider_dispatch's own spawn machinery
+    "/check_no_file_derived_data_paths.py",  # path-guard: holds lane/path literals as DETECTION patterns, never delivers (OI-898)
 )
 _EXCLUDE_BASENAMES = {f"{n}.py" for n in _LANES}
 
