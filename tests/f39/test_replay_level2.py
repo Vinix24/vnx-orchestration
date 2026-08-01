@@ -72,6 +72,7 @@ _CHAIN_SCENARIOS = _collect_chain_scenarios()
 # Individual chain tests (parametrized)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 @pytest.mark.parametrize("name,scenario_path", _CHAIN_SCENARIOS, ids=[s[0] for s in _CHAIN_SCENARIOS])
 def test_level2_chain_scenario(
     name: str,
@@ -111,6 +112,7 @@ def test_level2_chain_scenario(
 # Aggregate gate test
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 def test_level2_aggregate_step_accuracy(request: pytest.FixtureRequest) -> None:
     """Level-2 gate: ≥90% of all steps across all chains must produce the correct decision.
 

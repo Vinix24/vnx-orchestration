@@ -116,11 +116,17 @@ flock_free_within() {
     return 1
 }
 
-# shellcheck disable=SC2034  # VNX_STATE_DIR / VNX_PROJECT_ID are consumed by the hook child process
+# OI-916: VNX_STATE_DIR / VNX_PROJECT_ID are consumed by the hook CHILD process
+# (the detached reconcile worker), so they must be EXPORTED — a bare
+# `VAR=value` assignment inside a script is not exported to child processes.
+# The hooks fall back to vnx_paths resolution when VNX_STATE_DIR is absent,
+# which would resolve the REAL central store and break this test's isolation
+# (and, worse, scatter throwaway markers into the production store).
+# shellcheck disable=SC2034  # exported for the hook child process
 run_session_start() {
     local root="$1" sid="$2"
     ( cd "$root" \
-        && VNX_STATE_DIR="$root/.vnx-data/state" VNX_PROJECT_ID="" \
+        && export VNX_STATE_DIR="$root/.vnx-data/state" VNX_PROJECT_ID="" \
         && printf '{"session_id":"%s","hook_event_name":"SessionStart"}' "$sid" \
         | bash "$HOOKS/session_reconcile_autoclose.sh" )
 }
@@ -128,7 +134,7 @@ run_session_start() {
 run_session_end() {
     local root="$1" sid="$2"
     ( cd "$root" \
-        && VNX_STATE_DIR="$root/.vnx-data/state" VNX_PROJECT_ID="" \
+        && export VNX_STATE_DIR="$root/.vnx-data/state" VNX_PROJECT_ID="" \
         && printf '{"session_id":"%s","hook_event_name":"SessionEnd"}' "$sid" \
         | bash "$HOOKS/session_reconcile_cleanup.sh" )
 }
