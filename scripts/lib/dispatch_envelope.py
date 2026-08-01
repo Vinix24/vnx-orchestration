@@ -662,7 +662,9 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
         return _unknown_verification()
 
 
-def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optional[str]:
+def _archive_dispatch_events(
+    terminal: Optional[str], dispatch_id: str
+) -> "tuple[Optional[str], bool]":
     """Archive the live event stream under ``dispatch_id`` (end-of-dispatch teardown).
 
     The envelope path previously never archived the per-dispatch ring buffer at
@@ -671,17 +673,26 @@ def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optio
     boundary guard (EventStore.append, #1276) rotated the previous stream, so the
     LAST dispatch in a series leaked its events into the live file.
 
-    Returns the archive path (str) when archived, else None.  Guards against
-    mislabeling: when the live file holds a DIFFERENT dispatch's events (this
-    dispatch never wrote to the stream — e.g. a pre-spawn failure), the file is
-    left untouched for the boundary guard of the next dispatch; archiving it here
-    would mislabel the previous dispatch's events under our id.
+    Returns ``(events_path, clear_ok)``:
+    - ``events_path`` is the archive path (str) when archived, else None.
+    - ``clear_ok`` tells the caller whether the live stream may be truncated
+      afterwards. It is False ONLY when the archive step itself raised and the
+      live file still holds this dispatch's events — clearing then would destroy
+      exactly the events that failed to archive (OI-918). It is True when the
+      archive succeeded, when there was nothing to archive (empty/missing file),
+      or when the live file holds a DIFFERENT dispatch's events (the caller's own
+      clear guard already refuses to wipe a foreign stream).
+
+    Guards against mislabeling: when the live file holds a DIFFERENT dispatch's
+    events (this dispatch never wrote to the stream — e.g. a pre-spawn failure),
+    the file is left untouched for the boundary guard of the next dispatch;
+    archiving it here would mislabel the previous dispatch's events under our id.
 
     Best-effort — a failure never breaks the dispatch (mirrors the
     ``_emit_governance`` archive contract in provider_dispatch).
     """
     if not terminal or not dispatch_id:
-        return None
+        return None, True
     try:
         from event_store import EventStore  # noqa: PLC0415
 
@@ -694,17 +705,18 @@ def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optio
                 "holds %r, not %s (left for the next dispatch's boundary guard)",
                 terminal, last_dispatch, dispatch_id,
             )
-            return None
+            return None, True
         archived = store.archive(terminal, dispatch_id)
         if archived is not None:
             logger.info("envelope: end-dispatch archived %s -> %s", terminal, archived)
-        return str(archived) if archived is not None else None
+        return (str(archived) if archived is not None else None), True
     except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
         logger.warning(
-            "envelope: end-dispatch event archive failed terminal=%s dispatch=%s (non-fatal): %s",
+            "envelope: end-dispatch event archive failed terminal=%s dispatch=%s "
+            "(non-fatal, live file left for the next dispatch's boundary guard): %s",
             terminal, dispatch_id, exc,
         )
-        return None
+        return None, False
 
 
 def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
@@ -781,7 +793,7 @@ def _govern(
     # envelope path never rotated the ring buffer at end-of-dispatch — only the
     # NEXT dispatch's write-side boundary guard did, so the LAST dispatch in a
     # series leaked its events into the live file.
-    events_path = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
+    events_path, _events_archive_ok = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
     # OI-903: on failure/timeout, a killed worker's partial report is preserved
@@ -979,7 +991,19 @@ def _govern(
     finally:
         # OI-878/OI-902: truncate the live event stream now that the archive
         # (top of _govern) and the receipt write are complete. Best-effort.
-        _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
+        # OI-918: only when the archive step actually succeeded (or had nothing
+        # to archive) — clearing after a FAILED archive would destroy exactly
+        # the events we wanted to preserve. On an archive failure the live file
+        # is left in place for the next dispatch's write-side boundary guard
+        # (#1276) to rotate, which is the second line of defence it exists for.
+        if _events_archive_ok:
+            _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
+        else:
+            logger.warning(
+                "envelope: end-dispatch clear skipped terminal=%s dispatch=%s — "
+                "archive failed; live file left for the next dispatch's boundary guard",
+                spec.terminal_id, spec.dispatch_id,
+            )
 
     if adapter_result.status != "success":
         # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
@@ -1133,6 +1157,22 @@ def _fail_loud_on_empty_success(
                 f"provider={provider_str} returned an empty completion with "
                 f"returncode={returncode} — refusing to report a silent empty "
                 f"success (raw spawn result: {raw_result!r})"
+            ),
+        )
+    if status != "success" and not (completion_text or "").strip():
+        # OI-925 (restant van OI-866): a NON-success spawn with a blank
+        # completion and no captured error previously surfaced in the
+        # dispatch_cli log line as "(no error captured)" even though the
+        # receipt classified it as empty_completion. Give the operator a
+        # diagnosable message instead of a silent blank. (Deepseek-harness:
+        # a returncode!=0 spawn with empty text and error=None lands here —
+        # _coerce_empty_completion_to_retryable only rewrites the rc=0 case.)
+        return (
+            status,
+            returncode or 1,
+            (
+                f"provider={provider_str} returned an empty completion with "
+                f"returncode={returncode} — no error captured by spawn"
             ),
         )
     return status, returncode, None

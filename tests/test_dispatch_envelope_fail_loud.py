@@ -181,6 +181,36 @@ def test_provider_adapter_empty_completion_is_fail_loud(
     assert "empty completion" in result.error
 
 
+def test_provider_adapter_nonzero_blank_no_error_is_diagnosable(tmp_path, monkeypatch):
+    """OI-925: a returncode!=0 spawn with a BLANK completion and NO captured
+    error must still surface a diagnosable error, not a silent
+    '(no error captured)' in the dispatch_cli log line.
+
+    The deepseek-harness empty-completion coercion in the spawn only rewrites
+    the returncode==0 case; a non-zero exit with empty text and error=None
+    previously fell through _fail_loud_on_empty_success with error=None, so the
+    receipt classified it as empty_completion while the operator-visible log
+    line said nothing. The central guard must cover the non-success case too.
+    """
+    monkeypatch.setattr(
+        "provider_spawns.deepseek_harness_spawn.resolve_harness_model",
+        lambda m: "deepseek-v4-test",
+    )
+    empty_result = _FakeKimiResult(returncode=1, completion_text="", error=None)
+    monkeypatch.setattr(
+        "provider_spawns.deepseek_harness_spawn.spawn_deepseek_harness",
+        lambda *a, **k: empty_result,
+    )
+
+    plan = _make_provider_plan(tmp_path, provider=Provider.DEEPSEEK_HARNESS, model="default")
+    result = ProviderAdapter().run(plan, "prompt")
+
+    assert result.status == "failure", f"expected failure, got {result.status}"
+    assert result.error, "non-success blank completion with no error must set a diagnosable error"
+    assert "empty completion" in result.error
+    assert "no error captured" in result.error
+
+
 def test_provider_adapter_nonempty_completion_still_succeeds(tmp_path, monkeypatch):
     """Guard rail: the fail-loud guard must not false-positive on real output."""
     real_result = _FakeKimiResult(returncode=0, completion_text="a real answer")

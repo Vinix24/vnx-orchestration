@@ -216,6 +216,47 @@ class TestEnvelopeEmitsBothReportAndReceipt:
 # ---------------------------------------------------------------------------
 
 
+class TestEnvelopeEventArchiveClear:
+    """OI-918: the end-of-dispatch clear must only fire when archiving succeeded.
+
+    _govern's finally unconditionally truncated the live event stream even when
+    the end-of-dispatch archive had failed — destroying exactly the events it
+    was meant to preserve. _archive_dispatch_events now returns
+    (events_path, clear_ok), and the clear is gated on clear_ok.
+    """
+
+    def _run(self, spec, codex_result, archive_return):
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec)
+        mock_archive = MagicMock(return_value=archive_return)
+        mock_clear = MagicMock()
+
+        with patch("provider_spawns.codex_spawn.spawn_codex", return_value=codex_result), \
+             patch("governance_emit.emit_unified_report", mock_report), \
+             patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
+             patch("dispatch_envelope._archive_dispatch_events", mock_archive), \
+             patch("dispatch_envelope._clear_dispatch_events", mock_clear):
+            result = run_envelope(spec, lane="codex")
+
+        return result, mock_archive, mock_clear
+
+    def test_archive_failure_skips_clear(self, spec):
+        """archive raised (clear_ok=False) -> live stream must NOT be truncated."""
+        codex_result = _FakeCodexResult(returncode=0)
+        result, mock_archive, mock_clear = self._run(spec, codex_result, (None, False))
+
+        assert result.status == "success"
+        mock_archive.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
+        mock_clear.assert_not_called()
+
+    def test_archive_success_still_clears(self, spec):
+        """archive succeeded (clear_ok=True) -> clear still fires as before."""
+        codex_result = _FakeCodexResult(returncode=0)
+        result, mock_archive, mock_clear = self._run(spec, codex_result, ("/arc/path.ndjson", True))
+
+        assert result.status == "success"
+        mock_clear.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
+
+
 class TestEnvelopeFailClosed:
     """GOVERN must raise EnvelopeGovernError when receipt is missing — never silent."""
 
@@ -568,7 +609,18 @@ class TestEnvelopeIdempotentDedup:
 
 
 class TestFlagGateClaude:
-    """VNX_UNIFIED_ENVELOPE flag controls whether envelope or legacy path is used for claude."""
+    """claude via provider_dispatch is ALWAYS rejected at the door (PR-5).
+
+    The old VNX_UNIFIED_ENVELOPE flag gate for the claude lane was removed:
+    provider_dispatch is not a provider-lane for claude — the single-entry
+    dispatch door owns all claude routing (DISPATCH_RULES provider->lane rule,
+    'claude/Opus/Sonnet panelists and workers route via the tmux-spawn lane —
+    NEVER provider_dispatch'). These tests pin that the claude flag-gate no
+    longer exists: regardless of VNX_UNIFIED_ENVELOPE, claude is refused with
+    EX_USAGE and neither dispatch path is invoked. (Previously the four tests
+    here asserted a flag-gate that PR-5 deleted, leaving them permanently red
+    — OI-919.)
+    """
 
     _CLAUDE_ARGV = [
         "--provider", "claude",
@@ -577,69 +629,46 @@ class TestFlagGateClaude:
         "--instruction", "noop",
     ]
 
-    def test_flag_off_calls_legacy_dispatch_claude(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE unset -> _dispatch_claude, envelope NOT invoked."""
+    def _assert_claude_rejected(self, monkeypatch, capsys):
+        monkeypatch.setenv("VNX_SINGLE_ENTRY_DISPATCH", "0")
+        monkeypatch.delenv("VNX_BENCH_SEED_MATERIALIZE", raising=False)
+        monkeypatch.delenv("VNX_BENCH_CLAUDE_HEADLESS", raising=False)
+
+        mock_legacy = MagicMock(return_value=0)
+        mock_via_envelope = MagicMock(return_value=0)
+
+        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
+             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
+            result = provider_dispatch.main(self._CLAUDE_ARGV)
+
+        assert result == provider_dispatch._EX_USAGE
+        mock_legacy.assert_not_called()
+        mock_via_envelope.assert_not_called()
+        assert "is not a provider-lane provider" in capsys.readouterr().err
+
+    def test_flag_off_claude_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE unset: claude is still rejected, not legacy-routed."""
         monkeypatch.delenv("VNX_UNIFIED_ENVELOPE", raising=False)
         monkeypatch.delenv("VNX_UNIFIED_ENVELOPE_LANES", raising=False)
+        self._assert_claude_rejected(monkeypatch, capsys)
 
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_legacy.assert_called_once()
-        mock_via_envelope.assert_not_called()
-        assert result == 0
-
-    def test_flag_on_calls_envelope(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE=1 + claude-subprocess in lanes -> _dispatch_claude_via_envelope."""
+    def test_flag_on_claude_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE=1 + claude-subprocess in lanes: still rejected."""
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE", "1")
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE_LANES", "claude-subprocess")
+        self._assert_claude_rejected(monkeypatch, capsys)
 
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_via_envelope.assert_called_once()
-        mock_legacy.assert_not_called()
-        assert result == 0
-
-    def test_flag_on_claude_alias_calls_envelope(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE=1 + "claude" (alias) in lanes -> _dispatch_claude_via_envelope."""
+    def test_flag_on_claude_alias_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE=1 + "claude" alias in lanes: still rejected."""
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE", "1")
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE_LANES", "claude")
+        self._assert_claude_rejected(monkeypatch, capsys)
 
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_via_envelope.assert_called_once()
-        mock_legacy.assert_not_called()
-        assert result == 0
-
-    def test_flag_on_wrong_lane_calls_legacy(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE=1 but claude NOT in lanes -> legacy _dispatch_claude."""
+    def test_flag_on_wrong_lane_claude_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE=1 + claude NOT in lanes: still rejected."""
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE", "1")
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE_LANES", "codex,gemini")
-
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_legacy.assert_called_once()
-        mock_via_envelope.assert_not_called()
-        assert result == 0
+        self._assert_claude_rejected(monkeypatch, capsys)
 
 
 # ---------------------------------------------------------------------------
