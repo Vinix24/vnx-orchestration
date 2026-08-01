@@ -34,9 +34,18 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# ExecutionPlan / ExecutionPermit: the plan + permit types routed by the
+# adapters and run_envelope_plan. Runtime import (not TYPE_CHECKING) so
+# typing.get_type_hints() on these signatures resolves them — the F821
+# unresolved-name finding (OI-288) was hiding a get_type_hints NameError.
+# No import cycle: dispatch_plan -> dispatch_spec and dispatch_internal
+# are stdlib-only leaf modules.
+from dispatch_internal import ExecutionPermit  # noqa: E402
+from dispatch_plan import ExecutionPlan  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1210,7 +1219,6 @@ class ProviderAdapter:
             _extract_token_usage,
             _resolve_codex_model,
             _resolve_deepseek_model,
-            _resolve_kimi_model_label,
             _resolve_moonshot_model,
             _resolve_zai_model,
         )
