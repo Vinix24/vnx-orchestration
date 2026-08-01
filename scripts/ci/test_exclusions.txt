@@ -6,6 +6,10 @@
 # sequential confirmation run of the candidates) and is excluded from the CI
 # sweep until its repair lands. Nothing is excluded silently.
 #
+# Entries with a "CI image" reason are green on main locally but cannot run in
+# the minimal CI image (undeclared heavy dependency stack); each names the
+# missing stack and the repair path to rejoin the sweep.
+#
 # Tracking item: OI-906 ("CI draait 18 van de 904 testbestanden"). Each
 # entry needs its own repair dispatch before it can rejoin the suite.
 #
@@ -98,6 +102,7 @@ tests/test_receipt_processor_autopr_rejected_mirror.py
 tests/test_receipt_processor_bootstrap.py
 tests/test_receipt_provenance.py
 tests/test_report_assembler.py
+tests/test_repo_map.py  # CI image: needs networkx+numpy+scipy (undeclared stack; repo_map falls back to positional ranking)
 tests/test_review_adapters.py
 tests/test_roadmap_consistency.py
 tests/test_runtime_coordination_schema_drift.py

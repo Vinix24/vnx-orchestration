@@ -22,13 +22,27 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pyyaml pytest-timeout
+          # pytest + pytest-timeout (hanging-test guard) plus the project's
+          # runtime deps (watchdog, jinja2, pyyaml, jsonschema, psutil), one
+          # test-only dep (hypothesis), and networkx (pure-Python; used by
+          # repo_map-backed dispatch enricher and its tests). Without these,
+          # tests that import governed-report validation, the intelligence
+          # daemon monitor, headless_trigger, `vnx init` (jinja2), or the repo
+          # map fail to collect or run with ModuleNotFoundError even though they
+          # pass on main.
+          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 networkx
 
       - name: Prepare expected repo layout
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.claude"
           rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+          # Mirror the repo's .claude content into the VNX_HOME copy. Code that
+          # resolves the project root to $VNX_HOME expects .claude/settings.json,
+          # .claude/terminals, and .claude/skills exactly like the local checkout
+          # (e.g. lane_adapter.SKILLS_ROOT, role-sync guards, session-start hooks).
+          # Exclude vnx-system to avoid recursive self-copy.
+          rsync -a --exclude 'vnx-system' ./.claude/ "$GITHUB_WORKSPACE/.claude/vnx-system/.claude/"
           rsync -a ./skills/ "$GITHUB_WORKSPACE/.claude/skills/"
 
       - name: Install ripgrep

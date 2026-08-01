@@ -32,9 +32,18 @@ os.environ["VNX_DATA_DIR"] = _CONFTEST_ISOLATION_TMP
 # Tests that exercise the guard override this explicitly.
 os.environ.setdefault("VNX_DATA_DIR_GUARD", "off")
 
+# Make the repo root importable for all tests. pytest's prepend import mode
+# only inserts the first non-package dir (tests/) into sys.path, so top-level
+# packages like scripts.* are unreachable when pytest is invoked on an absolute
+# path — which is exactly what CI does (pytest "$VNX_HOME/tests"). Inserting the
+# root mirrors `python -m pytest` from the repo root, where cwd is on sys.path.
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
+
 # Make scripts/lib importable for all tests
-_LIB_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-_SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+_LIB_DIR = _ROOT_DIR / "scripts" / "lib"
+_SCHEMAS_DIR = _ROOT_DIR / "schemas"
 
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
