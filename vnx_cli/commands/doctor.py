@@ -657,34 +657,8 @@ def _extract_hook_paths(command: str) -> list[str]:
     return candidates
 
 
-def _check_hook_paths(project_dir: Path) -> Check:
-    """WARN for hook commands in .claude/settings.json that reference missing files."""
-    settings_path = project_dir / ".claude" / "settings.json"
-    if not settings_path.is_file():
-        return Check(
-            name="hooks:path-resolution",
-            status=PASS,
-            detail="no .claude/settings.json found; skipping hook path check",
-        )
-
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return Check(
-            name="hooks:path-resolution",
-            status=WARN,
-            detail=f".claude/settings.json is unparseable ({exc}); hook paths cannot be audited",
-        )
-
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        return Check(
-            name="hooks:path-resolution",
-            status=PASS,
-            detail="no hooks section in .claude/settings.json",
-        )
-
-    project_root = project_dir.resolve()
+def _collect_dead_hook_paths(hooks: dict, project_root: Path) -> "tuple[list[str], list[str]]":
+    """Return (dead_relative, dead_absolute) hook paths that reference missing files."""
     dead_relative: list[str] = []
     dead_absolute: list[str] = []
 
@@ -718,6 +692,39 @@ def _check_hook_paths(project_dir: Path) -> Check:
                         target = project_root / normalized
                         if not target.is_file():
                             dead_relative.append(normalized)
+
+    return dead_relative, dead_absolute
+
+
+def _check_hook_paths(project_dir: Path) -> Check:
+    """WARN for hook commands in .claude/settings.json that reference missing files."""
+    settings_path = project_dir / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return Check(
+            name="hooks:path-resolution",
+            status=PASS,
+            detail="no .claude/settings.json found; skipping hook path check",
+        )
+
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return Check(
+            name="hooks:path-resolution",
+            status=WARN,
+            detail=f".claude/settings.json is unparseable ({exc}); hook paths cannot be audited",
+        )
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return Check(
+            name="hooks:path-resolution",
+            status=PASS,
+            detail="no hooks section in .claude/settings.json",
+        )
+
+    project_root = project_dir.resolve()
+    dead_relative, dead_absolute = _collect_dead_hook_paths(hooks, project_root)
 
     if dead_relative or dead_absolute:
         parts: list[str] = []
