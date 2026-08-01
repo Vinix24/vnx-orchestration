@@ -137,3 +137,18 @@ class RunStats:
     errors: int = 0
     skipped: int = 0
     suggestions: List[dict] = field(default_factory=list)
+
+
+def fail_closed_exit_code(stats: "RunStats | None") -> int:
+    """Return a non-zero exit code when the run failed closed (OI-862).
+
+    A run whose every session errored is a failed run and must not exit 0:
+    the per-session exception handler in the runner already counted the
+    errors, and a nightly pipeline that prints "Errors: N" with no analyzed
+    session would otherwise report launchd status 0 — the same silent-failure
+    pattern this chain exists to catch. Partial runs (some sessions analyzed)
+    stay green so a single session hiccup does not alarm the nightly job.
+    """
+    if stats is not None and stats.errors > 0 and stats.sessions_analyzed == 0:
+        return 1
+    return 0

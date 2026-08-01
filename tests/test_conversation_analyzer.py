@@ -1397,5 +1397,52 @@ class TestAtomicWrites:
                 analyzer._resolve_project_id()
 
 
+# ---------------------------------------------------------------------------
+# Fail-closed exit code (OI-862)
+# ---------------------------------------------------------------------------
+
+class TestFailClosedExitCode:
+
+    def test_fail_closed_pure_function(self):
+        """The exit-code helper fails closed only on a fully-failed run."""
+        from conversation_analyzer import fail_closed_exit_code, RunStats
+        # All sessions failed -> non-zero (the OI-862 case).
+        assert fail_closed_exit_code(RunStats(errors=2, sessions_analyzed=0)) == 1
+        # Partial runs stay green — a single session hiccup must not alarm nightly.
+        assert fail_closed_exit_code(RunStats(errors=1, sessions_analyzed=1)) == 0
+        assert fail_closed_exit_code(RunStats(errors=2, sessions_analyzed=5)) == 0
+        # Clean run -> zero.
+        assert fail_closed_exit_code(RunStats(errors=0, sessions_analyzed=3)) == 0
+        # Defensive: None stats (no run executed) -> zero.
+        assert fail_closed_exit_code(None) == 0
+
+    def test_main_returns_nonzero_when_all_sessions_fail(self):
+        """``conversation_analyzer.py`` exits non-zero when every session failed."""
+        import importlib.util
+        from unittest.mock import Mock
+
+        from conversation_analyzer import RunStats
+
+        spec = importlib.util.spec_from_file_location(
+            "conv_analyzer_main_oi862",
+            SCRIPT_DIR / "conversation_analyzer.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        fake = Mock()
+        fake.run.return_value = RunStats(errors=3, sessions_analyzed=0)
+        tmp_db = Path(tempfile.mkdtemp()) / "quality.db"
+        tmp_db.write_text("")
+
+        argv = ["conversation_analyzer.py", "--max-sessions", "5"]
+        with patch.object(sys, "argv", argv), \
+             patch.object(mod, "DB_PATH", tmp_db), \
+             patch.object(mod, "ConversationAnalyzer", return_value=fake):
+            rc = mod.main()
+
+        assert rc == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
