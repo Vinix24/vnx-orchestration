@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import warnings
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -80,16 +81,140 @@ MODE_COMMANDS: Dict[VNXMode, FrozenSet[str]] = {
 
 MODE_FILENAME = "mode.json"
 
+_PROJECT_ID_RE = None
+
+
+def _project_id_re():
+    """Lazily import the canonical project_id regex (vnx_ids is import-light)."""
+    global _PROJECT_ID_RE
+    if _PROJECT_ID_RE is None:
+        from vnx_ids import PROJECT_ID_RE
+        _PROJECT_ID_RE = PROJECT_ID_RE
+    return _PROJECT_ID_RE
+
+
+def _resolve_controlled_data_dir() -> Path:
+    """Resolve the runtime data dir for the ACTIVE project, fabric-consistent.
+
+    Ordered resolution (mirrors ``vnx_paths._resolve_state_root`` / bash
+    ``vnx_paths.sh``), anchored on the CWD-resolved project_id:
+
+      1. Central ``~/.vnx-data/<project_id>`` when the CWD-resolved project_id
+         already has a central store.
+      2. The project-local ``<project_root>/.vnx-data`` (dev checkout / fresh
+         install without a central store yet).
+      3. XDG ``~/.local/share/vnx/<project_id>`` for a fresh identified project.
+
+    Uses ``project_root.resolve_project_id`` (env > ``.vnx-project-id`` marker >
+    git remote) — the SAME resolver the data-dir guard uses — rather than the
+    ambient identity chain, so an inherited-identity subprocess cannot silently
+    pick a *different* project's central store as the mode.json target (OI-911).
+    """
+    from project_root import resolve_central_data_dir, resolve_project_id
+
+    pid = None
+    try:
+        pid = resolve_project_id()
+    except RuntimeError:
+        pid = None
+    if pid and _project_id_re().match(pid):
+        central = resolve_central_data_dir(pid)
+        if central.is_dir():
+            return central.resolve()
+        from project_root import resolve_project_root
+        local = resolve_project_root(__file__) / ".vnx-data"
+        if local.is_dir():
+            return local.resolve()
+        xdg_base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        return (Path(xdg_base) / "vnx" / pid).resolve()
+    # No resolvable project_id: keep mode.json project-local (same as bash
+    # resolution for a fresh checkout) — never guess a shared central store.
+    from project_root import resolve_project_root
+    return (resolve_project_root(__file__) / ".vnx-data").resolve()
+
 
 def _mode_file_path(data_dir: Optional[str] = None) -> Path:
-    """Return path to mode.json, deriving from environment if needed."""
-    if data_dir is None:
-        data_dir = os.environ.get("VNX_DATA_DIR")
-    if not data_dir:
-        raise RuntimeError(
-            "VNX_DATA_DIR not set. Run 'vnx init' first."
-        )
-    return Path(data_dir) / MODE_FILENAME
+    """Return path to mode.json, resolving the data dir like the rest of the fabric.
+
+    Resolution order (same two-key contract as ``project_root.resolve_data_dir``
+    and ``plan_gate_panel._resolve_data_dir``):
+
+      1. A caller-supplied ``data_dir`` wins.
+      2. ``VNX_DATA_DIR`` — honored ONLY when ``VNX_DATA_DIR_EXPLICIT=1`` is also
+         set. A bare inherited ``VNX_DATA_DIR`` is pollution, not config: it is
+         ignored with a warning unless it already equals the controlled store
+         (the bash-derived value in a normal CLI run), in which case it is
+         honored silently.
+      3. The controlled store for the active project
+         (:func:`_resolve_controlled_data_dir`).
+
+    Previously this read ``os.environ["VNX_DATA_DIR"]`` raw, with no two-key
+    contract and no project-id guard — the fourth data-dir resolver in the
+    fabric and the only one without any protection. That let a mode.json write
+    land in the wrong project store (OI-911).
+    """
+    if data_dir:
+        return Path(data_dir).expanduser().resolve() / MODE_FILENAME
+
+    explicit_val = os.environ.get("VNX_DATA_DIR", "").strip()
+    if explicit_val and os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+        return Path(explicit_val).expanduser().resolve() / MODE_FILENAME
+
+    controlled = _resolve_controlled_data_dir()
+    if explicit_val:
+        if Path(explicit_val).expanduser().resolve() != controlled:
+            warnings.warn(
+                f"VNX_DATA_DIR env-var set ({explicit_val}) but VNX_DATA_DIR_EXPLICIT=1 "
+                "is required for it to be honored. Ignoring and using the resolved "
+                f"store {controlled}. "
+                "See https://github.com/Vinix24/vnx-orchestration/issues/225",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        # else: the value already matches the controlled store (bash-derived) — silent.
+    return controlled / MODE_FILENAME
+
+
+def _guard_mode_write_target(target_dir: Path) -> None:
+    """Fail loud when a mode.json write would land in another project's store.
+
+    The controlled resolution already keeps mode.json in the active project's
+    central ``~/.vnx-data/<id>`` or its own project-local ``.vnx-data``. This
+    guard additionally rejects an explicitly-supplied ``data_dir`` that points
+    into ``~/.vnx-data/<other>`` while the CWD-resolved project_id is not
+    ``<other>`` — a cross-project write (OI-911).
+
+    When no project_id is resolvable the guard cannot verify and stays silent;
+    the resolution side already fell back to the project-local store for the
+    env-derived path.
+    """
+    home_vnx = Path.home() / ".vnx-data"
+    try:
+        resolved = target_dir.expanduser().resolve()
+    except OSError:
+        return
+    try:
+        rel = resolved.relative_to(home_vnx)
+    except ValueError:
+        return  # repo-local / scratch / XDG — not a central-store path
+
+    from project_root import resolve_project_id
+    try:
+        pid = resolve_project_id()
+    except RuntimeError:
+        return  # cannot verify against a project_id — allow
+
+    if not pid or not _project_id_re().match(pid):
+        return
+    expected = home_vnx / pid
+    if resolved == expected or str(resolved).startswith(str(expected) + os.sep):
+        return
+    raise RuntimeError(
+        f"mode.json write target {resolved} is {rel.parts[0]!r}'s central store, "
+        f"but the active project resolves to {pid!r}. Refusing to write mode.json "
+        "into another project's store. Set VNX_PROJECT_ID or run from the "
+        "correct project (OI-911)."
+    )
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -127,8 +252,13 @@ def read_mode(data_dir: Optional[str] = None) -> Optional[VNXMode]:
 
 
 def write_mode(mode: VNXMode, data_dir: Optional[str] = None) -> Path:
-    """Write mode to mode.json atomically. Returns the path written."""
+    """Write mode to mode.json atomically. Returns the path written.
+
+    Refuses (raises) when the resolved write target is another project's
+    central store (see :func:`_guard_mode_write_target`).
+    """
     path = _mode_file_path(data_dir)
+    _guard_mode_write_target(path.parent)
     payload = {
         "mode": str(mode),
         "set_at": datetime.now(timezone.utc).isoformat(),

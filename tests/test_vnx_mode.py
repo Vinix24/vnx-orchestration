@@ -39,16 +39,26 @@ from vnx_mode import (
 
 @pytest.fixture
 def data_dir(tmp_path):
-    """Create a temp .vnx-data directory and set VNX_DATA_DIR."""
+    """Create a temp .vnx-data directory and set VNX_DATA_DIR (+ explicit flag).
+
+    VNX_DATA_DIR_EXPLICIT=1 is required by the two-key contract (OI-911): a bare
+    VNX_DATA_DIR is inherited pollution and is ignored by ``_mode_file_path``.
+    """
     d = tmp_path / ".vnx-data"
     d.mkdir()
     old = os.environ.get("VNX_DATA_DIR")
+    old_explicit = os.environ.get("VNX_DATA_DIR_EXPLICIT")
     os.environ["VNX_DATA_DIR"] = str(d)
+    os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
     yield d
     if old:
         os.environ["VNX_DATA_DIR"] = old
     else:
         os.environ.pop("VNX_DATA_DIR", None)
+    if old_explicit:
+        os.environ["VNX_DATA_DIR_EXPLICIT"] = old_explicit
+    else:
+        os.environ.pop("VNX_DATA_DIR_EXPLICIT", None)
 
 
 # ---------------------------------------------------------------------------
