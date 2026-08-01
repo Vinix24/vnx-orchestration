@@ -15,28 +15,19 @@ set -euo pipefail
 
 # ── Detect terminal from working directory ───────────────────────────
 TERMINAL=""
-ROLE=""
-TRACK=""
 
 case "$PWD" in
   */terminals/T0|*/T0)
     TERMINAL="T0"
-    ROLE="orchestrator"
     ;;
   */terminals/T1|*/T1)
     TERMINAL="T1"
-    ROLE="worker"
-    TRACK="A"
     ;;
   */terminals/T2|*/T2)
     TERMINAL="T2"
-    ROLE="worker"
-    TRACK="B"
     ;;
   */terminals/T3|*/T3)
     TERMINAL="T3"
-    ROLE="worker"
-    TRACK="C"
     ;;
   *)
     # Not a VNX terminal directory — exit silently
@@ -44,14 +35,6 @@ case "$PWD" in
     exit 0
     ;;
 esac
-
-# ── Also check environment variables (set by vnx start) ─────────────
-if [ -n "${CLAUDE_ROLE:-}" ]; then
-  ROLE="$CLAUDE_ROLE"
-fi
-if [ -n "${CLAUDE_TRACK:-}" ]; then
-  TRACK="$CLAUDE_TRACK"
-fi
 
 # ── Resolve project root from directory structure ────────────────────
 # Walk up from terminal dir to find project root
