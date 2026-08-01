@@ -33,7 +33,6 @@ from tmux_interactive_dispatch import (
     _default_launch_command,
     _resolve_invocation_project_root,
     _resolve_state_dir,
-    _sanitize_session_name,
     main,
 )
 from tmux_worktree import ReapResult, WorktreeAllocateError, WorktreeHandle
@@ -910,7 +909,7 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
             # Both blocks must have the correct env prefix and python3 path.
             for block_idx, expected_status in ((0, "done"), (1, "failed")):
                 block = _extract_protocol_block(protocol, block_idx)
-                self.assertIn(f"VNX_STATE_DIR=", block)
+                self.assertIn("VNX_STATE_DIR=", block)
                 self.assertIn(str(state_dir), block)
                 self.assertIn(str(tmp_path), block)
 
@@ -1023,6 +1022,54 @@ class TestStateDirMatchesCanonical(unittest.TestCase):
             lane_path,
             f"MISMATCH: lane={lane_path!r} != canonical={canonical_path!r}",
         )
+
+
+class TestStateDirInvocationAware(unittest.TestCase):
+    """Central-mode guard: _resolve_state_dir must follow the INVOCATION project
+    root, not the lane code's __file__.
+
+    In central-install mode the lane code lives under
+    ~/.vnx-system/versions/<v>/scripts/lib/. Deriving the state root from
+    __file__ collapsed every plan-gate receipt/report into the version-dir's
+    local .vnx-data (OI-900) — a tree 'vnx update' later pruned (OI-912),
+    destroying the audit trail.
+    """
+
+    def setUp(self) -> None:
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("VNX_PROJECT_ROOT", "VNX_PROJECT_ID", "VNX_DATA_DIR",
+                      "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR")
+        }
+        for k in ("VNX_PROJECT_ROOT", "VNX_PROJECT_ID", "VNX_DATA_DIR",
+                  "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR"):
+            os.environ.pop(k, None)
+        self._cwd = Path.cwd()
+
+    def tearDown(self) -> None:
+        os.chdir(self._cwd)
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_state_dir_follows_vnx_project_root_not_file(self):
+        """VNX_PROJECT_ROOT (central-install shim export) must anchor the lane
+        state dir — even though the lane code's __file__ lives in the shared
+        engine tree (a git repo whose top-level is NOT the operator's project)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            os.environ["VNX_PROJECT_ROOT"] = str(project)
+
+            resolved = _resolve_state_dir()
+
+            self.assertEqual(
+                resolved,
+                (project / ".vnx-data" / "state").resolve(),
+                "central-mode lane state dir must resolve from the invocation "
+                "project root, never the lane code's __file__ location",
+            )
 
 
 class TestInvocationProjectRootResolution(unittest.TestCase):
@@ -1806,7 +1853,6 @@ class TestSharedPrepareWiringTmux(unittest.TestCase):
 
     def test_shared_prepare_1_smart_context_prepended(self):
         """VNX_SHARED_PREPARE=1: smart_context is prepended before the prepare() body."""
-        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL
         lane = self._make_lane()
         fake_skill = "SKILL_BODY"
         fake_perm = "PREAMBLE\n---\n\n" + fake_skill
@@ -2728,7 +2774,6 @@ class TestSubmitVerify(_LaneTestCase):
 
     def test_settle_and_retry_timeouts_read_from_env(self):
         """VNX_TMUX_PASTE_SETTLE_SECONDS / SUBMIT_RETRY_DELAY / SUBMIT_VERIFY_TIMEOUT read from env."""
-        import time as _time
         fake = FakeTmux(
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,

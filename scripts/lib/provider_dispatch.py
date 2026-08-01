@@ -96,12 +96,23 @@ def _resolve_data_dir() -> Path:
     VNX_DATA_DIR override is honored ONLY when VNX_DATA_DIR_EXPLICIT=1 is also set
     (same guard as project_root.resolve_data_dir) to prevent cross-project pollution
     from inherited shell environments. Fixes OI-126.
+
+    The project_id comes from the canonical resolver (VNX_PROJECT_ID env >
+    nearest ``.vnx-project-id`` marker > git remote), never a hardcoded default.
+    The old ``os.environ.get("VNX_PROJECT_ID", "vnx-dev")`` silently routed every
+    dispatch that did not export VNX_PROJECT_ID into the vnx-dev store, while the
+    event stream (event_store._events_dir) resolved the same context marker-aware
+    — the OI-900 split that polluted ``~/.vnx-data/vnx-dev/unified_reports`` with
+    21 mission-control plan-gate receipts/reports. An unresolvable project fails
+    closed (raises) rather than guessing (ADR-007), matching
+    ``dispatch_cli._resolve_project_id``.
     """
     explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
     explicit_val = os.environ.get("VNX_DATA_DIR", "")
     if explicit_flag and explicit_val:
         return Path(explicit_val).resolve()
-    project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    from project_root import resolve_project_id  # noqa: PLC0415
+    project_id = resolve_project_id()
     return Path.home() / ".vnx-data" / project_id
 
 
@@ -2346,7 +2357,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         _ctx = _dm.DispatchContext(
-            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+            project_id=_resolve_data_dir().name,
             session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
             task_class=getattr(args, "task_class", None) or None,
             dispatch_id=args.dispatch_id,

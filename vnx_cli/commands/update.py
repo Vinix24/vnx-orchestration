@@ -428,6 +428,153 @@ def _collect_protected_versions(
     return protected
 
 
+def _iter_site_packages_dirs() -> list:
+    """Candidate site-packages roots to scan for pip-install pointers.
+
+    Covers the interpreter's global + user site-packages, plus any ``sys.path``
+    entry whose basename is ``site-packages``/``dist-packages`` (venvs, extra
+    prefixes). Deduplicated, resolved, best-effort — an import failure returns
+    an empty list so a prune never fails on an exotic interpreter.
+    """
+    try:
+        import site as _site
+
+        candidates = list(_site.getsitepackages())
+        user = _site.getusersitepackages()
+        if user:
+            candidates.append(user)
+    except Exception:  # vnx-silent-except: site introspection is best-effort
+        candidates = []
+    for entry in sys.path:
+        if Path(entry).name in ("site-packages", "dist-packages"):
+            candidates.append(entry)
+    seen = set()
+    out = []
+    for raw in candidates:
+        try:
+            resolved = str(Path(raw).expanduser().resolve())
+        except OSError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(Path(resolved))
+    return out
+
+
+_PATH_TOKEN_RE = re.compile(r"/[^\s'\"()<>\[\]{}]+")
+
+
+def _text_references_dir(text: str, version_dir: Path) -> bool:
+    """True when ``text`` mentions a path that resolves to ``version_dir``.
+
+    Handles raw absolute paths, ``~/``-forms and ``file://`` URLs, and tolerates
+    symlink aliasing (macOS ``/tmp`` -> ``/private/tmp``): the comparison is
+    done on ``Path.resolve()`` of both sides, never on the raw string.
+    """
+    vdir = version_dir.resolve()
+    try:
+        from urllib.parse import unquote, urlparse
+
+        for m in re.finditer(r"file://([^\s'\"()<>\[\]{}]+)", text):
+            raw = unquote(urlparse(m.group(1)).path)
+            try:
+                if Path(raw).expanduser().resolve() == vdir:
+                    return True
+            except OSError:
+                continue
+    except ImportError:
+        pass
+    for m in _PATH_TOKEN_RE.finditer(text):
+        token = m.group(0)
+        if token == "/" or ".." in token:
+            continue
+        try:
+            if Path(token).expanduser().resolve() == vdir:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _pip_install_references_to(version_dir: Path) -> list:
+    """Reasons a pip install in the current interpreter maps into ``version_dir``.
+
+    Scans site-packages for the three shapes a pip install leaves behind when it
+    targets a version dir:
+      1. ``<pkg>-*.dist-info/direct_url.json`` — pip records ``url`` pointing at
+         the install source; an editable install keeps the ORIGINAL source dir
+         (OI-912: the global ``vnx_cli`` console script was ``pip install -e
+         versions/edge`` and ``direct_url.json`` still named ``versions/edge``
+         after the dir was pruned).
+      2. ``*.pth`` files whose content mentions the dir (path-based installs).
+      3. ``__editable__*.py`` finder modules whose MAPPING mentions the dir.
+
+    Pruning a dir any of these reference breaks the install silently — that is
+    the exact silent-catastrophe the GC-protect protection set exists to avoid.
+    """
+    reasons = []
+    for site in _iter_site_packages_dirs():
+        if not site.is_dir():
+            continue
+        # 1. dist-info direct_url.json
+        try:
+            dist_infos = list(site.glob("*.dist-info"))
+        except OSError:
+            dist_infos = []
+        for di in dist_infos:
+            direct_url = di / "direct_url.json"
+            if not direct_url.is_file():
+                continue
+            try:
+                data = json.loads(direct_url.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            url = (data or {}).get("url", "") or ""
+            if _text_references_dir(url, version_dir):
+                reasons.append(f"pip install {di.name} -> {url}")
+        # 2. + 3. .pth files and __editable__ finder modules
+        try:
+            pth_files = list(site.glob("*.pth")) + list(site.glob("__editable__*.py"))
+        except OSError:
+            continue
+        for pth in pth_files:
+            try:
+                text = pth.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _text_references_dir(text, version_dir):
+                reasons.append(f"pip editable {pth.name} references {version_dir}")
+    return reasons
+
+
+def _symlink_references_to(root: Path, version_dir: Path) -> list:
+    """Reasons a symlink under the central install root points into ``version_dir``.
+
+    Walks the central install tree (``~/.vnx-system``) WITHOUT following symlinks
+    and records any symlink whose resolved target is the version dir or sits
+    inside it. ``current`` is handled separately by ``_prune_old_versions`` (it
+    is never a prune candidate), but a bin/ shim or a legacy alias symlink that
+    points at a version dir must protect it too (OI-912).
+    """
+    reasons = []
+    vdir = version_dir.resolve()
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in list(dirnames) + list(filenames):
+                entry = Path(dirpath) / name
+                try:
+                    if not entry.is_symlink():
+                        continue
+                    target = entry.resolve()
+                    if target == vdir or vdir in target.parents:
+                        reasons.append(f"symlink {entry} -> {target}")
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return reasons
+
+
 def _prune_old_versions(
     root: Path,
     keep_last: int,
@@ -472,7 +619,15 @@ def _prune_old_versions(
     for version_dir in to_prune:
         if current and version_dir.resolve() == current.resolve():
             continue
-        reasons = sorted(protected.get(_normalize_version(version_dir.name), ()))
+        reasons = set(protected.get(_normalize_version(version_dir.name), ()))
+        # OI-912: a pip-install or symlink that maps into this version dir is a
+        # live reference — pruning it silently breaks that install (the global
+        # vnx_cli console script died with ModuleNotFoundError when update
+        # removed versions/edge). Fail-loud is too blunt (the update to the NEW
+        # version is fine); protect the referenced dir with a clear message.
+        reasons.update(_pip_install_references_to(version_dir))
+        reasons.update(_symlink_references_to(root, version_dir))
+        reasons = sorted(reasons)
         if reasons:
             reason_text = "; ".join(reasons)
             if dry_run:
