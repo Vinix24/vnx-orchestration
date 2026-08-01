@@ -4,6 +4,21 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.4.1] — 2026-08-01
+
+Patch release (8 commits since 1.4.0). Headline: the **fleet-wide plan-gate unblock** — in a central install the plan-gate resolved its data dir from the module's own location inside the read-only pinned version dir, so every plan-gate on the machine died with `PermissionError` on `~/.vnx-system/versions/<v>/.vnx-data` across all five provider lanes and every project. The data dir is now resolved from the central store for the active `project_id`, plus seven hardening fixes across the dispatch, gate, audit, and scheduler paths.
+
+### Fixed
+
+- **Plan-gate data-dir resolution (#1280)** — the headline fix. `resolve_data_dir(caller_file=__file__)` anchored to the module's own location, which in a central install sits inside the read-only pinned version dir; now resolved from the central store for the active `project_id`. Same anchor fixed in `provider_costs._resolve_costs_path`, which mkdir's `events/` on every provider-lane dispatch and is why all five lanes failed identically. Also: 0-of-N readable verdicts now returns `INFRA_FAIL` instead of `REVISE` — a plan that was never reviewed must not read as a plan judgment.
+- **Plan-gate probe degraded semantics + per-seat verdicts (#1275, OI-888)** — `degraded` fires on an all-attest ledger, and per-seat verdicts are persisted.
+- **Dispatch-boundary ringbuffer rotation enforced on the write side (#1276, OI-878)**.
+- **Dream scheduler job runnable after install (#1277, OI-895)** — the installed job now actually runs under launchd/cron.
+- **Adoption reader reads the DB offer junction (#1278, OI-894)** — zero-row updates become visible.
+- **Declared review gates wired to evidence (#1279, OI-876/OI-881)** — gates connected via obligations.
+- **Side-door delivery scan skips pattern-definition guards (#1281, OI-898)** — those guards hold lane literals as detection patterns and never deliver.
+- **Project-id guard on `project_root.resolve_data_dir`'s explicit branch (#1282, OI-899)** — the `VNX_DATA_DIR` + `VNX_DATA_DIR_EXPLICIT=1` branch was completely unchecked while `vnx_paths` was already guarded. Advisory by default (`VNX_DATA_DIR_GUARD=warn`).
+
 ## [1.4.0] — 2026-07-31
 
 The fourth minor (47 commits since 1.3.1). Headlines: the **ReceiptV2 schema contract with measured token capture** (claude-harness transcript harvest for all providers and a session `wire.jsonl` harvest for kimi), **worker-provider free choice shipped end-to-end** (ModelPin floor-vs-default semantics, workers default-pinned), the **producer-freshness monitor** that makes silent producer death visible within a day, the **door writing a dispatches row on acceptance**, provider-lane **failure classification with a dead-route registry**, **ringbuffer truncate on every teardown path**, phantom-guard **worktree-branch resolution**, and **coordination-lock hardening** (bounded retry + process-group cleanup).
