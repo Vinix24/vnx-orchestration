@@ -167,6 +167,35 @@ def _inject_skill_context(
     )
 
 
+def _has_prompt_assembler_role(role: str | None) -> bool:
+    """True when PromptAssembler has a role prompt for *role*.
+
+    PromptAssembler's L2 reads ``scripts/lib/prompts/roles/<role>.md`` and falls
+    back to base_worker.md when the file is missing — so two distinct roles
+    WITHOUT a prompt file (e.g. quality-engineer vs system-architect) would
+    otherwise receive byte-identical context.
+    """
+    if not role:
+        return False
+    return (Path(__file__).resolve().parent.parent / "prompts" / "roles" / f"{role}.md").exists()
+
+
+def _has_legacy_role_source(role: str | None) -> bool:
+    """True when the legacy 3-tier has a ROLE-SPECIFIC source (agents/ or skills/).
+
+    Terminal fallback is deliberately excluded: it is generic per terminal, not
+    role context. Only role-specific sources decide the routing below.
+    """
+    if not role:
+        return False
+    import subprocess_dispatch as _sd
+    root = _sd.Path(_sd.__file__).resolve().parents[2]
+    return (
+        (root / "agents" / role / "CLAUDE.md").exists()
+        or (root / ".claude" / "skills" / role / "CLAUDE.md").exists()
+    )
+
+
 def _try_prompt_assembler(
     terminal_id: str,
     instruction: str,
@@ -174,7 +203,23 @@ def _try_prompt_assembler(
     dispatch_metadata: "dict | None",
     intelligence_section: str,
 ) -> str | None:
-    """Attempt PromptAssembler path; return assembled pipe_input or None on failure."""
+    """Attempt PromptAssembler path; return assembled pipe_input or None on failure.
+
+    Dispatch-20260801-w10 routing fix: when the role has a project-level
+    agents/skills source but NO PromptAssembler role prompt, return None to route
+    through the legacy 3-tier resolution. PromptAssembler would otherwise
+    silently substitute base_worker.md as L2, so a dispatch with
+    ``role=quality-engineer`` got the exact same context as one with
+    ``role=system-architect``. Roles WITH a prompt file (backend-developer,
+    test-engineer, ...) keep using PromptAssembler unchanged.
+    """
+    if _has_prompt_assembler_role(role) is False and _has_legacy_role_source(role):
+        logger.info(
+            "_inject_skill_context: role=%s has no PromptAssembler prompt but has a "
+            "legacy role source — using legacy 3-tier so agents/{role}/CLAUDE.md reaches the worker",
+            role,
+        )
+        return None
     try:
         from prompt_assembler import PromptAssembler  # noqa: PLC0415
         assembler = PromptAssembler()

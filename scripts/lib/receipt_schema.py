@@ -121,6 +121,18 @@ class ReceiptV2:
     # timeout, model_error, unknown). failure_reason is the human-readable detail.
     failure_reason: Optional[str] = None
     failure_class: Optional[str] = None
+    # Deterministic role-applied control (dispatch-20260801-w10): stamped by the
+    # provider/envelope GOVERN paths after the deterministic check that the
+    # resolved role source's content actually reached the assembled final prompt.
+    # role_tier is one of prompt_assembler | agents | skills | terminal | none.
+    # role_applied is False (stamped) when the resolved source content is absent
+    # from the prompt; role_not_applied_reason explains why. Conditionally stamped
+    # (None omits), so lanes that do not yet compute the verdict keep a
+    # byte-identical receipt shape.
+    role_applied: Optional[bool] = None
+    role_tier: Optional[str] = None
+    role_not_applied_reason: Optional[str] = None
+    role_source_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -188,6 +200,14 @@ class ReceiptV2:
             receipt["failure_reason"] = self.failure_reason
         if self.failure_class is not None:
             receipt["failure_class"] = self.failure_class
+        if self.role_applied is not None:
+            receipt["role_applied"] = self.role_applied
+        if self.role_tier is not None:
+            receipt["role_tier"] = self.role_tier
+        if self.role_not_applied_reason is not None:
+            receipt["role_not_applied_reason"] = self.role_not_applied_reason
+        if self.role_source_path is not None:
+            receipt["role_source_path"] = self.role_source_path
         return receipt
 
 
