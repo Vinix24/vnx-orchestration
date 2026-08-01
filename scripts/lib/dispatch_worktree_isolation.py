@@ -18,8 +18,8 @@ worker's own dispatch id fails loud instead of running for 25 minutes on the
 wrong identity.
 
 The claim REGISTRY lives under the canonical state root resolved by
-``vnx_paths.resolve_paths()["VNX_STATE_DIR"]`` — the ADR-026 SSOT, not a
-per-checkout ``<repo>/.vnx-data/state``.  A claim map that must serialize two
+``vnx_paths.resolve_data_root(project_root) / "state"`` — the ADR-026 SSOT, not
+a per-checkout ``<repo>/.vnx-data/state``.  A claim map that must serialize two
 concurrent dispatches has to be visible from BOTH racing contexts (the main
 checkout and the dispatch worktree); a repo-local pin would fork the registry
 exactly as far apart as the racing worktrees are, and the OI-861 race would

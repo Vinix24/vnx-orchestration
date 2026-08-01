@@ -66,6 +66,7 @@ class FakeTmux:
         receipt_status: str = "done",
         ready_content: str = "Welcome to Claude\n? for shortcuts",
         post_paste_capture_seq: "list[str] | None" = None,
+        post_paste_content: "str | None" = None,
     ) -> None:
         self.receipts_file = receipts_file
         self.dispatch_id = dispatch_id
@@ -77,6 +78,10 @@ class FakeTmux:
         self._receipt_status = receipt_status
         self._ready_content = ready_content
         self._post_paste_seq: list[str] = list(post_paste_capture_seq or [])
+        # OI-863: persistent content for capture-pane calls AFTER the submit
+        # (once post_paste_capture_seq is exhausted), e.g. a pane that stays on
+        # a permission prompt.  None → fall back to ready_content.
+        self._post_paste_content = post_paste_content
         self.commands: list[list[str]] = []
         self.pasted: list[str] = []
         self.killed_sessions: list[str] = []
@@ -101,9 +106,14 @@ class FakeTmux:
             return TmuxResult(0, "@1\n")
 
         if cmd == "capture-pane":
-            # Post-paste: consume the staged-response queue (FIFO).
-            if self._paste_fired and self._post_paste_seq:
-                return TmuxResult(0, self._post_paste_seq.pop(0))
+            # Post-paste: consume the staged-response queue (FIFO) first, then
+            # fall back to persistent post-paste content (OI-863 permission
+            # prompts), then to ready_content.
+            if self._paste_fired:
+                if self._post_paste_seq:
+                    return TmuxResult(0, self._post_paste_seq.pop(0))
+                if self._post_paste_content is not None:
+                    return TmuxResult(0, self._post_paste_content)
             return TmuxResult(0, self._ready_content)
 
         if cmd == "load-buffer":
@@ -723,7 +733,8 @@ class TestWorkStartedGate(_LaneTestCase):
     def test_hand_deliver_renudges_when_still_staged(self):
         """Unit test of the gate directly: when no work is observed AND the instruction
         is still staged in the input region, the gate sends ONE guarded re-nudge Enter
-        and emits interactive_hand_deliver, then returns False (no work)."""
+        and emits interactive_hand_deliver, then returns WORK_START_NO_PROGRESS (the
+        staged idle pane carries no permission prompt)."""
         # Persistent staged content (would trip _verify_submit in a full dispatch, so we
         # exercise the gate method directly): capture-pane always shows the paste
         # annotation and no working indicator.
@@ -738,6 +749,7 @@ class TestWorkStartedGate(_LaneTestCase):
             "VNX_TMUX_WORK_START_TIMEOUT": "0.1",
             "VNX_TMUX_WORK_START_POLL": "0.02",
         }):
+            from tmux_interactive_dispatch import WORK_START_NO_PROGRESS
             observed = lane._await_work_started(
                 "%1",
                 self.DISPATCH_ID,
@@ -748,7 +760,7 @@ class TestWorkStartedGate(_LaneTestCase):
                 label="T1",
             )
 
-        self.assertFalse(observed, "no work was ever observed")
+        self.assertEqual(observed, WORK_START_NO_PROGRESS, "no work was ever observed")
         enters = [
             c for c in fake.commands
             if c[:1] == ["send-keys"] and c[-1] == "Enter"
@@ -757,6 +769,98 @@ class TestWorkStartedGate(_LaneTestCase):
         with get_connection(self.state_dir) as conn:
             events = get_events(conn, entity_id=self.DISPATCH_ID)
         self.assertIn("interactive_hand_deliver", {e["event_type"] for e in events})
+
+
+# The literal OI-863 pane: sfp1c stuck on a Bash(chmod:*) permission rule.
+_PERMISSION_PANE_TEXT = (
+    "Permission rule Bash(chmod:*) requires confirmation for this command.\n"
+    "\n"
+    "Do you want to proceed?\n"
+    "  1. Yes\n"
+    "  2. Yes, and don't ask again for this project\n"
+    "  3. No\n"
+)
+
+
+class TestAwaitingPermission(_LaneTestCase):
+    def test_permission_prompt_is_not_fast_aborted(self):
+        """OI-863: a worker blocked on a permission prompt at work-start must NOT be
+        fast-aborted as interactive_no_progress.  The lane proceeds to the receipt
+        wait, emits interactive_awaiting_permission, and fails at deadline with the
+        distinct awaiting_permission reason — never killing a worker one keystroke
+        would save."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            post_paste_content=_PERMISSION_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, deadline_seconds=0.3, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "awaiting_permission")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        event_types = {e["event_type"] for e in events}
+        self.assertIn("interactive_awaiting_permission", event_types)
+        self.assertNotIn("interactive_no_progress", event_types)
+
+    def test_working_worker_still_fails_as_deadline_not_permission(self):
+        """A genuinely working worker (token counter, no prompt) must NOT be
+        classified awaiting_permission — the deadline stays a plain deadline."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+        self.assertNotEqual(result.failure_reason, "awaiting_permission")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertNotIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
+
+    def test_mid_wait_permission_prompt_emits_event(self):
+        """OI-863: a permission prompt raised MID receipt-wait (after the worker had
+        started) is surfaced via interactive_awaiting_permission on the first poll
+        that sees it, well before the deadline."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            # Direct wait-loop call: the pane ALREADY shows the permission prompt
+            # (ready_content, since no paste precedes the call in this unit test).
+            ready_content=_PERMISSION_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        # baseline_backstop=True so a report left by an earlier test in the shared
+        # /var/folders temp root is treated as baseline, not fresh completion.
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.15,
+            poll_interval=0.02,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),
+            baseline_backstop=True,
+            pane_id="%1",
+            label="T1",
+        )
+        self.assertIsNone(result, "no receipt ever arrives on a blocked worker")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
 
 
 class TestHeadlessGuard(_LaneTestCase):
