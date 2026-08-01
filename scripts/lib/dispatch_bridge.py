@@ -223,7 +223,12 @@ def stage_spec_bundle(
         "dispatch_id": dispatch_id,
         "staging_id": staging_id,
         "instruction_file": str(instruction_file.resolve()),
-        "role": role or "backend-developer",
+        # OI-921: never silently fill the backend-developer sentinel. An empty role
+        # is staged as an explicit "" so the door's validate() Rule 7 rejects it
+        # loud (bad-role) — the caller MUST choose a real role. The distinction
+        # between "no role chosen" (empty) and a conscious "backend-developer"
+        # (a valid agents/ role) is preserved on the spec.
+        "role": (role or "").strip(),
         "target_slot": target_slot,
         "gate": _canonical_gate(gate),
         "dispatch_paths": [
@@ -316,7 +321,10 @@ def deliver_via_door(
         return bridge_dispatch(
             instruction_text=instruction_text,
             dispatch_id=dispatch_id,
-            role=role or "backend-developer",
+            # OI-921: pass the caller's role through unchanged — never inject the
+            # backend-developer sentinel here. stage_spec_bundle writes "" for an
+            # unset role so the door rejects it loud instead of silently defaulting.
+            role=role,
             target_slot=target_slot,
             provider=provider,
             model=model,
@@ -340,7 +348,9 @@ def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description="VNX legacy→door dispatch bridge (PR-12)")
     parser.add_argument("--dispatch-id", required=True)
     parser.add_argument("--terminal", required=True, dest="target_slot")
-    parser.add_argument("--role", default="backend-developer")
+    # OI-921: NO sentinel default — a caller that omits --role must fail loud at the
+    # door (validate Rule 7) rather than silently dispatch as backend-developer.
+    parser.add_argument("--role", default="")
     parser.add_argument("--provider", default="claude")
     parser.add_argument("--model", default=None)
     parser.add_argument("--gate", default="")
