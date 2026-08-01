@@ -315,9 +315,10 @@ def claim_next_queued_dispatch(
     isolation_level=None (required for explicit BEGIN IMMEDIATE) commits
     any pending implicit transaction on the connection.
     """
+    prev_isolation_level = conn.isolation_level
     conn.isolation_level = None  # autocommit mode for manual BEGIN IMMEDIATE control
-    conn.execute("BEGIN IMMEDIATE")
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
             SELECT dispatch_id FROM dispatches
@@ -386,6 +387,9 @@ def claim_next_queued_dispatch(
         except sqlite3.Error:
             pass
         raise
+    finally:
+        # Restore the caller's isolation mode — don't leave it in autocommit. (OI-015)
+        conn.isolation_level = prev_isolation_level
 
 
 def update_attempt(

@@ -170,6 +170,15 @@ class TestClaimBasic(_DbTestCase):
             result = claim_next_queued_dispatch(c, "T1", "test-proj")
         self.assertEqual(result, "d-p1")
 
+    def test_claim_restores_conn_isolation_level(self):
+        """OI-015: claim must not leave the caller's connection in autocommit mode."""
+        self._insert_queued("d-iso-001")
+        with self.conn() as c:
+            before = c.isolation_level
+            result = claim_next_queued_dispatch(c, "T1", "test-proj")
+            self.assertEqual(result, "d-iso-001")
+            self.assertEqual(c.isolation_level, before)
+
 
 class TestClaimCrossProjectIsolation(_DbTestCase):
     """ADR-007: project-A claimer must never see project-B queued rows."""
