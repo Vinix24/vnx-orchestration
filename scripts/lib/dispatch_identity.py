@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 # trail must stop propagating it — treated as "no real role".
 _FAKE_DEFAULT_ROLE = "backend-developer"
 
+# Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
+# backend-developer default (receipt-quality track).
+_IDENTITY_UNRESOLVED = "identity_unresolved"
+
 # Receipt-quality PR-4: instruction-header source used by the write-time
 # capture-gap backfill (mirrors subprocess_dispatch._ROLE_HEADER_RE).
 _ROLE_HEADER_RE = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
@@ -164,3 +168,33 @@ def resolve_dispatch_role(
             exc_info=True,
         )
         return None
+
+
+def resolve_effective_role(
+    role: Optional[str],
+    dispatch_id: str,
+    project_id: str,
+    state_dir: Optional[Path] = None,
+) -> str:
+    """Resolve the dispatch's real role for receipt/report emission.
+
+    The single canonical resolution shared by every emit path
+    (``dispatch_govern._resolve_govern_role``, ``dispatch_envelope._govern``,
+    ``provider_dispatch._emit_governance``, ``report_to_receipt_converter``).
+
+    Order:
+      1. A genuinely-set caller role (never the fake ``backend-developer``
+         default, which writers stamp when they never resolved a real role).
+      2. ``dispatch_metadata`` via the ADR-007 composite key
+         (``dispatch_id``, ``project_id``) — the fallback for writers that
+         never carried a real role on the spec.
+      3. ``"identity_unresolved"``.
+
+    FAIL-OPEN: never raises — receipt/report emission must not break on the
+    identity join (mirrors ``resolve_dispatch_role``'s contract).
+    """
+    candidate = (role or "").strip()
+    if candidate and candidate != _FAKE_DEFAULT_ROLE:
+        return candidate
+    resolved = resolve_dispatch_role(dispatch_id, project_id, state_dir=state_dir)
+    return resolved or _IDENTITY_UNRESOLVED

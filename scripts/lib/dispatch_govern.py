@@ -46,12 +46,10 @@ logger = logging.getLogger(__name__)
 # since the tmux dispatch.sh sets PYTHONPATH to scripts/lib only (not scripts/).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 
-# The fake default stamped by writers that never resolved a real role. The
-# receipt trail must never propagate it (mirrors dispatch_identity).
-_FAKE_DEFAULT_ROLE = "backend-developer"
-
 # Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
-# backend-developer default (receipt-quality track).
+# backend-developer default (receipt-quality track). The fake-default guard
+# itself lives in dispatch_identity.resolve_effective_role, the shared resolver
+# every emit path uses.
 _IDENTITY_UNRESOLVED = "identity_unresolved"
 
 # The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
@@ -71,8 +69,8 @@ def _resolve_govern_role(spec: "GovernSpec") -> str:
     """Resolve the dispatch's real role for govern-emitted receipts/frontmatter.
 
     Receipt-quality PR-2: propagate dispatch identity into the GOVERN-
-    SYNTHESIZED emit path via the same resolver PR-1 added for the v2 emit
-    path (``dispatch_identity.resolve_dispatch_role``).
+    SYNTHESIZED emit path via the shared resolver
+    (``dispatch_identity.resolve_effective_role``).
 
     Order:
       1. ``spec.role`` when genuinely set (never the fake default).
@@ -83,23 +81,18 @@ def _resolve_govern_role(spec: "GovernSpec") -> str:
     FAIL-OPEN: never raises — receipt/report emission must not break on the
     identity join.
     """
-    spec_role = (spec.role or "").strip()
-    if spec_role and spec_role != _FAKE_DEFAULT_ROLE:
-        return spec_role
-    resolved: Optional[str] = None
     try:
-        from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+        from dispatch_identity import resolve_effective_role  # noqa: PLC0415
         from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-        resolved = resolve_dispatch_role(
-            spec.dispatch_id, _resolve_project_id(), state_dir=spec.state_dir,
+        return resolve_effective_role(
+            spec.role, spec.dispatch_id, _resolve_project_id(), state_dir=spec.state_dir,
         )
     except Exception:  # noqa: BLE001 — identity join is fail-open
         logger.debug(
             "govern: role resolution failed open dispatch=%s",
             spec.dispatch_id, exc_info=True,
         )
-        resolved = None
-    return resolved or _IDENTITY_UNRESOLVED
+        return _IDENTITY_UNRESOLVED
 
 
 # ---------------------------------------------------------------------------
