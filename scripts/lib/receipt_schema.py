@@ -55,6 +55,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# OI-817 (kimi_gate nitpick on PR-B0): ``schema_version`` / ``event_type`` are
+# part of the v2 contract's identity (ADR-035 §3.2.1/§7.1 r2 — never keyed on
+# status; always ``task_complete``), not caller data. ``ReceiptV2.__post_init__``
+# forces these constants so a future emit site cannot bypass them by stamping a
+# non-v2 receipt or a different event_type.
+RECEIPT_V2_SCHEMA_VERSION = 2
+RECEIPT_V2_EVENT_TYPE = "task_complete"
+
+
 @dataclass
 class ReceiptV2:
     """The ADR-035 v2 dispatch receipt emitted by ``governance_emit``.
@@ -90,9 +99,10 @@ class ReceiptV2:
     report_path: Optional[str] = None
     events_path: Optional[str] = None
     cost_usd: Optional[float] = None
-    # Stamped from the contract's own defaults; overridable for tests.
-    event_type: str = "task_complete"
-    schema_version: int = 2
+    # Contract identity — forced to the module constants in __post_init__
+    # (OI-817), never caller-overridable.
+    event_type: str = RECEIPT_V2_EVENT_TYPE
+    schema_version: int = RECEIPT_V2_SCHEMA_VERSION
     timestamp: Optional[str] = None  # None -> stamped with now at construction
     # Conditionally stamped.
     permission_enforcement: Optional[str] = None
@@ -128,6 +138,11 @@ class ReceiptV2:
         self.receipt_kind = validate_receipt_kind(self.receipt_kind)
         # Same normalization the pre-PR-B0 literal applied at build time.
         self.duration_seconds = round(float(self.duration_seconds), 3)
+        # OI-817: schema_version/event_type are contract identity — force the
+        # constants regardless of what a caller passed (a future emit site must
+        # not be able to bypass them).
+        self.schema_version = RECEIPT_V2_SCHEMA_VERSION
+        self.event_type = RECEIPT_V2_EVENT_TYPE
         if self.timestamp is None:
             self.timestamp = _utc_now_iso()
 
