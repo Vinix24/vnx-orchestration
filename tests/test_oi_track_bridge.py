@@ -177,6 +177,26 @@ def _events(state_dir, event_type):
     return out
 
 
+def _plan_blocker(state_dir, track_id, *, resolved=False):
+    """Insert a synthetic OI-PLAN-<track> plan-gate blocker row directly.
+
+    Mirrors the row ``planning_cli._seed_plan_blocker`` creates (blocks/manual),
+    optionally pre-resolved as a gate that already passed. The track must exist
+    (the 0024 composite FK (track_id, project_id) → tracks is enforced)."""
+    db = state_dir / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        "INSERT INTO track_open_items "
+        "(track_id, project_id, oi_id, link_type, link_source, resolved_at) "
+        "VALUES (?, ?, ?, 'blocks', 'manual', ?)",
+        (track_id, PROJECT_ID, f"OI-PLAN-{track_id}",
+         "2026-07-01T00:00:00Z" if resolved else None),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # R4.3 / R8.3 — require resolution schema (pre-0030 fails)
 # ---------------------------------------------------------------------------
@@ -1357,3 +1377,66 @@ class TestPerItemFieldHardening:
         assert "OI-x" in res.unmappable
         assert res.linked == 0
         assert _rows(state_dir, "OI-x") == []
+
+
+# ---------------------------------------------------------------------------
+# OI-929 — the bridge must NOT close the synthetic OI-PLAN-<track> plan-gate
+# blockers. They belong to the plan-first gate lifecycle
+# (planning_cli._seed_plan_blocker / _resolve_plan_blocker), never to the
+# open-items store, and never map to open_items.json — so the R4.2 obsolete-
+# sweep would close every one of them. The carve-out is per-sweep: a genuinely
+# obsolete OI-xxx link still closes, and a resolved plan blocker never reopens.
+# ---------------------------------------------------------------------------
+
+class TestPlanGateBlockersPreserved:
+    def test_unresolved_plan_blocker_survives_bridge_run(self, state_dir):
+        """OI-929 regression: an unresolved OI-PLAN-<track> blocker must NOT be
+        closed by the obsolete-sweep — it never maps to open_items.json and is
+        owned by the plan-first gate, not the open-items store."""
+        _mk_track(state_dir, "feat-a")
+        _plan_blocker(state_dir, "feat-a")
+        assert _rows(state_dir, "OI-PLAN-feat-a")[0]["resolved_at"] is None
+
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID,
+            open_items=[_oi("OI-1", pr_id="#404")],  # unrelated real OI (unmappable)
+        )
+        row = _rows(state_dir, "OI-PLAN-feat-a")[0]
+        assert row["resolved_at"] is None          # NOT closed by the sweep
+        assert row["resolution_reason"] is None
+        assert res.unlinked == 0                    # nothing destroyed
+        assert "OI-PLAN-feat-a" not in res.unmappable  # not a fake "unmappable" tally
+        assert res.plan_gate_links_skipped == 1     # counted honestly instead
+
+    def test_genuinely_obsolete_oi_link_still_closed(self, state_dir):
+        """The plan-gate carve-out must NOT disable the whole sweep: a real,
+        genuinely obsolete OI-xxx link with no current mapping still closes."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        _plan_blocker(state_dir, "feat-a")
+        bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100")])
+        assert _active_blocks(state_dir) == 2  # real OI-1 + plan blocker
+
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID,
+            open_items=[_oi("OI-1", status="done", pr_id="#100")])
+        # The genuinely obsolete OI-1 link closes...
+        assert res.unlinked == 1
+        assert _rows(state_dir, "OI-1")[0]["resolved_at"] is not None
+        # ...but the plan blocker survives untouched.
+        assert _rows(state_dir, "OI-PLAN-feat-a")[0]["resolved_at"] is None
+        assert _active_blocks(state_dir) == 1
+        assert res.plan_gate_links_skipped == 1
+
+    def test_resolved_plan_blocker_stays_resolved(self, state_dir):
+        """A plan blocker the gate already resolved stays resolved — the bridge
+        neither reopens it nor unlinks it (the carve-out is not a wipe-and-recreate)."""
+        _mk_track(state_dir, "feat-a")
+        _plan_blocker(state_dir, "feat-a", resolved=True)
+        assert _rows(state_dir, "OI-PLAN-feat-a")[0]["resolved_at"] is not None
+
+        res = bridge.import_open_items_to_tracks(state_dir, PROJECT_ID, open_items=[])
+        assert res.reopened == 0
+        assert res.unlinked == 0
+        assert res.linked == 0
+        assert _rows(state_dir, "OI-PLAN-feat-a")[0]["resolved_at"] is not None
