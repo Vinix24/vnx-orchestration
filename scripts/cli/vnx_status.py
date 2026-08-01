@@ -182,6 +182,7 @@ def _build_json_output(cs: dict, t0: dict) -> dict:
         "terminals": t0.get("terminals", {}),
         "recent_decisions": cs.get("decisions", [])[:3],
         "queues": t0.get("queues", {}),
+        "system_health": t0.get("system_health", {}),
         "strategy_available": bool(cs),
         "t0_state_available": bool(t0),
     }
