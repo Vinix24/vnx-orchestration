@@ -25,6 +25,7 @@ from .models import (
     SessionMetrics,
     SessionFlags,
     RunStats,
+    fail_closed_exit_code,
 )
 from .parser import SessionParser
 from .detector import HeuristicDetector
@@ -35,7 +36,7 @@ from .runner import ConversationAnalyzer
 __all__ = [
     "SessionParser", "SessionMetrics", "SessionFlags",
     "HeuristicDetector", "DeepAnalyzer", "DigestGenerator",
-    "ConversationAnalyzer", "RunStats", "normalize_model",
+    "ConversationAnalyzer", "RunStats", "fail_closed_exit_code", "normalize_model",
     "Colors", "log",
     "CLAUDE_PROJECTS_DIR", "SCRIPT_DIR", "PATHS",
     "VNX_BASE", "STATE_DIR", "DB_PATH", "ANALYZER_VERSION",
