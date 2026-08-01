@@ -257,3 +257,55 @@ class TestConcurrentGatesDoNotCollide:
         finally:
             remove_gate_worktree(wt_a, project_root=local)
             remove_gate_worktree(wt_b, project_root=local)
+
+
+class TestLinkedWorktreeLockDir:
+    """OI-905: `_worktree_lock` must resolve the shared git dir via
+    `git rev-parse --git-common-dir`, not assume `<root>/.git` is a directory.
+
+    In a linked git worktree `.git` is an ASCII file pointing at the real
+    gitdir, so `mkdir` under `<root>/.git/worktrees` raises
+    NotADirectoryError before any gate can run. This suite reproduces that
+    exact layout (`git worktree add`) and requires create/remove to succeed.
+    """
+
+    def test_create_and_remove_work_in_linked_worktree(self, origin_and_local, tmp_path):
+        """create_gate_worktree/remove_gate_worktree must work when project_root
+        is itself a linked worktree (.git is a file, not a directory)."""
+        local = origin_and_local["local"]
+        linked = tmp_path / "linked-wt"
+        _run_git(["worktree", "add", "-b", "wt-branch", str(linked)], local)
+
+        # Sanity: in a linked worktree .git is a file, not a directory — the
+        # exact layout that crashed on `<root>/.git/worktrees` mkdir.
+        assert (linked / ".git").is_file()
+        assert not (linked / ".git").is_dir()
+
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="linked",
+            project_root=linked,
+        )
+        try:
+            assert wt_path.exists()
+            assert (wt_path / "marker.txt").read_text() == "FRESH_FROM_PR_BRANCH\n"
+        finally:
+            remove_gate_worktree(wt_path, project_root=linked)
+
+        assert not wt_path.exists()
+
+    def test_worktree_lock_uses_common_git_dir_not_linked_git_file(
+        self, origin_and_local, tmp_path,
+    ):
+        """The lock file must land under the shared git dir's worktrees/, which
+        for a linked worktree is the main repo's .git/worktrees/, never under
+        the .git *file*."""
+        from gate_worktree import _git_common_dir
+
+        local = origin_and_local["local"]
+        linked = tmp_path / "linked-wt"
+        _run_git(["worktree", "add", "-b", "wt-branch", str(linked)], local)
+
+        common = _git_common_dir(linked)
+        assert common == (local / ".git").resolve()
+        assert common.is_dir()
+        assert (common / "worktrees").is_dir()
