@@ -393,6 +393,9 @@ class PanelistResult:
     dispatched: bool = False         # did the dispatch + report read succeed
     parse_error: bool = False
     error: str = ""
+    raw_text: str = ""               # OI-839: the lane's raw report, kept ONLY on
+                                     # parse_error so the unparseable output survives
+                                     # for diagnosis instead of vanishing with the tempfile
 
 
 def _decision(decision: str, block: int, revise: int, passes: int, rationale: str) -> Dict[str, Any]:
@@ -740,12 +743,17 @@ def _dispatch_one(
             dispatched=False, error=str(exc), report_path=dispatch_id,
         )
     parsed = parse_verdict(report_text)
+    # OI-839: on parse_error the raw lane output is the ONLY diagnostic that tells
+    # us WHAT failed to parse (trailing comma, prose-bleed, nested fence). Keep it
+    # on the result so _emit_seat_records can persist it into the hash-chained
+    # seat ledger — previously it vanished with the temporary report file.
     return PanelistResult(
         label=member["label"], provider=member["provider"],
         model=member.get("model_arg", ""),
         verdict=parsed["verdict"], blocking_findings=parsed["blocking_findings"],
         rationale=parsed["rationale"], parse_error=parsed["parse_error"],
         dispatched=True, report_path=dispatch_id,
+        raw_text=report_text if parsed["parse_error"] else "",
     )
 
 
@@ -809,7 +817,7 @@ def _emit_seat_records(
                 if (result.dispatched and not result.parse_error)
                 else "abstain"
             )
-            append_chained_entry(seat_ledger_path, {
+            record = {
                 "type": SEAT_RECORD_TYPE,
                 "track_id": track_id,
                 "project_id": project_id,
@@ -819,7 +827,14 @@ def _emit_seat_records(
                 "responded": result.dispatched,
                 "parse_error": result.parse_error,
                 "run_at": now,
-            })
+            }
+            # OI-839: carry the raw lane output on parse-error records so the
+            # unparseable text is preserved in the durable, hash-chained ledger
+            # for diagnosis — a later parser hardening can be built against the
+            # REAL failure mode instead of a guessed one.
+            if result.parse_error and result.raw_text:
+                record["raw_output"] = result.raw_text
+            append_chained_entry(seat_ledger_path, record)
     except Exception:  # vnx-silent-except: seat persistence must never break the gate
         return
 

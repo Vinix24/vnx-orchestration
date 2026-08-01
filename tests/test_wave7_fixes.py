@@ -102,13 +102,14 @@ class TestKimiAuditGapStatus:
 
         governance_calls = []
 
-        def capture_governance(args, provider, model, res, start, end, status):
+        def capture_governance(args, provider, model, res, start, end, status,
+                               event_store=None):
             governance_calls.append(status)
 
         with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
              patch("event_store.EventStore", return_value=MagicMock(append=MagicMock())), \
              patch("provider_dispatch._emit_governance", side_effect=capture_governance), \
-             patch.dict(os.environ, {"VNX_KIMI_MODEL": "k2-test"}):
+             patch.dict(os.environ, {"VNX_KIMI_MODEL": "kimi-k3"}):
 
             from provider_dispatch import _dispatch_kimi
 
@@ -117,7 +118,7 @@ class TestKimiAuditGapStatus:
                 terminal_id="T1",
                 instruction="test instruction",
                 provider="kimi",
-                model="k2-test",
+                model="kimi-k3",
                 pr_id=None,
             )
             rc = _dispatch_kimi(args)
@@ -133,13 +134,14 @@ class TestKimiAuditGapStatus:
 
         governance_calls = []
 
-        def capture_governance(args, provider, model, res, start, end, status):
+        def capture_governance(args, provider, model, res, start, end, status,
+                               event_store=None):
             governance_calls.append(status)
 
         with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
              patch("event_store.EventStore", return_value=MagicMock(append=MagicMock())), \
              patch("provider_dispatch._emit_governance", side_effect=capture_governance), \
-             patch.dict(os.environ, {"VNX_KIMI_MODEL": "k2-test"}):
+             patch.dict(os.environ, {"VNX_KIMI_MODEL": "kimi-k3"}):
 
             from provider_dispatch import _dispatch_kimi
 
@@ -148,7 +150,7 @@ class TestKimiAuditGapStatus:
                 terminal_id="T1",
                 instruction="test instruction",
                 provider="kimi",
-                model="k2-test",
+                model="kimi-k3",
                 pr_id=None,
             )
             rc = _dispatch_kimi(args)
