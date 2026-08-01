@@ -589,6 +589,43 @@ def _worktree_has_changes(worktree: Any, base_ref: str = "origin/main") -> Optio
     return None
 
 
+def _origin_branch_has_commits(dispatch_id: str, worktree: Any) -> bool:
+    """True iff ``origin/dispatch/<dispatch_id>`` exists on the remote.
+
+    Mirrors ``dispatch_outcome_classifier._origin_branch_has_commits``'s
+    salvage check for the same ``tmux_worktree.py`` branch-naming convention
+    (``f"dispatch/{dispatch_id}"``). A worker that commits, pushes, and opens
+    a PR can leave a locally-clean worktree (checked back out to the base
+    ref) — ``_worktree_has_changes`` alone then reads "no work" even though
+    the work already landed on origin (issue #1226: the false-positive that
+    made the kimi build-worker lane look unusable when it was not). This is
+    the escape hatch: proof the branch was pushed overrides a clean local
+    tree.
+
+    Existence-only (no tree-diff against base): pushing a branch is an
+    irreversible, network-verified side-effect a text-only fabrication can't
+    fake, unlike a local commit. Best-effort: any git/subprocess failure
+    yields False (fail-safe — a check that can't run must not waive the
+    guard) rather than raising.
+    """
+    if not dispatch_id:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), "ls-remote", "origin", f"dispatch/{dispatch_id}"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "kimi_spawn: fabrication-invariant origin-branch check failed for %s (skipping): %s",
+            dispatch_id, exc,
+        )
+        return False
+    if result.returncode != 0:
+        return False
+    return bool(result.stdout.strip())
+
+
 # Inherited venv-activation vars that point Python at a FOREIGN site-packages.
 # The kimi CLI is a standalone `uv tool` with its own isolated venv; if VNX is
 # invoked from inside an unrelated project's virtualenv (e.g. a worker spawned
@@ -780,6 +817,7 @@ def _finalize_kimi_result(
     raw_samples: Optional[list] = None,
     saw_tool_calls: bool = False,
     worktree: Optional[Any] = None,
+    dispatch_id: str = "",
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult.
 
@@ -791,6 +829,13 @@ def _finalize_kimi_result(
     approval defaults again). ``worktree=None`` (no isolation worktree known,
     e.g. non-worktree dispatches) skips the check gracefully — there is nothing
     to diff against.
+
+    ``dispatch_id`` feeds the issue #1226 escape hatch: a locally-clean
+    worktree that would otherwise trip the guard is waived when a matching
+    ``dispatch/<dispatch_id>`` branch exists on origin — proof the worker
+    committed, pushed, and (typically) opened a PR before its worktree was
+    reset back to a clean base. Omitted (``""``) skips the escape hatch, not
+    the guard itself.
     """
     try:
         proc.wait(timeout=10)
@@ -804,6 +849,8 @@ def _finalize_kimi_result(
     worktree_unchanged = False
     if saw_tool_calls and worktree is not None:
         worktree_unchanged = _worktree_has_changes(worktree) is False
+        if worktree_unchanged and dispatch_id and _origin_branch_has_commits(dispatch_id, worktree):
+            worktree_unchanged = False
 
     if errors_captured:
         error: Optional[str] = "\n".join(errors_captured)
@@ -973,6 +1020,7 @@ def spawn_kimi(
         raw_samples=raw_samples,
         saw_tool_calls=saw_tool_calls,
         worktree=cwd,
+        dispatch_id=dispatch_id,
     )
 
     # Post-run token harvest. stream-json carries no token accounting (measured

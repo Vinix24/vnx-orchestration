@@ -24,6 +24,7 @@ from provider_spawns.kimi_spawn import (  # noqa: E402
     _build_kimi_cmd,
     _finalize_kimi_result,
     _is_quota_or_auth_error,
+    _origin_branch_has_commits,
     _worktree_has_changes,
     normalize_kimi_event,
     spawn_kimi,
@@ -1289,6 +1290,154 @@ class TestFabricationInvariant(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
 
 
+class TestOriginBranchHasCommits(unittest.TestCase):
+    """`_origin_branch_has_commits` — the issue #1226 escape hatch: a pushed
+    ``dispatch/<id>`` branch on origin proves real work even when the local
+    worktree was reset back to a clean base after push."""
+
+    def test_empty_dispatch_id_returns_false(self) -> None:
+        with patch("provider_spawns.kimi_spawn.subprocess.run") as mock_run:
+            self.assertFalse(_origin_branch_has_commits("", Path("/tmp/wt")))
+        mock_run.assert_not_called()
+
+    def test_branch_present_on_origin_returns_true(self) -> None:
+        mock_result = MagicMock(
+            returncode=0,
+            stdout="abc123def456\trefs/heads/dispatch/d-46210c5d\n",
+        )
+        with patch("provider_spawns.kimi_spawn.subprocess.run", return_value=mock_result) as mock_run:
+            self.assertTrue(_origin_branch_has_commits("d-46210c5d", Path("/tmp/wt")))
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args, ["git", "-C", "/tmp/wt", "ls-remote", "origin", "dispatch/d-46210c5d"])
+
+    def test_branch_absent_from_origin_returns_false(self) -> None:
+        mock_result = MagicMock(returncode=0, stdout="")
+        with patch("provider_spawns.kimi_spawn.subprocess.run", return_value=mock_result):
+            self.assertFalse(_origin_branch_has_commits("d-nope", Path("/tmp/wt")))
+
+    def test_git_failure_returns_false(self) -> None:
+        mock_result = MagicMock(returncode=128, stdout="")
+        with patch("provider_spawns.kimi_spawn.subprocess.run", return_value=mock_result):
+            self.assertFalse(_origin_branch_has_commits("d-x", Path("/tmp/wt")))
+
+    def test_subprocess_exception_returns_false(self) -> None:
+        with patch("provider_spawns.kimi_spawn.subprocess.run", side_effect=OSError("no git")):
+            self.assertFalse(_origin_branch_has_commits("d-x", Path("/tmp/wt")))
+
+    def test_subprocess_timeout_returns_false(self) -> None:
+        with patch(
+            "provider_spawns.kimi_spawn.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10),
+        ):
+            self.assertFalse(_origin_branch_has_commits("d-x", Path("/tmp/wt")))
+
+
+class TestFabricationInvariantOriginEscapeHatch(unittest.TestCase):
+    """`_finalize_kimi_result`'s issue #1226 fix: a clean local worktree does
+    NOT trip the fabrication guard when the dispatch's branch was already
+    pushed to origin — the false-positive that made the kimi build-worker
+    lane look unusable when the worker had actually self-persisted via PR."""
+
+    @staticmethod
+    def _mock_proc(returncode: int = 0) -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.wait = MagicMock(return_value=returncode)
+        return proc
+
+    def test_clean_worktree_with_pushed_branch_passes(self) -> None:
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False), \
+             patch("provider_spawns.kimi_spawn._origin_branch_has_commits", return_value=True) as mock_origin:
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="Done, pushed dispatch/d1 and opened a PR.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                dispatch_id="d1",
+            )
+        mock_origin.assert_called_once_with("d1", Path("/tmp/fake-worktree"))
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_clean_worktree_without_pushed_branch_still_fails(self) -> None:
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False), \
+             patch("provider_spawns.kimi_spawn._origin_branch_has_commits", return_value=False):
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                dispatch_id="d1",
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_no_dispatch_id_skips_escape_hatch(self) -> None:
+        """Omitted dispatch_id must not waive the guard — only skip the
+        extra origin check, matching every pre-existing call site that
+        doesn't pass dispatch_id."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False), \
+             patch("provider_spawns.kimi_spawn._origin_branch_has_commits") as mock_origin:
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+            )
+        mock_origin.assert_not_called()
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+
+    def test_dirty_worktree_never_consults_origin(self) -> None:
+        """Real local work needs no origin round-trip — the escape hatch is
+        only consulted when the local check alone would fail the dispatch."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=True), \
+             patch("provider_spawns.kimi_spawn._origin_branch_has_commits") as mock_origin:
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="Done, file created.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                dispatch_id="d1",
+            )
+        mock_origin.assert_not_called()
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+
 class TestKimiFabricationInvariantEndToEnd(unittest.TestCase):
     """Full wiring through spawn_kimi() -> _consume_kimi_stream() ->
     _finalize_kimi_result(), against a real temp git worktree — proves the
@@ -1326,6 +1475,22 @@ class TestKimiFabricationInvariantEndToEnd(unittest.TestCase):
 
     def test_tool_calls_no_worktree_known_skips_gracefully(self) -> None:
         result = _spawn_kimi_with_events(self._TOOL_CALL_EVENTS, cwd=None)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_tool_calls_no_diff_but_pushed_branch_passes(self) -> None:
+        """End-to-end proof the issue #1226 escape hatch is wired all the way
+        through spawn_kimi(): a clean worktree with the dispatch's branch
+        already on origin must not fail the dispatch. ``_spawn_kimi_with_events``
+        always calls with ``dispatch_id="d1"``, so this exercises the real
+        threading, not just the isolated unit."""
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            with patch(
+                "provider_spawns.kimi_spawn._origin_branch_has_commits", return_value=True,
+            ) as mock_origin:
+                result = _spawn_kimi_with_events(self._TOOL_CALL_EVENTS, cwd=tmp)
+        mock_origin.assert_called_once_with("d1", tmp)
         self.assertIsNone(result.error)
         self.assertEqual(result.returncode, 0)
 
