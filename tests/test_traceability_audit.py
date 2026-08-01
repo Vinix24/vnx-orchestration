@@ -248,6 +248,43 @@ class TestCategoryC:
         report = gap_prs_without_receipt(prs, receipts, dispatches)
         assert report.gap_count == 0
 
+    def test_legacy_event_alias_pr_merged_traced(self):
+        """OI-003: legacy 'event: pr_merged' alias (no raw event_type key) must be traced."""
+        prs = [_pr(number=777, branch="feat/x")]
+        receipts = [
+            ReceiptRecord(
+                dispatch_id="20260101-legacy-impl",
+                pr_id="",
+                event_type="pr_merged",  # normalized from raw 'event' alias
+                status="success",
+                timestamp="2026-01-15T10:00:00Z",
+                commit_hash="",
+                terminal="T1",
+                source_file="test.ndjson",
+                raw={"event": "pr_merged", "pr_number": 777},
+            )
+        ]
+        dispatches: list[DispatchRecord] = []
+        report = gap_prs_without_receipt(prs, receipts, dispatches)
+        assert report.gap_count == 0, f"legacy pr_merged alias should be traced: {report.examples}"
+
+    def test_single_feat_token_does_not_attach_unrelated_dispatch(self):
+        """OI-003: a lone 'feat' branch token must not attach an unrelated dispatch."""
+        prs = [_pr(number=301, branch="feat/foo")]
+        receipts = [_receipt("20260101-feat-bar-impl", event_type="task_complete")]
+        dispatches: list[DispatchRecord] = []
+        report = gap_prs_without_receipt(prs, receipts, dispatches)
+        assert report.gap_count == 1, "single conventional-commit token must not link"
+        assert report.traced == 0
+
+    def test_branch_requires_two_significant_token_matches(self):
+        """OI-003: two significant branch tokens must both match to link."""
+        prs = [_pr(number=302, branch="feature/dispatch-audit")]
+        receipts = [_receipt("20260101-dispatch-audit-impl", event_type="task_complete")]
+        dispatches: list[DispatchRecord] = []
+        report = gap_prs_without_receipt(prs, receipts, dispatches)
+        assert report.gap_count == 0, f"two-token branch should link: {report.examples}"
+
     def test_unlinked_pr_is_gap(self):
         """PR with no linkage at all → gap."""
         prs = [_pr(number=999, title="chore: cleanup", branch="chore/cleanup")]
