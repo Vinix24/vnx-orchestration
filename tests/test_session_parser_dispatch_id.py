@@ -145,16 +145,65 @@ class TestProcessUserDispatchId:
         parser._process_user(record, metrics)
         assert metrics.dispatch_id == "20260731-123456-my-feature"
 
-    def test_only_first_three_messages_checked(self, parser):
-        """After 3 user messages, the parser stops looking for a dispatch ID."""
+    def test_real_id_from_bold_header(self, parser):
+        """A dispatch ID in a bold-styled header is accepted."""
         metrics = _make_metrics()
-        # First 3 have no dispatch ID
-        for _ in range(3):
+        record = _make_user_record("**Dispatch-ID:** 20260731-123456-my-feature")
+        parser._process_user(record, metrics)
+        assert metrics.dispatch_id == "20260731-123456-my-feature"
+
+    def test_real_id_with_trailing_period(self, parser):
+        """A dispatch ID followed by a sentence period is cleaned before storage."""
+        metrics = _make_metrics()
+        record = _make_user_record("Dispatch-ID: 20260731-123456-my-feature.")
+        parser._process_user(record, metrics)
+        assert metrics.dispatch_id == "20260731-123456-my-feature"
+
+    def test_placeholder_before_real_id_same_message(self, parser):
+        """A template placeholder before the real ID does not block extraction.
+
+        The worker-context template carries ``Dispatch-ID: <dispatch_id>`` in
+        its Commit Convention section, ahead of the Dispatch Metadata footer
+        with the real ID. First-match-only extraction lost these sessions
+        (OI-872); the parser must keep scanning and take the first VALID ID.
+        """
+        metrics = _make_metrics()
+        record = _make_user_record(
+            "Include in commit body:\n```\nDispatch-ID: <dispatch_id>\n```\n\n"
+            "### Dispatch Metadata\n\n- Dispatch-ID: 20260731-123456-my-feature\n"
+            "- Model: sonnet\n"
+        )
+        parser._process_user(record, metrics)
+        assert metrics.dispatch_id == "20260731-123456-my-feature"
+
+    def test_placeholder_only_message_stays_empty(self, parser):
+        """A message with only a placeholder keeps dispatch_id empty."""
+        metrics = _make_metrics()
+        record = _make_user_record(
+            "### Dispatch Metadata\n\n- Dispatch-ID: <dispatch_id>\n"
+        )
+        parser._process_user(record, metrics)
+        assert metrics.dispatch_id == ""
+
+    def test_only_first_scan_window_messages_checked(self, parser):
+        """After MAX_DISPATCH_SCAN_MESSAGES user messages, the parser stops looking."""
+        metrics = _make_metrics()
+        # First window-size messages have no dispatch ID
+        for _ in range(parser.MAX_DISPATCH_SCAN_MESSAGES):
             parser._process_user(_make_user_record("regular message"), metrics)
-        # 4th message has a real ID but should be ignored
+        # The next message has a real ID but is outside the scan window
         parser._process_user(
             _make_user_record("| **Dispatch-ID** | 20260731-123456-real |"), metrics)
         assert metrics.dispatch_id == ""
+
+    def test_real_id_inside_scan_window(self, parser):
+        """A real ID in the 6th user message is still within the scan window."""
+        metrics = _make_metrics()
+        for _ in range(5):
+            parser._process_user(_make_user_record("regular message"), metrics)
+        parser._process_user(
+            _make_user_record("| **Dispatch-ID** | 20260731-123456-real |"), metrics)
+        assert metrics.dispatch_id == "20260731-123456-real"
 
     def test_first_id_wins(self, parser):
         """The first valid dispatch ID found is kept; later ones are ignored."""
@@ -164,3 +213,32 @@ class TestProcessUserDispatchId:
         parser._process_user(record1, metrics)
         parser._process_user(record2, metrics)
         assert metrics.dispatch_id == "20260731-123456-first"
+
+
+class TestExtractDispatchId:
+    """Tests for SessionParser._extract_dispatch_id — first-valid-in-document-order."""
+
+    def test_none_for_no_mentions(self, parser):
+        """No Dispatch-ID mention yields None."""
+        assert parser._extract_dispatch_id("no dispatch here") is None
+
+    def test_skips_placeholder_to_real_id(self, parser):
+        """A later real ID is returned even when a placeholder appears first."""
+        text = "Dispatch-ID: <dispatch_id>\n\n### Dispatch Metadata\n- Dispatch-ID: 20260731-abc-123"
+        assert parser._extract_dispatch_id(text) == "20260731-abc-123"
+
+    def test_none_for_placeholder_only(self, parser):
+        """Placeholder-only text yields None."""
+        assert parser._extract_dispatch_id("Dispatch-ID: <dispatch_id>") is None
+
+    def test_first_valid_wins(self, parser):
+        """The first VALID ID wins; an invalid first candidate is skipped."""
+        text = ("Dispatch-ID: 20260731-abc-123\n"
+                "Dispatch-ID: 20260731-xyz-789")
+        assert parser._extract_dispatch_id(text) == "20260731-abc-123"
+
+    def test_table_and_header_order(self, parser):
+        """Table and header mentions are scanned in document order."""
+        text = ("Dispatch-ID: 20260731-header-1\n"
+                "| **Dispatch-ID** | 20260731-table-2 |")
+        assert parser._extract_dispatch_id(text) == "20260731-header-1"

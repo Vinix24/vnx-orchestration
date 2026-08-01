@@ -14,8 +14,22 @@ from .models import (
 class SessionParser:
     """Parse a Claude Code JSONL session into structured metrics."""
 
+    # How many initial user messages are scanned for a dispatch ID. A governed
+    # worker session always carries its own dispatch ID in the initial prompt
+    # (the Dispatch Metadata footer), so a bounded window is enough. The window
+    # is generous (10) to cover sessions where the real ID lands in a slightly
+    # later user message (measured: msg 6), while deliberately NOT scanning the
+    # full transcript — long-lived T0 orchestration sessions reference many
+    # other dispatches later on, and attributing the whole session to one of
+    # them would be wrong.
+    MAX_DISPATCH_SCAN_MESSAGES = 10
+
     DISPATCH_TABLE_RE = re.compile(r'\|\s*\*\*Dispatch-ID\*\*\s*\|\s*([^\|]+?)\s*\|')
-    DISPATCH_HEADER_RE = re.compile(r'Dispatch-ID:\s*(\S+)')
+    # Optional bold markers around the label ("**Dispatch-ID:** value") are
+    # tolerated so bold-styled mentions are captured instead of yielding the
+    # asterisks as the candidate. The closing "**" sits AFTER the colon in the
+    # bold form ("**Dispatch-ID:** value"), hence the trailing optional group.
+    DISPATCH_HEADER_RE = re.compile(r'(?:\*\*)?Dispatch-ID\s*:\s*(?:\*\*)?\s*(\S+)')
     # Placeholder pattern: <any-text> — template placeholders like <dispatch_id>
     # must never be treated as real IDs.
     PLACEHOLDER_RE = re.compile(r'^<[^>]+>$')
@@ -23,6 +37,10 @@ class SessionParser:
     # minimum validation that rejects template placeholders, empty strings,
     # and free-form text while accepting all real dispatch ID formats.
     VALID_DISPATCH_ID_RE = re.compile(r'^\d{8}-')
+    # Trailing prose punctuation that commonly follows an inline dispatch ID in
+    # free text ("Dispatch-ID: 20260613-852rev-deepseek.") — never part of the
+    # ID itself, stripped before the date-prefix check.
+    TRAILING_PUNCT_RE = re.compile(r'[.,;:!?)\]}\'"]+$')
 
     @staticmethod
     def session_id_from_path(jsonl_path: Path) -> str:
@@ -129,34 +147,64 @@ class SessionParser:
         Returns the trimmed string when it looks like a real dispatch ID,
         or None when the value is a template placeholder, empty, or
         otherwise not a valid ID.
+
+        Normalisation strips markdown bold markers (``**id**``) and trailing
+        prose punctuation (``Dispatch-ID: 20260613-x.``) that an inline mention
+        picks up from the surrounding sentence.
         """
         if not raw:
             return None
         candidate = raw.strip()
-        if not candidate:
-            return None
+        if candidate.startswith("**") and candidate.endswith("**"):
+            candidate = candidate[2:-2].strip()
         # Reject template placeholders: <dispatch_id>, <any-text>, etc.
         if cls.PLACEHOLDER_RE.match(candidate):
+            return None
+        # Strip trailing sentence punctuation (never part of a dispatch ID).
+        candidate = cls.TRAILING_PUNCT_RE.sub("", candidate)
+        if not candidate:
             return None
         # Require the YYYYMMDD- date-prefix that every real dispatch ID carries.
         if not cls.VALID_DISPATCH_ID_RE.match(candidate):
             return None
         return candidate
 
+    @classmethod
+    def _extract_dispatch_id(cls, text: str) -> Optional[str]:
+        """Return the first VALID dispatch ID found in *text*, or None.
+
+        Scans every Dispatch-ID mention (table cell or header) in document
+        order and returns the first candidate that passes validation.  A
+        template placeholder (``<dispatch_id>``) earlier in the text no longer
+        blocks extraction of a real ID that appears later in the same message:
+        the worker-context template carries the placeholder in its Commit
+        Convention section before the Dispatch Metadata footer holds the real
+        ID, so first-match-only extraction silently lost 96.7% of sessions
+        (OI-872).
+        """
+        candidates = []
+        for m in cls.DISPATCH_TABLE_RE.finditer(text):
+            candidates.append((m.start(), m.group(1)))
+        for m in cls.DISPATCH_HEADER_RE.finditer(text):
+            candidates.append((m.start(), m.group(1)))
+        candidates.sort(key=lambda pair: pair[0])
+        for _, raw in candidates:
+            validated = cls._validate_dispatch_id(raw)
+            if validated:
+                return validated
+        return None
+
     def _process_user(self, record: dict, metrics: SessionMetrics):
         metrics.user_message_count += 1
-        if not metrics.dispatch_id and metrics.user_message_count <= 3:
-            content = record.get("message", {}).get("content", "")
-            text = content if isinstance(content, str) else " ".join(
-                b.get("text", "") for b in content if isinstance(b, dict)
-            ) if isinstance(content, list) else ""
-            m = self.DISPATCH_TABLE_RE.search(text)
-            if not m:
-                m = self.DISPATCH_HEADER_RE.search(text)
-            if m:
-                validated = self._validate_dispatch_id(m.group(1))
-                if validated:
-                    metrics.dispatch_id = validated
+        if metrics.dispatch_id or metrics.user_message_count > self.MAX_DISPATCH_SCAN_MESSAGES:
+            return
+        content = record.get("message", {}).get("content", "")
+        text = content if isinstance(content, str) else " ".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        ) if isinstance(content, list) else ""
+        dispatch_id = self._extract_dispatch_id(text)
+        if dispatch_id:
+            metrics.dispatch_id = dispatch_id
 
     @staticmethod
     def _parse_timestamp(ts_str: str) -> Optional[datetime]:
