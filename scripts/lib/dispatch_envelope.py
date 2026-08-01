@@ -663,7 +663,10 @@ def _govern(
 
     duration = (end_time - start_time).total_seconds()
 
-    # REPORT first — idempotent: worker-written file is preserved, not overwritten
+    # REPORT first — idempotent: worker-written file is preserved, not overwritten.
+    # OI-903: on failure/timeout, a killed worker's partial report is preserved
+    # under a .partial.md sidecar so the canonical report stays contract-compliant
+    # while the partial output remains retrievable.
     report_path: Optional[Path] = None
     try:
         report_path = emit_unified_report(
@@ -675,6 +678,7 @@ def _govern(
             findings=[],
             duration_seconds=duration,
             data_dir=spec.data_dir,
+            preserve_partial=adapter_result.status != "success",
         )
     except Exception as exc:
         logger.error(

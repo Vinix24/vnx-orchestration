@@ -837,6 +837,10 @@ def _emit_governance(
                 duration_seconds=duration,
                 data_dir=data_dir,
                 frontmatter=frontmatter,
+                # OI-903: on failure/timeout, preserve a killed worker's partial
+                # report under a .partial.md sidecar instead of leaving an invalid
+                # file blocking the canonical (structured) failure report.
+                preserve_partial=status != "success",
             )
             print(f"Report: {report_path}", file=sys.stderr)
             break
