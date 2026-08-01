@@ -82,14 +82,40 @@ MODE_FILENAME = "mode.json"
 
 
 def _mode_file_path(data_dir: Optional[str] = None) -> Path:
-    """Return path to mode.json, deriving from environment if needed."""
-    if data_dir is None:
-        data_dir = os.environ.get("VNX_DATA_DIR")
-    if not data_dir:
-        raise RuntimeError(
-            "VNX_DATA_DIR not set. Run 'vnx init' first."
-        )
-    return Path(data_dir) / MODE_FILENAME
+    """Return the path to mode.json, resolving the data dir like the rest of the fabric.
+
+    Resolution order (the same two-key contract as ``project_root.resolve_data_dir``
+    and ``vnx_paths.resolve_paths``):
+
+      1. A caller-supplied ``data_dir`` wins (callers like ``vnx_setup`` /
+         ``vnx_starter`` pass the already-resolved ``VNX_DATA_DIR``).
+      2. ``VNX_DATA_DIR`` — honored ONLY when ``VNX_DATA_DIR_EXPLICIT=1`` is also
+         set. A bare inherited ``VNX_DATA_DIR`` is pollution, not config.
+      3. The fabric-controlled store for the active project:
+         ``vnx_paths.resolve_paths()["VNX_DATA_DIR"]`` — the SAME resolver the rest
+         of the fabric uses (``vnx_init``, ``vnx_setup``, ``vnx_starter``), which
+         applies the two-key contract and the data-dir/project-id guard.
+
+    Previously this read ``os.environ["VNX_DATA_DIR"]`` raw — the fourth data-dir
+    resolver in the fabric and the only one without any protection. A suite-wide
+    test run that pinned a scratch pad with ``VNX_DATA_DIR_EXPLICIT=1`` lost the
+    flag in a cleaned-env subprocess and the write silently fell back to
+    ``~/.vnx-data/<project_id>`` (OI-911).
+    """
+    if data_dir:
+        return Path(data_dir).expanduser().resolve() / MODE_FILENAME
+
+    explicit_val = os.environ.get("VNX_DATA_DIR", "").strip()
+    if explicit_val and os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+        return Path(explicit_val).expanduser().resolve() / MODE_FILENAME
+
+    # Deferred import: vnx_paths pulls in data_dir_guard / project_root, which
+    # must not be loaded at vnx_mode import time (vnx_mode is imported by the
+    # bash CLI from minimal PYTHONPATHs). resolve_paths itself warns about a bare
+    # VNX_DATA_DIR and runs the project-id guard on the resolved store.
+    from vnx_paths import resolve_paths
+    resolved = Path(resolve_paths()["VNX_DATA_DIR"]).expanduser().resolve()
+    return resolved / MODE_FILENAME
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -126,9 +152,77 @@ def read_mode(data_dir: Optional[str] = None) -> Optional[VNXMode]:
         return None
 
 
+def _guard_mode_write_target(target_dir: Path) -> None:
+    """Fail loud when a mode.json write would land outside the active project store.
+
+    Two checks (OI-911):
+
+    1. Divergence guard. When ``VNX_DATA_DIR`` is set WITHOUT
+       ``VNX_DATA_DIR_EXPLICIT=1``, the two-key contract treats it as inherited
+       pollution and the fabric resolver falls back to the resolved store. If
+       that fallback diverges from the env value, the process was configured for
+       a different data dir and writing mode.json to the fallback store is
+       exactly the OI-911 test-run incident. Refuse.
+    2. Cross-project guard. A write target under ``~/.vnx-data/<other>`` while
+       the resolved project_id is not ``<other>`` is a cross-project write.
+
+    When no project_id is resolvable the cross-project half cannot verify and
+    stays silent (same contract as ``data_dir_guard``); the divergence half is
+    env-verifiable and always runs.
+    """
+    try:
+        target = Path(target_dir).expanduser().resolve()
+    except OSError:
+        return
+
+    env_val = os.environ.get("VNX_DATA_DIR", "").strip()
+    explicit = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    if env_val and not explicit:
+        env_path = Path(env_val).expanduser().resolve()
+        if env_path != target:
+            raise RuntimeError(
+                f"mode.json write target {target} diverges from the inherited "
+                f"VNX_DATA_DIR={env_val} without VNX_DATA_DIR_EXPLICIT=1. A bare "
+                "VNX_DATA_DIR is pollution, not config: refusing to write mode.json "
+                "to a store the environment did not pin (OI-911). Set "
+                "VNX_DATA_DIR_EXPLICIT=1 to opt in explicitly."
+            )
+
+    home_vnx = Path.home() / ".vnx-data"
+    try:
+        rel = target.relative_to(home_vnx)
+    except ValueError:
+        return  # repo-local / scratch / XDG — not a central-store path
+
+    from project_root import resolve_project_id
+    try:
+        pid = resolve_project_id()
+    except RuntimeError:
+        return  # cannot verify against a project_id — allow
+    pid = pid.strip()
+    if not pid:
+        return
+    expected = home_vnx / pid
+    if target == expected or str(target).startswith(str(expected) + os.sep):
+        return
+    raise RuntimeError(
+        f"mode.json write target {target} is {rel.parts[0]!r}'s central store, "
+        f"but the active project resolves to {pid!r}. Refusing to write mode.json "
+        "into another project's store (OI-911). Set VNX_PROJECT_ID or run from "
+        "the correct project."
+    )
+
+
 def write_mode(mode: VNXMode, data_dir: Optional[str] = None) -> Path:
-    """Write mode to mode.json atomically. Returns the path written."""
+    """Write mode to mode.json atomically. Returns the path written.
+
+    Refuses (raises) when the write target is not the active project's store:
+    a write that diverges from a bare (non-explicit) ``VNX_DATA_DIR``, or that
+    lands in another project's ``~/.vnx-data/<other>``, is rejected loudly
+    (see :func:`_guard_mode_write_target`).
+    """
     path = _mode_file_path(data_dir)
+    _guard_mode_write_target(path.parent)
     payload = {
         "mode": str(mode),
         "set_at": datetime.now(timezone.utc).isoformat(),
