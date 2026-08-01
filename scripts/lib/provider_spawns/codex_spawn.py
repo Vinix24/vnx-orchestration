@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 
+# Cap on stderr lines drained per spawn. A real codex subprocess closes its pipe,
+# so readline() returns b"" and the loop breaks on EOF. This bound is the safety
+# valve for a stream that never terminates (e.g. a mock in tests) — it must never
+# leave the daemon drain thread alive forever (OI-910). Far above any realistic
+# stderr volume, so production behavior is unchanged.
+_STDERR_DRAIN_MAX_LINES = 1_000_000
+
 
 @dataclass
 class CodexSpawnResult:
@@ -415,10 +422,21 @@ def _launch_codex_proc(
     if proc.stderr is not None:
         def _drain_stderr(p, buf):
             try:
-                for line in iter(p.stderr.readline, b""):
+                for _ in range(_STDERR_DRAIN_MAX_LINES):
+                    line = p.stderr.readline()
+                    if line == b"":
+                        break
                     buf.append(line)
                     if len(buf) > 200:
                         del buf[:100]
+                else:
+                    # Loop exhausted without EOF — the stream never terminated.
+                    # Bound the leak instead of letting the daemon thread spin.
+                    logger.warning(
+                        "codex_spawn: stderr drain exceeded %d lines; "
+                        "dropping remainder (non-terminating stream)",
+                        _STDERR_DRAIN_MAX_LINES,
+                    )
             except (ValueError, OSError):
                 pass
         threading.Thread(
