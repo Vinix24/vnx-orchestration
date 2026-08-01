@@ -94,7 +94,12 @@ def test_run_panel_persists_abstain_for_unresponsive_seat(tmp_path):
 
 
 def test_run_panel_persists_abstain_for_parse_error_seat(tmp_path):
-    """A report whose verdict fence does not parse is a non-scoring abstain row."""
+    """A report whose verdict fence does not parse is a non-scoring abstain row.
+
+    OI-839: the raw lane output must be preserved on the parse-error record so
+    a later parser hardening can be built against the REAL failure mode — the
+    unparseable text used to vanish with the temporary report file.
+    """
     seat_ledger = tmp_path / "plan-gate-seats.ndjson"
 
     def _garbled(provider, model_arg, instruction, dispatch_id):
@@ -114,6 +119,12 @@ def test_run_panel_persists_abstain_for_parse_error_seat(tmp_path):
     assert rows["glm-5.2-harness"]["verdict"] == "abstain"
     assert rows["glm-5.2-harness"]["responded"] is True
     assert rows["glm-5.2-harness"]["parse_error"] is True
+    # OI-839: raw output preserved for the parse-error lane, absent for readable ones.
+    assert rows["glm-5.2-harness"]["raw_output"] == "# review\n\nno verdict fence here\n"
+    for label in ("codex", "deepseek", "opus", "kimi"):
+        assert "raw_output" not in rows[label], (
+            f"{label} passed cleanly; raw_output must only appear on parse-error records"
+        )
 
 
 def test_run_panel_panelist_rows_carry_model(tmp_path):

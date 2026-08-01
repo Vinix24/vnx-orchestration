@@ -51,7 +51,10 @@ def recs_kimi_wins(tmp_path):
     data = {
         "routing_by_task": {
             "01_code_generation": [
-                {"model_id": "kimi-k2-0905", "composite_score": 9.0,
+                # kimi-k3 = the registered kimi_cli default (wave7_models.yaml);
+                # kimi-k2-0905 is a moonshot litellm model and fails the
+                # kimi_cli registry constraint check in provider_dispatch.
+                {"model_id": "kimi-k3", "composite_score": 9.0,
                  "avg_duration_seconds": 200.0, "cost_usd_per_call": 0.001},
                 {"model_id": "claude-sonnet-4-6", "composite_score": 8.0,
                  "avg_duration_seconds": 512.0, "cost_usd_per_call": None},
@@ -130,7 +133,7 @@ class TestG8ConstraintFiltering:
         )
 
         assert decision.primary is not None
-        assert decision.primary.model_id == "kimi-k2-0905"
+        assert decision.primary.model_id == "kimi-k3"
         assert not decision.constraints_applied
 
     def test_all_filtered_primary_is_none(self, recs_deepseek_only, monkeypatch):
