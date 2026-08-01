@@ -48,6 +48,12 @@ class SkillValidator:
 
         with open(self.skills_file, 'r') as f:
             data = yaml.safe_load(f)
+            # OI-660: a zero-byte/corrupt registry parses to None — surface a
+            # clear error instead of crashing later on None.get('skills', {}).
+            if data is None:
+                raise ValueError(
+                    f"Skills registry is empty or not valid YAML: {self.skills_file}"
+                )
             return data.get('skills', {})
 
     def _load_directory_skills(self) -> Set[str]:

@@ -170,17 +170,29 @@ class FakeTmux:
 
 
 def _extract_protocol_block(text: str, block_index: int = 0) -> str:
-    """Return the raw bash code block body at ``block_index`` (0-based) from *text*.
+    """Return the raw completion-protocol bash block body at ``block_index``.
 
-    The new completion protocol emits TWO bash blocks (done / failed).
+    The completion protocol emits TWO bash blocks (done / failed):
     ``block_index=0`` → done block; ``block_index=1`` → failed block.
+
+    Blocks are selected by CONTENT (must carry ``append_receipt.py``), not by
+    raw position: the full delivered body can contain other bash blocks before
+    the protocol (e.g. the worktree-cleanup ``python3 -c`` guard), which would
+    otherwise shift every index by one (OI-657 — the two
+    ``TestSingleShotSuccess`` protocol tests were failing on main because of
+    exactly that drift).
     """
-    blocks = re.findall(r"```bash\n(.+?)\n```", text, re.DOTALL)
+    blocks = [
+        b.strip()
+        for b in re.findall(r"```bash\n(.+?)\n```", text, re.DOTALL)
+        if "append_receipt.py" in b
+    ]
     if block_index >= len(blocks):
         raise AssertionError(
-            f"Expected at least {block_index + 1} bash block(s), found {len(blocks)}"
+            f"Expected at least {block_index + 1} completion bash block(s), "
+            f"found {len(blocks)}"
         )
-    return blocks[block_index].strip()
+    return blocks[block_index]
 
 
 def _extract_protocol_receipt(text: str, block_index: int = 0) -> dict:

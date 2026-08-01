@@ -152,6 +152,36 @@ class TestHookContextContent:
         assert "@panel" in ctx
         assert "@fabric-reference" in ctx
 
+    def test_operator_only_skills_are_not_advertised_as_invocable(self, tmp_path):
+        """OI-656: @architect (and @t0-orchestrator) carry
+        disable-model-invocation: true — advertising them in the same flat
+        'Core skills' list as invocable skills invites an autonomous T0 to
+        invoke them and hit 'Unknown skill'. The hook must keep the two
+        groups apart: architect/t0-orchestrator only under an
+        operator-only marker, never in the model-invocable list."""
+        project = _make_project(tmp_path)
+
+        out = _run_hook(project / ".claude" / "terminals" / "T0")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+
+        invocable_marker = "Model-invocable skills:"
+        operator_marker = "Operator-only skills"
+        assert invocable_marker in ctx, "invocable-skills group must be present"
+        assert operator_marker in ctx, "operator-only group must be present"
+
+        invocable_line = next(
+            l for l in ctx.splitlines() if l.startswith("Model-invocable skills:")
+        )
+        # @architect must not be presented as model-invocable.
+        assert "@architect" not in invocable_line
+        assert "@t0-orchestrator" not in invocable_line
+        # Both must still be present somewhere (so T0 knows they exist).
+        operator_line = next(
+            l for l in ctx.splitlines() if l.startswith("Operator-only skills")
+        )
+        assert "@architect" in operator_line
+        assert "@t0-orchestrator" in operator_line
+
     def test_old_pin_language_is_absent(self):
         """Sonnet-pinned and VNX_OVERRIDE_WORKERS_KIMI_PINNED must not appear
         in the T0 role or skill files after the free-per-dispatch
