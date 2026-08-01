@@ -39,6 +39,10 @@ if sys_path_dir not in sys.path:
 logger = logging.getLogger(__name__)
 
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
+# OI-645: PrEnforcementResult must be a module-level binding — the
+# _enforce_pr_exists return annotation resolves it at introspection time
+# (get_type_hints), not only on the deferred-import exception path.
+from pr_enforcement import PrEnforcementResult  # noqa: E402
 
 # Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4/§5):
 # detached ephemeral spawns run under the blanket --dangerously-skip-permissions
@@ -935,7 +939,6 @@ class TmuxInteractiveDispatch:
             logger.error(
                 "interactive: PR-enforcement guard errored dispatch=%s: %s", dispatch_id, exc,
             )
-            from pr_enforcement import PrEnforcementResult  # noqa: PLC0415
             return PrEnforcementResult(applicable=False, ok=True, reason=f"guard error: {exc}")
 
         if not result.applicable:
