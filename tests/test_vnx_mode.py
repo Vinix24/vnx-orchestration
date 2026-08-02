@@ -166,6 +166,44 @@ class TestModeWriteGuard:
         with pytest.raises(RuntimeError, match="another project"):
             write_mode(VNXMode.STARTER, str(other))
 
+    def test_test_isolation_guard_fires_when_project_id_unresolvable(
+        self, tmp_path, monkeypatch
+    ):
+        """w22/PR#1333: the test-isolation guard must fire even when
+        resolve_project_id() cannot resolve a project_id at all — exactly the
+        subprocess-with-a-cleaned-env scenario the guard exists for (no
+        VNX_PROJECT_ID, no reachable .vnx-project-id marker, no git remote).
+
+        Before the fix, ``_guard_mode_write_target`` returned on the
+        ``except RuntimeError: return`` branch before ever calling
+        ``refuse_real_central_store_write_under_pytest``, silently allowing
+        the write to land under the (mocked) real central store. RED on
+        43600f56.
+        """
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        no_git_cwd = tmp_path / "no_git_cwd"
+        no_git_cwd.mkdir()
+        central = fake_home / ".vnx-data" / "vnx-dev"
+        central.mkdir(parents=True)
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.setenv("VNX_DATA_DIR_GUARD", "off")
+        monkeypatch.chdir(no_git_cwd)
+
+        # Sanity: this scenario really makes resolve_project_id() fail —
+        # otherwise this test would pass for the wrong reason (hitting a
+        # different guard branch instead of the RuntimeError-early-return gap).
+        from project_root import resolve_project_id
+        with pytest.raises(RuntimeError):
+            resolve_project_id()
+
+        with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
+            write_mode(VNXMode.STARTER, str(central))
+
+        assert not (central / "mode.json").exists()
+
     def test_cleaned_env_subprocess_does_not_write_real_store(self, tmp_path):
         """OI-911 regression: a subprocess that loses VNX_DATA_DIR_EXPLICIT must
         not write mode.json into the resolved central store.
