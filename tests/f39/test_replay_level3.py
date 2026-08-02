@@ -92,7 +92,6 @@ _SCENARIOS = _collect_scenarios()
 # Individual scenario tests (parametrized)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 @pytest.mark.parametrize("name,scenario_path", _SCENARIOS, ids=[s[0] for s in _SCENARIOS])
 def test_level3_scenario(
     name: str,
@@ -125,7 +124,6 @@ def test_level3_scenario(
 # Aggregate gate test
 # ---------------------------------------------------------------------------
 
-@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 def test_level3_aggregate_pass_rate(request: pytest.FixtureRequest) -> None:
     """Level-3 gate: ≥80% of all edge case scenarios must produce the correct decision.
 
