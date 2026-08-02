@@ -197,6 +197,15 @@ def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
 # ~70k cut to 6000 chars reached only seat 1 plus a sliver of seat 2 — 8.5% of the material,
 # paid for five panelists and synthesised over one and a half.
 #
+# The cut itself keeps HEAD and TAIL, never the head alone: a seat report echoes its
+# frontmatter, the instruction and the shared context first, and only THEN carries the
+# analysis. A head-first cut over the per-seat budget leaves nothing but boilerplate when the
+# echo alone exceeds the budget. Measured live (sales-copilot panel, 2026-07-18/22): an
+# 11.7KB --context-file produced a ~12.8K echo inside a ~13K report, and a head-first 12000-
+# char cut dropped the analysis entirely. Head-and-tail keeps the question/framing up front
+# and the analysis/conclusion at the back; the echoed middle is exactly the part that may be
+# dropped (see _distill).
+#
 # This is NOT a return to the OI-809 failure mode: _stage_prompt() puts the stage instruction
 # FIRST, so a fixed-length cut anywhere downstream can only ever trim the context tail, never
 # the task. The budget is therefore the second line of defence, not the only one — raising it
@@ -210,9 +219,12 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
     Each seat report gets its OWN distillate budget (``_SEAT_DISTILLATE_BUDGET``) before it
     is joined, so every seat is represented downstream regardless of how many seats the
     panel has — never a single head-first cut over the whole concatenation, which let the
-    first seats eat all the space and dropped the last seats entirely (OI-820). ``limit``
-    stays the generous per-report backstop against a pathological runaway report (see
-    _clip); either cut is logged loudly (see _distill), never silent.
+    first seats eat all the space and dropped the last seats entirely (OI-820). The per-seat
+    cut keeps HEAD and TAIL (the analysis sits at the end of a seat report, after the echoed
+    context), so a seat whose echo alone exceeds the budget still carries its conclusion into
+    the downstream stages. ``limit`` stays the generous per-report backstop against a
+    pathological runaway report (see _clip); either cut is logged loudly (see _distill),
+    never silent.
     """
     parts = []
     for fo in fan_out:
@@ -238,6 +250,11 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
 # FIRST, so such a cut can only ever hit the context tail, never the task (OI-809) — the
 # budget is the second line of defence, not the only one, which is why raising it
 # (6000 -> 12000) is bounded risk.
+#
+# A cut here also keeps HEAD and TAIL (same shape as the per-seat distill above): a
+# contrarian/verify document leads with its framing and ends with its conclusion, so a
+# head-first cut would keep the framing and drop the verdict — the same silent degradation
+# the per-seat cut fixes, one stage later.
 _DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_DISTILLATE_BUDGET", "12000"))
 
 
@@ -254,17 +271,32 @@ def _distill(
     already passed through — the cascading-verbatim growth is exactly the OI-809 bug. The
     fan-out digest is instead bounded per seat at assembly time by _digest() under
     _SEAT_DISTILLATE_BUDGET (OI-820). ``env_hint`` names the budget's env var in the log so
-    an operator raises the right one. Trimming is always logged loudly, never silent (same
-    discipline as _clip)."""
+    an operator raises the right one.
+
+    A cut keeps the HEAD and the TAIL, never the head alone. A panel report opens with the
+    question and framing, then echoes the shared context, and only THEN carries the analysis
+    and conclusion — so a head-first cut over the budget leaves only boilerplate when the
+    echo alone exceeds it. Measured live (sales-copilot panel, 2026-07-18/22): an 11.7KB
+    --context-file produced a ~12.8K echo inside a ~13K report, and a head-first 12000-char
+    cut dropped the analysis entirely. The tail gets at least half the budget so the analysis
+    and conclusion always survive; the middle (where the echoed context sits) is what is
+    dropped, with a marker naming how many chars were omitted. Trimming is always logged
+    loudly, never silent (same discipline as _clip)."""
     t = (text or "").strip()
     if len(t) <= limit:
         return t
+    omitted = len(t) - limit
     logger.warning(
-        "panel distillate: %s trimmed to %d chars for the downstream stage (was %d) — "
-        "raise %s if this loses signal",
-        tag, limit, len(t), env_hint,
+        "panel distillate: %s trimmed to %d chars for the downstream stage (was %d; "
+        "%d middle chars omitted) — raise %s if this loses signal",
+        tag, limit, len(t), omitted, env_hint,
     )
-    return t[:limit] + f"\n…[{tag} truncated to fit the downstream-stage budget]"
+    head_budget = limit // 2
+    tail_budget = limit - head_budget
+    head = t[:head_budget]
+    tail = t[-tail_budget:] if tail_budget else ""
+    marker = f"\n…[{tag}: {omitted:,} middle chars omitted]\n"
+    return f"{head}{marker}{tail}"
 
 
 def _stage_prompt(instruction: str, context_sections: List[Tuple[str, str]], reminder: str) -> str:

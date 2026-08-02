@@ -158,10 +158,58 @@ class TestDigestBudget:
         assert analysis_marker in digest
         assert digest.count("issue ") == 55
 
+    def test_large_context_echo_does_not_cut_analysis(self):
+        """A report whose echoed context ALONE exceeds the per-seat distillate budget must
+        still surface the analysis that comes after it. An 11.7KB --context-file reproduced
+        the bug live: the echo measured ~12.8K chars inside a ~13K report, and a head-first
+        12000-char cut kept only the boilerplate and dropped the analysis entirely. The
+        per-seat cut keeps HEAD and TAIL, so the conclusion survives even when the echo eats
+        the whole budget."""
+        analysis_marker = "ANALYSIS_ONLY_MARKER_XYZ_789"
+        echoed_context = "context line: lorem ipsum dolor sit amet consectetur adipiscing\n" * 200
+        assert len(echoed_context) > dp._SEAT_DISTILLATE_BUDGET, (
+            f"echo size {len(echoed_context)} must exceed the per-seat budget "
+            f"{dp._SEAT_DISTILLATE_BUDGET}"
+        )
+        report = (
+            "---\ntitle: panel report\nprovider: codex\n---\n"
+            "## Instruction\nYou are one seat on a deliberation panel.\n"
+            "QUESTION: audit src/\n\n## Shared context\n"
+            + echoed_context
+            + f"\n\nFindings:\n{analysis_marker}\nreal analysis text follows here."
+        )
+        assert len(report) > dp._SEAT_DISTILLATE_BUDGET
+        fan_out = [{"provider": "codex", "lens": "security", "text": report}]
+        digest = dp._digest(fan_out)
+        assert analysis_marker in digest, "analysis was cut off — the old truncation bug is back"
+
+    def test_distill_keeps_head_and_tail_and_marks_the_omitted_middle(self):
+        """The per-seat cut must keep the HEAD (question/framing) and the TAIL
+        (analysis/conclusion) within the budget and mark the dropped middle with a marker
+        naming how many chars were omitted — not a head-first cut, which drops the analysis
+        when the echoed context alone exceeds the budget."""
+        head_marker = "QUESTION_FRAMING_START"
+        analysis_marker = "ANALYSIS_ONLY_MARKER_XYZ_789"
+        echoed = "context line: lorem ipsum dolor sit amet consectetur adipiscing\n" * 200
+        report = (
+            head_marker + "\n## Shared context\n" + echoed
+            + f"\n\nFindings:\n{analysis_marker}\nreal analysis text follows here."
+        )
+        assert len(report) > dp._SEAT_DISTILLATE_BUDGET
+        fan_out = [{"provider": "codex", "lens": "security", "text": report}]
+        digest = dp._digest(fan_out)
+        assert head_marker in digest, "head (question/framing) must survive the cut"
+        assert analysis_marker in digest, "tail (analysis/conclusion) must survive the cut"
+        omitted = len(report) - dp._SEAT_DISTILLATE_BUDGET
+        assert f"{omitted:,} middle chars omitted" in digest, (
+            "the omission marker must name how many middle chars were dropped"
+        )
+
     def test_seat_over_budget_is_distilled_loudly_per_seat(self, caplog):
         """A single seat report over the per-seat distillate budget is cut at ASSEMBLY time
-        (inside _digest, OI-820) — head-first to the seat budget — and the cut is logged
-        loudly with the seat name and the seat-budget env var, never a silent drop."""
+        (inside _digest, OI-820) — head and tail kept within the seat budget, middle dropped
+        with a marker — and the cut is logged loudly with the seat name and the seat-budget
+        env var, never a silent drop."""
         report = "frontmatter + echoed context\n" + "c" * 15_000 + "\nTAIL_ANALYSIS_MARKER_789"
         fan_out = [{"provider": "kimi", "lens": "risks", "text": report}]
         with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
