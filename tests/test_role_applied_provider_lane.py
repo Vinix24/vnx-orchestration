@@ -208,7 +208,7 @@ def _run_envelope_govern(tmp_path, *, instruction, role):
     result = _AdapterResult(returncode=0, completion_text="all good", status="success")
     start = end = datetime.now(timezone.utc)
     with (
-        patch("dispatch_envelope._archive_dispatch_events", return_value=None),
+        patch("dispatch_envelope._archive_dispatch_events", return_value=(None, True)),
         patch("dispatch_envelope._clear_dispatch_events"),
         patch("provider_costs.emit_provider_cost"),
         patch("phantom_guard.record_phantom_if_any"),
