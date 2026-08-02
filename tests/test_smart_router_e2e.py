@@ -37,7 +37,10 @@ def recommendations_yaml(tmp_path):
             "01_code_generation": [
                 {"model_id": "claude-sonnet-4-6", "composite_score": 8.0,
                  "avg_duration_seconds": 512.0, "cost_usd_per_call": None},
-                {"model_id": "kimi-k2-0905", "composite_score": 7.0,
+                # kimi-k3 = the registered kimi_cli default; kimi-k2-0905 (the
+                # retired moonshot litellm model) fails the kimi_cli registry
+                # constraint check in provider_dispatch since 2026-07-21.
+                {"model_id": "kimi-k3", "composite_score": 7.0,
                  "avg_duration_seconds": 200.0, "cost_usd_per_call": 0.02},
             ],
             "02_code_review": [
@@ -80,8 +83,8 @@ class TestAutoRouteNdjsonPersistence:
         record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
         assert record["dispatch_id"] == "dispatch-claude-001"
         assert record["task_class"] == "01_code_generation"
-        # Cost-aware routing: kimi-k2-0905 has explicit cost=0.02 < sonnet null/inf → kimi wins.
-        assert record["chosen_route"]["model_id"] == "kimi-k2-0905"
+        # Cost-aware routing: kimi-k3 has explicit cost=0.02 < sonnet's enriched ~0.045 → kimi wins.
+        assert record["chosen_route"]["model_id"] == "kimi-k3"
 
     def test_kimi_route_writes_ndjson(self, recommendations_yaml, state_dir):
         decision = decide(
@@ -136,35 +139,18 @@ class TestAutoRouteNdjsonPersistence:
 
 
 class TestProviderDispatchAutoRouteIntegration:
-    """Integration test: provider_dispatch.main() with --auto-route writes NDJSON."""
+    """Integration test: provider_dispatch.main() with --auto-route writes NDJSON.
 
-    def test_main_auto_route_writes_ndjson_for_claude(self, recommendations_yaml, state_dir, monkeypatch):
-        import provider_dispatch
+    PR-5 (2026-06-15) changed the contract: claude is not a provider-lane
+    provider — the single-entry dispatch door owns all claude routing. Auto-route
+    therefore dispatches provider-lane providers only (kimi, litellm, ...); an
+    auto-route that decides a claude model is rejected at the door with EX_USAGE.
+    These tests pin that contract — previously they seeded --provider claude and
+    relied on the retired claude subprocess path (subprocess_dispatch.
+    deliver_with_recovery).
+    """
 
-        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        monkeypatch.setattr(
-            "smart_router._RECOMMENDATIONS_PATH", recommendations_yaml
-        )
-
-        with patch("subprocess_dispatch.deliver_with_recovery", return_value=True), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
-            result = provider_dispatch.main([
-                "--provider", "claude",
-                "--terminal-id", "T1",
-                "--dispatch-id", "e2e-claude-auto-route",
-                "--instruction", "implement feature X",
-                "--model", "sonnet",
-                "--auto-route",
-            ])
-
-        assert result == 0
-        ndjson_path = state_dir / "route_decisions.ndjson"
-        assert ndjson_path.exists(), "auto-route MUST produce route_decisions.ndjson entry"
-        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
-        assert record["dispatch_id"] == "e2e-claude-auto-route"
-        assert record["task_class"] == "01_code_generation"
-
-    def test_main_auto_route_overrides_model_for_review(self, recommendations_yaml, state_dir, monkeypatch):
+    def test_main_auto_route_writes_ndjson_for_kimi(self, recommendations_yaml, state_dir, monkeypatch):
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
@@ -174,14 +160,43 @@ class TestProviderDispatchAutoRouteIntegration:
 
         captured_model = {}
 
-        def _mock_deliver(**kwargs):
-            captured_model["model"] = kwargs.get("model")
-            return True
+        def _fake_dispatch(args, **kwargs):
+            captured_model["model"] = args.model
+            return 0
 
-        with patch("subprocess_dispatch.deliver_with_recovery", side_effect=_mock_deliver), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
+        with patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
             result = provider_dispatch.main([
-                "--provider", "claude",
+                "--provider", "kimi",
+                "--terminal-id", "T1",
+                "--dispatch-id", "e2e-kimi-auto-route",
+                "--instruction", "implement feature X",
+                "--model", "sonnet",
+                "--auto-route",
+            ])
+
+        assert result == 0
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        assert ndjson_path.exists(), "auto-route MUST produce route_decisions.ndjson entry"
+        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
+        assert record["dispatch_id"] == "e2e-kimi-auto-route"
+        assert record["task_class"] == "01_code_generation"
+        # Cost-aware routing: kimi-k3 (explicit cost 0.02) beats claude-sonnet-4-6
+        # (enriched ~0.045); the routed model must override the --model sonnet seed.
+        assert record["chosen_route"]["model_id"] == "kimi-k3"
+        assert captured_model["model"] == "kimi-k3"
+
+    def test_main_auto_route_review_decides_claude_rejected_at_door(self, recommendations_yaml, state_dir, monkeypatch):
+        import provider_dispatch
+
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        monkeypatch.setattr(
+            "smart_router._RECOMMENDATIONS_PATH", recommendations_yaml
+        )
+
+        with patch("provider_dispatch._dispatch_kimi", return_value=0), \
+             patch("provider_dispatch._dispatch_litellm", return_value=0):
+            result = provider_dispatch.main([
+                "--provider", "kimi",
                 "--terminal-id", "T1",
                 "--dispatch-id", "e2e-review-route",
                 "--instruction", "review the code changes for security",
@@ -190,22 +205,22 @@ class TestProviderDispatchAutoRouteIntegration:
                 "--auto-route",
             ])
 
-        assert result == 0
-        assert captured_model["model"] == "opus"
+        # A review task auto-routes to claude-opus; claude is owned by the single-entry
+        # door, so provider_dispatch must reject with EX_USAGE instead of dispatching.
+        assert result == provider_dispatch._EX_USAGE
 
     def test_main_without_auto_route_no_ndjson(self, state_dir, monkeypatch):
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
-        with patch("subprocess_dispatch.deliver_with_recovery", return_value=True), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
+        with patch("provider_dispatch._dispatch_kimi", return_value=0):
             provider_dispatch.main([
-                "--provider", "claude",
+                "--provider", "kimi",
                 "--terminal-id", "T1",
                 "--dispatch-id", "e2e-no-auto-route",
                 "--instruction", "implement feature",
-                "--model", "sonnet",
+                "--model", "kimi-k3",
             ])
 
         ndjson_path = state_dir / "route_decisions.ndjson"
@@ -222,14 +237,13 @@ class TestProviderDispatchAutoRouteIntegration:
             tmp_path / "nonexistent.yaml",
         )
 
-        with patch("subprocess_dispatch.deliver_with_recovery", return_value=True), \
-             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
+        with patch("provider_dispatch._dispatch_kimi", return_value=0):
             result = provider_dispatch.main([
-                "--provider", "claude",
+                "--provider", "kimi",
                 "--terminal-id", "T1",
                 "--dispatch-id", "e2e-fallback",
                 "--instruction", "implement feature",
-                "--model", "sonnet",
+                "--model", "kimi-k3",
                 "--auto-route",
             ])
 
