@@ -16,6 +16,7 @@ Canonical name = the registry key (e.g. ``opus-5``, ``sonnet-5``,
   claude-opus-4-8               -> opus-4-8
   claude-opus-5                 -> opus-5
   claude-sonnet-5               -> sonnet-5
+  claude-sonnet-4-6             -> sonnet-4-6
   claude-fable-5                -> fable-5
 
 Unknown/unmapped strings pass through unchanged — the caller decides how to
@@ -42,6 +43,16 @@ _UNKNOWN_SENTINELS = frozenset({"", "unknown", "null", "none", "n/a", "na", "uns
 # versioned key names exactly one model generation, the unversioned one names
 # a moving default.
 _VERSIONED_KEY_RE = re.compile(r"-\d")
+
+# Provider prefix "claude-<family>" for a generation the registry does not
+# carry verbatim (retired ids like claude-sonnet-4-6, or bare-family shorthand
+# like claude-sonnet): the prefix is stripped so the result takes the same
+# family-version form as claude-opus-4-8 -> opus-4-8. Explicit aliases and
+# litellm_name-derived aliases still win (claude-sonnet-5 -> sonnet-5,
+# claude-haiku-4-5 -> haiku); this regex is the final fallback, and it is
+# deliberately restricted to the known families so the legacy 3.x naming
+# (claude-3-5-sonnet) is never mangled.
+_CLAUDE_FAMILY_RE = re.compile(r"^claude-(opus|sonnet|haiku|fable)(?:-|$)")
 
 # Explicit aliases the registry cannot derive from litellm_name/cli_model_arg
 # (common shorthand the operator uses, or dated-suffix variants):
@@ -178,6 +189,20 @@ def normalize_model_name(model: Optional[str]) -> str:
             return keys[stripped]
         if stripped in aliases:
             return aliases[stripped]
+
+    # Provider-prefixed "claude-<family>..." the registry does not carry
+    # verbatim (retired generation ids): strip the prefix so claude-sonnet-4-6
+    # and claude-opus-4-8 normalize to the same family-version form (only the
+    # opus id had a registry entry to strip its prefix — sonnet-4-6 passed
+    # through intact, which is the inconsistency this fixes). Re-resolve the
+    # stripped form (claude-fable -> fable -> fable-5); fall back to it
+    # verbatim when it is not itself a registry key (sonnet-4-6 is a retired
+    # id, not a key).
+    if _CLAUDE_FAMILY_RE.match(norm):
+        stripped = norm[len("claude-"):]
+        if stripped:
+            resolved = normalize_model_name(stripped)
+            return resolved or stripped
 
     return raw
 

@@ -64,6 +64,8 @@ class TestNormalizeModelName:
             ("fable", "fable-5"),
             # 4-series and dated full ids.
             ("claude-opus-4-8", "opus-4-8"),
+            ("claude-sonnet-4-6", "sonnet-4-6"),
+            ("claude-opus-4-6", "opus-4-6"),
             ("claude-haiku-4-5-20251001", "haiku"),
             ("claude-haiku-4-5", "haiku"),
             # Already-canonical keys are unchanged.
@@ -75,8 +77,18 @@ class TestNormalizeModelName:
     def test_maps_variant_to_canonical(self, variant, canonical):
         assert normalize_model_name(variant) == canonical
 
+    def test_claude_prefix_stripped_for_retired_generations(self):
+        """claude-sonnet-4-6 and claude-opus-4-8 normalize to the same
+        family-version form — the claude- provider prefix is stripped for both.
+        This is the inconsistency the dispatch fixed: claude-opus-4-8 resolved
+        through its litellm_name alias, while claude-sonnet-4-6 (a retired id
+        with no registry entry) previously passed through with the prefix
+        intact, so the ledger counted the same model under two names."""
+        assert normalize_model_name("claude-sonnet-4-6") == "sonnet-4-6"
+        assert normalize_model_name("claude-opus-4-8") == "opus-4-8"
+
     def test_unmapped_string_passes_through(self):
-        assert normalize_model_name("claude-sonnet-4-6") == "claude-sonnet-4-6"
+        assert normalize_model_name("gpt-4-turbo") == "gpt-4-turbo"
 
     def test_unknown_sentinel_passes_through(self):
         assert normalize_model_name("unknown") == "unknown"

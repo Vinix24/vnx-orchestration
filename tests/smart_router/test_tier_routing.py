@@ -16,12 +16,28 @@ from providers.smart_router.cost_tier import TIER_HIGH, TIER_LOW, TIER_MID, TIER
 from providers.smart_router.tier_routing import TierRoute, resolve_tier_route
 
 
-def test_tier_zero_uses_local_gemma():
-    route = resolve_tier_route(TIER_ZERO, env={})
-    assert route.provider == "local-gemma"
-    assert route.lane == "mlx"
+def test_tier_zero_with_deepseek_key_uses_harness():
+    """tier-zero routes to DeepSeek flash via claude-harness with a codex vangnet
+    when DEEPSEEK_API_KEY is present (operator decision 2026-08-02: local models
+    skipped until gemma-4-12b-integration ships)."""
+    env = {"DEEPSEEK_API_KEY": "sk-test-123"}
+    route = resolve_tier_route(TIER_ZERO, env=env)
+    assert route.provider == "deepseek"
+    assert route.model == "deepseek-v4-flash"
+    assert route.lane == "claude_harness_keyed"
+    assert "DEEPSEEK_API_KEY" in route.env_requirements
     assert route.fallback is not None
-    assert route.fallback.provider == "ollama"
+    assert route.fallback.provider == "codex"
+    assert route.fallback.model == "gpt-5.5"
+
+
+def test_tier_zero_no_key_uses_codex():
+    """Without DEEPSEEK_API_KEY, tier-zero falls back to Codex via provider lane
+    (local-gemma route is preserved but unused until gemma-4-12b-integration)."""
+    route = resolve_tier_route(TIER_ZERO, env={})
+    assert route.provider == "codex"
+    assert route.model == "gpt-5.5"
+    assert route.lane == "provider"
 
 
 def test_tier_mid_uses_sonnet():
