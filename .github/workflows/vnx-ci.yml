@@ -13,6 +13,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        # Full history (fetch-depth: 0): the profile-a suite includes
+        # test_pre_merge_gate.py::TestCheckPRSize, which pins real commit
+        # SHAs (9e0813e2..5ab8fe8c) to verify merge-base range counting
+        # (OI-838). A depth-1 clone cannot resolve those refs and the test
+        # fails with a loud HOLD. Same pattern as the trace-token-check and
+        # slug-match-check jobs below.
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
