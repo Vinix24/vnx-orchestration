@@ -68,6 +68,14 @@ class RuntimeSnapshot:
     # membership: an empty set rejects every role, so an undiscoverable registry
     # fails closed instead of silently accepting anything.
     valid_roles: Optional[frozenset[str]] = None
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
+    # dispatch this one continues, the tier escalation, and the smart_router
+    # task class. Computed by the door (build_runtime_snapshot) and passed in so
+    # compile_plan stays pure — it only copies them onto the plan.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +109,13 @@ class ExecutionPlan:
     role: Optional[str] = None          # carried from DispatchSpec for the phantom-guard review
                                         # exemption (codex P0.2 F2). NOT in digest() — advisory only,
                                         # must not perturb the permit fingerprint.
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): advisory receipt
+    # metadata, NOT in digest() — like ``role``, it must not perturb the permit
+    # fingerprint. parent_dispatch / tier_from / tier_to / task_class.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
     requires_mcp: bool = False          # OI-865: True keeps the worker's ambient MCP config instead
                                         # of the force-empty scoped posture. Default False is the
                                         # choice for a MISSING spec field: DispatchSpec.requires_mcp
@@ -340,6 +355,13 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         instruction_file=spec.instruction_file,
         route_reason=",".join(fired),
         role=spec.role,
+        # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): copied from the
+        # door-computed snapshot so the receipt can say which dispatch this one
+        # continues and on which tier.
+        parent_dispatch=snapshot.parent_dispatch,
+        task_class=snapshot.task_class,
+        tier_from=snapshot.tier_from,
+        tier_to=snapshot.tier_to,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )

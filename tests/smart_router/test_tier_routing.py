@@ -27,13 +27,17 @@ def test_tier_zero_uses_local_gemma():
 def test_tier_mid_uses_sonnet():
     route = resolve_tier_route(TIER_MID, env={})
     assert route.provider == "claude"
-    assert route.model == "claude-sonnet-4-6"
+    # canonical registry key (model-ssot-en-ketenlink) — the old claude-sonnet-4-6
+    # string is not a wave7_models.yaml key and rejected with
+    # model-not-in-current-registry the moment tier-mid actually routes.
+    assert route.model == "sonnet-5"
 
 
 def test_tier_high_uses_opus():
     route = resolve_tier_route(TIER_HIGH, env={})
     assert route.provider == "claude"
-    assert route.model == "claude-opus-4-8"
+    # canonical registry key — the fleet runs Opus 5 (model-ssot-en-ketenlink).
+    assert route.model == "opus-5"
 
 
 def test_tier_low_no_key_uses_kimi_cli():
@@ -87,7 +91,7 @@ def test_deepseek_harness_fallback_is_kimi():
 def test_unknown_tier_defaults_to_opus():
     """Unknown tier strings default to tier-high (safe over silent skip)."""
     route = resolve_tier_route("tier-unknown", env={})
-    assert route.model == "claude-opus-4-8"
+    assert route.model == "opus-5"
 
 
 def test_route_dispatch_default_off():
@@ -117,4 +121,4 @@ def test_route_dispatch_high_loc():
     result = route_dispatch({"instruction": "implement feature"}, ["x.py"], 350, env=env)
     assert result is not None
     assert result.tier == TIER_HIGH
-    assert result.model == "claude-opus-4-8"
+    assert result.model == "opus-5"

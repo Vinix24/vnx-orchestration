@@ -976,7 +976,9 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
         lane = self._make_lane(fake)
 
-        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+        # model passed explicitly — a dispatch receipt must name the model that
+        # ran (fail-closed), and production always passes the resolved model.
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1", model="sonnet")
 
         for block_idx, expected_status in ((0, "done"), (1, "failed")):
             receipt = _extract_protocol_receipt(protocol, block_idx)
@@ -1072,7 +1074,9 @@ class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
                 project_root=real_project_root,
             )
 
-            protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+            # model passed explicitly — a dispatch receipt must name the model
+            # that ran (fail-closed).
+            protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1", model="sonnet")
 
             # Part 1: env vars and python3 path present in the done block (index 0).
             done_block = _extract_protocol_block(protocol, 0)

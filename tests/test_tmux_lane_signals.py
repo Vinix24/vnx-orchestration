@@ -417,6 +417,9 @@ class TestSessionIdVerifier(unittest.TestCase):
 # Stop hook: receipt-guarantee via the #788 converter (hermetic)
 # ---------------------------------------------------------------------------
 _VALID_REPORT = """\
+---
+model: sonnet
+---
 **Dispatch-ID**: {did}
 
 ## Summary

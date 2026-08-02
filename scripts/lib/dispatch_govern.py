@@ -188,6 +188,11 @@ def ensure_receipt(
 
     # ADR-012 worker-permission enforcement audit marker (only when flag ON).
     worker_enforcement = "enforced" if worker_permission_enforcement_enabled() else None
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the spec carries
+    # the fields when the door threaded them; otherwise the door's env vars the
+    # tmux pane inherited (the worker-authored receipt path reads the same env in
+    # append_receipt_internals.payload._stamp_model_identity). The model string
+    # is left for the append primitive to normalize.
     synthesized_receipt = SynthesizedLaneReceipt(
         dispatch_id=spec.dispatch_id,
         terminal_id=spec.terminal_id,
@@ -197,6 +202,12 @@ def ensure_receipt(
         contract_status=contract_status,
         permission_enforcement=permission_enforcement,
         role=_resolve_govern_role(spec),
+        parent_dispatch=(
+            spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+        ),
+        task_class=spec.task_class or os.environ.get("VNX_TASK_CLASS") or None,
+        tier_from=spec.tier_from or os.environ.get("VNX_TIER_FROM") or None,
+        tier_to=spec.tier_to or os.environ.get("VNX_TIER_TO") or None,
         worker_permission_enforcement=worker_enforcement,
         report_path=str(report_path) if report_path is not None else None,
     ).to_dict()
@@ -239,6 +250,14 @@ class GovernSpec:
     # receipt-quality PR-2: a genuinely-set spec role also threads through into
     # govern-emitted receipts and report frontmatter (see _resolve_govern_role).
     role: Optional[str] = None
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): which dispatch
+    # this one continues, the tier escalation, and the task class. The tmux lane
+    # does not know these (the worker pane inherits them from the door's env);
+    # ensure_receipt falls back to the env when the spec does not carry them.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
 
 
 @dataclass
@@ -549,6 +568,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         ),
     }
     _cost_usd = float(receipt_data.get("cost_usd") or 0.0)
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): resolve from the
+    # spec first, then the door's env vars (the tmux pane inherits them).
+    _parent_dispatch = spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+    _task_class = spec.task_class or os.environ.get("VNX_TASK_CLASS") or None
+    _tier_from = spec.tier_from or os.environ.get("VNX_TIER_FROM") or None
+    _tier_to = spec.tier_to or os.environ.get("VNX_TIER_TO") or None
     frontmatter = {
         "schema_version": 1,
         "dispatch_id": dispatch_id,
@@ -560,7 +585,9 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         # receipt-quality PR-2: resolved dispatch identity, not the hardcoded
         # fake default the converter would otherwise drop/misread.
         "role": _resolve_govern_role(spec),
-        "task_class": "implementation",
+        # dispatch-20260802-model-ssot-en-ketenlink: real task class instead of
+        # the old unconditional "implementation"; chain-link stamped when known.
+        "task_class": _task_class or "implementation",
         "pr_id": spec.pr_id or "none",
         "duration_seconds": float(raw.duration_seconds),
         "exit_code": _exit_code,
@@ -578,6 +605,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         "contract_status": contract_status,
         "permission_enforcement": permission_enforcement,
     }
+    if _parent_dispatch is not None:
+        frontmatter["parent_dispatch"] = _parent_dispatch
+    if _tier_from is not None:
+        frontmatter["tier_from"] = _tier_from
+    if _tier_to is not None:
+        frontmatter["tier_to"] = _tier_to
 
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 

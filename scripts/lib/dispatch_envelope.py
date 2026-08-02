@@ -69,6 +69,13 @@ class EnvelopeSpec:
     state_dir: Path
     data_dir: Path
     deadline_seconds: int = 900
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): threaded from the
+    # plan onto the receipt so the provider lane stamps the same values the
+    # door computed.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
 
 
 @dataclass
@@ -1029,6 +1036,12 @@ def _govern(
                     deadline_seconds=spec.deadline_seconds,
                     failure_reason=_classification.get("failure_reason"),
                     failure_class=_classification.get("failure_class"),
+                    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink):
+                    # the door's values flow plan -> EnvelopeSpec -> receipt.
+                    parent_dispatch=spec.parent_dispatch,
+                    task_class=spec.task_class,
+                    tier_from=spec.tier_from,
+                    tier_to=spec.tier_to,
                 )
             except Exception as exc:
                 raise EnvelopeGovernError(
@@ -1152,6 +1165,11 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
         deadline_seconds=spec.deadline_seconds,
+        # Chain-link — carried through PREPARE unchanged.
+        parent_dispatch=spec.parent_dispatch,
+        task_class=spec.task_class,
+        tier_from=spec.tier_from,
+        tier_to=spec.tier_to,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify raw+injections reconstruct it
@@ -1725,6 +1743,12 @@ def run_envelope_plan(
         state_dir=state_dir,
         data_dir=data_dir,
         deadline_seconds=plan.deadline_seconds,
+        # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): from the plan,
+        # which the door computed from the spec.
+        parent_dispatch=plan.parent_dispatch,
+        task_class=plan.task_class,
+        tier_from=plan.tier_from,
+        tier_to=plan.tier_to,
     )
 
     enriched_instruction = _prepare(spec)
@@ -1739,6 +1763,10 @@ def run_envelope_plan(
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
         deadline_seconds=spec.deadline_seconds,
+        parent_dispatch=spec.parent_dispatch,
+        task_class=spec.task_class,
+        tier_from=spec.tier_from,
+        tier_to=spec.tier_to,
     )
 
     # INTEGRITY — the bundle dir is the pending/<id>/ that hosts instruction.md.

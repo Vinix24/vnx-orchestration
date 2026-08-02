@@ -5,8 +5,15 @@ Tier→provider mappings (honoring provider_constraints.yaml):
   tier-low  → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
                (DEEPSEEK_API_KEY required) OR Kimi via CLI (kimi-via-cli-only
                constraint)
-  tier-mid  → claude-sonnet-4-6
-  tier-high → claude-opus-4-8
+  tier-mid  → sonnet-5  (canonical registry key — see wave7_models.yaml)
+  tier-high → opus-5    (canonical registry key — see wave7_models.yaml)
+
+Model names here are canonical registry keys from wave7_models.yaml, never
+free-form strings: the registry is the single source of truth for model
+identity (dispatch-20260802-model-ssot-en-ketenlink). The previous 4-series
+ids (claude-sonnet-4-6 / claude-opus-4-8) were not registry keys and would
+reject with model-not-in-current-registry the moment tier-mid/tier-high
+actually routed; the fleet now runs the 5-series.
 
 Constraint references (provider_constraints.yaml):
   kimi-via-cli-only: Kimi must use lane='kimi_cli', never via=api/moonshot
@@ -61,14 +68,14 @@ _ROUTE_KIMI = TierRoute(
 _ROUTE_MID = TierRoute(
     tier=TIER_MID,
     provider="claude",
-    model="claude-sonnet-4-6",
+    model="sonnet-5",  # canonical registry key (wave7_models.yaml)
     lane="tmux_interactive",
 )
 
 _ROUTE_HIGH = TierRoute(
     tier=TIER_HIGH,
     provider="claude",
-    model="claude-opus-4-8",
+    model="opus-5",  # canonical registry key (wave7_models.yaml)
     lane="tmux_interactive",
 )
 

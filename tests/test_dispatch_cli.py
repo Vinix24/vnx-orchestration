@@ -1116,9 +1116,11 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 def test_default_model_pins_flip_workers_to_kimi_k3():
     """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus.
     WPFC PR-4: worker pins carry default semantics (spec.model wins over the pin);
-    T0 stays floor (pin always wins). ModelPin, not a bare string."""
+    T0 stays floor (pin always wins). ModelPin, not a bare string.
+    dispatch-20260802-model-ssot-en-ketenlink: T0's fallback is the canonical
+    opus-5 registry key (the fleet runs Opus 5), not the bare opus alias."""
     assert _DEFAULT_MODEL_PINS == {
-        "T0": ModelPin(model="opus", semantics="floor"),
+        "T0": ModelPin(model="opus-5", semantics="floor"),
         "T1": ModelPin(model="kimi-k3", semantics="default"),
         "T2": ModelPin(model="kimi-k3", semantics="default"),
         "T3": ModelPin(model="kimi-k3", semantics="default"),
@@ -1132,7 +1134,9 @@ def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
     provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only.
     WPFC PR-4: workers carry pin_semantics: default; T0 stays floor."""
     pins = _load_model_pins_from_yaml()
-    assert pins["T0"] == ModelPin(model="claude-opus-4-8", semantics="floor")
+    # dispatch-20260802-model-ssot-en-ketenlink: t0-opus-only now pins the
+    # canonical opus-5 registry key.
+    assert pins["T0"] == ModelPin(model="opus-5", semantics="floor")
     assert pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
     assert pins["T2"] == ModelPin(model="kimi-k3", semantics="default")
     assert pins["T3"] == ModelPin(model="kimi-k3", semantics="default")
@@ -1238,7 +1242,7 @@ def test_load_model_pins_unreadable_yaml_fails_loud_and_falls_back(tmp_path, cap
             pins = _load_model_pins_from_yaml()
 
     assert pins == _DEFAULT_MODEL_PINS
-    assert pins["T0"] == ModelPin(model="opus", semantics="floor")
+    assert pins["T0"] == ModelPin(model="opus-5", semantics="floor")
     assert any("model-pins YAML unreadable" in rec.message for rec in caplog.records), (
         "unreadable YAML must log loudly, not silently fall back"
     )
@@ -2620,7 +2624,9 @@ def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monk
     assert rc == 0
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
-    assert plan_arg.model == "claude-opus-4-8", (
+    # dispatch-20260802-model-ssot-en-ketenlink: t0-opus-only pins the canonical
+    # opus-5 registry key.
+    assert plan_arg.model == "opus-5", (
         f"T0 pin (t0-opus-only) must be unaffected by the worker override (got {plan_arg.model!r})"
     )
     assert not any("worker-claude-override" in w for w in plan_arg.warnings)
