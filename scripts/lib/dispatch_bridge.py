@@ -79,7 +79,11 @@ _PROVIDER_ALIASES = {
     "deepseek-harness": "deepseek-harness",
     "local-gemma": "local-gemma",
     "auto": "auto",
-    "": "claude",
+    # OI-962: empty/None provider must resolve to AUTO so the smart router can
+    # fill in provider+model BEFORE validation.  Previously this resolved to
+    # "claude", which meant the router never saw the dispatch and kimi-pinned
+    # workers rejected provider=claude + model=kimi-k3 on constraint violation.
+    "": "auto",
 }
 
 
