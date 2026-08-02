@@ -118,9 +118,13 @@ class TestEnrichInstructionHelper:
         with patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path):
             with _patch_selector(result):
                 enriched = provider_dispatch._enrich_instruction(args)
-        assert "Relevant Intelligence" in enriched
+        # dispatch-20260801-w10: _enrich_instruction now assembles via the shared
+        # injector (L1+L2 + DISPATCH INSTRUCTION + L3). Intelligence still reaches
+        # the prompt (TestAntipattern item), the raw instruction is preserved, and
+        # the assembled prompt is wrapped by the injector.
         assert "TestAntipattern" in enriched
         assert "base instruction" in enriched
+        assert "DISPATCH INSTRUCTION:" in enriched
 
     def test_returns_original_instruction_when_no_intelligence(self, tmp_path):
         args = _make_args("gemini", instruction="original work")
@@ -128,13 +132,17 @@ class TestEnrichInstructionHelper:
         with patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path):
             with _patch_selector(result):
                 enriched = provider_dispatch._enrich_instruction(args)
-        assert enriched == "original work"
+        # The raw instruction survives assembly even when no intelligence items
+        # resolve; the role context is now layered around it.
+        assert "original work" in enriched
 
     def test_returns_original_on_intelligence_injection_import_failure(self):
         args = _make_args("litellm:deepseek")
         with patch.dict(sys.modules, {"intelligence_injection": None}):
             enriched = provider_dispatch._enrich_instruction(args)
-        assert enriched == "base instruction"
+        # Intelligence is best-effort inside the shared injector; an import
+        # failure must not crash enrichment or drop the instruction.
+        assert "base instruction" in enriched
 
     def test_dispatch_paths_parsed_from_args(self, tmp_path):
         args = _make_args("codex")
@@ -184,7 +192,7 @@ class TestCodexIntelligenceWiring:
                         with patch("event_store.EventStore"):
                             provider_dispatch._dispatch_codex(args)
         prompt_used = mock_spawn.call_args[1].get("prompt") or mock_spawn.call_args[0][0]
-        assert prompt_used == "plain codex task"
+        assert "plain codex task" in prompt_used
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +225,7 @@ class TestGeminiIntelligenceWiring:
                         with patch("event_store.EventStore"):
                             provider_dispatch._dispatch_gemini(args)
         prompt_used = mock_spawn.call_args[1].get("prompt") or mock_spawn.call_args[0][0]
-        assert prompt_used == "plain gemini task"
+        assert "plain gemini task" in prompt_used
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +272,7 @@ class TestLitellmIntelligenceWiring:
                                 with patch("providers.provider_registry.get_default_model", return_value=self._mock_registry().get_default_model.return_value):
                                     provider_dispatch._dispatch_litellm(args)
         prompt_used = mock_spawn.call_args[1].get("prompt") or mock_spawn.call_args[0][0]
-        assert prompt_used == "plain litellm task"
+        assert "plain litellm task" in prompt_used
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +306,7 @@ class TestKimiIntelligenceWiring:
                         with patch("event_store.EventStore"):
                             provider_dispatch._dispatch_kimi(args)
         prompt_used = mock_spawn.call_args[1].get("prompt") or mock_spawn.call_args[0][0]
-        assert prompt_used == "plain kimi task"
+        assert "plain kimi task" in prompt_used
 
     def test_kimi_enrich_called_once_no_double_enrichment(self, tmp_path):
         args = _make_args("kimi")

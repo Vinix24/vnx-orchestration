@@ -316,32 +316,20 @@ class LaneRouter:
 
 
 def _prepare(spec: EnvelopeSpec) -> str:
-    """Enrich instruction with intelligence context and repo map (best-effort).
+    """Enrich instruction with role context + intelligence and repo map (best-effort).
 
     Mirrors _enrich_instruction in provider_dispatch.py but operates on EnvelopeSpec.
-    Both layers fall back silently to the original instruction on any failure.
+    Layers fall back silently to the original instruction on any failure:
+
+    1. Repo-map layer on the RAW instruction (target-file extraction most
+       accurate before any enrichment text is added).
+    2. Role context + intelligence + full assembly via ``_inject_skill_context``
+       — the shared lane-neutral injector used by every dispatch lane
+       (dispatch-20260801-w10). This closes the envelope-lane gap where the
+       role's CLAUDE.md never reached the worker. On injector failure the
+       prompt falls back to a role label header.
     """
     instruction = spec.instruction
-
-    try:
-        from intelligence_injection import build_intelligence_section  # noqa: PLC0415
-
-        instruction = build_intelligence_section(
-            instruction=instruction,
-            dispatch_id=spec.dispatch_id,
-            role=spec.role,
-            state_dir=spec.state_dir,
-            pr_id=spec.pr_id,
-            dispatch_paths=None,
-        )
-    except ImportError:
-        logger.debug(
-            "envelope._prepare: intelligence_injection not available — skipping"
-        )
-    except Exception as exc:
-        logger.warning(
-            "envelope._prepare: intelligence injection failed (%s) — skipping", exc
-        )
 
     try:
         from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
@@ -351,6 +339,32 @@ def _prepare(spec: EnvelopeSpec) -> str:
         logger.warning(
             "envelope._prepare: repo map layer failed (%s) — skipping", exc
         )
+
+    try:
+        from skill_context import _inject_skill_context  # noqa: PLC0415
+
+        dispatch_metadata: dict = {"dispatch_id": spec.dispatch_id}
+        if spec.pr_id:
+            dispatch_metadata["pr_id"] = spec.pr_id
+        instruction = _inject_skill_context(
+            spec.terminal_id,
+            instruction,
+            spec.role,
+            dispatch_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
+        logger.warning(
+            "envelope._prepare: skill injection failed (%s); falling back to role label",
+            exc,
+        )
+        if spec.role:
+            header = f"## Role\n\nYou are operating as a **{spec.role}** worker."
+        else:
+            header = (
+                "## Worker Preamble\n\n"
+                "You are a VNX headless worker executing a dispatch instruction."
+            )
+        instruction = f"{header}\n\n{instruction}"
 
     return instruction
 
@@ -394,6 +408,29 @@ def _record_integrity(
         logger.error(
             "envelope: final-prompt integrity failed (non-fatal) dispatch=%s: %s",
             spec.dispatch_id,
+            exc,
+        )
+        return None
+
+
+def _verify_role_application(
+    final_prompt: str,
+    terminal_id: str,
+    role: Optional[str],
+):
+    """Best-effort: run the deterministic role-applied control for *final_prompt*.
+
+    Returns a RoleApplicationVerdict (or None on any failure — the control must
+    never break receipt emission; the fields then stay None/omitted).
+    """
+    try:
+        from role_application import verify_role_applied  # noqa: PLC0415
+        return verify_role_applied(final_prompt, terminal_id, role)
+    except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "envelope._verify_role_application: failed (non-fatal) role=%s terminal=%s: %s",
+            role,
+            terminal_id,
             exc,
         )
         return None
@@ -856,6 +893,14 @@ def _govern(
                     )
                     _role = "identity_unresolved"
 
+                # Deterministic role-applied control (dispatch-20260801-w10):
+                # did the resolved role source actually reach the enriched prompt
+                # (spec.instruction)? FAIL-OPEN — a verification error must never
+                # break receipt emission; the fields simply stay None (omitted).
+                _role_app = _verify_role_application(
+                    spec.instruction, spec.terminal_id, spec.role,
+                )
+
                 # receipt-quality PR-B2 fix-forward (Finding C): aggregate
                 # PreToolUse-hook tool-call signals for this dispatch
                 # (toolcall_signals.py), mirroring provider_dispatch._emit_
@@ -965,6 +1010,18 @@ def _govern(
                     verification=_verification_from_report(report_path),
                     role=_role,
                     receipt_kind="dispatch",
+                    role_applied=(
+                        getattr(_role_app, "role_applied", None) if _role_app is not None else None
+                    ),
+                    role_tier=(
+                        getattr(_role_app, "tier", None) if _role_app is not None else None
+                    ),
+                    role_not_applied_reason=(
+                        getattr(_role_app, "reason", None) if _role_app is not None else None
+                    ),
+                    role_source_path=(
+                        getattr(_role_app, "source_path", None) if _role_app is not None else None
+                    ),
                     session_id=adapter_result.session_id,
                     tool_call_count=_toolcall_signals.get("tool_call_count"),
                     tool_call_failures=_toolcall_signals.get("tool_call_failures"),

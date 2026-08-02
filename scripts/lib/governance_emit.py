@@ -100,6 +100,10 @@ def emit_dispatch_receipt(
     deadline_seconds: Optional[int] = None,
     failure_reason: Optional[str] = None,
     failure_class: Optional[str] = None,
+    role_applied: Optional[bool] = None,
+    role_tier: Optional[str] = None,
+    role_not_applied_reason: Optional[str] = None,
+    role_source_path: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -248,6 +252,10 @@ def emit_dispatch_receipt(
         deadline_seconds=deadline_seconds,
         failure_reason=failure_reason,
         failure_class=failure_class,
+        role_applied=role_applied,
+        role_tier=role_tier,
+        role_not_applied_reason=role_not_applied_reason,
+        role_source_path=role_source_path,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
