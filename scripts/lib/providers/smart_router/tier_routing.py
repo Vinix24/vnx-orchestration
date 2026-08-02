@@ -6,8 +6,8 @@ Tier→provider mappings (honoring provider_constraints.yaml):
                Local-gemma route preserved but unused — reactivate when
                gemma-4-12b-integration ships.
   tier-low  → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
-               (DEEPSEEK_API_KEY required) OR Kimi via CLI (kimi-via-cli-only
-               constraint)
+               (DEEPSEEK_API_KEY required); fallback Codex via provider lane
+               (kimi quota exhausted 2026-08-02, OI-940)
   tier-mid  → sonnet-5  (canonical registry key — see wave7_models.yaml)
   tier-high → opus-5    (canonical registry key — see wave7_models.yaml)
 
@@ -77,6 +77,13 @@ _ROUTE_KIMI = TierRoute(
     lane="kimi_cli",  # kimi-via-cli-only: never via=api or moonshot
 )
 
+_ROUTE_CODEX = TierRoute(
+    tier=TIER_LOW,
+    provider="codex",
+    model="gpt-5.5",
+    lane="provider",
+)
+
 _ROUTE_MID = TierRoute(
     tier=TIER_MID,
     provider="claude",
@@ -104,11 +111,10 @@ def _deepseek_available(env: dict) -> bool:
 def resolve_tier_route(tier: str, env: Optional[dict] = None) -> TierRoute:
     """Resolve a cost tier to a TierRoute.
 
-    For tier-zero: prefers DeepSeek claude-harness (key-auth) when DEEPSEEK_API_KEY
-    is present, falls back to Codex via provider lane (operator decision 2026-08-02:
-    local models skipped until gemma-4-12b-integration ships). For tier-low:
-    prefers DeepSeek claude-harness, falls back to Kimi CLI. Unknown tier strings
-    default to tier-high.
+    For tier-zero and tier-low: prefers DeepSeek claude-harness (key-auth) when
+    DEEPSEEK_API_KEY is present; falls back to Codex via provider lane (kimi quota
+    exhausted 2026-08-02, OI-940; local models skipped until gemma-4-12b-integration
+    ships). Unknown tier strings default to tier-high.
     """
     _env = env if env is not None else dict(os.environ)
 
@@ -142,9 +148,9 @@ def resolve_tier_route(tier: str, env: Optional[dict] = None) -> TierRoute:
                 model="deepseek-v4-flash",  # deepseek-chat discontinued 2026-07-24
                 lane="claude_harness_keyed",
                 env_requirements=("DEEPSEEK_API_KEY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-                fallback=_ROUTE_KIMI,
+                fallback=_ROUTE_CODEX,
             )
-        return _ROUTE_KIMI
+        return _ROUTE_CODEX
 
     if tier == TIER_MID:
         return _ROUTE_MID

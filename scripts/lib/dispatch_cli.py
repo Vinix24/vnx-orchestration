@@ -11,6 +11,7 @@ tmux (subscription). Provider lane executes via run_envelope_plan (provider_mete
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -992,6 +993,20 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
         return frozenset()
 
 
+def _apply_smart_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Optional[str]]":
+    """Consult the smart router when the spec carries no explicit provider (AUTO).
+
+    Encapsulated here so the import + call in run_dispatch stays minimal.
+    Fail-open: import errors and router exceptions return the original vspec
+    unchanged with route_reason=None.
+    """
+    try:
+        from providers.smart_router.door_routing import apply_door_route  # noqa: PLC0415
+        return apply_door_route(vspec)
+    except Exception:
+        return vspec, None
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -1498,6 +1513,13 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         _emit_reject(vspec)
         return 1
 
+    # Smart router: fill in provider + model when the spec carries none
+    # (provider=AUTO). Fail-open — a broken router leaves vspec unchanged.
+    # T0 is never routed (t0-opus-only is a floor, not an advisory).
+    door_route_reason: Optional[str] = None
+    door_vspec, door_route_reason = _apply_smart_router(vspec)
+    vspec = door_vspec
+
     # P1-#1: wrap everything after validate in try/except — door never panics
     try:
         snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
@@ -1506,6 +1528,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         if isinstance(plan, Reject):
             _emit_reject(plan)
             return 1
+
+        # Merge the door route reason into the plan so it's visible in dry-run
+        # output and carried on the ExecutionPlan.
+        if door_route_reason:
+            plan = dataclasses.replace(
+                plan,
+                route_reason=f"{door_route_reason};{plan.route_reason}",
+            )
 
         # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth
         # model ranks the deterministic anchors into a sidecar BEFORE the permit

@@ -4,7 +4,7 @@ Canonical import: from providers.smart_router import classify_task, decide, rout
 Backward-compat: from smart_router import classify_task, decide
 
 PR-2 additions: classify_dispatch(), TierRoute, resolve_tier_route(), route_dispatch().
-route_dispatch() is default-off; returns None unless VNX_AUTO_ROUTE=1.
+route_dispatch() is default-on since 2026-08-02; disable with VNX_SMART_ROUTER_DISABLE=1.
 """
 from __future__ import annotations
 
@@ -44,19 +44,31 @@ def route_dispatch(
     loc_estimate: int = 0,
     env: Optional[dict] = None,
 ) -> Optional[TierRoute]:
-    """Smart router entry point. Returns None when VNX_AUTO_ROUTE is unset.
+    """Smart router entry point. Default-on since 2026-08-02.
 
-    Default-off per memory smart-router-built-not-operative: the router is built
-    but not operative until VNX_AUTO_ROUTE=1 is set. Callers fall back to the
-    existing dispatch path on None return.
+    Tier-low routing (deepseek-v4-flash, codex fallback) is active by default.
+    Operators can disable it with VNX_SMART_ROUTER_DISABLE=1. The old VNX_AUTO_ROUTE
+    opt-in flag is still honoured for backward compat but is superseded.
 
-    When VNX_AUTO_ROUTE=1: classifies via classify_dispatch() and resolves a
-    TierRoute via resolve_tier_route().
+    When active: classifies via classify_dispatch() and resolves a TierRoute via
+    resolve_tier_route(). Returns None when the router is disabled or when
+    classification fails unexpectedly (fail-open).
     """
     _env = env if env is not None else dict(_os.environ)
-    # Audit D7: a bare truthiness check treated VNX_AUTO_ROUTE=0/false as ENABLING (any non-empty
-    # string is truthy). Honour only the canonical truthy values, matching the docstring.
-    if _env.get("VNX_AUTO_ROUTE", "").strip().lower() not in ("1", "true", "yes", "on"):
+
+    # Operator opt-out: VNX_SMART_ROUTER_DISABLE=1 suppresses the router entirely.
+    if _env.get("VNX_SMART_ROUTER_DISABLE", "").strip().lower() in ("1", "true", "yes", "on"):
         return None
-    tier = classify_dispatch(task_spec, file_paths or [], loc_estimate)
-    return resolve_tier_route(tier, _env)
+
+    # Backward compat: VNX_AUTO_ROUTE=0/false/off explicitly disables, matching the
+    # old default-off contract. Any other value (including unset) → router runs.
+    auto_route = _env.get("VNX_AUTO_ROUTE", "").strip().lower()
+    if auto_route in ("0", "false", "no", "off"):
+        return None
+
+    try:
+        tier = classify_dispatch(task_spec, file_paths or [], loc_estimate)
+        return resolve_tier_route(tier, _env)
+    except Exception:
+        # Fail-open: a broken classifier must never block a dispatch.
+        return None
