@@ -36,12 +36,13 @@ def _mock_collect(payload: dict, subprocess_run=None) -> str:
 
 def test_gemini_build_prompt_uses_assembler_when_role_given(adapter: GeminiAdapter) -> None:
     """When role= is given, _build_prompt must route through PromptAssembler."""
-    with patch("vertex_ai_runner.collect_file_contents", side_effect=_mock_collect):
+    with patch("gemini_adapter.collect_file_contents", side_effect=_mock_collect) as m:
         result = adapter._build_prompt(
             instruction="Review the PR",
             changed_files=[],
             role="backend-developer",
         )
+    assert m.called, "collect_file_contents mock must fire (patch target is the consumer namespace)"
     assert isinstance(result, str)
     assert len(result) > len("Review the PR"), "Assembler should expand prompt with L1+L2 context"
     assert "---" in result
@@ -53,11 +54,12 @@ def test_gemini_build_prompt_uses_assembler_when_role_given(adapter: GeminiAdapt
 
 def test_gemini_build_prompt_fallback_to_raw_when_no_role(adapter: GeminiAdapter) -> None:
     """When role= is None and dispatch_metadata is absent, _build_prompt returns raw instruction."""
-    with patch("vertex_ai_runner.collect_file_contents", side_effect=_mock_collect):
+    with patch("gemini_adapter.collect_file_contents", side_effect=_mock_collect) as m:
         result = adapter._build_prompt(
             instruction="Review the PR",
             changed_files=[],
         )
+    assert m.called, "collect_file_contents mock must fire (patch target is the consumer namespace)"
     assert result == "Review the PR"
 
 
@@ -67,12 +69,13 @@ def test_gemini_build_prompt_fallback_to_raw_when_no_role(adapter: GeminiAdapter
 
 def test_gemini_prompt_includes_base_worker_rules(adapter: GeminiAdapter) -> None:
     """Assembled gemini prompt must include Layer 1 base worker rules (billing safety)."""
-    with patch("vertex_ai_runner.collect_file_contents", side_effect=_mock_collect):
+    with patch("gemini_adapter.collect_file_contents", side_effect=_mock_collect) as m:
         result = adapter._build_prompt(
             instruction="Do work",
             changed_files=[],
             role="backend-developer",
         )
+    assert m.called, "collect_file_contents mock must fire (patch target is the consumer namespace)"
     content_lower = result.lower()
     assert "billing" in content_lower or "anthropic" in content_lower, \
         "Layer 1 billing safety must appear in assembled gemini prompt"
@@ -84,11 +87,12 @@ def test_gemini_prompt_includes_base_worker_rules(adapter: GeminiAdapter) -> Non
 
 def test_gemini_prompt_includes_role_context(adapter: GeminiAdapter) -> None:
     """Assembled gemini prompt must include role-specific context for 'backend-developer'."""
-    with patch("vertex_ai_runner.collect_file_contents", side_effect=_mock_collect):
+    with patch("gemini_adapter.collect_file_contents", side_effect=_mock_collect) as m:
         result = adapter._build_prompt(
             instruction="Do work",
             changed_files=[],
             role="backend-developer",
         )
+    assert m.called, "collect_file_contents mock must fire (patch target is the consumer namespace)"
     assert "backend" in result.lower() or "backend-developer" in result.lower(), \
         "Role context for backend-developer must appear in assembled gemini prompt"
