@@ -10,7 +10,19 @@ red/green depended on a model answer instead of on the code.
 
 import pytest
 from _pytest.mark import MarkMatcher
-from _pytest.mark.expression import Expression, ParseError
+from _pytest.mark.expression import Expression
+
+try:  # pytest < 9
+    from _pytest.mark.expression import ParseError
+except ImportError:  # pytest >= 9 removed ParseError from _pytest.mark.expression
+    # Measured 2026-08-02: pytest 8.4.1's ParseError subclasses Exception directly
+    # (not SyntaxError), so it needs its own import above. On pytest 9.1.1 the class
+    # is gone and Expression.compile() raises a plain builtins.SyntaxError for an
+    # invalid expression instead — confirmed via
+    # `Expression.compile("not (")` on both versions. Bind to SyntaxError, not the
+    # broader Exception: a too-wide catch here would also swallow unrelated bugs in
+    # _markexpr_selects_live and silently keep the replay tests deselected.
+    ParseError = SyntaxError
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

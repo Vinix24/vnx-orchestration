@@ -1,0 +1,203 @@
+# Full-suite CI test exclusions (OI-906).
+#
+# profile-a in .github/workflows/vnx-ci.yml runs pytest "$GITHUB_WORKSPACE/tests"
+# at directory level (the real checkout, not the vendored .claude/vnx-system
+# copy — measured 2026-08-02: the vendored tree produces ~197 layout-artifact
+# failures, not code reds). This file is the EXPLICIT exclusion list: every
+# path below is red on main (measured 2026-08-01: pytest tests/ --ignore=tests/f39,
+# then a sequential confirmation run of the candidates) and is excluded from
+# the CI sweep until its repair lands. Nothing is excluded silently.
+#
+# Entries with a "CI image" reason are green on main locally but cannot run in
+# the minimal CI image (undeclared heavy dependency stack); each names the
+# missing stack and the repair path to rejoin the sweep.
+#
+# Tracking item: OI-906 ("CI draait 18 van de 904 testbestanden"). Each
+# entry needs its own repair dispatch before it can rejoin the suite.
+#
+# test_dispatch_envelope.py is NOT listed here: only TestFlagGateClaude is red
+# (4 tests), and the workflow filters it out with -k "not TestFlagGateClaude" so
+# the file's 29 green tests still run.
+#
+# dispatch 20260802-w20b-1310-red-classify (2026-08-02) added the 42 files below
+# citing OI-946..OI-953: PR #1310 widened this same sweep from 831 files (the
+# ones NOT already listed above) to include these too, and 213 of their tests
+# came back red in CI. Classified A/B by running the exact same full-suite
+# composition (this file's exclusions + --ignore=tests/f39) on a fresh
+# origin/main worktree: 218 failed there too, with 15699 passed on BOTH sides —
+# 204 of the 213 branch reds reproduce byte-for-byte on main, and the
+# remaining 9 pass in isolation on both main and the branch (order/load-
+# dependent, OI-658 class). Zero of the 213 are caused by PR #1310 itself
+# (which only touches this workflow, this file, and two conftest.py files —
+# no application code). Each new entry cites the OI covering its cluster.
+#
+tests/integration/test_gemini_streaming_gated.py
+tests/migrations/test_auto_apply.py
+tests/pool/test_pool_lease_e2e.py
+tests/test_adapter_conformance.py
+tests/test_adr007_dispatches_repair.py
+tests/test_adr007_structural_conformance.py
+tests/test_agent_stream_sse.py
+tests/test_agent_validation.py
+tests/test_api_operator_dedup.py
+tests/test_auto_commit_stash_isolation.py
+tests/test_auto_report_integration.py
+tests/test_behavior_contracts.py
+tests/test_bench_headless_routing.py
+tests/test_bench_seed_integrity.py
+tests/test_benchmark_fixes.py
+tests/test_billing_safety.py  # OI-951: doc/content drift the test already asserts against, red on main too
+tests/test_bootstrap_enforcement.py
+tests/test_build_t0_state_exception_handling.py
+tests/test_burnin_certification.py  # hangs without VNX_HEADLESS_CLI=echo; covered by burn-in-headless.yml
+tests/test_busy_terminal_certification.py
+tests/test_ci_gate.py
+tests/test_claude_github_review_linkage.py
+tests/test_cleanup_stale_vnx_sessions.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
+tests/test_cli_engine_bootstrap.py
+tests/test_cli_flag_forwarding.py
+tests/test_cli_init.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_close_track_if_done.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_codex_pr311_findings.py
+tests/test_codex_r2_fixes.py
+tests/test_constraint_enforcer.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
+tests/test_context_rotation.py
+tests/test_conversation_analyzer.py
+tests/test_conversation_resume.py
+tests/test_dashboard_feature.py
+tests/test_dashboard_kanban_certification.py
+tests/test_dashboard_sse_empty_file.py
+tests/test_delivery_failure_codes.py
+tests/test_dispatch_agent_default_instruction.py
+tests/test_dispatch_daemon.py
+tests/test_dispatch_enricher.py
+tests/test_dispatch_lifecycle_register_events.py  # OI-949: dispatch register/event-log ordering, red on main too
+tests/test_dispatch_manifest.py
+tests/test_dispatch_register.py  # OI-949: dispatch register/event-log ordering, red on main too
+tests/test_dispatch_register_path.py  # OI-949: dispatch register/event-log ordering, red on main too
+tests/test_dispatch_register_state_writer_integration.py
+tests/test_dispatch_serialization.py
+tests/test_dispatcher_drain_lifecycle.py
+tests/test_error_contracts.py
+tests/test_future_state_reconciliation.py
+tests/test_gate_dispatch_id.py
+tests/test_gate_evidence_accuracy.py
+tests/test_gate_execution_certification.py
+tests/test_gate_runner.py
+tests/test_gate_status_schema.py
+tests/test_gemini_prompt_no_duplicate.py
+tests/test_governance_blockers_fix.py
+tests/test_governance_digest_certification.py
+tests/test_governance_digest_runner.py
+tests/test_headless_dispatch_daemon_wave5.py
+tests/test_headless_inspect.py
+tests/test_horizon_parity.py
+tests/test_horizon_schema_migration_fix.py
+tests/test_horizon_skill_alias.py  # OI-951: doc/content drift the test already asserts against, red on main too
+tests/test_init_migrate_bootstrap.py
+tests/test_installer_no_template_leak.py
+tests/test_intelligence_ab_framework.py
+tests/test_intelligence_pipeline_e2e.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
+tests/test_learning_feature.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
+tests/test_learning_loop_exception_handling.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
+tests/test_learning_loop_tz.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
+tests/test_litellm_agentic_runner.py
+tests/test_llm_decision_router.py
+tests/test_migrate_0022_preflight.py  # OI-953: misc independent red, confirmed red on main too
+tests/test_migrate_future_system.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_migrate_pool_seed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_observability_linkage.py
+tests/test_open_items_gate_certification.py
+tests/test_pattern_id_stability.py
+tests/test_pattern_matching.py
+tests/test_per_pr_closure.py
+tests/test_plan_gate_enforcement.py
+tests/test_plan_gate_panel.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_planning_api.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_planning_cli.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_planning_cli_objective.py
+tests/test_pool_manager_real_spawn.py
+tests/test_pool_provider_mix_integration.py
+tests/test_pool_state_repo.py
+tests/test_pr10_provider_string_canon.py
+tests/test_pr2_requeue_clear_context.py
+tests/test_pr_recommendation_integration.py  # OI-953: misc independent red, confirmed red on main too
+tests/test_project_status_hook.py
+tests/test_provider_dispatch_contract_integration.py
+tests/test_provider_dispatch_deepseek_harness.py
+tests/test_provider_dispatch_entry.py
+tests/test_provider_dispatch_governance_integration.py
+tests/test_quality_advisory_pipeline.py
+tests/test_queue_reconciliation_certification.py
+tests/test_quickstart_validation.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_receipt_classifier.py
+tests/test_receipt_deterministic_fixes.py
+tests/test_receipt_instruction_hash.py
+tests/test_receipt_processor_autopr_rejected_mirror.py
+tests/test_receipt_processor_bootstrap.py
+tests/test_receipt_provenance.py
+tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
+tests/test_receipt_v2_pr5_schema_cutover.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
+tests/test_repo_map.py  # CI image: red in the minimal image on two measured stacks — without tree-sitter repo_map.py raises NameError (_TSParser, latent scripts/lib bug, repair needs own dispatch; scripts/lib is out of scope here), and the networkx PageRank tests need the undeclared networkx+numpy+scipy stack. Installing networkx alone makes it WORSE (27 failed vs 13): repo_map leaves its positional fallback and nx.pagerank crashes on missing numpy, which also breaks the green test_repo_map_provider_coverage.py.
+tests/test_report_assembler.py
+tests/test_review_adapters.py
+tests/test_roadmap_consistency.py
+tests/test_routing_policy.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
+tests/test_runtime_coordination_schema_drift.py
+tests/test_runtime_facade_registry_integration.py
+tests/test_safe_autonomy_cutover.py
+tests/test_schema_init_view_ordering.py
+tests/test_selflearn_path_unification.py
+tests/test_semantics_cleanup.py
+tests/test_serve_dashboard_api.py
+tests/test_session_ids_staleness.py
+tests/test_sessionstart_hook.py  # OI-951: doc/content drift the test already asserts against, red on main too
+tests/test_smart_router_cost_aware.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
+tests/test_smart_router_e2e.py
+tests/test_smart_router_multiprovider.py
+tests/test_strategy_roadmap.py
+tests/test_strategy_roadmap_real_file.py
+tests/test_subprocess_adapter_pr3.py
+tests/test_subprocess_cheap_lane.py
+tests/test_subprocess_dispatch_f34.py
+tests/test_subprocess_dispatch_identity.py
+tests/test_subprocess_dispatch_worktree_isolation.py
+tests/test_subprocess_health.py
+tests/test_subprocess_w3e_robustness.py
+tests/test_t0_decision_log.py  # OI-949: dispatch register/event-log ordering, red on main too
+tests/test_t0_escalations_log.py  # OI-949: dispatch register/event-log ordering, red on main too
+tests/test_t0_skill_consistency.py
+tests/test_t0_skill_slim.py  # OI-951: doc/content drift the test already asserts against, red on main too
+tests/test_tagger_ab.py
+tests/test_tagger_persist.py
+tests/test_tagging_events.py
+tests/test_tenant_stamp_fail_closed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_terminal_state_reconciler.py
+tests/test_tmux_adapter.py
+tests/test_tmux_adapter_interface.py
+tests/test_tmux_interactive_dispatch.py  # fails / exceeds per-test timeout (OI-906)
+tests/test_tmux_worktree.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
+tests/test_track_cli.py
+tests/test_track_reconciler.py
+tests/test_track_v23_cli.py
+tests/test_vnx_cli.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_vnx_start_runtime.py
+tests/test_vnx_tagger.py
+tests/test_w5b_small_fixes.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
+tests/test_w_init_project_id_threading.py
+tests/test_wave4_central_install_e2e.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/test_wave4_cmd_update.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/test_wave4_path_resolver.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/test_wave4_regen_settings_target.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/test_wave4_save_restore.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/test_wave4_write_guard.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/test_wave7_deepseek_smoke.py
+tests/test_wave7_fixes.py
+tests/test_week_1_skills.py
+tests/test_wheel_build.py  # OI-953: misc independent red, confirmed red on main too
+tests/test_wheel_install.py
+tests/test_wiring_completeness.py
+tests/test_worker_heartbeat.py
+tests/test_worker_state_dir.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
+tests/unit/test_codex_event_normalizer.py
