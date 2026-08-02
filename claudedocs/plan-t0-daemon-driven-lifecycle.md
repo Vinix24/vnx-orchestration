@@ -1,10 +1,38 @@
-# Bouwplan: T0 daemon-driven lifecycle (context-rotatie) — herziening r2
+# Bouwplan: T0-gemedieerde context-rotatie — herziening r3
 
 > Track: `t0-daemon-driven-lifecycle`
 > Dispatch: dispatch-20260802-rotation-lifecycle-plan
 > Datum: 2026-08-02
-> Status: plan — herzien na plan-gate REVISE (0 pass, 2 revise, 2 block)
-> Herziening: r2 — adresseert alle 14 bevindingen uit de gate-run
+> Status: plan — herzien na plan-gate r2 (0 pass / 3 revise / 1 block)
+> Herziening: r3 — operatorbesluit: rotatie is T0-gemedieerd, geen daemon-hard-kill
+
+---
+
+## 0. Operatorbesluit: T0-gemedieerd, niet daemon-hard-kill
+
+De plan-gate gaf in ronde 2: `0 pass / 3 revise / 1 block`. De opus-zetel blokkeerde op een
+ontwerpsplitsing die kimi zo formuleerde:
+
+> make rotation T0-mediated (rotation_requested marker + checkpoint at next boundary) **or**
+> add a real quiescence signal
+
+**De operator kiest T0-gemedieerd.** De daemon **kilt niets, spawnt niets, wacht op niets**.
+Hij zet een verzoek-marker (`rotation_requested`). T0 ziet die op zijn eerstvolgende
+governance-grens en roteert zichzelf via het bestaande `checkpoint()`-pad. Dit is precies de
+weg die `context_rotation.py` al ontwerpt voor T0-geïnitieerde rotatie (docs/operations/
+CONTEXT_ROTATION.md:216-217: de oude T0 "is expected to exit shortly after" — de exit is
+onderdeel van T0's eigen boundary-logica, niet van dit plan).
+
+De vijf zwaarste r2-bevindingen lossen hiermee in één keer op. Per bevinding, waar het in dit
+plan staat:
+
+| r2-bevinding | Oplossing in deze vorm | Sectie |
+|---|---|---|
+| Destructieve teardown (`tmux kill-session` op de oude T0) | **Vervalt.** Er is geen daemon-kill. De daemon deed dat ook feitelijk fout: hij zocht sessies met `^vnx-t0-`, terwijl `start.sh:30` sessies `vnx-<basename>` noemt en de levende sessies `orch-t0`, `mc-t0`, `seo-t0`, `t0-sales-copilot` heten. Geen match. Wat wél matchte was de successor die `respawn()` zelf aanmaakt (`vnx-t0-rotation-<term>-<id>`, `context_rotation.py:675`) — de daemon kon dus zijn eigen verse T0 killen. | §2.6, Appendix A |
+| Twee levende T0's | **Vervalt.** Er wordt maar één T0 gestart, door de bestaande weg: de oude T0 roept `checkpoint()` aan, die `respawn()` uitvoert en op `.ready` wacht, en de oude T0 exit daarna zelf. Geen daemon die een tweede start terwijl de eerste nog draait. | §2.6 |
+| `mid_action`-poort dood in de code | **Leeft.** T0 beslist zelf of hij op een grens staat en roept `checkpoint()` aan met de juiste `mid_action`-waarde. De poort in `decide_rotation()` (regel 314-315) blijft onaangetast en is de enige die over rotatie beslist. | §2.4 |
+| `respawn()`-wachten blokkeert de dispatcher-loop (tot 60s) | **Vervalt als probleem.** `respawn()` wordt alleen nog aangeroepen vanuit `checkpoint()`, die draait in T0's eigen proces. De dispatcher-loop roept `respawn()` nooit aan; de tick roept alleen de marker-schrijver. | §2.6 |
+| `.ready` als hartslag — eenmalig en dus gegarandeerd stale | **Vervalt als probleem.** Zonder daemon-gestuurde liveness-detectie is er geen versheidssignaal nodig. `.ready` blijft alleen de eenmalige handshake binnen `respawn()` (rotation_id-gestempeld). Liveness is de verantwoordelijkheid van de operator (`tmux ls`), de dispatcher-supervisor, en de freshness-timestamp (§4.2). | §2.6, §4.2 |
 
 ---
 
@@ -38,11 +66,16 @@ $ python3 -m pytest tests/test_context_rotation.py -q --tb=no
 77 passed, 1 failed
 ```
 
-Alles in `context_rotation.py` is passief. Geen enkel code-pad vuurt zonder dat iemand `enabled: true` flipt én `checkpoint()` aanroept. De test-suite (77/78 tests groen; de ene falende test `test_project_id_scoped_across_two_projects` is een pre-existing path-resolutie-issue in een non-central-store omgeving) dekt de volledige module.
+Alles in `context_rotation.py` is passief. Geen enkel code-pad vuurt zonder dat iemand
+`enabled: true` flipt én `checkpoint()` aanroept. De test-suite (77/78 tests groen; de ene
+falende test `test_project_id_scoped_across_two_projects` is een pre-existing path-resolutie-
+issue — twee project_ids resolven naar hetzelfde pad in project-local mode, zie §8.3) dekt de
+volledige module.
 
 ### 1.2 Wat bestaat maar niet voor dit doel gebouwd is
 
-**De UNIFIED_SUPERVISOR hooks** (`scripts/lib/dispatcher_supervisor_ticks.sh`, 224 regels) zijn een throttled-tick patroon binnen de dispatcher-loop. Ze gaten op `VNX_SUPERVISOR_MODE=unified`:
+**De UNIFIED_SUPERVISOR hooks** (`scripts/lib/dispatcher_supervisor_ticks.sh`, 224 regels) zijn
+een throttled-tick patroon binnen de dispatcher-loop. Ze gaten op `VNX_SUPERVISOR_MODE=unified`:
 
 ```
 $ grep -n "VNX_SUPERVISOR_MODE\|_maybe_runtime_supervise\|_unified_supervisor_lease_sweep_tick" scripts/lib/dispatcher_supervisor_ticks.sh
@@ -52,7 +85,7 @@ $ grep -n "VNX_SUPERVISOR_MODE\|_maybe_runtime_supervise\|_unified_supervisor_le
 206:    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
 ```
 
-Deze hooks worden aangeroepen in `process_dispatches()` (`scripts/dispatcher_minimal.sh:599-603`):
+Deze hooks worden aangeroepen in `process_dispatches()` (`scripts/dispatcher_minimal.sh:599-607`):
 
 ```
 $ grep -n "process_dispatches\|_maybe_runtime_supervise\|_unified_supervisor_lease_sweep_tick" scripts/dispatcher_minimal.sh
@@ -61,46 +94,51 @@ $ grep -n "process_dispatches\|_maybe_runtime_supervise\|_unified_supervisor_lea
 603:    _unified_supervisor_lease_sweep_tick
 ```
 
-**Het throttled-tick patroon is herbruikbaar voor een rotatie-tick.** De bestaande ticks (runtime_supervise elke 60s, lease_sweep elke 30s) zijn exact het mechanisme waar de rotatie-daemon aan moet haken. Er ontbreekt een `_maybe_rotation_tick`.
+**Het throttled-tick patroon is herbruikbaar voor een rotatie-tick.** De bestaande ticks
+(runtime_supervise elke 60s, lease_sweep elke 30s) zijn exact het mechanisme waar de
+rotatie-daemon aan moet haken. Er ontbreekt een `_maybe_rotation_tick`.
 
-**De supervisor wrappers** (`scripts/dispatcher_supervisor.sh`, 194 regels; `scripts/receipt_processor_supervisor.sh`, 207 regels) zijn het template voor een rotatie-daemon supervisor: singleton-enforcement, exponential backoff (2s -> 60s), child-monitoring, en PID/lock-file management.
+**De supervisor wrappers** (`scripts/dispatcher_supervisor.sh`, 194 regels;
+`scripts/receipt_processor_supervisor.sh`, 207 regels) zijn het template voor een rotatie-
+daemon supervisor: singleton-enforcement, exponential backoff (2s -> 60s), child-monitoring,
+en PID/lock-file management.
 
-```
-$ grep -n "singleton_enforcer\|enforce_singleton" scripts/dispatcher_supervisor.sh
-75:# Singleton enforcement
-78:source "$VNX_DIR/scripts/singleton_enforcer.sh"
-81:enforce_singleton "$SUPERVISOR_NAME" "$LOG_FILE" "$SCRIPT_DIR/dispatcher_supervisor.sh"
-```
-
-**De standaard supervisormodus is `legacy`.** De dispatcher gebruikt `${VNX_SUPERVISOR_MODE:-legacy}` — wie geen `VNX_SUPERVISOR_MODE=unified` exporteert, krijgt géén enkele tick. Dit is relevant voor de "default-aan"-claim in §3.3: die claim hangt aan `unified`, maar `unified` is niet de default.
+**De standaard supervisormodus is `legacy`.** De dispatcher gebruikt
+`${VNX_SUPERVISOR_MODE:-legacy}` — wie geen `VNX_SUPERVISOR_MODE=unified` exporteert, krijgt
+géén enkele tick. Dit is relevant voor §3.3: de rotatie-tick mag hier NIET aan hangen.
 
 ### 1.3 Wat ontbreekt (gap-analyse)
 
 | Gap | Waarom het ontbreekt |
 |---|---|
-| **Geen daemon die de rotatie bezit** | `checkpoint()` is een passieve functie — iemand moet 'm aanroepen. In het huidige model is dat een draaiende T0 die zelf beslist. Er is geen externe entiteit die de levenscyclus bewaakt. |
+| **Geen verzoek-pad van buiten de T0** | `checkpoint()` is een passieve functie — iemand moet 'm aanroepen. Er is geen externe entiteit die een rotatie *verzoekt* op basis van sessie-duur, zonder zelf te roteren. |
 | **Geen tick in de dispatcher-loop voor rotatie** | `dispatcher_supervisor_ticks.sh` heeft ticks voor lease_sweep, runtime_supervise, OI-bridge, objective-reconcile, en learning-cycle. Geen rotatie-tick. |
-| **Geen crash-loop-halt** | Als een verse T0 sterft voordat hij z'n `.ready`-signaal schrijft, timeout `respawn()` na 60s en keert terug met `success=False`. Maar er is geen mechanisme dat telt hoe vaak dit gebeurt en stopt met respawnen na N pogingen. |
-| **Geen handoff-lease** | `checkpoint()` heeft een request-marker TTL (120s, regel 819-826) die duplicate calls binnen hetzelfde proces voorkomt. Maar er is geen distributed lease die concurrente rotaties van twee losse processen blokkeert. |
-| **Geen receipt-per-check** | `checkpoint()` emit alleen een receipt bij een bevestigde rotatie (`context_rotation_continuation`, regel 877-880). Een periodieke check die geen rotatie triggert laat geen spoor achter. Een stille daemon-dood wordt niet gedetecteerd. |
-| **Rotatie is default-uit** | `configs/context_rotation.yaml:enabled: false`. Bovendien: `VNX_SUPERVISOR_MODE` default is `legacy`, niet `unified`. |
+| **Geen crash-loop-halt** | Als een verse T0 niet `.ready` schrijft, abort `respawn()` na 60s en keert terug met `success=False`. Maar er is geen mechanisme dat telt hoe vaak dit achter elkaar gebeurt en stopt met *verzoeken* na N pogingen. |
+| **Geen lease op de marker** | `checkpoint()` heeft een request-marker TTL (120s, regel 819-826) die duplicate calls binnen hetzelfde proces voorkomt. Maar er is geen distributed lease die concurrente marker-writes van twee losse dispatcher-processen blokkeert. |
+| **State-paden zijn niet gegarandeerd project_id-gescopet** | `rotation_state_dir`/`rotation_handoff_dir` resolven via `_resolve_state_root`, die in project-local mode (branch 4) twee project_ids op hetzelfde pad laat landen (de enige rode test in de suite). Crash-teller, lease en durable state landen daar. |
+| **Rotatie is default-uit** | `configs/context_rotation.yaml:enabled: false`. |
 
 ### 1.4 Grens met PR #1149 (`t0-context-rotation-revival`)
 
-PR #1149 leverde het **mechanisme**: `context_rotation.py` met `checkpoint()` -> `write_t0_handoff()` -> `respawn()`. Het is een passief integratiepunt — een draaiende T0 moet het aanroepen.
+PR #1149 leverde het **mechanisme**: `context_rotation.py` met `checkpoint()` ->
+`write_t0_handoff()` -> `respawn()`. Het is een passief integratiepunt — een draaiende T0 moet
+het aanroepen.
 
-Deze track (`t0-daemon-driven-lifecycle`) bouwt de **daemon** die:
-1. Periodiek checkt of een T0 aan de rotatie-drempel zit
-2. De rotatie triggert (handoff schrijven, verse T0 spawnen)
-3. De levenscyclus bewaakt (is de verse T0 nog alive?)
-4. Zichzelf beschermt tegen crash-loops en concurrente rotaties
-5. Een receipt achterlaat bij elke check
+Deze track (`t0-daemon-driven-lifecycle`) bouwt de **verzoeker** die:
+1. Periodiek meet of een T0 aan de sessie-duur-drempel zit
+2. Een `rotation_requested`-marker plaatst die T0 bij zijn volgende grens consumeert
+3. Zichzelf beschermt tegen verzoek-loops (crash-loop-halt) en concurrente writes (flock)
+4. Een receipt achterlaat bij elke echte state-transitie
+5. De levenscyclus bewaken NIET zelf doet — dat blijft T0's eigen boundary-logica
 
-Het mechanisme uit #1149 wordt **gebruikt**, niet herbouwd. De daemon is de **eigenaar** van de levenscyclus — dat is wat #1149 expliciet niet levert (zie `CONTEXT_ROTATION.md:339-341`: "No fully hands-off auto-respawn from a daemon with no T0 present — that needs a governed interactive-session-spawn primitive and is explicitly parked as a follow-up track").
+Het mechanisme uit #1149 wordt **gebruikt, niet herbouwd**. De daemon wordt géén eigenaar van
+de levenscyclus — hij is de verzoeker. Dat bewaart de scope-grens uit `CONTEXT_ROTATION.md`:
+"No fully hands-off auto-respawn from a daemon with no T0 present" blijft staan, want de daemon
+spawnt niet.
 
 ---
 
-## 2. Doelarchitectuur
+## 2. Doelarchitectuur (T0-gemedieerd)
 
 ### 2.1 Wie bezit de levenscyclus
 
@@ -121,54 +159,117 @@ Het mechanisme uit #1149 wordt **gebruikt**, niet herbouwd. De daemon is de **ei
 │  │  ┌──────────────────────────────────────┐  │  │
 │  │  │  _maybe_rotation_tick   ← NIEUW      │  │  │
 │  │  │  (interval: 120s default)            │  │  │
-│  │  │  Gated op VNX_SUPERVISOR_MODE=unified│  │  │
-│  │  │  + VNX_T0_ROTATION_DAEMON=1          │  │  │
+│  │  │  Gated op VNX_T0_ROTATION_DAEMON=1   │  │  │
+│  │  │  ONAFHANKELIJK van supervisor-mode   │  │  │
 │  │  └──────────────────────────────────────┘  │  │
 │  └────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────┘
+        │
+        │  schrijft alleen de marker:
+        │  state/rotation/<project_id>/T0_request.json
+        │  { "rotation_id", "status": "rotation_requested", "requested_at" }
+        ▼
+┌──────────────────────────────────────────────────┐
+│  T0 (draaiend, interactief)                      │
+│  roept op zijn governance-grens checkpoint()     │
+│  aan (bestaat al) — leest de marker, roteert     │
+│  zichzelf: handoff → respawn() → wacht .ready →  │
+│  oude T0 exit zelf.                              │
+└──────────────────────────────────────────────────┘
 ```
 
-De **dispatcher** bezit alle periodieke taken. De rotatie-tick wordt een zusje van de bestaande ticks — zelfde patroon, zelfde gating, zelfde throttling. Geen aparte daemon, geen extra proces. Dit is de dunst mogelijke toevoeging.
+**De dispatcher bezit de periodieke meting.** De rotatie-tick wordt een zusje van de bestaande
+ticks — zelfde patroon, zelfde throttling, maar met een **eigen, onafhankelijke schakelaar**
+(§3.3). De tick doet maar één ding: meten of `session_duration >= max_session_seconds` en zo
+ja een `rotation_requested`-marker schrijven. Hij kilt, spawnt en wacht niet.
 
-**Twee onafhankelijke schakelaars** (bevinding overige #6 — gefaseerde uitrol):
+**T0 bezit de rotatie-uitvoering.** Alleen T0, via `checkpoint()` op een echte
+governance-grens, roteert. De `mid_action`-poort in `decide_rotation()` is daarmee de enige
+poort die over een daadwerkelijke rotatie beslist.
 
-| Schakelaar | Default | Effect |
-|---|---|---|
-| `VNX_SUPERVISOR_MODE=unified` | `legacy` | Activeert ALLE ticks (runtime_supervise, lease_sweep, OI-bridge, reconcile, learning-cycle, rotation) |
-| `VNX_T0_ROTATION_DAEMON=1` | `0` (uit) | Activeert specifiek de rotatie-tick. Zonder deze flag schrijft de tick alleen health receipts (dry-run), hij roteert nooit. |
+### 2.2 State-layout — expliciet project_id-gescopet (bevinding ADR-007)
 
-`VNX_SUPERVISOR_MODE=legacy` is de enige kill-switch die de dispatcher nu kent. Die zet alles uit — lease_sweep, runtime_supervise, OI-bridge, reconcile. Een rotatie-specifieke rollback vraagt om een rotatie-specifieke schakelaar. Vandaar `VNX_T0_ROTATION_DAEMON`.
+Alle rotatie-state leeft in het project-resolved data root, onder een **expliciete
+project_id-laag**. Dit is de correctie op de r2-claim "alle state is project_id-gescopet":
+die claim klopte alleen in central-install mode. In project-local mode (`_resolve_state_root`
+branch 4, `vnx_paths.py:420-421`) resolven twee project_ids op dezelfde project_root naar
+hetzelfde pad — bewezen door `test_project_id_scoped_across_two_projects`
+(`tests/test_context_rotation.py:715`).
 
-**Uitrolpad** (bevinding overige #6):
-1. PR 1-2: tick bestaat, maar `VNX_T0_ROTATION_DAEMON` default `0`. Tick schrijft health receipts, roteert niet. Geen productie-impact.
-2. PR 3: operator zet `VNX_T0_ROTATION_DAEMON=1` per project. Eerst in vnx-dev, dan vnx-orchestration, dan fleet. Elke stap minimaal 24h observatie.
-3. PR 4: docs + integratietests landen. Uitrol is dan al geverifieerd op vnx-dev.
+**Ontwerp:** de drie path-helpers krijgen de project_id als padcomponent, los van hoe
+`_resolve_state_root` resolveert:
 
-### 2.2 Waar draait de daemon
+```
+<data_root>/state/rotation/<project_id>/T0_durable.json     (durable_state_path)
+<data_root>/state/rotation/<project_id>/T0_request.json     (request_marker_path)
+<data_root>/state/rotation/<project_id>/T0.ready            (ready_signal_path)
+<data_root>/state/rotation/<project_id>/T0_rotation.lock    (lease, §3.2)
+<data_root>/rotation_handovers/<project_id>/T0/handoff.md   (rotation_handoff_dir)
+```
 
-De rotatie-logica draait **in-process** in `dispatcher_minimal.sh`, als een throttled tick in `process_dispatches()`. Dit is geen aparte daemon — het is een extra functie in de bestaande dispatcher-loop. De dispatcher is al persistent (draait onder `dispatcher_supervisor.sh` met auto-restart). Een extra proces zou een nieuw singleton-mechanisme, een nieuw PID-bestand, en een nieuw supervisor-wrapper nodig hebben — onnodige complexiteit.
+`project_id` voldoet aan `PROJECT_ID_RE = ^[a-z][a-z0-9-]{1,31}$` (`vnx_ids.py:15`) — een
+veilige, enkele padcomponent zonder punten of slashes (path-traversal-safe, zelfde redenering
+als `_validate_terminal`, `context_rotation.py:93-99`).
 
-### 2.3 Hoe merkt de daemon dat de drempel bereikt is
+Dit is een **deliverable in PR 2** (§5), niet een neveneffect: het maakt crash-teller, lease en
+durable state gegarandeerd project_id-disjunct in álle resolutie-modussen en maakt de enige
+rode test groen. Omdat de feature dormant is (`enabled: false` overal, geen `T0_durable.json`/
+`T0_request.json`/`T0.ready` op schijf) is de pad-verandering compatvrij.
 
-**Pre-flight check: bestaat er een T0?** (bevinding overige #3 — geen preconditie)
+### 2.3 Hoe de tick een verzoek plaatst (bevinding: gedeelde teller)
 
-De rotatie-tick checkt eerst of er een T0-sessie bestaat via `tmux list-sessions -F '#{session_name}'` en een naming convention (`vnx-t0-*` of de session name uit de state). Geen T0-sessie -> de tick schrijft een health receipt met `reason: no_t0_session` en returnt. Geen spawn-from-nothing. Dit bewaart de scope-grens uit `CONTEXT_ROTATION.md:339-341`.
+`_maybe_rotation_tick()` (bash) roept `python3 scripts/lib/rotation_daemon.py tick` aan, die:
 
-**Primaire trigger: sessie-duur** (bevinding B1 — kernmechanisme)
+1. **Policy leest** (`RotationPolicy.load`). Als `enabled != true` of `respawn !=
+   "tmux_new_session"`: schrijf de freshness-timestamp en return. Geen marker.
+2. **Durable state leest** (`T0_durable.json`).
+3. **Crash-loop-halt checkt**: als `crash_loop_halted_until` in de toekomst ligt, geen verzoek
+   (§3.1).
+4. **Sessie-duur berekent**: `session_duration = now - last_rotation_at`. Koude start
+   (`last_rotation_at = None`): zet `last_rotation_at = now` en return — de klok start, geen
+   rotatie op de eerste tick.
+5. **Marker-status leest** (`T0_request.json`). Bij een verse `rotation_requested` (al
+   gevraagd) of `in_progress` (T0 is al aan het roteren) → return. Alleen bij afwezig of
+   afgehandeld (`success`/`aborted`) en `session_duration >= max_session_seconds` → schrijf
+   `rotation_requested` met een nieuw `rotation_id` en `based_on_last_rotation_at` (de
+   `last_rotation_at` waarop de duur-beslissing is gebaseerd — de generatie-guard, §2.4).
+6. **Request-hervalidatie**: ziet de tick een `rotation_requested`-marker terwijl
+   `session_duration < max_session_seconds` (de duur die het verzoek rechtvaardigde is niet meer
+   bereikt, bijv. na een rotatie die de durable state wél bijwerkte), dan wist hij de marker.
+   Zo kan een verzoek nooit langer leven dan de sessie-duur die het rechtvaardigt.
+7. **Receipt-emit** bij een daadwerkelijke marker-write (§4).
+8. **Freshness-timestamp schrijft** (`.last_rotation_tick_ts`, §4.2).
 
-De tick leest `durable_state.json:last_rotation_at`. Daaruit berekent hij `session_duration_seconds = now - last_rotation_at`. Dit is deterministisch — twee integers aftrekken.
+**De tick raakt `boundaries_since_last_rotation` niet aan.** Die teller is exclusief eigendom
+van `checkpoint()` (increment bij elke grens zonder rotatie, `context_rotation.py:836-840`;
+reset op bevestigde rotatie, `context_rotation.py:870-873`). In de T0-gemedieerde vorm heeft
+de tick zijn eigen cooldown: hij vraagt maximaal één keer per `max_session_seconds` (een verse
+`rotation_requested` blokkeert een nieuwe). De r2-problematiek — daemon-tick en `checkpoint()`
+schreven allebei in dezelfde teller zonder afgesproken semantiek — vervalt hiermee expliciet:
+**de tick schrijft alleen de marker, `checkpoint()` schrijft alleen de teller.**
 
-**Koude start** (bevinding B1 — `last_rotation_at=None`): de eerste tick die na een cold start draait, zet `last_rotation_at = now` in de durable state. Dit start de klok. De T0 krijgt `max_session_seconds` vanaf dat moment. Als `last_rotation_at` later `None` blijkt (omdat een eerdere schrijfactie faalde), wordt het opnieuw op `now` gezet — de klok herstart, geen crash.
+### 2.4 Hoe T0 het verzoek consumeert (bevinding: marker-status + mid_action-poort)
 
-**Ontwerpbeslissing**: sessie-duur is de primaire trigger. Context-percentage is een optionele backstop (alleen als de T0 een betrouwbaar signaal levert). Dit is een puur deterministische check. Geen model-call.
+`checkpoint()` (`context_rotation.py:778`) krijgt één uitbreiding: het leest de marker vóór
+`decide_rotation()` en geeft een nieuw `rotation_requested`-signaal door. De guard logica:
 
-### 2.4 Hoe triggert de daemon de rotatie — het nieuwe triggerpad (bevinding B1)
+```python
+# checkpoint(), vóór decide_rotation() — de marker is al gelezen (regel 817-819)
+in_flight = _load_json_safe(request_path)
+if in_flight and in_flight.get("status") == "in_progress":
+    # bestaande duplicate-guard (TTL 120s): al roterend → no-op     [ONGEWIJZIGD]
+    ...
+# rotation_requested is een geldig verzoek, maar alleen voor de durable-state-
+# generatie waarop de tick het schreef (based_on_last_rotation_at). Een verzoek
+# dat ouder is dan de laatst bevestigde rotatie is stale en mag niet triggeren.
+rotation_requested = bool(
+    in_flight
+    and in_flight.get("status") == "rotation_requested"
+    and in_flight.get("based_on_last_rotation_at") == durable.get("last_rotation_at")
+)
+```
 
-**Wat fout was in r1**: het plan schreef `checkpoint(at_governance_boundary=False)`. De code op `context_rotation.py:316-317` retourneert `not_at_boundary` bij `False`, en regel 319 weigert elke trigger behalve `governance_boundary`. De daemon kon via dit pad nooit roteren. Het plan erkende bovendien niet dat `True` hardcoderen een daemon zonder liveness-poort impliceert.
-
-**Wat r2 ontwerpt**: een tweede trigger-mode in `decide_rotation()` die **binnen** de bestaande poorten opereert, niet eromheen.
-
-Het bestaande `decide_rotation()` (regel 298-334):
+`decide_rotation()` krijgt één parameter en één tak:
 
 ```python
 def decide_rotation(
@@ -178,82 +279,47 @@ def decide_rotation(
     boundaries_since_last_rotation: int,
     context_pct: Optional[float] = None,
     mid_action: bool = False,
+    rotation_requested: bool = False,                 # NIEUW
 ) -> RotationDecision:
-    if not policy.enabled:                                    # poort 1
+    if not policy.enabled:                            # poort 1
         return RotationDecision(False, "disabled")
-    if mid_action:                                            # poort 2
+    if mid_action:                                    # poort 2 — LEEFT
         return RotationDecision(False, "mid_action")
-    if not at_governance_boundary:                            # poort 3
+    if not at_governance_boundary:                    # poort 3
         return RotationDecision(False, "not_at_boundary")
-    if policy.trigger != "governance_boundary":               # poort 4
+    if rotation_requested:                            # poort 4 — NIEUW
+        # De daemon heeft sessie-duur al gevalideerd; de debounce-teller is
+        # niet van toepassing op een daemon-verzoek (de tick-request-cooldown
+        # is de debounce). Nog steeds alleen op een echte grens, nooit mid-action.
+        return RotationDecision(True, "rotation_requested")
+    if policy.trigger != "governance_boundary":       # poort 5 (bestaand)
         return RotationDecision(False, f"unsupported_trigger:{policy.trigger}")
-    # ... debounce, pct_ceiling ...
+    # ... debounce, pct_ceiling (ONGEWIJZIGD)
 ```
 
-De uitbreiding voor `session_duration`-mode:
+Toelichting per poort:
 
-```python
-def decide_rotation(
-    *,
-    policy: RotationPolicy,
-    at_governance_boundary: bool,
-    boundaries_since_last_rotation: int,
-    context_pct: Optional[float] = None,
-    mid_action: bool = False,
-    session_duration_seconds: Optional[float] = None,         # NIEUW
-) -> RotationDecision:
-    if not policy.enabled:
-        return RotationDecision(False, "disabled")
-    if mid_action:
-        return RotationDecision(False, "mid_action")
+- **Poort 1 (`enabled`)** onveranderd. Ook in daemon-verzoek-modus moet `enabled: true` zijn.
+- **Poort 2 (`mid_action`)** **leeft.** De daemon roteert niet en heeft dus geen
+  mid-action-voorspelling nodig. T0 roept `checkpoint()` aan op een grens waar hij zelf vindt
+  dat hij niet mid-action zit. De poort blijft de enige die een daadwerkelijke rotatie tegenhoudt.
+- **Poort 3 (`at_governance_boundary`)** blijft voor beide paden gelden. Een daemon-verzoek
+  roteert alleen als T0 de checkpoint op een echte grens aanroept. Dit is het kernverschil met
+  r2: daar werd `at_governance_boundary=False` geprobeerd (en door regel 316-317 geblokkeerd).
+- **Poort 4 (`rotation_requested`)** is de enige nieuwe tak. Hij staat vóór de
+  `governance_boundary`-trigger-check en vóór de debounce, met de expliciete aantekening dat de
+  request-cooldown van de tick de debounce is. De bestaande boundary-trigger en debounce blijven
+  bit-identiek voor T0-geïnitieerde rotatie (handmatig via de rotate-skill).
+- **De `boundaries_since_last_rotation`-teller** wordt door het daemon-verzoek **overgeslagen**,
+  maar niet geschonden: hij wordt bij een `rotation_requested`-rotatie wél gereset naar 0
+  (bestaande code, `context_rotation.py:870-873`). De teller blijft voor T0-geïnitieerde
+  rotaties; het daemon-verzoek heeft zijn eigen cooldown. Dit staat expliciet in §2.3.
 
-    # --- NIEUW: session_duration triggerpad ---
-    if policy.trigger == "session_duration":
-        if session_duration_seconds is None:
-            return RotationDecision(False, "no_session_duration_signal")
-        if session_duration_seconds < policy.max_session_seconds:
-            return RotationDecision(False, "session_duration_below_threshold")
-        # In duration-mode: de debounce is een cooldown in seconden,
-        # niet een boundary-teller. min_boundaries_between_rotations
-        # wordt geherinterpreteerd als min_ticks tussen rotaties, en
-        # elke tick = tick_interval_seconds. De effectieve cooldown is
-        # min_boundaries_between_rotations * tick_interval_seconds.
-        return RotationDecision(True, "session_duration_exceeded")
-
-    # --- Bestaand: governance_boundary triggerpad (ongewijzigd) ---
-    if not at_governance_boundary:
-        return RotationDecision(False, "not_at_boundary")
-    if policy.trigger != "governance_boundary":
-        return RotationDecision(False, f"unsupported_trigger:{policy.trigger}")
-    # ... debounce, pct_ceiling (ongewijzigd) ...
-```
-
-**Toelichting bij de poorten**:
-
-- **Poort 1 (`enabled`)** blijft onveranderd. Ook in daemon-mode moet `enabled: true` zijn.
-- **Poort 2 (`mid_action`)** blijft onveranderd. De daemon mag nooit mid-action roteren — de tick heeft geen zicht op wat de T0 op dat moment doet. De tick vertrouwt op het feit dat een T0 die mid-action zit, zijn context-percentage niet onbeheerst laat oplopen (native compaction dekt dat). De `session_duration`-trigger vuurt alleen als de T0 al `max_session_seconds` draait — lang genoeg dat een normaal dispatch-/gate-ritme boundaries heeft gekruist waarin een rotatie past.
-- **Poort 3 (`at_governance_boundary`)** wordt **overgeslagen** in `session_duration`-mode. De daemon tick is per definitie niet op een governance boundary — hij checkt op wall-clock tijd.
-- **Poort 4 (`trigger != "governance_boundary"`)** wordt vervangen door een `if policy.trigger == "session_duration"` tak die vóór de bestaande `governance_boundary`-tak zit. Het `else`-pad (alles wat niet `session_duration` is) valt terug op de bestaande logica.
-- **Debounce** in daemon-mode: de `boundaries_since_last_rotation`-teller wordt **niet** gebruikt voor debouncing. De debounce komt van de tick-interval zelf (120s) plus de `min_boundaries_between_rotations` herinterpretatie als cooldown-ticks. Na een rotatie telt de daemon `min_boundaries_between_rotations` ticks af voordat een nieuwe rotatie mag. Dit is dezelfde teller, maar hij wordt opgehoogd bij elke tick (niet alleen bij governance boundaries — zie bevinding overige #1).
-
-**Verificatie dat dit pad op de echte poorten is gebaseerd** (vereist door de dispatch-instructie):
+**Verificatie dat de bestaande poorten echt zo in de code staan** (vereist door de
+dispatch-instructie):
 
 ```
-$ sed -n '298,334p' scripts/lib/context_rotation.py
-def decide_rotation(
-    *,
-    policy: RotationPolicy,
-    at_governance_boundary: bool,
-    boundaries_since_last_rotation: int,
-    context_pct: Optional[float] = None,
-    mid_action: bool = False,
-) -> RotationDecision:
-    """Pure decision function — no I/O, no side effects.
-
-    Gates, in order: enabled -> never mid-action -> must be at a governance
-    boundary -> durable boundary-count debounce (bypassable only by the
-    optional pct_ceiling backstop, which still requires being at a boundary).
-    """
+$ sed -n '312,334p' scripts/lib/context_rotation.py
     if not policy.enabled:
         return RotationDecision(False, "disabled")
     if mid_action:
@@ -277,118 +343,154 @@ def decide_rotation(
     if pct_backstop:
         return RotationDecision(True, "pct_ceiling_backstop")
     return RotationDecision(False, "debounced")
-$
 ```
 
-De herziening voegt één parameter toe (`session_duration_seconds`) en één `if`-tak vóór regel 316. De bestaande `governance_boundary`-logica (regel 316-334) blijft bit-identiek. De `mid_action`-poort (regel 314-315) blijft van toepassing op beide paden. Er wordt geen tweede beslisfunctie naast `decide_rotation()` gebouwd.
+### 2.5 Marker-status en volledige statusovergangen (bevinding: in-flight-guard)
 
-De `rotation_tick()`-functie (nieuw, §5-PR1) roept `decide_rotation()` aan met `at_governance_boundary=False, session_duration_seconds=<berekend>`. De functie `checkpoint()` (de T0-integratie) blijft de bestaande `governance_boundary`-trigger gebruiken en is onveranderd.
+**Bevinding r2:** `checkpoint()`'s in-flight-guard herkent alleen `status: in_progress`
+(`context_rotation.py:820`). In r2 heette de daemon-marker `awaiting_ready`; die kende de guard
+niet. In deze vorm heet de marker `rotation_requested` en **kent de guard hem wel** (§2.4).
 
-### 2.5 Hoe de daemon de rotatie uitvoert — twee-fasen model (bevinding B2 + overige #5)
+Volledige statusovergangen:
 
-**Wat fout was in r1**: `checkpoint()` -> `respawn()` is synchroon en blokkeert tot 60s. De daemon-tick mag de dispatcher-loop niet zo lang ophouden. Bovendien: na een succesvolle rotatie leven er twee T0's; het plan schoof de kill door naar "het bestaande mechanisme" dat niet bestaat.
+| Status | Schrijver | Betekenis | Guard/consument |
+|---|---|---|---|
+| *(geen)* | — | geen verzoek open | tick mag schrijven |
+| `rotation_requested` | tick | sessie-duur overschreden; T0 mag bij de volgende grens roteren. Draagt `based_on_last_rotation_at` (de durable `last_rotation_at` op schrijf-moment) | checkpoint leest dit als geldig verzoek (`rotation_requested=True`) **alleen als `based_on_last_rotation_at` nog matcht**; tick schrijft niet over een verse heen en wist 'm als de duur niet meer rechtvaardigt (§2.3.6) |
+| `in_progress` | checkpoint | T0 voert de rotatie uit (handoff + respawn) | checkpoint guard: verse `in_progress` → `already_in_progress` no-op (bestaand, TTL 120s); stale `in_progress` → fall-through (bestaand) |
+| `success` | checkpoint | rotatie bevestigd; counter gereset; continuation-receipt geëmit | tick mag een nieuw verzoek plaatsen (na `max_session_seconds`) |
+| `aborted` | checkpoint | rotatie mislukt (handoff-write-fail of respawn-timeout); counter NIET gereset | tick telt dit voor crash-loop-halt (§3.1); nieuw verzoek pas na cooldown |
 
-**Wat r2 ontwerpt**: een twee-fasen rotatie waarin de daemon niet blokkeert.
+```
+(geen) ──tick: duration >= max_session_seconds──▶ rotation_requested
+rotation_requested ──tick: duration < max────────▶ (geen)  [hervalidatie, §2.3.6]
+rotation_requested ──checkpoint: T0 op grens─────▶ in_progress
+in_progress ──respawn bevestigd──────────────────▶ success
+in_progress ──handoff-fail / respawn-timeout─────▶ aborted
+aborted ──tick: na crash-loop-cooldown──────────▶ (geen) / rotation_requested
+```
 
-**Fase 1 — start (tick N)**:
-1. `rotation_tick()` roept `decide_rotation()` met `session_duration_seconds`. Bij `True`: start de rotatie.
-2. Schrijft handoff via `write_t0_handoff()`.
-3. Registreert de **oude** T0's tmux session name (via `tmux list-sessions` of een bekend pad in durable state).
-4. Roept `respawn()` aan — maar zonder te wachten. Dit vereist een nieuwe parameter `wait_for_ready=False` op `respawn()`. Met deze flag: spawn de nieuwe T0, stuur de resume-prompt, maar **poll niet** op `.ready`. Retourneer direct met `success=None` (pending).
-5. Schrijft de request marker met `status: awaiting_ready`, `old_session_name`, `new_session_name`.
-6. Retourneert. De dispatcher-loop gaat door.
+**Idempotentie:** een verse `rotation_requested` (ook als T0 de checkpoint meerdere keren op
+dezelfde grens aanroept) leidt tot één rotatie: de eerste `checkpoint()` consumeert 'm
+(status → `in_progress`), de tweede ziet `in_progress` en short-circuits. Dit is de bestaande
+idempotentie-gedachte uit de docstring (regel 802-804), uitgebreid van `in_progress` naar
+`rotation_requested` + `in_progress`.
 
-**Fase 2 — voltooi (tick N+1, N+2, ...)**:
-1. `rotation_tick()` ziet een request marker met `status: awaiting_ready`.
-2. Pollt `.ready` met rotation_id-match (korte timeout: 2s — alleen even kijken, niet wachten).
-3. **Ready**: de nieuwe T0 heeft z'n `.ready` geschreven.
-   a. Schrijft `tmux send-keys -t <old_session> "Ik draag over aan een verse T0. Tot ziens!" Enter`
-   b. Wacht 5s grace period.
-   c. `tmux kill-session -t <old_session>` (harde kill als de oude T0 niet zelf exit).
-   d. Verifieert dat de nieuwe T0 nog leeft: `tmux has-session -t <new_session>` (exit code 0).
-   e. Leeft de nieuwe T0 niet meer (ondanks `.ready`): dit telt als een failed spawn voor crash-loop-detectie (§3.1).
-   f. Leeft de nieuwe T0 wel: update durable state (`last_rotation_at = now`, `boundaries_since_last_rotation = 0`), emit `context_rotation_continuation` receipt, markeer request marker `status: success`.
-4. **Nog niet ready, binnen timeout**: blijf `awaiting_ready`. De volgende tick probeert opnieuw.
-5. **Timeout verstreken** (default: 120s sinds `created_at`): abort. Reap de nieuwe T0 (`tmux kill-session -t <new_session>`), markeer request marker `status: aborted`, increment crash counter (§3.1).
+**TTL-semantiek:** de `request_ttl_seconds` (120s) geldt alleen voor de `in_progress`-
+duplicate-guard. Een `rotation_requested`-marker heeft geen TTL: hij blijft staan tot T0 hem
+consumeert, de tick hem wist omdat de duur niet meer rechtvaardigt (§2.3.6), of de tick hem
+overschrijft. De **generatie-guard** (`based_on_last_rotation_at`) voorkomt dat een verzoek
+dóórwerkt ná een bevestigde rotatie: zodra `checkpoint()` `last_rotation_at` bijwerkt, matcht de
+`based_on_last_rotation_at` van elk openstaand verzoek niet meer en wordt het bij de volgende
+tick gewist. Dit dekt ook het randgeval van een handmatige `/rotate`
+(`~/.claude/skills/rotate/SKILL.md`, eigen choreografie die de durable state niet raakt): het
+verzoek kan dan nog één grens meeliften, maar wordt bij de eerstvolgende tick gewist zodra de
+tick ziet dat het niet meer gerechtvaardigd is — zie §6.13 en het risico-register (R11).
 
-**Waarom `tmux has-session` als liveness-check** (bevinding B2 — stale `.ready`): `tmux has-session` is kernel-beheerd. Als het T0-proces sterft, geeft de kernel de ptty vrij en verdwijnt de tmux-sessie. Geen stale state, geen PID-hergebruik, geen periodieke schrijfactie nodig van de T0. De `.ready`-file blijft zijn rol houden als **eenmalig rotatie-handshake** — het signaal "ik ben opgestart en heb de handoff gelezen". Liveness daarna is de verantwoordelijkheid van de daemon, via `tmux has-session`.
+### 2.6 Twee-fasen-model zonder daemon-teardown
 
-**T0-sessie-identificatie**: de daemon moet weten welke tmux-sessie de T0 is. Twee benaderingen, in volgorde:
-1. Uit `durable_state.json` veld `t0_session_name` — geschreven door de daemon zelf na een succesvolle rotatie.
-2. Fallback: `tmux list-sessions -F '#{session_name}' | grep '^vnx-t0-'` — naming convention.
+De "twee fasen" uit r2 blijven, maar de taakverdeling verandert fundamenteel:
 
-Bij een koude start zonder `t0_session_name` in durable state: de eerste tick detecteert de T0-sessie via de naming convention en schrijft `t0_session_name` naar durable state.
+**Fase 1 — verzoek (tick N, in de dispatcher-loop):**
+1. `rotation_daemon.tick()` meet `session_duration >= max_session_seconds`.
+2. Schrijft de `rotation_requested`-marker met `based_on_last_rotation_at` (onder flock, §3.2).
+3. Emit `state_mutation`-receipt (§4).
+4. Retourneert onmiddellijk. De dispatcher-loop gaat door. **Geen wachten, geen spawn, geen kill.**
 
-### 2.6 Teardown van de oude T0 — expliciet ontwerp (bevinding B2)
+**Fase 2 — uitvoer (T0's eerstvolgende governance-grens):**
+1. T0 roept `checkpoint(at_governance_boundary=True, project_id=..., terminal="T0")` aan.
+2. `checkpoint()` leest de `rotation_requested`-marker, geeft `rotation_requested=True` door aan
+   `decide_rotation()`, die (enabled, niet mid-action, op grens) `should_rotate=True` retourneert.
+3. `checkpoint()` schrijft de handoff (`write_t0_handoff`), zet de marker op `in_progress`, en
+   roept `respawn()` aan. **Dit is T0's eigen proces** — de dispatcher-loop is hier niet bij
+   betrokken en wordt dus nooit geblokkeerd (r2-bevinding "respawn-wachten blokkeert de
+   dispatcher" vervalt).
+4. `respawn()` spawnt de verse T0 (`tmux new-session -d -s vnx-t0-rotation-<term>-<id>`,
+   `context_rotation.py:675`), wacht bounded (default 60s) op de rotation_id-gestempelde
+   `.ready`, en reapt bij timeout **alleen de sessie die deze call zelf spawnde**
+   (`context_rotation.py:710-718`) — nooit de sessie van de beller (de oude T0).
+5. Op `success`: `checkpoint()` reset de teller, zet `last_rotation_at`, schrijft `success`,
+   emit continuation-receipt. De oude T0 exit zelf (zijn eigen boundary-logica, zoals
+   `CONTEXT_ROTATION.md:216-217` al voorschrijft).
+6. Op `aborted`: `checkpoint()` schrijft `aborted`, laat de teller staan, telt voor
+   crash-loop-halt (§3.1).
 
-De teardown is **deterministisch** en **niet optioneel**. De volgorde is:
+**Waarom er geen twee levende T0's zijn:** er wordt maar één T0 gestart — de successor, door
+de bestaande `respawn()`-weg, aangeroepen door de oude T0 zelf. De oude T0 draait door tot de
+handshake bevestigd is en exit dan zelf. Er is geen daemon die een tweede start terwijl de
+eerste nog draait.
 
-1. Nieuwe T0 schrijft `.ready` (handshake voltooid).
-2. Daemon stuurt shutdown-commando naar oude T0: `tmux send-keys -t <old_session> -l "Context-rotatie voltooid. De verse T0 heeft de sessie overgenomen."` + Enter.
-3. Daemon wacht 5 seconden grace period (de oude T0 mag zelf `exit` aanroepen).
-4. Daemon force-killt de oude sessie: `tmux kill-session -t <old_session>`.
-5. Daemon verifieert dat de **nieuwe** sessie nog bestaat: `tmux has-session -t <new_session>`.
-6. Pas na deze verificatie wordt de rotatie als "succesvol" gemarkeerd.
+**Waarom er geen destructieve teardown is:** de daemon kilt niets. `tmux kill-session` bestaat
+alleen nog als het zelf-reap-pad binnen `respawn()` (`context_rotation.py:716`), dat per
+constructie alleen de sessie raakt die diezelfde call heeft aangemaakt — nooit een levende T0.
+De r2-fout (daemon zocht `^vnx-t0-` en matchte daarmee alleen zijn eigen verse successor,
+`context_rotation.py:675`, terwijl levende T0's `orch-t0`/`mc-t0`/`seo-t0`/`t0-sales-copilot`
+heten) is hiermee structureel onmogelijk: er is geen sessie-zoek-logica meer.
 
-**Faalmodus — oude T0 al dood**: `tmux kill-session` op een niet-bestaande sessie exit met non-zero. De daemon behandelt dit als succes (de oude T0 is weg, dat was het doel). Alleen het niet kunnen killen van de oude T0 na 3 pogingen is een fout.
-
-**Faalmodus — nieuwe T0 sterft tijdens grace period**: stap 5 vangt dit. De crash-teller (§3.1) wordt opgehoogd. De rotatie is mislukt, de oude T0 is al gekilld (stap 4). Dit is het worst-case scenario: **beide T0's zijn weg**. De impact: de dispatcher merkt bij de volgende tick dat er geen T0-sessie is, schrijft `reason: no_t0_session`, en wacht op handmatige interventie. Dit scenario is bewust niet zelfherstellend: de daemon heeft geen "spawn-from-nothing"-primitief (§6, scope-grens).
-
-Dit scenario treedt alleen op als de nieuwe T0 `.ready` schrijft (dus succesvol opstart, handoff lezen, `vnx handoff mark-ready` aanroepen) en daarna binnen 5 seconden sterft. De kans hierop is laag, maar niet nul. Het wordt expliciet benoemd in het risico-register (§7).
+**Liveness en `.ready`:** de daemon doet geen liveness-detectie. `.ready` blijft de eenmalige
+handshake binnen `respawn()` (rotation_id-gestempeld). Als je tóch daemon-gestuurde liveness
+wilt, is een echt signaal nodig (bijv. een periodieke timestamp die de T0 schrijft) — maar die
+toevoeging is bewust **niet** in deze track: de dispatcher-supervisor herstart een dode
+dispatcher, de operator ziet een dode sessie via `tmux ls`, en de freshness-timestamp (§4.2)
+signaleert een stille tick-dood. Een periodiek T0-schrijfsignaal zou een nieuw producer-
+protocol en een nieuwe monitoring-check eisen, zonder dat de operator nu iets mist.
 
 ---
 
 ## 3. De drie hardheidseisen
 
-### 3.1 Crash-loop-halt (herzien — bevinding B1 + overige #2)
+### 3.1 Crash-loop-halt (herzien voor T0-gemedieerde vorm)
 
-**Wat fout was in r1**: de teller werd opgehoogd op `respawn().success`, wat alleen betekent dat `.ready` binnen 60s verscheen. Een T0 die `.ready` schrijft en daarna sterft, reset de teller. De halt kan structureel niet vuren op het waarschijnlijkste faalpad.
+**Wat r2 deed:** de daemon telde gecombineerd falen (`.ready`-timeout óf nieuwe T0 sterft
+tijdens teardown) en stopte met respawnen na N pogingen.
 
-**Wat r2 ontwerpt**: de crash-teller telt op **gecombineerd falen**: ofwel de nieuwe T0 haalt de ready-handshake niet (timeout), ofwel hij haalt 'm wel maar overleeft de teardown van de oude T0 niet (verificatie-stap 5 in §2.6 faalt).
+**Wat deze vorm doet:** de daemon respawnt niet, dus hij telt ook geen respawn-falen. Maar T0
+kan bij elke grens een rotatie blijven proberen die structureel faalt (bijv. tmux-spawn
+kapot). Zonder halt blijft T0 per grens falen en blijft de tick verse verzoeken plaatsen.
 
-**Durable state uitbreiding**:
+**Ontwerp:** de faaltelling hoort bij de uitvoering, dus bij `checkpoint()` — die de durable
+state toch al schrijft. De tick consumeert de uitkomst.
 
-```python
-# Bestaand: durable_state.json
-{
-  "boundaries_since_last_rotation": 0,
-  "last_rotation_at": "2026-08-02T12:00:00Z"
-}
+1. `checkpoint()` op `aborted` (handoff-write-fail of respawn-faal): incrementeer
+   `consecutive_spawn_failures` in `T0_durable.json`.
+2. Bij `consecutive_spawn_failures >= max_consecutive_failures` (default 3): zet
+   `crash_loop_halted_until = now + cooldown_seconds` (default 1800s).
+3. `checkpoint()` op `success`: reset `consecutive_spawn_failures = 0` en
+   `crash_loop_halted_until = null`.
+4. `rotation_daemon.tick()` leest `crash_loop_halted_until`: als die in de toekomst ligt,
+   schrijft hij géén `rotation_requested`-marker en logt `crash_loop_halted: true`.
+5. Na de cooldown: reset de teller; de volgende tick mag weer verzoeken.
 
-# Nieuw (toe te voegen):
-{
-  "boundaries_since_last_rotation": 0,
-  "last_rotation_at": "2026-08-02T12:00:00Z",
-  "t0_session_name": "vnx-t0-orchestrator",       # NIEUW — voor teardown
-  "consecutive_spawn_failures": 0,                 # NIEUW
-  "crash_loop_halted_until": null                  # NIEUW
-}
-```
+`max_consecutive_failures` en `cooldown_seconds` zijn configureerbaar via
+`configs/context_rotation.yaml` met env-override (`VNX_T0_ROTATION_MAX_FAILURES`,
+`VNX_T0_ROTATION_COOLDOWN_SECONDS`).
 
-**Regels**:
+**Waarom dit werkt zonder daemon-spawn:** de halt onderbreekt de *verzoek*-cyclus, niet de
+uitvoering. Een T0 die op een grens `rotation_requested` mist, roteert niet — het verzoek komt
+pas terug nadat de cooldown verlopen is en de tick opnieuw mag verzoeken.
 
-1. Elke mislukte rotatiepoging — ofwel timeout op `.ready`, ofwel nieuwe T0 sterft tijdens teardown — incrementeert `consecutive_spawn_failures`.
-2. Bij `consecutive_spawn_failures >= max_consecutive_failures` (default: 3): zet `crash_loop_halted_until = now + cooldown_seconds` (default: 1800s = 30 min).
-3. Zolang `crash_loop_halted_until` in de toekomst ligt: de tick schrijft health receipts met `crash_loop_halted: true` maar doet geen rotatiepogingen.
-4. Na cooldown: reset `consecutive_spawn_failures = 0`, `crash_loop_halted_until = null`. Volgende tick probeert opnieuw.
-5. Een **volledig succesvolle** rotatie (nieuwe T0 leeft, oude T0 is gekilld, verificatie OK) reset `consecutive_spawn_failures = 0` direct.
-6. `max_consecutive_failures` en `cooldown_seconds` zijn configureerbaar via `configs/context_rotation.yaml`, met env-override (`VNX_T0_ROTATION_MAX_FAILURES`, `VNX_T0_ROTATION_COOLDOWN_SECONDS`).
+### 3.2 Handoff-lease: `fcntl.flock` (behouden uit r2)
 
-**Implementatie**: de teller-logica zit in `_evaluate_crash_loop()` en `_record_spawn_failure()` in `context_rotation.py`. `rotation_tick()` roept deze aan. De bestaande test-suite wordt uitgebreid met tests voor het gecombineerde faalpad.
+`fcntl.flock` blijft — kernel-beheerd, automatisch vrijgegeven bij procesdood, geen
+PID-hergebruik. In de T0-gemedieerde vorm is het doel iets anders geworden:
 
-### 3.2 Handoff-lease (herzien — bevinding overige #4)
+- **r2 doel:** twee daemon-instanties mogen niet gelijktijdig een rotatie *starten*.
+- **deze vorm:** twee entiteiten schrijven in hetzelfde state-pad — de tick schrijft de
+  `rotation_requested`-marker en `checkpoint()` zet `in_progress`/`success`/`aborted`. Zonder
+  lease kan een dispatcher-restart (oud proces + nieuw proces) twee markers tegelijk schrijven,
+  en kan de tick over een `in_progress`-marker heen schrijven.
 
-**Wat fout was in r1**: PID-gebaseerde stale-lock-detectie is fragiel (PID-hergebruik).
-
-**Wat r2 ontwerpt**: `fcntl.flock()` — kernel-beheerd, automatisch vrijgegeven bij procesdood, geen PID-hergebruikprobleem.
+**Ontwerp:** `acquire_rotation_lease(lock_path, timeout_seconds=5.0)` op
+`<state>/rotation/<project_id>/T0_rotation.lock`. Gehouden rond:
+1. Elke marker-write in `rotation_daemon.tick()`.
+2. De marker-statusovergang in `checkpoint()` (van `rotation_requested` naar `in_progress`).
 
 ```python
 import fcntl
 
 def acquire_rotation_lease(lock_path: Path, timeout_seconds: float = 5.0) -> bool:
-    """Acquire an exclusive fcntl.flock on <lock_path>. Non-blocking
-    with a bounded retry loop (max timeout_seconds). Returns True if
-    the lock was acquired, False if another process holds it."""
+    """Exclusive fcntl.flock on <lock_path>. Non-blocking with a bounded
+    retry loop. True if acquired; False if another process holds it."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     deadline = time.monotonic() + timeout_seconds
@@ -403,323 +505,432 @@ def acquire_rotation_lease(lock_path: Path, timeout_seconds: float = 5.0) -> boo
             time.sleep(0.1)
 ```
 
-**Waarom `fcntl.flock` en niet PID+locks**:
-- Kernel-beheerd: bij procesdood (normaal of crash) geeft de kernel de lock vrij. Geen stale-lock cleanup nodig.
-- Geen PID in het lock-bestand: geen race tussen PID-check en lock-acquisitie.
-- POSIX-standaard: werkt op macOS en Linux.
-- Geen DB-afhankelijkheid: zelfde mechanisme als de singleton-enforcer (`scripts/singleton_enforcer.sh` gebruikt `flock`), maar dan in Python.
+Lock-bestand is leeg; de lock zit op de file descriptor. Zelfde mechanisme als de
+singleton-enforcer (`scripts/singleton_enforcer.sh` gebruikt `flock`), maar dan in Python.
 
-**Lease lifetime**: de lock wordt gehouden door het Python-proces dat `rotation_tick()` uitvoert. Omdat dit in-process in de dispatcher-loop draait, leeft de lock zolang de dispatcher leeft. Dit is correct: de dispatcher is de enige die rotaties mag starten. De lock beschermt tegen een race waarbij twee dispatcher-instanties (bv. een oude die nog niet gestopt is en een nieuwe na herstart) tegelijk een rotatie starten.
+### 3.3 Gefaseerde uitrol en eigen schakelaar (bevinding overige #6)
 
-**Lock-bestand**: `<state>/rotation/T0_rotation.lock`. Naast `T0_request.json`. Het bestand zelf is leeg; de lock is op de file descriptor, niet op de inhoud.
+**Wat r2 fout deed:** PR 3 zette `enabled: true` plus respawn in één keer fleet-breed aan, en
+leunde voor rollback op `VNX_SUPERVISOR_MODE=legacy` — maar die zet ook lease_sweep,
+runtime_supervise, de OI-bridge en reconcile uit. Dat is geen kill-switch voor rotatie.
 
-### 3.3 Rotatie default-aan (herzien — bevinding overige #6 + overige #7)
-
-**Wat fout was in r1**:
-- Claim "default-aan" hing op `VNX_SUPERVISOR_MODE=unified`, maar de default van die variabele is `legacy` (nergens benoemd).
-- PR 3 zette `enabled:true` + `respawn:tmux_new_session` fleet-breed in één keer aan, zonder fasering, per-project opt-in, of eigen kill-switch.
-- `VNX_SUPERVISOR_MODE=legacy` als kill-switch zet ook lease_sweep, runtime_supervise, OI-bridge, en reconcile uit — onacceptabel breed.
-
-**Wat r2 ontwerpt**: drie onafhankelijke schakelaars met expliciete defaults.
+**Ontwerp — drie onafhankelijke niveaus:**
 
 | Niveau | Schakelaar | Default | Scope |
 |---|---|---|---|
-| 1. Mechanisme beschikbaar | `configs/context_rotation.yaml:enabled` | `false` | `checkpoint()` werkt (T0-geïnitieerd) |
-| 2. Tick actief | `VNX_SUPERVISOR_MODE=unified` | `legacy` | Alle supervisor-ticks |
-| 3. Tick roteert | `VNX_T0_ROTATION_DAEMON=1` | `0` (uit) | Alleen rotatie-tick |
+| 1. Mechanisme | `configs/context_rotation.yaml:enabled` | `false` | `checkpoint()`/`decide_rotation()` (T0-geïnitieerd) |
+| 2. Uitvoerbaar | `configs/context_rotation.yaml:respawn` | `off` | `checkpoint()` spawnt een successor |
+| 3. Tick verzoekt | `VNX_T0_ROTATION_DAEMON=1` | `0` (uit) | alleen de rotatie-tick; **onafhankelijk van `VNX_SUPERVISOR_MODE`** |
 
-**Default-gedrag**:
-- Geen enkele variabele gezet: rotatie is volledig uit. `checkpoint()` is een no-op (bestaand gedrag). De tick bestaat niet eens (niveau 2 niet gehaald).
-- `VNX_SUPERVISOR_MODE=unified` gezet, verder niets: de rotatie-tick draait en schrijft health receipts (§4), maar roteert niet. Dry-run mode.
-- `VNX_SUPERVISOR_MODE=unified` + `VNX_T0_ROTATION_DAEMON=1`: de rotatie-tick roteert op basis van sessie-duur.
-- `configs/context_rotation.yaml:enabled: true`: `checkpoint()` werkt voor T0-geïnitieerde rotatie (bestaand mechanisme, niet de daemon).
+**De rotatie-tick gated op `VNX_T0_ROTATION_DAEMON=1` + `enabled: true` + `respawn:
+tmux_new_session` in de policy** — en **niet** op `VNX_SUPERVISOR_MODE`. Daarmee:
+- Rotatie uitzetten (`VNX_T0_ROTATION_DAEMON=0`) raakt geen enkele andere tick.
+- Rotatie aanzetten eist geen `unified`-modus (en zet dus geen lease_sweep/
+  runtime_supervise/OI-bridge/reconcile aan die de operator niet wilde).
+- Zonder `enabled: true` of met `respawn: off` is de tick een no-op (alleen freshness-
+  timestamp) — een droge run die nooit een verzoek plaatst, dus nooit het "T0 roteert zonder
+  successor"-geval creëert.
 
-**Wat default-aan NIET betekent**: het betekent niet dat elke installatie automatisch roteert. De operator moet expliciet twee flags zetten. "Default" slaat op de code: de code paden zijn aanwezig en de tick-structuur is ready; de activatie is een configuratiekeuze.
-
-**Config-flip in PR 3**: `configs/context_rotation.yaml` krijgt nieuwe velden (`max_session_seconds`, `max_consecutive_failures`, `cooldown_seconds`). `enabled` en `respawn` blijven op hun huidige defaults (`false` / `off`). De factory-defaults veranderen niet.
+**Uitrolpad:**
+1. **PR 1-2:** code + tests landen met `VNX_T0_ROTATION_DAEMON` default `0`. Geen
+   productie-impact; de tick bestaat maar draait niet.
+2. **PR 3:** operator zet per project opt-in aan, één voor één: `VNX_T0_ROTATION_DAEMON=1`,
+   `enabled: true`, `respawn: tmux_new_session`. Volgorde: vnx-dev eerst (minimaal 24h
+   observatie), dan vnx-orchestration, dan de rest van de fleet. Elke stap is een bewuste
+   config-actie, geen fleet-flip.
+3. **PR 4:** docs + integratietests landen; de uitrol is dan al op vnx-dev geverifieerd.
 
 ---
 
-## 4. Receipt-per-check-vloer (herzien — bevinding B3)
+## 4. Receipt-vloer (herzien: `state_mutation`, geen nieuw `health`-kind)
 
-### 4.1 Volume-dimensie
+**Bevinding r2/B3:** 720 receipts per dag per project (elke 120s één) tegen een grootboek van
+~23.000, zonder retentie of sampling. Bovendien: `receipt_kind: "health"` zit **niet** in de
+gesloten set `RECEIPT_KINDS` (`dispatch_identity.py:67-77`) en `validate_receipt_kind`
+(`dispatch_identity.py:79-89`) gooit een `ValueError`.
 
-**Tick-interval**: 120 seconden (configureerbaar via `VNX_ROTATION_TICK_INTERVAL`).
+### 4.1 Keuze: bestaande soort `state_mutation`, geen set-uitbreiding
 
-**Receipts per dag per project**: `86400 / 120 = 720`.
+**De tick emit géén receipt per tick.** Hij emit alleen bij een echte state-transitie:
+wanneer hij een `rotation_requested`-marker schrijft. Dat is een state-mutatie (filesystem
+state), en `state_mutation` is een bestaande soort in de gesloten set — dezelfde die de
+continuation-receipt al gebruikt (`context_rotation.py:752`). Er is dus **geen
+`RECEIPT_KINDS`-uitbreiding nodig**.
 
-**Tegen het grootboek** (23.292 receipts op 2026-08-02): 720 receipts/dag = 3% van het totaal per dag. Over 30 dagen: 21.600 receipts — een verdubbeling van het grootboek.
+| Gebeurtenis | Receipt? | `receipt_kind` | `event_type` | `dispatch_id` |
+|---|---|---|---|---|
+| Tick draait, geen verzoek (duration < max) | Nee (alleen freshness-ts) | — | — | — |
+| Tick schrijft `rotation_requested` | Ja | `state_mutation` | `rotation_requested` | `rotation_id` |
+| Tick geblokkeerd door crash-loop-halt | Nee (log + freshness-ts) | — | — | — |
+| T0 bevestigt rotatie | Ja (bestaand) | `state_mutation` | `context_rotation_continuation` | `rotation_id` |
+| Rotatie `aborted` | Nee (marker + log; counter telt) | — | — | — |
 
-Dit volume is te hoog om ongedifferentieerd in het hoofdgrootboek te landen. De health-check receipt is een **apart receipt_kind** dat:
+**Volume:** bounded door de rotatiefrequentie, niet door de tick-interval. Met
+`max_session_seconds` op 4 uur: maximaal ~6 `rotation_requested` + ~6 continuation per dag per
+project ≈ 12 receipts. Dat is verwaarloosbaar tegen een grootboek van ~23.000 en heeft **geen
+eigen retentie of sampling nodig** — het volume is zelf-limiterend.
 
-1. In een **eigen NDJSON-bestand** wordt geschreven: `<data_dir>/receipts/health_rotation.ndjson` — naast `t0_receipts.ndjson`, niet erin.
-2. **Niet meetelt** in governance-aggregaties (First-Pass Yield, rework rate, dispatch-tellingen). De `receipt_kind: health` wordt door de read-model-query's uitgefilterd.
-3. Een **eigen retentie** heeft: 7 dagen (5.040 receipts per project). De rotatie-tick verwijdert entries ouder dan 7 dagen uit `health_rotation.ndjson` bij elke tick. Dit is een eenvoudige truncatie — het bestand wordt herschreven zonder de oude entries.
-
-**Payload** — adresseert het `unknown:unknown`-patroon (bevinding B3):
+**Payload van de request-receipt:**
 
 ```json
 {
-  "event_type": "rotation_health_check",
-  "receipt_kind": "health",
-  "dispatch_id": "health_20260802T120000Z",
-  "role": "t0-rotation-daemon",
+  "event_type": "rotation_requested",
+  "receipt_kind": "state_mutation",
   "terminal": "T0",
+  "dispatch_id": "<rotation_id>",
+  "role": "t0-rotation-daemon",
   "timestamp": "2026-08-02T12:00:00Z",
   "project_id": "vnx-dev",
-  "source": "rotation_tick",
+  "source": "rotation_daemon",
   "fields": {
-    "rotated": false,
-    "reason": "session_duration_below_threshold",
-    "seconds_since_last_rotation": 3600,
+    "reason": "session_duration_exceeded",
+    "seconds_since_last_rotation": 14400,
     "max_session_seconds": 14400,
     "crash_loop_halted": false,
-    "consecutive_spawn_failures": 0,
-    "t0_session_alive": true,
-    "tick_interval_seconds": 120
+    "consecutive_spawn_failures": 0
   }
 }
 ```
 
-Velden:
-- `dispatch_id`: `health_<ISO-timestamp>` — geen echte dispatch, maar wel herleidbaar naar een tijdstip.
-- `role`: `t0-rotation-daemon` — de entiteit die de receipt produceert, niet `unknown`.
-- `t0_session_alive`: of `tmux has-session` de T0-sessie vindt — het primaire liveness-signaal.
-- `reason`: waarom er niet (of wel) geroteerd is — volledige traceability per tick.
+`dispatch_id` = `rotation_id` (UUID hex) — zelfde id als de latere continuation-receipt, zodat
+de lees-modellen (`conversation_read_model.py`) het verzoek en de bevestiging aan elkaar
+ketenen. `role` is `t0-rotation-daemon`, geen `unknown`.
 
-### 4.2 Freshness — eigen mechanisme, niet producer_freshness_monitor (bevinding B3)
+**Waarom geen `health`-soort en geen 720/dag:** de lees-modellen filteren per `receipt_kind`;
+een `health`-soort zou die filters, retentie en aggregaties moeten aanpassen, allemaal voor een
+signaal dat de freshness-timestamp (§4.2) al goedkoper en deterministisch levert. De gesloten
+set blijft stabiel. De "receipt-vloer"-gedachte van r2 — elke tick een spoor achterlaten om een
+stille dood te detecteren — wordt overgenomen door de freshness-check, niet door receipts.
 
-**Wat fout was in r1**: het plan leunde op `producer_freshness_monitor`, die sinds 31 juli `status=stale` rapporteert en op `cadence_seconds=86400` draait (dagelijks), niet op de 5 minuten die het plan claimde.
+### 4.2 Freshness — eigen timestamp, gecheckt door een bestaande tick
 
-**Wat r2 ontwerpt**: de rotatie-tick schrijft een eigen timestamp-bestand: `<state_dir>/.last_rotation_tick_ts`. De dispatcher's eigen `_maybe_runtime_supervise`-tick (60s interval) checkt dit bestand. Als de timestamp ouder is dan `max_tick_interval * 3` (default: 360s), logt `_maybe_runtime_supervise` een waarschuwing op ERROR-niveau.
+**Het signaal:** de tick schrijft elke keer dat hij draait `<state>/rotation/.last_rotation_tick_ts`
+(unix-timestamp). Zelfs als hij géén verzoek plaatst (duration te laag, crash-loop-halt,
+policy uit).
 
-Dit is **geen nieuwe monitor** — het is een extra check in een bestaande tick die al elke 60s draait. De check is deterministisch: lees timestamp, vergelijk met `now`. Geen model-call, geen aparte poller.
+**De check:** de bestaande `_maybe_runtime_supervise`-tick (60s interval,
+`dispatcher_supervisor_ticks.sh:26-50`) leest deze timestamp. Ouder dan `max_tick_interval * 3`
+(default 360s): log op ERROR-niveau "rotation tick stale". Dit is geen nieuwe monitor — een
+extra regel in een tick die al draait. Determinisch: timestamp lezen, met `now` vergelijken.
 
-**Fallback-detectie**: als de dispatcher zelf sterft, stopt ook `_maybe_runtime_supervise`. Dan is er geen proces meer dat de waarschuwing kan loggen. Dit is hetzelfde faalpad als nu: een dode dispatcher wordt gedetecteerd door `dispatcher_supervisor.sh` (die herstart 'm). De supervisor wrappers zijn de uiteindelijke vangnetten.
-
-### 4.3 Wanneer wordt er WEL een receipt geschreven?
-
-| Situatie | Receipt? | Welk bestand? |
-|---|---|---|
-| Elke rotatie-tick (120s) | Ja, health check | `health_rotation.ndjson` |
-| Tick skipped (throttled) | Nee | — |
-| Succesvolle rotatie | Ja, health check + `context_rotation_continuation` | `health_rotation.ndjson` + `t0_receipts.ndjson` |
-| Mislukte rotatie | Ja, health check met `reason: spawn_failed` | `health_rotation.ndjson` |
-| Crash-loop-halt actief | Ja, health check met `crash_loop_halted: true` | `health_rotation.ndjson` |
-| Geen T0-sessie | Ja, health check met `reason: no_t0_session` | `health_rotation.ndjson` |
-
-De vloer is: zolang de dispatcher-loop draait en `VNX_SUPERVISOR_MODE=unified`, verschijnen er elke 120s health receipts. Zodra de receipts stoppen, is ofwel de dispatcher dood, ofwel `VNX_SUPERVISOR_MODE` teruggezet naar `legacy`. Beide zijn detecteerbaar.
+**Fallback:** sterft de dispatcher zelf, dan sterft ook `_maybe_runtime_supervise` en is er
+geen proces dat alarmeert — hetzelfde faalpad als nu; de dispatcher-supervisor herstart 'm en
+is het uiteindelijke vangnet.
 
 ---
 
-## 5. Opsplitsing in deliverables (herzien — bevinding overige #8)
+## 5. Opsplitsing in deliverables
 
 ### task_class per deliverable
 
 | PR | task_class | Rationale |
 |---|---|---|
-| PR 1 | `foundation` | Bouwt de tick-infrastructuur — geen gedragsverandering, alleen meetbaarheid |
-| PR 2 | `safety` | Crash-loop-halt + handoff-lease — harde veiligheidsmechanismen |
-| PR 3 | `activation` | Config-flip, sessie-duur trigger, freshness — maakt de feature actief |
-| PR 4 | `validation` | Integratietests + documentatie — bewijst dat het geheel werkt |
+| PR 1 | `foundation` | Tick + marker-plumbing + `decide_rotation`/`checkpoint`-uitbreiding. Geen gedragsverandering, alleen meetbaarheid + verzoek-pad. |
+| PR 2 | `safety` | Crash-loop-halt + flock-lease + project_id-state-scoping-fix. Harde mechanismen. |
+| PR 3 | `activation` | Per-project opt-in + freshness-alarm + uitrol. Maakt de feature actief onder operator-controle. |
+| PR 4 | `validation` | Integratietests + documentatie. Bewijst dat het geheel werkt. |
 
 ### model-routing-vloer per deliverable
 
 | PR | Model-calls? | Toelichting |
 |---|---|---|
-| PR 1 | Nee | Bash tick + Python `decide_rotation()`-uitbreiding + receipt-schrijver — allemaal deterministisch |
-| PR 2 | Nee | `fcntl.flock()`, teller-logica, durable state — volledig deterministisch |
-| PR 3 | Nee | Config-uitlezing, sessie-duur-berekening, timestamp-vergelijking — deterministisch |
-| PR 4 | Nee | Integratietests met injectable `tmux_spawn_fn`/`tmux_kill_fn` — deterministische mocks |
+| PR 1 | Nee | Bash-tick + Python (`rotation_daemon.tick`, `decide_rotation`-tak) — timestamps, config, marker-JSON. Volledig deterministisch. |
+| PR 2 | Nee | `fcntl.flock()`, teller-logica, pad-herstructurering. Volledig deterministisch. |
+| PR 3 | Nee | Env/config-uitlezing, timestamp-vergelijking. Volledig deterministisch. |
+| PR 4 | Nee | Integratietests met injectable `tmux_spawn_fn`/`tmux_kill_fn`. Deterministische mocks. |
 
-**Geen enkele deliverable bevat een model-call.** Alle vier PR's opereren op vaste regels, tellers, timestamps, en kernel-primitieven (`flock`, `tmux has-session`). De enige model-afhankelijkheid is indirect: de daemon spawnt een `claude --model opus`-proces via `respawn()`. Maar de daemon zelf neemt geen model-beslissingen.
+**Geen enkele deliverable bevat een model-call.** De enige model-afhankelijkheid is indirect:
+`respawn()` spawnt een `claude --model opus`-proces (de successor). Maar dat gebeurt in
+`checkpoint()` (T0's eigen proces), niet in de daemon, en de daemon neemt geen model-
+beslissingen. De routing is: **geen model** — vaste regels, tellers, timestamps en
+kernel-primitieven (`flock`, `tmux`).
 
-ADR-007 (multitenant project_id-stamping) is **niet van toepassing**: deze track voegt geen nieuwe centrale-DB-tabellen toe. Alle state leeft in het bestaande project_id-gescopete filesystem pad (`~/.vnx-data/<project_id>/state/rotation/`), dat al via `vnx_paths._resolve_state_root` resolveert. De health receipts gaan naar `<data_dir>/receipts/health_rotation.ndjson`, wat binnen hetzelfde project_id-gescopete data_dir valt.
+### Size-gate-verantwoording (bevinding overige: size-gate op PR2)
 
----
+`scripts/lib/context_rotation.py` is **898** regels en staat **niet** op `FILE_SIZE_ALLOWLIST`
+(`quality_advisory.py:36-59`). `FILE_SIZE_BLOCKING_PYTHON` is **1200** (`quality_advisory.py:22`).
+De r2-begroting (+120 in PR1 en +200 in PR2) bracht het bestand op 1218 — een blocking
+gate-fail bij geboorte, want `file_size_blocking` is `severity="blocking"` en `pre_merge_gate`
+blokkeert daarop.
 
-### PR 1: Rotatie-tick + decide_rotation-uitbreiding (foundation)
+**Deze vorm splitst van meet af aan:**
 
-**task_class**: `foundation`
+| Bestand | Nu | PR 1 | PR 2 | Max | Gate |
+|---|---|---|---|---|---|
+| `scripts/lib/context_rotation.py` | 898 | +50 → 948 | +50 → 998 | **998** | < 1200 ✓ |
+| `scripts/lib/rotation_daemon.py` (nieuw) | — | ~180 | +60 → 240 | **240** | < 1200 ✓ |
+| `scripts/lib/dispatcher_supervisor_ticks.sh` | 224 | +30 | — | 254 | < 600 ✓ |
+| `tests/test_context_rotation.py` | 1127 | +80 | +120 | ~1330 | test (advisory) |
+| `tests/test_rotation_daemon.py` (nieuw) | — | ~150 | +80 | ~230 | test (advisory) |
 
-**Wat**: Voeg `_maybe_rotation_tick` toe aan `scripts/lib/dispatcher_supervisor_ticks.sh`. Breid `decide_rotation()` uit met de `session_duration`-trigger (zie §2.4). Voeg `rotation_tick()` toe aan `context_rotation.py` als de periodieke entrypoint. De tick schrijft health receipts maar roteert niet (`VNX_T0_ROTATION_DAEMON` default `0`).
+- **`context_rotation.py`** houdt alleen de T0-kant: `decide_rotation()` (+1 param, +1 tak,
+  ~15 regels) en `checkpoint()` (marker-lezen + statusovergang + generatie-guard, ~40 regels).
+  Blijft op ~998.
+- **Nieuwe module `scripts/lib/rotation_daemon.py`** neemt de daemon-kant: `tick()`,
+  `_should_request_rotation()`, `_write_request_marker()`, `_emit_request_receipt()`,
+  `acquire_rotation_lease()`, en de crash-loop-helpers. Nieuw bestand, ~240 regels, ruim onder
+  1200. Geen allowlist-entry nodig.
+- **Functie-grootte:** `FUNCTION_SIZE_BLOCKING_PYTHON` is 70 (`quality_advisory.py:89`). De r2
+  `rotation_tick()` was op ~80 begroot. In deze vorm is `rotation_daemon.tick()` gesplitst in
+  helpers van elk < 70 regels (zie boven). Transparantie: de functie-grootte-gate emitteert als
+  `severity="warning"` (`quality_advisory.py:305-314`), dus geen hard block — maar de opsplitsing
+  houdt het bestand schoon en onder de soft-max.
 
-**Bestanden**:
-- `scripts/lib/context_rotation.py` — `decide_rotation()`: nieuwe parameter `session_duration_seconds`, `session_duration`-triggerpad (zie code-blok in §2.4). Nieuwe functie `rotation_tick()` (~80 regels). Nieuwe functie `emit_rotation_health_receipt()` (~40 regels).
-- `scripts/lib/dispatcher_supervisor_ticks.sh` — nieuwe functie `_maybe_rotation_tick()` (~35 regels, zelfde patroon als `_maybe_runtime_supervise`)
-- `scripts/dispatcher_minimal.sh:607` — voeg `_maybe_rotation_tick` toe aan `process_dispatches()`, na `_maybe_learning_cycle`
-- `configs/context_rotation.yaml` — nieuwe velden: `max_session_seconds: 14400`, `max_consecutive_failures: 3`, `cooldown_seconds: 1800`
-- `tests/test_context_rotation.py` — tests voor `decide_rotation()` met `session_duration`-trigger (~100 regels)
-
-**Afhankelijkheden**: Geen. Dit is de eerste steen.
-
-**Verificatie**:
-- `decide_rotation()` met `trigger=session_duration, session_duration_seconds=18000` retourneert `should_rotate=True`
-- `decide_rotation()` met `trigger=session_duration, session_duration_seconds=3600` retourneert `should_rotate=False`
-- `decide_rotation()` met `trigger=session_duration, mid_action=True` retourneert `should_rotate=False` (poort 2 intact)
-- `decide_rotation()` met `trigger=governance_boundary` (bestaand pad) — alle bestaande tests blijven groen
-- `_maybe_rotation_tick` gate op `VNX_SUPERVISOR_MODE=unified` + `VNX_T0_ROTATION_DAEMON=1`
-- `_maybe_rotation_tick` schrijft health receipt bij elke tick (met `VNX_SUPERVISOR_MODE=unified`)
-- `_maybe_rotation_tick` throttling: tweede call binnen interval is no-op
-- Bestaande tests blijven groen: `python3 -m pytest tests/test_context_rotation.py -q`
-
-**Grootte**: ~310 regels (120 Python + 35 bash + 5 config + 10 dispatcher + ~140 tests)
-
----
-
-### PR 2: Crash-loop-halt + handoff-lease + twee-fasen rotatie
-
-**task_class**: `safety`
-
-**Wat**: Implementeer de twee-fasen rotatie (§2.5), crash-loop-halt (§3.1), handoff-lease via `fcntl.flock` (§3.2), en de expliciete teardown van de oude T0 (§2.6).
-
-**Bestanden**:
-- `scripts/lib/context_rotation.py` — `rotation_tick()` uitgebreid met fase-1/fase-2 logica. Nieuwe functies: `acquire_rotation_lease()`, `release_rotation_lease()`, `_evaluate_crash_loop()`, `_record_spawn_failure()`. Uitbreiding `respawn()` met `wait_for_ready` parameter. Uitbreiding durable state met `t0_session_name`, `consecutive_spawn_failures`, `crash_loop_halted_until`. (~200 regels)
-- `tests/test_context_rotation.py` — tests voor twee-fasen rotatie, crash-loop-halt, lease, teardown (~250 regels)
-
-**Afhankelijkheden**: PR 1 (de tick en `rotation_tick()` moeten bestaan)
-
-**Verificatie**:
-- Twee-fasen flow: tick N start rotatie (status `awaiting_ready`), tick N+1 voltooit na `.ready`
-- Crash-teller incrementeert op timeout (`.ready` niet binnen deadline)
-- Crash-teller incrementeert op "nieuwe T0 sterft tijdens teardown"
-- Crash-teller reset op volledig succesvolle rotatie
-- Halt na 3 failures, cooldown verloopt na 30 minuten
-- Lease via `fcntl.flock`: tweede concurrente poging faalt
-- Lease wordt automatisch vrijgegeven bij procesdood (kernel)
-- Teardown: oude T0-sessie is weg na succesvolle rotatie (geen twee levende T0's)
-- `tmux has-session` bevestigt nieuwe T0 leeft na teardown
-- `python3 -m pytest tests/test_context_rotation.py -q` — alle tests groen
-
-**Grootte**: ~450 regels (200 Python + 250 tests)
+**Alternatief dat bewust níét gekozen is:** `context_rotation.py` op de allowlist zetten. Dat
+bevriest een groeiend monolith in plaats van hem te splitsen; de dispatch-instructie vraagt
+expliciet "splits of verplaats". De splitsing hierboven doet beide: de daemon-kant verhuist naar
+een nieuw bestand, de T0-kant blijft klein.
 
 ---
 
-### PR 3: Config-flip + sessie-duur trigger + freshness + retentie
+### PR 1: Tick + verzoek-marker + `decide_rotation`/`checkpoint`-uitbreiding (foundation)
 
-**task_class**: `activation`
+**Wat:** `_maybe_rotation_tick` in `dispatcher_supervisor_ticks.sh` (bash), `rotation_daemon.tick`
+(python), en de T0-kant: `decide_rotation()` krijgt `rotation_requested`, `checkpoint()` leest
+de marker. Geen gedragsverandering (alle vlaggen uit).
 
-**Wat**: Activeer de sessie-duur trigger, implementeer freshness-check in `_maybe_runtime_supervise`, implementeer 7-daagse retentie op health receipts, en voeg `VNX_T0_ROTATION_DAEMON` als onafhankelijke kill-switch.
+**Bestanden:**
+- `scripts/lib/rotation_daemon.py` (nieuw) — `tick()` (~25), `_should_request_rotation()`
+  (~35), `_write_request_marker()` (~30), `_emit_request_receipt()` (~30), freshness-schrijver
+  (~10). ~180 regels.
+- `scripts/lib/context_rotation.py` — `decide_rotation()`: parameter + tak (~15).
+  `checkpoint()`: marker-lezen vóór `decide_rotation()`, `rotation_requested`-signaal met
+  generatie-guard (`based_on_last_rotation_at`), en de statusovergang
+  `rotation_requested → in_progress` (~40).
+- `scripts/lib/dispatcher_supervisor_ticks.sh` — `_maybe_rotation_tick()` (~30), zelfde
+  throttle-patroon als `_maybe_runtime_supervise` maar gated op `VNX_T0_ROTATION_DAEMON`.
+- `scripts/dispatcher_minimal.sh` — call `_maybe_rotation_tick` in `process_dispatches()`,
+  na `_maybe_learning_cycle` (regel 606).
+- `configs/context_rotation.yaml` — nieuwe velden: `max_session_seconds: 14400`,
+  `max_consecutive_failures: 3`, `cooldown_seconds: 1800`.
+- `tests/test_context_rotation.py` (+~80) en `tests/test_rotation_daemon.py` (nieuw, ~150).
 
-**Bestanden**:
-- `scripts/lib/context_rotation.py` — `rotation_tick()` uitgebreid met sessie-duur berekening en koude-start afhandeling. Health receipt retentie-logica (truncate entries > 7 dagen). (~60 regels)
-- `scripts/lib/runtime_supervise.py` — check op `.last_rotation_tick_ts` freshness (~15 regels)
-- `scripts/lib/dispatcher_supervisor_ticks.sh` — `_maybe_rotation_tick` leest `VNX_T0_ROTATION_DAEMON` env var (~5 regels)
-- `tests/test_context_rotation.py` — tests voor sessie-duur, koude start, retentie, freshness (~120 regels)
+**Afhankelijkheden:** geen.
 
-**Afhankelijkheden**: PR 2 (crash-loop-halt en lease moeten bestaan voordat rotatie actief is)
+**Verificatie:**
+- `decide_rotation(rotation_requested=True, at_governance_boundary=True, mid_action=False,
+  enabled=True)` retourneert `should_rotate=True, reason="rotation_requested"`.
+- `decide_rotation(rotation_requested=True, mid_action=True)` retourneert `False` (poort 2).
+- `decide_rotation(rotation_requested=True, at_governance_boundary=False)` retourneert `False`
+  (poort 3).
+- Bestaande `governance_boundary`-paden: alle bestaande tests blijven groen.
+- `rotation_daemon.tick` schrijft een `rotation_requested`-marker (met
+  `based_on_last_rotation_at`) bij `session_duration >= max_session_seconds` en geen verse
+  marker.
+- `rotation_daemon.tick` overschrijft een verse `rotation_requested`/`in_progress` niet, en wist
+  een `rotation_requested` zodra `session_duration < max_session_seconds`.
+- Generatie-guard: `checkpoint()` honoreert een `rotation_requested` alleen als
+  `based_on_last_rotation_at == durable.last_rotation_at`; een verzoek dat op een oudere
+  generatie slaat wordt genegeerd.
+- `_maybe_rotation_tick` throttle: tweede call binnen interval is no-op.
+- `_maybe_rotation_tick` met `VNX_T0_ROTATION_DAEMON=0` (of unset): no-op.
+- `python3 -m pytest tests/test_context_rotation.py tests/test_rotation_daemon.py -q` — groen.
 
-**Verificatie**:
-- Sessie-duur check: rotatie triggert na `max_session_seconds` (default 14400s)
-- Koude start: eerste tick zet `last_rotation_at = now`, rotatie vuurt na `max_session_seconds`
-- `VNX_T0_ROTATION_DAEMON=0`: tick schrijft health receipts, roteert niet
-- `VNX_T0_ROTATION_DAEMON=1`: tick schrijft health receipts én roteert
-- Health receipt retentie: entries ouder dan 7 dagen worden verwijderd
-- Freshness: `.last_rotation_tick_ts` wordt elke tick bijgewerkt
-- Runtime_supervise alarmeert als timestamp > 360s oud is
-- `python3 -m pytest tests/test_context_rotation.py -q` — alle tests groen
-
-**Grootte**: ~200 regels (80 Python + 120 tests)
+**Grootte:** ~380 regels (180 python + 45 python-uitbreiding + 30 bash + 1 dispatcher + 5 config
++ ~230 tests).
 
 ---
 
-### PR 4: End-to-end integratietest + documentatie-update
+### PR 2: Crash-loop-halt + flock-lease + project_id-state-scoping (safety)
 
-**task_class**: `validation`
+**Wat:** crash-loop-halt (§3.1), `fcntl.flock`-lease (§3.2), en de expliciete
+project_id-laag in de state-paden (§2.2) die de enige rode test groen maakt.
 
-**Wat**: Integratietest die de volledige keten aflegt, plus update van documentatie.
+**Bestanden:**
+- `scripts/lib/context_rotation.py` — crash-loop-helpers (`_record_spawn_failure`,
+  `_evaluate_crash_loop`, `_reset_crash_loop`, ~40) en pad-helpers: `rotation_state_dir`,
+  `rotation_handoff_dir`, `durable_state_path`, `request_marker_path`, `ready_signal_path`
+  krijgen de project_id-laag (~25 wijziging).
+- `scripts/lib/rotation_daemon.py` — `acquire_rotation_lease()` (+20), crash-loop-uitlezing in
+  `_should_request_rotation` (+40).
+- `tests/test_context_rotation.py` (+~120) — crash-loop-transities, lease-race,
+  project_id-scoping (de bestaande `test_project_id_scoped_across_two_projects` gaat van rood
+  naar groen).
+- `tests/test_rotation_daemon.py` (+~80) — lease om marker-writes, halt-gedrag in de tick.
 
-**Bestanden**:
-- `tests/test_rotation_daemon_integration.py` — integratietest met injectable `tmux_spawn_fn`/`tmux_kill_fn` (~200 regels)
-- `docs/operations/CONTEXT_ROTATION.md` — nieuwe sectie "Daemon-driven mode" (~100 regels)
-- `docs/operations/UNIFIED_SUPERVISOR.md` — rotatie-tick toevoegen aan architectuur-diagram en configuratie (~30 regels)
+**Afhankelijkheden:** PR 1 (de tick en `rotation_requested` moeten bestaan).
 
-**Afhankelijkheden**: PR 3 (volledige keten moet werken)
+**Verificatie:**
+- 3 achtereenvolgende `aborted` → `crash_loop_halted_until` in de toekomst; tick plaatst geen
+  verzoek; na cooldown wordt gereset.
+- `success` reset de faalteller direct.
+- Lease: tweede concurrente acquire faalt binnen timeout; kernel geeft vrij bij procesdood.
+- `test_project_id_scoped_across_two_projects` is groen: `rotation_handoff_dir("project-a")`
+  != `rotation_handoff_dir("project-b")` op dezelfde project_root.
+- `python3 -m pytest tests/test_context_rotation.py tests/test_rotation_daemon.py -q` — groen.
 
-**Verificatie**:
-- Integratietest: mock-tmux spawn -> mock-ready signaal -> verify receipt -> verify oude T0 gekilld
-- Crash-loop-halt integratietest: 3 failed spawns -> halt -> cooldown -> retry
-- Lease integratietest: twee concurrente ticks -> één wint
-- Documentatie consistent met code (geen verouderde verwijzingen)
-- `python3 -m pytest tests/test_rotation_daemon_integration.py tests/test_context_rotation.py -q` — alle tests groen
+**Grootte:** ~310 regels (90 python + 200 tests).
 
-**Grootte**: ~330 regels (200 tests + 130 docs)
+---
+
+### PR 3: Per-project opt-in + freshness-alarm + uitrol (activation)
+
+**Wat:** de tick wordt per project aanzetbaar (§3.3), freshness-alarm in
+`_maybe_runtime_supervise` (§4.2), en de uitrol-playbook-documentatie.
+
+**Bestanden:**
+- `scripts/lib/runtime_supervise.py` — leest `.last_rotation_tick_ts`, logt ERROR bij
+  stale > 360s (~15 regels).
+- `scripts/lib/dispatcher_supervisor_ticks.sh` — geen wijziging nodig aan de gate (al in PR 1);
+  de interval-var `VNX_ROTATION_TICK_INTERVAL` documenteren.
+- `configs/context_rotation.yaml` — comments bij de nieuwe velden; per-project voorbeeld.
+- `docs/operations/CONTEXT_ROTATION.md` — sectie "Daemon-verzoek (T0-gemedieerd)" met de
+  opt-in-stappen en de uitrol-volgorde.
+- `tests/test_runtime_supervise.py` (of bestaand runtime-supervise-testbestand) — stale-alarm.
+
+**Afhankelijkheden:** PR 2.
+
+**Verificatie:**
+- `VNX_T0_ROTATION_DAEMON=1` + `enabled: true` + `respawn: tmux_new_session`: tick schrijft
+  verzoeken.
+- `VNX_T0_ROTATION_DAEMON=0`: tick draait, schrijft freshness-ts, geen verzoeken.
+- `enabled: false` met `VNX_T0_ROTATION_DAEMON=1`: tick no-op (geen verzoeken).
+- Freshness: `.last_rotation_tick_ts` wordt elke tick bijgewerkt; runtime_supervise alarmeert
+  als de ts > 360s oud is.
+- `python3 -m pytest ...` — groen.
+
+**Grootte:** ~150 regels (25 python + 30 docs + ~95 tests).
+
+---
+
+### PR 4: End-to-end integratietest + documentatie (validation)
+
+**Wat:** integratietest die de volledige keten aflegt (tick schrijft verzoek → checkpoint
+consumeert → respawn → `.ready` → continuation-receipt → oude T0 exit), plus
+documentatie-update.
+
+**Bestanden:**
+- `tests/test_rotation_daemon_integration.py` (nieuw, ~220) — injectable `tmux_spawn_fn`/
+  `tmux_kill_fn`; mock-successor schrijft `.ready`; assert marker-transities
+  `rotation_requested → in_progress → success`, continuation-receipt, counter-reset.
+- `tests/test_rotation_daemon_integration.py` — crash-loop-integratie: 3 `aborted` → halt →
+  cooldown → nieuw verzoek.
+- `docs/operations/CONTEXT_ROTATION.md` — nieuwe sectie "Daemon-verzoek (T0-gemedieerd)" met
+  architectuur-diagram en statusovergangen.
+- `docs/operations/UNIFIED_SUPERVISOR.md` — rotatie-tick toevoegen (met de aantekening dat de
+  tick NIET van `VNX_SUPERVISOR_MODE` afhangt).
+
+**Afhankelijkheden:** PR 3.
+
+**Verificatie:**
+- Integratietest: mock-tick schrijft verzoek → mock-checkpoint consumeert → mock-ready →
+  verify receipt + marker `success` + counter-reset.
+- Crash-loop-integratie: 3 failed spawns → halt → cooldown → retry.
+- Lease-integratie: twee concurrente marker-writes → één wint.
+- Documentatie consistent met code.
+- `python3 -m pytest tests/test_rotation_daemon_integration.py tests/test_rotation_daemon.py
+  tests/test_context_rotation.py -q` — groen.
+
+**Grootte:** ~350 regels (220 tests + 130 docs).
 
 ### Afhankelijkheidsgraaf
 
 ```
-PR 1 (foundation: tick + decide_rotation-uitbreiding + health receipts)
-  └── PR 2 (safety: crash-loop-halt + lease + twee-fasen + teardown)
-        └── PR 3 (activation: sessie-duur + freshness + retentie + VNX_T0_ROTATION_DAEMON)
+PR 1 (foundation: tick + marker + decide/checkpoint-uitbreiding)
+  └── PR 2 (safety: crash-loop + lease + project_id-scoping)
+        └── PR 3 (activation: per-project opt-in + freshness)
               └── PR 4 (validation: integratietests + docs)
 ```
 
 Elke PR is onafhankelijk deploybaar:
-- PR 1: voegt een tick toe die health receipts schrijft, roteert niet. Geen gedragsverandering.
-- PR 2: voegt veiligheidsmechanismen toe, maar zonder activatie (flags staan nog uit).
-- PR 3: maakt rotatie actief, maar alleen met expliciete `VNX_T0_ROTATION_DAEMON=1`.
-- PR 4: voegt tests en docs toe, geen gedragsverandering.
+- PR 1: voegt een tick toe die draait maar niets doet zonder vlaggen. Geen gedragsverandering.
+- PR 2: voegt veiligheidsmechanismen toe, nog steeds uit.
+- PR 3: maakt het verzoek-pad actief, alleen met expliciete per-project opt-in.
+- PR 4: tests + docs, geen gedragsverandering.
 
 ---
 
 ## 6. Wat het NIET doet (scope-grenzen)
 
-1. **Geen headless T0.** De daemon respawnt een interactieve T0 via `tmux new-session`. Het goal specificeert expliciet "IN-PLACE (no new-tmux-window + poll-pane + send-keys + kill-old-window choreography)" — maar dit slaat op het elimineren van de choreografie in de **rotate skill** (stap 4, `~/.claude/skills/rotate/SKILL.md:49-73`), niet op het elimineren van tmux zelf. De daemon vervangt de handmatige stappen door een programmatische flow. De verse T0 draait nog steeds in een tmux-sessie.
-
-2. **Geen spawn-from-nothing.** Als er geen T0-sessie bestaat, roteert de daemon niet — hij schrijft een health receipt met `reason: no_t0_session` en wacht. Het starten van een initiële T0 is een handmatige actie van de operator. Dit bewaart de scope-grens uit `CONTEXT_ROTATION.md:339-341`.
-
-3. **Geen automatische `/goal`-hervatting.** De daemon roteert de T0-sessie, maar hervat geen lopende `/goal`-directive. Dat is de taak van de verse T0 via `/kickoff` (die de handoff leest). De daemon is een lifecycle-manager, geen taakplanner.
-
-4. **Geen cross-project rotatie.** De daemon draait per project (één dispatcher per project). De rotatie-tick checkt alleen de T0 van het eigen project. Fleet-wide rotatie-coördinatie valt buiten scope.
-
-5. **Geen vervanging van native compaction.** Zoals `CONTEXT_ROTATION.md:3-6` stelt: "Native Claude Code compaction stays the baseline." De daemon vervangt geen compaction — rotatie is een aanvullende laag.
-
-6. **Geen T1/T2/T3 rotatie.** De worker-rotatie (`hooks/vnx_rotate.sh`) is een apart systeem dat `/clear` gebruikt. Deze track raakt alleen T0.
-
-7. **Geen self-healing van de dispatcher-supervisor zelf.** Als `dispatcher_supervisor.sh` sterft, is handmatige interventie nodig (zelfde als nu). De freshness-check in `runtime_supervise` signaleert dit, maar herstart niet automatisch.
-
-8. **Geen model-downgrade voor de verse T0.** `_SUCCESSOR_MODEL = "opus"` (regel 82) is hard. De verse T0 start altijd met `--model opus`.
-
-9. **Geen directe writes naar `.vnx-data/`.** Alle state wordt geschreven via `context_rotation.py`'s bestaande path helpers en `append_receipt_payload()`. De daemon schrijft nooit rechtstreeks naar het filesystem buiten deze paden.
-
-10. **Geen verwijdering van de menselijke poort.** De daemon roteert op basis van meetbare criteria (sessie-duur). Hij beslist niet inhoudelijk — dat blijft de T0's domein. De operator kan rotatie altijd stoppen door `VNX_T0_ROTATION_DAEMON=0` te zetten.
+1. **Geen daemon-hard-kill.** De daemon kilt nooit een tmux-sessie. `tmux kill-session` bestaat
+   alleen nog als het zelf-reap-pad binnen `respawn()` voor de sessie die die call zelf
+   aanmaakte.
+2. **Geen daemon-spawn.** De daemon start nooit een T0. Spawnen gebeurt uitsluitend via
+   `respawn()`, aangeroepen door `checkpoint()` in T0's eigen proces. "Spawn-from-nothing" blijft
+   buiten scope (scope-grens uit `CONTEXT_ROTATION.md`).
+3. **Geen sessie-naam-afhankelijkheid.** De daemon zoekt geen sessies via `tmux list-sessions`
+   of een naming convention. De r2-fout (zoeken op `^vnx-t0-`, dat alleen de eigen
+   `vnx-t0-rotation-*`-successor matchte, terwijl levende T0's anders heten) is hiermee
+   structureel onmogelijk — er is geen sessie-zoek-logica.
+4. **Geen headless T0.** De successor draait interactief in tmux (`claude --model opus`, geen
+   `-p`/`--print`). Onveranderd uit r2.
+5. **Geen automatische `/goal`-hervatting.** De verse T0 resume via `vnx handoff show`
+   (`_build_resume_prompt`). De daemon is geen taakplanner.
+6. **Geen cross-project rotatie.** De tick draait per project (één dispatcher per project) en
+   schrijft alleen in het eigen project_id-gescopete pad.
+7. **Geen vervanging van native compaction.** Compaction blijft de baseline; rotatie is een
+   aanvullende laag.
+8. **Geen T1/T2/T3-rotatie.** Worker-rotatie (`hooks/vnx_rotate.sh`) is een apart systeem.
+9. **Geen self-healing van de dispatcher-supervisor.** Een dode dispatcher wordt herstart door
+   `dispatcher_supervisor.sh`; de freshness-check signaleert een stille tick-dood maar herstart
+   niet.
+10. **Geen model-downgrade voor de verse T0.** `_SUCCESSOR_MODEL = "opus"`
+    (`context_rotation.py:82`) blijft hard.
+11. **Geen directe writes naar `.vnx-data/`.** Alle state via de bestaande path-helpers en
+    `append_receipt_payload()`.
+12. **Geen nieuwe liveness-producent.** Zonder daemon-gestuurde liveness-detectie is er geen
+    periodiek T0-schrijfsignaal nodig; `.ready` blijft de eenmalige handshake.
+13. **Geen integratie met de handmatige `/rotate`-skill.** `~/.claude/skills/rotate/SKILL.md`
+    heeft een eigen choreografie (nieuw venster in dezelfde sessie, `/kickoff`) die de durable
+    state en de request-marker niet raakt. Deze track laat die skill ongemoeid. Randgeval:
+    een stale `rotation_requested` kan na een handmatige `/rotate` nog één grens meeliften;
+    de tick wist 'm zodra de duur niet meer rechtvaardigt (§2.3.6, §2.5). De skill laten
+    meeschrijven op de marker is een expliciete vervolg-track, niet deze.
 
 ---
 
-## 7. Risico-register (bevinding overige #8)
+## 7. Risico-register
 
 | # | Risico | Kans | Impact | Mitigatie | Sectie |
 |---|---|---|---|---|---|
-| R1 | Nieuwe T0 schrijft `.ready` en sterft binnen 5s grace period -> beide T0's weg | Laag | Hoog | Daemon detecteert `no_t0_session` bij volgende tick; alert via health receipt. Handmatige interventie nodig (geen auto-spawn-from-nothing). | §2.6, §6.2 |
-| R2 | Crash-loop-halt te lang (30 min) — operator merkt het niet en T0 draait door met volle context | Laag | Middel | Health receipts met `crash_loop_halted: true` zijn zichtbaar in de receipt-stream. Runtime_supervise logt ERROR als timestamp te oud is. | §3.1, §4.2 |
-| R3 | `fcntl.flock` niet beschikbaar op niet-POSIX systemen (Windows) | N.v.t. | N.v.t. | VNX draait alleen op macOS/Linux. Geen mitigatie nodig. | §3.2 |
-| R4 | Twee dispatcher-instanties (oud + nieuw na herstart) claimen beide geen lock door race | Zeer laag | Middel | `flock` met `LOCK_NB` is atomisch op POSIX. De kans dat twee processen simultaan `open()` + `flock()` aanroepen zonder dat de kernel er één blokkeert is nul. | §3.2 |
-| R5 | `tmux has-session` faalt door tmux-server crash — daemon denkt dat T0 dood is | Zeer laag | Middel | Als de tmux-server crasht, is de T0 ook echt dood (alle sessies weg). Geen vals-positief. | §2.5 |
-| R6 | Health receipt NDJSON groeit onbeheerst door retentie-bug | Laag | Laag | Retentie is een eenvoudige timestamp-vergelijking + bestandsherschrijving. Test in PR 3 dekt dit. Max bestandsgrootte bij 7 dagen = ~1MB (720 entries/dag * 7 * ~200 bytes). | §4.1 |
-| R7 | Sessie-duur trigger vuurt tijdens een kritieke operatie van de T0 | Middel | Hoog | De `mid_action`-poort in `decide_rotation()` blijft actief. Maar de daemon kent de T0's interne toestand niet. Mitigatie: `max_session_seconds` is bewust ruim (4h) — de T0 heeft meer dan genoeg tijd om elke operatie af te ronden. | §2.4 |
-| R8 | `VNX_SUPERVISOR_MODE=unified` actief op een project zonder dispatcher — rotatie-tick draait nooit | N.v.t. | Geen | Zonder dispatcher draait er geen `process_dispatches()` loop en dus geen tick. Dit is correct: geen dispatcher betekent geen daemon. | §2.2 |
-| R9 | Health receipt `dispatch_id` formaat (`health_<timestamp>`) botst met echte dispatch IDs | N.v.t. | Geen | Dispatch IDs zijn `YYYYMMDD-HHMMSS-<slug>`. Het prefix `health_` voorkomt elke overlap. | §4.1 |
+| R1 | T0 komt lang niet bij een grens; het verzoek blijft lang staan | Laag | Laag | `rotation_requested` heeft geen TTL; het blijft staan tot de volgende grens. `max_session_seconds` is een zachte drempel — T0 draait door met compaction als vangnet. | §2.5 |
+| R2 | `checkpoint()` faalt structureel (tmux-spawn kapot); T0 blijft per grens proberen | Laag | Middel | Crash-loop-halt: na 3 `aborted` stopt de tick met verzoeken tot de cooldown. | §3.1 |
+| R3 | Twee dispatcher-instanties (oud + nieuw na restart) schrijven tegelijk een marker | Zeer laag | Middel | `fcntl.flock` met `LOCK_NB` is atomisch op POSIX; de tweede acquire faalt binnen 5s. | §3.2 |
+| R4 | `fcntl.flock` niet beschikbaar op niet-POSIX | N.v.t. | N.v.t. | VNX draait alleen op macOS/Linux. | §3.2 |
+| R5 | `respawn()` timeout laat de oude T0 zitten zonder successor | Laag | Middel | `respawn()` reapt alleen zijn eigen orphan-sessie; de oude T0 blijft draaien. Crash-teller telt. Geen verloren sessie. | §2.6 |
+| R6 | De tick-emit van request-receipts groeit onbeheerst | N.v.t. | Geen | Volume is gebonden aan rotatiefrequentie (~12/dag max), niet aan de tick-interval. Geen retentie nodig. | §4.1 |
+| R7 | Twee project_ids onder één project_root collideren in project-local mode | N.v.t. | Hoog (zonder fix) | Verholpen in PR 2: expliciete project_id-laag in de state-paden maakt de state altijd project_id-disjunct. | §2.2, §8.3 |
+| R8 | Operator zet `enabled: true` + `respawn: off` en daarna `VNX_T0_ROTATION_DAEMON=1` — T0 roteert zonder successor | Laag | Hoog | De tick schrijft alleen een verzoek als de policy ook `respawn: tmux_new_session` heeft. Met `respawn: off` is de tick een no-op. | §3.3 |
+| R9 | `rotation_id` als `dispatch_id` botst met echte dispatch-ids | N.v.t. | Geen | `rotation_id` is UUID-hex; dispatch-ids zijn `YYYYMMDD-HHMMSS-<slug>`. Geen overlap. | §4.1 |
+| R10 | De daemon schrijft een verzoek voor een T0 die niet bestaat (niemand draait 'm) | Laag | Laag | De marker blijft staan; zodra een T0 opstart en een grens bereikt, consumeert hij 'm. Geen spawn-from-nothing, geen sessie-zoek-logica. | §2.3, §6.3 |
+| R11 | Stale `rotation_requested` na een handmatige `/rotate` leidt tot een dubbele rotatie bij de eerstvolgende grens | Zeer laag | Middel | Generatie-guard (`based_on_last_rotation_at`): een verzoek dat niet meer op de actuele durable-generatie slaat wordt door `checkpoint()` genegeerd en door de tick gewist (§2.3.6). Volledige integratie met de handmatige skill is een vervolg-track (§6.13). | §2.4, §2.5, §6.13 |
 
 ---
 
-## 8. Toetsingscriteria (bevinding overige #8)
+## 8. Toetsingscriteria
 
 ### 8.1 task_class per deliverable
 
 | PR | task_class | Definitie |
 |---|---|---|
 | PR 1 | `foundation` | Infrastructuur zonder gedragsverandering. Feature is meetbaar maar niet actief. |
-| PR 2 | `safety` | Harde veiligheidsmechanismen. Zonder deze mag de feature niet aan. |
-| PR 3 | `activation` | Maakt de feature actief onder expliciete operator-controle. |
+| PR 2 | `safety` | Harde veiligheidsmechanismen (halt, lease, scoping). Zonder deze mag de feature niet aan. |
+| PR 3 | `activation` | Maakt de feature actief onder expliciete per-project operator-controle. |
 | PR 4 | `validation` | Bewijst dat het geheel werkt en documenteert het. |
 
 ### 8.2 model-routing-vloer
 
-Alle vier PR's zijn volledig deterministisch. Geen enkele PR bevat een model-call. De routing is daarmee: **geen model** — alles draait in-process in Python en bash, op dezelfde machine als de dispatcher.
+Alle vier PR's zijn volledig deterministisch — vaste regels, tellers, timestamps en
+kernel-primitieven (`flock`, `tmux`). Geen enkele PR bevat een model-call. De enige
+model-afhankelijkheid is indirect (de successor wordt als `claude --model opus` gespawnd), en
+die zit in T0's eigen `checkpoint()`-proces, niet in de daemon. Per PR gedetailleerd in §5.
 
-### 8.3 ADR-007 toepasbaarheid
+### 8.3 ADR-007 — expliciete uitspraak
 
-ADR-007 (multitenant project_id-stamping op alle centrale-DB-tabellen) is **niet van toepassing** op deze track. De track voegt geen nieuwe database-tabellen toe. Alle state is filesystem-gebaseerd binnen het bestaande project_id-gescopete pad (`~/.vnx-data/<project_id>/state/rotation/`), dat al via `vnx_paths._resolve_state_root` resolveert.
+**Letter (niet van toepassing):** ADR-007 verplicht `project_id`-stamping en composiet-UNIQUE
+op alle **centrale-DB-tabellen**. Deze track voegt geen centrale-DB-tabellen toe, geen
+migraties, geen UNIQUE-constraints. De bewijs-test (`tests/test_migrate_dry_run.py`) wordt niet
+geraakt. Er is dus geen ADR-007-migratie-deliverable.
+
+**Geest (wél toegepast, en de r2-claim gecorrigeerd):** r2 stelde "alle state leeft in het
+bestaande project_id-gescopete pad". Dat is **onjuist** in project-local mode: de enige rode
+test in de suite (`test_project_id_scoped_across_two_projects`,
+`tests/test_context_rotation.py:715`) bewijst dat twee project_ids op dezelfde project_root
+naar hetzelfde pad resolven (`_resolve_state_root` branch 4, `vnx_paths.py:420-421`). Daar
+landden crash-teller, lease en durable state. PR 2 verhelpt dit structureel: de state-paden
+krijgen een expliciete project_id-laag (§2.2), zodat de state in álle resolutie-modussen
+project_id-disjunct is. De ADR-007-geest — "project_id is de identiteitslaag" — is daarmee
+gerespecteerd, nu ook voor filesystem-state in plaats van alleen DB-tabellen.
 
 ---
 
@@ -728,95 +939,294 @@ ADR-007 (multitenant project_id-stamping op alle centrale-DB-tabellen) is **niet
 Elk hieronder genoemd regelnummer is geverifieerd met het bijbehorende commando.
 
 ```
-# Bestandsscan context_rotation.py
+# Bestandsscan context_rotation.py — 898 regels (r2-appendix zei 899; gecorrigeerd)
 $ wc -l scripts/lib/context_rotation.py
-899 scripts/lib/context_rotation.py
+898 scripts/lib/context_rotation.py
 
 # Functie-definities
 $ grep -n "^def \|^class " scripts/lib/context_rotation.py
+93:def _validate_terminal(terminal: str) -> str:
+119:def _project_data_root(project_id: str, project_root: Optional[Path] = None) -> Path:
+131:def rotation_state_dir(project_id: str, project_root: Optional[Path] = None) -> Path:
+135:def rotation_handoff_dir(
+142:def durable_state_path(
+149:def request_marker_path(
+156:def ready_signal_path(
 220:class RotationPolicy:
 293:class RotationDecision:
 298:def decide_rotation(
-403:def write_t0_handoff(
+403:def write_t0_handoff(*, logdir: Path, project_root: Path, project_id: str) -> Path:
 512:class RespawnResult:
+520:def _build_resume_prompt(
 535:class SpawnPartialFailure(RuntimeError):
+548:def _default_tmux_spawn(
+610:def _default_tmux_kill(session_name: str) -> None:
+617:def _check_ready(ready_path: Path, rotation_id: str) -> bool:
 624:def write_ready_signal(
 642:def respawn(
 731:class RotationOutcome:
+740:def _emit_continuation_receipt(
+769:def _load_durable(path: Path) -> Dict[str, Any]:
 778:def checkpoint(
+
+# decide_rotation gates — de poorten waarmee r1/r2 fout ging
+$ sed -n '312,334p' scripts/lib/context_rotation.py
+    if not policy.enabled:
+        return RotationDecision(False, "disabled")
+    if mid_action:
+        return RotationDecision(False, "mid_action")
+    if not at_governance_boundary:
+        return RotationDecision(False, "not_at_boundary")
+    if policy.trigger != "governance_boundary":
+        # Only governance_boundary is implemented (verified round 1: no
+        # reliable live-% signal for interactive T0).
+        return RotationDecision(False, f"unsupported_trigger:{policy.trigger}")
+    ... (debounce, pct_ceiling)
 
 # Opus-pin
 $ grep -n "_SUCCESSOR_MODEL\|--model opus" scripts/lib/context_rotation.py
 82:_SUCCESSOR_MODEL = "opus"
 597:            ["tmux", "send-keys", "-t", session_name, "-l", f"claude --model {_SUCCESSOR_MODEL}"],
 
-# Default-uit
-$ grep -n "enabled: false\|respawn: off" configs/context_rotation.yaml
-enabled: false
-respawn: off
+# De successor-sessienaam die de r2 "^vnx-t0-" zoekterm wél matchte
+$ sed -n '675p' scripts/lib/context_rotation.py
+    session_name = f"vnx-t0-rotation-{terminal.lower()}-{rotation_id[:8]}"
 
-# Tick-patronen in dispatcher_supervisor_ticks.sh
-$ wc -l scripts/lib/dispatcher_supervisor_ticks.sh
-224 scripts/lib/dispatcher_supervisor_ticks.sh
+# De in-flight-guard die alleen "in_progress" kent (bevinding marker-status)
+$ sed -n '818,828p' scripts/lib/context_rotation.py
+    now = now_fn()
+    in_flight = _load_json_safe(request_path)
+    if in_flight and in_flight.get("status") == "in_progress":
+        created_at = in_flight.get("created_at")
+        if created_at and _seconds_since(created_at, now) < request_ttl_seconds:
+            return RotationOutcome(
+                rotated=False, reason="already_in_progress", rotation_id=in_flight.get("rotation_id"),
+            )
+        # Stale in_progress marker (a previous attempt crashed mid-flight
+        # without ever writing an outcome) — fall through and retry.
 
-# Dispatcher loop call order
-$ grep -n "process_dispatches\|_maybe_runtime_supervise\|_unified_supervisor_lease_sweep" scripts/dispatcher_minimal.sh
-599:process_dispatches() {
-601:    _maybe_runtime_supervise
-603:    _unified_supervisor_lease_sweep_tick
+# Debounce-teller: checkpoint is de enige schrijver
+$ sed -n '836,845p' scripts/lib/context_rotation.py
+    if not decision.should_rotate:
+        if at_governance_boundary:
+            durable["boundaries_since_last_rotation"] = durable.get("boundaries_since_last_rotation", 0) + 1
+            _write_json_atomic(durable_path, durable)
+        return RotationOutcome(rotated=False, reason=decision.reason)
 
-# Supervisor wrappers
-$ wc -l scripts/dispatcher_supervisor.sh scripts/receipt_processor_supervisor.sh
-194 scripts/dispatcher_supervisor.sh
-207 scripts/receipt_processor_supervisor.sh
+    rotation_id = uuid.uuid4().hex[:12]
+    _write_json_atomic(request_path, {
+        "rotation_id": rotation_id, "status": "in_progress", "created_at": _iso(now),
+    })
 
-# Singleton enforcement
-$ grep -n "singleton_enforcer\|enforce_singleton" scripts/dispatcher_supervisor.sh
-75:# Singleton enforcement
-78:source "$VNX_DIR/scripts/singleton_enforcer.sh"
-81:enforce_singleton "$SUPERVISOR_NAME" "$LOG_FILE" "$SCRIPT_DIR/dispatcher_supervisor.sh"
+# Reset op bevestigde rotatie + success-status
+$ sed -n '870,880p' scripts/lib/context_rotation.py
+    if confirmed:
+        durable["boundaries_since_last_rotation"] = 0
+        durable["last_rotation_at"] = _iso(now_fn())
+        _write_json_atomic(durable_path, durable)
+        _write_json_atomic(request_path, {
+            "rotation_id": rotation_id, "status": "success", "created_at": _iso(now),
+        })
+        _emit_continuation_receipt(
+            terminal=terminal, dispatch_id=rotation_id, handoff_path=str(handoff_path),
+            context_pct=context_pct, project_id=project_id,
+        )
 
-# Rotate skill
-$ wc -l ~/.claude/skills/rotate/SKILL.md
-106 /Users/vincentvandeth/.claude/skills/rotate/SKILL.md
+# respawn() blokkeert (tot 60s) — alleen in T0's eigen proces in deze vorm
+$ sed -n '701,723p' scripts/lib/context_rotation.py
+    start = time_fn()
+    while True:
+        if _check_ready(ready_path, rotation_id):
+            return RespawnResult(
+                success=True, reason="ready", session_name=session_name,
+                rotation_id=rotation_id, waited_seconds=time_fn() - start,
+            )
+        elapsed = time_fn() - start
+        if elapsed >= timeout_seconds:
+            ...
+            try:
+                kill(session_name)
+            ...
 
-# Test suite
-$ python3 -m pytest tests/test_context_rotation.py -q --tb=no
-77 passed, 1 failed
+# Continuation-receipt gebruikt state_mutation (bestaande gesloten-set-soort)
+$ sed -n '750,752p' scripts/lib/context_rotation.py
+    receipt = {
+        "event_type": "context_rotation_continuation",
+        "receipt_kind": "state_mutation",
 
-# Volledige test suite (alleen context_rotation-relevante)
-$ wc -l tests/test_context_rotation.py
-1127 tests/test_context_rotation.py
+# RECEIPT_KINDS gesloten set — health zit er NIET in
+$ sed -n '67,90p' scripts/lib/dispatch_identity.py
+RECEIPT_KINDS = frozenset({
+    "build",
+    "doc",
+    "test",
+    "review_gate",
+    "panel_seat",
+    "state_mutation",
+    "sub_dispatch",
+    "dispatch",
+})
 
-# VNX_SUPERVISOR_MODE default
-$ grep -n "VNX_SUPERVISOR_MODE.*legacy" scripts/lib/dispatcher_supervisor_ticks.sh
-27:    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
-206:    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
 
-# producer_freshness_monitor status
-$ cat ~/.vnx-data/vnx-dev/health/producer_freshness_monitor.json
-{
-  "component": "producer_freshness_monitor",
-  "expected_interval_seconds": 86400,
-  "last_run_iso": "2026-07-31T15:38:15Z",
-  "status": "stale"
+def validate_receipt_kind(receipt_kind: Optional[str]) -> str:
+    """Emit-time lint (PR-3: warn -> raise). Every emitted receipt MUST carry
+    a ``receipt_kind`` from the closed set; a missing or out-of-vocab value
+    hard-fails the emit. Returns the validated kind. Raises ValueError.
+    """
+    if receipt_kind not in RECEIPT_KINDS:
+        raise ValueError(
+            f"Invalid receipt_kind {receipt_kind!r}. Must be one of "
+            f"{sorted(RECEIPT_KINDS)} (receipt-quality §3b closed set; "
+            "emit-time lint raises)."
+        )
+    return receipt_kind
+
+# Size-gates
+$ sed -n '21,22p;88,89p' scripts/lib/quality_advisory.py
+FILE_SIZE_WARNING_PYTHON = 500
+FILE_SIZE_BLOCKING_PYTHON = 1200
+FUNCTION_SIZE_WARNING_PYTHON = 40
+FUNCTION_SIZE_BLOCKING_PYTHON = 70
+
+# context_rotation.py staat NIET op de size-allowlist
+$ grep -n "context_rotation" scripts/lib/quality_advisory.py
+(none)
+
+# function_size_blocking is een warning (soft), geen hard block — transparantie
+$ sed -n '305,314p' scripts/lib/quality_advisory.py
+            if length > FUNCTION_SIZE_BLOCKING_PYTHON:
+                checks.append(QualityCheck(
+                    check_id="function_size_blocking",
+                    severity="warning",
+                    file=str(file_path),
+                    symbol=node.name,
+                    message=f"Function is large: {length} lines (soft max {FUNCTION_SIZE_BLOCKING_PYTHON})",
+                    evidence=f"function={node.name},lines={length},max={FUNCTION_SIZE_BLOCKING_PYTHON}",
+                    action_required=False,
+                ))
+
+# start.sh sessienaam — waarom "^vnx-t0-" nooit matcht op levende T0's
+$ sed -n '30p' scripts/commands/start.sh
+  local session_name="vnx-$(basename "$PROJECT_ROOT")"
+
+# Levende tmux-sessies (gemeten 2026-08-02) — geen enkele matcht "^vnx-t0-"
+$ tmux ls
+ConeyBox: 1 windows (created Fri Jul 24 15:28:30 2026) (attached)
+legio: 1 windows (created Sun Jul 26 08:42:10 2026)
+linkedin-oncue: 1 windows (created Mon Jul 27 13:28:23 2026)
+mc-t0: 2 windows (created Fri Jul 24 09:09:23 2026) (attached)
+onlineplasticgroup: 1 windows (created Mon Jul 27 11:38:18 2026)
+orch-t0: 1 windows (created Fri Jul 24 09:09:23 2026) (attached)
+salesminds-bu: 1 windows (created Fri Jul 24 11:49:54 2026)
+seo-t0: 1 windows (created Fri Jul 31 11:50:54 2026) (attached)
+t0-sales-copilot: 1 windows (created Fri Jul 24 09:09:23 2026)
+vnx-D-1ee94ba6: 1 windows (created Fri Jul 24 09:44:13 2026)
+vnx-D-4a9fbe0f: 1 windows (created Thu Jul 30 13:15:16 2026)
+vnx-D-87cd1e1f: 1 windows (created Wed Jul 29 17:52:07 2026)
+vnx-D-ad81c3f1: 1 windows (created Fri Jul 24 11:10:29 2026)
+vnx-D-d657bf39: 1 windows (created Sat Aug  1 18:49:47 2026)
+
+De levende T0-sessies zijn orch-t0, mc-t0, seo-t0, t0-sales-copilot (niet "vnx-t0-*").
+Wat wél matchte was de vnx-t0-rotation-* successor die respawn() zelf aanmaakt.
+Dit ontwerp leunt op géén enkele sessie-naam: de daemon zoekt geen sessies (§6.3).
+
+# Tick-patroon in dispatcher_supervisor_ticks.sh — de sjabloon voor _maybe_rotation_tick
+$ sed -n '26,50p' scripts/lib/dispatcher_supervisor_ticks.sh
+_maybe_runtime_supervise() {
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+    local interval="${VNX_RUNTIME_SUPERVISE_INTERVAL:-60}"
+    local state_file="$STATE_DIR/.last_runtime_supervise_ts"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last < interval )); then
+        return 0
+    fi
+    local log_file="$VNX_LOGS_DIR/runtime_supervise.log"
+    mkdir -p "$(dirname "$log_file")"
+    python3 "$VNX_DIR/scripts/lib/runtime_supervise.py" >> "$log_file" 2>&1 || true
+    printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }
+
+# Dispatcher-loop call order
+$ sed -n '599,607p' scripts/dispatcher_minimal.sh
+process_dispatches() {
+    local count=0
+    _maybe_runtime_supervise
+    _cleanup_stuck_dispatches
+    _unified_supervisor_lease_sweep_tick
+    _maybe_auto_seed_tracks
+    _maybe_oi_bridge_tick
+    _maybe_objective_reconcile
+    _maybe_learning_cycle
+
+# project_id-regex (path-veilig als padcomponent)
+$ grep -n "PROJECT_ID_RE = " scripts/lib/vnx_ids.py
+15:PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+
+# _resolve_state_root branch 4 — project-local collapse (de ADR-007-claim van r2 was onjuist)
+$ sed -n '419,421p' scripts/lib/vnx_paths.py
+    # 4. Existing dev checkout / pre-migration install — keep project-local dir.
+    if local.is_dir():
+        return local.resolve()
+
+# De enige rode test in de suite
+$ python3 -m pytest tests/test_context_rotation.py -q --tb=short
+...F....
+FAILED tests/test_context_rotation.py::TestWriteT0Handoff::test_project_id_scoped_across_two_projects
+1 failed, 77 passed in 1.73s
+
+# Oude T0 exit zelf (bestaande contract)
+$ sed -n '214,217p' docs/operations/CONTEXT_ROTATION.md
+   marks the rotation confirmed; the old T0 is expected to exit shortly
+   after (outside this module's scope — the actual "exit" instruction is
+   part of T0's own boundary logic, not `context_rotation.py`).
+
+# Geen rotatie-state op schijf — de feature is volledig dormant
+$ find ~/.vnx-data -name "T0_durable.json" -o -name "T0_request.json" -o -name "T0.ready" 2>/dev/null
+(none)
 ```
+
+---
 
 ## Appendix B: Bevindingen-adressering (verplicht — dispatch-instructie)
 
-| # | Bevinding | Sectie in herzien plan |
+Per bevinding: in welke sectie hij is geadresseerd. Een lijst, geen proza.
+
+| # | Bevinding | Geadresseerd in |
 |---|---|---|
-| B1 | Kernmechanisme is gegarandeerde no-op (`at_governance_boundary=False`) | §2.4 — nieuw `session_duration`-triggerpad in `decide_rotation()`, met `sed`-bewijs van de echte poorten |
-| B2 | Twee levende T0's na rotatie | §2.5 (twee-fasen model), §2.6 (expliciete teardown) |
-| B2 | `.ready` eenmalig -> gegarandeerd stale | §2.5 — `tmux has-session` als primair liveness-signaal, `.ready` alleen voor rotatie-handshake |
-| B3 | Receipt-volume niet gedimensioneerd (720/dag) | §4.1 — apart bestand, retentie 7 dagen, `receipt_kind: health`, payload met `dispatch_id` + `role` |
-| B3 | `producer_freshness_monitor` is stale + verkeerde cadence | §4.2 — eigen timestamp-bestand, gecheckt door `runtime_supervise` |
-| overige #1 | Debounce-teller alleen bij `True` opgehoogd | §2.4 — in daemon-mode telt de tick bij elke iteratie, niet alleen bij boundaries |
-| overige #2 | Crash-loop-halt telt op `.ready`-verschijning | §3.1 — telt op gecombineerd falen (timeout OF nieuwe T0 sterft tijdens teardown) |
-| overige #3 | Geen preconditie dat T0 bestaat | §2.3 — pre-flight check via `tmux list-sessions`, `reason: no_t0_session` |
-| overige #4 | PID-gebaseerde stale-lock-detectie fragiel | §3.2 — `fcntl.flock()` kernel-beheerd, geen PID |
-| overige #5 | `respawn()` blokkeert dispatcher tot 60s | §2.5 — twee-fasen rotatie, `wait_for_ready=False`, voltooiing in volgende tick |
-| overige #6 | PR 3 fleet-breed `enabled:true` zonder fasering | §2.1 — `VNX_T0_ROTATION_DAEMON=1` als onafhankelijke kill-switch, §3.3 uitrolpad |
-| overige #7 | "Default-aan"-claim hangt aan `unified`, default is `legacy` | §1.2 (vaststelling default), §3.3 (drie onafhankelijke schakelaars met expliciete defaults) |
-| overige #8 | Ontbrekende toetsingscriteria | §5 (task_class + model-routing per PR), §7 (risico-register), §8 (ADR-007) |
+| Op-besluit 1 | Destructieve teardown vervalt (plus: `^vnx-t0-`-zoekterm matcht alleen de eigen `vnx-t0-rotation-*`-successor; levende sessies heten anders) | §0 (tabel), §2.6, §6.3, Appendix A (`tmux ls` + `context_rotation.py:675` + `start.sh:30`) |
+| Op-besluit 2 | Twee levende T0's vervalt | §2.6 ("er wordt er maar één gestart, door de bestaande weg"), §6.2 |
+| Op-besluit 3 | `mid_action`-poort leeft | §2.4 (poort 2), §1.4 |
+| Op-besluit 4 | `respawn()`-wachten blokkeert de dispatcher-loop niet meer | §2.6 (fase 2 is T0's eigen proces), §0 (tabel) |
+| Op-besluit 5 | `.ready` als hartslag vervalt als probleem; geen daemon-liveness | §2.6 ("Liveness en `.ready`"), §6.12, §4.2 (freshness als vervanger) |
+| Blijft staan | Tick in de dispatcher-loop | §2.1, §2.2 (diagram), PR 1 |
+| Blijft staan | Twee-fasen-model | §2.6 (fase 1 = verzoek, fase 2 = uitvoer) |
+| Blijft staan | Crash-loop-halt | §3.1 |
+| Blijft staan | `fcntl.flock` | §3.2 |
+| Blijft staan | Sectie 1 (gemeten huidige toestand) | §1 (behouden uit r2) |
+| Open 1 | Gedeelde `boundaries_since_last_rotation`-teller zonder semantiek | §2.3 ("de tick schrijft alleen de marker, `checkpoint()` alleen de teller") + §2.4 (poort 4 bypass) |
+| Open 2 | Marker-status / in-flight-guard kent `awaiting_ready` niet | §2.5 (volledige statusovergangen-tabel) + §2.4 (guard leest `rotation_requested` met generatie-guard; naam is niet langer `awaiting_ready`) |
+| Open 3 | Receipt-vloer: 720/dag + `health` niet in `RECEIPT_KINDS` + `validate_receipt_kind` gooit | §4.1 (`state_mutation`, bestaande soort; geen set-uitbreiding; volume bounded) + Appendix A (`dispatch_identity.py:67-89`) |
+| Open 4 | Size-gate PR2: 898 regels, niet op allowlist, +120/+200 = 1218 | §5 ("Size-gate-verantwoording": splitsing naar `rotation_daemon.py`; context_rotation.py max ~993; functie-opsplitsing) + Appendix A (`quality_advisory.py:21-22,88-89,305-314`) |
+| Open 5 | Gefaseerde uitrol; `VNX_SUPERVISOR_MODE=legacy` is geen kill-switch | §3.3 (eigen schakelaar `VNX_T0_ROTATION_DAEMON`, onafhankelijk van supervisor-mode) |
+| Open 6 | Drie ontbrekende toetsingscriteria | §5 (task_class + model-routing per PR), §7 (risico-register), §8.3 (ADR-007) |
+| Open 7 | ADR-007-onderbouwing leunt op project_id-scoping die de rode test weerspreekt | §2.2 (expliciete project_id-laag in state-paden), §8.3 (letter niet van toepassing, geest wél en gecorrigeerd), PR 2 (deliverable) + Appendix A (`vnx_paths.py:419-421`, `tests/test_context_rotation.py:715`) |
+
+---
+
+## Appendix C: Verificatie-eisen dispatch-instructie
+
+1. **Per bevinding → sectie.** Zie Appendix B.
+2. **Per regelnummer → sed/grep-uitvoer.** Zie Appendix A. Elk regelnummer dat in dit plan
+   voorkomt is daar terug te vinden met het commando dat het vaststelde.
+3. **Sessienamen met uitvoer + ontwerp leunt er niet op.** Zie Appendix A (`tmux ls`):
+   levende T0-sessies zijn `orch-t0`, `mc-t0`, `seo-t0`, `t0-sales-copilot`; geen enkele
+   matcht `^vnx-t0-`. Wat wél matchte was `vnx-t0-rotation-<term>-<id>`
+   (`context_rotation.py:675`), de successor die `respawn()` zelf aanmaakt. Dit ontwerp heeft
+   **geen sessie-zoek-logica** (§6.3): de daemon schrijft alleen een marker, zoekt niets, kilt
+   niets.
