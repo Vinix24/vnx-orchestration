@@ -6,8 +6,11 @@ Tests: State loading, dependency recommendations, blocked PR detection
 
 import os
 import sys
+import tempfile
 import yaml
 from pathlib import Path
+
+import pytest
 
 # Add scripts dir to path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -15,6 +18,18 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from pr_queue_manager import PRQueueManager
 from generate_t0_recommendations import RecommendationEngine, PR_QUEUE_STATE_FILE
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vnx_data_dir(monkeypatch):
+    """Sibling of tests/test_pr_dispatch_integration.py — same PRQueueManager
+    write surface, same w19c/OI-934 isolation requirement. See that file's
+    fixture docstring for the full incident writeup.
+    """
+    isolated = tempfile.mkdtemp(prefix="test_pr_recommendation_integration_")
+    monkeypatch.setenv("VNX_DATA_DIR", isolated)
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_PROJECT_ROOT", tempfile.mkdtemp(prefix="test_pr_recommendation_project_root_"))
 
 
 def test_pr_queue_state_loading():

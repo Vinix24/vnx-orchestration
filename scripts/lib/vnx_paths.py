@@ -313,6 +313,64 @@ def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
     return None
 
 
+def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
+    """Fail loud when code is ABOUT TO WRITE under the real central store
+    while running under pytest (w19c / test-store-isolation class guard).
+
+    Call this from write surfaces — a manager class's ``__init__``, a
+    ``write_*`` function — right before any file/dir gets created, NOT from
+    generic path resolvers. ``vnx_paths.resolve_paths()`` /
+    ``_resolve_state_root()`` are pure computations used by plenty of
+    legitimate read-only tests that inspect resolution logic without ever
+    touching disk (e.g. ``tests/test_path_resolution_regression.py`` calling
+    ``resolve_paths()`` with a deliberately clean env to assert on shape, not
+    on where it points) — those must keep resolving to wherever production
+    would, even ``~/.vnx-data/vnx-dev``, without failing. Only an imminent
+    WRITE into that path is the actual hazard.
+
+    ``_resolve_state_root``'s branch 3 ("existing central install — keep
+    resolving to ``~/.vnx-data/<id>``") is correct for production, but a
+    landmine when something is about to write there during THIS repo's own
+    test suite: vnx-orchestration IS a real, governed central-store project
+    (``~/.vnx-data/vnx-dev``), so a test that loses its isolation — a
+    stripped ``VNX_DATA_DIR_EXPLICIT``, a leaked ``VNX_PROJECT_ID``, a
+    subprocess with a cleaned env — silently resolves right back to that
+    live store. That is exactly how ``tests/test_pr_dispatch_integration.py``
+    wrote real dispatch-staging files into production governance state, and
+    how ``vnx_mode.write_mode()``'s resolver fallback can flip the live
+    ``mode.json`` from operator to starter, closing the governance door for
+    ``vnx dispatch``.
+
+    Deliberately checks the ACTUAL resolved value rather than requiring
+    ``VNX_DATA_DIR_EXPLICIT=1`` (contrast with the precedent in
+    ``build_t0_state._pytest_db_isolation_guard`` /
+    ``migrate_future_system._pytest_db_isolation_guard``): callers of this
+    function have their own legitimate no-explicit-flag paths (fresh-install
+    / XDG / project-local fallbacks all resolve safely without it), so the
+    flag itself is not the invariant. Landing a WRITE in the real
+    ``~/.vnx-data`` is.
+
+    Production is unaffected: pytest is never in ``sys.modules`` outside a
+    test run.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in _sys.modules:
+        return
+    real_home_vnx_data = (Path(os.path.expanduser("~")) / ".vnx-data").resolve()
+    resolved = resolved.resolve()
+    sep = os.sep
+    if str(resolved) == str(real_home_vnx_data) or str(resolved).startswith(
+        str(real_home_vnx_data) + sep
+    ):
+        raise RuntimeError(
+            f"[TEST ISOLATION GUARD] about to write under the real central "
+            f"store '{resolved}' while running under pytest. A test lost its "
+            "isolation. Set VNX_DATA_DIR_EXPLICIT=1 with a tmp_path-based "
+            "VNX_DATA_DIR before this code runs, or ensure the "
+            "tests/conftest.py _vnx_data_dir_isolation autouse fixture is "
+            "active for this test."
+        )
+
+
 def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
     """Resolve the VNX runtime data root (the ``.vnx-data`` equivalent).
 

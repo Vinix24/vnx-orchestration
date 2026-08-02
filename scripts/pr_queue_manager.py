@@ -20,6 +20,7 @@ if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
 from vnx_paths import resolve_paths as _resolve_vnx_paths
+from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse_real_store_write
 from pr_queue_state_snapshot import build_vnx_state_snapshot
 from project_scope import current_project_id as _current_project_id
 from result_contract import (
@@ -81,6 +82,14 @@ class PRQueueManager:
         self.dispatch_dir = Path(vnx_paths["VNX_DISPATCH_DIR"])
         self.vnx_state_dir = Path(vnx_paths["VNX_STATE_DIR"]).expanduser().resolve()
         self.legacy_state_dir = (vnx_root / "state").resolve()
+
+        # w19c/OI-934: PRQueueManager exists to write PR queue state and
+        # dispatch-staging files — construction is the earliest point that
+        # reliably signals an imminent write. Refuses loudly instead of
+        # silently landing in the real central store under a leaked/lost
+        # test isolation (see tests/test_pr_dispatch_integration.py history).
+        _refuse_real_store_write(self.vnx_state_dir)
+        _refuse_real_store_write(self.dispatch_dir)
         rollback_flag = _rollback_mode_flag()
         self.rollback_mode = bool(rollback_flag)
         dual_write_flag = _env_flag("VNX_PR_QUEUE_DUAL_WRITE_LEGACY")

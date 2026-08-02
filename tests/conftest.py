@@ -101,6 +101,26 @@ def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv — the last setenv wins within the same function scope.
     Tests that need the fallback behaviour (no explicit flag) can monkeypatch
     delenv("VNX_DATA_DIR_EXPLICIT") to undo this guard for that test only.
+
+    This is the "point the store at tmp_path" half of the class-wide guard
+    (w19c/OI-934). It is NOT itself the backstop: a test that opts out of the
+    explicit flag (or a subprocess that loses it) still has a legitimate
+    no-flag resolution path (fresh-install / XDG / project-local fallbacks),
+    so this fixture cannot unconditionally refuse — and neither can the
+    resolver itself (``vnx_paths.resolve_paths()`` / ``_resolve_state_root()``
+    are pure computations with plenty of legitimate read-only callers that
+    must keep resolving to wherever production would, real central store
+    included, without failing).
+
+    The "fail loud when about to WRITE into the real ~/.vnx-data" half lives
+    at the actual write surfaces instead:
+    ``vnx_paths.refuse_real_central_store_write_under_pytest`` is called from
+    ``PRQueueManager.__init__`` (scripts/pr_queue_manager.py) and from
+    ``vnx_mode._guard_mode_write_target`` (scripts/lib/vnx_mode.py, alongside
+    the existing OI-911 divergence/cross-project checks). New write surfaces
+    should call it too — see that function's docstring in
+    scripts/lib/vnx_paths.py. Regression tests:
+    tests/test_vnx_data_dir_real_store_guard.py.
     """
     isolated = tmp_path / "_vnx_test_data"
     isolated.mkdir(parents=True, exist_ok=True)

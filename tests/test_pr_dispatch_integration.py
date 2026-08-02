@@ -6,15 +6,44 @@ Tests PR 2.5 implementation
 
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+import pytest
 
 VNX_HOME = Path(os.environ.get("VNX_HOME", Path(__file__).resolve().parents[1]))
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from pr_queue_manager import PRQueueManager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vnx_data_dir(monkeypatch):
+    """PRQueueManager() resolves VNX_STATE_DIR/VNX_DISPATCH_DIR from
+    VNX_DATA_DIR and writes real staging dispatches + queue state there.
+    Without an explicit, isolated VNX_DATA_DIR these tests land in the real
+    central store (~/.vnx-data/<project>) instead of a throwaway tmp dir
+    (w19c/OI-934: this file previously had zero isolation and repeatedly
+    wrote staging files into production governance state).
+
+    PROJECT_ROOT is isolated too: PRQueueManager.update_markdown() writes
+    PR_QUEUE.md to project_root, and project_root resolves via vnx_paths'
+    git-toplevel walk regardless of VNX_DATA_DIR — left unpinned, every run
+    overwrites this repo's own git-tracked PR_QUEUE.md.
+
+    Module-level autouse (not a test-function parameter) so the file still
+    runs standalone via ``python3 tests/test_pr_dispatch_integration.py``
+    (main() calls the test functions directly, with no pytest fixture
+    injection) exactly as it did before.
+    """
+    isolated = tempfile.mkdtemp(prefix="test_pr_dispatch_integration_")
+    monkeypatch.setenv("VNX_DATA_DIR", isolated)
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_PROJECT_ROOT", tempfile.mkdtemp(prefix="test_pr_dispatch_project_root_"))
 
 
 def test_pr_dispatch_creation():

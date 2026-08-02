@@ -5,7 +5,6 @@ Tests the setup flow: prereq check → init → doctor → register → next-ste
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -31,7 +30,7 @@ from vnx_setup import (
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def vnx_env(tmp_path):
+def vnx_env(tmp_path, monkeypatch):
     """Create a minimal VNX project structure with paths dict."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -55,15 +54,16 @@ def vnx_env(tmp_path):
         "VNX_DB_DIR": str(data_dir / "database"),
     }
 
-    # Set env vars for vnx_mode to work
+    # Set env vars for vnx_mode to work. monkeypatch (not raw os.environ)
+    # so teardown restores whatever conftest's autouse isolation had pinned
+    # instead of deleting it outright — a raw os.environ.pop() here used to
+    # strip VNX_STATE_DIR for the rest of the session, causing later tests
+    # (e.g. tests/test_pr_recommendation_integration.py) to resolve a
+    # different state dir than their module-level frozen path expected.
     for k, v in paths.items():
-        os.environ[k] = v
+        monkeypatch.setenv(k, v)
 
     yield paths
-
-    # Cleanup env
-    for k in paths:
-        os.environ.pop(k, None)
 
 
 # ---------------------------------------------------------------------------

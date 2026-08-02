@@ -155,7 +155,7 @@ def read_mode(data_dir: Optional[str] = None) -> Optional[VNXMode]:
 def _guard_mode_write_target(target_dir: Path) -> None:
     """Fail loud when a mode.json write would land outside the active project store.
 
-    Two checks (OI-911):
+    Three checks (OI-911 + w19c/OI-934):
 
     1. Divergence guard. When ``VNX_DATA_DIR`` is set WITHOUT
        ``VNX_DATA_DIR_EXPLICIT=1``, the two-key contract treats it as inherited
@@ -163,12 +163,21 @@ def _guard_mode_write_target(target_dir: Path) -> None:
        that fallback diverges from the env value, the process was configured for
        a different data dir and writing mode.json to the fallback store is
        exactly the OI-911 test-run incident. Refuse.
-    2. Cross-project guard. A write target under ``~/.vnx-data/<other>`` while
+    2. Test-isolation guard (w19c/OI-934). Under pytest, refuse a write into
+       the REAL central store outright — even with NO env override at all
+       (nothing to "diverge" from) and even when the resolved project_id
+       happens to match, which is exactly the gap the divergence check above
+       cannot see: a completely clean test env resolves to this repo's own
+       real ``~/.vnx-data/vnx-dev`` "correctly", and correctly is still wrong
+       for a test. This is what let a suite-wide pytest run flip the live
+       mode.json from operator to starter with no divergence to catch.
+    3. Cross-project guard. A write target under ``~/.vnx-data/<other>`` while
        the resolved project_id is not ``<other>`` is a cross-project write.
 
     When no project_id is resolvable the cross-project half cannot verify and
-    stays silent (same contract as ``data_dir_guard``); the divergence half is
-    env-verifiable and always runs.
+    stays silent (same contract as ``data_dir_guard``); the divergence and
+    test-isolation halves are verifiable independent of project_id and always
+    run.
     """
     try:
         target = Path(target_dir).expanduser().resolve()
@@ -204,6 +213,14 @@ def _guard_mode_write_target(target_dir: Path) -> None:
         return
     expected = home_vnx / pid
     if target == expected or str(target).startswith(str(expected) + os.sep):
+        # No divergence, no cross-project mismatch — by OI-911's own checks
+        # this write is "correct". Still refuse it under pytest (w19c/OI-934):
+        # a completely clean test env resolving "correctly" to this repo's
+        # real ~/.vnx-data/vnx-dev is exactly the gap those two checks can't
+        # see, since there is neither a divergence nor a project mismatch to
+        # catch.
+        from vnx_paths import refuse_real_central_store_write_under_pytest
+        refuse_real_central_store_write_under_pytest(target)
         return
     raise RuntimeError(
         f"mode.json write target {target} is {rel.parts[0]!r}'s central store, "
