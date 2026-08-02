@@ -102,7 +102,7 @@ tests/test_receipt_processor_autopr_rejected_mirror.py
 tests/test_receipt_processor_bootstrap.py
 tests/test_receipt_provenance.py
 tests/test_report_assembler.py
-tests/test_repo_map.py  # CI image: needs networkx+numpy+scipy (undeclared stack; repo_map falls back to positional ranking)
+tests/test_repo_map.py  # CI image: red in the minimal image on two measured stacks — without tree-sitter repo_map.py raises NameError (_TSParser, latent scripts/lib bug, repair needs own dispatch; scripts/lib is out of scope here), and the networkx PageRank tests need the undeclared networkx+numpy+scipy stack. Installing networkx alone makes it WORSE (27 failed vs 13): repo_map leaves its positional fallback and nx.pagerank crashes on missing numpy, which also breaks the green test_repo_map_provider_coverage.py.
 tests/test_review_adapters.py
 tests/test_roadmap_consistency.py
 tests/test_runtime_coordination_schema_drift.py

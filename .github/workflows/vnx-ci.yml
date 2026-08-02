@@ -23,14 +23,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # pytest + pytest-timeout (hanging-test guard) plus the project's
-          # runtime deps (watchdog, jinja2, pyyaml, jsonschema, psutil), one
-          # test-only dep (hypothesis), and networkx (pure-Python; used by
-          # repo_map-backed dispatch enricher and its tests). Without these,
-          # tests that import governed-report validation, the intelligence
-          # daemon monitor, headless_trigger, `vnx init` (jinja2), or the repo
-          # map fail to collect or run with ModuleNotFoundError even though they
-          # pass on main.
-          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 networkx
+          # declared runtime deps (watchdog, jinja2, pyyaml, jsonschema, psutil
+          # — all in pyproject.toml [project.dependencies]) and one test-only
+          # dep (hypothesis). Without these, tests that import governed-report
+          # validation, the intelligence daemon monitor, headless_trigger, or
+          # `vnx init` (jinja2) fail to collect with ModuleNotFoundError even
+          # though they pass on main.
+          # networkx is deliberately NOT installed: without numpy/scipy alongside,
+          # repo_map.py leaves its positional fallback for the networkx path and
+          # nx.pagerank crashes on the missing numpy — measured 2026-08-02:
+          # test_repo_map_provider_coverage.py (green on main) fails 2 tests with
+          # networkx present, passes 11/11 without it.
+          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2
 
       - name: Prepare expected repo layout
         run: |
