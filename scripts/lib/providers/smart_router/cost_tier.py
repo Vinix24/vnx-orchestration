@@ -53,7 +53,9 @@ def classify_dispatch(
 
     Rules applied in priority order (first match wins):
     1. Security-touching keywords or 'security' tag → tier-high
-    2. Architectural/cross-component keywords → tier-high
+    2. Architectural/cross-component keywords AND LOC > 150 → tier-high
+       (arch keywords alone do NOT escalate; a 60-LOC "refactor" is a word,
+       not an architecture change — see lane_calibration.yaml case 01)
     3. LOC > 300 → tier-high
     4. Schema/design keywords → tier-mid
     5. Multi-file (>1) AND LOC > 30 → tier-mid
@@ -66,9 +68,20 @@ def classify_dispatch(
     full_text = f"{instruction} {' '.join(tags)}"
     n_files = len(file_paths) if file_paths else 0
 
+    # Defense-in-depth: the public API guarantees loc_estimate is int >= 0,
+    # but callers that bypass door_routing may pass None (OI-963).
+    if not isinstance(loc_estimate, int):
+        loc_estimate = 0
+
     if "security" in tags or _has_keyword(full_text, _SECURITY_KEYWORDS):
         return TIER_HIGH
-    if _has_keyword(full_text, _ARCH_KEYWORDS):
+    # Arch keywords only escalate when scope justifies it (LOC > 150).
+    # Measured: a 60-LOC config refactor containing "refactor" was classified
+    # tier-high because the keyword check ran before any LOC check.  Moving
+    # the LOC threshold into the condition keeps the escalation for genuine
+    # architecture-scale work while removing it for small tasks that happen
+    # to use an arch vocabulary word in their instruction.
+    if _has_keyword(full_text, _ARCH_KEYWORDS) and loc_estimate > _LOC_LOW_MAX:
         return TIER_HIGH
     if loc_estimate > _LOC_MID_MAX:
         return TIER_HIGH

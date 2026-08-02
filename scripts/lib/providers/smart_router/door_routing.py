@@ -17,10 +17,13 @@ Constraints:
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 from typing import Optional, Tuple, Union
 
 from dispatch_spec import Provider, ValidatedSpec  # noqa: PLC0415 — sibling package, no cycle
+
+logger = logging.getLogger(__name__)
 
 
 # TierRoute.provider string -> Provider enum.
@@ -97,6 +100,14 @@ def resolve_door_route(
     except Exception:
         # Fail-open: a broken classifier or resolver must never block a dispatch.
         # The door falls through to its existing behaviour.
+        # A failing router that is silent is indistinguishable from a correctly
+        # operating router that declined to route — always log at WARNING so
+        # drift (e.g. a TypeError on stale loc_estimate=None) is visible.
+        logger.warning(
+            "smart-router door routing: classifier/resolver failed, dispatch "
+            "falls through to default lane (fail-open). Error: %s",
+            exc_info=True,
+        )
         return None
 
 

@@ -1024,6 +1024,11 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[tuple[Provider
             file_paths=file_paths,
         )
     except Exception:
+        logger.warning(
+            "smart-router pre-validate: router call failed, dispatch "
+            "falls through to default lane (fail-open). Error: %s",
+            exc_info=True,
+        )
         return None
 
 

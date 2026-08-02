@@ -46,12 +46,12 @@ class TierRoute:
     fallback: Optional["TierRoute"] = None
 
 
-# ── tier-zero route ──
-# Operator decision 2026-08-02: local models are skipped until the
-# gemma-4-12b-integration track ships — DeepSeek flash via claude-harness is
-# the tier-zero entry route, falling back to Codex via provider lane when
-# DEEPSEEK_API_KEY is absent. resolve_tier_route() builds the route on the fly
-# so the tier field is correct in every return value.
+# ── tier-zero / tier-low routes ──
+# DeepSeek flash via claude-harness is the primary route for both entry tiers
+# (operator decision 2026-08-02: skip local models for now).  When
+# DEEPSEEK_API_KEY is absent, both fall back to Codex via provider lane
+# (kimi quota exhausted 2026-08-02, OI-940).  resolve_tier_route() creates
+# routes on the fly so the tier field is correct in every return value.
 
 # Preserved but unused: local Gemma route. Reactivate when gemma-4-12b-integration
 # ships (queued track). The Gemma chain (primary + Ollama fallback) is intact below
@@ -70,19 +70,15 @@ class TierRoute:
 #     fallback=_ROUTE_LOCAL_GEMMA_FALLBACK,
 # )
 
-_ROUTE_KIMI = TierRoute(
-    tier=TIER_LOW,
-    provider="kimi",
-    model="kimi-k2",
-    lane="kimi_cli",  # kimi-via-cli-only: never via=api or moonshot
-)
-
-_ROUTE_CODEX = TierRoute(
-    tier=TIER_LOW,
-    provider="codex",
-    model="gpt-5.5",
-    lane="provider",
-)
+# Preserved but unused: Kimi CLI route (kimi-via-cli-only constraint).  Kimi quota
+# was exhausted 2026-08-02 (OI-940); Codex is the active fallback.  Reactivate when
+# quota is restored or a new Kimi model tier is added.
+# _ROUTE_KIMI = TierRoute(
+#     tier=TIER_LOW,
+#     provider="kimi",
+#     model="kimi-k2",
+#     lane="kimi_cli",
+# )
 
 _ROUTE_MID = TierRoute(
     tier=TIER_MID,
@@ -118,7 +114,7 @@ def resolve_tier_route(tier: str, env: Optional[dict] = None) -> TierRoute:
     """
     _env = env if env is not None else dict(os.environ)
 
-    if tier == TIER_ZERO:
+    if tier in (TIER_ZERO, TIER_LOW):
         if _deepseek_available(_env):
             return TierRoute(
                 tier=tier,
@@ -139,18 +135,6 @@ def resolve_tier_route(tier: str, env: Optional[dict] = None) -> TierRoute:
             model="gpt-5.5",
             lane="provider",
         )
-
-    if tier == TIER_LOW:
-        if _deepseek_available(_env):
-            return TierRoute(
-                tier=tier,
-                provider="deepseek",
-                model="deepseek-v4-flash",  # deepseek-chat discontinued 2026-07-24
-                lane="claude_harness_keyed",
-                env_requirements=("DEEPSEEK_API_KEY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-                fallback=_ROUTE_CODEX,
-            )
-        return _ROUTE_CODEX
 
     if tier == TIER_MID:
         return _ROUTE_MID
