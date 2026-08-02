@@ -16,13 +16,10 @@ Level-3 scenarios require complex multi-source reasoning:
 
 The lower threshold (80% vs 90%) reflects the genuine difficulty of these scenarios.
 
-This suite shells out to a real `claude -p` subprocess and is gated behind the
-`replay` marker (deselected by default). Run explicitly:
-
 Usage:
-    pytest -m replay tests/f39/test_replay_level3.py -v
-    pytest -m replay tests/f39/test_replay_level3.py -v --model haiku
-    pytest -m replay tests/f39/test_replay_level3.py -v --dry-run
+    pytest tests/f39/test_replay_level3.py -v
+    pytest tests/f39/test_replay_level3.py -v --model haiku
+    pytest tests/f39/test_replay_level3.py -v --dry-run
 
 Set VNX_F39_MODEL env var to override default model.
 Set VNX_F39_DRY_RUN=1 to skip LLM calls.
@@ -36,13 +33,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-# Gate the whole module behind the `replay` marker (registered in pyproject.toml
-# [tool.pytest.ini_options], deselected by default via addopts). These tests
-# shell out to a real `claude -p` subprocess and start paid inference, so a
-# plain `pytest tests/` must not collect them. Run explicitly with:
-#     pytest -m replay tests/f39/ -v
-pytestmark = pytest.mark.replay
 
 # Make scripts/f39 importable
 _F39_DIR = Path(__file__).resolve().parents[2] / "scripts" / "f39"
@@ -92,6 +82,7 @@ _SCENARIOS = _collect_scenarios()
 # Individual scenario tests (parametrized)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 @pytest.mark.parametrize("name,scenario_path", _SCENARIOS, ids=[s[0] for s in _SCENARIOS])
 def test_level3_scenario(
     name: str,
@@ -124,6 +115,7 @@ def test_level3_scenario(
 # Aggregate gate test
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 def test_level3_aggregate_pass_rate(request: pytest.FixtureRequest) -> None:
     """Level-3 gate: ≥80% of all edge case scenarios must produce the correct decision.
 

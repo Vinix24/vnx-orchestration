@@ -1,10 +1,12 @@
 # Full-suite CI test exclusions (OI-906).
 #
-# profile-a in .github/workflows/vnx-ci.yml runs pytest "$VNX_HOME/tests" at
-# directory level. This file is the EXPLICIT exclusion list: every path below
-# is red on main (measured 2026-08-01: pytest tests/ --ignore=tests/f39, then a
-# sequential confirmation run of the candidates) and is excluded from the CI
-# sweep until its repair lands. Nothing is excluded silently.
+# profile-a in .github/workflows/vnx-ci.yml runs pytest "$GITHUB_WORKSPACE/tests"
+# at directory level (the real checkout, not the vendored .claude/vnx-system
+# copy — measured 2026-08-02: the vendored tree produces ~197 layout-artifact
+# failures, not code reds). This file is the EXPLICIT exclusion list: every
+# path below is red on main (measured 2026-08-01: pytest tests/ --ignore=tests/f39,
+# then a sequential confirmation run of the candidates) and is excluded from
+# the CI sweep until its repair lands. Nothing is excluded silently.
 #
 # Entries with a "CI image" reason are green on main locally but cannot run in
 # the minimal CI image (undeclared heavy dependency stack); each names the

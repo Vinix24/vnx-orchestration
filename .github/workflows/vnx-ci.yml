@@ -41,12 +41,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.claude"
           rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
-          # Mirror the repo's .claude content into the VNX_HOME copy. Code that
-          # resolves the project root to $VNX_HOME expects .claude/settings.json,
-          # .claude/terminals, and .claude/skills exactly like the local checkout
-          # (e.g. lane_adapter.SKILLS_ROOT, role-sync guards, session-start hooks).
-          # Exclude vnx-system to avoid recursive self-copy.
-          rsync -a --exclude 'vnx-system' ./.claude/ "$GITHUB_WORKSPACE/.claude/vnx-system/.claude/"
           rsync -a ./skills/ "$GITHUB_WORKSPACE/.claude/skills/"
 
       - name: Install ripgrep
@@ -91,8 +85,21 @@ jobs:
             echo "[skip] progress_state checksum not available"
           fi
           # Full-suite sweep: pytest tests/ at directory level so every test file
-          # is exercised, not the handful of explicit files listed before. The
-          # explicit exclusion list lives in scripts/ci/test_exclusions.txt —
+          # is exercised, not the handful of explicit files listed before.
+          #
+          # The sweep targets $GITHUB_WORKSPACE/tests — the real checkout — NOT
+          # $VNX_HOME/tests. The vendored .claude/vnx-system/ tree is an install
+          # artefact for doctor/path-resolution checks, not the source of truth:
+          # it has no .git and only a partial layout, so tests that resolve their
+          # repo root from __file__ break there en masse. Measured 2026-08-02 on
+          # a faithful local replica of this job (same rsync layout, same venv):
+          # the identical sweep failed 222 tests in 43 files against the vendored
+          # tree vs 25 against the real checkout — ~197 layout artefacts, not
+          # code reds. Mirroring .claude into the vendored copy did not close
+          # that gap. The 18 pre-existing explicit-file invocations in this
+          # workflow deliberately keep their $VNX_HOME paths (green as-is).
+          #
+          # The explicit exclusion list lives in scripts/ci/test_exclusions.txt —
           # each entry is red on main (OI-906) and cites the open item tracking
           # its repair; nothing is excluded silently. No shared --basetemp: a
           # suite-wide shared basetemp broke tmp_path fixtures (see memory:
@@ -103,10 +110,10 @@ jobs:
               ''|\#*) continue ;;
             esac
             rel="$(printf '%s' "$line" | sed -E 's/[[:space:]]*#.*//' | tr -d '[:space:]')"
-            [ -n "$rel" ] && IGNORE+=(--ignore="$VNX_HOME/$rel")
-          done < "$VNX_HOME/scripts/ci/test_exclusions.txt"
+            [ -n "$rel" ] && IGNORE+=(--ignore="$GITHUB_WORKSPACE/$rel")
+          done < "$GITHUB_WORKSPACE/scripts/ci/test_exclusions.txt"
           pytest -q \
-            "$VNX_HOME/tests" \
+            "$GITHUB_WORKSPACE/tests" \
             -p no:cacheprovider \
             --timeout=180 \
             -k "not TestFlagGateClaude" \
