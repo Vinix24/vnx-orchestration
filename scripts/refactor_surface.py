@@ -25,6 +25,12 @@ Gebruik:
         --names    _parse_pr_number,_parse_pr_numbers,_git_toplevel
 
 Exit 0 = oppervlak intact. Exit 1 = minstens een naam ontbreekt of wijst naar een ander object.
+
+cwd-onafhankelijkheid: die komt UITSLUITEND uit de module-level bootstrap hieronder,
+die <dit-script>/../lib vanuit de eigen ligging van het script op sys.path zet. Er is
+bewust GEEN tweede mechanisme in main(): een default die hetzelfde pad nog een keer
+zou berekenen is redundant en maskeert welk mechanisme het werk doet. Alleen een
+expliciet meegegeven --lib-dir wordt er in main() nog vóór gezet.
 """
 from __future__ import annotations
 
@@ -33,12 +39,12 @@ import importlib
 import sys
 from pathlib import Path
 
-# scripts/lib op sys.path voor de project-root-helper én als basis-importpad. Het
-# script staat zelf in scripts/, dus dit pad volgt uit de eigen ligging en is
-# onafhankelijk van de cwd van de aanroeper (gate-worktrees, tests/).
+# scripts/lib op sys.path als basis-importpad. Het script staat zelf in scripts/,
+# dus dit pad volgt uit de eigen ligging en is onafhankelijk van de cwd van de
+# aanroeper (gate-worktrees, tests/). DIT is de fix voor de vroegere cwd-relatieve
+# lib-dir: valt deze regel weg of wordt hij cwd-relatief, dan zijn de te toetsen
+# modules alleen nog vindbaar vanuit een toevallig gunstige cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-
-from project_root import resolve_project_root  # noqa: E402
 
 
 def _module_name(path: str) -> str:
@@ -53,16 +59,13 @@ def main() -> int:
     p.add_argument(
         "--lib-dir",
         default=None,
-        help="dir om op sys.path te zetten (default: <project-root>/scripts/lib, "
-             "opgelost via scripts/lib/project_root.py, nooit cwd-relatief)",
+        help="extra dir om vóórop sys.path te zetten (default: geen — de sibling "
+             "lib/-dir staat al op sys.path via de module-level bootstrap)",
     )
     args = p.parse_args()
 
     if args.lib_dir is not None:
-        lib_dir = Path(args.lib_dir).resolve()
-    else:
-        lib_dir = resolve_project_root(__file__) / "scripts" / "lib"
-    sys.path.insert(0, str(lib_dir))
+        sys.path.insert(0, str(Path(args.lib_dir).resolve()))
 
     names = [n.strip() for n in args.names.split(",") if n.strip()]
     if not names:
