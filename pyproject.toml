@@ -98,6 +98,11 @@ vnx_orchestration = [
     "configs/**/*",
     "hooks/**/*",
     "examples/**/*",
+    # OI-921: the agents/ role registry must ship with the engine — the worker
+    # resolves its role profile from agents/<role>/CLAUDE.md and compile_plan's
+    # role-registry check reads the same dir. Without this glob a pip install
+    # fails closed on every role (empty registry → all roles rejected).
+    "agents/**/*",
 ]
 
 # ---------------------------------------------------------------------------

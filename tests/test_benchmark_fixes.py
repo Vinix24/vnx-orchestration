@@ -293,14 +293,22 @@ class TestModelsYamlDeduplicated:
         ids = [m["id"] for m in models]
         assert "kimi-k2-0905" not in ids
 
-    def test_kimi_k2_6_still_present(self):
+    def test_kimi_cli_lane_model_still_present(self):
+        # kimi-k2-6 was retired upstream (kimi-cli 1.46.0 has no K2.6); the
+        # canonical CLI-dispatchable model is now kimi-k2-7-code
+        # (wave7_models.yaml kimi_cli section, 20260721-kimi-lane-hardening).
         models = run_benchmark.load_models()
         ids = [m["id"] for m in models]
-        assert "kimi-k2-6" in ids
+        assert "kimi-k2-7-code" in ids
 
     def test_total_model_count_after_dedup(self):
+        # The dedup invariant is id-uniqueness, not a magic count: models.yaml
+        # grows as lanes are added (19 today), so a hardcoded number breaks on
+        # every addition. A duplicate id is the failure mode the original
+        # kimi-k2-0905 dedup removed.
         models = run_benchmark.load_models()
-        assert len(models) == 7
+        ids = [m["id"] for m in models]
+        assert len(ids) == len(set(ids)), "model ids must be unique (dedup invariant)"
 
 
 # ---------------------------------------------------------------------------

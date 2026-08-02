@@ -125,9 +125,9 @@ class TestInjectSkillContextExtractsMetadata:
         }
         instruction = "Implement the layered prompt assembler with ADR grounding"
 
-        with patch("subprocess_dispatch_internals.skill_injection._try_prompt_assembler", return_value=None):
+        with patch("skill_context._try_prompt_assembler", return_value=None):
             with patch(
-                "subprocess_dispatch_internals.skill_injection._legacy_claude_md_resolution",
+                "skill_context._legacy_claude_md_resolution",
                 return_value=instruction,
             ):
                 _inject_skill_context("T1", instruction, role="backend-developer", dispatch_metadata=metadata)

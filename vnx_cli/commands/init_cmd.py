@@ -330,7 +330,11 @@ def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: b
         print(f"  exists  {skills_dir.relative_to(project_dir)}/")
 
     settings_path = claude_dir / "settings.json"
-    if not settings_path.exists() or force:
+    # settings.json is project-owned (custom env, permissions, hooks): scaffolded
+    # only when absent, ALWAYS preserved under --force — the same contract as the
+    # .vnx-version pin (OI-695). Operators refresh the VNX-owned keys via
+    # `vnx regen-settings --merge`, not by clobbering the project file.
+    if not settings_path.exists():
         _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx), project_dir)
         print(f"  created {settings_path.relative_to(project_dir)}")
     else:

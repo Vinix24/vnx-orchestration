@@ -259,6 +259,15 @@ def _resolve_state_project_id(project_root: Path) -> Optional[str]:
          (env > .vnx-project-id file > registry; requires operator+project).
       2. Lenient ``.vnx-project-id`` marker / ``VNX_PROJECT_ID`` env lookup,
          which needs no operator_id — so a fresh ``vnx init`` project resolves.
+      3. ADR-007 git-remote fallback (``git remote get-url origin``), scoped to
+         the given project_root only. This keeps the data-dir resolution
+         consistent with the horizon/pool CLIs and the data_dir_guard fallback:
+         a bare repo whose only identity signal is its origin remote still
+         resolves a project_id, so the state root defaults CENTRAL
+         (``~/.vnx-data/<pid>``) instead of falling back to the repo-local
+         ``<project>/.vnx-data`` (OI-897b). Only reached when the identity
+         chain and marker both yield nothing, so repos that carry a marker or
+         a registry entry are unaffected.
 
     Returns None when no validated project_id is available, so
     _resolve_state_root applies its collision-safe project-local fallback
@@ -273,7 +282,35 @@ def _resolve_state_project_id(project_root: Path) -> Optional[str]:
         pid = getattr(identity, "project_id", None)
         if pid and _PROJECT_ID_RE.match(pid):
             return pid
-    return _project_id_from_marker(project_root)
+    pid = _project_id_from_marker(project_root)
+    if pid:
+        return pid
+    return _project_id_from_git_remote(project_root)
+
+
+def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
+    """Derive a validated project_id from ``git remote get-url origin``.
+
+    Scoped strictly to ``project_root`` — unlike ``project_root.resolve_project_id``
+    this never consults the CWD, so resolving a bare repo does not leak a
+    marker/id from wherever the caller happens to be running.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(project_root), "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    if not out:
+        return None
+    name = out.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    if name and _PROJECT_ID_RE.match(name):
+        return name
+    return None
 
 
 def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:

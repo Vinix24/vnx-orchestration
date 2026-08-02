@@ -778,26 +778,9 @@ def _load_session_store_entries() -> "dict[str, dict]":
         return {}
 
 
-def _operator_get_sessions() -> dict:
-    """GET /api/operator/sessions -- read-only live session observability tile.
-
-    Composes tmux session liveness (name, project, idle/busy, activity age) with
-    the persistent session-store state (provider session_id, last dispatch_id).
-    No control actions are exposed here; Part B restart panel is out of scope.
-    """
-    now = datetime.now(_UTC)
-    degraded = False
-    degraded_reasons: list[str] = []
+def _tmux_sessions_to_map(tmux_sessions: list) -> dict:
+    """Seed the name-keyed session map from tmux liveness rows (session_id None)."""
     sessions_by_name: dict[str, dict] = {}
-
-    try:
-        tmux_sessions, tmux_reasons = _list_tmux_sessions(now)
-        degraded_reasons.extend(tmux_reasons)
-    except Exception as exc:
-        tmux_sessions = []
-        degraded = True
-        degraded_reasons.append(f"tmux enumeration failed: {exc}")
-
     for s in tmux_sessions:
         sessions_by_name[s["name"]] = {
             "name": s["name"],
@@ -809,14 +792,11 @@ def _operator_get_sessions() -> dict:
             "dispatch_id": None,
             "remote_control_url": None,
         }
+    return sessions_by_name
 
-    try:
-        store_entries = _load_session_store_entries()
-    except Exception as exc:
-        store_entries = {}
-        degraded = True
-        degraded_reasons.append(f"session store read failed: {exc}")
 
+def _merge_session_store_entries(sessions_by_name: dict, store_entries: dict, now: datetime) -> None:
+    """Merge session-store state into the tmux-backed map (mutates the map in place)."""
     for terminal_id, entry in store_entries.items():
         name = terminal_id
         session_id = entry.get("session_id") or None
@@ -848,6 +828,37 @@ def _operator_get_sessions() -> dict:
                 "dispatch_id": dispatch_id,
                 "remote_control_url": None,
             }
+
+
+def _operator_get_sessions() -> dict:
+    """GET /api/operator/sessions -- read-only live session observability tile.
+
+    Composes tmux session liveness (name, project, idle/busy, activity age) with
+    the persistent session-store state (provider session_id, last dispatch_id).
+    No control actions are exposed here; Part B restart panel is out of scope.
+    """
+    now = datetime.now(_UTC)
+    degraded = False
+    degraded_reasons: list[str] = []
+
+    try:
+        tmux_sessions, tmux_reasons = _list_tmux_sessions(now)
+        degraded_reasons.extend(tmux_reasons)
+    except Exception as exc:
+        tmux_sessions = []
+        degraded = True
+        degraded_reasons.append(f"tmux enumeration failed: {exc}")
+
+    sessions_by_name = _tmux_sessions_to_map(tmux_sessions)
+
+    try:
+        store_entries = _load_session_store_entries()
+    except Exception as exc:
+        store_entries = {}
+        degraded = True
+        degraded_reasons.append(f"session store read failed: {exc}")
+
+    _merge_session_store_entries(sessions_by_name, store_entries, now)
 
     data = sorted(
         sessions_by_name.values(),

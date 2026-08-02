@@ -90,3 +90,21 @@ producers:
     key_column: metric_name
     timestamp_column: last_ts
     cadence_seconds: 259200
+
+  # --- Auto-dream consolidation cycles (ADR-019 / OI-896) -------------------
+  # Key = cycle status, never table level (OI-881). The stream that matters is
+  # status='completed': a cycle finished consolidation and is awaiting T0
+  # review (ADR-019 §3 — mandatory within 30 days). A completed cycle that sits
+  # unreviewed past cadence reads as stale (a review gate silently skipped),
+  # and a scheduler that NEVER ran surfaces via expected_keys — absence is
+  # asserted, not observed. `reviewed`/`rejected` are separate keys, so an
+  # active review pipeline cannot hide a dead consolidation one.
+  - name: dream_cycles
+    type: sqlite
+    db: "{state_dir}/quality_intelligence.db"
+    query: "SELECT status, MAX(COALESCE(completed_at, started_at)) AS last_ts FROM dream_cycles GROUP BY status"
+    key_column: status
+    timestamp_column: last_ts
+    cadence_seconds: 86400
+    expected_keys:
+      - completed

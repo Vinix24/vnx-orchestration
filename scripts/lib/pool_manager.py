@@ -15,7 +15,6 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -122,10 +121,13 @@ def _spawn_via_provider_dispatch(
         ]
 
     try:
+        # OI-017: the pool never reads the child's stdout/stderr, so holding PIPE
+        # buffers lets a chatty worker fill the OS pipe (~64KB) and block forever.
+        # Redirect to DEVNULL instead of risking a pipe-buffer deadlock.
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
             cwd=str(worktree_path),
         )

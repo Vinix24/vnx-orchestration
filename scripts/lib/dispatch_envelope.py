@@ -316,32 +316,20 @@ class LaneRouter:
 
 
 def _prepare(spec: EnvelopeSpec) -> str:
-    """Enrich instruction with intelligence context and repo map (best-effort).
+    """Enrich instruction with role context + intelligence and repo map (best-effort).
 
     Mirrors _enrich_instruction in provider_dispatch.py but operates on EnvelopeSpec.
-    Both layers fall back silently to the original instruction on any failure.
+    Layers fall back silently to the original instruction on any failure:
+
+    1. Repo-map layer on the RAW instruction (target-file extraction most
+       accurate before any enrichment text is added).
+    2. Role context + intelligence + full assembly via ``_inject_skill_context``
+       — the shared lane-neutral injector used by every dispatch lane
+       (dispatch-20260801-w10). This closes the envelope-lane gap where the
+       role's CLAUDE.md never reached the worker. On injector failure the
+       prompt falls back to a role label header.
     """
     instruction = spec.instruction
-
-    try:
-        from intelligence_injection import build_intelligence_section  # noqa: PLC0415
-
-        instruction = build_intelligence_section(
-            instruction=instruction,
-            dispatch_id=spec.dispatch_id,
-            role=spec.role,
-            state_dir=spec.state_dir,
-            pr_id=spec.pr_id,
-            dispatch_paths=None,
-        )
-    except ImportError:
-        logger.debug(
-            "envelope._prepare: intelligence_injection not available — skipping"
-        )
-    except Exception as exc:
-        logger.warning(
-            "envelope._prepare: intelligence injection failed (%s) — skipping", exc
-        )
 
     try:
         from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
@@ -351,6 +339,32 @@ def _prepare(spec: EnvelopeSpec) -> str:
         logger.warning(
             "envelope._prepare: repo map layer failed (%s) — skipping", exc
         )
+
+    try:
+        from skill_context import _inject_skill_context  # noqa: PLC0415
+
+        dispatch_metadata: dict = {"dispatch_id": spec.dispatch_id}
+        if spec.pr_id:
+            dispatch_metadata["pr_id"] = spec.pr_id
+        instruction = _inject_skill_context(
+            spec.terminal_id,
+            instruction,
+            spec.role,
+            dispatch_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
+        logger.warning(
+            "envelope._prepare: skill injection failed (%s); falling back to role label",
+            exc,
+        )
+        if spec.role:
+            header = f"## Role\n\nYou are operating as a **{spec.role}** worker."
+        else:
+            header = (
+                "## Worker Preamble\n\n"
+                "You are a VNX headless worker executing a dispatch instruction."
+            )
+        instruction = f"{header}\n\n{instruction}"
 
     return instruction
 
@@ -394,6 +408,29 @@ def _record_integrity(
         logger.error(
             "envelope: final-prompt integrity failed (non-fatal) dispatch=%s: %s",
             spec.dispatch_id,
+            exc,
+        )
+        return None
+
+
+def _verify_role_application(
+    final_prompt: str,
+    terminal_id: str,
+    role: Optional[str],
+):
+    """Best-effort: run the deterministic role-applied control for *final_prompt*.
+
+    Returns a RoleApplicationVerdict (or None on any failure — the control must
+    never break receipt emission; the fields then stay None/omitted).
+    """
+    try:
+        from role_application import verify_role_applied  # noqa: PLC0415
+        return verify_role_applied(final_prompt, terminal_id, role)
+    except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "envelope._verify_role_application: failed (non-fatal) role=%s terminal=%s: %s",
+            role,
+            terminal_id,
             exc,
         )
         return None
@@ -662,7 +699,9 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
         return _unknown_verification()
 
 
-def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optional[str]:
+def _archive_dispatch_events(
+    terminal: Optional[str], dispatch_id: str
+) -> "tuple[Optional[str], bool]":
     """Archive the live event stream under ``dispatch_id`` (end-of-dispatch teardown).
 
     The envelope path previously never archived the per-dispatch ring buffer at
@@ -671,17 +710,26 @@ def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optio
     boundary guard (EventStore.append, #1276) rotated the previous stream, so the
     LAST dispatch in a series leaked its events into the live file.
 
-    Returns the archive path (str) when archived, else None.  Guards against
-    mislabeling: when the live file holds a DIFFERENT dispatch's events (this
-    dispatch never wrote to the stream — e.g. a pre-spawn failure), the file is
-    left untouched for the boundary guard of the next dispatch; archiving it here
-    would mislabel the previous dispatch's events under our id.
+    Returns ``(events_path, clear_ok)``:
+    - ``events_path`` is the archive path (str) when archived, else None.
+    - ``clear_ok`` tells the caller whether the live stream may be truncated
+      afterwards. It is False ONLY when the archive step itself raised and the
+      live file still holds this dispatch's events — clearing then would destroy
+      exactly the events that failed to archive (OI-918). It is True when the
+      archive succeeded, when there was nothing to archive (empty/missing file),
+      or when the live file holds a DIFFERENT dispatch's events (the caller's own
+      clear guard already refuses to wipe a foreign stream).
+
+    Guards against mislabeling: when the live file holds a DIFFERENT dispatch's
+    events (this dispatch never wrote to the stream — e.g. a pre-spawn failure),
+    the file is left untouched for the boundary guard of the next dispatch;
+    archiving it here would mislabel the previous dispatch's events under our id.
 
     Best-effort — a failure never breaks the dispatch (mirrors the
     ``_emit_governance`` archive contract in provider_dispatch).
     """
     if not terminal or not dispatch_id:
-        return None
+        return None, True
     try:
         from event_store import EventStore  # noqa: PLC0415
 
@@ -694,17 +742,18 @@ def _archive_dispatch_events(terminal: Optional[str], dispatch_id: str) -> Optio
                 "holds %r, not %s (left for the next dispatch's boundary guard)",
                 terminal, last_dispatch, dispatch_id,
             )
-            return None
+            return None, True
         archived = store.archive(terminal, dispatch_id)
         if archived is not None:
             logger.info("envelope: end-dispatch archived %s -> %s", terminal, archived)
-        return str(archived) if archived is not None else None
+        return (str(archived) if archived is not None else None), True
     except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
         logger.warning(
-            "envelope: end-dispatch event archive failed terminal=%s dispatch=%s (non-fatal): %s",
+            "envelope: end-dispatch event archive failed terminal=%s dispatch=%s "
+            "(non-fatal, live file left for the next dispatch's boundary guard): %s",
             terminal, dispatch_id, exc,
         )
-        return None
+        return None, False
 
 
 def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
@@ -781,7 +830,7 @@ def _govern(
     # envelope path never rotated the ring buffer at end-of-dispatch — only the
     # NEXT dispatch's write-side boundary guard did, so the LAST dispatch in a
     # series leaked its events into the live file.
-    events_path = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
+    events_path, _events_archive_ok = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
     # OI-903: on failure/timeout, a killed worker's partial report is preserved
@@ -821,17 +870,20 @@ def _govern(
             receipt_path = ndjson_path
         else:
             try:
-                # receipt-quality PR-1: resolve dispatch identity (role) from
-                # dispatch_metadata just before the emit. FAIL-OPEN — a resolver
-                # error must never break receipt emission.
+                # receipt-quality PR-1 + W7 fix: resolve dispatch identity
+                # (role) just before the emit. The shared resolver prefers the
+                # genuinely-set spec role (never the fake backend-developer
+                # default), falls back to dispatch_metadata, then stamps
+                # identity_unresolved. FAIL-OPEN — a resolver error must never
+                # break receipt emission.
                 try:
-                    from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+                    from dispatch_identity import resolve_effective_role  # noqa: PLC0415
                     _project_id = getattr(spec, "project_id", None)
                     if not _project_id:
                         from dispatch_cli import _resolve_project_id  # noqa: PLC0415
                         _project_id = _resolve_project_id()
-                    _role = resolve_dispatch_role(
-                        spec.dispatch_id, _project_id, state_dir=spec.state_dir,
+                    _role = resolve_effective_role(
+                        spec.role, spec.dispatch_id, _project_id, state_dir=spec.state_dir,
                     )
                 except Exception:  # noqa: BLE001 — identity join is fail-open
                     logger.debug(
@@ -839,8 +891,15 @@ def _govern(
                         spec.dispatch_id,
                         exc_info=True,
                     )
-                    _role = None
-                _role = _role or "identity_unresolved"
+                    _role = "identity_unresolved"
+
+                # Deterministic role-applied control (dispatch-20260801-w10):
+                # did the resolved role source actually reach the enriched prompt
+                # (spec.instruction)? FAIL-OPEN — a verification error must never
+                # break receipt emission; the fields simply stay None (omitted).
+                _role_app = _verify_role_application(
+                    spec.instruction, spec.terminal_id, spec.role,
+                )
 
                 # receipt-quality PR-B2 fix-forward (Finding C): aggregate
                 # PreToolUse-hook tool-call signals for this dispatch
@@ -951,6 +1010,18 @@ def _govern(
                     verification=_verification_from_report(report_path),
                     role=_role,
                     receipt_kind="dispatch",
+                    role_applied=(
+                        getattr(_role_app, "role_applied", None) if _role_app is not None else None
+                    ),
+                    role_tier=(
+                        getattr(_role_app, "tier", None) if _role_app is not None else None
+                    ),
+                    role_not_applied_reason=(
+                        getattr(_role_app, "reason", None) if _role_app is not None else None
+                    ),
+                    role_source_path=(
+                        getattr(_role_app, "source_path", None) if _role_app is not None else None
+                    ),
                     session_id=adapter_result.session_id,
                     tool_call_count=_toolcall_signals.get("tool_call_count"),
                     tool_call_failures=_toolcall_signals.get("tool_call_failures"),
@@ -977,7 +1048,19 @@ def _govern(
     finally:
         # OI-878/OI-902: truncate the live event stream now that the archive
         # (top of _govern) and the receipt write are complete. Best-effort.
-        _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
+        # OI-918: only when the archive step actually succeeded (or had nothing
+        # to archive) — clearing after a FAILED archive would destroy exactly
+        # the events we wanted to preserve. On an archive failure the live file
+        # is left in place for the next dispatch's write-side boundary guard
+        # (#1276) to rotate, which is the second line of defence it exists for.
+        if _events_archive_ok:
+            _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
+        else:
+            logger.warning(
+                "envelope: end-dispatch clear skipped terminal=%s dispatch=%s — "
+                "archive failed; live file left for the next dispatch's boundary guard",
+                spec.terminal_id, spec.dispatch_id,
+            )
 
     if adapter_result.status != "success":
         # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
@@ -1131,6 +1214,22 @@ def _fail_loud_on_empty_success(
                 f"provider={provider_str} returned an empty completion with "
                 f"returncode={returncode} — refusing to report a silent empty "
                 f"success (raw spawn result: {raw_result!r})"
+            ),
+        )
+    if status != "success" and not (completion_text or "").strip():
+        # OI-925 (restant van OI-866): a NON-success spawn with a blank
+        # completion and no captured error previously surfaced in the
+        # dispatch_cli log line as "(no error captured)" even though the
+        # receipt classified it as empty_completion. Give the operator a
+        # diagnosable message instead of a silent blank. (Deepseek-harness:
+        # a returncode!=0 spawn with empty text and error=None lands here —
+        # _coerce_empty_completion_to_retryable only rewrites the rc=0 case.)
+        return (
+            status,
+            returncode or 1,
+            (
+                f"provider={provider_str} returned an empty completion with "
+                f"returncode={returncode} — no error captured by spawn"
             ),
         )
     return status, returncode, None

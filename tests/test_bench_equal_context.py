@@ -58,28 +58,32 @@ def test_provider_equal_context_returns_instruction_byte_for_byte(monkeypatch):
 
 
 def test_provider_without_equal_context_invokes_existing_enrichers(monkeypatch):
-    intelligence = Mock(return_value="intelligence-added")
+    # dispatch-20260801-w10: _enrich_instruction now applies the repo-map layer to
+    # the RAW instruction first, then assembles via the shared injector
+    # (_inject_skill_context), which owns intelligence + role context. The
+    # intelligence_injection module is no longer called directly here.
     repo_map = Mock(return_value="repo-map-added")
-    monkeypatch.setitem(
-        sys.modules,
-        "intelligence_injection",
-        SimpleNamespace(build_intelligence_section=intelligence),
-    )
+    inject_skill = Mock(return_value="assembled")
     monkeypatch.setitem(
         sys.modules,
         "dispatch_enricher",
         SimpleNamespace(apply_repo_map_layer=repo_map),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "skill_context",
+        SimpleNamespace(_inject_skill_context=inject_skill),
+    )
     monkeypatch.delenv("VNX_BENCH_EQUAL_CONTEXT", raising=False)
 
     result = provider_dispatch._enrich_instruction(_provider_args())
 
-    assert result == "repo-map-added"
-    intelligence.assert_called_once()
+    assert result == "assembled"
     repo_map.assert_called_once_with(
-        "intelligence-added",
+        RAW_INSTRUCTION,
         {"role": "security-engineer"},
     )
+    inject_skill.assert_called_once()
 
 
 def test_tmux_equal_context_skips_all_context_assembly(monkeypatch, tmp_path):

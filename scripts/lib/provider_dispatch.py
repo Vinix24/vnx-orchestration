@@ -96,12 +96,23 @@ def _resolve_data_dir() -> Path:
     VNX_DATA_DIR override is honored ONLY when VNX_DATA_DIR_EXPLICIT=1 is also set
     (same guard as project_root.resolve_data_dir) to prevent cross-project pollution
     from inherited shell environments. Fixes OI-126.
+
+    The project_id comes from the canonical resolver (VNX_PROJECT_ID env >
+    nearest ``.vnx-project-id`` marker > git remote), never a hardcoded default.
+    The old ``os.environ.get("VNX_PROJECT_ID", "vnx-dev")`` silently routed every
+    dispatch that did not export VNX_PROJECT_ID into the vnx-dev store, while the
+    event stream (event_store._events_dir) resolved the same context marker-aware
+    — the OI-900 split that polluted ``~/.vnx-data/vnx-dev/unified_reports`` with
+    21 mission-control plan-gate receipts/reports. An unresolvable project fails
+    closed (raises) rather than guessing (ADR-007), matching
+    ``dispatch_cli._resolve_project_id``.
     """
     explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
     explicit_val = os.environ.get("VNX_DATA_DIR", "")
     if explicit_flag and explicit_val:
         return Path(explicit_val).resolve()
-    project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+    from project_root import resolve_project_id  # noqa: PLC0415
+    project_id = resolve_project_id()
     return Path.home() / ".vnx-data" / project_id
 
 
@@ -192,51 +203,82 @@ def _record_final_prompt_integrity(
 
 
 def _enrich_instruction(args: argparse.Namespace) -> str:
-    """Prepend intelligence context and repo map to instruction for non-Claude provider paths.
+    """Prepend role context + intelligence and repo map to instruction for non-Claude provider paths.
 
     Claude dispatches are enriched inside subprocess_dispatch.deliver_with_recovery
     via skill_injection._build_intelligence_section; this function handles the
-    remaining providers (codex, gemini, litellm, kimi).
+    remaining providers (codex, gemini, litellm, kimi, deepseek-harness,
+    glm-harness, local-gemma).
 
-    Applies two layers (best-effort, each layer falls back silently on failure):
-    1. Intelligence injection (existing — ADR context, prior findings, etc.)
-    2. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher step)
+    Applies layers (best-effort, each layer falls back silently on failure):
+    1. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher
+       step; applied to the RAW instruction so target-file extraction is most
+       accurate before any enrichment text is added).
+    2. Role context + intelligence + full assembly via
+       ``_inject_skill_context`` — the SAME injector the tmux/subprocess lanes
+       use (dispatch-20260801-w10). This closes the provider-lane gap where a
+       dispatch staged with ``role=quality-engineer`` received byte-identical
+       context to ``role=system-architect`` because the role's CLAUDE.md never
+       reached the worker. On injector failure the prompt falls back to a role
+       label header (mirrors tmux_interactive_dispatch._assemble_context).
 
     Input-side audit closure: once assembled, the enriched body is persisted and
     checked for containment of the raw instruction + recorded injections
     (final_prompt_integrity). The result is stashed on ``args._final_prompt_integrity``
     (not returned — the string contract stays unchanged for existing callers) so
-    ``_emit_governance`` can stamp it onto the receipt.
+    ``_emit_governance`` can stamp it onto the receipt. The deterministic
+    role-applied verdict is stashed on ``args._role_application`` the same way.
 
     Returns the original instruction unchanged on any failure.
     """
     if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
         return args.instruction
 
-    # Layer: intelligence injection (existing)
-    try:
-        from intelligence_injection import build_intelligence_section  # noqa: PLC0415
-        enriched = build_intelligence_section(
-            instruction=args.instruction,
-            dispatch_id=args.dispatch_id,
-            role=getattr(args, "role", None),
-            state_dir=_resolve_state_dir(),
-            pr_id=getattr(args, "pr_id", None),
-            dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-        )
-    except ImportError as exc:
-        logger.warning("_enrich_instruction: intelligence_injection unavailable (%s)", exc)
-        enriched = args.instruction
+    role = getattr(args, "role", None)
 
-    # Layer: repo map (new — extends coverage to all providers)
+    # Layer 1: repo map (on the raw instruction — mirrors dispatch_prepare.prepare).
+    enriched = args.instruction
     try:
         from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
         enriched = apply_repo_map_layer(
             enriched,
-            {"role": getattr(args, "role", None)},
+            {"role": role},
         )
     except Exception as exc:
         logger.warning("_enrich_instruction: repo map layer failed (%s) — skipping", exc)
+
+    # Layer 2: role context + intelligence + full assembly via the shared injector.
+    try:
+        from skill_context import _inject_skill_context  # noqa: PLC0415
+        dispatch_metadata: dict = {"dispatch_id": args.dispatch_id}
+        dispatch_paths = _resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or "")
+        if dispatch_paths:
+            dispatch_metadata["dispatch_paths"] = dispatch_paths
+        pr_id = getattr(args, "pr_id", None)
+        if pr_id:
+            dispatch_metadata["pr_id"] = pr_id
+        enriched = _inject_skill_context(
+            getattr(args, "terminal_id", ""),
+            enriched,
+            role,
+            dispatch_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
+        logger.warning(
+            "_enrich_instruction: skill injection failed (%s); falling back to role label",
+            exc,
+        )
+        if role:
+            header = f"## Role\n\nYou are operating as a **{role}** worker."
+        else:
+            header = (
+                "## Worker Preamble\n\n"
+                "You are a VNX headless worker executing a dispatch instruction."
+            )
+        enriched = f"{header}\n\n{enriched}"
+
+    # Deterministic control: did the resolved role source actually reach the prompt?
+    args._role_application = _verify_role_application(enriched, args)
 
     args._final_prompt_integrity = _record_final_prompt_integrity(
         dispatch_id=args.dispatch_id,
@@ -245,6 +287,28 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     )
 
     return enriched
+
+
+def _verify_role_application(final_prompt: str, args: argparse.Namespace):
+    """Best-effort: run the deterministic role-applied control for *final_prompt*.
+
+    Returns a RoleApplicationVerdict (or None on any failure — the control must
+    never break a dispatch). Stashed on ``args._role_application`` so
+    ``_emit_governance`` can stamp it onto the receipt.
+    """
+    try:
+        from role_application import verify_role_applied  # noqa: PLC0415
+        return verify_role_applied(
+            final_prompt,
+            getattr(args, "terminal_id", ""),
+            getattr(args, "role", None),
+        )
+    except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "_enrich_instruction: role_applied verification failed (non-fatal): %s",
+            exc,
+        )
+        return None
 
 
 def _extract_response_text(result: Any) -> str:
@@ -651,17 +715,24 @@ def _emit_governance(
     # auto-vivified Mock child.
     _integrity = vars(args).get("_final_prompt_integrity")
 
-    # receipt-quality PR-1: resolve dispatch identity (role) from
-    # dispatch_metadata just before the emit. FAIL-OPEN — a resolver error
-    # must never break receipt emission.
+    # Deterministic role-applied verdict (dispatch-20260801-w10). Same guard as
+    # _integrity: only stamped when _enrich_instruction computed it; a MagicMock
+    # args that never set the attribute yields a real None via vars().get().
+    _role_app = vars(args).get("_role_application")
+
+    # receipt-quality PR-1 + W7 fix: resolve dispatch identity (role) just
+    # before the emit. The shared resolver prefers the genuinely-set --role
+    # (never the fake backend-developer default), falls back to
+    # dispatch_metadata, then stamps identity_unresolved. FAIL-OPEN — a
+    # resolver error must never break receipt emission.
     try:
-        from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
+        from dispatch_identity import resolve_effective_role  # noqa: PLC0415
         _project_id = vars(args).get("project_id")
         if not _project_id:
             from dispatch_cli import _resolve_project_id  # noqa: PLC0415
             _project_id = _resolve_project_id()
-        _role = resolve_dispatch_role(
-            args.dispatch_id, _project_id, state_dir=state_dir,
+        _role = resolve_effective_role(
+            getattr(args, "role", None), args.dispatch_id, _project_id, state_dir=state_dir,
         )
     except Exception:  # noqa: BLE001 — identity join is fail-open
         logger.debug(
@@ -669,8 +740,7 @@ def _emit_governance(
             getattr(args, "dispatch_id", "?"),
             exc_info=True,
         )
-        _role = None
-    _role = _role or "identity_unresolved"
+        _role = "identity_unresolved"
 
     # receipt-quality PR-B2: aggregate PreToolUse-hook tool-call signals for
     # this dispatch (scripts/lib/toolcall_signals.py). FAIL-OPEN — an
@@ -764,6 +834,18 @@ def _emit_governance(
                 },
                 role=_role,
                 receipt_kind="dispatch",
+                role_applied=(
+                    getattr(_role_app, "role_applied", None) if _role_app is not None else None
+                ),
+                role_tier=(
+                    getattr(_role_app, "tier", None) if _role_app is not None else None
+                ),
+                role_not_applied_reason=(
+                    getattr(_role_app, "reason", None) if _role_app is not None else None
+                ),
+                role_source_path=(
+                    getattr(_role_app, "source_path", None) if _role_app is not None else None
+                ),
                 # receipt-quality PR-B1: threaded through so the claude-lane
                 # benchmark exemption path (the only route that reaches this
                 # provider="claude" case) can backfill token_usage from the
@@ -2345,7 +2427,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         _ctx = _dm.DispatchContext(
-            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+            project_id=_resolve_data_dir().name,
             session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
             task_class=getattr(args, "task_class", None) or None,
             dispatch_id=args.dispatch_id,

@@ -20,7 +20,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
@@ -604,7 +604,10 @@ def gap_prs_without_receipt(
         # Strategy 2b: direct pr_number field match — only pr_merged events close the gap
         if not linked and pr.number:
             for r in receipts:
-                if r.raw.get("event_type") == "pr_merged" and r.raw.get("pr_number") == pr.number:
+                # Compare the normalized event_type (which also accepts the legacy
+                # 'event: pr_merged' alias) rather than the raw key, so backfilled
+                # pre-cutover receipts are still traceable. (OI-003)
+                if r.event_type == "pr_merged" and r.raw.get("pr_number") == pr.number:
                     linked = True
                     break
 
@@ -619,14 +622,17 @@ def gap_prs_without_receipt(
         # Split branch into tokens, require >=2 tokens of >=4 chars to match
         # within a receipt dispatch_id. E.g. "feat/my-feature" → ["feat", "my", "feature"]
         # → a dispatch_id containing "my-feature" or "feat-my" matches.
+        # Require at least 2 significant tokens AND 2 matches so a lone
+        # conventional-commit prefix like "feat" cannot attach an unrelated
+        # dispatch. (OI-003)
         if not linked and pr.branch:
             branch_raw = pr.branch.lower().replace("/", "-").replace("_", "-")
             branch_tokens = [t for t in re.split(r"[-]+", branch_raw) if len(t) >= 4]
-            if branch_tokens:
+            if len(branch_tokens) >= 2:
                 for did in receipt_dispatch_ids:
                     did_lower = did.lower()
                     matches = sum(1 for tok in branch_tokens if tok in did_lower)
-                    if matches >= max(1, len(branch_tokens) // 2):
+                    if matches >= 2:
                         linked = True
                         break
 

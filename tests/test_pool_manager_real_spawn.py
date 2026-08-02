@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -336,3 +337,27 @@ class TestSpawnFailureModeNeverFakesSuccess:
             assert len(result.errors) > 0, (
                 "Spawn failures must appear in ExecResult.errors"
             )
+
+
+class TestSpawnPipeHandling:
+    """OI-017: spawn must not hold un-drained stdout/stderr PIPE buffers."""
+
+    def test_spawn_redirects_worker_pipes_to_devnull(self, tmp_path):
+        """The pool never reads child output — PIPE buffers risk a deadlock."""
+        with patch("pool_worktree_manager.create_worker_worktree", return_value=tmp_path):
+            with patch("pool_manager.subprocess.Popen") as mock_popen:
+                mock_proc = type("FakeProc", (), {"pid": 4242})()
+                mock_popen.return_value = mock_proc
+                with patch("pool_manager.os.kill"):
+                    result = _spawn_via_provider_dispatch(
+                        "vnx-dev", "default", "T-pipe", "claude", "backend-developer"
+                    )
+
+        assert result.success is True
+        _, kwargs = mock_popen.call_args
+        assert kwargs["stdout"] is subprocess.DEVNULL, (
+            "stdout must be DEVNULL, not an un-drained PIPE"
+        )
+        assert kwargs["stderr"] is subprocess.DEVNULL, (
+            "stderr must be DEVNULL, not an un-drained PIPE"
+        )

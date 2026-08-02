@@ -17,6 +17,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from conversation_analyzer import (  # noqa: E402 (path insert above)
     ConversationAnalyzer, Colors, log,
     DB_PATH, PATHS, VNX_BASE, ANALYZER_VERSION,
+    fail_closed_exit_code,
 )
 
 
@@ -51,8 +52,9 @@ def main():
     rc = 0
     run_status = "ok"
     run_error = None
+    stats = None
     try:
-        analyzer.run(
+        stats = analyzer.run(
             max_sessions=args.max_sessions,
             deep_budget=args.deep_budget,
             dry_run=args.dry_run,
@@ -64,6 +66,16 @@ def main():
         run_status = "fail"
         run_error = str(e)
         rc = 1
+    else:
+        # OI-862: a run in which EVERY session failed must not exit 0. The
+        # runner's per-session handler counts errors but never influences the
+        # exit code, so a night where the whole pipeline failed still reported
+        # launchd status 0 — the silent-failure pattern this chain exists to catch.
+        if fail_closed_exit_code(stats):
+            log("ERROR", f"All sessions failed ({stats.errors} errors, 0 analyzed); returning non-zero exit")
+            run_status = "fail"
+            run_error = f"all sessions failed ({stats.errors} errors, 0 analyzed)"
+            rc = 1
     finally:
         analyzer.close()
         try:

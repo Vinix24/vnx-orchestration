@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Unit tests for vnx_cli/commands/doctor.py hook-path probe and agent enumeration."""
 
+import ast
 import json
 from pathlib import Path
 
 import pytest
 
-from vnx_cli.commands.doctor import PASS, WARN, _check_agents, _check_hook_paths
+from vnx_cli.commands.doctor import PASS, WARN, _check_agents, _check_hook_paths, _collect_dead_hook_paths
 
 
 def _make_agent(base: Path, name: str, rel: str = "agents") -> Path:
@@ -148,6 +149,54 @@ class TestHookPathResolution:
         result = _check_hook_paths(project)
 
         assert result.status == "PASS"
+
+
+class TestHookPathFunctionSize:
+    """OI-547: _check_hook_paths must stay within the 70-line codex advisory.
+
+    The function was split into _collect_dead_hook_paths + the probe so the
+    report-shaping stays readable. AST line-count guards the advisory the same
+    way test_doctor_refactor_oi1573.py guards cmd_doctor (≤190 lines).
+    """
+
+    def test_check_hook_paths_under_70_lines(self) -> None:
+        source = Path(__file__).parent.parent.parent.parent.parent / "vnx_cli" / "commands" / "doctor.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "_check_hook_paths"
+        )
+        assert fn.end_lineno - fn.lineno + 1 <= 70
+
+    def test_collect_dead_hook_paths_under_70_lines(self) -> None:
+        source = Path(__file__).parent.parent.parent.parent.parent / "vnx_cli" / "commands" / "doctor.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "_collect_dead_hook_paths"
+        )
+        assert fn.end_lineno - fn.lineno + 1 <= 70
+
+    def test_collect_dead_hook_paths_parts(self, tmp_path):
+        """Extracted helper keeps the relative/absolute dead-path split."""
+        project = tmp_path / "project"
+        project.mkdir()
+        hooks = {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": f"bash {project / 'scripts' / 'hooks' / 'gone.sh'}"},
+                        {"type": "command", "command": "bash scripts/hooks/relative_missing.sh"},
+                    ],
+                }
+            ]
+        }
+        dead_relative, dead_absolute = _collect_dead_hook_paths(hooks, project.resolve())
+        assert "gone.sh" in " ".join(dead_absolute)
+        assert "relative_missing.sh" in " ".join(dead_relative)
 
 
 class TestCheckAgents:

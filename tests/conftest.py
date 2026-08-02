@@ -55,6 +55,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "integration: end-to-end integration tests (slower; opt-in via -m integration)",
     )
+    config.addinivalue_line(
+        "markers",
+        "live: real headless-LLM inference (f39 replays; deselected by default — "
+        "opt in with -m live or --dry-run, OI-908)",
+    )
 
 
 # ---------------------------------------------------------------------------

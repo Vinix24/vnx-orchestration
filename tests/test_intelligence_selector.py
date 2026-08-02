@@ -2527,7 +2527,7 @@ class TestInjectSkillContextEndToEnd(unittest.TestCase):
         selector.select() carrying dispatch_paths, instruction_text, and pr_id."""
         from unittest.mock import MagicMock, patch
         import importlib
-        import subprocess_dispatch_internals.skill_injection as si
+        import skill_context as si
 
         mock_result = MagicMock()
         mock_result.items = []

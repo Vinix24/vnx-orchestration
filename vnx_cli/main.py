@@ -172,7 +172,9 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         "--force",
         action="store_true",
         help="overwrite existing scaffold files (allows reinitialisation); "
-             "never resets an existing .vnx-version pin — use --set-version for that",
+             "never resets an existing .vnx-version pin — use --set-version for that; "
+             "never clobbers an existing .claude/settings.json (project-owned) — "
+             "use `vnx regen-settings --merge` to refresh the VNX-owned keys",
     )
     init_parser.add_argument(
         "--set-version",

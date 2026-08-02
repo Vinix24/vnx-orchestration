@@ -13,13 +13,27 @@ With --format brief: schema 1.0 backward-compat (t0_brief.json format)
 
 Schema 2.2 changes (fabric-freshness):
   - Additive, backward-compatible: a top-level ``track_freshness`` marker
-    {reconciled, tracks, drifted, drifted_tracks, reason, seconds, store}.
+    {derived_refreshed, tracks, drifted, drifted_tracks, reason, seconds,
+    store, last_reconcile_at, last_reconcile_age_hours, gh_health,
+    nominated_not_closed, autoclose_degraded, autoclose_reason}.
     Before projecting, the builder runs the advisory track reconciler against
     the central tracks SSOT and records declared-vs-derived drift here, so the
-    SessionStart snapshot carries its own freshness. A compact form
-    {reconciled, drifted, tracks, reason} is also surfaced in t0_index.json
-    (the always-loaded cold-start file). Consumers that predate 2.2 ignore the
-    new key (no removals/renames).
+    SessionStart snapshot carries its own freshness. ``derived_refreshed``
+    (renamed from ``reconciled``, which over-claimed) reports ONLY the
+    derived-status refresh. The auto-close reconciler's real health — last run
+    time/age, gh health, nominated-but-not-closed backlog, and the
+    ``autoclose_degraded`` boolean — is read from reconcile_summary.json, so a
+    downed auto-close reconciler is visible instead of reading as green. A
+    compact form {derived_refreshed, drifted, tracks, reason,
+    autoclose_degraded, autoclose_reason} is also surfaced in t0_index.json
+    (the always-loaded cold-start file).
+
+Schema 2.2 addition (OI-896, auto-dream reviews):
+  - Additive, backward-compatible: a top-level ``dream_reviews`` section
+    {available, pending_count, oldest_age_seconds, pending_reviews} surfacing
+    auto-dream (ADR-019) consolidation cycles awaiting mandatory T0 review.
+    Mirrored to t0_detail/dream_reviews.json. The zero-pending case is
+    explicitly reported so an absent review queue is as visible as a full one.
 
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
@@ -596,6 +610,100 @@ def _build_human_gate_queue(state_dir: Path, project_id: str) -> List[Dict[str, 
             "created_at": row.get("created_at"),
         })
     return queue
+
+
+# ---------------------------------------------------------------------------
+# Auto-dream review queue (ADR-019 / OI-896)
+# ---------------------------------------------------------------------------
+#
+# ADR-019 §3 makes T0 review mandatory for every auto-dream consolidation
+# cycle in its first 30 days. The consolidator writes a pending-review.json
+# per completed cycle, but before this reader NOTHING in the fabric consumed
+# it (grep for list_pending_reviews hit only scripts/dream/ itself). A
+# mandatory human gate without a notification is skipped by construction.
+# This section surfaces the queue at every SessionStart — and the zero case
+# explicitly (pending_count: 0), because an absent review queue is as much a
+# signal as a populated one.
+
+def _resolve_dream_data_root(state_dir: Path) -> Path:
+    """Resolve the data root that owns the dream/ state subtree.
+
+    Central installs keep dream reviews under the central data root
+    (``~/.vnx-data/<project_id>/state/dream``); repo-local installs under
+    ``<data>/state/dream`` where ``state_dir`` is ``<data>/state``.
+    """
+    central = _central_state_dir_for(state_dir)
+    if central is not None:
+        return central.parent
+    return state_dir.parent if state_dir.name == "state" else state_dir
+
+
+def _build_dream_reviews(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """Pending auto-dream consolidation reviews awaiting T0 approval (OI-896).
+
+    Best-effort and never raises: an unavailable identity, an import failure,
+    or an unreadable review dir degrades to ``available=False`` with a visible
+    ``pending_count: 0`` rather than blocking SessionStart.
+
+    Returned shape:
+      - ``available``: True when the reader ran (even for a zero queue).
+      - ``pending_count``: number of cycles awaiting operator review.
+      - ``oldest_age_seconds``: age of the oldest waiting review, or None
+        when the queue is empty.
+      - ``pending_reviews``: per-cycle summary (cycle_id, input_count,
+        created_at, age_seconds).
+    """
+    empty: Dict[str, Any] = {
+        "available": False,
+        "pending_count": 0,
+        "oldest_age_seconds": None,
+        "pending_reviews": [],
+    }
+    pid = (project_id or "").strip()
+    if not pid:
+        return empty
+    try:
+        if str(_SCRIPT_DIR) not in sys.path:
+            sys.path.insert(0, str(_SCRIPT_DIR))
+        from dream.review_gate import list_pending_reviews
+    except Exception:
+        return empty
+    try:
+        pending = list_pending_reviews(pid, _resolve_dream_data_root(state_dir)) or []
+    except Exception:
+        return empty
+    if not pending:
+        return {**empty, "available": True}
+
+    now = _now_utc()
+    reviews: List[Dict[str, Any]] = []
+    oldest_age: Optional[float] = None
+    for r in pending:
+        created_raw = (r.get("created_at") or "").strip()
+        age: Optional[float] = None
+        if created_raw:
+            try:
+                dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age = max(0.0, (now - dt).total_seconds())
+            except ValueError:
+                age = None
+        reviews.append({
+            "cycle_id": r.get("cycle_id"),
+            "input_count": r.get("input_count"),
+            "created_at": created_raw,
+            "age_seconds": age,
+        })
+        if age is not None and (oldest_age is None or age > oldest_age):
+            oldest_age = age
+
+    return {
+        "available": True,
+        "pending_count": len(reviews),
+        "oldest_age_seconds": oldest_age,
+        "pending_reviews": reviews,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1770,6 +1878,104 @@ def _resolve_tracks_store(state_dir: Path, project_id: str) -> Path:
     return state_dir
 
 
+# ---------------------------------------------------------------------------
+# Auto-close reconciler health (reconcile_summary.json)
+# ---------------------------------------------------------------------------
+
+_RECONCILE_SUMMARY_FILENAME = "reconcile_summary.json"
+
+# A full day without a single auto-close run means the reconciler is down. The
+# measured inter-run cadence is minutes (median ~8 min, p90 ~3.2 h over 443
+# observed gaps in reconcile_history.ndjson), so 24 h flags a dead reconciler
+# (the 31 h outage that motivated this work) with a wide margin against any
+# ordinary idle period.
+_AUTOCLOSE_STALE_HOURS = 24.0
+
+
+def _parse_reconcile_timestamp(value: Any) -> Optional[datetime]:
+    """Parse a reconcile_summary ``finished_at`` ISO string to an aware datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Read the auto-close reconciler's health from reconcile_summary.json.
+
+    Returns:
+      last_reconcile_at        — ``finished_at`` from the summary (ISO or None).
+      last_reconcile_age_hours — age of that run in hours (float or None).
+      gh_health                — ``evidence_source_health.gh`` (or None).
+      nominated_not_closed     — counts.nominated minus counts.closed.
+      autoclose_degraded       — True when auto-close is unhealthy.
+      autoclose_reason         — short human-readable reason.
+
+    Degraded means: gh is not "ok" (absent/auth_failed/timeout/unknown), OR the
+    last run has nominated-but-unverified tracks the reconciler could not
+    verify (unverified > 0 with nominated_not_closed > 0 — this is the stuck
+    backlog, distinct from guard-declined closes like stale_candidate which
+    keep nominated_not_closed > 0 on healthy runs), OR the last run is older
+    than _AUTOCLOSE_STALE_HOURS. A missing summary is itself a degraded signal:
+    it means the auto-close reconciler has never written a summary, and the
+    block is still emitted rather than omitted.
+    """
+    now = now or datetime.now(timezone.utc)
+    summary_path = store / _RECONCILE_SUMMARY_FILENAME
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {
+            "last_reconcile_at": None,
+            "last_reconcile_age_hours": None,
+            "gh_health": None,
+            "nominated_not_closed": None,
+            "autoclose_degraded": True,
+            "autoclose_reason": "no_reconcile_summary",
+        }
+
+    gh_health = (summary.get("evidence_source_health") or {}).get("gh")
+    counts = summary.get("counts") or {}
+    nominated = int(counts.get("nominated", 0) or 0)
+    closed = int(counts.get("closed", 0) or 0)
+    unverified = int(counts.get("unverified", 0) or 0)
+    nominated_not_closed = nominated - closed
+
+    finished_raw = summary.get("finished_at")
+    finished_dt = _parse_reconcile_timestamp(finished_raw)
+    if finished_dt is not None:
+        age_hours = round(max(0.0, (now - finished_dt).total_seconds() / 3600.0), 1)
+    else:
+        age_hours = None
+
+    gh_bad = gh_health != "ok"
+    stuck = unverified > 0 and nominated_not_closed > 0
+    stale = age_hours is not None and age_hours > _AUTOCLOSE_STALE_HOURS
+
+    if gh_bad:
+        reason = "gh_absent" if gh_health == "absent" else f"gh_{gh_health or 'unknown'}"
+    elif stuck:
+        reason = "nominated_not_closed"
+    elif stale:
+        reason = "stale"
+    else:
+        reason = "ok"
+
+    return {
+        "last_reconcile_at": finished_raw or None,
+        "last_reconcile_age_hours": age_hours,
+        "gh_health": gh_health,
+        "nominated_not_closed": nominated_not_closed,
+        "autoclose_degraded": gh_bad or stuck or stale,
+        "autoclose_reason": reason,
+    }
+
+
 def _reconcile_tracks_fresh(
     state_dir: Path, project_id: str, *, store: Optional[Path] = None
 ) -> Dict[str, Any]:
@@ -1798,13 +2004,20 @@ def _reconcile_tracks_fresh(
     degrades to a ``precondition_unmet`` marker (safe, never raises).
     """
     marker: Dict[str, Any] = {
-        "reconciled": False,
+        "derived_refreshed": False,
         "tracks": 0,
         "drifted": 0,
         "drifted_tracks": [],
         "reason": None,
         "seconds": 0.0,
         "store": None,
+        # Auto-close reconciler health (from reconcile_summary.json).
+        "last_reconcile_at": None,
+        "last_reconcile_age_hours": None,
+        "gh_health": None,
+        "nominated_not_closed": None,
+        "autoclose_degraded": False,
+        "autoclose_reason": None,
     }
     pid = (project_id or "").strip()
     if not pid:
@@ -1815,6 +2028,9 @@ def _reconcile_tracks_fresh(
     # canonical projection); otherwise resolve it here.
     store = store if store is not None else _resolve_tracks_store(state_dir, pid)
     marker["store"] = str(store)
+    # Auto-close health is independent of the derived-status refresh below:
+    # surface it even when that refresh degrades to precondition_unmet/error.
+    marker.update(_autoclose_health(store))
     t0 = time.monotonic()
     try:
         if str(_LIB_DIR) not in sys.path:
@@ -1835,7 +2051,7 @@ def _reconcile_tracks_fresh(
 
     drifted = [r for r in results if r.get("drifted")]
     marker.update(
-        reconciled=True,
+        derived_refreshed=True,
         tracks=len(results),
         drifted=len(drifted),
         drifted_tracks=[
@@ -1890,6 +2106,7 @@ def build_t0_state(
     tracks = _build_tracks(state_dir)
     canonical_tracks = _build_tracks_from_db(tracks_store, project_id)  # R3.2/ADR-007: tenant-scoped (central SSOT)
     human_gate_queue = _build_human_gate_queue(tracks_store, project_id)  # proposed deliverables awaiting operator promote
+    dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -1919,6 +2136,7 @@ def build_t0_state(
         "track_freshness": track_freshness,
         "canonical_tracks": canonical_tracks,
         "human_gate_queue": human_gate_queue,
+        "dream_reviews": dream_reviews,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
         "open_items": open_items,
@@ -2017,6 +2235,7 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
     "dispatch_register_events": "dispatch_register",
     "active_chains": "active_chains",
     "intelligence": "intelligence",
+    "dream_reviews": "dream_reviews",
     # Phase 2 W-state-5: heavy strategic_state lives in a private state key
     # (``_strategic_state_heavy``) so it is excluded from t0_state.json/the
     # brief output but still mirrored to t0_detail/strategic_state.json.
@@ -2069,14 +2288,17 @@ def _track_freshness_summary(tf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     The full marker (with per-track drift detail) lives in the state doc; the
     index carries only the cheap orientation fields so a cold-start session sees
-    whether the projection is fresh and how many tracks drifted.
+    whether the projection is fresh, how many tracks drifted, and whether the
+    auto-close reconciler is degraded.
     """
     tf = tf or {}
     return {
-        "reconciled": bool(tf.get("reconciled", False)),
+        "derived_refreshed": bool(tf.get("derived_refreshed", False)),
         "drifted": tf.get("drifted", 0),
         "tracks": tf.get("tracks", 0),
         "reason": tf.get("reason"),
+        "autoclose_degraded": bool(tf.get("autoclose_degraded", False)),
+        "autoclose_reason": tf.get("autoclose_reason"),
     }
 
 
@@ -2281,10 +2503,11 @@ def _emit_health_beacon(
     """Emit HealthBeacon heartbeat (best-effort).
 
     Carries a compact track-freshness summary so reconcile health (e.g.
-    ``reconciled=False`` with an ``error:*`` reason) is observable on the
-    beacon, not only inside the projection. A benign skip
-    (``no_project_id``/``precondition_unmet``) is reported but does NOT flip the
-    beacon to ``fail`` — only a real build/write failure does.
+    ``derived_refreshed=False`` with an ``error:*`` reason, or a degraded
+    auto-close reconciler) is observable on the beacon, not only inside the
+    projection. A benign skip (``no_project_id``/``precondition_unmet``) is
+    reported but does NOT flip the beacon to ``fail`` — only a real build/write
+    failure does.
     """
     details: Dict[str, Any] = {
         "format": fmt,
@@ -2293,9 +2516,11 @@ def _emit_health_beacon(
     }
     if track_freshness is not None:
         details["track_freshness"] = {
-            "reconciled": bool(track_freshness.get("reconciled", False)),
+            "derived_refreshed": bool(track_freshness.get("derived_refreshed", False)),
             "drifted": track_freshness.get("drifted", 0),
             "reason": track_freshness.get("reason"),
+            "autoclose_degraded": bool(track_freshness.get("autoclose_degraded", False)),
+            "autoclose_reason": track_freshness.get("autoclose_reason"),
         }
     try:
         from health_beacon import HealthBeacon

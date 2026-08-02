@@ -80,6 +80,7 @@ _SCENARIOS = _collect_scenarios()
 # Individual scenario tests (parametrized)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 @pytest.mark.parametrize("name,scenario_path", _SCENARIOS, ids=[s[0] for s in _SCENARIOS])
 def test_level1_scenario(
     name: str,
@@ -113,6 +114,7 @@ def test_level1_scenario(
 # Aggregate gate test
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live  # OI-908: real headless claude inference — opt in with -m live / --dry-run
 def test_level1_aggregate_pass_rate(request: pytest.FixtureRequest) -> None:
     """Level-1 gate: ≥90% of all scenarios must produce the correct decision.
 

@@ -39,7 +39,9 @@ def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
     fields in the v2 canonical shape (§3) — not session state — so they are
     promoted directly onto the receipt here instead of nested under a
     (now-removed) session{} object. Caller-supplied values are never
-    overwritten. The rest of the session's state (liveness, terminal
+    overwritten; a falsy (null/blank) session_id is REPLACED with the
+    resolved value (OI-796) — setdefault would otherwise preserve the
+    null/blank. The rest of the session's state (liveness, terminal
     heartbeat) is resolved by session_id against runtime_coordination.db at
     read time, not carried on the immutable receipt line.
     """
@@ -54,7 +56,13 @@ def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
             "provider": "unknown",
         }
 
-    enriched.setdefault("session_id", session_meta.get("session_id", "unknown"))
+    # OI-796: setdefault would PRESERVE a null/blank caller-supplied session_id
+    # instead of replacing it. Only overwrite a falsy value — a valid
+    # caller-supplied session_id is returned verbatim by the resolver
+    # (priority 1), so this never clobbers it, and a resolver crash (the
+    # fallback session_meta above) still honours a valid caller-supplied value.
+    if not enriched.get("session_id"):
+        enriched["session_id"] = session_meta.get("session_id") or "unknown"
     if not enriched.get("terminal"):
         enriched["terminal"] = session_meta.get("terminal", "unknown")
     enriched.setdefault("model", session_meta.get("model", "unknown"))

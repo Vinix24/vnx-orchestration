@@ -319,6 +319,50 @@ def test_bridge_tick_failure_writes_freshness_via_atomic_rename_too(tmp_path):
     assert stray_tmp == [], f"tmp file(s) left behind after rename: {stray_tmp}"
 
 
+def test_bridge_tick_writes_timestamp_marker_via_atomic_rename(tmp_path):
+    """OI-798: the `.last_oi_bridge_ts` throttle marker must use the same
+    atomic tmp+rename as the freshness file. A truncating `echo >` leaves a
+    torn marker if the supervisor dies mid-write, which would delay the next
+    bridge tick by a full interval (the throttle reads this file every tick).
+    The marker write is UNCONDITIONAL (runs on both the fresh and not-fresh
+    branches), so the tick's exit code must not gate it."""
+    source = TICKS_SH.read_text()
+    match = re.search(
+        r"^_maybe_oi_bridge_tick\(\) \{\n.*?^\}\n", source, re.MULTILINE | re.DOTALL,
+    )
+    assert match, "could not locate _maybe_oi_bridge_tick() in dispatcher_supervisor_ticks.sh"
+    body = match.group(0)
+
+    # The old truncating pattern must be gone from this tick.
+    assert 'echo "$now" > "$state_file"' not in body
+
+    # The new pattern must be present: write to a tmp sibling, then rename.
+    assert '"$state_file.tmp.$$"' in body, "timestamp marker must land on a tmp sibling first"
+    assert "mv -f" in body, "timestamp marker must complete via an atomic rename"
+
+    # Functional check: a real tick writes the marker with no stray tmp behind.
+    state_dir = tmp_path / "state"
+    _build_db_v30(state_dir)
+
+    env = _base_env(state_dir, tmp_path)
+    env["VNX_OI_BRIDGE_INTERVAL"] = "0"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    env["VNX_LOG_CAPTURE"] = str(tmp_path / "log_capture.txt")
+
+    proc = _run_bash("_maybe_oi_bridge_tick", env)
+    assert proc.returncode == 0, proc.stderr
+
+    ts_file = state_dir / ".last_oi_bridge_ts"
+    assert ts_file.exists(), "timestamp marker was not written"
+    assert ts_file.read_text().strip().isdigit(), (
+        f"timestamp marker must be a bare epoch-seconds integer, "
+        f"got {ts_file.read_text().strip()!r}"
+    )
+
+    stray_tmp = list(state_dir.glob(".last_oi_bridge_ts.tmp.*"))
+    assert stray_tmp == [], f"tmp file(s) left behind after rename: {stray_tmp}"
+
+
 # ---------------------------------------------------------------------------
 # Reconcile freshness gate: --apply withheld unless bridge signal == "1"
 # ---------------------------------------------------------------------------

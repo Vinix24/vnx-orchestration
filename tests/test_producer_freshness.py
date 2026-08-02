@@ -157,6 +157,8 @@ def test_real_config_loads() -> None:
         "review_gate_obligations",
         "dispatches_table",
         "governance_metrics",
+        # OI-896: auto-dream cycles, grouped per cycle status
+        "dream_cycles",
     ]
 
 
@@ -278,3 +280,142 @@ def test_cli_no_write_touches_nothing_and_reports(fake_state: Path, capsys, monk
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "stale"
     assert any(f["producer"] == "review_gate_results" for f in out["findings"])
+
+
+# ---------------------------------------------------------------------------
+# Auto-dream consolidation (ADR-019 / OI-896) — dream_cycles producer
+# ---------------------------------------------------------------------------
+# The key is the cycle STATUS, never table level (OI-881). status='completed'
+# means a cycle finished consolidation and is waiting on the mandatory T0
+# review gate. A completed cycle that sits unreviewed past cadence is stale —
+# a review gate skipped by construction. `expected_keys: [completed]` makes a
+# scheduler that NEVER ran visible too: absence is asserted, not observed.
+
+_DREAM_CYCLES_SPEC = {
+    "name": "dream_cycles",
+    "type": "sqlite",
+    "query": (
+        "SELECT status, MAX(COALESCE(completed_at, started_at)) AS last_ts "
+        "FROM dream_cycles GROUP BY status"
+    ),
+    "key_column": "status",
+    "timestamp_column": "last_ts",
+    "cadence_seconds": DAY,
+    "expected_keys": ["completed"],
+}
+
+
+def _make_dream_db(state_dir: Path, rows: list[tuple[str, str]]) -> None:
+    """Create quality_intelligence.db with a dream_cycles table (status, ts)."""
+    db = state_dir / "quality_intelligence.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE dream_cycles ("
+            " cycle_id TEXT, project_id TEXT, started_at TEXT, completed_at TEXT,"
+            " status TEXT)"
+        )
+        for status, ts in rows:
+            completed = ts if status in ("completed", "reviewed", "rejected") else None
+            conn.execute(
+                "INSERT INTO dream_cycles (cycle_id, project_id, started_at, completed_at, status)"
+                " VALUES (?, 'vnx-dev', ?, ?, ?)",
+                (f"dream-{status}-{ts}", ts, completed, status),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _dream_iso(days_ago: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - days_ago * DAY))
+
+
+def test_dream_cycles_stale_completed_is_a_finding_per_status_key(tmp_path: Path) -> None:
+    """A completed cycle unreviewed past cadence is stale; a fresh reviewed
+    cycle must NOT hide it (per sleutel — the OI-881 lesson)."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _make_dream_db(
+        state_dir,
+        [
+            ("completed", _dream_iso(3.0)),   # completed 3 days ago, never reviewed
+            ("reviewed", _dream_iso(0.1)),     # a review happened just now
+        ],
+    )
+    spec = {**_DREAM_CYCLES_SPEC, "db": str(state_dir / "quality_intelligence.db")}
+
+    section = pf.evaluate_producer(spec, now=NOW)
+
+    assert section["status"] == "stale"
+    stale_keys = {f["key"] for f in section["findings"]}
+    assert stale_keys == {"completed"}, (
+        "only the unreviewed completed stream may be flagged — the fresh "
+        "reviewed sibling stays green (per status, not per table)"
+    )
+    assert section["findings"][0]["kind"] == "stale"
+    assert section["findings"][0]["silence_seconds"] >= 3 * DAY
+
+
+def test_dream_cycles_never_ran_is_expected_key_absent(tmp_path: Path) -> None:
+    """A scheduler that never produced a cycle can only be caught by an
+    expected-key assertion — grouping existing rows finds nothing."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _make_dream_db(state_dir, [])  # dream_cycles exists but is empty
+    spec = {**_DREAM_CYCLES_SPEC, "db": str(state_dir / "quality_intelligence.db")}
+
+    section = pf.evaluate_producer(spec, now=NOW)
+
+    assert section["status"] == "stale"
+    assert section["findings"][0]["key"] == "completed"
+    assert section["findings"][0]["kind"] == "missing"
+    assert section["findings"][0]["expected_key_absent"] is True
+
+
+def test_real_config_sweep_knows_both_new_producers_and_flags_silence(
+    tmp_path: Path,
+) -> None:
+    """End-to-end against the REAL registry: both review_gate_obligations and
+    dream_cycles are evaluated, and a simulated silence (an unfulfilled gate
+    declaration + an unreviewed completed cycle) yields a finding each."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # Obligation: codex_gate declared 3 days ago, never fulfilled.
+    (state_dir / "review_gates" / "obligations").mkdir(parents=True)
+    (state_dir / "review_gates" / "obligations" / "20260729-dispatch.json").write_text(
+        json.dumps(
+            {
+                "dispatch_id": "20260729-dispatch",
+                "gate": "codex_gate",
+                "declared_at": _dream_iso(3.0),
+                "status": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Dream: a completed cycle unreviewed for 3 days; a fresh reviewed one.
+    _make_dream_db(
+        state_dir,
+        [("completed", _dream_iso(3.0)), ("reviewed", _dream_iso(0.1))],
+    )
+    # Keep the other sqlite producers readable so the findings under test are
+    # not drowned out by source_unreadable noise. Their known stale keys
+    # (dlv > 7d cadence, fpy/rework > 3d cadence) are pre-existing producers,
+    # not the two under test.
+    _make_runtime_db(state_dir)
+    _make_quality_db(state_dir)
+
+    registry = pf.load_registry(REPO_ROOT / "configs" / "producer_freshness.yaml")
+    report = pf.run_sweep(state_dir, registry, now=NOW)
+
+    producers = {s["producer"] for s in report["producers"]}
+    assert {"review_gate_obligations", "dream_cycles"} <= producers
+
+    findings_by = {(f["producer"], f["key"]): f for f in report["findings"]}
+    assert findings_by[("review_gate_obligations", "codex_gate")]["kind"] == "stale"
+    assert findings_by[("dream_cycles", "completed")]["kind"] == "stale"
+    # Per-key: the fresh reviewed dream cycle stays green.
+    assert ("dream_cycles", "reviewed") not in findings_by
+    assert report["status"] == "stale"

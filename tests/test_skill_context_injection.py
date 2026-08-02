@@ -85,7 +85,7 @@ def _call_with_fake_root(fake_root: Path, terminal_id: str, instruction: str) ->
     with (
         patch.object(subprocess_dispatch, "__file__", str(fake_file)),
         patch(
-            "subprocess_dispatch_internals.skill_injection._try_prompt_assembler",
+            "skill_context._try_prompt_assembler",
             return_value=None,
         ),
         patch.object(

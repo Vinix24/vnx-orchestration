@@ -410,6 +410,7 @@ Every dispatch instruction MUST include the following footer (codified — don't
 - DO NOT bypass tests with --no-verify
 - DO NOT abort if first sub-task succeeds — continue with rest
 - After commit: PUSH and CREATE PR (or update if existing) — dispatch is INCOMPLETE without PR
+- DO NOT suppress with `# noqa:` — the Lint Patterns gate rejects it. Use a PLAIN marker comment on the line: `# vnx-silent-except: <reason>` (silent except) / `# vnx-atomic-write: <reason>` (non-atomic state write)
 
 ## Codex unavailable note
 Codex CLI rate-limited until <date>. Gemini-only review after fix.

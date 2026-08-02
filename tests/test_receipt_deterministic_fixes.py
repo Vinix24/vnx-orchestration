@@ -122,7 +122,8 @@ class TestDispatchCodexModelNonEmpty:
 
         captured_model = []
 
-        def mock_emit(args, provider, model_used, result, start, end, status):
+        def mock_emit(args, provider, model_used, result, start, end, status,
+                      event_store=None):
             captured_model.append(model_used)
 
         mock_result = MagicMock()
@@ -170,7 +171,8 @@ class TestDispatchKimiModelLabelNonEmpty:
 
         captured_model = []
 
-        def mock_emit(args, provider, model_used, result, start, end, status):
+        def mock_emit(args, provider, model_used, result, start, end, status,
+                      event_store=None):
             captured_model.append(model_used)
 
         mock_result = MagicMock()

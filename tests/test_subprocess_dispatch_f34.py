@@ -206,7 +206,7 @@ class TestInjectSkillContextIntegration:
             return real_path_cls(*args, **kwargs)
 
         with patch("subprocess_dispatch.Path", side_effect=fake_path), \
-             patch("subprocess_dispatch_internals.skill_injection._try_prompt_assembler", return_value=None):
+             patch("skill_context._try_prompt_assembler", return_value=None):
             yield
 
     def test_inject_prepends_agents_context(self, tmp_path):
