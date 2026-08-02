@@ -161,15 +161,18 @@ class DeliberationResult:
         return "\n".join(lines)
 
 
-# Per-report backstop fed into the sequential stages (contrarian/verify/synthesis). This is
-# NOT a normal-case truncation — full seat reports (~15-25k tokens total across a 5-seat
-# fan-out) fit easily in a modern context window, so the digest feeds them WHOLE. A prior
-# 6000-char budget was consumed entirely by each report's echoed frontmatter + instruction +
-# shared context, so downstream stages saw only boilerplate and never the analysis, and it
-# degraded silently for a whole session (sales-copilot panel, 2026-07-18/22). Heuristic
-# echo-stripping and a model-emitted sentinel were both considered and rejected — fragile,
-# or dependent on model cooperation. This backstop exists only to bound a pathological
-# runaway report; hitting it must never be silent (see _clip).
+# Per-report backstop applied before the per-seat distillate at digest assembly time. This
+# is NOT a normal-case truncation — it only bounds a PATHOLOGICAL runaway report. Normal
+# bounding is per seat, at assembly, under _SEAT_DISTILLATE_BUDGET (OI-820): each seat's
+# report gets its own slice of the downstream budget, so every seat stays represented in
+# the contrarian/verify/synthesis stages no matter how many seats the panel has. A prior
+# single 6000-char budget over the WHOLE concatenated digest was consumed by the first
+# seats' echoed frontmatter + instruction + shared context, so the last seats (and often
+# the analysis itself) never reached downstream, and it degraded silently for a whole
+# session (sales-copilot panel, 2026-07-18/22). Heuristic echo-stripping and a
+# model-emitted sentinel were both considered and rejected — fragile, or dependent on
+# model cooperation. The backstop here exists only to cap a single seat's raw report
+# before the per-seat distill is applied; hitting it must never be silent (see _clip).
 _REPORT_BACKSTOP = int(os.environ.get("VNX_PANEL_REPORT_BACKSTOP", "40000"))
 
 
@@ -185,49 +188,115 @@ def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
     return text
 
 
-def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str:
-    """Full digest of the fan-out for the contrarian/verify/synthesis stages.
+# Per-seat distillate budget for carrying the fan-out INTO a later stage's prompt (OI-820).
+# Each seat report is distilled under ITS OWN budget before it is joined into the digest, so
+# every seat is represented in the contrarian/verify/synthesis stages no matter how many
+# seats the panel has. A single head-first cut over the WHOLE concatenated digest was the
+# old shape: the first seats ate all the space and the last seats vanished entirely.
+# Measured on 166 real seat reports (~14.1k chars average, up to ~50k), a 5-seat digest of
+# ~70k cut to 6000 chars reached only seat 1 plus a sliver of seat 2 — 8.5% of the material,
+# paid for five panelists and synthesised over one and a half.
+#
+# The cut itself keeps HEAD and TAIL, never the head alone: a seat report echoes its
+# frontmatter, the instruction and the shared context first, and only THEN carries the
+# analysis. A head-first cut over the per-seat budget leaves nothing but boilerplate when the
+# echo alone exceeds the budget. Measured live (sales-copilot panel, 2026-07-18/22): an
+# 11.7KB --context-file produced a ~12.8K echo inside a ~13K report, and a head-first 12000-
+# char cut dropped the analysis entirely. Head-and-tail keeps the question/framing up front
+# and the analysis/conclusion at the back; the echoed middle is exactly the part that may be
+# dropped (see _distill).
+#
+# This is NOT a return to the OI-809 failure mode: _stage_prompt() puts the stage instruction
+# FIRST, so a fixed-length cut anywhere downstream can only ever trim the context tail, never
+# the task. The budget is therefore the second line of defence, not the only one — raising it
+# is bounded risk. Hitting it is always logged loudly (see _distill), never silent.
+_SEAT_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_SEAT_DISTILLATE_BUDGET", "12000"))
 
-    Feeds each seat's FULL report text — no normal-case truncation. ``limit`` is a
-    generous per-report backstop against a pathological runaway report only; hitting it
-    is always logged (see _clip), never silent.
+
+def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str:
+    """Per-seat distilled digest of the fan-out for the contrarian/verify/synthesis stages.
+
+    Each seat report gets its OWN distillate budget (``_SEAT_DISTILLATE_BUDGET``) before it
+    is joined, so every seat is represented downstream regardless of how many seats the
+    panel has — never a single head-first cut over the whole concatenation, which let the
+    first seats eat all the space and dropped the last seats entirely (OI-820). The per-seat
+    cut keeps HEAD and TAIL (the analysis sits at the end of a seat report, after the echoed
+    context), so a seat whose echo alone exceeds the budget still carries its conclusion into
+    the downstream stages. ``limit`` stays the generous per-report backstop against a
+    pathological runaway report (see _clip); either cut is logged loudly (see _distill),
+    never silent.
     """
     parts = []
     for fo in fan_out:
         text = (fo.get("text") or "").strip()
         text = _clip(text, fo.get("provider", "?"), limit)
+        seat = f"{fo.get('provider', '?')} / {fo.get('lens', '?')}"
+        text = _distill(
+            text, seat, _SEAT_DISTILLATE_BUDGET, env_hint="VNX_PANEL_SEAT_DISTILLATE_BUDGET"
+        )
         parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text}")
     return "\n\n".join(parts)
 
 
-# Per-hop budget for carrying an EARLIER stage's already-substantial output INTO a LATER
-# stage's prompt (OI-809). Distinct from _REPORT_BACKSTOP: that bounds one seat's raw
-# report once, generously, against a pathological runaway. This bounds what gets
-# RE-EMBEDDED at every downstream stage transition. Without it, the full fan-out digest
-# (up to 5 seats x _REPORT_BACKSTOP each) plus the contrarian output plus the verify
-# output all get re-embedded VERBATIM into the synthesis prompt — ~85% duplicated
-# material, observed live as 2216- and 3751-line prompts — until a fixed-length cut
-# (here or downstream in the dispatch lane) trims the prompt mid-sentence BEFORE the
-# stage instruction, so the seat receives corrupted context with its task missing.
-_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_DISTILLATE_BUDGET", "6000"))
+# Per-hop budget for carrying an EARLIER stage's SINGLE-document output (contrarian, verify)
+# INTO a LATER stage's prompt (OI-809). Distinct from _REPORT_BACKSTOP (bounds one seat's
+# raw report once, generously, against a pathological runaway) and from
+# _SEAT_DISTILLATE_BUDGET (bounds each seat within the fan-out digest at assembly time,
+# OI-820): this bounds what gets RE-EMBEDDED at a stage transition when the source is a
+# single text, not a concatenation. Without it, the contrarian output and the verify output
+# would re-embed VERBATIM into the synthesis prompt — ~85% duplicated material, observed
+# live as 2216- and 3751-line prompts — until a fixed-length cut (here or downstream in the
+# dispatch lane) trims the prompt mid-sentence. _stage_prompt() keeps the stage instruction
+# FIRST, so such a cut can only ever hit the context tail, never the task (OI-809) — the
+# budget is the second line of defence, not the only one, which is why raising it
+# (6000 -> 12000) is bounded risk.
+#
+# A cut here also keeps HEAD and TAIL (same shape as the per-seat distill above): a
+# contrarian/verify document leads with its framing and ends with its conclusion, so a
+# head-first cut would keep the framing and drop the verdict — the same silent degradation
+# the per-seat cut fixes, one stage later.
+_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_DISTILLATE_BUDGET", "12000"))
 
 
-def _distill(text: str, tag: str, limit: int = _DISTILLATE_BUDGET) -> str:
+def _distill(
+    text: str,
+    tag: str,
+    limit: int = _DISTILLATE_BUDGET,
+    env_hint: str = "VNX_PANEL_DISTILLATE_BUDGET",
+) -> str:
     """Bound prior-stage material before a downstream stage's prompt carries it forward.
 
-    Applied at every stage transition (diverge->contrarian->verify->synthesis) so the
-    prompt stays bounded regardless of how many hops a piece of text has already passed
-    through — the cascading-verbatim growth is exactly the OI-809 bug. Trimming is always
-    logged loudly, never silent (same discipline as _clip)."""
+    Applied at single-text stage transitions (contrarian->verify, contrarian/verify->
+    synthesis) so the prompt stays bounded regardless of how many hops a piece of text has
+    already passed through — the cascading-verbatim growth is exactly the OI-809 bug. The
+    fan-out digest is instead bounded per seat at assembly time by _digest() under
+    _SEAT_DISTILLATE_BUDGET (OI-820). ``env_hint`` names the budget's env var in the log so
+    an operator raises the right one.
+
+    A cut keeps the HEAD and the TAIL, never the head alone. A panel report opens with the
+    question and framing, then echoes the shared context, and only THEN carries the analysis
+    and conclusion — so a head-first cut over the budget leaves only boilerplate when the
+    echo alone exceeds it. Measured live (sales-copilot panel, 2026-07-18/22): an 11.7KB
+    --context-file produced a ~12.8K echo inside a ~13K report, and a head-first 12000-char
+    cut dropped the analysis entirely. The tail gets at least half the budget so the analysis
+    and conclusion always survive; the middle (where the echoed context sits) is what is
+    dropped, with a marker naming how many chars were omitted. Trimming is always logged
+    loudly, never silent (same discipline as _clip)."""
     t = (text or "").strip()
     if len(t) <= limit:
         return t
+    omitted = len(t) - limit
     logger.warning(
-        "panel distillate: %s trimmed to %d chars for the downstream stage (was %d) — "
-        "raise VNX_PANEL_DISTILLATE_BUDGET if this loses signal",
-        tag, limit, len(t),
+        "panel distillate: %s trimmed to %d chars for the downstream stage (was %d; "
+        "%d middle chars omitted) — raise %s if this loses signal",
+        tag, limit, len(t), omitted, env_hint,
     )
-    return t[:limit] + f"\n…[{tag} truncated to fit the downstream-stage budget]"
+    head_budget = limit // 2
+    tail_budget = limit - head_budget
+    head = t[:head_budget]
+    tail = t[-tail_budget:] if tail_budget else ""
+    marker = f"\n…[{tag}: {omitted:,} middle chars omitted]\n"
+    return f"{head}{marker}{tail}"
 
 
 def _stage_prompt(instruction: str, context_sections: List[Tuple[str, str]], reminder: str) -> str:
@@ -325,7 +394,7 @@ def run_deliberation(
     )
     contra_prompt = _stage_prompt(
         contra_instruction,
-        [("The panel said (fan-out digest, distilled)", _distill(digest, "fan-out digest"))],
+        [("The panel said (fan-out digest)", digest)],
         reminder=f"Reminder: attack the consensus above. Focus: {spec.contrarian_focus}.",
     )
     result.contrarian = _first_ok(
@@ -345,7 +414,7 @@ def run_deliberation(
     verify_prompt = _stage_prompt(
         verify_instruction,
         [
-            ("Panel findings", _distill(digest, "fan-out digest")),
+            ("Panel findings", digest),
             ("Red-team", _distill(result.contrarian, "contrarian")),
         ],
         reminder=f"Reminder: verify the TOP 5 claims above against {spec.verify_target}.",
@@ -366,7 +435,7 @@ def run_deliberation(
     synth_prompt = _stage_prompt(
         synth_instruction,
         [
-            ("Divergent views", _distill(digest, "fan-out digest")),
+            ("Divergent views", digest),
             ("Red-team", _distill(result.contrarian, "contrarian")),
             ("Verification", _distill(result.factcheck, "verify")),
         ],

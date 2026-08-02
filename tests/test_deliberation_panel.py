@@ -159,12 +159,18 @@ class TestDigestBudget:
         assert digest.count("issue ") == 55
 
     def test_large_context_echo_does_not_cut_analysis(self):
-        """A report whose echoed provenance/context ALONE exceeds the old 6000-char budget
-        (an 11.7KB --context-file reproduced the bug live) must still surface the analysis
-        that comes after it — the exact failure mode that degraded the panel silently."""
+        """A report whose echoed context ALONE exceeds the per-seat distillate budget must
+        still surface the analysis that comes after it. An 11.7KB --context-file reproduced
+        the bug live: the echo measured ~12.8K chars inside a ~13K report, and a head-first
+        12000-char cut kept only the boilerplate and dropped the analysis entirely. The
+        per-seat cut keeps HEAD and TAIL, so the conclusion survives even when the echo eats
+        the whole budget."""
         analysis_marker = "ANALYSIS_ONLY_MARKER_XYZ_789"
         echoed_context = "context line: lorem ipsum dolor sit amet consectetur adipiscing\n" * 200
-        assert len(echoed_context) > 12_000, f"echo size {len(echoed_context)} must exceed 12KB"
+        assert len(echoed_context) > dp._SEAT_DISTILLATE_BUDGET, (
+            f"echo size {len(echoed_context)} must exceed the per-seat budget "
+            f"{dp._SEAT_DISTILLATE_BUDGET}"
+        )
         report = (
             "---\ntitle: panel report\nprovider: codex\n---\n"
             "## Instruction\nYou are one seat on a deliberation panel.\n"
@@ -172,10 +178,83 @@ class TestDigestBudget:
             + echoed_context
             + f"\n\nFindings:\n{analysis_marker}\nreal analysis text follows here."
         )
-        assert len(report) > 12_000
+        assert len(report) > dp._SEAT_DISTILLATE_BUDGET
         fan_out = [{"provider": "codex", "lens": "security", "text": report}]
         digest = dp._digest(fan_out)
         assert analysis_marker in digest, "analysis was cut off — the old truncation bug is back"
+
+    def test_distill_keeps_head_and_tail_and_marks_the_omitted_middle(self):
+        """The per-seat cut must keep the HEAD (question/framing) and the TAIL
+        (analysis/conclusion) within the budget and mark the dropped middle with a marker
+        naming how many chars were omitted — not a head-first cut, which drops the analysis
+        when the echoed context alone exceeds the budget."""
+        head_marker = "QUESTION_FRAMING_START"
+        analysis_marker = "ANALYSIS_ONLY_MARKER_XYZ_789"
+        echoed = "context line: lorem ipsum dolor sit amet consectetur adipiscing\n" * 200
+        report = (
+            head_marker + "\n## Shared context\n" + echoed
+            + f"\n\nFindings:\n{analysis_marker}\nreal analysis text follows here."
+        )
+        assert len(report) > dp._SEAT_DISTILLATE_BUDGET
+        fan_out = [{"provider": "codex", "lens": "security", "text": report}]
+        digest = dp._digest(fan_out)
+        assert head_marker in digest, "head (question/framing) must survive the cut"
+        assert analysis_marker in digest, "tail (analysis/conclusion) must survive the cut"
+        omitted = len(report) - dp._SEAT_DISTILLATE_BUDGET
+        assert f"{omitted:,} middle chars omitted" in digest, (
+            "the omission marker must name how many middle chars were dropped"
+        )
+
+    def test_seat_over_budget_is_distilled_loudly_per_seat(self, caplog):
+        """A single seat report over the per-seat distillate budget is cut at ASSEMBLY time
+        (inside _digest, OI-820) — head and tail kept within the seat budget, middle dropped
+        with a marker — and the cut is logged loudly with the seat name and the seat-budget
+        env var, never a silent drop."""
+        report = "frontmatter + echoed context\n" + "c" * 15_000 + "\nTAIL_ANALYSIS_MARKER_789"
+        fan_out = [{"provider": "kimi", "lens": "risks", "text": report}]
+        with caplog.at_level(logging.WARNING, logger="deliberation_panel"):
+            digest = dp._digest(fan_out)
+        warnings = [r for r in caplog.records if "distillate" in r.message]
+        assert warnings, "a per-seat distill cut must be logged loudly, never silently"
+        assert "kimi" in warnings[0].message
+        assert "VNX_PANEL_SEAT_DISTILLATE_BUDGET" in warnings[0].message
+        body = digest.split("]\n", 1)[1]
+        assert len(body) < 12_500  # bounded to the per-seat budget (+ short truncation notice)
+        assert "[kimi / risks]" in digest  # the seat still appears, bounded
+
+    def test_every_seat_survives_per_seat_distill(self):
+        """OI-820 regression: under the old single-budget whole-digest cut the first seats
+        ate all the space and the last seats vanished entirely. With a per-seat budget, EVERY
+        seat — including the last — must be present in the digest even when each report is
+        far larger than the budget."""
+        seats = [
+            {"provider": f"p{i}", "lens": f"lens{i}", "text": f"MARKER_{i}\n" + "x" * 15_000}
+            for i in range(5)
+        ]
+        digest = dp._digest(seats)
+        for i in range(5):
+            assert f"[p{i} / lens{i}]" in digest, f"seat {i} missing from the digest"
+            assert f"MARKER_{i}" in digest, (
+                f"seat {i}'s content vanished — head-first whole-digest cut is back"
+            )
+        assert len(digest) > 5 * 10_000, "digest too small for 5 seats at the per-seat budget"
+
+    def test_seat_distillate_budget_default_is_12000(self):
+        """The per-seat budget default is 12k chars: at 5 seats ~60k chars carry into the
+        synthesis stage, which fits a modern context window (OI-820)."""
+        assert dp._SEAT_DISTILLATE_BUDGET == 12_000
+
+    def test_seat_distillate_budget_env_var_override(self):
+        lib_dir = str(REPO_ROOT / "scripts" / "lib")
+        code = (
+            f"import sys; sys.path.insert(0, {lib_dir!r}); import deliberation_panel as dp; "
+            "print(dp._SEAT_DISTILLATE_BUDGET)"
+        )
+        env = {**os.environ, "VNX_PANEL_SEAT_DISTILLATE_BUDGET": "777"}
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
+        )
+        assert result.stdout.strip() == "777"
 
 
 class TestReportBackstop:
@@ -271,9 +350,11 @@ class TestStageDistillation:
     def test_synthesis_prompt_bounded_and_instruction_survives_huge_prior_stages(self):
         """The exact OI-809 failure mode: every stage returns a HUGE report (as a live
         cascading-verbatim run would produce). The synthesis stage's prompt must (a)
-        still contain its own instruction/ask, (b) stay far smaller than the old
-        3x-full-blob cascade, and (c) place the instruction BEFORE the bulky context so
-        a tail-truncation downstream can only ever cut context, never the task."""
+        still contain its own instruction/ask, (b) stay bounded PER UNIT — each seat's
+        fan-out slice capped at _SEAT_DISTILLATE_BUDGET at assembly (OI-820), each single
+        prior-stage text capped at _DISTILLATE_BUDGET — with no raw 50k blob carried
+        verbatim, and (c) place the instruction BEFORE the bulky context so a
+        tail-truncation downstream can only ever cut context, never the task."""
         rec = _HugeRecorder(size=50_000)
         dp.run_deliberation("sweep", "audit src/", dispatcher=rec, roster=ROSTER, max_workers=3)
         synth_prompts = rec.stage_prompts("synth")
@@ -284,18 +365,47 @@ class TestStageDistillation:
         assert "SYNTHESISER" in synth_prompt
         assert "Produce" in synth_prompt and "CONSENSUS" in synth_prompt
 
-        # (b) carried-forward material is DISTILLED (bounded), not the raw huge blobs —
-        # the old cascading-verbatim approach would put ~3 x 50_000 = 150_000+ chars of
-        # digest/contrarian/factcheck into this single prompt.
-        assert len(synth_prompt) < 30_000, (
-            f"synth prompt is {len(synth_prompt)} chars — prior-stage material was not "
-            "bounded before being carried into this stage"
-        )
+        # (b) carried-forward material is DISTILLED (bounded per unit), not the raw huge
+        # blobs — the old cascading-verbatim approach would put ~3 x 50_000 = 150_000+
+        # chars of digest/contrarian/factcheck into this single prompt verbatim.
+        def _section(prompt, label):
+            start = prompt.index(f"--- {label} ---") + len(f"--- {label} ---")
+            end = prompt.index(f"--- END {label} ---")
+            return prompt[start:end]
+
+        divergent = _section(synth_prompt, "Divergent views")
+        red_team = _section(synth_prompt, "Red-team")
+        verification = _section(synth_prompt, "Verification")
+        # fan-out digest: 3 seats x per-seat budget (+ tags / truncation notices)
+        assert len(divergent) < 3 * dp._SEAT_DISTILLATE_BUDGET + 2_000
+        # single-text hops: bounded by the per-hop budget (+ truncation notice)
+        assert len(red_team) < dp._DISTILLATE_BUDGET + 1_000
+        assert len(verification) < dp._DISTILLATE_BUDGET + 1_000
+        # no raw 50k blob survives verbatim anywhere in the prompt
+        assert "H" * 40_000 not in synth_prompt
 
         # (c) instruction precedes the bulky context
         instr_pos = synth_prompt.index("SYNTHESISER")
         context_pos = synth_prompt.index("H" * 100)
         assert instr_pos < context_pos
+
+    def test_all_seats_reach_the_contrarian_and_synthesis_prompts(self):
+        """OI-820 regression at the stage level: the old flow distilled the WHOLE
+        concatenated digest head-first at each stage transition, so seat 1 ate the budget
+        and the later seats never reached the downstream stages. With per-seat distillation
+        at assembly, every seat's tag must appear in the contrarian and synthesis prompts."""
+        calls = []
+
+        def big(provider, model, prompt, did):
+            calls.append({"provider": provider, "prompt": prompt, "did": did})
+            return f"SEAT_{provider}\n" + "y" * 15_000
+
+        dp.run_deliberation("sweep", "audit src/", dispatcher=big, roster=ROSTER, max_workers=3)
+        contra = next(c["prompt"] for c in calls if "-contrarian-" in c["did"])
+        synth = next(c["prompt"] for c in calls if "-synth-" in c["did"])
+        for provider, _ in ROSTER:
+            assert f"[{provider} / " in contra, f"{provider} missing from the contrarian prompt"
+            assert f"[{provider} / " in synth, f"{provider} missing from the synthesis prompt"
 
     def test_instruction_survives_a_simulated_downstream_tail_truncation(self):
         """Even if some layer downstream of this module applies its own fixed-length cut
