@@ -9,6 +9,7 @@ geen gedeelde --basetemp geforceerd.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -103,22 +104,28 @@ def test_niet_importeerbare_module_faalt_met_zichtbare_importfout(tmp_path: Path
 
 
 def test_lib_dir_default_werkt_vanuit_andere_cwd(tmp_path: Path) -> None:
-    """Regressie op mankement 3: de default mag niet cwd-relatief zijn.
+    """Regressie op mankement 3: de tool moet cwd-onafhankelijk kunnen draaien.
 
-    Draait vanuit een lege tmp-cwd ZONDER --lib-dir tegen een echt re-export-paar
-    in de repo (data_dir_guard re-exporteert resolve_project_id uit project_root).
-    De ongefixte tool loste 'scripts/lib' tegen de cwd op en faalde met een
-    misleidende 'originele module niet importeerbaar'.
+    De cwd-onafhankelijkheid komt van de module-level bootstrap in
+    refactor_surface.py (die <script>/../lib vanuit de eigen ligging op sys.path
+    zet) — dat is het enige mechanisme, er is geen tweede default in main().
+    Deze test draait het script in een subprocess vanuit een lege tmp-cwd ZONDER
+    --lib-dir tegen een echt re-export-paar in de repo (data_dir_guard
+    re-exporteert resolve_project_id uit project_root). PYTHONPATH wordt uit de
+    omgeving gescrubd zodat alleen de bootstrap de modules kan leveren: valt
+    de bootstrap weg of wordt hij cwd-relatief, dan is scripts/lib onvindbaar
+    en gaat deze test rood.
     """
     vreemde_cwd = tmp_path / "ergens-anders"
     vreemde_cwd.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     args = [
         sys.executable, str(TOOL),
         "--original", "data_dir_guard.py",
         "--new", "project_root.py",
         "--names", "resolve_project_id",
     ]
-    r = subprocess.run(args, cwd=vreemde_cwd, capture_output=True, text=True)
+    r = subprocess.run(args, cwd=vreemde_cwd, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert "OK          resolve_project_id" in r.stdout
 
