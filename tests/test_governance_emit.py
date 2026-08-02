@@ -436,6 +436,69 @@ def test_unified_report_includes_findings(tmp_data):
 
 
 # ---------------------------------------------------------------------------
+# OI-903 — preserve a killed worker's partial report via .partial.md sidecar
+# ---------------------------------------------------------------------------
+
+def _write_worker_report(data_dir, content: str) -> Path:
+    reports_dir = data_dir / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / "test-dispatch-002.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_preserve_partial_renames_invalid_report_and_writes_fresh(tmp_data):
+    """A partial (contract-invalid) worker report is preserved as .partial.md and
+    the canonical report is rewritten as a structured body."""
+    partial_content = (
+        "Worker report cut off mid-sentence:...plus the PR round-1 changes:Po\n"
+        "## Findings: None\n"
+    )
+    _write_worker_report(tmp_data, partial_content)
+
+    path = emit_unified_report(
+        **_base_report_kwargs(tmp_data), preserve_partial=True,
+    )
+
+    # Fresh structured report at the canonical path.
+    assert path == tmp_data / "unified_reports" / "test-dispatch-002.md"
+    assert "## Response" in path.read_text()
+    # Partial output preserved and retrievable.
+    partial = tmp_data / "unified_reports" / "test-dispatch-002.partial.md"
+    assert partial.exists(), "killed-worker partial report must be preserved"
+    assert "plus the PR round-1 changes:Po" in partial.read_text()
+
+
+def test_preserve_partial_keeps_valid_worker_report(tmp_data):
+    """A contract-compliant worker report is never touched by preserve_partial."""
+    valid = (
+        "## Summary\n"
+        + ("x" * 60)
+        + "\n## Changes\n- thing\n## Verification\n- ok\n## Open Items\nNone\n"
+    )
+    _write_worker_report(tmp_data, valid)
+
+    path = emit_unified_report(
+        **_base_report_kwargs(tmp_data), preserve_partial=True,
+    )
+
+    # Idempotent early-return: the worker's valid report is preserved verbatim.
+    assert "## Summary" in path.read_text()
+    assert not (tmp_data / "unified_reports" / "test-dispatch-002.partial.md").exists()
+
+
+def test_preserve_partial_default_is_idempotent_preserve(tmp_data):
+    """Without preserve_partial (success path), the worker report is preserved as-is."""
+    partial_content = "partial body without contract headings"
+    _write_worker_report(tmp_data, partial_content)
+
+    path = emit_unified_report(**_base_report_kwargs(tmp_data))
+
+    assert path.read_text() == partial_content
+    assert not (tmp_data / "unified_reports" / "test-dispatch-002.partial.md").exists()
+
+
+# ---------------------------------------------------------------------------
 # Receipt-quality PR-1 — role + receipt_kind propagation
 # ---------------------------------------------------------------------------
 

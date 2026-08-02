@@ -27,6 +27,20 @@ from provider_spawns.codex_spawn import CodexSpawnResult, _build_cmd, _kill_proc
 from canonical_event import CanonicalEvent
 
 
+def _mock_stderr(*lines: bytes) -> MagicMock:
+    """Build a stderr mock whose readline terminates on b"" (OI-910).
+
+    A real codex subprocess opens stderr in binary mode, so readline() returns
+    bytes and yields b"" at EOF. Without a terminating readline, the drain
+    thread in _launch_codex_proc spins forever on the b"" sentinel and leaks a
+    daemon thread into the rest of the test session, which pytest-timeout then
+    kills mid-suite (INTERNALERROR).
+    """
+    stderr = MagicMock()
+    stderr.readline.side_effect = [*lines, b""]
+    return stderr
+
+
 # ---------------------------------------------------------------------------
 # Test 0: model defaults and explicit override
 # ---------------------------------------------------------------------------
@@ -36,15 +50,27 @@ class TestCodexSpawnModelResolution:
 
     def test_build_cmd_defaults_to_gpt55(self, monkeypatch):
         monkeypatch.delenv("VNX_CODEX_DEFAULT_MODEL", raising=False)
-        assert _build_cmd("") == ["codex", "exec", "--json", "--model", "gpt-5.5"]
+        monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
+        assert _build_cmd("") == [
+            "codex", "exec", "--json",
+            "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5",
+        ]
 
     def test_build_cmd_uses_env_default(self, monkeypatch):
         monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.5-test")
-        assert _build_cmd("") == ["codex", "exec", "--json", "--model", "gpt-5.5-test"]
+        monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
+        assert _build_cmd("") == [
+            "codex", "exec", "--json",
+            "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5-test",
+        ]
 
     def test_build_cmd_explicit_model_overrides_env_default(self, monkeypatch):
         monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.5-test")
-        assert _build_cmd("gpt-5.5") == ["codex", "exec", "--json", "--model", "gpt-5.5"]
+        monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
+        assert _build_cmd("gpt-5.5") == [
+            "codex", "exec", "--json",
+            "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5",
+        ]
 
 
 
@@ -99,6 +125,7 @@ class TestCodexSpawnBrokenPipe:
             stdin_mock = MagicMock()
             stdin_mock.write.side_effect = BrokenPipeError("pipe broken")
             proc.stdin = stdin_mock
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
 
             MockPopen.return_value = proc
 
@@ -143,6 +170,7 @@ class TestCodexSpawnTimeout:
             proc.poll = MagicMock(return_value=-15)
             stdin_mock = MagicMock()
             proc.stdin = stdin_mock
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -203,6 +231,7 @@ class TestCodexSpawnOnEventStop:
             proc.poll = MagicMock(return_value=0)
             stdin_mock = MagicMock()
             proc.stdin = stdin_mock
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -265,6 +294,7 @@ class TestCodexSpawnNormalCompletion:
             proc.poll = MagicMock(return_value=0)
             stdin_mock = MagicMock()
             proc.stdin = stdin_mock
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -301,6 +331,7 @@ class TestEventWriterFailureLogged:
         proc.wait = MagicMock(return_value=0)
         proc.poll = MagicMock(return_value=0)
         proc.stdin = MagicMock()
+        proc.stderr = _mock_stderr(b"warn: codex sandbox")
         MockPopen.return_value = proc
         return proc
 
@@ -376,6 +407,7 @@ class TestEventWriterFailureLogged:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -414,6 +446,7 @@ class TestEventWriterFailureLogged:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -508,3 +541,62 @@ class TestKillProcFallbackWaitFailure:
                 _kill_proc(proc)
             except Exception as exc:
                 pytest.fail(f"_kill_proc propagated unexpectedly: {exc!r}")
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (OI-910): a non-terminating stderr stream must not leak the drain thread
+# ---------------------------------------------------------------------------
+
+class TestCodexSpawnDrainThreadLeak:
+    """OI-910: a stderr stream that never returns b"" must not leak the drain thread.
+
+    Pre-fix, a mocked Popen stderr makes readline() return a fresh non-empty
+    Mock forever, so the b"" sentinel loop in _launch_codex_proc never ends. The
+    daemon thread keeps consuming the stream, and pytest-timeout eventually kills
+    it mid-suite — crashing the whole pytest session with INTERNALERROR at ~16%.
+    """
+
+    def test_drain_stderr_thread_terminates_on_nonterminating_stream(self, monkeypatch):
+        import time
+
+        import provider_spawns.codex_spawn as cs
+
+        # Tight cap so the guard trips quickly. On the pre-fix code this constant
+        # does not exist, the thread spins unbounded, and the tail buffer keeps
+        # growing — which is exactly the leak this test catches (red on old code).
+        if hasattr(cs, "_STDERR_DRAIN_MAX_LINES"):
+            monkeypatch.setattr(cs, "_STDERR_DRAIN_MAX_LINES", 5)
+
+        proc = MagicMock()
+        proc.pid = 99
+        proc.returncode = 0
+        proc.wait = MagicMock(return_value=0)
+        proc.poll = MagicMock(return_value=0)
+        proc.stdin = MagicMock()
+        # readline never returns b"" — a stream that never reaches EOF.
+        proc.stderr = MagicMock()
+        proc.stderr.readline.return_value = b"x"
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen", return_value=proc), \
+             patch(
+                 "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                 return_value=iter([]),
+             ):
+            result = spawn_codex(
+                prompt="test",
+                model="",
+                dispatch_id="test-drain-leak",
+                terminal_id="T1",
+            )
+
+        assert result.returncode == 0
+
+        # Give the drain thread a chance to consume the stream: on fixed code it
+        # exits after the cap; on broken code it keeps appending forever.
+        time.sleep(0.2)
+        tail = list(proc._vnx_stderr_tail)
+        time.sleep(0.2)
+        assert list(proc._vnx_stderr_tail) == tail, (
+            "drain thread still alive: the stderr stream never reached EOF and "
+            "the daemon thread kept consuming it (OI-910 leak)"
+        )

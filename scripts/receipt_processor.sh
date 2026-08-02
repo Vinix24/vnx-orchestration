@@ -140,8 +140,7 @@ _psr_extract_terminal() {
 _psr_parse_receipt_json() {
     local report_path="$1" report_name="$2"
     local receipt_json
-    receipt_json=$(python3 "$SCRIPTS_DIR/report_parser.py" "$report_path" 2>/dev/null)
-    if [ $? -ne 0 ] || [ -z "$receipt_json" ]; then
+    if ! receipt_json=$(python3 "$SCRIPTS_DIR/report_parser.py" "$report_path" 2>/dev/null) || [ -z "$receipt_json" ]; then
         log_structured_failure "receipt_parse_failed" "report_parser.py failed to generate receipt JSON" "report=$report_name"
         log "ERROR" "Failed to parse report: $report_name"
         return 1
@@ -240,18 +239,26 @@ _psr_verify_contract() {
 }
 
 # Record pattern adoption signals for completed dispatches (non-fatal, A-5).
+# Non-fatal by contract, but NOT silent (OI-894): a failing adoption recording
+# zeroes the injection-effectiveness measurement, so failures log at WARN with
+# the captured stderr instead of vanishing behind 2>/dev/null.
 _psr_record_adoption() {
     local dispatch_id="$1" terminal="$2" report_path="$3" event_type="$4"
     [ -n "$dispatch_id" ] && [ "$event_type" = "task_complete" ] || return 0
-    python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
-        "$dispatch_id" "${terminal:-unknown}" "$report_path" 2>/dev/null \
-        || log "DEBUG" "Pattern adoption recording skipped (non-fatal)"
+    local adoption_output adoption_rc
+    adoption_output=$(python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
+        "$dispatch_id" "${terminal:-unknown}" "$report_path" 2>&1)
+    adoption_rc=$?
+    if [ $adoption_rc -ne 0 ]; then
+        log "WARN" "Pattern adoption recording failed for dispatch=$dispatch_id (rc=$adoption_rc): $(echo "$adoption_output" | tail -1 | head -c 200)"
+    fi
 }
 
 # Process a single report — orchestrates extracted sub-functions.
 process_single_report() {
     local report_path="$1"
-    local report_name=$(basename "$report_path")
+    local report_name
+    report_name=$(basename "$report_path")
 
     log "INFO" "Processing: $report_name"
 
@@ -338,7 +345,8 @@ _ppr_process_rate_limited() {
 
 # Process all pending reports with flood protection and rate limiting.
 process_pending_reports() {
-    local cutoff=$(get_cutoff_time)
+    local cutoff
+    cutoff=$(get_cutoff_time)
     log "INFO" "Scanning for reports newer than: $cutoff"
     _ppr_collect_pending
     if ! check_flood_protection "$_PPR_QUEUE_COUNT"; then
@@ -402,10 +410,12 @@ _poll_new_reports() {
 # Process any reports from the last 10 minutes created while the processor was down.
 _mnr_startup_catchup() {
     local catchup_count=0
-    local now=$(date +%s)
+    local now
+    now=$(date +%s)
     for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
         [ -f "$report" ] || continue
-        local mtime=$(stat -f%m "$report" 2>/dev/null || stat -c%Y "$report" 2>/dev/null || echo 0)
+        local mtime
+        mtime=$(stat -f%m "$report" 2>/dev/null || stat -c%Y "$report" 2>/dev/null || echo 0)
         local age_secs=$(( now - mtime ))
         if [ "$age_secs" -le 600 ] && should_process_report "$report"; then
             log "INFO" "Startup catchup: processing $( basename "$report" ) (age: ${age_secs}s)"

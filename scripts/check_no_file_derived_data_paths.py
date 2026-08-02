@@ -19,13 +19,25 @@ data/roadmap paths must route through ``vnx_paths.resolve_*`` /
 
 Detection
 ---------
-AST-based, so comments and docstrings never trip it: a violation is a
-``.vnx-data`` / ``ROADMAP.yaml`` string constant that sits inside a path-join
-(``/`` BinOp) or ``Path(...)`` call whose expression also references
-``__file__`` *or* a module-/function-level name that is itself bound to a
-``__file__``-anchored expression (``_REPO_ROOT``, ``_THIS_DIR``, ``here``,
-``script_dir``, ...). A ``state_dir.parent.parent`` built from a resolved
-runtime Path parameter is NOT flagged — only ``__file__``-anchored derivations.
+AST-based, so comments and docstrings never trip it. Two violation shapes:
+
+1. OUTPUT side — a ``.vnx-data`` / ``ROADMAP.yaml`` string constant that sits
+   inside a path-join (``/`` BinOp) or ``Path(...)`` call whose expression also
+   references ``__file__`` *or* a module-/function-level name that is itself
+   bound to a ``__file__``-anchored expression (``_REPO_ROOT``, ``_THIS_DIR``,
+   ``here``, ``script_dir``, ...). A ``state_dir.parent.parent`` built from a
+   resolved runtime Path parameter is NOT flagged — only ``__file__``-anchored
+   derivations.
+2. INPUT side — a call to a canonical data/state-dir resolver
+   (``resolve_data_dir`` / ``resolve_state_dir`` / ``resolve_dispatch_dir``,
+   bare or attribute form) fed a ``__file__``-anchored argument, e.g.
+   ``resolve_data_dir(caller_file=__file__)``. This is the same keystone bug
+   entering through the resolver's front door: the resolver honors its
+   ``caller_file`` anchor FIRST (git-from-physical-location), so in a central
+   install it resolves the read-only ``~/.vnx-system/versions/<v>/.vnx-data``
+   even though the caller used the canonical helper. This exact construct in
+   ``plan_gate_panel.py`` blocked every plan-gate fleet-wide (2026-07-31) while
+   passing shape-1 detection — the gate tested the mechanism, not the input.
 
 Scope
 -----
@@ -162,6 +174,76 @@ GRANDFATHERED: Dict[str, Set[str]] = {
     },
 }
 
+# Pre-existing INPUT-side violations (shape 2): canonical resolver calls fed a
+# __file__ anchor. Same bug class as plan_gate_panel.py:506 (fixed in the
+# plan-gate datadir dispatch, 2026-07-31); the sites below are grandfathered so
+# the gate can block NEW occurrences while each is migrated in follow-up work.
+# Assessment per site (kept deliberately, with rationale):
+#   - tmux_interactive_dispatch: MIGRATED in OI-900 (#1308). _resolve_state_dir
+#     no longer feeds __file__ to the resolver; it honors the explicit
+#     VNX_DATA_DIR override and otherwise anchors on the invocation project root
+#     via vnx_paths.resolve_state_dir. Dropped from the list, as the gate
+#     requires of a migrated site.
+#   - staging_validator / lease_sweep: dispatch-door lane code with its own
+#     governed test surface; the door threads explicit dirs in the governed path
+#     and these fallbacks fire only on the un-threaded path. Migrating them
+#     belongs with the door owners, not the plan-gate fix.
+#   - worker_permission_relay: last-resort except-branch AFTER vnx_paths.ensure_env()
+#     (the VNX_HOME+marker-aware resolver) failed — mirrors the grandfathered
+#     defensive-fallback pattern above.
+#   - append_receipt_internals (payload/session_resolver/warning_destination),
+#     subsystem_health, the *_effectiveness_probe modules: receipt-provenance /
+#     intelligence side paths; read-mostly, env-overridable, and outside this
+#     dispatch's blast radius.
+# (provider_costs.py was on EVERY provider lane's hot path — emit_provider_cost
+# mkdirs events/ per dispatch — so it was fixed in the same dispatch instead of
+# grandfathered: it now mirrors provider_dispatch._resolve_data_dir.)
+GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
+    "scripts/lib/staging_validator.py": {
+        "resolve_data_dir(caller_file=__file__)",
+    },
+    "scripts/lib/worker_permission_relay.py": {
+        "resolve_state_dir(caller_file=__file__)",
+    },
+    "scripts/lib/lease_sweep.py": {
+        "resolve_state_dir(__file__)",
+    },
+    "scripts/lib/subsystem_health.py": {
+        "project_root.resolve_data_dir(__file__)",
+    },
+    "scripts/lib/append_receipt_internals/payload.py": {
+        "facade.resolve_state_dir(__file__)",
+    },
+    "scripts/lib/append_receipt_internals/session_resolver.py": {
+        "facade.resolve_state_dir(__file__)",
+    },
+    "scripts/lib/append_receipt_internals/warning_destination.py": {
+        "resolve_state_dir(__file__)",
+    },
+    "scripts/lib/plan_gate_effectiveness_probe.py": {
+        "project_root.resolve_state_dir(__file__)",
+    },
+    "scripts/lib/migration_effectiveness_probe.py": {
+        "project_root.resolve_state_dir(__file__)",
+    },
+    "scripts/lib/injection_effectiveness_probe.py": {
+        "project_root.resolve_state_dir(__file__)",
+        "project_root.resolve_data_dir(__file__)",
+    },
+}
+
+# Canonical data/state-dir resolver entry points that must never be fed a
+# __file__-derived anchor (shape 2). Attribute form
+# (``project_root.resolve_data_dir``) and bare form (``from project_root import
+# resolve_data_dir``) are both matched. ``resolve_project_root`` is deliberately
+# NOT in this set: it resolves a REPO root (worktree/provenance semantics), not
+# a .vnx-data dir — a related but distinct concern tracked separately.
+RESOLVER_FN_NAMES = frozenset({
+    "resolve_data_dir",
+    "resolve_state_dir",
+    "resolve_dispatch_dir",
+})
+
 
 # ---------------------------------------------------------------------------
 # Core detection
@@ -292,6 +374,23 @@ def _segment(source: str, node: ast.AST) -> str:
     return " ".join(seg.split())
 
 
+def _is_resolver_call(node: ast.AST) -> bool:
+    """True for calls to a canonical resolver, bare or attribute form."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in RESOLVER_FN_NAMES
+    if isinstance(func, ast.Attribute):
+        return func.attr in RESOLVER_FN_NAMES
+    return False
+
+
+def _resolver_call_args(node: ast.Call) -> List[ast.AST]:
+    """All argument expressions of a call (positional + keyword values)."""
+    return list(node.args) + [kw.value for kw in node.keywords]
+
+
 def check_source(source: str) -> List[Tuple[int, str]]:
     """Return (lineno, normalized_segment) violations for one file's source."""
     try:
@@ -305,6 +404,17 @@ def check_source(source: str) -> List[Tuple[int, str]]:
     seen: Set[Tuple[int, str]] = set()
     # Candidate path expressions: '/' path-joins and Path(...) calls.
     for node in ast.walk(tree):
+        # Shape 2 (input side): a canonical resolver fed a __file__ anchor.
+        if _is_resolver_call(node):
+            if any(
+                _references_file_anchor(arg, anchored)
+                for arg in _resolver_call_args(node)
+            ):
+                key = (getattr(node, "lineno", 0), _segment(source, node))
+                if key not in seen:
+                    seen.add(key)
+                    violations.append(key)
+            continue
         is_join = isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
         is_path_call = (
             isinstance(node, ast.Call)
@@ -360,7 +470,7 @@ def scan_dir(root: Path) -> List[Tuple[str, int, str]]:
             source = py.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        allowed = GRANDFATHERED.get(rel, set())
+        allowed = GRANDFATHERED.get(rel, set()) | GRANDFATHERED_RESOLVER_ANCHORS.get(rel, set())
         for lineno, seg in _dedup_violations(source):
             if seg in allowed:
                 continue

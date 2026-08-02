@@ -39,6 +39,15 @@ if sys_path_dir not in sys.path:
 logger = logging.getLogger(__name__)
 
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
+from pr_enforcement import PrEnforcementResult  # noqa: E402
+from worker_pane_classifier import classify_worker_pane  # noqa: E402
+
+# Work-started gate outcome codes (OI-863): a worker blocked on a permission
+# prompt is ALIVE and recoverable — one relayed answer saves it — so it must not
+# be fast-aborted as no_progress.  The gate returns one of these.
+WORK_START_WORKING = "working"
+WORK_START_AWAITING_PERMISSION = "awaiting_permission"
+WORK_START_NO_PROGRESS = "no_progress"
 
 # Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4/§5):
 # detached ephemeral spawns run scoped (empty ambient MCP + acceptEdits + role
@@ -414,6 +423,43 @@ class TmuxInteractiveDispatch:
         )
         # P0-1: mtime stability cache for report backstop.
         self._report_mtime_cache: dict[str, float] = {}
+        # OI-863: dispatch ids for which the awaiting-permission detection event
+        # has already been emitted (one event per dispatch, not one per poll).
+        self._awaiting_permission_emitted: set[str] = set()
+
+    # -- OI-863 pane classification ----------------------------------------
+    def _classify_pane(self, pane_id: str):
+        """Capture *pane_id* and classify it (never raises).
+
+        Returns a ``WorkerPaneState``; a failed capture classifies as unknown
+        so a tmux error never takes down the lane.
+        """
+        cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+        content = cap.stdout if cap.returncode == 0 else ""
+        return classify_worker_pane(content)
+
+    def _emit_awaiting_permission(
+        self,
+        dispatch_id: str,
+        label: str,
+        pane_id: str,
+        reason: str,
+    ) -> None:
+        """Emit ``interactive_awaiting_permission`` at most once per dispatch.
+
+        The event is the detection surface T0 uses to answer the prompt (one
+        keystroke) instead of letting the worker burn its whole deadline.
+        """
+        if dispatch_id in self._awaiting_permission_emitted:
+            return
+        self._awaiting_permission_emitted.add(dispatch_id)
+        self._emit_event(
+            "interactive_awaiting_permission",
+            dispatch_id=dispatch_id,
+            label=label,
+            reason=reason,
+            metadata={"pane_id": pane_id},
+        )
 
     @staticmethod
     def _resolve_project_root() -> Path:
@@ -935,7 +981,6 @@ class TmuxInteractiveDispatch:
             logger.error(
                 "interactive: PR-enforcement guard errored dispatch=%s: %s", dispatch_id, exc,
             )
-            from pr_enforcement import PrEnforcementResult  # noqa: PLC0415
             return PrEnforcementResult(applicable=False, ok=True, reason=f"guard error: {exc}")
 
         if not result.applicable:
@@ -1396,7 +1441,7 @@ class TmuxInteractiveDispatch:
         baseline_pending_ids: "frozenset[str]",
         completion_statuses: "frozenset[str]",
         label: str,
-    ) -> bool:
+    ) -> str:
         """Confirm the worker actually STARTED working after a verified submit.
 
         ``_verify_submit`` confirms the input box is no longer staged, but under
@@ -1408,23 +1453,30 @@ class TmuxInteractiveDispatch:
         This bounded watchdog polls for a real work signal — the UserPromptSubmit
         sentinel, a version-robust working indicator (``_looks_working``), or a fresh
         receipt — and re-nudges ONCE with a guarded Enter if the instruction is still
-        staged (never a stray Enter into a running session). It returns True as soon as
-        work is observed; False if no work appears within the window, so the caller can
-        FAST-ABORT (retryable in seconds) instead of burning the full deadline.
+        staged (never a stray Enter into a running session).
+
+        Returns one of WORK_START_*:
+
+        * ``WORK_START_WORKING`` — work observed (or gate disabled); proceed to the
+          receipt wait.
+        * ``WORK_START_AWAITING_PERMISSION`` — no work within the window AND the pane
+          shows a permission prompt (OI-863).  The worker is ALIVE and one keystroke
+          saves it; the caller must NOT fast-abort it as no_progress.
+        * ``WORK_START_NO_PROGRESS`` — no work and no permission prompt; the caller can
+          FAST-ABORT (retryable in seconds) instead of burning the full deadline.
 
         Gate is on by default; set ``VNX_TMUX_WORK_START_GATE=0`` to restore the prior
         proceed-straight-to-receipt-wait behavior.
 
-        Known limitation: a worker blocked on an interactive permission prompt shows no
-        working indicator, so for an attended/permissioned session enable the permission
-        relay (``VNX_PERMISSION_RELAY=1``) so the prompt is answered before the window
-        elapses. Autonomous (skip-permissions) workers — the benchmark and headless lanes
-        — are unaffected.
+        A worker blocked on a permission prompt is now detected (not a silent
+        no-progress); an attended/permissioned session should still enable the
+        permission relay (``VNX_PERMISSION_RELAY=1``) so the prompt is ANSWERED rather
+        than merely detected.
         """
         if os.environ.get("VNX_TMUX_WORK_START_GATE", "1").strip().lower() in (
             "0", "false", "no", "off"
         ):
-            return True
+            return WORK_START_WORKING
 
         timeout = float(os.environ.get("VNX_TMUX_WORK_START_TIMEOUT", "120"))
         poll = float(os.environ.get("VNX_TMUX_WORK_START_POLL", "3"))
@@ -1469,7 +1521,7 @@ class TmuxInteractiveDispatch:
         nudged = False
         while time.monotonic() < deadline:
             if _work_observed():
-                return True
+                return WORK_START_WORKING
             # Guarded hand-deliver: re-submit ONCE, and only while the instruction is
             # still staged AND not working as of this instant (both re-checked right
             # before the send) — never a stray Enter into a session that just started.
@@ -1484,7 +1536,17 @@ class TmuxInteractiveDispatch:
                 self._runner.run(["send-keys", "-t", pane_id, "Enter"])
                 nudged = True
             time.sleep(poll)
-        return _work_observed()
+        # Gate window elapsed without work.  Classify the pane: a permission prompt is
+        # a RECOVERABLE state — one relayed answer saves the worker — so it must NOT
+        # fast-abort as no_progress (OI-863).
+        final = self._classify_pane(pane_id)
+        if final.is_awaiting_permission:
+            self._emit_awaiting_permission(
+                dispatch_id, label, pane_id,
+                "permission prompt at work-start gate; not fast-aborting",
+            )
+            return WORK_START_AWAITING_PERMISSION
+        return WORK_START_NO_PROGRESS
 
     def _paste(self, pane_id: str, content: str, max_inline: int = 50000) -> bool:
         """Load *content* into a tmux buffer and paste it into the pane."""
@@ -1769,6 +1831,8 @@ class TmuxInteractiveDispatch:
         baseline_count: int = 0,
         baseline_pending_ids: "frozenset[str] | None" = None,
         baseline_backstop: "bool | None" = None,
+        pane_id: "str | None" = None,
+        label: "str | None" = None,
     ) -> "dict | None":
         """Poll signals 1–3 until a NEW completion appears beyond the baseline.
 
@@ -1777,6 +1841,12 @@ class TmuxInteractiveDispatch:
           When None, falls back to legacy combined position-based baseline (backward compat).
         *baseline_backstop* guards signal 3 (True if report was backstop-active at baseline).
           When None, captured at call time (conservative default).
+
+        *pane_id* (optional): when provided, the loop classifies the pane on each
+          poll and emits ``interactive_awaiting_permission`` the first time the
+          worker is seen blocked on a permission prompt (OI-863) — so a worker
+          that hangs on a prompt MID-RUN is surfaced long before the deadline,
+          instead of burning the full ``deadline_seconds`` invisible.
 
         Priority: signal 1 (canonical) > signal 2 (pending) > signal 3 (backstop).
         Returns the best matching receipt, or None on deadline.
@@ -1831,6 +1901,17 @@ class TmuxInteractiveDispatch:
             else:
                 if time.monotonic() >= deadline:
                     return None
+                # OI-863: mid-wait permission-prompt detection.  A detached worker
+                # blocked on a prompt produces no receipt; surface it the moment the
+                # pane betrays it (at most once per dispatch) instead of waiting the
+                # full deadline invisible.
+                if pane_id is not None:
+                    _pane_state = self._classify_pane(pane_id)
+                    if _pane_state.is_awaiting_permission and label is not None:
+                        self._emit_awaiting_permission(
+                            dispatch_id, label, pane_id,
+                            "permission prompt during receipt wait",
+                        )
                 time.sleep(poll_interval)
                 continue
 
@@ -2042,6 +2123,22 @@ class TmuxInteractiveDispatch:
                 # failed write must never abort the dispatch.
                 try:
                     _write_worker_scope_hook_settings(Path(cwd))
+                    # OI-804 (ADR-005 audit gap): a successful state mutation —
+                    # the settings.local.json registration — emits a coordination
+                    # event so the write lands in the audit trail. Best-effort
+                    # like the write itself: an emit failure must never abort the
+                    # dispatch.
+                    self._emit_event(
+                        "hook_settings_written",
+                        dispatch_id=dispatch_id,
+                        label=label,
+                        reason="worker-scope PreToolUse hook registered in worktree",
+                        metadata={
+                            "settings_path": str(
+                                Path(cwd) / ".claude" / "settings.local.json"
+                            )
+                        },
+                    )
                 except Exception as exc:  # noqa: BLE001 - hook wiring is best-effort
                     logger.warning(
                         "interactive: worker-scope hook settings write failed "
@@ -2321,6 +2418,49 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                 )
 
+            # OI-877: record the worker's process group(s) so teardown can find
+            # dispatch processes that escape the worktree (their repo-root
+            # resolves to the main checkout).  Capture at readiness — AFTER the
+            # SessionStart hooks have fired, so any hook-spawned background
+            # process is already a member of the captured groups and stays
+            # re-findable at teardown even after reparenting (PPID 1).  The
+            # pane shell's own group is excluded: only the worker's groups are
+            # recorded, never the dispatcher's.  Best-effort: a failed capture
+            # degrades to worktree-scan-only teardown.
+            if _ready and worktree_handle is not None:
+                try:
+                    from dispatch_process_registry import (  # noqa: PLC0415
+                        collect_descendant_pgids,
+                        record_dispatch_pgids,
+                    )
+                    _pane_pid_res = self._runner.run(
+                        ["display-message", "-p", "-t", pane_id, "#{pane_pid}"]
+                    )
+                    _pane_pid_str = (
+                        (_pane_pid_res.stdout or "").strip()
+                        if _pane_pid_res.returncode == 0
+                        else ""
+                    )
+                    if _pane_pid_str.isdigit():
+                        _pane_pid = int(_pane_pid_str)
+                        _worker_pgids = collect_descendant_pgids(_pane_pid)
+                        try:
+                            _worker_pgids.discard(os.getpgid(_pane_pid))
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        if _worker_pgids:
+                            record_dispatch_pgids(
+                                dispatch_id,
+                                sorted(_worker_pgids),
+                                repo_root=self._project_root,
+                            )
+                except Exception as _pgid_exc:
+                    logger.warning(
+                        "interactive: dispatch pgid capture failed for %s: %s",
+                        dispatch_id,
+                        _pgid_exc,
+                    )
+
             if attach:
                 self._attach(session)
 
@@ -2453,7 +2593,7 @@ class TmuxInteractiveDispatch:
             # Fast-abort (retryable in seconds) instead of burning deadline_seconds.
             # baseline / baseline_pending_ids are the PRE-DELIVERY snapshot (step 5),
             # so a pre-existing/stale receipt is never miscounted as fresh progress.
-            if not self._await_work_started(
+            _work_start = self._await_work_started(
                 pane_id,
                 dispatch_id,
                 signal_dir=signal_dir,
@@ -2461,7 +2601,18 @@ class TmuxInteractiveDispatch:
                 baseline_pending_ids=baseline_pending_ids,
                 completion_statuses=completion_statuses,
                 label=label,
-            ):
+            )
+            if _work_start == WORK_START_AWAITING_PERMISSION:
+                # OI-863: the worker is ALIVE, blocked on one permission prompt.  Do
+                # NOT fast-abort — a single relayed answer saves it.  Fall through to
+                # the relay (answers it when a window is open) and the receipt wait
+                # (whose deadline path re-classifies the pane if nothing resolves it).
+                logger.warning(
+                    "interactive: dispatch %s worker awaiting permission at work-start; "
+                    "proceeding to relay+wait instead of fast-aborting",
+                    dispatch_id,
+                )
+            if _work_start == WORK_START_NO_PROGRESS:
                 # Capture the pane tail so operators can see WHY no work was observed
                 # (idle prompt, permission prompt, error) and tune the heuristic.
                 _pane_tail = ""
@@ -2518,9 +2669,26 @@ class TmuxInteractiveDispatch:
                 baseline_count=baseline,
                 baseline_pending_ids=baseline_pending_ids,
                 baseline_backstop=baseline_backstop,
+                pane_id=pane_id,
+                label=label,
             )
 
             if receipt is None:
+                # OI-863: classify the pane at deadline.  A worker STILL blocked on a
+                # permission prompt is not a plain deadline — record it distinctly as
+                # awaiting_permission so the audit trail shows a recoverable state,
+                # not a silent hang.
+                _deadline_state = self._classify_pane(pane_id)
+                _deadline_reason = (
+                    "tmux_awaiting_permission"
+                    if _deadline_state.is_awaiting_permission
+                    else "tmux_receipt_deadline_exceeded"
+                )
+                if _deadline_state.is_awaiting_permission:
+                    self._emit_awaiting_permission(
+                        dispatch_id, label, pane_id,
+                        "still awaiting permission at receipt deadline",
+                    )
                 self._govern_report(
                     dispatch_id=dispatch_id,
                     terminal_id=label,
@@ -2530,6 +2698,7 @@ class TmuxInteractiveDispatch:
                     base_sha=worktree_handle.base_sha if worktree_handle else None,
                     worktree_path=worktree_handle.path if worktree_handle else None,
                     model=model,
+                    failure_reason=_deadline_reason,
                     role=role,
                     session_id=session_uuid,
                 )
@@ -2541,7 +2710,11 @@ class TmuxInteractiveDispatch:
                     label=label,
                     window_id=window_id,
                     pane_id=pane_id,
-                    failure_reason="receipt deadline exceeded",
+                    failure_reason=(
+                        "awaiting_permission"
+                        if _deadline_state.is_awaiting_permission
+                        else "receipt deadline exceeded"
+                    ),
                     duration_seconds=time.monotonic() - start_time,
                     worktree_state=_wt_state[0],
                     worktree_path=str(worktree_handle.path) if worktree_handle else None,
@@ -2673,9 +2846,31 @@ class TmuxInteractiveDispatch:
 # CLI — single-shot dispatch entry point
 # ---------------------------------------------------------------------------
 def _resolve_state_dir() -> Path:
-    """Delegate to canonical project_root resolver; ensures lane and append_receipt share the same state dir."""
-    from project_root import resolve_state_dir
-    return resolve_state_dir(caller_file=__file__)
+    """Resolve the lane's runtime state dir, honoring the explicit override and
+    otherwise anchoring on the INVOCATION project root — never the lane code's
+    on-disk location.
+
+    In central-install mode the lane code lives under
+    ``~/.vnx-system/versions/<v>/scripts/lib/``. Deriving the state root from
+    ``__file__`` collapsed every plan-gate receipt/report into the version-dir's
+    local ``.vnx-data`` (OI-900) — a tree ``vnx update`` later pruned (OI-912),
+    destroying the audit trail.
+
+    Resolution order:
+      1. ``VNX_DATA_DIR_EXPLICIT=1`` + ``VNX_DATA_DIR`` — explicit override
+         (test isolation / CI / worktree isolation), same two-key contract as
+         ``project_root.resolve_state_dir``.
+      2. The invocation project root (VNX_PROJECT_ROOT shim > CWD git > lane
+         repo — the same chain as ``_resolve_invocation_project_root``) is the
+         operator's project, so its ``.vnx-data/state`` is the correct runtime
+         root and matches what ``append_receipt`` resolves from that context.
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    explicit_val = os.environ.get("VNX_DATA_DIR", "")
+    if explicit_flag and explicit_val:
+        return Path(explicit_val).expanduser().resolve() / "state"
+    from vnx_paths import resolve_state_dir as resolve_vnx_state_dir
+    return resolve_vnx_state_dir(_resolve_invocation_project_root())
 
 
 def _resolve_invocation_project_root() -> Path:
@@ -2756,6 +2951,11 @@ def main(argv: "list[str] | None" = None) -> int:
         help="spawn worker in the main repo checkout (opt-out of isolation)",
     )
     parser.add_argument("--base-ref", default="origin/main")
+    parser.add_argument(
+        "--requires-mcp", action="store_true", default=False, dest="requires_mcp",
+        help="Preserve ambient MCP config for this dispatch instead of the default "
+             "force-empty scoped posture (spec requires_mcp: true / Requires-MCP: true).",
+    )
     # ADR-006: staging→pending→promote gate enforcement.
     parser.add_argument(
         "--from-staging-id", default=None, dest="from_staging_id",
@@ -2804,6 +3004,7 @@ def main(argv: "list[str] | None" = None) -> int:
         isolated_worktree=args.isolated_worktree,
         base_ref=args.base_ref,
         working_tree_only=args.working_tree_only,
+        requires_mcp=args.requires_mcp,
     )
     print(json.dumps(result.__dict__, default=str))
     return 0 if result.success else 1

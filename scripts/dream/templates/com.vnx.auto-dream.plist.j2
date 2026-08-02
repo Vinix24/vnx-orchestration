@@ -12,6 +12,20 @@
         <string>--project-id</string>
         <string>{{ project_id }}</string>
     </array>
+    <!-- launchd runs the job with a minimal environment outside any project:
+         arm the PR-17 scheduler gate, provide a usable PATH, and pin the
+         project root so `vnx dream run` can resolve the project (OI-895). -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VNX_DREAM_SCHEDULER_ENABLED</key>
+        <string>1</string>
+        <key>VNX_CANONICAL_ROOT</key>
+        <string>{{ project_root }}</string>
+        <key>PATH</key>
+        <string>{{ path_env }}</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{ project_root }}</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -19,9 +33,12 @@
         <key>Minute</key>
         <integer>0</integer>
     </dict>
+    <!-- Logs live in the central data dir (resolve_central_data_dir), the
+         ADR-026 SSOT — never repo-local .vnx-data, which would fork state.
+         The installer creates this directory before the agent is loaded. -->
     <key>StandardOutPath</key>
-    <string>{{ project_root }}/.vnx-data/events/dream/launchd.out.log</string>
+    <string>{{ log_dir }}/launchd.out.log</string>
     <key>StandardErrorPath</key>
-    <string>{{ project_root }}/.vnx-data/events/dream/launchd.err.log</string>
+    <string>{{ log_dir }}/launchd.err.log</string>
 </dict>
 </plist>

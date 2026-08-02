@@ -66,7 +66,7 @@ class TestLiteLLMUsageCompleteEvent:
         host_mock = MagicMock(spec=_LiteLLMNormalizerHost)
         host_mock.drain_stream.return_value = iter([usage_event])
 
-        text, events_written, timed_out, stopped_early, ew_failures, token_usage = _consume_litellm_stream(
+        text, events_written, timed_out, stopped_early, ew_failures, token_usage, first_error_event = _consume_litellm_stream(
             proc=proc_mock,
             host=host_mock,
             on_event=None,
@@ -81,6 +81,9 @@ class TestLiteLLMUsageCompleteEvent:
 
         assert token_usage == usage_payload
         assert events_written == 1
+        # The 7th return value (OI-866 first-error-event capture) stays None on a
+        # clean usage_complete stream.
+        assert first_error_event is None
 
 
 # ---------------------------------------------------------------------------

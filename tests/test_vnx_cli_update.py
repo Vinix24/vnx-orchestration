@@ -885,6 +885,109 @@ def test_prune_protection_ignores_malformed_entries(tmp_path, monkeypatch, capsy
     assert "malformed protected version" in captured.err
 
 
+# ---------------------------------------------------------------------------
+# OI-912: prune must not silently delete a version-dir something still points at
+# (pip-install / symlink references), even when no .vnx-version pin exists.
+# ---------------------------------------------------------------------------
+
+def test_prune_protects_pip_editable_direct_url(tmp_path, monkeypatch):
+    """A pip editable install whose direct_url.json names the version dir must
+    protect it from prune — the OI-912 incident (global vnx_cli console script
+    was `pip install -e versions/edge`; pruning edge broke `vnx --version`)."""
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    fake_site = tmp_path / "fake-site-packages"
+    dist_info = fake_site / "vnx_orchestration-1.3.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "direct_url.json").write_text(
+        json.dumps(
+            {
+                "dir_info": {"editable": True},
+                "url": f"file://{tmp_path}/versions/v1.0.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(update_module, "_iter_site_packages_dirs", lambda: [fake_site])
+
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    output = buf.getvalue()
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    # v1.0.1 referenced by the pip editable install -> protected, NOT pruned.
+    assert remaining == ["v1.0.1", "v1.0.3", "v1.0.4", "v1.0.5"]
+    assert "Protected from prune" in output
+    assert "pip install vnx_orchestration-1.3.0.dist-info" in output
+
+    events = _audit_events(audit_log)
+    protected = [
+        e for e in events if e["event_type"] == "central_install_prune_protected"
+    ]
+    assert len(protected) == 1
+    assert protected[0]["protected_version"] == "v1.0.1"
+    assert any("pip install" in r for r in protected[0]["reasons"])
+
+
+def test_prune_protects_pip_editable_pth(tmp_path, monkeypatch):
+    """A *.pth / __editable__ finder whose content names the version dir must
+    protect it — the second shape a pip -e install leaves in site-packages."""
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    fake_site = tmp_path / "fake-site-packages"
+    fake_site.mkdir(parents=True)
+    (fake_site / "__editable__.vnx_orchestration-1.3.0.pth").write_text(
+        "import __editable___vnx_orchestration_1_3_0_finder; "
+        "__editable___vnx_orchestration_1_3_0_finder.install()",
+        encoding="utf-8",
+    )
+    (fake_site / "__editable___vnx_orchestration_1_3_0_finder.py").write_text(
+        f"MAPPING = {{'vnx_cli': '{tmp_path}/versions/v1.0.1'}}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(update_module, "_iter_site_packages_dirs", lambda: [fake_site])
+
+    _prune_old_versions(tmp_path, keep_last=3, dry_run=False)
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == ["v1.0.1", "v1.0.3", "v1.0.4", "v1.0.5"]
+
+
+def test_prune_protects_symlink_reference(tmp_path, monkeypatch):
+    """A symlink under the central install root that points into a version dir
+    must protect it — a bin/ shim or legacy alias must not dangle after prune."""
+    _empty_registry(tmp_path, monkeypatch)
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "vnx").symlink_to(tmp_path / "versions" / "v1.0.1")
+
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    output = buf.getvalue()
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == ["v1.0.1", "v1.0.3", "v1.0.4", "v1.0.5"]
+    assert "symlink" in output
+
+    events = _audit_events(audit_log)
+    protected = [
+        e for e in events if e["event_type"] == "central_install_prune_protected"
+    ]
+    assert len(protected) == 1
+    assert protected[0]["protected_version"] == "v1.0.1"
+    assert any("symlink" in r for r in protected[0]["reasons"])
+
+
 def test_collect_protected_versions_normalizes_v_prefix(tmp_path, monkeypatch):
     _empty_registry(tmp_path, monkeypatch)
     protected = _collect_protected_versions(tmp_path, protect_pins="v1.3.0,1.2.3")

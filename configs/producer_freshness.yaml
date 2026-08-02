@@ -1,0 +1,110 @@
+# Producer freshness registry — per-key cadence contract for every silent-failure-
+# prone producer in the VNX fabric.
+#
+# The monitor (scripts/producer_freshness_monitor.py) groups activity by each
+# producer's OWN key, never by table/directory level. A table can look alive
+# while individual keys are dead:
+#   - governance_metrics: dispatch_count/mean_cqs write daily while fpy and
+#     rework_rate have been dead since 2026-06-16.
+#   - dispatches: 35 rows, all from the dlv- producer; the dispatch door has
+#     not written since 2026-07-16.
+#   - review_gates: zero requests since 2026-07-25, zero results since
+#     2026-07-28, while dispatches with gate=codex_gate kept flowing.
+#
+# Placeholders expanded at load time: {state_dir}, {data_dir}, {project_id}.
+#
+# cadence_seconds: the maximum silence a key may have before it is reported.
+# The track goal is "silent failure visible within a day" for daily producers.
+version: 1
+
+producers:
+  # --- Review-gate layer (the 2026-07-31 incident) -------------------------
+  # Filenames: pr-<number>-<gate>.json; the gate name is the producer key.
+  - name: review_gate_requests
+    type: directory
+    path: "{state_dir}/review_gates/requests"
+    glob: "*.json"
+    key_regex: '^pr-[0-9]+-(?P<key>.+)\.json$'
+    timestamp: mtime
+    cadence_seconds: 86400
+    demand:
+      # Evidence that work kept flowing while the producer was silent:
+      # dispatch-door events newer than the key's last_seen.
+      type: ndjson_events
+      path: "{state_dir}/dispatch_register.ndjson"
+      timestamp_field: timestamp
+      label: dispatch_register events
+
+  - name: review_gate_results
+    type: directory
+    path: "{state_dir}/review_gates/results"
+    glob: "*.json"
+    key_regex: '^pr-[0-9]+-(?P<key>.+)\.json$'
+    timestamp: mtime
+    cadence_seconds: 86400
+    demand:
+      type: ndjson_events
+      path: "{state_dir}/dispatch_register.ndjson"
+      timestamp_field: timestamp
+      label: dispatch_register events
+
+  # --- Review-gate obligations (OI-876/OI-881, 2026-07-31) -------------------
+  # One obligation per door-accepted dispatch that declares gate=<name>
+  # (scripts/lib/gate_obligations.py, written by the dispatch door; fulfilled
+  # by scripts/gate_obligation_runner.py). Key = gate name. A key goes stale
+  # when its OLDEST pending declaration exceeds cadence: a declared gate that
+  # produced no request/result record is a finding, per sleutel — a live
+  # sibling gate can no longer hide a dead one behind directory-level mtime.
+  - name: review_gate_obligations
+    type: gate_obligations
+    path: "{state_dir}/review_gates/obligations"
+    cadence_seconds: 86400
+    demand:
+      type: ndjson_events
+      path: "{state_dir}/dispatch_register.ndjson"
+      timestamp_field: timestamp
+      label: dispatch_register events
+
+  # --- Dispatch producers in runtime_coordination.db -----------------------
+  # Key = producer prefix of dispatch_id (text before the first '-').
+  # expected_keys makes a producer that writes NOTHING visible: an absent
+  # producer cannot be found by grouping rows that exist.
+  - name: dispatches_table
+    type: sqlite
+    db: "{state_dir}/runtime_coordination.db"
+    query: "SELECT dispatch_id, created_at FROM dispatches"
+    key_column: dispatch_id
+    key_transform: prefix
+    timestamp_column: created_at
+    cadence_seconds: 604800
+    expected_keys:
+      - dlv
+      - DISP
+
+  # --- Governance metrics in quality_intelligence.db -----------------------
+  # Key = metric_name. Nightly computation when healthy; 3 days grace.
+  - name: governance_metrics
+    type: sqlite
+    db: "{state_dir}/quality_intelligence.db"
+    query: "SELECT metric_name, MAX(computed_at) AS last_ts FROM governance_metrics GROUP BY metric_name"
+    key_column: metric_name
+    timestamp_column: last_ts
+    cadence_seconds: 259200
+
+  # --- Auto-dream consolidation cycles (ADR-019 / OI-896) -------------------
+  # Key = cycle status, never table level (OI-881). The stream that matters is
+  # status='completed': a cycle finished consolidation and is awaiting T0
+  # review (ADR-019 §3 — mandatory within 30 days). A completed cycle that sits
+  # unreviewed past cadence reads as stale (a review gate silently skipped),
+  # and a scheduler that NEVER ran surfaces via expected_keys — absence is
+  # asserted, not observed. `reviewed`/`rejected` are separate keys, so an
+  # active review pipeline cannot hide a dead consolidation one.
+  - name: dream_cycles
+    type: sqlite
+    db: "{state_dir}/quality_intelligence.db"
+    query: "SELECT status, MAX(COALESCE(completed_at, started_at)) AS last_ts FROM dream_cycles GROUP BY status"
+    key_column: status
+    timestamp_column: last_ts
+    cadence_seconds: 86400
+    expected_keys:
+      - completed

@@ -289,7 +289,11 @@ def _refresh_registry_files(shipped: Path, target: Path) -> "tuple[int, int]":
                 f"Refusing to write registry file through symlink: {dest} "
                 f"-> {os.path.realpath(str(dest))}"
             )
-        if dest.exists():
+        # OI-660: only a REAL, non-empty file counts as an existing registry to
+        # preserve. A zero-byte file (or a directory named skills.yaml) is the
+        # exact "corrupt/absent" case that must be re-seeded from canon, not
+        # left to survive bootstrap byte-for-byte as 'preserved'.
+        if dest.is_file() and dest.stat().st_size > 0:
             preserved += 1
             continue
 

@@ -66,6 +66,7 @@ import schema_migration
 import schema_manifest
 from atomic_io import audit_event_append
 import tenant_stamping
+from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 
 # ---------------------------------------------------------------------------
@@ -3189,6 +3190,56 @@ def _run_w1_coupled_migration(rc_db_path: Path) -> None:
         print("  [W1] No tenant-stamping changes needed (RC + QI already clean).")
 
 
+def _pipeline_would_mutate(db_path: Path) -> bool:
+    """Return True when the migration pipeline would change this DB.
+
+    Cheap pre-check that opens a read-only connection and inspects three signals:
+
+    1. user_version < TERMINAL_VERSION → the numbered walk will apply at least one
+       migration.
+    2. ADR-007 repair is needed → the dispatches table will be rebuilt.
+    3. The DB's effective manifest does not hold → version reconciliation will
+       downgrade user_version, which causes the walk to re-apply.
+
+    When all three signals are clean the schema pipeline (repair + reconcile +
+    walk + converge) is a confident no-op.  W1 tenant-stamping could still
+    mutate but has its own self-checkpoint + restore — the schema walk's commits
+    are independent of W1, and skipping a backup for W1-only mutations is
+    acceptable because W1 never corrupts the terminal schema.
+
+    Fail-safe: any exception during the check (DB unreadable, schema_manifest
+    bug, etc.) returns True so the backup is always taken when uncertain.
+    """
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=30.0)
+        conn.execute("PRAGMA query_only = ON")
+        try:
+            # Signal 1: user_version below the terminal → walk will apply migrations.
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if user_version < schema_manifest.TERMINAL_VERSION:
+                return True
+
+            # Signal 2: ADR-007 repair would rebuild the dispatches table.
+            if _dispatches_needs_adr007_repair(conn):
+                return True
+
+            # Signal 3: the effective manifest version's invariants don't hold
+            # → reconciliation would downgrade → walk would re-apply.
+            candidates = [v for v in schema_manifest.SCHEMA_MANIFEST if v <= user_version]
+            effective = max(candidates) if candidates else None
+            if effective is not None:
+                violations = schema_manifest.validate_db_at_version(conn, effective)
+                if violations:
+                    return True
+
+            return False
+        finally:
+            conn.close()
+    except Exception:
+        # Fail-safe: when in doubt, back up.
+        return True
+
+
 def backup_store_vacuum_into(db_path: Path) -> Path:
     """D6 data-safety: consistent pre-migration backup via ``VACUUM INTO``.
 
@@ -3276,7 +3327,19 @@ def run(
     print(f"\nVNX migrate_future_system — db: {db_path}")
 
     if backup:
-        backup_store_vacuum_into(db_path)
+        if _pipeline_would_mutate(db_path):
+            backup_store_vacuum_into(db_path)
+            # Rotate older premigrate backups best-effort; never let cleanup
+            # abort the migration. The backup prefix is derived from the live
+            # DB's name so rotation works regardless of the DB path.
+            _premigrate_prefix = f"{db_path.name}.premigrate-"
+            _premigrate_keep = parse_backup_keep(
+                os.environ.get("VNX_PREMIGRATE_BACKUP_KEEP"))
+            rotate_backups_safe(
+                db_path.parent, _premigrate_prefix, _premigrate_keep)
+        else:
+            print("  [backup] skipped — store is already at target schema "
+                  "version, no mutation expected")
 
     _run_pipeline(db_path, project_root,
                   tenant_stamp_fatal=tenant_stamp_fatal,

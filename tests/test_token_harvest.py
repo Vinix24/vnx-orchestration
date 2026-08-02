@@ -8,6 +8,7 @@ lane.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -334,3 +335,151 @@ def test_claude_receipt_no_session_id_keeps_marker(tmp_path):
     line = (state_dir / "t0_receipts.ndjson").read_text().strip().splitlines()[-1]
     data = json.loads(line)
     assert data["token_usage"] == {"unavailable": True}
+
+
+# ---------------------------------------------------------------------------
+# OI-884: deepseek-harness / glm-harness run through the Claude Code harness
+# (claude_harness_keyed, redirected ANTHROPIC_BASE_URL) and leave a full
+# transcript — their receipts must harvest exactly like the native claude lane.
+# ---------------------------------------------------------------------------
+
+def test_deepseek_harness_receipt_carries_harvested_token_usage(tmp_path, monkeypatch):
+    """A deepseek-harness receipt with an 'unavailable' marker and a resolvable
+    session_id carries real harvested counts (core OI-884 DoD)."""
+    projects_dir = tmp_path / "projects"
+    _write_transcript(projects_dir, "session-receipt-ds", [
+        _assistant_line("msg_1", _FULL_USAGE),
+    ])
+    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+
+    from governance_emit import emit_dispatch_receipt
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    emit_dispatch_receipt(
+        dispatch_id="dispatch-b1-deepseek",
+        terminal_id="T1",
+        provider="deepseek-harness",
+        model="deepseek-v4-flash",
+        pr_id=None,
+        status="success",
+        completion_pct=100,
+        risk=0.0,
+        findings=[],
+        duration_seconds=3.5,
+        token_usage={"unavailable": True},
+        cost_usd=None,
+        state_dir=state_dir,
+        receipt_kind="dispatch",
+        session_id="session-receipt-ds",
+    )
+    line = (state_dir / "t0_receipts.ndjson").read_text().strip().splitlines()[-1]
+    data = json.loads(line)
+    assert data["token_usage"] == {
+        "input": 100,
+        "output": 20,
+        "cache_creation_5m": 10,
+        "cache_creation_1h": 5,
+        "cache_read": 2,
+    }
+
+
+def test_glm_harness_receipt_carries_harvested_token_usage(tmp_path, monkeypatch):
+    """A glm-harness receipt with an 'unavailable' marker and a resolvable
+    session_id carries real harvested counts (core OI-884 DoD)."""
+    projects_dir = tmp_path / "projects"
+    _write_transcript(projects_dir, "session-receipt-glm", [
+        _assistant_line("msg_1", _FULL_USAGE),
+    ])
+    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+
+    from governance_emit import emit_dispatch_receipt
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    emit_dispatch_receipt(
+        dispatch_id="dispatch-b1-glm",
+        terminal_id="T1",
+        provider="glm-harness",
+        model="glm-5.2",
+        pr_id=None,
+        status="success",
+        completion_pct=100,
+        risk=0.0,
+        findings=[],
+        duration_seconds=3.5,
+        token_usage={"unavailable": True},
+        cost_usd=None,
+        state_dir=state_dir,
+        receipt_kind="dispatch",
+        session_id="session-receipt-glm",
+    )
+    line = (state_dir / "t0_receipts.ndjson").read_text().strip().splitlines()[-1]
+    data = json.loads(line)
+    assert data["token_usage"] == {
+        "input": 100,
+        "output": 20,
+        "cache_creation_5m": 10,
+        "cache_creation_1h": 5,
+        "cache_read": 2,
+    }
+
+
+def test_deepseek_harness_missing_transcript_fails_open(tmp_path, monkeypatch):
+    """Fail-open: a deepseek-harness receipt whose transcript is missing still
+    emits. The guard now fires for harness providers (the OI-884 broadening),
+    harvest resolves to unavailable, and the caller-supplied marker is
+    preserved — the receipt is never broken by a missing transcript."""
+    import token_harvest as th
+
+    calls = []
+    real = th.harvest_session_tokens
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(th, "harvest_session_tokens", spy)
+
+    from governance_emit import emit_dispatch_receipt
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    emit_dispatch_receipt(
+        dispatch_id="dispatch-b1-ds-missing",
+        terminal_id="T1",
+        provider="deepseek-harness",
+        model="deepseek-v4-flash",
+        pr_id=None,
+        status="success",
+        completion_pct=100,
+        risk=0.0,
+        findings=[],
+        duration_seconds=3.5,
+        token_usage={"unavailable": True},
+        cost_usd=None,
+        state_dir=state_dir,
+        receipt_kind="dispatch",
+        session_id="session-does-not-exist",
+    )
+    line = (state_dir / "t0_receipts.ndjson").read_text().strip().splitlines()[-1]
+    data = json.loads(line)
+    assert data["token_usage"] == {"unavailable": True}
+    assert len(calls) == 1  # the guard fired for a harness provider
+
+
+def test_emit_and_backfill_share_one_harness_provider_set():
+    """OI-884: both consumers gate on the exact same single source of truth,
+    so the nightly backfill can never cover a different set than the emit
+    path. A third harness provider only needs adding in token_harvest."""
+    os.environ.setdefault("VNX_PROJECT_ID", "vnx-dev")
+    import governance_emit
+    import link_sessions_dispatches
+    import token_harvest
+
+    assert governance_emit.CLAUDE_HARNESS_PROVIDERS is token_harvest.CLAUDE_HARNESS_PROVIDERS
+    assert link_sessions_dispatches.CLAUDE_HARNESS_PROVIDERS is token_harvest.CLAUDE_HARNESS_PROVIDERS
+    assert token_harvest.CLAUDE_HARNESS_PROVIDERS == frozenset(
+        {"claude", "deepseek-harness", "glm-harness"}
+    )
+    assert "kimi" not in token_harvest.CLAUDE_HARNESS_PROVIDERS

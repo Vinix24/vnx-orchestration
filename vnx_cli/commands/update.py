@@ -16,6 +16,12 @@ from pathlib import Path
 
 from vnx_cli._reexec import PIN_FILE_NAME, _PIN_RE, _normalize_version
 
+# Late import: vnx_version_ro lives in the engine tree (scripts/lib/), not in
+# the pip CLI tree, so we import it inside the functions that need it rather
+# than at module level.  This keeps the pip CLI importable without the engine
+# on sys.path and without a try/except wrapper.
+_VNX_VERSION_RO_MODULE = "vnx_version_ro"
+
 
 VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration.git"
 DEFAULT_KEEP_LAST = 3
@@ -136,10 +142,19 @@ def _fetch_version(
 
     if target_dir.is_dir():
         print(f"Pulling {target} in {target_dir}...")
-        subprocess.run(
-            ["git", "-C", str(target_dir), "pull", "--ff-only"],
-            check=True,
-        )
+        from vnx_cli import _engine as _eng2
+        _eng2.ensure_engine_on_path()
+        from vnx_version_ro import writeable_version_dir as _wvd
+        with _wvd(target_dir):
+            subprocess.run(
+                ["git", "-C", str(target_dir), "pull", "--ff-only"],
+                check=True,
+            )
+            # Strip and marker happen inside the context so the dir is
+            # writable for both.  _write_install_marker has its own inner
+            # context manager that is a no-op when already writable.
+            _strip_tenant_marker(target_dir)
+            _write_install_marker(target_dir, audit_log=audit_log)
     else:
         ref = "main" if target == "edge" else target
         print(f"Cloning {VNX_GIT_REMOTE} (ref={ref}) -> {target_dir}...")
@@ -148,14 +163,14 @@ def _fetch_version(
              VNX_GIT_REMOTE, str(target_dir)],
             check=True,
         )
+        _strip_tenant_marker(target_dir)
+        _write_install_marker(target_dir, audit_log=audit_log)
+        # Lock the freshly cloned pinned version dir (edge stays writable).
+        from vnx_cli import _engine as _eng3
+        _eng3.ensure_engine_on_path()
+        from vnx_version_ro import make_readonly as _mkro
+        _mkro(target_dir)
 
-    # The installed engine tree must be TENANT-NEUTRAL. The repo tracks its own
-    # `.vnx-project-id = vnx-dev`, so a clone/pull drags that marker into the shared
-    # version dir. In central-install mode the door's CWD is this tree; a stray marker
-    # there makes CWD-based project_id resolution return `vnx-dev` for EVERY consumer
-    # (the fleet-wide misroute/hard-reject class). Strip it after every fetch.
-    _strip_tenant_marker(target_dir)
-    _write_install_marker(target_dir, audit_log=audit_log)
     return target_dir
 
 
@@ -198,13 +213,15 @@ def _write_install_marker(version_dir: Path, audit_log: "Path | None" = None) ->
     from vnx_cli import _engine
     _engine.ensure_engine_on_path()
     from atomic_io import atomic_write_text
+    from vnx_version_ro import writeable_version_dir
 
-    atomic_write_text(version_dir / INSTALL_MODE_MARKER, f"{INSTALL_MODE_VALUE}\n")
-    _emit_audit_event(
-        "central_install_marker_written",
-        {"version_dir": str(version_dir)},
-        audit_log=audit_log,
-    )
+    with writeable_version_dir(version_dir):
+        atomic_write_text(version_dir / INSTALL_MODE_MARKER, f"{INSTALL_MODE_VALUE}\n")
+        _emit_audit_event(
+            "central_install_marker_written",
+            {"version_dir": str(version_dir)},
+            audit_log=audit_log,
+        )
 
 
 def _is_under_versions(root: Path, version_dir: Path) -> bool:
@@ -411,6 +428,153 @@ def _collect_protected_versions(
     return protected
 
 
+def _iter_site_packages_dirs() -> list:
+    """Candidate site-packages roots to scan for pip-install pointers.
+
+    Covers the interpreter's global + user site-packages, plus any ``sys.path``
+    entry whose basename is ``site-packages``/``dist-packages`` (venvs, extra
+    prefixes). Deduplicated, resolved, best-effort — an import failure returns
+    an empty list so a prune never fails on an exotic interpreter.
+    """
+    try:
+        import site as _site
+
+        candidates = list(_site.getsitepackages())
+        user = _site.getusersitepackages()
+        if user:
+            candidates.append(user)
+    except Exception:  # vnx-silent-except: site introspection is best-effort
+        candidates = []
+    for entry in sys.path:
+        if Path(entry).name in ("site-packages", "dist-packages"):
+            candidates.append(entry)
+    seen = set()
+    out = []
+    for raw in candidates:
+        try:
+            resolved = str(Path(raw).expanduser().resolve())
+        except OSError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(Path(resolved))
+    return out
+
+
+_PATH_TOKEN_RE = re.compile(r"/[^\s'\"()<>\[\]{}]+")
+
+
+def _text_references_dir(text: str, version_dir: Path) -> bool:
+    """True when ``text`` mentions a path that resolves to ``version_dir``.
+
+    Handles raw absolute paths, ``~/``-forms and ``file://`` URLs, and tolerates
+    symlink aliasing (macOS ``/tmp`` -> ``/private/tmp``): the comparison is
+    done on ``Path.resolve()`` of both sides, never on the raw string.
+    """
+    vdir = version_dir.resolve()
+    try:
+        from urllib.parse import unquote, urlparse
+
+        for m in re.finditer(r"file://([^\s'\"()<>\[\]{}]+)", text):
+            raw = unquote(urlparse(m.group(1)).path)
+            try:
+                if Path(raw).expanduser().resolve() == vdir:
+                    return True
+            except OSError:
+                continue
+    except ImportError:
+        pass
+    for m in _PATH_TOKEN_RE.finditer(text):
+        token = m.group(0)
+        if token == "/" or ".." in token:
+            continue
+        try:
+            if Path(token).expanduser().resolve() == vdir:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _pip_install_references_to(version_dir: Path) -> list:
+    """Reasons a pip install in the current interpreter maps into ``version_dir``.
+
+    Scans site-packages for the three shapes a pip install leaves behind when it
+    targets a version dir:
+      1. ``<pkg>-*.dist-info/direct_url.json`` — pip records ``url`` pointing at
+         the install source; an editable install keeps the ORIGINAL source dir
+         (OI-912: the global ``vnx_cli`` console script was ``pip install -e
+         versions/edge`` and ``direct_url.json`` still named ``versions/edge``
+         after the dir was pruned).
+      2. ``*.pth`` files whose content mentions the dir (path-based installs).
+      3. ``__editable__*.py`` finder modules whose MAPPING mentions the dir.
+
+    Pruning a dir any of these reference breaks the install silently — that is
+    the exact silent-catastrophe the GC-protect protection set exists to avoid.
+    """
+    reasons = []
+    for site in _iter_site_packages_dirs():
+        if not site.is_dir():
+            continue
+        # 1. dist-info direct_url.json
+        try:
+            dist_infos = list(site.glob("*.dist-info"))
+        except OSError:
+            dist_infos = []
+        for di in dist_infos:
+            direct_url = di / "direct_url.json"
+            if not direct_url.is_file():
+                continue
+            try:
+                data = json.loads(direct_url.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            url = (data or {}).get("url", "") or ""
+            if _text_references_dir(url, version_dir):
+                reasons.append(f"pip install {di.name} -> {url}")
+        # 2. + 3. .pth files and __editable__ finder modules
+        try:
+            pth_files = list(site.glob("*.pth")) + list(site.glob("__editable__*.py"))
+        except OSError:
+            continue
+        for pth in pth_files:
+            try:
+                text = pth.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _text_references_dir(text, version_dir):
+                reasons.append(f"pip editable {pth.name} references {version_dir}")
+    return reasons
+
+
+def _symlink_references_to(root: Path, version_dir: Path) -> list:
+    """Reasons a symlink under the central install root points into ``version_dir``.
+
+    Walks the central install tree (``~/.vnx-system``) WITHOUT following symlinks
+    and records any symlink whose resolved target is the version dir or sits
+    inside it. ``current`` is handled separately by ``_prune_old_versions`` (it
+    is never a prune candidate), but a bin/ shim or a legacy alias symlink that
+    points at a version dir must protect it too (OI-912).
+    """
+    reasons = []
+    vdir = version_dir.resolve()
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in list(dirnames) + list(filenames):
+                entry = Path(dirpath) / name
+                try:
+                    if not entry.is_symlink():
+                        continue
+                    target = entry.resolve()
+                    if target == vdir or vdir in target.parents:
+                        reasons.append(f"symlink {entry} -> {target}")
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return reasons
+
+
 def _prune_old_versions(
     root: Path,
     keep_last: int,
@@ -455,7 +619,15 @@ def _prune_old_versions(
     for version_dir in to_prune:
         if current and version_dir.resolve() == current.resolve():
             continue
-        reasons = sorted(protected.get(_normalize_version(version_dir.name), ()))
+        reasons = set(protected.get(_normalize_version(version_dir.name), ()))
+        # OI-912: a pip-install or symlink that maps into this version dir is a
+        # live reference — pruning it silently breaks that install (the global
+        # vnx_cli console script died with ModuleNotFoundError when update
+        # removed versions/edge). Fail-loud is too blunt (the update to the NEW
+        # version is fine); protect the referenced dir with a clear message.
+        reasons.update(_pip_install_references_to(version_dir))
+        reasons.update(_symlink_references_to(root, version_dir))
+        reasons = sorted(reasons)
         if reasons:
             reason_text = "; ".join(reasons)
             if dry_run:
@@ -481,6 +653,10 @@ def _prune_old_versions(
                 audit_log=audit_log,
             )
             print(f"Pruning: {version_dir}")
+            from vnx_cli import _engine as _eng4
+            _eng4.ensure_engine_on_path()
+            from vnx_version_ro import make_writable as _mkw
+            _mkw(version_dir)
             shutil.rmtree(version_dir)
 
 

@@ -15,28 +15,19 @@ set -euo pipefail
 
 # ── Detect terminal from working directory ───────────────────────────
 TERMINAL=""
-ROLE=""
-TRACK=""
 
 case "$PWD" in
   */terminals/T0|*/T0)
     TERMINAL="T0"
-    ROLE="orchestrator"
     ;;
   */terminals/T1|*/T1)
     TERMINAL="T1"
-    ROLE="worker"
-    TRACK="A"
     ;;
   */terminals/T2|*/T2)
     TERMINAL="T2"
-    ROLE="worker"
-    TRACK="B"
     ;;
   */terminals/T3|*/T3)
     TERMINAL="T3"
-    ROLE="worker"
-    TRACK="C"
     ;;
   *)
     # Not a VNX terminal directory — exit silently
@@ -44,14 +35,6 @@ case "$PWD" in
     exit 0
     ;;
 esac
-
-# ── Also check environment variables (set by vnx start) ─────────────
-if [ -n "${CLAUDE_ROLE:-}" ]; then
-  ROLE="$CLAUDE_ROLE"
-fi
-if [ -n "${CLAUDE_TRACK:-}" ]; then
-  TRACK="$CLAUDE_TRACK"
-fi
 
 # ── Resolve project root from directory structure ────────────────────
 # Walk up from terminal dir to find project root
@@ -138,7 +121,9 @@ case "$TERMINAL" in
     fi
 
     ADDITIONAL_CONTEXT="T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
-Available skills: @t0-orchestrator @architect @planner
+Model-invocable skills: @horizon @planner @panel @fabric-reference
+Operator-only skills (not model-invocable): @t0-orchestrator @architect
+Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
 Use /t0-orchestrator for orchestration decisions and receipt processing
 
 Terminals:
@@ -146,7 +131,7 @@ $(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
 ${T0_OPEN_ITEMS:-No open items data}
 
 CRITICAL: After every completion receipt, check quality advisory + open items before proceeding.
-Skills must NOT use @ prefix in Role field. Check .vnx/skills/skills.yaml for valid skills.${T0_SKILL_BODY:+
+Skills must NOT use @ prefix in Role field. Skill registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer).${T0_SKILL_BODY:+
 
 ---
 $T0_SKILL_BODY}"

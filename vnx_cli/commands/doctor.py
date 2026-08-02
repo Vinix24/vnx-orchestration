@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vnx_cli import _engine
+from vnx_cli._reexec import PIN_FILE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -134,25 +135,41 @@ def _check_agents(project_dir: Path) -> Check:
     )
 
 
-def _resolve_central_pin(central_path: Path) -> str:
-    """Resolve the version pin for a central install directory."""
+def _read_project_pin(project_dir: Path) -> str:
+    """Read the project's ``.vnx-version`` pin file (the operator's pin intent).
+
+    This is the SAME file ``vnx_cli._reexec`` honors at startup, so doctor's
+    ``pin`` field and ``cat .vnx-version`` agree (OI-914). Returns the raw
+    first line when present and non-empty, ``"unset"`` when there is no usable
+    pin, or ``"error"`` when a pin file exists but cannot be read.
+    """
+    pin_file = project_dir / PIN_FILE_NAME
+    if not pin_file.is_file():
+        return "unset"
+    try:
+        first = pin_file.read_text(encoding="utf-8").strip().splitlines()[0]
+    except OSError as exc:
+        logger.warning("doctor: cannot read pin file %s: %s", pin_file, exc)
+        return "error"
+    if not first:
+        return "unset"
+    return first
+
+
+def _resolve_active_version(central_path: Path) -> str:
+    """The version dir the ``current`` symlink actually points at.
+
+    This is what loads absent a pin re-exec — NOT the project's ``.vnx-version``
+    pin intent. Reported separately from ``pin`` so a pin that is not honored is
+    visible instead of the two silently disagreeing under one label.
+    """
     try:
         if central_path.is_symlink():
             return central_path.resolve().name
-    except OSError as e:
-        logger.warning("doctor: cannot resolve central_path symlink: %s", e)
-        return "error"
-    for fname in ("VERSION", "version.txt", ".vnx-version"):
-        vf = central_path / fname
-        if vf.is_file():
-            try:
-                first = vf.read_text(encoding="utf-8").strip().splitlines()[0]
-                if first:
-                    return first
-            except OSError as e:
-                logger.warning("doctor: cannot read version file %s: %s", vf, e)
-                return "error"
-    return "unset"
+    except OSError as exc:
+        logger.warning("doctor: cannot resolve central_path symlink: %s", exc)
+        return "unresolved"
+    return central_path.name
 
 
 def _check_central_install_marker(central_path: Path) -> "str | None":
@@ -182,7 +199,16 @@ def _check_central_install_marker(central_path: Path) -> "str | None":
 
 
 def _check_install_mode(project_dir: Path) -> Check:
-    """Detect embedded vs central VNX install mode and report the active pin."""
+    """Detect embedded vs central VNX install mode and report pin vs active.
+
+    In central mode the check reports two values that OI-914 found conflated
+    under one "pin" label:
+      * ``pin`` — the project's ``.vnx-version`` file (the pin the startup
+        re-exec honors; matches ``cat .vnx-version``);
+      * ``active`` — the version dir the ``current`` symlink resolves to
+        (what actually runs absent a re-exec).
+    Reporting both makes a pin that is not honored visible.
+    """
     embedded_path = project_dir / ".claude" / "vnx-system"
     central_path = Path.home() / ".vnx-system" / "current"
 
@@ -190,24 +216,28 @@ def _check_install_mode(project_dir: Path) -> Check:
     embedded_active = (embedded_path / "scripts").is_dir()
 
     if central_active:
-        pin = _resolve_central_pin(central_path)
+        pin = _read_project_pin(project_dir)
+        active = _resolve_active_version(central_path)
+        marker_issue = _check_central_install_marker(central_path)
         if pin == "error":
             return Check(
                 name="install:mode",
                 status=WARN,
-                detail="mode: central, pin: error (cannot read version file — check permissions)",
+                detail=(
+                    f"mode: central, pin: error (cannot read "
+                    f"{project_dir / PIN_FILE_NAME} — check permissions), active: {active}"
+                ),
             )
-        marker_issue = _check_central_install_marker(central_path)
         if marker_issue is not None:
             return Check(
                 name="install:mode",
                 status=WARN,
-                detail=f"mode: central, pin: {pin}, {marker_issue}",
+                detail=f"mode: central, pin: {pin}, active: {active}, {marker_issue}",
             )
         return Check(
             name="install:mode",
             status=PASS,
-            detail=f"mode: central, pin: {pin}",
+            detail=f"mode: central, pin: {pin}, active: {active}",
         )
     if embedded_active:
         return Check(
@@ -627,34 +657,8 @@ def _extract_hook_paths(command: str) -> list[str]:
     return candidates
 
 
-def _check_hook_paths(project_dir: Path) -> Check:
-    """WARN for hook commands in .claude/settings.json that reference missing files."""
-    settings_path = project_dir / ".claude" / "settings.json"
-    if not settings_path.is_file():
-        return Check(
-            name="hooks:path-resolution",
-            status=PASS,
-            detail="no .claude/settings.json found; skipping hook path check",
-        )
-
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return Check(
-            name="hooks:path-resolution",
-            status=WARN,
-            detail=f".claude/settings.json is unparseable ({exc}); hook paths cannot be audited",
-        )
-
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        return Check(
-            name="hooks:path-resolution",
-            status=PASS,
-            detail="no hooks section in .claude/settings.json",
-        )
-
-    project_root = project_dir.resolve()
+def _collect_dead_hook_paths(hooks: dict, project_root: Path) -> "tuple[list[str], list[str]]":
+    """Return (dead_relative, dead_absolute) hook paths that reference missing files."""
     dead_relative: list[str] = []
     dead_absolute: list[str] = []
 
@@ -688,6 +692,39 @@ def _check_hook_paths(project_dir: Path) -> Check:
                         target = project_root / normalized
                         if not target.is_file():
                             dead_relative.append(normalized)
+
+    return dead_relative, dead_absolute
+
+
+def _check_hook_paths(project_dir: Path) -> Check:
+    """WARN for hook commands in .claude/settings.json that reference missing files."""
+    settings_path = project_dir / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return Check(
+            name="hooks:path-resolution",
+            status=PASS,
+            detail="no .claude/settings.json found; skipping hook path check",
+        )
+
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return Check(
+            name="hooks:path-resolution",
+            status=WARN,
+            detail=f".claude/settings.json is unparseable ({exc}); hook paths cannot be audited",
+        )
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return Check(
+            name="hooks:path-resolution",
+            status=PASS,
+            detail="no hooks section in .claude/settings.json",
+        )
+
+    project_root = project_dir.resolve()
+    dead_relative, dead_absolute = _collect_dead_hook_paths(hooks, project_root)
 
     if dead_relative or dead_absolute:
         parts: list[str] = []

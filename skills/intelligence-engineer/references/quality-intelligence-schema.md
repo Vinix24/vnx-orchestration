@@ -154,17 +154,33 @@ CREATE TABLE vnx_code_quality (
 );
 ```
 
+### session_analytics (base schema, not imperative)
+
+Per-session stats parsed from Claude Code JSONL logs by the conversation analyzer. Unlike the tables below, this one **is** defined in `schemas/quality_intelligence.sql` directly.
+
+```sql
+CREATE TABLE IF NOT EXISTS session_analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,  -- ADR-007: NO default; writers fail-closed via resolve_stamp_project_id
+    project_path TEXT NOT NULL,
+    -- ... token/tool/flag columns ...
+    UNIQUE (project_id, session_id)
+);
+```
+
+As of migration v29 (OI-853/OI-855, #1248), `project_id` is `NOT NULL` with no default and the UNIQUE constraint is composite `(project_id, session_id)` — a doc or migration showing single-column `UNIQUE(session_id)` describes the pre-v29 shape. The writer (`scripts/conversation_analyzer/runner.py::_resolve_project_id`) fails closed: an unresolvable tenant raises `TenantUnresolved` and that one session's write is skipped, not stamped with a guessed `project_id`. `_migrate_v29` decides whether a rebuild is needed from `PRAGMA index_list`/`index_info` (order- and quoting-independent), not from a literal-SQL-text comparison, and preserves every pre-existing index across the rebuild (not just a hardcoded subset).
+
 ## Imperative additions (not in base SQL)
 
 `scripts/quality_db_init.py` adds these in `bootstrap_qi_db()`:
 
 - **`confidence_events`** (line ~321) — append-only log of confidence changes. Tracks why a pattern's confidence went up/down.
 - **`dispatch_pattern_offered`** (line ~408) — record of which patterns were offered to which dispatch (for impression tracking, A/B analysis).
-- **`session_analytics`** — per-T0-session stats (dispatch count, success rate, etc).
 - **`quality_trends`** — time-series of project quality over time.
 - **`improvement_suggestions`** — operator-facing recommendations.
 
-These are NOT in `schemas/quality_intelligence.sql` directly because they evolved post-base-schema and were added as imperative migrations. Always use `bootstrap_qi_db()` for fresh init; never run only the base SQL.
+These are NOT in `schemas/quality_intelligence.sql` directly because they evolved post-base-schema and were added as imperative migrations. Always use `bootstrap_qi_db()` for fresh init; never run only the base SQL. (`session_analytics` moved out of this list above — it is base-schema.)
 
 ## Retention
 

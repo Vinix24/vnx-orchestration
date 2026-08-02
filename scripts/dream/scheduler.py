@@ -18,10 +18,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
+from project_root import resolve_central_data_dir
 
 _PLIST_LABEL = "com.vnx.auto-dream"
 _PLIST_NAME = f"{_PLIST_LABEL}.plist"
 _CRON_MARKER = f"# vnx-auto-dream:{_PLIST_LABEL}"
+
+# Fallback PATH for the scheduled job when the installer itself runs with an
+# empty PATH. Covers the standard macOS/Linux locations for git/kimi/vnx.
+_DEFAULT_PATH_ENV = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _path_env() -> str:
+    """PATH snapshot for the scheduled job.
+
+    launchd/cron start with a minimal PATH; the install-time PATH is the best
+    available record of where vnx/git/kimi actually live on this machine.
+    """
+    return os.environ.get("PATH") or _DEFAULT_PATH_ENV
+
+
+def _central_log_dir(project_id: str) -> Path:
+    """Log dir for scheduler stdout/stderr, under the central data dir.
+
+    ADR-026: resolve_central_data_dir(project_id) is the SSOT for runtime
+    state — never the repo-local .vnx-data, which would fork state.
+    """
+    return resolve_central_data_dir(project_id) / "events" / "dream"
 
 
 def _render_plist(template_path: Path, ctx: dict) -> str:
@@ -40,12 +63,19 @@ def _install_macos(project_id: str, project_root: Path, vnx_bin: str) -> str:
     template_path = (
         Path(__file__).resolve().parent / "templates" / "com.vnx.auto-dream.plist.j2"
     )
+    log_dir = _central_log_dir(project_id)
     ctx = {
         "vnx_bin_path": vnx_bin,
         "project_id": project_id,
         "project_root": str(project_root),
+        "path_env": _path_env(),
+        "log_dir": str(log_dir),
     }
     rendered = _render_plist(template_path, ctx)
+
+    # Create the log dir before launchd is asked to write to it — launchd
+    # does not create missing StandardOutPath/StandardErrorPath directories.
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     out_dir = Path.home() / "Library" / "LaunchAgents"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -86,12 +116,31 @@ def _uninstall_macos() -> str:
     return f"Unloaded and removed: {out_path}"
 
 
-def _cron_line(vnx_bin: str, project_id: str) -> str:
-    return f"0 3 * * * {vnx_bin} dream run --project-id {project_id}  {_CRON_MARKER}"
+def _cron_line(
+    vnx_bin: str,
+    project_id: str,
+    project_root: Path,
+    log_dir: Path,
+    path_env: str,
+) -> str:
+    # cron starts the job with a minimal environment and cwd=$HOME — outside
+    # any project. Same gaps as the launchd plist (OI-895): arm the scheduler
+    # gate, pin the project root, and redirect output to the central log dir
+    # (ADR-026) instead of letting it vanish into cron mail.
+    return (
+        f"0 3 * * * cd {project_root} && "
+        f"VNX_DREAM_SCHEDULER_ENABLED=1 "
+        f"VNX_CANONICAL_ROOT={project_root} "
+        f"PATH={path_env} "
+        f"{vnx_bin} dream run --project-id {project_id} "
+        f">> {log_dir}/cron.out.log 2>&1  {_CRON_MARKER}"
+    )
 
 
-def _install_linux(project_id: str, vnx_bin: str) -> str:
-    new_line = _cron_line(vnx_bin, project_id)
+def _install_linux(project_id: str, project_root: Path, vnx_bin: str) -> str:
+    log_dir = _central_log_dir(project_id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    new_line = _cron_line(vnx_bin, project_id, project_root, log_dir, _path_env())
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     existing = result.stdout if result.returncode == 0 else ""
     lines = [ln for ln in existing.splitlines() if _CRON_MARKER not in ln]
@@ -138,7 +187,7 @@ def install_scheduler(
     if sys_platform == "Darwin":
         return _install_macos(project_id, project_root, vnx_bin)
     elif sys_platform == "Linux":
-        return _install_linux(project_id, vnx_bin)
+        return _install_linux(project_id, project_root, vnx_bin)
     else:
         raise RuntimeError(
             f"Unsupported platform: {sys_platform}. Only macOS and Linux supported."

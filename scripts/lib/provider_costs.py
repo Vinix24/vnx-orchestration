@@ -147,9 +147,27 @@ def _make_record_id(
 
 
 def _resolve_costs_path() -> Path:
-    """Resolve .vnx-data/events/provider_costs.ndjson via project_root.py."""
-    from project_root import resolve_data_dir  # noqa: PLC0415
-    data_dir = resolve_data_dir(__file__)
+    """Resolve <central store>/events/provider_costs.ndjson.
+
+    Central store = ``$HOME/.vnx-data/<project_id>`` — mirroring
+    ``provider_dispatch._resolve_data_dir`` exactly, so the cost event lands in
+    the same tenant store as the lane's report and receipt. ``VNX_DATA_DIR`` is
+    honored ONLY together with ``VNX_DATA_DIR_EXPLICIT=1`` (OI-126 two-key
+    contract).
+
+    NEVER derive this from the module's own location: in a central install
+    ``__file__`` sits inside the read-only ``~/.vnx-system/versions/<v>/`` tree,
+    so ``resolve_data_dir(__file__)`` resolved the keystone and the mkdir in
+    ``emit_provider_cost`` died with EACCES on EVERY provider lane — the
+    2026-07-31 fleet-wide plan-gate block.
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    explicit_val = os.environ.get("VNX_DATA_DIR", "")
+    if explicit_flag and explicit_val:
+        data_dir = Path(explicit_val).resolve()
+    else:
+        project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+        data_dir = Path.home() / ".vnx-data" / project_id
     return data_dir / "events" / "provider_costs.ndjson"
 
 

@@ -32,6 +32,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 ensure_env
 
+# ── Interpreter resolution (measured 2026-07-30) ──────────────────────────
+# This script runs under launchd (com.vnx.conversation-analyzer), a pure
+# background context with no interactive shell alias to mask a broken
+# /opt/homebrew/bin/python3 (relinked to a dependency-less 3.14 at 09:32
+# today). Resolve one interpreter here and use it at every call site below.
+# Precedence: repo venv (uv-managed, has deps) > pinned homebrew 3.12
+# (no deps, but a stable interpreter) > bare `python3` (last resort).
+if [ -x "$SCRIPT_DIR/../.venv/bin/python" ]; then
+    VNX_PYTHON="$SCRIPT_DIR/../.venv/bin/python"
+elif [ -x "/opt/homebrew/opt/python@3.12/bin/python3.12" ]; then
+    VNX_PYTHON="/opt/homebrew/opt/python@3.12/bin/python3.12"
+else
+    VNX_PYTHON="python3"
+fi
+
 # Load user environment for email digest (launchd doesn't source ~/.zshrc)
 # Reads VNX_DIGEST_EMAIL and VNX_SMTP_PASS from ~/.zshrc or ~/.zprofile
 for _rc in "$HOME/.zprofile" "$HOME/.zshrc"; do
@@ -69,7 +84,7 @@ log_msg "=== Nightly conversation analysis starting ==="
 
 # Phase 0: Ensure DB schema is up to date (runs migrations if needed)
 log_msg "Phase 0: Running DB schema migrations..."
-python3 "$SCRIPT_DIR/quality_db_init.py" 2>&1 | tee -a "$LOG_FILE"
+"$VNX_PYTHON" "$SCRIPT_DIR/quality_db_init.py" 2>&1 | tee -a "$LOG_FILE"
 log_msg "Phase 0 complete"
 
 # Optionally start Ollama if not running and available
@@ -95,7 +110,7 @@ fi
 
 # Phase 1: Run the analyzer (session parsing + heuristics + deep analysis)
 log_msg "Phase 1: Running conversation analyzer..."
-python3 "$SCRIPT_DIR/conversation_analyzer.py" \
+"$VNX_PYTHON" "$SCRIPT_DIR/conversation_analyzer.py" \
     --max-sessions 50 \
     --deep-budget 20 \
     2>&1 | tee -a "$LOG_FILE"
@@ -105,7 +120,7 @@ log_msg "Phase 1 complete (exit=$ANALYZER_EXIT)"
 
 # Phase 1.5: Cross-reference sessions, dispatches, and receipts
 log_msg "Phase 1.5: Running session-dispatch linkage..."
-if python3 "$SCRIPT_DIR/link_sessions_dispatches.py" 2>&1 | tee -a "$LOG_FILE"; then
+if "$VNX_PYTHON" "$SCRIPT_DIR/link_sessions_dispatches.py" 2>&1 | tee -a "$LOG_FILE"; then
     log_msg "Phase 1.5 complete: session-dispatch linkage updated"
 else
     log_msg "Phase 1.5 WARNING: session-dispatch linkage failed (non-fatal)"
@@ -113,7 +128,7 @@ fi
 
 # Phase 2: Generate T0 session brief (model-based, auto — read-only state file)
 log_msg "Phase 2: Generating T0 session brief..."
-if python3 "$SCRIPT_DIR/generate_t0_session_brief.py" 2>&1 | tee -a "$LOG_FILE"; then
+if "$VNX_PYTHON" "$SCRIPT_DIR/generate_t0_session_brief.py" 2>&1 | tee -a "$LOG_FILE"; then
     log_msg "Phase 2 complete: t0_session_brief.json updated"
 else
     log_msg "Phase 2 WARNING: session brief generation failed (non-fatal)"
@@ -121,7 +136,7 @@ fi
 
 # Phase 2.5: Governance metrics aggregation + SPC
 log_msg "Phase 2.5: Computing governance metrics..."
-if python3 "$SCRIPT_DIR/governance_aggregator.py" --backfill 2>&1 | tee -a "$LOG_FILE"; then
+if "$VNX_PYTHON" "$SCRIPT_DIR/governance_aggregator.py" --backfill 2>&1 | tee -a "$LOG_FILE"; then
     log_msg "Phase 2.5 complete: governance metrics updated"
 else
     log_msg "Phase 2.5 WARNING: governance aggregation failed (non-fatal)"
@@ -129,7 +144,7 @@ fi
 
 # Phase 3: Generate suggested edits (human-in-the-loop, pending review)
 log_msg "Phase 3: Generating suggested edits..."
-if python3 "$SCRIPT_DIR/generate_suggested_edits.py" 2>&1 | tee -a "$LOG_FILE"; then
+if "$VNX_PYTHON" "$SCRIPT_DIR/generate_suggested_edits.py" 2>&1 | tee -a "$LOG_FILE"; then
     log_msg "Phase 3 complete: pending_edits.json updated"
 else
     log_msg "Phase 3 WARNING: suggested edits generation failed (non-fatal)"
@@ -138,7 +153,7 @@ fi
 # Phase 4: Send digest email (requires VNX_DIGEST_EMAIL + VNX_SMTP_PASS)
 if [ -n "${VNX_DIGEST_EMAIL:-}" ] && [ -n "${VNX_SMTP_PASS:-}" ]; then
     log_msg "Phase 4: Sending digest email to $VNX_DIGEST_EMAIL..."
-    if python3 "$SCRIPT_DIR/send_digest_email.py" 2>&1 | tee -a "$LOG_FILE"; then
+    if "$VNX_PYTHON" "$SCRIPT_DIR/send_digest_email.py" 2>&1 | tee -a "$LOG_FILE"; then
         log_msg "Phase 4 complete: digest email sent"
     else
         log_msg "Phase 4 WARNING: digest email failed (non-fatal)"

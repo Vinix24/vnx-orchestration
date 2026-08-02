@@ -109,8 +109,10 @@ def _extract_bullets(text: str) -> list[str]:
 
 
 def _write_ndjson_event(events_file: Path, adr: dict) -> None:
+    # Include project_id so identical ADR content across projects gets distinct
+    # record_ids instead of colliding (ADR rows are keyed by (adr_id, project_id)). (OI-004)
     record_id = hashlib.sha256(
-        f"{adr['adr_id']}:{adr['source_hash']}".encode()
+        f"{adr['project_id']}:{adr['adr_id']}:{adr['source_hash']}".encode()
     ).hexdigest()
     event = {
         "record_id": record_id,

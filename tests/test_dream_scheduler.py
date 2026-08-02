@@ -143,7 +143,7 @@ class TestUninstallSchedulerMacOS:
 
 
 class TestInstallSchedulerLinux:
-    def test_cron_entry_added(self):
+    def test_cron_entry_added(self, tmp_path):
         """install_scheduler on Linux adds crontab entry with project_id."""
         existing_cron = "30 6 * * * /usr/bin/backup\n"
 
@@ -160,6 +160,7 @@ class TestInstallSchedulerLinux:
 
         with (
             patch("scheduler.platform.system", return_value="Linux"),
+            patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", side_effect=mock_run),
         ):
             result = scheduler.install_scheduler("vnx-dev", vnx_bin="/usr/bin/vnx")
@@ -168,7 +169,7 @@ class TestInstallSchedulerLinux:
         assert "vnx-auto-dream" in captured["new"]
         assert "# vnx-auto-dream" in result or "Cron entry" in result
 
-    def test_cron_idempotent(self):
+    def test_cron_idempotent(self, tmp_path):
         """Re-installing replaces existing auto-dream cron line (no duplicates)."""
         existing = "0 3 * * * /usr/bin/vnx dream run --project-id vnx-dev  # vnx-auto-dream:com.vnx.auto-dream\n"
         captured = {}
@@ -184,6 +185,7 @@ class TestInstallSchedulerLinux:
 
         with (
             patch("scheduler.platform.system", return_value="Linux"),
+            patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", side_effect=mock_run),
         ):
             scheduler.install_scheduler("vnx-dev", vnx_bin="/usr/bin/vnx")

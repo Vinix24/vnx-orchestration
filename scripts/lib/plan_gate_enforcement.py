@@ -87,6 +87,11 @@ def _has_col(conn: sqlite3.Connection, table: str, col: str) -> bool:
 def plan_gate_state(db_path: "str | Path", track_id: str, project_id: str) -> str:
     """Return ``PASSED`` / ``UNRESOLVED`` / ``UNSUPPORTED`` for a track's plan-first gate.
 
+    Records every evaluation to the observe-only guard-fired counter
+    (guard_stats; fired == UNRESOLVED) so a plan gate that never blocks for
+    weeks is visible as a statistic instead of vanishing into logs. The
+    counter wraps the return value and can never alter it.
+
     Read-only URI connection: a missing DB file raises immediately rather than
     silently creating an empty one (callers degrade any exception to a WARN — never
     crash the door). ``UNSUPPORTED`` when the schema lacks ``track_open_items`` or its
@@ -96,6 +101,26 @@ def plan_gate_state(db_path: "str | Path", track_id: str, project_id: str) -> st
     Only the ``OI-PLAN-<track>`` blocker counts here; other unresolved ``blocks``
     open-items are the closure gate's concern, not the plan-first gate's.
     """
+    state = _plan_gate_state_decision(db_path, track_id, project_id)
+    try:
+        import logging  # noqa: PLC0415
+
+        import guard_stats  # noqa: PLC0415
+
+        guard_stats.record_guard_evaluation(
+            "plan_gate_state",
+            state == UNRESOLVED,
+            detail={"track_id": track_id, "state": state},
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only: never break the gate on the counter
+        logging.getLogger(__name__).warning(
+            "plan_gate_enforcement: guard-fired counter failed (state unchanged): %s", exc
+        )
+    return state
+
+
+def _plan_gate_state_decision(db_path: "str | Path", track_id: str, project_id: str) -> str:
+    """The read-only plan-gate decision (see ``plan_gate_state`` for the contract)."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
     try:
         if not (_has_table(conn, "track_open_items") and _has_col(conn, "track_open_items", "resolved_at")):

@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import sys
 import json
 import tempfile
@@ -642,3 +643,58 @@ class TestOperatorSessions:
         assert result["degraded"] is True
         assert any("session store" in reason.lower() for reason in result["degraded_reasons"])
         assert result["data"] == []
+
+    def test_panes_failure_surfaces_degraded_reason(self) -> None:
+        """A tmux list-panes failure degrades busy/idle but sessions still list.
+
+        Matches the sessions-failure path: a failing probe must be observable,
+        not silent (sessobs #1076 residual, OI-558).
+        """
+        sessions_ok = ao.subprocess.CompletedProcess(
+            args=["tmux", "list-sessions"],
+            returncode=0,
+            stdout="vnx-demo\t1700000000\n",
+            stderr="",
+        )
+        panes_failed = ao.subprocess.CompletedProcess(
+            args=["tmux", "list-panes"],
+            returncode=1,
+            stdout="",
+            stderr="error",
+        )
+        with (
+            patch.object(ao.shutil, "which", return_value="/usr/bin/tmux"),
+            patch.object(ao.subprocess, "run", side_effect=[sessions_ok, panes_failed]),
+        ):
+            sessions, reasons = ao._list_tmux_sessions(datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        # Sessions still list (busy/idle classification degrades, not the list).
+        assert len(sessions) == 1
+        assert any("list-panes" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# OI-558 residual: _operator_get_sessions stays within the 70-line advisory
+# ---------------------------------------------------------------------------
+
+class TestOperatorSessionsFunctionSize:
+    """sessobs #1076 residual: the sessions endpoint was split so it stays ≤70 lines."""
+
+    _API_OPERATOR = Path(__file__).parent.parent / "dashboard" / "api_operator.py"
+
+    def _function_length(self, name: str) -> int:
+        tree = ast.parse(self._API_OPERATOR.read_text(encoding="utf-8"))
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+        )
+        return fn.end_lineno - fn.lineno + 1
+
+    def test_operator_get_sessions_under_70_lines(self) -> None:
+        assert self._function_length("_operator_get_sessions") <= 70
+
+    def test_merge_helper_under_70_lines(self) -> None:
+        assert self._function_length("_merge_session_store_entries") <= 70
+
+    def test_tmux_map_helper_under_70_lines(self) -> None:
+        assert self._function_length("_tmux_sessions_to_map") <= 70

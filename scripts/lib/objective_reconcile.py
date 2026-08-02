@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -343,11 +344,41 @@ def _save_pr_state_cache(
 # gh helpers
 # ---------------------------------------------------------------------------
 
-def _detect_gh(repo_root: Path) -> str:
+# Absolute fallback locations for the gh binary. A launchd/cron background or a
+# minimal PATH (non-interactive shell) often omits the Homebrew bin dir even
+# though gh is installed and works in an interactive terminal. Resolving these
+# explicitly prevents a live gh from being misreported as "absent".
+_GH_FALLBACK_PATHS: Tuple[str, ...] = (
+    "/opt/homebrew/bin/gh",
+    "/usr/local/bin/gh",
+    "/usr/bin/gh",
+)
+
+
+def _resolve_gh_binary() -> Optional[str]:
+    """Resolve the gh binary to an absolute path, or None when truly absent.
+
+    First honors the calling PATH via shutil.which (interactive shells), then a
+    short list of absolute fallback paths for environments whose PATH omits the
+    gh directory. Never raises.
+    """
+    found = shutil.which("gh")
+    if found:
+        return found
+    for candidate in _GH_FALLBACK_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _detect_gh(repo_root: Path, gh_binary: Optional[str] = None) -> str:
     """Return 'ok', 'absent', 'auth_failed', or 'timeout'."""
+    gh = gh_binary or _resolve_gh_binary()
+    if not gh:
+        return "absent"
     try:
         result = subprocess.run(
-            ["gh", "auth", "status"],
+            [gh, "auth", "status"],
             capture_output=True, text=True, timeout=10,
             cwd=str(repo_root),
         )
@@ -360,11 +391,16 @@ def _detect_gh(repo_root: Path) -> str:
         return "absent"
 
 
-def _gh_pr_view(pr_number: int, repo_root: Path, timeout: int = 15) -> Optional[Dict[str, Any]]:
+def _gh_pr_view(
+    pr_number: int, repo_root: Path, timeout: int = 15, gh_binary: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Call ``gh pr view <n> --json state,mergedAt``. Returns dict or None on error."""
+    gh = gh_binary or _resolve_gh_binary()
+    if not gh:
+        return None
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", "state,mergedAt"],
+            [gh, "pr", "view", str(pr_number), "--json", "state,mergedAt"],
             capture_output=True, text=True, timeout=timeout,
             cwd=str(repo_root),
         )
@@ -759,8 +795,12 @@ def run_reconcile(
 
     # ------------------------------------------------------------------ step 4a
     # gh detection — absent / auth-failed → all unverified, exit 3.
+    # Resolve the binary once per run and reuse it for every PR lookup, so a
+    # PATH that differs from an interactive shell (launchd/cron background)
+    # cannot flip a live gh to "absent" partway through a run.
     # ------------------------------------------------------------------ step 4a
-    gh_health = _detect_gh(repo_root)
+    gh_binary = _resolve_gh_binary()
+    gh_health = _detect_gh(repo_root, gh_binary)
     if gh_health in ("absent", "auth_failed", "timeout"):
         per_track = [
             {
@@ -828,7 +868,7 @@ def run_reconcile(
         # Fetch live states; cache any MERGED results.
         for pn in prs_to_fetch:
             gh_calls_used += 1
-            data = _gh_pr_view(pn, repo_root)
+            data = _gh_pr_view(pn, repo_root, gh_binary=gh_binary)
             pr_results[pn] = data
             if data is not None and _is_merged(data):
                 pr_cache[str(pn)] = data

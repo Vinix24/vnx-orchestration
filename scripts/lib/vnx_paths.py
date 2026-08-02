@@ -259,6 +259,15 @@ def _resolve_state_project_id(project_root: Path) -> Optional[str]:
          (env > .vnx-project-id file > registry; requires operator+project).
       2. Lenient ``.vnx-project-id`` marker / ``VNX_PROJECT_ID`` env lookup,
          which needs no operator_id — so a fresh ``vnx init`` project resolves.
+      3. ADR-007 git-remote fallback (``git remote get-url origin``), scoped to
+         the given project_root only. This keeps the data-dir resolution
+         consistent with the horizon/pool CLIs and the data_dir_guard fallback:
+         a bare repo whose only identity signal is its origin remote still
+         resolves a project_id, so the state root defaults CENTRAL
+         (``~/.vnx-data/<pid>``) instead of falling back to the repo-local
+         ``<project>/.vnx-data`` (OI-897b). Only reached when the identity
+         chain and marker both yield nothing, so repos that carry a marker or
+         a registry entry are unaffected.
 
     Returns None when no validated project_id is available, so
     _resolve_state_root applies its collision-safe project-local fallback
@@ -273,7 +282,93 @@ def _resolve_state_project_id(project_root: Path) -> Optional[str]:
         pid = getattr(identity, "project_id", None)
         if pid and _PROJECT_ID_RE.match(pid):
             return pid
-    return _project_id_from_marker(project_root)
+    pid = _project_id_from_marker(project_root)
+    if pid:
+        return pid
+    return _project_id_from_git_remote(project_root)
+
+
+def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
+    """Derive a validated project_id from ``git remote get-url origin``.
+
+    Scoped strictly to ``project_root`` — unlike ``project_root.resolve_project_id``
+    this never consults the CWD, so resolving a bare repo does not leak a
+    marker/id from wherever the caller happens to be running.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(project_root), "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    if not out:
+        return None
+    name = out.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    if name and _PROJECT_ID_RE.match(name):
+        return name
+    return None
+
+
+def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
+    """Fail loud when code is ABOUT TO WRITE under the real central store
+    while running under pytest (w19c / test-store-isolation class guard).
+
+    Call this from write surfaces — a manager class's ``__init__``, a
+    ``write_*`` function — right before any file/dir gets created, NOT from
+    generic path resolvers. ``vnx_paths.resolve_paths()`` /
+    ``_resolve_state_root()`` are pure computations used by plenty of
+    legitimate read-only tests that inspect resolution logic without ever
+    touching disk (e.g. ``tests/test_path_resolution_regression.py`` calling
+    ``resolve_paths()`` with a deliberately clean env to assert on shape, not
+    on where it points) — those must keep resolving to wherever production
+    would, even ``~/.vnx-data/vnx-dev``, without failing. Only an imminent
+    WRITE into that path is the actual hazard.
+
+    ``_resolve_state_root``'s branch 3 ("existing central install — keep
+    resolving to ``~/.vnx-data/<id>``") is correct for production, but a
+    landmine when something is about to write there during THIS repo's own
+    test suite: vnx-orchestration IS a real, governed central-store project
+    (``~/.vnx-data/vnx-dev``), so a test that loses its isolation — a
+    stripped ``VNX_DATA_DIR_EXPLICIT``, a leaked ``VNX_PROJECT_ID``, a
+    subprocess with a cleaned env — silently resolves right back to that
+    live store. That is exactly how ``tests/test_pr_dispatch_integration.py``
+    wrote real dispatch-staging files into production governance state, and
+    how ``vnx_mode.write_mode()``'s resolver fallback can flip the live
+    ``mode.json`` from operator to starter, closing the governance door for
+    ``vnx dispatch``.
+
+    Deliberately checks the ACTUAL resolved value rather than requiring
+    ``VNX_DATA_DIR_EXPLICIT=1`` (contrast with the precedent in
+    ``build_t0_state._pytest_db_isolation_guard`` /
+    ``migrate_future_system._pytest_db_isolation_guard``): callers of this
+    function have their own legitimate no-explicit-flag paths (fresh-install
+    / XDG / project-local fallbacks all resolve safely without it), so the
+    flag itself is not the invariant. Landing a WRITE in the real
+    ``~/.vnx-data`` is.
+
+    Production is unaffected: pytest is never in ``sys.modules`` outside a
+    test run.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in _sys.modules:
+        return
+    real_home_vnx_data = (Path(os.path.expanduser("~")) / ".vnx-data").resolve()
+    resolved = resolved.resolve()
+    sep = os.sep
+    if str(resolved) == str(real_home_vnx_data) or str(resolved).startswith(
+        str(real_home_vnx_data) + sep
+    ):
+        raise RuntimeError(
+            f"[TEST ISOLATION GUARD] about to write under the real central "
+            f"store '{resolved}' while running under pytest. A test lost its "
+            "isolation. Set VNX_DATA_DIR_EXPLICIT=1 with a tmp_path-based "
+            "VNX_DATA_DIR before this code runs, or ensure the "
+            "tests/conftest.py _vnx_data_dir_isolation autouse fixture is "
+            "active for this test."
+        )
 
 
 def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:

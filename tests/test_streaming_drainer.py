@@ -25,6 +25,7 @@ from _streaming_drainer import (
     _make_error_event,
     _parse_line,
     _STREAMING_TIER,
+    coerce_chunk_stall,
 )
 
 
@@ -324,6 +325,106 @@ class TestTierLabeling:
         events = list(adapter.drain_stream(proc, "T1", "d-001", event_store=None))
 
         assert events[0].observability_tier == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: OI-903 chunk-stall / total-deadline relationship
+# ---------------------------------------------------------------------------
+
+class TestChunkStallCoercion:
+    """The chunk (stall) timeout must scale with the total deadline."""
+
+    def test_kimi_long_deadline_stall_floor(self):
+        """1200s stall default with a 3600s deadline is floored to 1800s.
+
+        Regression for OI-903: a kimi worker was SIGTERM'd at 1890.6s by the
+        1200s chunk timeout after a legitimate 1200s silent thinking phase.
+        """
+        assert coerce_chunk_stall(1200.0, 3600.0) == 1800.0
+
+    def test_chunk_never_exceeds_total_deadline(self):
+        """A stall timeout above the deadline is capped at the deadline."""
+        assert coerce_chunk_stall(4000.0, 3600.0) == 3600.0
+        assert coerce_chunk_stall(300.0, 900.0) == 450.0
+
+    def test_positive_deadline_floor_unchanged_when_already_above(self):
+        """A chunk already above half the deadline passes through unchanged."""
+        assert coerce_chunk_stall(1800.0, 3600.0) == 1800.0
+
+    def test_nonpositive_values_unchanged(self):
+        """Non-positive deadline or chunk is left alone (loop fires immediately)."""
+        assert coerce_chunk_stall(1200.0, 0.0) == 1200.0
+        assert coerce_chunk_stall(0.0, 3600.0) == 0.0
+        assert coerce_chunk_stall(1200.0, -5.0) == 1200.0
+
+
+class TestStallSurvival:
+    """A worker silent longer than the raw chunk timeout but within its deadline
+    must NOT be killed by the stall detector (OI-903)."""
+
+    def test_long_silence_within_deadline_not_killed(self, monkeypatch):
+        """chunk_timeout=1 with a 10s deadline: the floor raises the effective
+        stall to 5s, so a 2s silent gap between lines survives.
+
+        Red on the old code: the 1s chunk timeout fires at t=1s and the worker
+        is killed before its second line (t=2s) arrives.
+        """
+        monkeypatch.delenv("VNX_CHUNK_TIMEOUT", raising=False)
+        monkeypatch.delenv("VNX_TOTAL_DEADLINE", raising=False)
+
+        script = (
+            "import sys, time\n"
+            'sys.stdout.write(\'{"type":"text","data":{"n":0}}\' + "\\n")\n'
+            "sys.stdout.flush()\n"
+            "time.sleep(2)\n"
+            'sys.stdout.write(\'{"type":"text","data":{"n":1}}\' + "\\n")\n'
+            "sys.stdout.flush()\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,  # own session so _kill_process's killpg is scoped
+        )
+        adapter = _EchoNormalizer()
+        events = list(adapter.drain_stream(
+            proc, "T1", "d-oi903", event_store=None,
+            chunk_timeout=1.0, total_deadline=10.0,
+        ))
+
+        types = [e.event_type for e in events]
+        assert types == ["text", "text"], (
+            f"expected both lines delivered, got {types} (worker was killed by "
+            f"an un-scaled chunk timeout)"
+        )
+        assert not [e for e in events if e.event_type == "error"]
+
+    def test_env_chunk_timeout_override_skips_floor(self, monkeypatch):
+        """VNX_CHUNK_TIMEOUT retains top precedence: an explicit override fires
+        fast even when far below the deadline (no floor applied)."""
+        monkeypatch.setenv("VNX_CHUNK_TIMEOUT", "0.2")
+        monkeypatch.delenv("VNX_TOTAL_DEADLINE", raising=False)
+
+        script = (
+            "import sys, time\n"
+            "sys.stdout.write('hello-not-json')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(5)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,  # own session so _kill_process's killpg is scoped
+        )
+        adapter = _EchoNormalizer()
+        t0 = time.monotonic()
+        events = list(adapter.drain_stream(
+            proc, "T1", "d-env", event_store=None,
+            chunk_timeout=30.0, total_deadline=30.0,
+        ))
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 3.0, f"env override should fire fast, got {elapsed:.2f}s"
+        assert any(e.event_type == "error" for e in events)
 
 
 # ---------------------------------------------------------------------------

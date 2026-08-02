@@ -43,6 +43,7 @@ from adapter_types import (
     SpawnResult,
     StopResult,
 )
+from _streaming_drainer import coerce_chunk_stall  # noqa: E402 — shared stall/deadline rule (OI-903)
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,37 @@ class SubprocessAdapter:
         self._processes[terminal_id] = process
         self._dispatch_ids[terminal_id] = dispatch_id
 
+        # OI-877: record the worker's process group so teardown can find
+        # dispatch processes that escape the worktree (their repo-root
+        # resolves to the main checkout).  Only when the worker runs inside an
+        # isolated dispatch worktree — that is the case whose teardown path
+        # (remove_dispatch_worktree) reads the registry.  The worker runs with
+        # preexec_fn=os.setsid, so its PGID == its PID.  Best-effort: a failed
+        # record degrades to worktree-scan-only teardown.
+        if dispatch_id and cwd is not None:
+            try:
+                _wt = Path(cwd).resolve()
+                if (
+                    len(_wt.parts) >= 3
+                    and _wt.parts[-3] == ".vnx-data"
+                    and _wt.parts[-2] == "worktrees"
+                    and _wt.name.startswith("dispatch-")
+                ):
+                    from dispatch_process_registry import (  # noqa: PLC0415
+                        record_dispatch_pgids,
+                    )
+                    record_dispatch_pgids(
+                        dispatch_id,
+                        [os.getpgid(process.pid)],
+                        repo_root=_wt.parents[2],
+                    )
+            except Exception as _rec_exc:
+                logger.debug(
+                    "subprocess_adapter: dispatch pgid record failed for %s: %s",
+                    dispatch_id,
+                    _rec_exc,
+                )
+
         # Archive previous dispatch events, then clear for new dispatch
         es = self._get_event_store()
         if es is not None:
@@ -593,6 +625,11 @@ class SubprocessAdapter:
             total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
         except (KeyError, ValueError):
             pass
+        # OI-903: the chunk (stall) timeout must scale with the total deadline so a
+        # long deadline stays the binding constraint. Skipped when VNX_CHUNK_TIMEOUT
+        # is set explicitly — env overrides retain top precedence.
+        if "VNX_CHUNK_TIMEOUT" not in os.environ:
+            chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
         # Clear any prior timeout flag for this terminal
         self._timed_out.discard(terminal_id)
         process = self._processes.get(terminal_id)

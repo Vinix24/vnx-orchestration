@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 # Size warning threshold (10 MB per contract)
 _SIZE_WARNING_BYTES = 10 * 1024 * 1024
+# Hard upper bound (50 MB): auto-truncate with emergency archive to prevent
+# lane blockage when teardown never runs. Deliberately higher than the warning
+# threshold so the warning fires first and gives operators time to react.
+_SIZE_HARD_LIMIT_BYTES = 50 * 1024 * 1024
+# Flag file written alongside the oversize NDJSON to make the condition visible
+# to the dispatcher and the operator dashboard (ADR-005 observability).
+_OVERSIZE_FLAG_SUFFIX = ".oversize"
 
 
 def _events_dir() -> Path:
@@ -74,6 +81,11 @@ class EventStore:
     def __init__(self, events_dir: Optional[Path] = None) -> None:
         self._events_dir = events_dir or _events_dir()
         self._sequences: Dict[str, int] = {}
+        # Last dispatch_id appended per terminal (OI-878). Used to detect a
+        # dispatch boundary on the write side so a live file that still holds a
+        # previous dispatch's events (because the end-of-dispatch teardown never
+        # ran) is archived + truncated before the new dispatch's events mix in.
+        self._boundary_terminal: Dict[str, str] = {}
 
     def _terminal_path(self, terminal: str) -> Path:
         return self._events_dir / f"{terminal}.ndjson"
@@ -82,6 +94,70 @@ class EventStore:
         seq = self._sequences.get(terminal, 0) + 1
         self._sequences[terminal] = seq
         return seq
+
+    def _rotate_at_dispatch_boundary(self, terminal: str, new_dispatch_id: str) -> None:
+        """Enforce the per-dispatch ring buffer on the write side (OI-878).
+
+        A new dispatch appending to a live file that still holds a PREVIOUS
+        dispatch's events means the teardown that should have archived + cleared
+        at the end of that dispatch never ran (the door's provider-lane envelope
+        path never calls ``_emit_governance``, so the END-of-dispatch archive is
+        skipped there; the adapter only clears at the START of the next dispatch).
+
+        When that happens, archive the previous dispatch's events under its own
+        dispatch_id and truncate the live file so the new dispatch starts a
+        fresh ring buffer.  This guarantees the archive entry exists under the
+        dispatch that produced the events, instead of the events being stranded
+        in the live file until a manual rescue.
+
+        Idempotent and cheap: the boundary is checked once per (store instance,
+        terminal, dispatch_id) via the in-memory tracker, and the live file is
+        re-read only when the boundary actually changes.  Never raises — a
+        rotation failure degrades to the pre-fix behavior (append to a mixed
+        stream) rather than breaking the event pipeline.
+        """
+        if not new_dispatch_id:
+            return
+        if self._boundary_terminal.get(terminal) == new_dispatch_id:
+            return
+        self._boundary_terminal[terminal] = new_dispatch_id
+
+        path = self._terminal_path(terminal)
+        if not path.exists():
+            return
+        try:
+            if path.stat().st_size == 0:
+                return
+        except OSError:
+            return
+        try:
+            last = self.last_event(terminal)
+        except Exception:  # vnx-silent-except: rotation is best-effort; a read failure must never break the append path
+            last = None
+        if last is None:
+            return
+        prev_dispatch_id = last.get("dispatch_id") or ""
+        if not prev_dispatch_id or prev_dispatch_id == new_dispatch_id:
+            return
+        try:
+            self.archive(terminal, prev_dispatch_id)
+            self.clear(terminal)
+            self._sequences.pop(terminal, None)
+            logger.warning(
+                "event_store: dispatch boundary %s -> %s — archived previous "
+                "dispatch events and cleared live file (end-teardown had not run)",
+                prev_dispatch_id,
+                new_dispatch_id,
+            )
+        except Exception:  # vnx-silent-except: rotation failure degrades to appending to the mixed stream rather than raising into the dispatch
+            logger.warning(
+                "event_store: dispatch boundary rotation failed for %s "
+                "(prev=%s new=%s) — previous events left in place",
+                terminal,
+                prev_dispatch_id,
+                new_dispatch_id,
+                exc_info=True,
+            )
 
     def append(
         self,
@@ -107,6 +183,19 @@ class EventStore:
         if isinstance(event, _CE):
             event.validate_shape()  # raises EventShapeError on schema violations
             effective_dispatch_id = dispatch_id if dispatch_id is not None else event.dispatch_id
+        else:
+            effective_dispatch_id = dispatch_id if dispatch_id is not None else event.get("dispatch_id", "")
+
+        # OI-878: enforce the per-dispatch ring-buffer boundary on the write
+        # side.  When a new dispatch's first event arrives and the live file
+        # still holds a PREVIOUS dispatch's events (the teardown that should
+        # have archived + cleared at the end of that dispatch never ran), archive
+        # the previous dispatch's events under its own dispatch_id and truncate
+        # the live file before appending. Runs BEFORE the envelope is built so a
+        # rotation's sequence reset is visible to this event's sequence number.
+        self._rotate_at_dispatch_boundary(terminal, effective_dispatch_id)
+
+        if isinstance(event, _CE):
             envelope: Dict[str, Any] = {
                 "type": event.event_type,
                 "timestamp": event.timestamp,
@@ -121,7 +210,6 @@ class EventStore:
                 "provider_meta": event.provider_meta,
             }
         else:
-            effective_dispatch_id = dispatch_id if dispatch_id is not None else event.get("dispatch_id", "")
             # Legacy dict path — default tier 2 (buffered) for backwards compat
             envelope = {
                 "type": event.get("type", "unknown"),
@@ -143,14 +231,57 @@ class EventStore:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-        # Size warning
+        # Size warning + oversize flag file so the condition is visible to the
+        # dispatcher dashboard (not just the log stream). Previously 36 warnings
+        # fired without any consumer (OI-858, Cluster E1).
         try:
-            if path.stat().st_size > _SIZE_WARNING_BYTES:
+            st = path.stat()
+            if st.st_size > _SIZE_WARNING_BYTES:
                 logger.warning(
                     "event_store: %s exceeds %d bytes — operator intervention recommended",
                     path,
                     _SIZE_WARNING_BYTES,
                 )
+                # Write a flag file so the dispatcher can surface this without
+                # tailing the log. The flag is terminal-scoped and lives next to
+                # the NDJSON file so it is visible in `vnx pool status`.
+                flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
+                flag_path.write_text(
+                    f"oversize:{terminal}:{st.st_size}:{datetime.now(timezone.utc).isoformat()}\n"
+                )
+        except OSError:
+            pass
+
+        # Hard upper bound: if the file has grown past the hard limit (50 MB),
+        # auto-truncate with an emergency archive so the lane doesn't block.
+        # This must work without any teardown — the write itself is the gate.
+        # The emergency archive uses a synthetic dispatch_id so the events are
+        # not lost, just moved out of the live stream.
+        try:
+            if path.stat().st_size > _SIZE_HARD_LIMIT_BYTES:
+                emergency_id = (
+                    f"emergency-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                )
+                logger.error(
+                    "event_store: HARD LIMIT (%d bytes) exceeded for %s — "
+                    "emergency archive+truncate to prevent lane blockage (OI-858)",
+                    _SIZE_HARD_LIMIT_BYTES,
+                    path,
+                )
+                try:
+                    self.archive(terminal, emergency_id)
+                except Exception as _arch_exc:
+                    logger.error(
+                        "event_store: emergency archive failed for %s: %s",
+                        terminal,
+                        _arch_exc,
+                    )
+                # clear() is called AFTER archive so the archive can read the
+                # full file before truncation. Pass no archive_dispatch_id —
+                # archive was just done above.
+                self.clear(terminal)
+                # Re-count sequences from 1 after emergency truncation
+                self._sequences.pop(terminal, None)
         except OSError:
             pass
 
@@ -215,13 +346,21 @@ class EventStore:
         are archived to .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
         before truncation.
 
-        Also resets the sequence counter.
+        Also resets the sequence counter and removes any oversize flag file.
         """
         if archive_dispatch_id:
             self.archive(terminal, archive_dispatch_id)
 
         path = self._terminal_path(terminal)
         self._sequences.pop(terminal, None)
+        self._boundary_terminal.pop(terminal, None)
+
+        # Remove any oversize flag file on clean teardown
+        flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
+        try:
+            flag_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
         if not path.exists():
             return
@@ -232,6 +371,18 @@ class EventStore:
                 f.truncate(0)
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def oversize_flags(self) -> list[Path]:
+        """Return paths to all oversize flag files currently present.
+
+        Each flag file indicates a terminal whose event file has exceeded the
+        soft warning threshold and has NOT been cleared since.  The dispatcher
+        can call this to surface the condition in ``vnx pool status`` without
+        tailing the log stream (OI-858 consumer).
+        """
+        if not self._events_dir.exists():
+            return []
+        return sorted(self._events_dir.glob(f"*{_OVERSIZE_FLAG_SUFFIX}"))
 
     def event_count(self, terminal: str) -> int:
         """Count events in the NDJSON file for a terminal."""

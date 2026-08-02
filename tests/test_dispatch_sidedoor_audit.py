@@ -66,6 +66,50 @@ def test_process_cleanup_detector_is_not_flagged_as_raw_claude_spawn():
     )
 
 
+def test_check_no_file_derived_data_paths_guard_is_not_flagged_as_delivery_caller():
+    # Regression (OI-898): check_no_file_derived_data_paths.py holds lane/path literals as
+    # DETECTION patterns for its path-guard scan; it never delivers a dispatch and must not
+    # be flagged as a delivery caller (same shape as process_cleanup.py on the raw side).
+    found = audit_mod.scan_delivery_callers()
+    assert "scripts/check_no_file_derived_data_paths.py" not in found, (
+        "check_no_file_derived_data_paths.py is a pattern-definition guard, not a delivery "
+        "caller; it should be excluded from the delivery scan"
+    )
+
+
+def test_delivery_exclusion_does_not_blind_scanner_to_real_new_caller(tmp_path):
+    # the exclusion is scoped to the guard file: a genuinely NEW delivery caller (different
+    # basename) under the same tree IS still returned, proving the scanner is not blind.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "new_side_door.py").write_text(
+        'subprocess.run(["python3", "scripts/lib/subprocess_dispatch.py", "--deliver"])\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_delivery_callers(root=tmp_path)
+    assert "scripts/new_side_door.py" in found, (
+        "scanner went blind: a real new delivery caller is no longer detected"
+    )
+
+
+def test_delivery_exclusion_is_anchored_on_guard_basename(tmp_path):
+    # the rule is substring-anchored on the basename path, not on incidental content: a
+    # planted file NAMED check_no_file_derived_data_paths.py holding a lane literal is
+    # excluded, while the identical content under another name is flagged.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    content = 'LANE = "scripts/lib/subprocess_dispatch.py"\n'
+    (scripts / "check_no_file_derived_data_paths.py").write_text(content, encoding="utf-8")
+    (scripts / "other_guard.py").write_text(content, encoding="utf-8")
+    found = audit_mod.scan_delivery_callers(root=tmp_path)
+    assert "scripts/check_no_file_derived_data_paths.py" not in found, (
+        "basename-anchored exclusion did not apply to the planted guard-named file"
+    )
+    assert "scripts/other_guard.py" in found, (
+        "exclusion leaked beyond the guard basename — identical content must still be flagged"
+    )
+
+
 def test_scan_detects_known_raw_claude_spawns():
     found = audit_mod.scan_raw_claude_spawns()
     for caller in (

@@ -31,10 +31,12 @@ parallel path:
   Lane rule the door enforces: **`claude`/Opus → tmux-spawn lane** (subscription, June-15
   escape; never `provider_dispatch`, never headless `claude -p`); `kimi`/`glm`/`deepseek`
   → `provider_dispatch`. Known interim side door being consolidated by PR-12: the PM
-  plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
-- **Feature/build planning** goes through the roadmap layer (`vnx roadmap`,
-  `roadmap_manager.py`, `build_strategy_projection.py` — waves/objectives), NOT
-  ad-hoc plan docs scattered in `claudedocs/`.
+  horizon plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
+- **Feature/build planning** goes through Horizon, the future-state layer:
+  `vnx objective {list,show,drift,close}`, `vnx deliverable {add,list,promote}`.
+  The tracks DB is the SSOT; ROADMAP.yaml is a static example. Use the `horizon`
+  skill for planning and plan-first gate panel decisions. See
+  `vnx_cli/commands/horizon.py`. NOT ad-hoc plan docs in `claudedocs/`.
 - **Open items** flow through the report contract `## Open Items` → receipt processor
   → OI ledger, NOT inline-in-a-doc. Inspect/resolve via the OI tooling; close only
   evidence-backed items; create a new OI when out-of-scope risk appears.
@@ -43,7 +45,11 @@ parallel path:
 
 ## 1. Runtime guardrails
 
-- T0 = Claude Opus only. T1/T2 = Sonnet-pinned unless the operator reconfigures.
+- T0 = Claude Opus only (`t0-opus-only`, pin_semantics=floor).
+  T1/T2/T3 = free per-dispatch provider/model choice; kimi-k3 fills in when the
+  spec carries no explicit model (`workers-kimi-pinned`, pin_semantics=default).
+  `provider=claude` for a build-worker still requires `VNX_OVERRIDE_WORKER_CLAUDE=1`
+  with an audit reason.
 - Do not rely on runtime `/model` switching. Re-verify worker readiness before the payload.
 - Tri-file for workers (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`); T0 itself uses `CLAUDE.md`.
 - `Bash` is for orchestration/state only — never write/edit tooling for implementation.
@@ -67,7 +73,7 @@ parallel path:
 3. REJECT      status=failure OR risk>0.8 OR blocking findings       → REJECT
 4. ESCALATE    architectural change OR new dependency OR policy      → ESCALATE
 5. INVESTIGATE risk 0.3–0.8 OR advisory=hold                         → DISPATCH follow-up to T3
-6. TERMINAL    all terminals busy (none ready)                       → WAIT
+6. SERIAL      dispatch needs claude-tmux lane AND lane occupied      → WAIT
 7. COMPLETE    completion=100 AND no blockers AND no pending OIs     → COMPLETE
 8. DEFAULT     receipt valid AND work pending                        → DISPATCH
 ```

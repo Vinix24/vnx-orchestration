@@ -60,6 +60,38 @@ def resolve_project_root(caller_file: str | None = None) -> Path:
     )
 
 
+def _run_explicit_data_dir_guard(resolved: Path) -> None:
+    """Run the data-dir/project-id guard on an explicitly pinned data-dir.
+
+    Signal only: this never changes the returned path. In the default
+    (``warn``) mode it emits ``VNXDataDirMismatchWarning`` when the pinned
+    dir does not belong to the active project_id; ``enforce`` raises and
+    ``off`` skips (see ``scripts/lib/data_dir_guard.py``).
+
+    Only the explicit branch (VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1) is
+    guarded — that is the branch the fleet-wide mitigation tells every
+    project to use, and the one that was measured silently accepting a
+    foreign project's data root (OI-900). The default branch is
+    deliberately NOT guarded: it returns the repo-local
+    ``root / ".vnx-data"``, which is legitimately not under
+    ``~/.vnx-data/<project_id>``, so guarding it would flag every ordinary
+    in-repo resolution in every checkout as a mismatch and flood normal
+    use with warnings.
+
+    Deferred import: ``data_dir_guard`` imports ``project_root`` at module
+    level, so a module-level import here would create an import cycle.
+    ``project_root`` is the lowest-level path module in the repo and must
+    stay importable standalone, so a missing guard module fails open.
+    """
+    try:
+        import data_dir_guard
+    except ImportError:  # vnx-silent-except: guard is advisory-only; project_root must stay importable when scripts/lib is not on sys.path
+        return
+    # project_id=None: the guard resolves the ambient id itself and treats
+    # an unresolvable id as "cannot verify" (silent), per its contract.
+    data_dir_guard.check_data_dir_project_id_guard(resolved, None)
+
+
 def resolve_data_dir(caller_file: str | None = None) -> Path:
     """Resolve VNX_DATA_DIR: $PROJECT_ROOT/.vnx-data by default.
 
@@ -70,7 +102,12 @@ def resolve_data_dir(caller_file: str | None = None) -> Path:
     explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
     explicit_val = os.environ.get("VNX_DATA_DIR")
     if explicit_flag and explicit_val:
-        return Path(explicit_val).resolve()
+        resolved = Path(explicit_val).resolve()
+        # Guard fires here, once per resolution; resolve_state_dir /
+        # resolve_dispatch_dir call resolve_data_dir and add no signal of
+        # their own, so one resolution produces at most one guard signal.
+        _run_explicit_data_dir_guard(resolved)
+        return resolved
 
     if explicit_val and not explicit_flag:
         warnings.warn(

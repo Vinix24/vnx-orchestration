@@ -458,54 +458,92 @@ class T0IntelligenceGatherer:
             return
         now = datetime.now().isoformat()
         try:
-            self.quality_db.execute(
+            cur = self.quality_db.execute(
                 "UPDATE pattern_usage SET used_count = used_count + 1, last_used = ?, "
-                "updated_at = ? WHERE pattern_hash = ?",
-                (now, now, pattern_id),
+                "updated_at = ? WHERE pattern_hash = ? OR pattern_id = ?",
+                (now, now, pattern_id, pattern_id),
             )
             self.quality_db.commit()
+            if cur.rowcount == 0:
+                # A zero-row adoption update means the offer/adoption id spaces
+                # diverged (e.g. caller passed a pattern_hash while the live row
+                # keys on pattern_id, or the offer was never registered).  This
+                # must be visible: an invisible zero-row update is exactly how
+                # the ignore-rate measurement went stale (OI-894).
+                log.warning(
+                    "Pattern adoption for %s (dispatch=%s) matched no pattern_usage "
+                    "row — used_count NOT incremented",
+                    pattern_id, dispatch_id,
+                )
         except sqlite3.Error as e:
-            log.debug("Failed to update pattern usage for %s: %s", pattern_id, e)
+            # Recording must never break receipt processing, but a failed
+            # adoption update is a data-path failure and must be visible.
+            log.warning("Failed to update pattern usage for %s: %s", pattern_id, e)
 
     def record_adoption_from_receipt(self, dispatch_id: str, terminal: str,
                                       report_path: str) -> Dict[str, Any]:
         """Correlate a completed receipt's file changes with patterns offered for this dispatch.
 
-        Reads intelligence_usage.ndjson for offer events with this dispatch_id,
-        extracts file paths from the report, and records adoptions for matches.
+        Offers come from two sources, merged per pattern_id:
+        - ``dispatch_pattern_offered`` (quality DB) — the canonical per-dispatch
+          offer store, written by the live intelligence-injection path
+          (intelligence_sources/_recording.py).  This is the single source of
+          truth: the DB row is written unconditionally at injection time, while
+          the ndjson offer writer is guarded on a dispatch_id the primary
+          dispatcher never passes (OI-894).
+        - ``intelligence_usage.ndjson`` — legacy offer events carrying
+          ``file_path``/``title``/``content`` for filename-based correlation.
+
+        A pattern counts as adopted when the report touches its file (legacy
+        filename signal) or, for DB-sourced offers that carry no file_path,
+        when the report's token overlap with the pattern content reaches
+        ``_CONTENT_USE_THRESHOLD`` (same heuristic as the WHY path's ``used``).
 
         When VNX_INJECTION_WHY_ENABLED=1, additionally persists a per-offer
-        used/ignored-reason row (see _record_injection_why) using a stronger,
-        content-overlap signal. That path is purely additive: with the flag off
-        this method's reads/writes/return value are unchanged.
+        used/ignored-reason row (see _record_injection_why). That path is
+        purely additive: with the flag off this method's reads/writes/return
+        value are unchanged.
         """
-        usage_log = self._usage_log_path()
-        if not usage_log.exists():
-            return {"adoptions": 0, "checked": 0}
-
         # Collect offered patterns for this dispatch
         offered: Dict[str, str] = {}  # pattern_id -> file_path
         offered_titles: Dict[str, str] = {}
         offered_content: Dict[str, str] = {}
-        try:
-            with open(usage_log, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("event_type") == "offer" and rec.get("dispatch_id") == dispatch_id:
-                        pid = rec.get("pattern_id", "")
-                        fp = rec.get("file_path", "")
-                        if pid:
-                            offered[pid] = fp
-                            offered_titles[pid] = rec.get("title", "") or ""
-                            offered_content[pid] = rec.get("content", "") or ""
-        except OSError:
-            return {"adoptions": 0, "checked": 0}
+
+        usage_log = self._usage_log_path()
+        if usage_log.exists():
+            try:
+                with open(usage_log, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("event_type") == "offer" and rec.get("dispatch_id") == dispatch_id:
+                            pid = rec.get("pattern_id", "")
+                            fp = rec.get("file_path", "")
+                            if pid:
+                                offered[pid] = fp
+                                offered_titles[pid] = rec.get("title", "") or ""
+                                offered_content[pid] = rec.get("content", "") or ""
+            except OSError as e:
+                log.warning("Failed to read usage log %s: %s", usage_log, e)
+
+        # Merge DB-junction offers (canonical store).  ndjson entries win on
+        # conflict because they carry the file_path needed for the filename
+        # signal; DB rows fill in offers the ndjson writer never logged.
+        for pid, meta in self._db_offers_for_dispatch(dispatch_id).items():
+            if pid not in offered:
+                offered[pid] = meta["file_path"]
+                offered_titles[pid] = meta["title"]
+                offered_content[pid] = meta["content"]
+            else:
+                if not offered_titles.get(pid):
+                    offered_titles[pid] = meta["title"]
+                if not offered_content.get(pid):
+                    offered_content[pid] = meta["content"]
 
         if not offered:
             return {"adoptions": 0, "checked": 0}
@@ -522,11 +560,23 @@ class T0IntelligenceGatherer:
             pass
 
         # Record adoption for patterns whose file_path appears in the report
+        # (filename signal) or — for offers without a file_path, i.e. the
+        # DB-junction store — whose content the report reflects (token-overlap
+        # signal, identical to the WHY path's `used` verdict).
         adoptions = 0
         for pattern_id, fp in offered.items():
             fp_lower = fp.lower() if fp else ""
-            if fp_lower and any(fp_lower.endswith(rf) or rf.endswith(fp_lower.split("/")[-1])
-                                for rf in report_files):
+            file_match = bool(fp_lower) and any(
+                fp_lower.endswith(rf) or rf.endswith(fp_lower.split("/")[-1])
+                for rf in report_files
+            )
+            content_source = offered_content.get(pattern_id) or offered_titles.get(pattern_id) or ""
+            content_match = (
+                not fp_lower
+                and bool(content_source)
+                and _token_overlap_ratio(content_source, text) >= _CONTENT_USE_THRESHOLD
+            )
+            if file_match or content_match:
                 self.record_pattern_adoption(pattern_id, terminal, dispatch_id)
                 adoptions += 1
 
@@ -544,6 +594,83 @@ class T0IntelligenceGatherer:
                 log.debug("Injection WHY instrumentation skipped for %s: %s", dispatch_id, exc)
 
         return {"adoptions": adoptions, "checked": len(offered)}
+
+    def _db_offers_for_dispatch(self, dispatch_id: str) -> Dict[str, Dict[str, str]]:
+        """Read per-dispatch offers from dispatch_pattern_offered (canonical store).
+
+        Returns ``pattern_id -> {"file_path", "title", "content"}``.  The
+        junction stores no file_path, so ``file_path`` is always empty and
+        ``content`` is resolved from the originating catalog row
+        (``intel_ap_N`` -> antipatterns.id N, ``intel_sp_N`` ->
+        success_patterns.id N) for the token-overlap adoption signal.
+        Never raises; a failed lookup is logged at WARNING because an
+        unreadable offer store silently zeroes the adoption measurement.
+        """
+        offers: Dict[str, Dict[str, str]] = {}
+        if not self.quality_db:
+            return offers
+        try:
+            table = self.quality_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='dispatch_pattern_offered'"
+            ).fetchone()
+            if not table:
+                return offers
+            rows = self.quality_db.execute(
+                "SELECT pattern_id, pattern_title FROM dispatch_pattern_offered "
+                "WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.warning("dispatch_pattern_offered lookup failed for %s: %s", dispatch_id, e)
+            return offers
+        for row in rows:
+            pid = row["pattern_id"] if isinstance(row, sqlite3.Row) else row[0]
+            title = row["pattern_title"] if isinstance(row, sqlite3.Row) else row[1]
+            if not pid:
+                continue
+            offers[pid] = {
+                "file_path": "",
+                "title": title or "",
+                "content": self._resolve_pattern_content(pid),
+            }
+        return offers
+
+    def _resolve_pattern_content(self, pattern_id: str) -> str:
+        """Resolve display content for a catalog-backed pattern_id.
+
+        Maps the intelligence-selector id space back to its source row so
+        DB-junction offers get a token-overlap signal.  Returns "" for ids
+        outside the catalog space or when the row is gone — the caller then
+        falls back to the junction's pattern_title.
+        """
+        if not self.quality_db:
+            return ""
+        table = None
+        row_key = ""
+        if pattern_id.startswith("intel_ap_"):
+            table, row_key = "antipatterns", pattern_id[len("intel_ap_"):]
+        elif pattern_id.startswith("intel_sp_"):
+            table, row_key = "success_patterns", pattern_id[len("intel_sp_"):]
+        if not table:
+            return ""
+        try:
+            row_id = int(row_key)
+        except (TypeError, ValueError):
+            return ""
+        try:
+            row = self.quality_db.execute(
+                f"SELECT title, description FROM {table} WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        except sqlite3.Error as e:
+            log.debug("Failed to resolve content for pattern %s: %s", pattern_id, e)
+            return ""
+        if row is None:
+            return ""
+        title = row["title"] if isinstance(row, sqlite3.Row) else row[0]
+        description = row["description"] if isinstance(row, sqlite3.Row) else row[1]
+        return f"{title or ''}\n{description or ''}"[:1000]
 
     def _record_injection_why(
         self,

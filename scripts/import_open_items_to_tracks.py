@@ -35,6 +35,14 @@ Contracts implemented:
   * R4.2 load ALL links by (project_id, oi_id) and supersede/resolve every
     now-obsolete active link, including CLOSURE when there is no current
     mapping (the OI was closed or became unmappable).
+  * OI-929 plan-gate carve-out: synthetic ``OI-PLAN-<track>`` blockers (the
+    plan-first gate, seeded by ``planning_cli._seed_plan_blocker``) are
+    excluded from the R4.2 obsolete-sweep ENTIRELY. They belong to the plan-gate
+    lifecycle, never to the open-items store, and never map to ``open_items.json``
+    — the sweep would otherwise close every one of them on a run. The bridge
+    neither closes nor reopens them (unresolved stays unresolved, resolved stays
+    resolved); the count is reported in ``plan_gate_links_skipped``, never
+    folded into ``unmappable`` (that tally is reserved for real open items).
   * R4.3 require the full resolution schema (migration 0030
     ``resolved_at`` / ``resolution_reason``); a pre-0030 DB fails CLOSED with
     an explicit error (CLI exit 5) and NEVER reports success.
@@ -107,6 +115,7 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 import tracks  # noqa: E402  (single-writer primitives — D1)
+from plan_gate_enforcement import PLAN_OI_PREFIX  # noqa: E402  (synthetic plan-gate OI prefix — canonical home)
 from vnx_ids import PROJECT_ID_RE  # noqa: E402  (canonical project-id format — ADR-007)
 
 DB_FILENAME = "runtime_coordination.db"
@@ -169,6 +178,10 @@ class BridgeResult:
     skipped_malformed: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     ledger_failed: bool = False
+    # OI-929: synthetic OI-PLAN-<track> blocker rows the bridge deliberately
+    # EXCLUDED from the obsolete-sweep. NOT a mutation counter — it counts rows
+    # the bridge chose not to touch, so it survives a run-level rollback as-is.
+    plan_gate_links_skipped: int = 0
 
     @property
     def ok(self) -> bool:
@@ -592,7 +605,25 @@ def import_open_items_to_tracks(
         # C4-N1: a MALFORMED item is untrustworthy input — exclude its oi_id so its
         # existing links are neither closed nor relinked (non-destructive; surfaced).
         malformed = set(result.skipped_malformed)
-        all_oi_ids = sorted((set(desired) | set(existing_by_oi)) - malformed)
+        # OI-929: synthetic plan-gate blockers (OI-PLAN-<track>) belong to the
+        # plan-first gate lifecycle (planning_cli._seed_plan_blocker /
+        # _resolve_plan_blocker), never to the open-items store — their ids never
+        # appear in open_items.json, so the R4.2 obsolete-sweep would close every
+        # one of them on a run. The bridge has no authority over the plan gate:
+        # exclude them from the sweep ENTIRELY (an unresolved blocker stays
+        # unresolved, a resolved one stays resolved) and count the excluded rows
+        # honestly instead of folding them into the unmappable tally.
+        plan_gate_ids = {
+            oi_id for oi_id in set(desired) | set(existing_by_oi)
+            if oi_id.startswith(PLAN_OI_PREFIX)
+        }
+        result.plan_gate_links_skipped = sum(
+            len(existing_by_oi[oi_id]) for oi_id in plan_gate_ids
+            if oi_id in existing_by_oi
+        )
+        all_oi_ids = sorted(
+            (set(desired) | set(existing_by_oi)) - malformed - plan_gate_ids
+        )
         _run_mutations(
             state_dir, conn, project_id, all_oi_ids,
             desired, existing_by_oi, link_source, result,
@@ -738,6 +769,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"reopened={result.reopened} unlinked={result.unlinked} "
         f"skipped={result.skipped} unmappable={len(result.unmappable)} "
         f"skipped_malformed={len(result.skipped_malformed)} "
+        f"plan_gate_links_skipped={result.plan_gate_links_skipped} "
         f"ledger_failed={result.ledger_failed}"
     )
     if result.ledger_failed:

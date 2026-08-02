@@ -241,6 +241,44 @@ def test_rule_non_scoring_with_dissent_still_revises():
     assert d["decision"] == "REVISE"
 
 
+def test_rule_zero_readable_verdicts_is_infra_fail_not_revise():
+    # 0 of N readable: no lane reviewed the plan, so there is NO plan judgment to
+    # hand back. This is an infrastructure failure and must surface as a distinct,
+    # recognizable outcome — never as a content REVISE ("revise the plan and
+    # re-run") for a plan no lane ever saw (2026-07-31 fleet-wide lane block:
+    # 0/5 lanes crashed identically and the gate read it as a plan REVISE).
+    d = pgp.apply_panel_rule([
+        _r("a", "x", dispatched=False),
+        _r("b", "x", dispatched=False),
+        _r("c", "x", parse_error=True),
+    ])
+    assert d["decision"] == "INFRA_FAIL"
+    assert d["pass_count"] == 0 and d["revise_count"] == 0 and d["block_count"] == 0
+    assert "NOT reviewed" in d["rationale"]
+    assert "infrastructure failure" in d["rationale"]
+    assert "non-scoring (abstained): a, b, c" in d["rationale"]
+    # ... while a panel with at least one readable verdict below quorum remains a
+    # (content) REVISE — the INFRA_FAIL floor only fires at ZERO readable voices.
+    d1 = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "x", dispatched=False), _r("c", "x", parse_error=True)])
+    assert d1["decision"] == "REVISE"
+
+
+def test_run_panel_all_lanes_down_returns_infra_fail(tmp_path, monkeypatch):
+    # End-to-end through run_panel: every lane raises (e.g. PermissionError on a
+    # read-only install tree) -> INFRA_FAIL, and the rationale names the lanes.
+    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        raise PermissionError(13, "Permission denied", "/readonly-install/.vnx-data")
+
+    out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=_disp)
+    assert out["decision"] == "INFRA_FAIL"
+    assert "NOT reviewed" in out["summary"]["rationale"]
+    assert all(p["dispatched"] is False for p in out["panelists"])
+
+
 # --------------------------------------------------------------------------
 # run_panel with an injected dispatcher (no live model)
 # --------------------------------------------------------------------------
@@ -645,6 +683,100 @@ def test_sanitize_doc_caps_huge_doc():
     assert "truncated" in out
 
 
+# --------------------------------------------------------------------------
+# doc-truncation VISIBILITY (a gate that reads only part of its input must say
+# so in the verdict, not just in the panelist's own prompt) + the raised,
+# platform-measured ARG_MAX-derived cap, with an env override.
+# --------------------------------------------------------------------------
+
+def test_max_doc_chars_default_is_400k(monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
+    assert pgp._max_doc_chars() == 400_000 == pgp.DEFAULT_MAX_DOC_CHARS
+
+
+def test_max_doc_chars_honors_env_override(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "12345")
+    assert pgp._max_doc_chars() == 12345
+
+
+def test_max_doc_chars_malformed_or_non_positive_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "not-a-number")
+    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "0")
+    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "-1")
+    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
+
+
+def test_doc_truncation_info_reports_no_truncation_for_small_doc(monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
+    small = "## Problem\n## Approach\n"
+    info = pgp._doc_truncation_info(small)
+    assert info == {
+        "truncated": False,
+        "original_chars": len(small),
+        "kept_chars": len(small),
+        "limit_chars": pgp.DEFAULT_MAX_DOC_CHARS,
+    }
+
+
+def test_doc_truncation_info_reports_exact_counts_when_truncated(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "100")
+    doc = "y" * 250
+    info = pgp._doc_truncation_info(doc)
+    assert info == {
+        "truncated": True,
+        "original_chars": 250,
+        "kept_chars": 100,
+        "limit_chars": 100,
+    }
+
+
+def test_run_panel_surfaces_doc_truncation_in_result_and_rationale(tmp_path, monkeypatch):
+    """The core visibility fix: a truncated doc must show up in the RESULT the operator
+    reads (top-level ``doc_truncation`` key, for --json and any programmatic caller) AND
+    in the human-readable summary rationale (so a truncation can never be missed just by
+    reading the one-line verdict) — never silently only in the panelist's own prompt."""
+    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "200")
+    doc = tmp_path / "plan.md"
+    doc.write_text("z" * 500, encoding="utf-8")
+
+    out = pgp.run_panel(
+        doc,
+        track_id="feat-trunc",
+        project_id="p1",
+        panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+        dispatcher=lambda provider, model_arg, instruction, dispatch_id: _make_report_with_fence("pass"),
+    )
+
+    assert out["doc_truncation"] == {
+        "truncated": True,
+        "original_chars": 500,
+        "kept_chars": 200,
+        "limit_chars": 200,
+    }
+    assert "PLAN DOC TRUNCATED" in out["summary"]["rationale"]
+    assert "200 of 500 chars" in out["summary"]["rationale"]
+    # the decision itself is untouched by truncation-visibility — only the disclosure is added
+    assert out["decision"] == "PASS"
+
+
+def test_run_panel_no_truncation_note_when_doc_fits(tmp_path, monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    out = pgp.run_panel(
+        doc,
+        track_id="feat-fits",
+        project_id="p1",
+        panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+        dispatcher=lambda provider, model_arg, instruction, dispatch_id: _make_report_with_fence("pass"),
+    )
+    assert out["doc_truncation"]["truncated"] is False
+    assert "TRUNCATED" not in out["summary"]["rationale"]
+
+
 def test_rule_empty_panel_is_not_pass():
     # a misconfigured empty panel must never fall through to PASS (kimi finding 8)
     d = pgp.apply_panel_rule([])
@@ -761,8 +893,10 @@ def test_missing_report_maps_to_parse_error_revise(tmp_path):
     )
     opus = next(p for p in out["panelists"] if p["label"] == "opus")
     assert opus["parse_error"] is True
-    # A single-panelist panel with a parse_error cannot pass (no_verdict guard).
-    assert out["decision"] == "REVISE"
+    # A single-panelist panel with a parse_error cannot pass (no_verdict guard) —
+    # and with ZERO readable verdicts the outcome is the infrastructure floor
+    # (INFRA_FAIL: the plan was not reviewed), not a content REVISE.
+    assert out["decision"] == "INFRA_FAIL"
 
 
 def test_fenceless_lane_abstains_not_counted_as_phantom_pass(tmp_path):
@@ -1256,23 +1390,59 @@ def test_resolve_data_dir_honors_explicit_value(tmp_path):
 
 
 def test_resolve_data_dir_none_resolves_to_real_path_not_none():
-    # With no caller-supplied data_dir, the resolver must fall back to the SAME helper the
-    # dispatch door uses (project_root.resolve_data_dir) rather than returning None -- a
-    # None base is exactly what broke the opus seat's report lookup (#1102 class bug).
+    # With no caller-supplied data_dir, the resolver must fall back to a real,
+    # absolute path rather than returning None -- a None base is exactly what broke
+    # the opus seat's report lookup (#1102 class bug).
     resolved = pgp._resolve_data_dir(None)
     assert resolved is not None
     assert isinstance(resolved, Path)
     assert resolved.is_absolute()
 
 
-def test_resolve_data_dir_none_matches_project_root_helper():
-    import sys
-    _lib = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
-    if _lib not in sys.path:
-        sys.path.insert(0, _lib)
-    from project_root import resolve_data_dir
+def test_resolve_data_dir_none_resolves_central_store_not_module_location(monkeypatch):
+    # The 2026-07-31 fleet-wide block: in a central install the module file sits in
+    # the read-only ~/.vnx-system/versions/<v>/ tree, so resolving the data dir from
+    # the module's own location (caller_file=__file__) makes every report write die
+    # with EACCES. The resolver must resolve the CENTRAL store for the active
+    # project_id (~/.vnx-data/<project_id>) — the same store provider_dispatch writes
+    # the provider-lane reports to — never a path derived from pgp.__file__.
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    resolved = pgp._resolve_data_dir(None)
+    assert resolved == Path.home() / ".vnx-data" / "vnx-dev"
+    assert resolved != Path(pgp.__file__).resolve().parent.parent.parent / ".vnx-data"
+    assert ".vnx-system" not in resolved.parts
 
-    assert pgp._resolve_data_dir(None) == resolve_data_dir(caller_file=pgp.__file__)
+
+def test_resolve_data_dir_env_override_requires_explicit_flag(tmp_path, monkeypatch):
+    # The two-key contract on the NORMAL path: VNX_DATA_DIR is honored ONLY together
+    # with VNX_DATA_DIR_EXPLICIT=1 (same as project_root.resolve_data_dir /
+    # vnx_paths.resolve_paths). A bare inherited VNX_DATA_DIR is pollution, not
+    # config — ignored (with a warning) in favor of the central store.
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    with pytest.warns(DeprecationWarning, match="VNX_DATA_DIR_EXPLICIT"):
+        resolved = pgp._resolve_data_dir(None)
+    assert resolved == Path.home() / ".vnx-data" / "vnx-dev"
+
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    assert pgp._resolve_data_dir(None) == tmp_path.resolve()
+
+
+def test_resolve_data_dir_unresolvable_project_id_fails_loudly(tmp_path, monkeypatch):
+    # No tempfile fallback: when no project_id can be resolved the gate must fail
+    # LOUDLY — a gate report written to a throwaway dir is a silently lost verdict.
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    # cwd with no .vnx-project-id marker walking up and no git remote ->
+    # project_root.resolve_project_id raises.
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RuntimeError, match="cannot resolve the active project_id"):
+        pgp._resolve_data_dir(None)
 
 
 def _completed_process():

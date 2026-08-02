@@ -8,7 +8,8 @@ implementation. This module runs that panel:
                             each via provider_dispatch (governed: report -> receipt)
                        ->  parse each panelist's structured verdict
                        ->  apply the panel pass/fail rule (PM-SKILL)
-                       ->  PASS | REVISE | BLOCK
+                       ->  PASS | REVISE | BLOCK | INFRA_FAIL (0 readable verdicts —
+                           an infrastructure outcome, never a plan judgment)
 
 The caller (``planning_cli plan-gate run``) resolves the ``OI-PLAN-<track>``
 blocker on PASS, which — via ``track_reconciler`` — flips the track's
@@ -23,6 +24,11 @@ Every lane routes through ``provider_dispatch.py``, so the provider constraints 
 enforced by construction (kimi-via-cli-only, zai-via-openrouter-only,
 no-anthropic-sdk) and each panelist emits a governed report -> receipt: the gate
 that gates everything is itself in the audit trail.
+
+Per-seat verdicts are appended to ``.vnx-attest/plan-gate-seats.ndjson`` (the same
+append-only, hash-chained ledger pattern as the ``plan_gate_pass`` evidence record)
+so the effectiveness probe can see whether every seat responded and what each one
+said — previously only the final resolved record survived the run (OI-888).
 """
 from __future__ import annotations
 
@@ -33,13 +39,21 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
 TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
+
+# Per-seat verdict ledger (OI-888): one append-only, hash-chained record per
+# panelist per run, under the repo's .vnx-attest/ dir next to the plan_gate_pass
+# evidence ledger. Read by the plan-gate effectiveness probe.
+SEAT_LEDGER_RELPATH = ".vnx-attest/plan-gate-seats.ndjson"
+SEAT_RECORD_TYPE = "plan_gate_seat"
 
 # Claude is NOT a provider-lane provider — provider_dispatch refuses it. Claude lanes
 # route via the TMUX-SPAWN lane (interactive `claude` in an ephemeral isolated worktree),
@@ -91,16 +105,75 @@ _VERDICT_CONTRACT = (
 # The plan doc is untrusted input inlined into each panelist's instruction. Two guards:
 #  - a doc must not be able to inject its own verdict fence (verdict spoofing);
 #  - a doc must not blow argv past ARG_MAX when passed as --instruction.
-MAX_DOC_CHARS = 60000
+#
+# DEFAULT_MAX_DOC_CHARS derivation (OI-858-class visibility fix, 2026-07-31): the previous
+# 60_000 was a 10x-too-conservative guess. Measured on this platform (macOS):
+# `getconf ARG_MAX` = 1_048_576 bytes — the ceiling execve() enforces on the COMBINED argv +
+# inherited-environment size for the provider_dispatch.py subprocess this doc is inlined
+# into (the claude/tmux lane instead writes the doc to a temp file and never inlines it, so
+# this cap only bites the kimi/glm/deepseek/codex provider lanes). Budget:
+#   - this module's own wrapper text (rubric + verdict contract + track/report boilerplate)
+#     measures ~1.2k chars around the doc body — negligible;
+#   - the subprocess's inherited environment measured ~3.7KB on this dev machine; budgeted
+#     here at a generous 150_000 bytes so the cap stays safe on much heavier CI/dev
+#     environments too;
+#   - the remaining ~898_000-byte margin is divided by 2 (not 1) bytes/char as a safety
+#     factor for non-ASCII plan-doc content (typographic quotes, em-dashes, arrows), which
+#     costs more than 1 byte/char in UTF-8, rather than assuming pure-ASCII.
+# That yields ~449k chars of headroom; DEFAULT_MAX_DOC_CHARS is set to a round 400_000 —
+# 6.7x the previous cap, comfortably inside the computed margin even under the pessimistic
+# 2-bytes/char assumption (400_000 * 2 = 800_000 doc bytes + 150_000 overhead = 950_000,
+# still ~98KB under ARG_MAX). Overridable via VNX_PLAN_GATE_MAX_DOC_CHARS (same pattern as
+# VNX_PANEL_RETRY) for an exceptional oversized plan.
+DEFAULT_MAX_DOC_CHARS = 400_000
+MAX_DOC_CHARS = DEFAULT_MAX_DOC_CHARS  # the no-override default; effective cap is _max_doc_chars()
+
+
+def _max_doc_chars() -> int:
+    """Effective plan-doc truncation cap: ``VNX_PLAN_GATE_MAX_DOC_CHARS`` override, default
+    ``DEFAULT_MAX_DOC_CHARS``. A malformed or non-positive value falls back to the default —
+    same override pattern as ``_panel_retry_count``."""
+    raw = os.environ.get("VNX_PLAN_GATE_MAX_DOC_CHARS", "").strip()
+    if not raw:
+        return DEFAULT_MAX_DOC_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_DOC_CHARS
+    return value if value > 0 else DEFAULT_MAX_DOC_CHARS
 
 
 def _sanitize_doc(doc_text: str) -> str:
     # Neutralize any embedded verdict fence so a plan doc cannot spoof a PASS: a space
     # after the backticks breaks the exact ```vnx-plan-verdict opener parse_verdict matches.
     safe = doc_text.replace("```" + VERDICT_FENCE, "``` " + VERDICT_FENCE + " (neutralized)")
-    if len(safe) > MAX_DOC_CHARS:
-        safe = safe[:MAX_DOC_CHARS] + f"\n\n[... plan doc truncated at {MAX_DOC_CHARS} chars for the gate ...]"
+    limit = _max_doc_chars()
+    if len(safe) > limit:
+        safe = safe[:limit] + f"\n\n[... plan doc truncated at {limit} chars for the gate ...]"
     return safe
+
+
+def _doc_truncation_info(doc_text: str) -> Dict[str, Any]:
+    """Whether ``_sanitize_doc`` will truncate this doc when inlined into a panelist
+    instruction, and by how much.
+
+    Mirrors ``_sanitize_doc``'s length check EXACTLY (same verdict-fence neutralization,
+    same effective cap) so the info reported here can never drift from what actually gets
+    truncated. This is the fix for the silent-partial-read defect: a gate that only reads
+    part of its input must say so in the verdict it hands back, not just in the panelist's
+    own prompt — see ``run_panel``, which attaches this to the top-level result and folds a
+    note into the summary rationale whenever ``truncated`` is True.
+    """
+    safe = doc_text.replace("```" + VERDICT_FENCE, "``` " + VERDICT_FENCE + " (neutralized)")
+    limit = _max_doc_chars()
+    original_chars = len(safe)
+    truncated = original_chars > limit
+    return {
+        "truncated": truncated,
+        "original_chars": original_chars,
+        "kept_chars": min(original_chars, limit),
+        "limit_chars": limit,
+    }
 
 
 _RUBRIC = (
@@ -312,6 +385,7 @@ def parse_verdict(report_text: str) -> Dict[str, Any]:
 class PanelistResult:
     label: str
     provider: str
+    model: str = ""                  # the model_arg the panelist was dispatched with
     verdict: str = "revise"          # pass | revise | block
     blocking_findings: List[str] = field(default_factory=list)
     rationale: str = ""
@@ -319,6 +393,9 @@ class PanelistResult:
     dispatched: bool = False         # did the dispatch + report read succeed
     parse_error: bool = False
     error: str = ""
+    raw_text: str = ""               # OI-839: the lane's raw report, kept ONLY on
+                                     # parse_error so the unparseable output survives
+                                     # for diagnosis instead of vanishing with the tempfile
 
 
 def _decision(decision: str, block: int, revise: int, passes: int, rationale: str) -> Dict[str, Any]:
@@ -342,6 +419,10 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     the abstention is transparent, never silent.
 
     Over the SCORING (readable) lanes only:
+    - infra floor: ZERO readable verdicts is NOT a plan judgment — the plan was never
+      reviewed. That returns INFRA_FAIL (an infrastructure outcome, distinct from every
+      content verdict) so a fleet-wide lane breakage can never read as an inhoudelijk
+      REVISE ("revise the plan") for a plan no lane ever saw.
     - quorum: require >= 2 readable verdicts to certify (a single voice can't fold to PASS).
     - any BLOCK -> REVISE.
     - >= 2 REVISE -> REVISE.
@@ -361,6 +442,18 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     block = sum(1 for r in scoring if r.verdict == "block")
     revise = sum(1 for r in scoring if r.verdict == "revise")
     passes = sum(1 for r in scoring if r.verdict == "pass")
+
+    if not scoring:
+        # 0 of N readable: every lane failed to dispatch or produced an unreadable
+        # verdict. The plan was NOT reviewed — this is an infrastructure failure,
+        # not a plan verdict, and must never read as "revise the plan and re-run".
+        return _decision(
+            "INFRA_FAIL", block, revise, passes,
+            f"0 readable verdicts of {len(results)} — no lane produced a verdict, so "
+            "the plan was NOT reviewed. This is an infrastructure failure, not a plan "
+            "judgment: fix the lanes and re-run the gate"
+            f"{ns_note}",
+        )
 
     # Liveness quorum: a multi-member panel must keep >= 2 readable voices to certify, so a
     # degraded 3-panel with only one readable lane can't pass on a single voice. A DELIBERATE
@@ -413,12 +506,31 @@ def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optiona
 
 
 def _resolve_data_dir(data_dir: Optional[str]) -> Path:
-    """Resolve the data_dir the claude/tmux-lane report is written under and read back from.
+    """Resolve the data_dir the panel reports are written under and read back from.
 
-    A caller-supplied ``data_dir`` wins. When omitted, resolve via the SAME helper the
-    dispatch door itself uses (``project_root.resolve_data_dir``, invoked by
-    ``tmux_interactive_dispatch.py``'s ``_resolve_state_dir`` as
-    ``resolve_state_dir(caller_file=__file__).parent``) instead of degrading to ``None``.
+    Resolution order (matches the rest of the fabric):
+      1. A caller-supplied ``data_dir`` wins.
+      2. ``VNX_DATA_DIR`` — honored on the NORMAL path, and ONLY when
+         ``VNX_DATA_DIR_EXPLICIT=1`` is also set (the same two-key contract as
+         ``project_root.resolve_data_dir`` / ``vnx_paths.resolve_paths``). A bare
+         inherited ``VNX_DATA_DIR`` is pollution, not config: it is ignored with a
+         warning, never silently honored.
+      3. The central store for the ACTIVE project: ``~/.vnx-data/<project_id>`` via
+         ``project_root.resolve_project_id()`` (env > ``.vnx-project-id`` marker >
+         git remote) + ``project_root.resolve_central_data_dir()`` — the same store
+         ``provider_dispatch._resolve_data_dir`` writes the provider-lane reports to,
+         so the write path and ``_read_report``'s read-back base always agree.
+
+    The data dir must NEVER be derived from this module's own location: in a central
+    install ``__file__`` sits inside the read-only ``~/.vnx-system/versions/<v>/``
+    tree, so ``resolve_data_dir(caller_file=__file__)`` resolves the keystone and
+    every report write dies with EACCES (fleet-wide plan-gate block, 2026-07-31 —
+    latent since the lane existed; surfaced when pinned version dirs went read-only).
+
+    There is deliberately NO tempfile fallback: a gate report that must be read back
+    from a throwaway dir is a silent verdict loss, not a degradation. When no
+    project_id can be resolved this raises — loudly — instead of writing state the
+    gate will never find.
 
     A ``None`` base means ``_read_report``'s base-fallback path can never resolve the
     claude/tmux-lane report: unlike ``provider_dispatch``, that lane prints no ``Report:``
@@ -429,12 +541,32 @@ def _resolve_data_dir(data_dir: Optional[str]) -> Path:
         return Path(data_dir)
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
+
+    explicit_val = os.environ.get("VNX_DATA_DIR", "").strip()
+    if explicit_val:
+        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+            return Path(explicit_val).expanduser().resolve()
+        warnings.warn(
+            f"VNX_DATA_DIR env-var set ({explicit_val}) but VNX_DATA_DIR_EXPLICIT=1 "
+            "is required for it to be honored. Ignoring and resolving the central "
+            "store for the active project_id instead. "
+            "See https://github.com/Vinix24/vnx-orchestration/issues/225",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    from project_root import resolve_central_data_dir, resolve_project_id  # noqa: PLC0415
     try:
-        from project_root import resolve_data_dir  # noqa: PLC0415
-        return resolve_data_dir(caller_file=__file__)
-    except Exception:
-        # Not a git repo and no VNX_CANONICAL_ROOT — last-resort fallback, same as before.
-        return Path(os.environ.get("VNX_DATA_DIR") or tempfile.gettempdir())
+        project_id = resolve_project_id()
+    except Exception as exc:
+        raise RuntimeError(
+            "plan-gate panel: cannot resolve the active project_id, so there is no "
+            "central store to write panel reports to. Set VNX_PROJECT_ID, run from a "
+            "project with a .vnx-project-id marker, or pass data_dir explicitly. "
+            "(No tempfile fallback: a gate report written to a throwaway dir is a "
+            "silently lost verdict.)"
+        ) from exc
+    return resolve_central_data_dir(project_id)
 
 
 def _make_default_dispatcher(
@@ -604,18 +736,107 @@ def _dispatch_one(
     """
     try:
         report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
-    except Exception as exc:  # dispatch / report-read failure -> no verdict
+    except Exception as exc:  # vnx-silent-except: dispatch/report-read failure -> no verdict, recorded as abstain
         return PanelistResult(
             label=member["label"], provider=member["provider"],
+            model=member.get("model_arg", ""),
             dispatched=False, error=str(exc), report_path=dispatch_id,
         )
     parsed = parse_verdict(report_text)
+    # OI-839: on parse_error the raw lane output is the ONLY diagnostic that tells
+    # us WHAT failed to parse (trailing comma, prose-bleed, nested fence). Keep it
+    # on the result so _emit_seat_records can persist it into the hash-chained
+    # seat ledger — previously it vanished with the temporary report file.
     return PanelistResult(
         label=member["label"], provider=member["provider"],
+        model=member.get("model_arg", ""),
         verdict=parsed["verdict"], blocking_findings=parsed["blocking_findings"],
         rationale=parsed["rationale"], parse_error=parsed["parse_error"],
         dispatched=True, report_path=dispatch_id,
+        raw_text=report_text if parsed["parse_error"] else "",
     )
+
+
+def _find_repo_root(start: Path) -> Optional[Path]:
+    """Walk ``start`` and its parents for a ``.git`` marker (dir or file).
+
+    Subprocess-free mirror of ``project_root.resolve_project_root``'s git
+    resolution: a worktree's ``.git`` is a FILE, a normal checkout's is a
+    directory — ``exists()`` covers both. The canonical helper is not used here
+    because it shells out through ``subprocess.run``, which the dispatcher-env
+    tests mock and count (they assert exactly one subprocess call per panel).
+    """
+    for d in [start, *start.parents]:
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def _resolve_seat_ledger_path(data_dir: Optional[str]) -> Optional[Path]:
+    """Resolve the per-seat verdict ledger path, or ``None`` with no repo anchor.
+
+    The governed path (``planning_cli plan-gate run`` -> ``run_panel``) always
+    passes ``data_dir``; the repo root is resolved by the ``.git`` marker so the
+    seat ledger lands next to the ``plan-gates.ndjson`` evidence ledger under
+    ``.vnx-attest/``. A caller with no ``data_dir`` (e.g. a test injecting a
+    dispatcher) gets ``None`` and skips persistence unless it passes
+    ``seat_ledger_path`` explicitly (OI-888).
+    """
+    if not data_dir:
+        return None
+    root = _find_repo_root(Path(__file__).resolve().parent) or _find_repo_root(Path.cwd())
+    if root is None:
+        return None
+    return root / SEAT_LEDGER_RELPATH
+
+
+def _emit_seat_records(
+    results: List[PanelistResult],
+    *,
+    track_id: str,
+    project_id: str,
+    seat_ledger_path: Optional[Path],
+) -> None:
+    """Append one append-only, hash-chained ``plan_gate_seat`` record per panelist.
+
+    Best-effort and non-raising: seat persistence must never break the gate it
+    hangs off (same contract as ``plan_gate_evidence.emit_plan_gate_pass``). Each
+    record carries the panelist id, model, the effective verdict (``abstain`` for
+    a non-scoring lane), and whether a report was returned at all — the durable
+    per-seat signal the effectiveness probe reads. Previously nothing survived
+    beyond the single resolved ``plan_gate_pass`` record (OI-888).
+    """
+    if not seat_ledger_path or not results:
+        return
+    try:
+        from ndjson_hash_chain import append_chained_entry  # noqa: PLC0415
+        now = datetime.now(timezone.utc).isoformat()
+        for result in results:
+            effective_verdict = (
+                result.verdict
+                if (result.dispatched and not result.parse_error)
+                else "abstain"
+            )
+            record = {
+                "type": SEAT_RECORD_TYPE,
+                "track_id": track_id,
+                "project_id": project_id,
+                "panelist_id": result.label,
+                "model": result.model,
+                "verdict": effective_verdict,
+                "responded": result.dispatched,
+                "parse_error": result.parse_error,
+                "run_at": now,
+            }
+            # OI-839: carry the raw lane output on parse-error records so the
+            # unparseable text is preserved in the durable, hash-chained ledger
+            # for diagnosis — a later parser hardening can be built against the
+            # REAL failure mode instead of a guessed one.
+            if result.parse_error and result.raw_text:
+                record["raw_output"] = result.raw_text
+            append_chained_entry(seat_ledger_path, record)
+    except Exception:  # vnx-silent-except: seat persistence must never break the gate
+        return
 
 
 def run_panel(
@@ -627,16 +848,20 @@ def run_panel(
     dispatcher: Optional[DispatcherFn] = None,
     data_dir: Optional[str] = None,
     timeout_seconds: int = 900,
+    seat_ledger_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run the plan-first panel over ``doc_path`` and return the verdict.
 
     ``dispatcher`` is injectable; when omitted the governed provider_dispatch
     dispatcher is used. Returns a dict with the overall ``decision``
-    (PASS|REVISE|BLOCK), the rule ``summary``, and per-panelist detail.
+    (PASS|REVISE|BLOCK, or INFRA_FAIL when no lane produced a readable verdict —
+    an infrastructure failure, not a plan judgment), the rule ``summary``, and
+    per-panelist detail.
     """
     panel = panel or DEFAULT_PANEL
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, timeout_seconds)
     doc_text = Path(doc_path).read_text(encoding="utf-8")
+    doc_truncation = _doc_truncation_info(doc_text)
     instruction = build_plan_review_instruction(doc_text, track_id)
 
     retries = _panel_retry_count()
@@ -657,10 +882,32 @@ def run_panel(
         results.append(result)
 
     summary = apply_panel_rule(results)
+    if seat_ledger_path is None:
+        seat_ledger_path = _resolve_seat_ledger_path(data_dir)
+    _emit_seat_records(
+        results, track_id=track_id, project_id=project_id, seat_ledger_path=seat_ledger_path,
+    )
+    if doc_truncation["truncated"]:
+        # The gate must never certify a verdict while silently hiding that it only read
+        # PART of the plan — fold an explicit, quantified note into the rationale (the one
+        # field every consumer — CLI text, --json, callers reading result["summary"]) already
+        # surfaces, alongside the structured detail below for a caller that wants the exact
+        # counts.
+        pct = 100.0 * doc_truncation["kept_chars"] / doc_truncation["original_chars"]
+        summary = {
+            **summary,
+            "rationale": (
+                summary["rationale"]
+                + f"; PLAN DOC TRUNCATED: gate read {doc_truncation['kept_chars']} of "
+                f"{doc_truncation['original_chars']} chars ({pct:.1f}%) — verdict may be "
+                "based on an incomplete plan"
+            ),
+        }
     return {
         "track_id": track_id,
         "project_id": project_id,
         "decision": summary["decision"],
         "summary": summary,
         "panelists": [r.__dict__ for r in results],
+        "doc_truncation": doc_truncation,
     }

@@ -12,7 +12,7 @@ would auto-dismiss its own tool calls (fabrication) rather than execute them.
 
 Authentication: OAuth via `kimi login` (operator-managed). No API key in spawn.
 
-OUTPUT FORMAT (kimi-cli 1.44.0, wire protocol 1.10):
+OUTPUT FORMAT (kimi-cli 1.46.0, wire protocol 1.10):
     `--output-format stream-json` emits Anthropic-style content-block message
     objects, one JSON object per line, with NO ``event_type`` field. Each line:
 
@@ -28,8 +28,16 @@ OUTPUT FORMAT (kimi-cli 1.44.0, wire protocol 1.10):
     ``text``); reasoning in blocks where ``type == "think"`` (field ``think``).
     The whole assistant message arrives end-loaded (after the model finishes
     thinking), so per-chunk stall detection must tolerate a long first-token gap.
-    Token/usage accounting is NOT reported by this format — usage is recorded as
-    explicitly-unavailable rather than a silently-measured zero.
+    Token/usage accounting is NOT reported by this format — measured on
+    kimi-cli 1.46.0 (the installed CLI) on both plain and tool-using workloads.
+    The default ``--print`` event-stream (no ``--output-format``) DOES carry a
+    ``StatusUpdate`` event with ``token_usage=TokenUsage(input_other, output,
+    input_cache_read, input_cache_creation)``, but as Python-repr display text,
+    not NDJSON — the line-based drainer would mis-parse it. The measured tokens
+    are instead recovered post-run from the session's ``wire.jsonl`` via
+    ``kimi export <session_id>`` (see ``_harvest_session_token_usage``). If that
+    harvest yields nothing, usage is recorded as explicitly-unavailable rather
+    than a silently-measured zero.
 
     Legacy ``event_type`` event-stream shapes (pre-1.44) are still parsed for
     backward compatibility.
@@ -43,9 +51,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
-import time
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -54,7 +64,7 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from _streaming_drainer import StreamingDrainerMixin  # noqa: E402
+from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -76,20 +86,24 @@ class KimiSpawnResult:
 
     @property
     def token_usage_measured(self) -> bool:
-        """True when actual token accounting was observed in the stream.
+        """True when actual token accounting was observed.
 
-        kimi-cli 1.44.0 stream-json does not report token accounting, so this
-        is False when token_usage is None (no token_count event was observed).
-        Available as an attribute for receipt/metadata consumers without being
-        part of the cross-provider frontmatter_fields() contract.
+        kimi-cli 1.46.0 stream-json does not report token accounting in the
+        stream; tokens are recovered post-run from the session's ``wire.jsonl``
+        (see ``_harvest_session_token_usage``). This is False when token_usage
+        is None — either the harvest was skipped (failed dispatch) or the
+        session export yielded no StatusUpdate. Available as an attribute for
+        receipt/metadata consumers without being part of the cross-provider
+        frontmatter_fields() contract.
         """
         return self.token_usage is not None
 
     def frontmatter_fields(self) -> Dict[str, Any]:
-        # kimi-cli 1.44.0 stream-json reports no token accounting, and completion_text
-        # is the (often empty) final message — not the agentic generation volume — so
-        # there is no reliable token count to report. Honest "unavailable" zeros with
-        # token_usage_measured=False; the scorer renders tokens/sec as n/a for kimi.
+        # kimi-cli 1.46.0 stream-json reports no token accounting in the stream,
+        # and completion_text is the (often empty) final message — not the agentic
+        # generation volume. Measured tokens arrive via the post-run wire.jsonl
+        # harvest (token_usage set) or stay honestly unavailable (token_usage=None,
+        # zeros + token_usage_measured=False; the scorer renders tokens/sec as n/a).
         usage = self.token_usage or {}
         return {
             "provider": "kimi",
@@ -375,6 +389,124 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
     if work_dir:
         cmd.extend(["-w", str(work_dir)])
     return cmd
+
+
+# kimi prints the resume handle to stderr after every --print run:
+#   "To resume this session: kimi -r <session_id>"
+# The session id is the key to the session's wire.jsonl, where the CLI records
+# the measured token accounting that stream-json itself never emits.
+_SESSION_ID_RE = re.compile(r"kimi\s+(-r|--resume)\s+([0-9a-fA-F-]+)")
+
+
+def _extract_session_id(stderr_text: str) -> Optional[str]:
+    """Return the kimi session id from the stderr resume line, or None.
+
+    ``kimi --print`` writes ``To resume this session: kimi -r <id>`` to stderr
+    on every run. The id is a UUID-ish string (dashes allowed). Missing or
+    malformed stderr returns None — the caller then skips the token harvest and
+    stays honestly unavailable.
+    """
+    m = _SESSION_ID_RE.search(stderr_text or "")
+    return m.group(2) if m else None
+
+
+def _parse_wire_token_usage(wire_jsonl: str) -> Optional[Dict[str, int]]:
+    """Aggregate ``StatusUpdate.token_usage`` from a session ``wire.jsonl``.
+
+    Each line is ``{"timestamp": ..., "message": {"type": "...", "payload": ...}}``.
+    A ``StatusUpdate`` payload carries the model call's accounting as
+    ``token_usage=TokenUsage(input_other, output, input_cache_read,
+    input_cache_creation)``. ``input_other`` and ``output`` are per-call NEW
+    tokens — summed across calls for the run total. ``input_cache_read`` is the
+    cumulative context-cache read for that call, so the LAST one is the run
+    total; ``input_cache_creation`` likewise.
+
+    Returns None when no StatusUpdate with a token_usage payload is present
+    (fail-open: the caller reports unavailable rather than a fabricated zero).
+    Malformed lines are skipped non-fatally.
+    """
+    total_input = 0
+    total_output = 0
+    last_cache_read = 0
+    last_cache_creation = 0
+    found = False
+    for line in (wire_jsonl or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("type") != "StatusUpdate":
+            continue
+        payload = msg.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tu = payload.get("token_usage")
+        if not isinstance(tu, dict):
+            continue
+        found = True
+        total_input += int(tu.get("input_other", 0) or 0)
+        total_output += int(tu.get("output", 0) or 0)
+        last_cache_read = int(tu.get("input_cache_read", 0) or 0)
+        last_cache_creation = int(tu.get("input_cache_creation", 0) or 0)
+    if not found:
+        return None
+    return {
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "cache_read_tokens": last_cache_read,
+        "cache_creation_tokens": last_cache_creation,
+    }
+
+
+def _harvest_session_token_usage(
+    session_id: str,
+    env: Dict[str, str],
+    cwd_str: Optional[str] = None,
+    timeout: float = 30.0,
+) -> Optional[Dict[str, int]]:
+    """Export the session and read StatusUpdate token_usage from its wire.jsonl.
+
+    Keeps the lane's token-less stream-json output (canonical events unchanged)
+    while still reporting the API's measured token accounting: after a clean
+    run, ``kimi export <session_id> -o <tmp.zip> --yes`` materialises the
+    session archive and the ``wire.jsonl`` inside it records every StatusUpdate
+    the CLI saw. Fail-open: any failure (export error, missing wire.jsonl, no
+    StatusUpdate) returns None — the receipt stays 'unavailable', never broken.
+    """
+    zip_path: Optional[Path] = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="kimi-wire-")
+        zip_path = Path(tmp_dir) / "session.zip"
+        export_cmd = ["kimi", "export", session_id, "-o", str(zip_path), "--yes"]
+        proc = subprocess.run(
+            export_cmd,
+            capture_output=True, text=True, timeout=timeout, env=env, cwd=cwd_str,
+        )
+        if proc.returncode != 0 or not zip_path.exists():
+            logger.debug(
+                "kimi_spawn: session export failed (rc=%s) — tokens stay unavailable",
+                proc.returncode,
+            )
+            return None
+        with zipfile.ZipFile(zip_path) as zf:
+            wire = zf.read("wire.jsonl").decode("utf-8", errors="replace")
+        return _parse_wire_token_usage(wire)
+    except Exception as exc:  # noqa: BLE001 — harvest must never break the dispatch
+        logger.debug("kimi_spawn: token harvest failed (fail-open): %s", exc)
+        return None
+    finally:
+        if zip_path is not None:
+            try:
+                import shutil as _shutil
+                _shutil.rmtree(zip_path.parent, ignore_errors=True)
+            except Exception:  # vnx-silent-except: cleanup must never raise
+                pass
 
 
 def _worktree_has_changes(worktree: Any, base_ref: str = "origin/main") -> Optional[bool]:
@@ -744,11 +876,16 @@ def spawn_kimi(
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
     The per-chunk stall default is 1200s (overridable via VNX_KIMI_STALL_THRESHOLD):
-    Kimi is a reasoning model whose 1.44.0 content-block output is end-loaded, so
+    Kimi is a reasoning model whose 1.46.0 content-block output is end-loaded, so
     the first token can arrive only after a long reasoning gap (a 300s default
     spuriously killed adversarial-review dispatches mid-think). A FAILURE is
     returned (never a silent empty
     success) when the CLI emits output but no answer text is extracted.
+
+    Token accounting: stream-json never carries it (measured on 1.46.0). On a
+    clean run the session is exported post-run and the StatusUpdate token_usage
+    read from its ``wire.jsonl`` (``_harvest_session_token_usage``); result.token_usage
+    is filled when that succeeds, stays None otherwise — fail-open, no estimates.
 
     event_writer signature: ``(terminal_id, event_dict, dispatch_id=...)`` called
     per normalized event. Failures are counted in result.event_writer_failures.
@@ -771,6 +908,11 @@ def spawn_kimi(
         total_deadline = float(os.environ.get("VNX_KIMI_TIMEOUT", total_deadline))
     except (TypeError, ValueError):
         pass
+    # OI-903: scale the stall timeout with the total deadline so a long spec
+    # deadline is the binding constraint, not a fixed 1200s silence. Skipped when
+    # VNX_KIMI_STALL_THRESHOLD is set explicitly — env overrides retain precedence.
+    if "VNX_KIMI_STALL_THRESHOLD" not in os.environ:
+        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     env = _isolate_kimi_env({**os.environ, **(extra_env or {})})
     cwd_str = str(cwd) if cwd is not None else None
@@ -826,7 +968,7 @@ def spawn_kimi(
         event_store=event_store, chunk_timeout=chunk_timeout,
         total_deadline=total_deadline,
     )
-    return _finalize_kimi_result(
+    result = _finalize_kimi_result(
         proc=proc, completion_text=completion_text,
         events_written=events_written, token_usage=token_usage,
         timed_out=timed_out, stopped_early=stopped_early,
@@ -837,3 +979,20 @@ def spawn_kimi(
         saw_tool_calls=saw_tool_calls,
         worktree=cwd,
     )
+
+    # Post-run token harvest. stream-json carries no token accounting (measured
+    # on kimi-cli 1.46.0), so on a clean run the session is exported and the
+    # StatusUpdate token_usage the CLI recorded is read from its wire.jsonl.
+    # Fail-open: no session id, export failure, or missing StatusUpdate leaves
+    # token_usage None — the receipt stays honestly unavailable, never broken.
+    if result.error is None and result.returncode == 0 and result.token_usage is None:
+        try:
+            stderr_text = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+        except Exception:  # noqa: BLE001 — harvest must never break the dispatch
+            stderr_text = ""
+        session_id = _extract_session_id(stderr_text)
+        if session_id:
+            harvested = _harvest_session_token_usage(session_id, env, cwd_str)
+            if harvested:
+                result.token_usage = harvested
+    return result

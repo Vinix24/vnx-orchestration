@@ -470,7 +470,13 @@ class IntelligenceSelector:
         return selected
 
     def emit_event(self, result: InjectionResult, coord_state_dir=None) -> Optional[str]:
-        """Emit an injection or suppression coordination event."""
+        """Emit an injection or suppression coordination event.
+
+        Retries with bounded deadline on sqlite lock contention (OI-868).
+        Raises :exc:`CoordinationLockError` when the lock cannot be acquired
+        within the deadline — a lost audit event must be visible, not silently
+        logged at WARNING.
+        """
         if not result.dispatch_id or not str(result.dispatch_id).strip():
             raise ValueError("emit_event: dispatch_id required for audit attribution")
         state_dir = coord_state_dir or self._coord_state_dir
@@ -482,12 +488,30 @@ class IntelligenceSelector:
             return None
         event_type = "intelligence_injection" if result.items_injected > 0 else "intelligence_suppression"
         reason = f"injected {result.items_injected} items at {result.injection_point}" if result.items_injected > 0 else "no items met minimum thresholds"
+        # Classification lives in coordination_retry, not here: both writers
+        # (this one and _recording.record_injection_audit) must recognize the
+        # same lock-busy failures, and the helper owns that contract.  OI-880:
+        # SQLite's own "database is locked" OperationalError is the same lost
+        # lock race the deadline sentinel reports, so it must reach callers as
+        # CoordinationLockError too — not vanish into the generic except below.
+        from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
+        deadline = deadline_for_timeout(DEFAULT_LOCK_TIMEOUT_SECONDS)
         try:
-            with get_connection(state_dir) as conn:
+            with get_connection(state_dir, timeout=DEFAULT_LOCK_TIMEOUT_SECONDS) as conn:
+                rearm_busy_timeout(conn, deadline)
                 event_id = _append_event(conn, event_type=event_type, entity_type="dispatch", entity_id=result.dispatch_id, actor="intelligence_selector", reason=reason, metadata=result.to_event_metadata())
+                rearm_busy_timeout(conn, deadline)
                 conn.commit()
             return event_id
+        except CoordinationLockError:
+            raise
         except Exception as exc:
+            if is_lock_timeout_error(exc):
+                raise CoordinationLockError(
+                    "Coordination DB write lock deadline exhausted — "
+                    "database is locked after busy_timeout; "
+                    "audit event NOT written"
+                ) from exc
             logger.warning("emit_event: failed to append coordination event for dispatch %s: %s", result.dispatch_id, exc)
             return None
 

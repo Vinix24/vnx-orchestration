@@ -4,6 +4,128 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.4.2] — 2026-08-02
+
+Patch release (42 commits since 1.4.1). Headline: the **reconcile chain and the cleanup of the open-item administration**. Open items went **from 773 to 53 across eight triage rounds** (#1304, #1305, #1307, #1315, #1316, #1317, #1318, #1319, #1320, #1321, #1323) — not a list-tidying exercise but the repair of an administration that was reporting itself green. The automatic close-out reconciler **stood still for 31 hours on a broken `gh` lookup path** and booked that as "does not exist" instead of as an outage (#1314). The bridge between findings and planning **would have wiped all 70 plan-gate blockers the moment it was switched on**; that only surfaced because it was measured against a copy of the production database (#1322). Workers on the provider lane **ran without their role instructions** (#1313, OI-926), and role validation was a silent default instead of a check (#1312, OI-921). The **refactor program has started**: the two proof tools landed in `scripts/` with their own tests (#1325), and the first verified moves are in (#1328, #1329).
+
+### Fixed
+
+Reconcile chain:
+
+- **Auto-close reconciler dead for 31 hours on a bare `gh` lookup (#1314)** — `_detect_gh`/`_gh_pr_view` shelled out to bare `gh`; on a non-interactive PATH (launchd/cron) that is `FileNotFoundError` → "absent", so every nominated track became unverified, nothing closed, and the outage read as "no merged PR". The binary is now resolved once per run to an absolute path (`shutil.which`, then `/opt/homebrew/bin` etc.), and `track_freshness` gained the real autoclose health read: `reconciled` renamed to `derived_refreshed`, plus `autoclose_degraded` from `reconcile_summary.json` with a 24h staleness threshold (measured cadence p90 ~3.2h — ordinary idle does not trip it, the 31h outage does).
+- **OI-bridge obsolete-sweep would have wiped all 70 plan-gate blockers (#1322, OI-929)** — the R4.2 sweep closed every active link whose oi_id was not in `open_items.json`; synthetic `OI-PLAN-<track>` blockers never appear there, so one bridge run resolved every plan-first gate blocker (measured 70→0 in a single run against a production-DB copy — and the supervisor tick runs this bridge automatically). The OI-PLAN namespace is now excluded from the sweep: the bridge has no authority over the plan-gate lifecycle.
+- **Reconcile worker bound to its own session lifetime (#1292, OI-873, OI-877)** — the SessionStart hook spawned a detached reconcile worker that nothing ever killed; the SessionEnd hook now kills the worker of its own session via a per-session marker under the central `$VNX_STATE_DIR` (ADR-026), not a repo-local `.vnx-data/state`.
+- **End-of-dispatch event teardown in the envelope path (#1291, OI-878, OI-902)** — the door's provider-lane envelope path never archived/cleared the per-dispatch event ringbuffer at end-of-dispatch; rotation only happened on the *next* dispatch's write-side boundary guard, so the last dispatch in a series leaked its events into the live `T{n}.ndjson`. `_govern` now archives under the dispatch's own id before the receipt and clears after it in a `finally`; a live file holding a *different* dispatch's events is left for the boundary guard.
+- **Stale `_archive_dispatch_events` mock aligned to the tuple signature (#1327, OI-933)** — the helper returns `(events_path, clear_ok)` since #1291; the mock still returned `None` and failed receipt-stamping tests with `TypeError`.
+
+Role governance:
+
+- **Role validation is enforced, not a silent default (#1312, OI-921)** — the bridge silently filled the backend-developer sentinel for any unset role and the deferred `compile_plan` registry check was never built, so nobody was ever forced to choose a role (20/20 dispatches on 2026-08-01 carried the default). An unset role is now staged as explicit `""` and rejected loud at the door; `compile_plan` rejects roles outside the registry discovered from `agents/` (fail-closed on an empty registry); `agents/**` ships in the wheel so the check works in pip installs too. A consciously chosen backend-developer stays valid.
+- **Provider-lane workers ran without their role instructions (#1313, OI-926)** — the provider/envelope lanes assembled the final prompt *without* the role's own CLAUDE.md context: a dispatch staged as quality-engineer got byte-identical context to one staged as system-architect. Both lanes now route through the same lane-neutral injector (`scripts/lib/skill_context.py`), and a deterministic whitespace-normalized containment check (no LLM) stamps `role_applied`/`role_tier`/`role_source_path` on the receipt — true only when the resolved role source's content actually reached the prompt, so the ledger records what was *used*, not what was requested.
+- **Staged `spec.role` propagated into envelope/provider receipts (#1303)** — the GOVERN paths resolved the receipt role from `dispatch_metadata` only, so a genuinely-roled dispatch landed as `identity_unresolved` whenever the DB join came up empty (21,095 of 21,779 receipts carried no role). One canonical resolver (caller role → dispatch_metadata → `identity_unresolved`; never the fake default) is wired into all three paths.
+
+Dispatch, paths, CLI:
+
+- **`vnx --version` reads VERSION before pip metadata (#1284)** — `_read_version()` asked `importlib.metadata` first, so the dist-info stamp (written once at editable-install time) always won over the VERSION file that moves with the code: `--version` reported a version unrelated to the running code, and `vnx init` pinned brand-new projects to the stale, already-pruned version.
+- **Gate worktree lock dir + PR head branch resolved correctly (#1285, OI-904, OI-905)** — the lock dir assumed `<root>/.git` is a directory and crashed with `NotADirectoryError` in a linked worktree before any gate ran (now derived from `git rev-parse --git-common-dir`); and `gate.sh` derived `--branch` from the local checkout, so T0 gating from main silently gated `origin/main` instead of the PR branch — the gate agent's reads missed the diff under review (now resolved from `gh pr view --json headRefName`, with a loud warning fallback).
+- **Reachability probe authenticated + HTTP status propagated to receipts (#1286, OI-893, OI-866)** — the dry-run probe sent unauthenticated requests to auth-gated endpoints, so it returned 401 by construction and every healthy keyed route looked dead; the probe now carries the lane's own key and reports 401 as AUTH REJECTED with a key hint, never as unreachable. And a litellm HTTP error status was dropped in normalization, collapsing receipts to "(no error captured)"; the status code now survives the normalize → consume → finalize chain into `failure_reason`/`failure_class`.
+- **`mode.json` resolved through the fabric resolver + fail-loud write guard (#1290, OI-911)** — `_mode_file_path` read `VNX_DATA_DIR` raw — a fourth resolver without the two-key contract; a cleaned-env subprocess lost the flag and its write silently fell back to `~/.vnx-data/vnx-dev`, flipping mode operator→starter and closing the governance door for `vnx dispatch`. Now resolved via `vnx_paths` like every other consumer, with a write guard that refuses divergent or cross-project targets.
+- **Pin honored by install identity; doctor separates pin from active (#1294, OI-892, OI-914)** — reexec compared VERSION strings, so a rolling dir like `versions/edge` satisfied a version pin while carrying arbitrary commits; now compared by resolved install dir (path identity), and the doctor reports the project's `.vnx-version` pin and the active install dir as separate fields.
+- **Receipts routed to the active project store + reference-safe version prune (#1308, OI-900, OI-912)** — two receipt writers resolved the runtime root without the active project context (a hardcoded `vnx-dev` fallback; a `__file__`-anchored state dir inside the shared versions tree), landing 21 plan-gate receipts in the wrong tenant store and 29 in the version dir; both now follow the ADR-007 resolution chain, failing closed when no project is resolvable. And `vnx update` pruned version dirs the console script still pointed at, killing `vnx --version`; the prune now scans candidates for live pip/symlink references and protects them with a message + audit event.
+- **Central-first state readers (#1309, OI-859, OI-897b)** — `dispatch_guard.sh` read a repo-local `t0_brief.json` that does not exist in a fresh checkout; it now reads runtime state via `vnx status --json` (degraded-check preserved, one source so the divergence-check is gone). The T0 SessionStart hook resolves the central state/logs dirs via `vnx_paths` with an explicit interpreter — no more repo-local-write / central-read split-brain. And in a bare git repo with only an origin remote, `project_id` resolved but the data dir fell back repo-local, crashing `vnx horizon list`; the ADR-007 git-remote fallback is now scoped to the project root.
+- **Central claim registry + `awaiting_permission` detection (#1311, OI-861, OI-863)** — the dispatch-id claim registry lived in repo-local state, forking the map exactly as far apart as the racing worktrees; it now lives in the canonical central state root and simultaneous claims from different project roots serialize on one shared map. And a detached tmux worker stuck on a Claude Code permission prompt showed no event, no receipt, no exit — only the hours-long dispatch deadline would ever fire; a pure pane classifier now labels `awaiting_permission` (recoverable — one relayed answer saves the worker — and explicitly NOT a dead worker), so the lane relays instead of fast-aborting.
+- **SC2155/F821 lint fixes in the dispatch path (#1297, OI-268, OI-288)** — `local x="$(cmd)"` declare-and-assigns (which mask the command's exit code) split in `dispatch.sh`; runtime import of `ExecutionPlan`/`ExecutionPermit` so `get_type_hints` resolves the string annotations in `dispatch_envelope`.
+
+Analytics and observability:
+
+- **Token rows linked to dispatches + provider-lane receipts priced (#1293, OI-872, OI-882)** — the conversation analyzer inspected only the first Dispatch-ID match per message, hit the `<dispatch_id>` template placeholder, and stopped: 96.7% of token rows stayed unlinkable. It now scans every mention for the first valid ID plus a backfill phase for already-analyzed rows (measured on a scratch copy: linked 40→621). And the envelope hardcoded `cost_usd=None` — provider-lane receipts carried real token_usage but no price; the chain broke on conversion, not measurement. The envelope now resolves the actual spawned model, computes cost, and emits the ADR-005 cost event.
+- **tmux `list-panes` failure surfaced via `degraded_reasons` (#1295, OI-558)** — the panes subprocess-failure path degraded busy/idle classification silently (sessions still listed, every pane command treated as absent); a failing probe is now logged and visible on the operator dashboard.
+- **Dream reviews surfaced in t0_state + `dream_cycles` freshness producer (#1300, OI-896)** — two silent producers gained readers: a `dream_reviews` section in `build_t0_state` (pending count, oldest age) and a producer-freshness key, so an unreviewed completed cycle goes stale and silence becomes a signal within a day.
+
+Triage rounds — measurement reports (no code change, verdicts with file:line evidence):
+
+- **T2: OI-105..128 re-tested (#1296)** — twelve items from 2026-06-03; the large majority proven outdated against main, OI-105 unjudgeable (non-reproducible runtime incident).
+- **OI-005..560 batch re-tested (#1304)** — 4 outdated, 1 unjudgeable, 7 still-standing advisory/design items; side-observation: ADR-005 doc-drift on the dispatch_register path.
+- **T12: OI-699..766 re-tested (#1307)** — 9 outdated with evidence, 3 still-standing design items; the kimi/phantom-guard/report-contract items are fixed on main or their mechanism is removed.
+- **R1: OI-005..629 re-tested (#1315)** — 1 outdated (the gemini runner failure mode was structurally replaced), 11 still-standing advisory/design items.
+- **R5: OI-818..833 re-tested (#1319)** — 3 outdated (worker-provider free choice landed; the refuted codex-round-3 claim), 9 still-standing design items.
+- **T9 report landed (#1324)** — the OI-561..655 verdicts from an earlier triage branch whose code fix already reached main via #1301; without this PR the evidence trail for that batch was missing.
+
+Triage rounds — small fixes, each with a test red on main:
+
+- **Five month-old OI-ledger findings closed (#1299, OI-003, OI-004, OI-015, OI-017)** — `traceability_audit` strategy 2b now matches normalized event types (legacy `event: pr_merged` receipts traced) and strategy 4 requires ≥2 significant branch tokens so a lone `feat` token cannot attach an unrelated dispatch; `index_adrs` record hash includes `project_id` (same-content cross-project collision ended); `claim_next_queued_dispatch` restores the caller's `isolation_level` in a `finally`; `pool_manager` spawn redirects child stdout/stderr to DEVNULL instead of undrained PIPE buffers that can deadlock.
+- **F821 `PrEnforcementResult` in tmux dispatch (#1301, OI-645)** — the string annotation was an undefined name (imported only inside an except-handler), so `get_type_hints()` failed with `NameError`; module-level import + regression test.
+- **Function-size splits with AST guards (#1302, OI-547, OI-558)** — `_check_hook_paths` (89→57 lines) and `_operator_get_sessions` (83→42); both carry ≤70-line AST guards that were red on the old code.
+- **Shell lint in receipt/session hooks (#1305, OI-678, OI-679, OI-684)** — `receipt_processor.sh` tests the exit status directly instead of `$?` (SC2181) and splits four declare-and-assigns (SC2155); `sessionstart.sh` drops the dead ROLE/TRACK override block that was never read or exported.
+- **`hook_settings_written` event + ReceiptV2 contract constants (#1316, OI-804, OI-817)** — the tmux lane now emits the event after a successful `settings.local.json` write (ADR-005 audit gap closed), and `ReceiptV2.__post_init__` forces `schema_version=2`/`event_type=task_complete` so the constants can no longer be bypassed.
+- **R3: four small fixes (#1317, OI-695, OI-775, OI-796, OI-798)** — `vnx init --force` clobbered the project-owned `.claude/settings.json` (now always preserved, same contract as the `.vnx-version` pin); `terminal_snapshot` enriches `claimed_by`/`lease_expires_at` from `dashboard_status.json`; receipt enrichment used `setdefault` for `session_id`, preserving null/blank (now a truthiness guard); the five timestamp markers wrote with truncating `echo >` (now atomic tmp+rename, same as the freshness write).
+- **R2: five small fixes (#1318, OI-656, OI-657, OI-660, OI-669, OI-670)** — `sessionstart.sh` splits model-invocable vs operator-only skills (architect/t0-orchestrator no longer advertised as invocable); tmux-protocol test helpers select completion blocks by content instead of position; a zero-byte `skills.yaml` is re-seeded and `validate_skill` raises a clear `ValueError`; shellcheck SC2154/SC2155 closed in `rp_delivery.sh`.
+- **R7: analyzer fail-closed exit code + marker footer (#1320, OI-862, OI-890)** — `conversation_analyzer` ignored its own RunStats return, so a night in which *all* sessions failed ended with exit 0; it now exits 1 with a "fail" heartbeat when errors>0 and nothing was analyzed. The marker-syntax + noqa-rejection rule is codified in the canonical T0 role footer so every dispatch carries it.
+- **R8: five small fixes (#1321, OI-908, OI-916, OI-918, OI-919, OI-925)** — the f39-replay tests (31 real headless `claude -p` calls) are marked `live` and deselected by default, with the opt-in restricted so `-m "not integration"` no longer silently collects them; `test_session_reconcile_lifetime.sh` exports `VNX_STATE_DIR` (a bare assignment does not reach child processes); the envelope clears live events only after a *successful* archive (clear-on-archive-fail wiped exactly the events that had to be kept); four permanently-red stale flag-gate tests rewritten to the current door contract; `_fail_loud_on_empty_success` gives a descriptive message instead of "(no error captured)".
+- **R6: raw lane output on parse-error + kimi test staleness (#1323, OI-839, OI-846)** — the plan-gate panel persists the raw lane output of parse-error seats into the hash-chained seat ledger, so parser hardening can be built against the real failure mode instead of a guessed one; the five red-on-main kimi tests (plus a hidden codex variant) were test-vs-code drift after the kimi-lane hardening — stale model keys and mock signatures updated.
+
+Also on main, preserved for T0 verification: two salvaged worker change sets whose lanes were killed externally mid-flight without a receipt (#1287 drain-thread-leak, #1288 chunk-timeout-deadline) — unreviewed, not merged on that basis.
+
+### Changed
+
+- **Refactor proof tools landed in `scripts/` with their own tests (#1325, phase 0)** — `refactor_equivalence.py` and `refactor_surface.py` moved out of `claudedocs/refactor-tools/`, fixing three T0 findings on the way: `_find` searched *all* scopes via `ast.walk` and could silently match a nested closure with the same name (now top-level/class body only, with a loud ambiguity failure); a dead module-level `REPO` constant removed; and the cwd-relative `--lib-dir` default replaced by the module bootstrap as the single mechanism, with a test hardened to actually be able to go red (PYTHONPATH scrubbed).
+- **Deterministic-first design principle + role routing table (#1298, docs)** — the system-architect agent must name the deterministic vs model-backed parts of a design and justify every model use; the T0 worker dispatch policy now states that backend-developer is the sentinel default and must never be chosen out of convenience — the role follows the work, not the terminal.
+- **First moves of the `track_reconciler` split (#1328, #1329)** — `_compute_derived_status` → `scripts/lib/track_reconciler_status.py` and `close_track_if_done` → `scripts/lib/track_reconciler_closure.py`: pure moves, AST-identical as proven by the new equivalence tool, re-exported at the old location so no consumer changed. `track_reconciler.py` drops 1143 → 667 lines, and its silently-broken ADVISORY ONLY contract is verifiably restored: the remaining file provably writes only `tracks.derived_status`.
+
+## [1.4.1] — 2026-08-01
+
+Patch release (8 commits since 1.4.0). Headline: the **fleet-wide plan-gate unblock** — in a central install the plan-gate resolved its data dir from the module's own location inside the read-only pinned version dir, so every plan-gate on the machine died with `PermissionError` on `~/.vnx-system/versions/<v>/.vnx-data` across all five provider lanes and every project. The data dir is now resolved from the central store for the active `project_id`, plus seven hardening fixes across the dispatch, gate, audit, and scheduler paths.
+
+### Fixed
+
+- **Plan-gate data-dir resolution (#1280)** — the headline fix. `resolve_data_dir(caller_file=__file__)` anchored to the module's own location, which in a central install sits inside the read-only pinned version dir; now resolved from the central store for the active `project_id`. Same anchor fixed in `provider_costs._resolve_costs_path`, which mkdir's `events/` on every provider-lane dispatch and is why all five lanes failed identically. Also: 0-of-N readable verdicts now returns `INFRA_FAIL` instead of `REVISE` — a plan that was never reviewed must not read as a plan judgment.
+- **Plan-gate probe degraded semantics + per-seat verdicts (#1275, OI-888)** — `degraded` fires on an all-attest ledger, and per-seat verdicts are persisted.
+- **Dispatch-boundary ringbuffer rotation enforced on the write side (#1276, OI-878)**.
+- **Dream scheduler job runnable after install (#1277, OI-895)** — the installed job now actually runs under launchd/cron.
+- **Adoption reader reads the DB offer junction (#1278, OI-894)** — zero-row updates become visible.
+- **Declared review gates wired to evidence (#1279, OI-876/OI-881)** — gates connected via obligations.
+- **Side-door delivery scan skips pattern-definition guards (#1281, OI-898)** — those guards hold lane literals as detection patterns and never deliver.
+- **Project-id guard on `project_root.resolve_data_dir`'s explicit branch (#1282, OI-899)** — the `VNX_DATA_DIR` + `VNX_DATA_DIR_EXPLICIT=1` branch was completely unchecked while `vnx_paths` was already guarded. Advisory by default (`VNX_DATA_DIR_GUARD=warn`).
+
+## [1.4.0] — 2026-07-31
+
+The fourth minor (47 commits since 1.3.1). Headlines: the **ReceiptV2 schema contract with measured token capture** (claude-harness transcript harvest for all providers and a session `wire.jsonl` harvest for kimi), **worker-provider free choice shipped end-to-end** (ModelPin floor-vs-default semantics, workers default-pinned), the **producer-freshness monitor** that makes silent producer death visible within a day, the **door writing a dispatches row on acceptance**, provider-lane **failure classification with a dead-route registry**, **ringbuffer truncate on every teardown path**, phantom-guard **worktree-branch resolution**, and **coordination-lock hardening** (bounded retry + process-group cleanup).
+
+### Added
+
+- **ReceiptV2 schema contract + role/receipt_kind propagation (#1229–#1235, #1237)** — ReceiptV2 and SynthesizedLaneReceipt contracts codified; role + receipt_kind propagated into v2 emit and govern-synthesized receipts; receipt_kind stamped on all remaining emitters with lint flipped to raise; converter role resolver + write-time capture-gap backfill; token-capture from claude transcripts; tool-call signals + dispatch→PR/rework columns; closed-outcome-status via recompute.
+- **Measured token capture for the harness lanes (#1269, #1270)** — `token_usage` harvested for all claude-harness providers (OI-884) and measured kimi tokens harvested from the session `wire.jsonl`.
+- **Worker-provider free choice (#1239, #1240, #1244, #1245)** — ModelPin contract (behavior-neutral), door coercion honors `ModelPin.semantics`, D4 floor-vs-default branching, and the worker pin_semantics flip from floor to default.
+- **Producer-freshness monitor (#1267)** — silent producer failure becomes visible within a day.
+- **Door writes a dispatches row on acceptance (#1266, OI-847)** — accepted dispatches enter the register from the door.
+- **Provider-lane failure classification (#1264, OI-866/867)** — classified failure reasons + dead-route registry + dry-run reachability check.
+- **Ringbuffer truncate on all teardown paths (#1263, OI-858)** — with a hard upper bound.
+- **Worker-scope PreToolUse enforcement hook (#1223)** — worktree-wired, default OFF.
+- **Gated, audited operator escape-hatch (#1220)** — routes one build task back to claude.
+- **`deadline_seconds` threaded spec → spawn (#1259)**; **`requires_mcp` threaded through the plan boundary (#1268, OI-865)**.
+- **CI out-of-repo symlink guard (#1256)** — tests referencing code outside the repo are caught.
+- **Pinned version dirs read-only after install (#1255)**; **premigrate backup skipped on no-op runs + rotation on three mechanisms (#1258)**.
+
+### Changed
+
+- **Build-worker default stays kimi-k3** — a quota-exhaustion flip to sonnet (#1221) was reverted (#1222); the audited escape-hatch (#1220) is the supported claude route.
+
+### Fixed
+
+- **Phantom-guard worktree-branch resolution (#1253, #1262)** — prefers the pushed branch over the worktree diff in the provider lane and detects a self-referencing `base_ref`.
+- **Coordination-lock hardening (#1260)** — bounded lock retry + process-group cleanup on worktree teardown.
+- **Plan-gate doc truncation surfaced in the verdict (#1265)** — with the ARG_MAX-derived cap raised.
+- **Analyzer correctness (#1248, #1261)** — project_id, ollama fast-fail, billing guard, atomic writes; placeholder dispatch_id rejected and the token_usage chain closed.
+- **Billing classifier classifies the real dispatch population (#1243, OI-824)**; **fail-closed close-gate on incomplete delivery (#1242, OI-829)**.
+- **Provenance-chain seams closed (#1238, #1241, #1246)** — the automated sweep commits instead of silently rolling back; the four data-fill seams blocking the chain are closed; the receipt-provenance write transaction is narrowed.
+- **Deliberation-panel reliability (#1236, OI-809/810/811)**.
+- **kimi-spawn fabrication guard made commit-aware (#1225)** — tree-diff supersedes the earlier blind guard.
+- **T0 role modernised (#1257)** — free-per-dispatch pins, horizon planning, serial lane.
+- **OI acceptance-criterion guard landed in the source repo (#1254)**; **reconcile-hook interpreter anchor + singleton guard (#1247)**.
+- **Diagnostics hardening (#1249)** — gate-name validation, merge-base `pr_size`, holder metadata, classified failures.
+- **Skills paths: scoping dropped from horizon/planner/control-centre (#1250)**.
+- **Docs corrected (#1251)** — stale references for #1246/#1248/#1249/#1250 replaced; runtime-liveness inventory added.
+
 ## [1.3.1] — 2026-07-23
 
 Patch release. Headlines: **kimi-k3 is the default build-worker** for T1/T2/T3, the pip CLI **honors the `.vnx-version` pin via startup re-exec** (hardened against cwd-local `vnx_cli` shadowing), **`vnx release publish --tag`** cuts immutable central-store versions with pin-safe GC, the **deepseek-v4-flash migration** off the discontinued deepseek-chat, and **symlink-safe `vnx init` scaffold writes**.

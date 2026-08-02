@@ -17,6 +17,7 @@ Verifies objective_reconcile.run_reconcile:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -248,10 +249,12 @@ def _make_gh_mock(
             call_log.append(list(cmd))
         if not isinstance(cmd, (list, tuple)) or not cmd:
             return subprocess.CompletedProcess(cmd, 1, "", "bad cmd")
-        if cmd[0] == "gh" and len(cmd) >= 2 and cmd[1] == "auth":
+        # objective_reconcile now invokes gh via its resolved absolute path.
+        cmd0 = os.path.basename(str(cmd[0]))
+        if cmd0 == "gh" and len(cmd) >= 2 and cmd[1] == "auth":
             rc = 0 if auth_ok else 1
             return subprocess.CompletedProcess(cmd, rc, "", "")
-        if cmd[0] == "gh" and len(cmd) >= 3 and cmd[1] == "pr" and cmd[2] == "view":
+        if cmd0 == "gh" and len(cmd) >= 3 and cmd[1] == "pr" and cmd[2] == "view":
             pr_num = int(cmd[3])
             resp = pr_responses.get(pr_num)
             if resp is None:
@@ -277,6 +280,16 @@ def _open_pr() -> Dict[str, str]:
 
 def _closed_pr() -> Dict[str, str]:
     return {"state": "CLOSED", "mergedAt": ""}
+
+
+def _is_gh_pr_view(cmd: list) -> bool:
+    """True when cmd invokes ``gh pr view`` — cmd[0] may be the resolved absolute path."""
+    return (
+        len(cmd) >= 3
+        and os.path.basename(str(cmd[0])) == "gh"
+        and cmd[1] == "pr"
+        and cmd[2] == "view"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +489,64 @@ def test_gh_absent_all_unverified_exit3_nothing_closed(tmp_path, monkeypatch):
     assert _phase(sd, "T-nogh") == "active"  # untouched
 
 
+def test_detect_gh_finds_absolute_path_when_gh_off_path(tmp_path, monkeypatch):
+    """gh absent from PATH but present at a fallback absolute path → _detect_gh "ok".
+
+    Red on old code: the old _detect_gh shells out to a bare "gh", which a
+    stripped PATH cannot resolve → FileNotFoundError → "absent" (assert fails).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_gh = tmp_path / "bin" / "gh"
+    fake_gh.parent.mkdir()
+    fake_gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_gh.chmod(0o755)
+
+    # Strip every dir that could hold gh from PATH.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    # New-code contract: no PATH hit, fallback list points at the fake binary.
+    # On old code these attributes do not exist — guard so the behavioral
+    # assertion below still runs and fails on the old resolver.
+    if hasattr(objective_reconcile, "shutil"):
+        monkeypatch.setattr(objective_reconcile.shutil, "which", lambda name: None)
+    if hasattr(objective_reconcile, "_GH_FALLBACK_PATHS"):
+        monkeypatch.setattr(objective_reconcile, "_GH_FALLBACK_PATHS", (str(fake_gh),))
+
+    seen: list = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        if cmd and cmd[0] == str(fake_gh):
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise FileNotFoundError(f"no such binary: {cmd[0] if cmd else ''}")
+
+    monkeypatch.setattr(objective_reconcile.subprocess, "run", fake_run)
+
+    assert objective_reconcile._detect_gh(repo) == "ok"
+    assert seen, "expected a gh auth status subprocess call"
+    assert seen[0][0] == str(fake_gh), "must invoke the resolved absolute path, not bare gh"
+
+
+def test_detect_gh_absent_when_binary_truly_nowhere(tmp_path, monkeypatch):
+    """_detect_gh says "absent" when the resolver finds no gh binary anywhere.
+
+    The probe must be able to say no. Red on old code: the resolver contract
+    (_resolve_gh_binary) does not exist, so the test cannot set up the no-gh
+    world and the old code resolves a live gh → "ok" instead of "absent".
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    if hasattr(objective_reconcile, "shutil"):
+        monkeypatch.setattr(objective_reconcile.shutil, "which", lambda name: None)
+    if hasattr(objective_reconcile, "_GH_FALLBACK_PATHS"):
+        monkeypatch.setattr(objective_reconcile, "_GH_FALLBACK_PATHS", ())
+
+    assert objective_reconcile._resolve_gh_binary() is None
+    assert objective_reconcile._detect_gh(repo) == "absent"
+
+
 def test_max_gh_calls_defers_second_candidate(tmp_path, monkeypatch):
     """--max-gh-calls 1 with 2 candidates → first proceeds, second is deferred; exit 0."""
     sd = _build_db(tmp_path)
@@ -500,7 +571,7 @@ def test_max_gh_calls_defers_second_candidate(tmp_path, monkeypatch):
     assert summary["counts"]["confirmed"] + summary["counts"]["deferred"] == 2
 
     # Count pr-view calls (excluding auth call)
-    pr_view_calls = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    pr_view_calls = [c for c in call_log if _is_gh_pr_view(c)]
     assert len(pr_view_calls) == 1
 
 
@@ -522,7 +593,7 @@ def test_merged_cache_second_run_no_gh_pr_view(tmp_path, monkeypatch):
     )
     assert code1 == 0
     assert summary1["counts"]["confirmed"] == 1
-    pr_view_calls_1 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    pr_view_calls_1 = [c for c in call_log if _is_gh_pr_view(c)]
     assert len(pr_view_calls_1) == 1
 
     # Reset log for second run
@@ -535,7 +606,7 @@ def test_merged_cache_second_run_no_gh_pr_view(tmp_path, monkeypatch):
     assert code2 == 0
     assert summary2["counts"]["confirmed"] == 1
 
-    pr_view_calls_2 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    pr_view_calls_2 = [c for c in call_log if _is_gh_pr_view(c)]
     assert len(pr_view_calls_2) == 0, "second run must NOT re-fetch a cached MERGED PR"
 
 
@@ -611,13 +682,15 @@ def test_cache_is_repo_scoped(tmp_path, monkeypatch):
         call_log.append(list(cmd))
         if not isinstance(cmd, (list, tuple)) or not cmd:
             return subprocess.CompletedProcess(cmd, 1, "", "")
-        if cmd[0] == "gh" and len(cmd) >= 2 and cmd[1] == "auth":
+        # objective_reconcile now invokes gh via its resolved absolute path.
+        cmd0 = os.path.basename(str(cmd[0]))
+        if cmd0 == "gh" and len(cmd) >= 2 and cmd[1] == "auth":
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        if cmd[0] == "gh" and len(cmd) >= 3 and cmd[1] == "pr" and cmd[2] == "view":
+        if cmd0 == "gh" and len(cmd) >= 3 and cmd[1] == "pr" and cmd[2] == "view":
             return subprocess.CompletedProcess(
                 cmd, 0, json.dumps({"state": "MERGED", "mergedAt": _MERGED_AT}), ""
             )
-        if cmd[0] == "git" and "remote" in cmd:
+        if cmd0 == "git" and "remote" in cmd:
             cwd = str(kwargs.get("cwd", ""))
             if "repo-a" in cwd:
                 return subprocess.CompletedProcess(
@@ -636,7 +709,7 @@ def test_cache_is_repo_scoped(tmp_path, monkeypatch):
         sd, PROJECT_ID, repo_root=repo_a, apply=False,
     )
     assert summary1["counts"]["confirmed"] == 1
-    pr_view_calls_1 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    pr_view_calls_1 = [c for c in call_log if _is_gh_pr_view(c)]
     assert len(pr_view_calls_1) == 1, "repo-a run must fetch PR 1002 from gh"
 
     call_log.clear()
@@ -646,7 +719,7 @@ def test_cache_is_repo_scoped(tmp_path, monkeypatch):
         sd, PROJECT_ID, repo_root=repo_b, apply=False,
     )
     assert summary2["counts"]["confirmed"] == 1
-    pr_view_calls_2 = [c for c in call_log if len(c) >= 3 and c[:3] == ["gh", "pr", "view"]]
+    pr_view_calls_2 = [c for c in call_log if _is_gh_pr_view(c)]
     assert len(pr_view_calls_2) == 1, "repo-b run must trigger its own gh pr view (different repo key)"
 
 

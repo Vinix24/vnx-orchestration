@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +70,43 @@ def _emit_usage(usage: object) -> None:
             log.warning("_litellm_runner: usage serialization fallback: %s", e)
             usage_dict = {"input_tokens": 0, "output_tokens": 0, "usage_serialization_failed": True}
     _emit({"event_type": "usage_complete", "usage": usage_dict})
+
+
+def _extract_status_code(exc: Exception) -> Optional[int]:
+    """Try to extract an HTTP status code from a litellm / httpx exception.
+
+    litellm wraps provider errors in various exception types (e.g.
+    litellm.exceptions.AuthenticationError, APIError, or raw httpx.HTTPStatusError).
+    The status code may be on the exception object itself (.status_code) or on a
+    nested response attribute.
+    """
+    # Direct attribute
+    for attr in ("status_code",):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int) and 100 <= val <= 599:
+            return val
+
+    # Nested response.status_code (httpx, requests patterns)
+    response = getattr(exc, "response", None)
+    if response is not None:
+        val = getattr(response, "status_code", None)
+        if isinstance(val, int) and 100 <= val <= 599:
+            return val
+
+    # Sometimes litellm stores it on a nested litellm_response or original_exception
+    for nested_attr in ("litellm_response", "original_exception"):
+        nested = getattr(exc, nested_attr, None)
+        if nested is not None:
+            val = getattr(nested, "status_code", None)
+            if isinstance(val, int) and 100 <= val <= 599:
+                return val
+            resp = getattr(nested, "response", None)
+            if resp is not None:
+                val = getattr(resp, "status_code", None)
+                if isinstance(val, int) and 100 <= val <= 599:
+                    return val
+
+    return None
 
 
 def main() -> int:
@@ -125,13 +163,33 @@ def main() -> int:
     except Exception as exc:
         msg = str(exc)
         msg_lower = msg.lower()
-        if any(kw in msg_lower for kw in ("authentication", "auth", "credentials", "apikey", "api key", "unauthorized", "forbidden")):
-            _emit({"error_type": "credentials_missing", "message": msg})
+
+        # Extract HTTP status code from litellm/httpx exceptions when available.
+        # litellm wraps provider errors in exceptions that often carry a
+        # status_code attribute (int) or embed it in the message string.
+        status_code = _extract_status_code(exc)
+
+        # Determine error_type from keywords + status code.
+        if (
+            any(kw in msg_lower for kw in ("authentication", "auth", "credentials",
+                                             "apikey", "api key", "unauthorized", "forbidden"))
+            or status_code in (401, 403)
+        ):
+            payload: dict = {"error_type": "credentials_missing", "message": msg}
+            if status_code is not None:
+                payload["status_code"] = status_code
+            _emit(payload)
             return _EXIT_CREDS
         if any(kw in msg_lower for kw in ("unavailable", "connection", "timeout", "unreachable", "refused")):
-            _emit({"error_type": "service_unavailable", "message": msg})
+            payload = {"error_type": "service_unavailable", "message": msg}
+            if status_code is not None:
+                payload["status_code"] = status_code
+            _emit(payload)
             return _EXIT_ERR
-        _emit({"error_type": "completion_error", "message": msg})
+        payload = {"error_type": "completion_error", "message": msg}
+        if status_code is not None:
+            payload["status_code"] = status_code
+        _emit(payload)
         return _EXIT_ERR
 
 

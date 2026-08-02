@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -222,9 +223,177 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
     print(f"  lane:         {plan.lane}")
     print(f"  target_id:    {plan.target_id}")
     print(f"  billing:      {plan.billing}")
+    print(f"  requires_mcp: {plan.requires_mcp}")
     print(f"  route_reason: {plan.route_reason}")
     for w in plan.warnings:
         print(f"  [WARN] {w}")
+
+
+def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
+    """Verify the selected lane's endpoint is reachable (OI-867).
+
+    Never fails the dry-run — always returns None.  Prints a [WARN] with
+    concrete evidence when the endpoint is unreachable or auth-rejected
+    so an operator can spot a dead route before approving the dispatch.
+
+    Checks performed:
+    - litellm-proxy lanes: HTTP GET http://127.0.0.1:4141/v1/models with
+      short timeout.  Carries Authorization: Bearer $LITELLM_API_KEY when that
+      env is set (OI-893) so an auth-gated proxy is probed the way the lane
+      actually talks to it.  401/403 → hard warning (auth broken).  Connection
+      refused/timeout → soft warning (proxy may be down).
+    - deepseek-harness: HTTP GET to api.deepseek.com/v1/models with
+      Authorization: Bearer $DEEPSEEK_API_KEY (OI-893).
+    - Other lanes: skipped (no cheap endpoint check available; claude-tmux
+      has no network endpoint, codex/kimi have ephemeral auth).
+    """
+    import urllib.request
+    import urllib.error
+
+    provider_val = plan.provider.value
+    lane = plan.lane
+
+    # ── litellm proxy lanes (litellm:deepseek, litellm:zai, litellm:moonshot) ──
+    if lane == "provider" and (
+        provider_val.startswith("litellm:")
+        or provider_val in ("litellm",)
+    ):
+        proxy_url = os.environ.get(
+            "LITELLM_PROXY_BASE",
+            "http://127.0.0.1:4141",
+        )
+        models_url = f"{proxy_url.rstrip('/')}/v1/models"
+        # OI-893: the probe must carry the proxy's Authorization header — an
+        # unauthenticated GET to an auth-gated /v1/models returns HTTP 401 by
+        # construction, so the OK branch would be unreachable whenever the proxy
+        # enforces a key. Add the header when LITELLM_API_KEY is present; when it
+        # is absent, the 401 the proxy returns is genuine and is reported as
+        # AUTH REJECTED with a "key not set" hint, never as an OK.
+        litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
+        try:
+            req = urllib.request.Request(models_url)
+            if litellm_key:
+                req.add_header("Authorization", f"Bearer {litellm_key}")
+            resp = urllib.request.urlopen(req, timeout=5)
+            body = resp.read().decode("utf-8", errors="replace")
+            # A 200 with an empty model list is suspicious but not a hard
+            # failure — the proxy may be warming up.
+            if resp.status == 200:
+                try:
+                    data = json.loads(body)
+                    model_count = len(data.get("data", []))
+                    if model_count == 0:
+                        print(
+                            f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
+                            f"from {models_url} — the lane may be stale. Evidence: "
+                            f"empty model list.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"[dispatch_cli] [reachability] litellm proxy OK: "
+                            f"{model_count} models at {models_url}",
+                            file=sys.stderr,
+                        )
+                except json.JSONDecodeError:
+                    print(
+                        f"[dispatch_cli] [WARN] litellm proxy response is not valid "
+                        f"JSON from {models_url} — response: {body[:200]}",
+                        file=sys.stderr,
+                    )
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")[:200]
+            except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
+                pass
+            if status in (401, 403):
+                if not litellm_key:
+                    auth_hint = (
+                        "LITELLM_API_KEY is not set — ANY dispatch on this "
+                        "lane will fail silently."
+                    )
+                else:
+                    auth_hint = (
+                        "The proxy API key (LITELLM_API_KEY) is missing or "
+                        "invalid — ANY dispatch on this lane will fail silently."
+                    )
+                print(
+                    f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
+                    f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
+                    f"{auth_hint}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
+                    f"from {models_url}. Evidence: {body or str(exc)}",
+                    file=sys.stderr,
+                )
+        except (urllib.error.URLError, OSError) as exc:
+            print(
+                f"[dispatch_cli] [WARN] litellm proxy unreachable at "
+                f"{models_url} ({exc}). The lane may be down — dispatch will "
+                f"likely fail.",
+                file=sys.stderr,
+            )
+        return
+
+    # ── deepseek-harness lane ──
+    if lane == "provider" and provider_val in (
+        "deepseek-harness", "deepseek_harness",
+    ):
+        ds_url = "https://api.deepseek.com/v1/models"
+        # OI-893: the probe must carry the API key. An unauthenticated GET to
+        # api.deepseek.com/v1/models returns HTTP 401 by construction, so the
+        # OK branch was unreachable. With DEEPSEEK_API_KEY set the probe now
+        # exercises the same auth the lane uses; when it is absent the 401 is
+        # genuine and is reported as AUTH REJECTED with a "key not set" hint.
+        ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        try:
+            req = urllib.request.Request(ds_url)
+            if ds_key:
+                req.add_header("Authorization", f"Bearer {ds_key}")
+            urllib.request.urlopen(req, timeout=5)
+            print(
+                f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
+                file=sys.stderr,
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                if not ds_key:
+                    auth_hint = "DEEPSEEK_API_KEY is not set."
+                elif exc.code == 403:
+                    auth_hint = "the API key is missing permissions."
+                else:
+                    auth_hint = "the API key is missing, invalid, or expired."
+                print(
+                    f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
+                    f"(HTTP {exc.code}) at {ds_url}. {auth_hint}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[dispatch_cli] [WARN] deepseek API returned HTTP "
+                    f"{exc.code} from {ds_url}.",
+                    file=sys.stderr,
+                )
+        except (urllib.error.URLError, OSError) as exc:
+            print(
+                f"[dispatch_cli] [WARN] deepseek API unreachable at "
+                f"{ds_url} ({exc}).",
+                file=sys.stderr,
+            )
+        return
+
+    # ── Claude tmux lane, codex, kimi, gemini — no cheap endpoint check ──
+    print(
+        f"[dispatch_cli] [reachability] lane={lane} — no cheap endpoint "
+        f"check available (lanes that don't go through a stable HTTP proxy "
+        f"are verified at spawn time).",
+        file=sys.stderr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -565,17 +734,134 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
     )
 
 
+def _persist_dispatch_row(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """Best-effort: create the dispatches tracker row for a door-accepted dispatch.
+
+    The door is the single entry point for dispatches, yet historically never
+    wrote a row to dispatches (runtime_coordination.db) — only the deliverable
+    layer (planning_cli.py, `dlv-` ids) did. Three consumers read this table for
+    door dispatches and all silently no-op without a row:
+
+    1. ``_persist_track_id`` (UPDATE-only) — track linkage, symptom TL-D1;
+    2. ``dispatch_outcome_classifier.reconcile_all_dispatch_outcomes`` — reads
+       the dispatch-id population plus ``state``/``track``/``created_at`` here;
+    3. ``receipt_provenance._link_pr_to_track`` — reads ``track_id`` by
+       ``dispatch_id`` for the TL-D2 tracks.pr_ref auto-propagation on merge.
+
+    Called from run_dispatch AFTER validation + plan compile and BEFORE the lane
+    choice, so rejected dispatches never get a row and in-flight dispatches are
+    visible to live queries.
+
+    ``state='proposed'`` deliberately: 'queued' would be claimed by the worker
+    pool (its claim query keys on state='queued') and, without a staged pool
+    bundle, rot into timed_out/expired via the stuck sweep; the supervisor's
+    stuck/ghost sweeps key on claimed/delivering/accepted/running. 'proposed'
+    is invisible to all of those — the same state the deliverable layer uses.
+
+    Idempotent per ADR-007's composite UNIQUE(dispatch_id, project_id): a retry
+    or fix-forward with the same id finds the existing row and leaves it
+    untouched. Never raises: tracker bookkeeping must never block the door.
+    """
+    db_path = _tracks_db_path(state_dir)
+    if not db_path.exists():
+        return
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'"
+            ).fetchone() is None:
+                return
+            has_project = _has_col(conn, "dispatches", "project_id")
+            track_id = (spec.track_id or "").strip()
+            if track_id and not _has_col(conn, "dispatches", "track_id"):
+                conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
+                conn.commit()
+            # Idempotency: an existing row (retry / fix-forward / deliverable
+            # layer) is left untouched — never a second row, never a mutation.
+            if has_project:
+                existing = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                    (spec.dispatch_id, spec.project_id),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE dispatch_id = ?",
+                    (spec.dispatch_id,),
+                ).fetchone()
+            if existing is not None:
+                return
+            cols = ["dispatch_id"]
+            vals = [spec.dispatch_id]
+            if has_project:
+                cols.append("project_id")
+                vals.append(spec.project_id)
+            cols.append("state")
+            vals.append("proposed")
+            if track_id:
+                cols.append("track_id")
+                vals.append(track_id)
+            now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            )
+            for ts_col in ("created_at", "updated_at"):
+                if _has_col(conn, "dispatches", ts_col):
+                    cols.append(ts_col)
+                    vals.append(now)
+            placeholders = ", ".join("?" for _ in cols)
+            conn.execute(
+                f"INSERT INTO dispatches ({', '.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("[dispatch_cli] dispatch row persist skipped: %s", exc)
+
+
+def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """Best-effort: register the review-gate obligation for a door-accepted dispatch.
+
+    OI-876/OI-881: before this hook, ``spec.gate`` was read exactly once (by
+    ``load_spec``) and then never consumed — a dispatch could declare
+    ``gate=codex_gate`` and produce zero request/result records while looking
+    identical to one whose gate ran. The obligation record (one JSON file per
+    dispatch under ``state/review_gates/obligations/``) is what
+    ``scripts/gate_obligation_runner.py`` fulfils and what the producer
+    freshness monitor asserts per gate key: declaration without evidence
+    becomes visible instead of silent.
+
+    Never raises: bookkeeping must never block the door (same contract as
+    ``_persist_dispatch_row``).
+    """
+    gate = (spec.gate or "").strip()
+    if not gate:
+        return
+    try:
+        from gate_obligations import pr_number_from_pr_id, register_obligation
+        register_obligation(
+            state_dir,
+            dispatch_id=spec.dispatch_id,
+            gate=gate,
+            project_id=spec.project_id,
+            pr_number=pr_number_from_pr_id(spec.pr_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — door bookkeeping must never raise
+        logger.debug("[dispatch_cli] gate obligation register skipped: %s", exc)
+
+
 def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
     """Best-effort: attach spec.track_id to an EXISTING dispatches row (UPDATE-only).
 
-    Never INSERTs. The dispatches table (runtime_coordination.db) is read by the
-    worker-pool claim query, the runtime reconciler, and the runtime supervisor's
-    stuck/ghost-dispatch sweeps, all keyed off `state`. Fabricating a row for the
-    leaseless claude-tmux lane (which has no pre-existing tracker row) risks
-    tripping those sweeps. D2 treats an absent/None track_id as a no-op, so a
-    dispatch with no pre-existing row is a safe, anticipated case here, not a
-    partial failure. Adds the track_id column additively (_has_col-guarded) when
-    missing. Never raises.
+    Never INSERTs — row creation is the door's job (``_persist_dispatch_row``,
+    invoked earlier in run_dispatch, right after validation + plan compile).
+    When that row exists this UPDATE stamps the track_id onto it; D2 treats an
+    absent/None track_id as a no-op, so a dispatch whose row could not be
+    created (e.g. no runtime_coordination.db yet) is a safe, anticipated case
+    here, not a partial failure. Adds the track_id column additively
+    (_has_col-guarded) when missing. Never raises.
     """
     track_id = (spec.track_id or "").strip()
     if not track_id:
@@ -642,6 +928,26 @@ def _via_for_provider(provider_value: str, sub_provider: Optional[str]) -> Optio
     return None
 
 
+def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
+    """Return the set of role names that exist in the agents/ registry.
+
+    A role is valid when ``<agents_dir>/<role>/CLAUDE.md`` exists — the same role
+    file the worker loads as its profile. Missing or unreadable registry → EMPTY
+    set, so compile_plan's OI-921 membership check rejects every role (fail-closed):
+    an undiscoverable registry must never silently accept an arbitrary role string.
+    """
+    try:
+        if not agents_dir.is_dir():
+            return frozenset()
+        return frozenset(
+            entry.name
+            for entry in agents_dir.iterdir()
+            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
+        )
+    except OSError:
+        return frozenset()
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -653,6 +959,7 @@ def build_runtime_snapshot(
     P0-1: instruction_text + check_registry=True (FAIL-CLOSED); effective model; SDK scan (warn via constraint engine).
     P0-2: staging binding verified via spec_file containment check.
     P1-#3: model_pins from provider_constraints.yaml SSOT.
+    OI-921: valid_roles discovered from the engine's agents/ registry (fail-closed).
     """
     from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
     from staging_validator import _exists_in_dir as _staging_exists  # noqa: PLC0415
@@ -883,12 +1190,18 @@ def build_runtime_snapshot(
             slot: pin for slot, pin in model_pin_specs.items() if slot != spec.target_slot
         }
 
+    # OI-921: role-registry — the set of roles that exist in agents/ (the engine's
+    # repo root, resolved exactly as run_dispatch does for validate). Empty set when
+    # the registry is missing → compile_plan rejects every role (fail-closed).
+    valid_roles = _discover_valid_roles(_resolve_repo_root() / "agents")
+
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
         staging_promoted=staging_promoted,
         target_health=target_health,
         target_capable=target_capable,
         model_pins=snapshot_model_pins,
+        valid_roles=valid_roles,
     )
 
 
@@ -950,6 +1263,7 @@ def _execute_claude(
         deadline_seconds=plan.deadline_seconds,
         base_ref=plan.base_ref,
         isolated_worktree=True,
+        requires_mcp=plan.requires_mcp,
     )
     return 0 if result.success else 1
 
@@ -1077,6 +1391,20 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             except Exception as exc:
                 logger.debug("[dispatch_cli] scout pre-pass skipped: %s", exc)
 
+            # The dispatch is irrevocably accepted here (validated, plan
+            # compiled): create its dispatches tracker row BEFORE the lane
+            # choice so _persist_track_id, reconcile_all_dispatch_outcomes and
+            # the TL-D2 pr_ref propagation all have a row to read. Idempotent
+            # (retry/fix-forward safe), state='proposed' (invisible to the
+            # claim/stuck/ghost sweeps), best-effort — never blocks the door.
+            _persist_dispatch_row(vspec.spec, state_dir=state_dir)
+
+            # OI-876/OI-881: a declared gate is an obligation, not decoration.
+            # Registered here — right after the dispatch is irrevocably
+            # accepted — so every accepted dispatch with gate=<name> has a
+            # checkable evidence trail from this point on.
+            _register_gate_obligation(vspec.spec, state_dir=state_dir)
+
             # TL-D1: export the resolved track_id alongside VNX_CURRENT_DISPATCH_ID and
             # persist it onto the dispatch tracker row so D2 can propagate it to
             # track.pr_ref on merge. Best-effort — never blocks the door.
@@ -1094,6 +1422,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
 
         if dry_run:
             _print_plan(plan, fp)
+            # OI-867: reachability check — verify the lane endpoint is
+            # responsive BEFORE the dispatch is approved.  Never fail-closed
+            # on a transient network hiccup; auth-rejection is a hard
+            # warning.  Provider lane availability is cheap to check (one
+            # HTTP call) and catches the exact class of silent failure that
+            # the 20260730-phantom-branch-fallback dispatch hit (litellm
+            # proxy 401 → 43ms dispatch death with no error trace).
+            _check_reachability(plan, vspec.spec)
             return 0
 
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):

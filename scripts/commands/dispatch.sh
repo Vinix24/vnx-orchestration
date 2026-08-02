@@ -10,7 +10,9 @@
 #       >  VNX_ADAPTER=subprocess  (env)  >  default: tmux
 #
 # All variables from bin/vnx (VNX_HOME, VNX_DATA_DIR, VNX_STATE_DIR,
-# VNX_DISPATCH_DIR, log, err) are available when this runs.
+# VNX_DISPATCH_DIR, VNX_PYTHON, log, err) are available when this runs.
+# Fallback keeps this file safe if ever sourced outside bin/vnx directly.
+VNX_PYTHON="${VNX_PYTHON:-python3}"
 
 # Single-source routing predicate (vnx_single_entry_enabled). Sourced RELATIVE to this file
 # (not VNX_HOME) so it resolves even under a test/stub VNX_HOME; the helper itself falls back
@@ -24,7 +26,7 @@ _d_parse_header() {
   # Parse [[TARGET:TX]], Role:, Gate:, Feature:, Adapter: from the dispatch file header.
   # Outputs: TERMINAL ROLE GATE FEATURE ADAPTER (tab-separated)
   local file="$1"
-  python3 -c "
+  "$VNX_PYTHON" -c "
 import re, sys
 
 path = '$file'
@@ -60,7 +62,7 @@ print(f'{target}\t{role}\t{gate}\t{feature}\t{adapter}')
 _d_check_terminal_idle() {
   # Returns 0 if terminal is idle (not leased), 1 otherwise.
   local terminal="$1"
-  python3 -c "
+  "$VNX_PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$VNX_HOME/scripts/lib')
 try:
@@ -81,7 +83,7 @@ _d_generate_dispatch_id() {
   # Generate a unique dispatch ID based on timestamp + slug + track.
   local slug="$1"
   local track="${2:-A}"
-  python3 -c "
+  "$VNX_PYTHON" -c "
 import sys
 sys.path.insert(0, '$VNX_HOME/scripts/lib')
 try:
@@ -241,7 +243,7 @@ HELP
     fi
     log "[dispatch] force-release-lock: class=$force_release_class"
     PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
-      python3 "$dispatch_cli_script" --force-release-lock "$force_release_class"
+      "$VNX_PYTHON" "$dispatch_cli_script" --force-release-lock "$force_release_class"
     return $?
   fi
 
@@ -279,7 +281,7 @@ HELP
 
   # P1-#7: no trailing colon (avoids CWD on sys.path when PYTHONPATH is unset)
   PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
+    "$VNX_PYTHON" "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
   return $?
 }
 
@@ -317,6 +319,7 @@ cmd_dispatch() {
   local model_override="${VNX_MODEL:-sonnet}"
   local adapter_override=""
   local dry_run=0
+  local requires_mcp_cli=""
 
   if [ "$#" -eq 0 ]; then
     err "[dispatch] No dispatch file specified. Use: vnx dispatch <file.md>"
@@ -343,6 +346,8 @@ Options:
   --model <model>       Override model (default: sonnet)
   --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
                         Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
+  --requires-mcp        Preserve ambient MCP config (Requires-MCP: true header) instead
+                        of the force-empty scoped posture
   --dry-run             Show what would happen without dispatching
   -h, --help            Show this help
 
@@ -382,6 +387,8 @@ HELP
         adapter_override="$2"; shift 2 ;;
       --adapter=*)
         adapter_override="${1#*=}"; shift ;;
+      --requires-mcp)
+        requires_mcp_cli="--requires-mcp"; shift ;;
       --dry-run|-n)
         dry_run=1; shift ;;
       -h|--help)
@@ -401,6 +408,8 @@ Options:
   --model <model>       Override model (default: sonnet)
   --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
                         Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
+  --requires-mcp        Preserve ambient MCP config (Requires-MCP: true header) instead
+                        of the force-empty scoped posture
   --dry-run             Show what would happen without dispatching
   -h, --help            Show this help
 
@@ -512,6 +521,18 @@ HELP
   local dispatch_id
   dispatch_id=$(_d_generate_dispatch_id "$slug" "$track")
 
+  # Derive requires_mcp from the Requires-MCP: header (mirrors dispatch_deliver.sh's
+  # sed pattern), unless --requires-mcp was passed explicitly — the CLI flag wins.
+  local _requires_mcp="false"
+  if [ -z "$requires_mcp_cli" ]; then
+    _requires_mcp=$(sed -n 's/^Requires-MCP:[[:space:]]*//Ip' "$abs_file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    _requires_mcp="${_requires_mcp:-false}"
+  fi
+  local _mcp_flag=()
+  if [ "$_requires_mcp" = "true" ] || [ -n "$requires_mcp_cli" ]; then
+    _mcp_flag=(--requires-mcp)
+  fi
+
   log "[dispatch] File:       $(basename "$abs_file")"
   log "[dispatch] Terminal:   $terminal (Track $track)"
   log "[dispatch] Role:       ${role:-<none>}"
@@ -519,6 +540,7 @@ HELP
   log "[dispatch] Feature:    ${feature:-<none>}"
   log "[dispatch] Model:      $model_override"
   log "[dispatch] Adapter:    $adapter$([ "$adapter" = tmux ] && printf ' (default, subscription)' || printf ' (burst, paid)')"
+  log "[dispatch] Requires-MCP: $([ "${#_mcp_flag[@]}" -gt 0 ] && printf 'yes' || printf 'no')"
   log "[dispatch] DispatchID: $dispatch_id"
 
   if [ "$dry_run" -eq 1 ]; then
@@ -541,7 +563,8 @@ HELP
   instruction=$(cat "$abs_file")
 
   # Move file to active/
-  local active_path="${VNX_DISPATCH_DIR}/active/$(basename "$abs_file")"
+  local active_path
+  active_path="${VNX_DISPATCH_DIR}/active/$(basename "$abs_file")"
   mkdir -p "${VNX_DISPATCH_DIR}/active"
   cp "$abs_file" "$active_path"
 
@@ -572,31 +595,34 @@ HELP
     # DEFAULT lane: subscription-preserving ephemeral tmux-spawn.
     # Leaseless — pass the resolved terminal as the worker label for audit parity.
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    python3 "$dispatch_script" \
+    "$VNX_PYTHON" "$dispatch_script" \
       --dispatch-id "$dispatch_id" \
       --instruction "$instruction" \
       --model "$model_override" \
       --worker-label "$terminal" \
       ${role:+--role "$role"} \
+      ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
       || exit_code=$?
   else
     # OPT-IN burst lane: paid headless SubprocessAdapter.
     local _ar_flag=()
     [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    python3 "$dispatch_script" \
+    "$VNX_PYTHON" "$dispatch_script" \
       --terminal-id "$terminal" \
       --dispatch-id "$dispatch_id" \
       --instruction "$instruction" \
       --model "$model_override" \
       ${role:+--role "$role"} \
       ${_ar_flag[@]+"${_ar_flag[@]}"} \
+      ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
       || exit_code=$?
   fi
 
   if [ "$exit_code" -eq 0 ]; then
     # Move to completed/
-    local completed_path="${VNX_DISPATCH_DIR}/completed/$(basename "$abs_file")"
+    local completed_path
+    completed_path="${VNX_DISPATCH_DIR}/completed/$(basename "$abs_file")"
     mkdir -p "${VNX_DISPATCH_DIR}/completed"
     mv "$active_path" "$completed_path" 2>/dev/null || true
     log "[dispatch] Done — dispatch $dispatch_id completed (receipt: success)"

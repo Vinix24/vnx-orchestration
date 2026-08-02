@@ -37,6 +37,20 @@ from provider_spawns.codex_spawn import (
 from canonical_event import CanonicalEvent
 
 
+def _mock_stderr(*lines: bytes) -> MagicMock:
+    """Build a stderr mock whose readline terminates on b"" (OI-910).
+
+    A real codex subprocess opens stderr in binary mode, so readline() returns
+    bytes and yields b"" at EOF. Without a terminating readline, the drain
+    thread in _launch_codex_proc spins forever on the b"" sentinel and leaks a
+    daemon thread into the rest of the test session, which pytest-timeout then
+    kills mid-suite (INTERNALERROR).
+    """
+    stderr = MagicMock()
+    stderr.readline.side_effect = [*lines, b""]
+    return stderr
+
+
 # ---------------------------------------------------------------------------
 # Fixture: known NDJSON raw event dicts (recorded from real codex exec --json)
 # ---------------------------------------------------------------------------
@@ -173,6 +187,7 @@ class TestCodexAdapterDelegatesToSpawn:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -222,6 +237,7 @@ class TestEventWriterReceivesAllEvents:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -269,6 +285,7 @@ class TestSessionIdExtraction:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -294,6 +311,7 @@ class TestSessionIdExtraction:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(
@@ -330,6 +348,7 @@ class TestCompletionText:
             proc.wait = MagicMock(return_value=0)
             proc.poll = MagicMock(return_value=0)
             proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"warn: codex sandbox")
             MockPopen.return_value = proc
 
             with patch(

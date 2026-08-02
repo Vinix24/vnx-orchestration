@@ -182,6 +182,22 @@ VNX_CONFIG_FILE="${VNX_CONFIG_DIR}/config.yml"
 TERMINALS_TEMPLATE_DIR="${VNX_HOME}/templates/terminals"
 SNIPPETS_TEMPLATE_DIR="${VNX_HOME}/templates/snippets"
 
+# ── Interpreter resolution (measured 2026-07-30) ──────────────────────────
+# /opt/homebrew/bin/python3 can be relinked out from under us (relinked to a
+# dependency-less 3.14 at 09:32 today), which fails every call site that
+# needs third-party packages (e.g. `import yaml` for the constraint registry).
+# Resolve one interpreter here and use it everywhere below instead of bare
+# `python3`. Precedence: repo venv (uv-managed, has deps) > pinned homebrew
+# 3.12 (no deps, but a stable interpreter) > bare `python3` (last resort).
+if [ -x "$VNX_HOME/.venv/bin/python" ]; then
+  VNX_PYTHON="$VNX_HOME/.venv/bin/python"
+elif [ -x "/opt/homebrew/opt/python@3.12/bin/python3.12" ]; then
+  VNX_PYTHON="/opt/homebrew/opt/python@3.12/bin/python3.12"
+else
+  VNX_PYTHON="python3"
+fi
+export VNX_PYTHON
+
 MARKER_BEGIN="<!-- VNX:BEGIN BOOTSTRAP -->"
 MARKER_END="<!-- VNX:END BOOTSTRAP -->"
 
@@ -747,11 +763,11 @@ CFG
 }
 
 cmd_intelligence_export() {
-  python3 "$VNX_HOME/scripts/intelligence_export.py"
+  "$VNX_PYTHON" "$VNX_HOME/scripts/intelligence_export.py"
 }
 
 cmd_intelligence_import() {
-  python3 "$VNX_HOME/scripts/intelligence_import.py"
+  "$VNX_PYTHON" "$VNX_HOME/scripts/intelligence_import.py"
 }
 
 cmd_init() {
@@ -772,8 +788,8 @@ cmd_init() {
   # PR-1: Python-led init orchestrator (unified bootstrap).
   # Falls back to inline bash if Python entrypoint is unavailable.
   local init_script="$VNX_HOME/scripts/vnx_init.py"
-  if command -v python3 >/dev/null 2>&1 && [ -f "$init_script" ]; then
-    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$init_script" "${init_args[@]+"${init_args[@]}"}"
+  if command -v "$VNX_PYTHON" >/dev/null 2>&1 && [ -f "$init_script" ]; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" "$init_script" "${init_args[@]+"${init_args[@]}"}"
     local rc=$?
     [ $rc -ne 0 ] && return $rc
   else
@@ -800,8 +816,8 @@ cmd_init() {
   if [ -z "$mode_flag" ]; then
     mode_flag="operator"
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+  if command -v "$VNX_PYTHON" >/dev/null 2>&1; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" -c "
 from vnx_mode import VNXMode, write_mode
 write_mode(VNXMode('$mode_flag'))
 print(f'[init] Mode set: $mode_flag')
@@ -832,8 +848,8 @@ _check_mode_gate() {
   local mode_file="$VNX_DATA_DIR/mode.json"
   [ -f "$mode_file" ] || return 0
 
-  if command -v python3 >/dev/null 2>&1; then
-    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+  if command -v "$VNX_PYTHON" >/dev/null 2>&1; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" -c "
 import sys
 from vnx_mode import check_command_allowed, ModeGateError
 try:
@@ -870,7 +886,7 @@ cmd_init_db() {
   fi
 
   # Use the full Python init script (handles backup, verification, metrics)
-  python3 "$db_init_script"
+  "$VNX_PYTHON" "$db_init_script"
   log "[init-db] Quality intelligence database ready"
 }
 
@@ -1054,7 +1070,7 @@ cmd_cost_report() {
     err "[cost-report] Missing tracker script: $tracker_script"
     return 1
   fi
-  python3 "$tracker_script" "$@"
+  "$VNX_PYTHON" "$tracker_script" "$@"
 }
 
 cmd_smoke() {
@@ -1780,8 +1796,8 @@ EOF
   # into project terminals. This ensures predictable behaviour regardless
   # of the user's global Claude Code configuration.
   local global_claude_json="$HOME/.claude.json"
-  if command -v python3 >/dev/null 2>&1 && [ -f "$global_claude_json" ]; then
-    python3 - "$terminals_dir" "$terminal_ids" "$force" <<'PYEOF'
+  if command -v "$VNX_PYTHON" >/dev/null 2>&1 && [ -f "$global_claude_json" ]; then
+    "$VNX_PYTHON" - "$terminals_dir" "$terminal_ids" "$force" <<'PYEOF'
 import json, os, sys
 
 terminals_dir = sys.argv[1]
@@ -1833,8 +1849,8 @@ PYEOF
   # Pre-populate ~/.gemini/trustedFolders.json with TRUST_FOLDER for the
   # project root and terminals dir so the dialog never appears.
   local gemini_trust_file="$HOME/.gemini/trustedFolders.json"
-  if command -v gemini >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    python3 - "$PROJECT_ROOT" "$gemini_trust_file" <<'PYEOF'
+  if command -v gemini >/dev/null 2>&1 && command -v "$VNX_PYTHON" >/dev/null 2>&1; then
+    "$VNX_PYTHON" - "$PROJECT_ROOT" "$gemini_trust_file" <<'PYEOF'
 import json, os, sys
 
 project_root   = sys.argv[1]
@@ -1937,7 +1953,7 @@ _detect_worktree_context() {
   # Sets: _WT_ROOT (worktree toplevel), _MAIN_ROOT (main repo root)
   # PR-3: Delegates to Python module (vnx_worktree.py) when available.
   local _wt_json
-  _wt_json="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+  _wt_json="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" -c "
 import json
 from vnx_worktree import detect_worktree_context
 ctx = detect_worktree_context('$PROJECT_ROOT')
@@ -1946,9 +1962,9 @@ print(json.dumps({'is_worktree': ctx.is_worktree, 'wt': ctx.worktree_root, 'main
 
   if [ -n "$_wt_json" ]; then
     local _is_wt
-    _is_wt="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['is_worktree'])" 2>/dev/null)"
-    _WT_ROOT="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['wt'])" 2>/dev/null)"
-    _MAIN_ROOT="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['main'])" 2>/dev/null)"
+    _is_wt="$(echo "$_wt_json" | "$VNX_PYTHON" -c "import json,sys; print(json.load(sys.stdin)['is_worktree'])" 2>/dev/null)"
+    _WT_ROOT="$(echo "$_wt_json" | "$VNX_PYTHON" -c "import json,sys; print(json.load(sys.stdin)['wt'])" 2>/dev/null)"
+    _MAIN_ROOT="$(echo "$_wt_json" | "$VNX_PYTHON" -c "import json,sys; print(json.load(sys.stdin)['main'])" 2>/dev/null)"
     [ "$_is_wt" = "True" ] && return 0 || return 1
   fi
 
@@ -2409,7 +2425,7 @@ main() {
       cmd_doctor "$@"
       ;;
     fabric-audit)
-      python3 "$VNX_HOME/scripts/fabric_audit.py" "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/fabric_audit.py" "$@"
       ;;
     smoke)
       cmd_smoke "$@"
@@ -2430,7 +2446,7 @@ main() {
       cmd_intelligence_import
       ;;
     analyze-sessions)
-      python3 "$VNX_HOME/scripts/conversation_analyzer.py" "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/conversation_analyzer.py" "$@"
       ;;
     new-worktree)
       cmd_new_worktree "$@"
@@ -2475,31 +2491,31 @@ main() {
       cmd_patch_agent_files
       ;;
     staging-list)
-      python3 "$VNX_HOME/scripts/pr_queue_manager.py" staging-list "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" staging-list "$@"
       ;;
     promote)
-      python3 "$VNX_HOME/scripts/pr_queue_manager.py" promote "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" promote "$@"
       ;;
     init-feature)
-      python3 "$VNX_HOME/scripts/pr_queue_manager.py" init-feature "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" init-feature "$@"
       ;;
     queue-status)
-      python3 "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
       ;;
     objective)
-      python3 "$VNX_HOME/scripts/planning_cli.py" objective "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
     deliverable)
-      python3 "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
       ;;
     suggest)
-      python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
       ;;
     insights)
-      python3 "$VNX_HOME/scripts/vnx_insights_cli.py" "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_insights_cli.py" "$@"
       ;;
     gate-check)
-      python3 "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"
@@ -2517,13 +2533,13 @@ main() {
       cmd_subsystems "$@"
       ;;
     ps)
-      python3 "$VNX_HOME/scripts/vnx_process_ux.py" ps "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_process_ux.py" ps "$@"
       ;;
     cleanup)
-      python3 "$VNX_HOME/scripts/vnx_process_ux.py" cleanup "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_process_ux.py" cleanup "$@"
       ;;
     restart)
-      python3 "$VNX_HOME/scripts/vnx_process_ux.py" restart "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_process_ux.py" restart "$@"
       ;;
     jump)
       cmd_jump "$@"
@@ -2547,25 +2563,25 @@ main() {
       bash "$VNX_HOME/scripts/vnx_shell_helper.sh" "$@"
       ;;
     setup)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_setup.py" "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_setup.py" "$@"
       ;;
     install-check)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --check "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_install.py" --check "$@"
       ;;
     install-validate)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --validate "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" "$VNX_HOME/scripts/vnx_install.py" --validate "$@"
       ;;
     migrate)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main migrate "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main migrate "$@"
       ;;
     pool)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.commands.pool "$@"
       ;;
     permission)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 "$VNX_HOME/scripts/permission_relay_cli.py" "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/permission_relay_cli.py" "$@"
       ;;
     dream)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main dream "$@"
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
       ;;
     help|-h|--help)
       usage

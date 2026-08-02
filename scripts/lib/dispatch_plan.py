@@ -61,6 +61,13 @@ class RuntimeSnapshot:
     target_capable: Mapping[str, bool] = field(default_factory=dict)  # target_id -> capability match
     model_pins: Mapping[str, ModelPin] = field(default_factory=dict)  # target_slot -> pin (model + semantics)
     claude_serial_enabled: bool = True
+    # OI-921: the set of role names that exist in the agents/ registry. None =
+    # registry not provided (direct/test callers that pre-date the field) —
+    # compile_plan skips the membership check so their behavior is unchanged. A
+    # non-None frozenset (the door always provides one, possibly EMPTY) ENFORCES
+    # membership: an empty set rejects every role, so an undiscoverable registry
+    # fails closed instead of silently accepting anything.
+    valid_roles: Optional[frozenset[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +101,15 @@ class ExecutionPlan:
     role: Optional[str] = None          # carried from DispatchSpec for the phantom-guard review
                                         # exemption (codex P0.2 F2). NOT in digest() — advisory only,
                                         # must not perturb the permit fingerprint.
+    requires_mcp: bool = False          # OI-865: True keeps the worker's ambient MCP config instead
+                                        # of the force-empty scoped posture. Default False is the
+                                        # choice for a MISSING spec field: DispatchSpec.requires_mcp
+                                        # defaults to False and the tmux lane's dispatch() defaults to
+                                        # False, so a spec that omits the field lands on exactly the
+                                        # value today's code already uses — never silently "no MCP"
+                                        # for a dispatch that already gets MCP. It IS in digest():
+                                        # MCP access changes worker behavior, so a permit for a
+                                        # requires_mcp plan must not validate a force-empty plan.
 
     def digest(self) -> str:
         """Stable sha256 over the canonical, order-independent field set.
@@ -113,6 +129,7 @@ class ExecutionPlan:
             "isolation": self.isolation.value,
             "require_worktree": self.require_worktree,
             "seed_materialize": self.seed_materialize,
+            "requires_mcp": self.requires_mcp,
             "instruction_delivery": self.instruction_delivery,
             "report_contract": self.report_contract,
             "warmup": self.warmup,
@@ -153,6 +170,21 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     if not snapshot.staging_promoted:
         return Reject("ADR-006", "dispatch rejected: staging not promoted (ADR-006 gate)")
     fired.append("D11")
+
+    # OI-921 — role-registry check: the validation dispatch_spec Rule 7 defers here.
+    # dispatch_bridge no longer silently fills the backend-developer sentinel, so a
+    # non-empty role must now name a role that actually exists in agents/. A
+    # consciously chosen "backend-developer" IS valid (it is a real agents/ role);
+    # only the SILENT default was the defect. snapshot.valid_roles=None (registry
+    # not provided) skips — the door always passes a frozenset (possibly empty =
+    # fail-closed, every role rejected).
+    if snapshot.valid_roles is not None and spec.role not in snapshot.valid_roles:
+        valid = ", ".join(sorted(snapshot.valid_roles))
+        return Reject(
+            "unknown-role",
+            f"role {spec.role!r} is not a known agent role; "
+            f"valid roles: {valid or '(none discovered — agents/ registry unavailable)'}",
+        )
 
     # D3 — constraint verdicts; blocking → Reject immediately; warn → collect
     for v in snapshot.constraint_verdicts:
@@ -298,6 +330,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         isolation=isolation,
         require_worktree=require_worktree,
         seed_materialize=seed_materialize,
+        requires_mcp=spec.requires_mcp,
         instruction_delivery=instruction_delivery,
         report_contract=report_contract,
         warmup=warmup,

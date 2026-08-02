@@ -34,9 +34,18 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# ExecutionPlan / ExecutionPermit: the plan + permit types routed by the
+# adapters and run_envelope_plan. Runtime import (not TYPE_CHECKING) so
+# typing.get_type_hints() on these signatures resolves them — the F821
+# unresolved-name finding (OI-288) was hiding a get_type_hints NameError.
+# No import cycle: dispatch_plan -> dispatch_spec and dispatch_internal
+# are stdlib-only leaf modules.
+from dispatch_internal import ExecutionPermit  # noqa: E402
+from dispatch_plan import ExecutionPlan  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +68,7 @@ class EnvelopeSpec:
     pr_id: Optional[str]
     state_dir: Path
     data_dir: Path
+    deadline_seconds: int = 900
 
 
 @dataclass
@@ -96,6 +106,12 @@ class _AdapterResult:
     # local transcript when the spawn itself reported none. None for adapters
     # with no session concept (e.g. codex).
     session_id: Optional[str] = None
+    # Actual model the spawn resolved and executed (e.g. deepseek-harness
+    # resolves "default"/"sonnet" -> "deepseek-v4-pro"). Used for cost
+    # computation in _govern so the receipt's cost_usd prices the model that
+    # actually ran, not a placeholder from the dispatch spec. None when the
+    # adapter did not resolve a distinct model (caller falls back to spec.model).
+    model: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +176,7 @@ class CodexAdapter:
                 token_usage=token_usage,
                 error=result.error,
                 event_writer_failures=result.event_writer_failures,
+                model=spec.model,
             )
         if result.timed_out:
             return _AdapterResult(
@@ -169,6 +186,7 @@ class CodexAdapter:
                 token_usage=token_usage,
                 timed_out=True,
                 event_writer_failures=result.event_writer_failures,
+                model=spec.model,
             )
         status = "success" if result.returncode == 0 else "failure"
         return _AdapterResult(
@@ -177,6 +195,7 @@ class CodexAdapter:
             status=status,
             token_usage=token_usage,
             event_writer_failures=result.event_writer_failures,
+            model=spec.model,
         )
 
 
@@ -209,6 +228,7 @@ class ClaudeSubprocessAdapter:
                 event_writer=event_writer,
                 cwd=cwd,
                 role=spec.role,
+                total_deadline=float(spec.deadline_seconds),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
@@ -228,6 +248,7 @@ class ClaudeSubprocessAdapter:
                     raw_usage.get("cache_read_input_tokens", 0) or 0
                 ),
             }
+        model_used = getattr(result, "model", None) or spec.model
 
         if result.error:
             return _AdapterResult(
@@ -237,6 +258,7 @@ class ClaudeSubprocessAdapter:
                 token_usage=token_usage,
                 error=result.error,
                 session_id=result.session_id,
+                model=model_used,
             )
         if result.timed_out:
             return _AdapterResult(
@@ -246,6 +268,7 @@ class ClaudeSubprocessAdapter:
                 token_usage=token_usage,
                 timed_out=True,
                 session_id=result.session_id,
+                model=model_used,
             )
         if result.stopped_early:
             return _AdapterResult(
@@ -254,6 +277,7 @@ class ClaudeSubprocessAdapter:
                 status="success",
                 token_usage=token_usage,
                 session_id=result.session_id,
+                model=model_used,
             )
         status = "success" if result.returncode == 0 else "failure"
         return _AdapterResult(
@@ -262,6 +286,7 @@ class ClaudeSubprocessAdapter:
             status=status,
             token_usage=token_usage,
             session_id=result.session_id,
+            model=model_used,
         )
 
 
@@ -291,32 +316,20 @@ class LaneRouter:
 
 
 def _prepare(spec: EnvelopeSpec) -> str:
-    """Enrich instruction with intelligence context and repo map (best-effort).
+    """Enrich instruction with role context + intelligence and repo map (best-effort).
 
     Mirrors _enrich_instruction in provider_dispatch.py but operates on EnvelopeSpec.
-    Both layers fall back silently to the original instruction on any failure.
+    Layers fall back silently to the original instruction on any failure:
+
+    1. Repo-map layer on the RAW instruction (target-file extraction most
+       accurate before any enrichment text is added).
+    2. Role context + intelligence + full assembly via ``_inject_skill_context``
+       — the shared lane-neutral injector used by every dispatch lane
+       (dispatch-20260801-w10). This closes the envelope-lane gap where the
+       role's CLAUDE.md never reached the worker. On injector failure the
+       prompt falls back to a role label header.
     """
     instruction = spec.instruction
-
-    try:
-        from intelligence_injection import build_intelligence_section  # noqa: PLC0415
-
-        instruction = build_intelligence_section(
-            instruction=instruction,
-            dispatch_id=spec.dispatch_id,
-            role=spec.role,
-            state_dir=spec.state_dir,
-            pr_id=spec.pr_id,
-            dispatch_paths=None,
-        )
-    except ImportError:
-        logger.debug(
-            "envelope._prepare: intelligence_injection not available — skipping"
-        )
-    except Exception as exc:
-        logger.warning(
-            "envelope._prepare: intelligence injection failed (%s) — skipping", exc
-        )
 
     try:
         from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
@@ -326,6 +339,32 @@ def _prepare(spec: EnvelopeSpec) -> str:
         logger.warning(
             "envelope._prepare: repo map layer failed (%s) — skipping", exc
         )
+
+    try:
+        from skill_context import _inject_skill_context  # noqa: PLC0415
+
+        dispatch_metadata: dict = {"dispatch_id": spec.dispatch_id}
+        if spec.pr_id:
+            dispatch_metadata["pr_id"] = spec.pr_id
+        instruction = _inject_skill_context(
+            spec.terminal_id,
+            instruction,
+            spec.role,
+            dispatch_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
+        logger.warning(
+            "envelope._prepare: skill injection failed (%s); falling back to role label",
+            exc,
+        )
+        if spec.role:
+            header = f"## Role\n\nYou are operating as a **{spec.role}** worker."
+        else:
+            header = (
+                "## Worker Preamble\n\n"
+                "You are a VNX headless worker executing a dispatch instruction."
+            )
+        instruction = f"{header}\n\n{instruction}"
 
     return instruction
 
@@ -369,6 +408,29 @@ def _record_integrity(
         logger.error(
             "envelope: final-prompt integrity failed (non-fatal) dispatch=%s: %s",
             spec.dispatch_id,
+            exc,
+        )
+        return None
+
+
+def _verify_role_application(
+    final_prompt: str,
+    terminal_id: str,
+    role: Optional[str],
+):
+    """Best-effort: run the deterministic role-applied control for *final_prompt*.
+
+    Returns a RoleApplicationVerdict (or None on any failure — the control must
+    never break receipt emission; the fields then stay None/omitted).
+    """
+    try:
+        from role_application import verify_role_applied  # noqa: PLC0415
+        return verify_role_applied(final_prompt, terminal_id, role)
+    except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "envelope._verify_role_application: failed (non-fatal) role=%s terminal=%s: %s",
+            role,
+            terminal_id,
             exc,
         )
         return None
@@ -460,6 +522,117 @@ def _resolve_fix_forward_diff(
     return pushed_diff if pushed_diff.strip() else own_diff
 
 
+def _resolve_phantom_diff(
+    dispatch_id: str,
+    *,
+    base_ref: str = "origin/main",
+    wt_path: Path,
+    repo: Path,
+) -> Optional[str]:
+    """Resolve the phantom-guard diff for the provider lane.
+
+    Prefers the pushed branch diff (durable, survives dispatch teardown) over
+    the live worktree diff (ephemeral, torn down in the finally block). Falls
+    back through each source; returns None when ALL sources are unresolvable so
+    the guard abstains instead of false-rejecting.
+
+    OI-870: reads the actual branch from the worktree (``git -C <wt_path>
+    rev-parse --abbrev-ref HEAD``) instead of deriving it from dispatch_id.
+    A fix-forward dispatch pushes onto a pre-existing PR branch, not its own
+    ``dispatch/<id>`` branch — deriving the branch name from dispatch_id misses
+    the real push target.
+
+    OI-869: detects a self-referencing base_ref (where base_ref resolves to the
+    same commit as the branch head, producing a zero-diff-by-definition) and
+    falls back to ``origin/main`` as the effective comparison base.
+    """
+    from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
+    from phantom_guard import compute_branch_diff, compute_worktree_diff  # noqa: PLC0415
+
+    # OI-870: read the actual branch from the worktree itself. A fix-forward
+    # dispatch may have checked out a different branch (the PR's head branch)
+    # and pushed onto that instead of its own dispatch/<id> branch.
+    try:
+        wt_branch = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if wt_branch.returncode == 0 and wt_branch.stdout.strip():
+            branch = wt_branch.stdout.strip()
+        else:
+            branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: could not read branch from worktree dispatch=%s (%s) "
+            "— falling back to dispatch-id-derived name",
+            dispatch_id, exc,
+        )
+        branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+
+    # OI-869: detect a self-referencing base_ref. When base_ref resolves to the
+    # same commit as the branch head (because the worker pushed onto the same
+    # branch that base_ref names), the diff is zero by definition — "diff
+    # against yourself" is not evidence of a phantom. Fall back to origin/main
+    # as the effective comparison base.
+    effective_base_ref = base_ref
+    try:
+        head_sha = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        base_sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", base_ref],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        if head_sha and base_sha and head_sha == base_sha:
+            logger.warning(
+                "_resolve_phantom_diff: base_ref %s resolves to the same commit "
+                "as branch head %s (%s) — self-referencing base, falling back "
+                "to origin/main dispatch=%s branch=%s",
+                base_ref, head_sha[:8], head_sha, dispatch_id, branch,
+            )
+            effective_base_ref = "origin/main"
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: self-ref check failed for base_ref=%s "
+            "dispatch=%s (%s) — using base_ref as-is",
+            base_ref, dispatch_id, exc,
+        )
+
+    # Check whether the worker pushed its branch. ``git worktree add -b`` may
+    # set upstream=origin/main implicitly, so ``@{upstream}`` alone is not a
+    # reliable signal — ask the remote whether the branch actually exists.
+    has_upstream = False
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch],
+            cwd=str(repo), capture_output=True, text=True, timeout=15,
+        )
+        # git ls-remote exits 0 even when the ref doesn't exist; non-empty
+        # stdout means the branch IS on the remote.
+        has_upstream = proc.returncode == 0 and bool(proc.stdout.strip())
+    except Exception as exc:
+        logger.warning(
+            "_resolve_phantom_diff: upstream check failed for branch=%s dispatch=%s (%s)",
+            branch, dispatch_id, exc,
+        )
+
+    if has_upstream:
+        try:
+            return compute_branch_diff(f"origin/{branch}", base_ref=effective_base_ref, repo=repo)
+        except Exception as exc:
+            logger.warning(
+                "_resolve_phantom_diff: branch diff failed for origin/%s dispatch=%s (%s)",
+                branch, dispatch_id, exc,
+            )
+
+    # Fall back to worktree diff — last chance before the teardown deletes it
+    try:
+        return compute_worktree_diff(wt_path, base_ref=effective_base_ref)
+    except Exception:
+        return None
+
+
 def _unknown_verification() -> Dict[str, Any]:
     """ADR-035 §3.1.1 fallback: an explicit 'we don't know' beats the
     current silent absence — used when no report is on disk to extract from."""
@@ -526,6 +699,89 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
         return _unknown_verification()
 
 
+def _archive_dispatch_events(
+    terminal: Optional[str], dispatch_id: str
+) -> "tuple[Optional[str], bool]":
+    """Archive the live event stream under ``dispatch_id`` (end-of-dispatch teardown).
+
+    The envelope path previously never archived the per-dispatch ring buffer at
+    END-of-dispatch (OI-878 / OI-902): ``run_envelope_plan`` wrote events via the
+    SubprocessAdapter's internal EventStore but only the NEXT dispatch's write-side
+    boundary guard (EventStore.append, #1276) rotated the previous stream, so the
+    LAST dispatch in a series leaked its events into the live file.
+
+    Returns ``(events_path, clear_ok)``:
+    - ``events_path`` is the archive path (str) when archived, else None.
+    - ``clear_ok`` tells the caller whether the live stream may be truncated
+      afterwards. It is False ONLY when the archive step itself raised and the
+      live file still holds this dispatch's events — clearing then would destroy
+      exactly the events that failed to archive (OI-918). It is True when the
+      archive succeeded, when there was nothing to archive (empty/missing file),
+      or when the live file holds a DIFFERENT dispatch's events (the caller's own
+      clear guard already refuses to wipe a foreign stream).
+
+    Guards against mislabeling: when the live file holds a DIFFERENT dispatch's
+    events (this dispatch never wrote to the stream — e.g. a pre-spawn failure),
+    the file is left untouched for the boundary guard of the next dispatch;
+    archiving it here would mislabel the previous dispatch's events under our id.
+
+    Best-effort — a failure never breaks the dispatch (mirrors the
+    ``_emit_governance`` archive contract in provider_dispatch).
+    """
+    if not terminal or not dispatch_id:
+        return None, True
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        store = EventStore()
+        last = store.last_event(terminal)
+        last_dispatch = (last or {}).get("dispatch_id") or ""
+        if last_dispatch and last_dispatch != dispatch_id:
+            logger.debug(
+                "envelope: end-dispatch archive skipped terminal=%s — live file "
+                "holds %r, not %s (left for the next dispatch's boundary guard)",
+                terminal, last_dispatch, dispatch_id,
+            )
+            return None, True
+        archived = store.archive(terminal, dispatch_id)
+        if archived is not None:
+            logger.info("envelope: end-dispatch archived %s -> %s", terminal, archived)
+        return (str(archived) if archived is not None else None), True
+    except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
+        logger.warning(
+            "envelope: end-dispatch event archive failed terminal=%s dispatch=%s "
+            "(non-fatal, live file left for the next dispatch's boundary guard): %s",
+            terminal, dispatch_id, exc,
+        )
+        return None, False
+
+
+def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
+    """Truncate the live event stream after the receipt is written (end-of-dispatch).
+
+    Runs in a finally after the receipt emit so the live ``T{n}.ndjson`` is
+    truncated even when the fail-closed receipt write raises EnvelopeGovernError.
+    Only clears when the live file still holds THIS dispatch's events (or is
+    empty) — never wipes a different dispatch's stream. Best-effort; never raises.
+    """
+    if not terminal or not dispatch_id:
+        return
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        store = EventStore()
+        last = store.last_event(terminal)
+        last_dispatch = (last or {}).get("dispatch_id") or ""
+        if last_dispatch and last_dispatch != dispatch_id:
+            return
+        store.clear(terminal)
+    except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
+        logger.warning(
+            "envelope: end-dispatch event clear failed terminal=%s dispatch=%s (non-fatal): %s",
+            terminal, dispatch_id, exc,
+        )
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -550,7 +806,36 @@ def _govern(
 
     duration = (end_time - start_time).total_seconds()
 
-    # REPORT first — idempotent: worker-written file is preserved, not overwritten
+    # OI-882: the envelope previously hardcoded cost_usd=None even though
+    # adapter_result.token_usage carried real tokens and wave7_models.yaml has
+    # the per-provider prices. Compute the estimate the same way
+    # provider_dispatch._emit_governance does, using the actual model the spawn
+    # resolved (falling back to the spec model). Non-fatal: an unresolvable
+    # price leaves cost_usd None instead of failing the receipt.
+    cost_usd: Optional[float] = None
+    _cost_model = getattr(adapter_result, "model", None) or spec.model
+    try:
+        from provider_dispatch import _compute_cost  # noqa: PLC0415
+        cost_usd = _compute_cost(spec.provider, _cost_model, adapter_result.token_usage)
+    except Exception as _cost_exc:  # noqa: BLE001 — cost must never break receipt emission
+        logger.debug(
+            "envelope._govern: cost compute failed dispatch=%s provider=%s (non-fatal): %s",
+            spec.dispatch_id, spec.provider, _cost_exc,
+        )
+
+    # OI-878/OI-902: end-of-dispatch event archive. Archive the live event stream
+    # under THIS dispatch's id BEFORE the receipt so the receipt can carry
+    # events_path (parity with provider_dispatch._emit_governance); the clear
+    # runs in the finally below AFTER the receipt write. Without this the
+    # envelope path never rotated the ring buffer at end-of-dispatch — only the
+    # NEXT dispatch's write-side boundary guard did, so the LAST dispatch in a
+    # series leaked its events into the live file.
+    events_path, _events_archive_ok = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
+
+    # REPORT first — idempotent: worker-written file is preserved, not overwritten.
+    # OI-903: on failure/timeout, a killed worker's partial report is preserved
+    # under a .partial.md sidecar so the canonical report stays contract-compliant
+    # while the partial output remains retrievable.
     report_path: Optional[Path] = None
     try:
         report_path = emit_unified_report(
@@ -562,6 +847,7 @@ def _govern(
             findings=[],
             duration_seconds=duration,
             data_dir=spec.data_dir,
+            preserve_partial=adapter_result.status != "success",
         )
     except Exception as exc:
         logger.error(
@@ -570,107 +856,210 @@ def _govern(
             exc,
         )
 
-    # RECEIPT second — fail-closed, with idempotent dedup
+    # RECEIPT second — fail-closed, with idempotent dedup. The end-of-dispatch
+    # event clear runs in finally so the live stream is truncated even when the
+    # fail-closed receipt emit raises EnvelopeGovernError.
     receipt_path: Optional[Path] = None
-    ndjson_path = spec.state_dir / "t0_receipts.ndjson"
-    if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
-        logger.info(
-            "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
-            spec.dispatch_id,
-        )
-        receipt_path = ndjson_path
-    else:
-        try:
-            # receipt-quality PR-1: resolve dispatch identity (role) from
-            # dispatch_metadata just before the emit. FAIL-OPEN — a resolver
-            # error must never break receipt emission.
-            try:
-                from dispatch_identity import resolve_dispatch_role  # noqa: PLC0415
-                _project_id = getattr(spec, "project_id", None)
-                if not _project_id:
-                    from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-                    _project_id = _resolve_project_id()
-                _role = resolve_dispatch_role(
-                    spec.dispatch_id, _project_id, state_dir=spec.state_dir,
-                )
-            except Exception:  # noqa: BLE001 — identity join is fail-open
-                logger.debug(
-                    "envelope._govern: role resolution failed open dispatch=%s",
-                    spec.dispatch_id,
-                    exc_info=True,
-                )
-                _role = None
-            _role = _role or "identity_unresolved"
-
-            # receipt-quality PR-B2 fix-forward (Finding C): aggregate
-            # PreToolUse-hook tool-call signals for this dispatch
-            # (toolcall_signals.py), mirroring provider_dispatch._emit_
-            # governance's wiring so the claude/subprocess-adapter lane also
-            # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
-            # FAIL-OPEN — an aggregation error or absent signal log must
-            # never break receipt emission; each field simply stays None
-            # (omitted by ReceiptV2).
-            _toolcall_signals: Dict[str, int] = {}
-            try:
-                _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-                if _signal_dir:
-                    from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-                    _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-            except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-                logger.debug(
-                    "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-                    spec.dispatch_id,
-                    exc_info=True,
-                )
-                _toolcall_signals = {}
-
-            receipt_path = emit_dispatch_receipt(
-                dispatch_id=spec.dispatch_id,
-                terminal_id=spec.terminal_id,
-                provider=spec.provider,
-                model=spec.model,
-                pr_id=spec.pr_id,
-                status=adapter_result.status,
-                completion_pct=100 if adapter_result.status == "success" else 0,
-                risk=0.0,
-                findings=[],
-                duration_seconds=duration,
-                token_usage=adapter_result.token_usage,
-                cost_usd=None,
-                state_dir=spec.state_dir,
-                report_path=str(report_path) if report_path else None,
-                final_prompt_path=getattr(integrity, "final_prompt_path", None),
-                final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
-                injection_reconstructs=(
-                    getattr(integrity, "injection_reconstructs", None)
-                    if integrity is not None
-                    else None
-                ),
-                # ADR-035 §3.1.1: envelope sub-path — the report is already
-                # on disk (emit_unified_report ran above), so extract
-                # verification{} from it via the shared regex extractor.
-                verification=_verification_from_report(report_path),
-                role=_role,
-                receipt_kind="dispatch",
-                session_id=adapter_result.session_id,
-                tool_call_count=_toolcall_signals.get("tool_call_count"),
-                tool_call_failures=_toolcall_signals.get("tool_call_failures"),
-                tool_call_retries=_toolcall_signals.get("tool_call_retries"),
+    try:
+        ndjson_path = spec.state_dir / "t0_receipts.ndjson"
+        if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
+            logger.info(
+                "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
+                spec.dispatch_id,
             )
-        except Exception as exc:
-            raise EnvelopeGovernError(
-                f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
-            ) from exc
+            receipt_path = ndjson_path
+        else:
+            try:
+                # receipt-quality PR-1 + W7 fix: resolve dispatch identity
+                # (role) just before the emit. The shared resolver prefers the
+                # genuinely-set spec role (never the fake backend-developer
+                # default), falls back to dispatch_metadata, then stamps
+                # identity_unresolved. FAIL-OPEN — a resolver error must never
+                # break receipt emission.
+                try:
+                    from dispatch_identity import resolve_effective_role  # noqa: PLC0415
+                    _project_id = getattr(spec, "project_id", None)
+                    if not _project_id:
+                        from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+                        _project_id = _resolve_project_id()
+                    _role = resolve_effective_role(
+                        spec.role, spec.dispatch_id, _project_id, state_dir=spec.state_dir,
+                    )
+                except Exception:  # noqa: BLE001 — identity join is fail-open
+                    logger.debug(
+                        "envelope._govern: role resolution failed open dispatch=%s",
+                        spec.dispatch_id,
+                        exc_info=True,
+                    )
+                    _role = "identity_unresolved"
 
-        if receipt_path is None:
-            raise EnvelopeGovernError(
-                f"envelope._govern: receipt_path is None after emit "
-                f"(fail-closed) dispatch={spec.dispatch_id}"
-            )
-        if not receipt_path.exists():
-            raise EnvelopeGovernError(
-                f"envelope._govern: receipt file absent on disk after emit "
-                f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
+                # Deterministic role-applied control (dispatch-20260801-w10):
+                # did the resolved role source actually reach the enriched prompt
+                # (spec.instruction)? FAIL-OPEN — a verification error must never
+                # break receipt emission; the fields simply stay None (omitted).
+                _role_app = _verify_role_application(
+                    spec.instruction, spec.terminal_id, spec.role,
+                )
+
+                # receipt-quality PR-B2 fix-forward (Finding C): aggregate
+                # PreToolUse-hook tool-call signals for this dispatch
+                # (toolcall_signals.py), mirroring provider_dispatch._emit_
+                # governance's wiring so the claude/subprocess-adapter lane also
+                # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
+                # FAIL-OPEN — an aggregation error or absent signal log must
+                # never break receipt emission; each field simply stays None
+                # (omitted by ReceiptV2).
+                _toolcall_signals: Dict[str, int] = {}
+                try:
+                    _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+                    if _signal_dir:
+                        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+                        _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
+                except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
+                    logger.debug(
+                        "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
+                        spec.dispatch_id,
+                        exc_info=True,
+                    )
+                    _toolcall_signals = {}
+
+                # ADR-005: emit cost event BEFORE receipt write. provider_dispatch
+                # and recovery raise on failure (fail-loud); the envelope is the
+                # third receipt path and matches them, but wraps in try/except so a
+                # cost-log failure never breaks the fail-closed receipt contract.
+                try:
+                    from provider_costs import emit_provider_cost  # noqa: PLC0415
+                    from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+                    _cost_pid = ""
+                    try:
+                        _cost_pid = resolve_stamp_project_id(
+                            db_path=str(spec.state_dir / "quality_intelligence.db")
+                        )
+                    except TenantUnresolved:
+                        pass  # emit falls back to env; cost-audit must not lose the event
+                    emit_provider_cost(
+                        provider=spec.provider,
+                        model=_cost_model,
+                        input_tokens=(
+                            adapter_result.token_usage.get("input")
+                            if adapter_result.token_usage else None
+                        ),
+                        output_tokens=(
+                            adapter_result.token_usage.get("output")
+                            if adapter_result.token_usage else None
+                        ),
+                        cost_usd_estimate=cost_usd,
+                        dispatch_id=spec.dispatch_id,
+                        project_id=_cost_pid,
+                    )
+                except Exception as _cost_event_exc:  # noqa: BLE001 — cost event must not break receipt
+                    logger.warning(
+                        "envelope._govern: cost event emit failed dispatch=%s (non-fatal): %s",
+                        spec.dispatch_id, _cost_event_exc,
+                    )
+
+                # OI-866: classify failure so the receipt carries a distinguishable
+                # failure_reason + failure_class instead of a silent
+                # "(no error captured)" log line.
+                _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
+                if adapter_result.status != "success":
+                    try:
+                        from failure_classification import classify_failure  # noqa: PLC0415
+                        _classification = classify_failure(
+                            status=adapter_result.status,
+                            error=adapter_result.error,
+                            completion_text=adapter_result.completion_text,
+                            timed_out=adapter_result.timed_out,
+                            provider=spec.provider,
+                            duration_seconds=duration,
+                            returncode=adapter_result.returncode,
+                        )
+                    except Exception:  # noqa: BLE001 — classification is best-effort
+                        logger.debug(
+                            "envelope._govern: failure classification failed dispatch=%s (non-fatal)",
+                            spec.dispatch_id,
+                            exc_info=True,
+                        )
+
+                receipt_path = emit_dispatch_receipt(
+                    dispatch_id=spec.dispatch_id,
+                    terminal_id=spec.terminal_id,
+                    provider=spec.provider,
+                    model=_cost_model,
+                    pr_id=spec.pr_id,
+                    status=adapter_result.status,
+                    completion_pct=100 if adapter_result.status == "success" else 0,
+                    risk=0.0,
+                    findings=[],
+                    duration_seconds=duration,
+                    token_usage=adapter_result.token_usage,
+                    cost_usd=cost_usd,
+                    state_dir=spec.state_dir,
+                    report_path=str(report_path) if report_path else None,
+                    events_path=events_path,
+                    final_prompt_path=getattr(integrity, "final_prompt_path", None),
+                    final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
+                    injection_reconstructs=(
+                        getattr(integrity, "injection_reconstructs", None)
+                        if integrity is not None
+                        else None
+                    ),
+                    # ADR-035 §3.1.1: envelope sub-path — the report is already
+                    # on disk (emit_unified_report ran above), so extract
+                    # verification{} from it via the shared regex extractor.
+                    verification=_verification_from_report(report_path),
+                    role=_role,
+                    receipt_kind="dispatch",
+                    role_applied=(
+                        getattr(_role_app, "role_applied", None) if _role_app is not None else None
+                    ),
+                    role_tier=(
+                        getattr(_role_app, "tier", None) if _role_app is not None else None
+                    ),
+                    role_not_applied_reason=(
+                        getattr(_role_app, "reason", None) if _role_app is not None else None
+                    ),
+                    role_source_path=(
+                        getattr(_role_app, "source_path", None) if _role_app is not None else None
+                    ),
+                    session_id=adapter_result.session_id,
+                    tool_call_count=_toolcall_signals.get("tool_call_count"),
+                    tool_call_failures=_toolcall_signals.get("tool_call_failures"),
+                    tool_call_retries=_toolcall_signals.get("tool_call_retries"),
+                    deadline_seconds=spec.deadline_seconds,
+                    failure_reason=_classification.get("failure_reason"),
+                    failure_class=_classification.get("failure_class"),
+                )
+            except Exception as exc:
+                raise EnvelopeGovernError(
+                    f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
+                ) from exc
+
+            if receipt_path is None:
+                raise EnvelopeGovernError(
+                    f"envelope._govern: receipt_path is None after emit "
+                    f"(fail-closed) dispatch={spec.dispatch_id}"
+                )
+            if not receipt_path.exists():
+                raise EnvelopeGovernError(
+                    f"envelope._govern: receipt file absent on disk after emit "
+                    f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
+                )
+    finally:
+        # OI-878/OI-902: truncate the live event stream now that the archive
+        # (top of _govern) and the receipt write are complete. Best-effort.
+        # OI-918: only when the archive step actually succeeded (or had nothing
+        # to archive) — clearing after a FAILED archive would destroy exactly
+        # the events we wanted to preserve. On an archive failure the live file
+        # is left in place for the next dispatch's write-side boundary guard
+        # (#1276) to rotate, which is the second line of defence it exists for.
+        if _events_archive_ok:
+            _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
+        else:
+            logger.warning(
+                "envelope: end-dispatch clear skipped terminal=%s dispatch=%s — "
+                "archive failed; live file left for the next dispatch's boundary guard",
+                spec.terminal_id, spec.dispatch_id,
             )
 
     if adapter_result.status != "success":
@@ -762,6 +1151,7 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         pr_id=spec.pr_id,
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
+        deadline_seconds=spec.deadline_seconds,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify raw+injections reconstruct it
@@ -826,10 +1216,28 @@ def _fail_loud_on_empty_success(
                 f"success (raw spawn result: {raw_result!r})"
             ),
         )
+    if status != "success" and not (completion_text or "").strip():
+        # OI-925 (restant van OI-866): a NON-success spawn with a blank
+        # completion and no captured error previously surfaced in the
+        # dispatch_cli log line as "(no error captured)" even though the
+        # receipt classified it as empty_completion. Give the operator a
+        # diagnosable message instead of a silent blank. (Deepseek-harness:
+        # a returncode!=0 spawn with empty text and error=None lands here —
+        # _coerce_empty_completion_to_retryable only rewrites the rc=0 case.)
+        return (
+            status,
+            returncode or 1,
+            (
+                f"provider={provider_str} returned an empty completion with "
+                f"returncode={returncode} — no error captured by spawn"
+            ),
+        )
     return status, returncode, None
 
 
-def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
+def _map_generic_spawn_result(
+    result: Any, provider_str: str, model: Optional[str] = None
+) -> _AdapterResult:
     """Map codex/kimi/gemini/litellm:* spawn result to _AdapterResult.
 
     Normalises token fields via _extract_token_usage from provider_dispatch.
@@ -850,6 +1258,7 @@ def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
             token_usage=token_usage,
             error=result.error,
             event_writer_failures=ewf,
+            model=model,
         )
     if result.timed_out:
         return _AdapterResult(
@@ -859,6 +1268,7 @@ def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
             token_usage=token_usage,
             timed_out=True,
             event_writer_failures=ewf,
+            model=model,
         )
     completion_text = result.completion_text or ""
     status = "success" if result.returncode == 0 else "failure"
@@ -872,6 +1282,7 @@ def _map_generic_spawn_result(result: Any, provider_str: str) -> _AdapterResult:
         token_usage=token_usage,
         error=guard_error,
         event_writer_failures=ewf,
+        model=model,
     )
 
 
@@ -907,7 +1318,6 @@ class ProviderAdapter:
             _extract_token_usage,
             _resolve_codex_model,
             _resolve_deepseek_model,
-            _resolve_kimi_model_label,
             _resolve_moonshot_model,
             _resolve_zai_model,
         )
@@ -935,7 +1345,7 @@ class ProviderAdapter:
                     returncode=1, completion_text="", status="failure",
                     error=f"codex spawn BrokenPipeError: {exc}",
                 )
-            return _map_generic_spawn_result(result, pv.value)
+            return _map_generic_spawn_result(result, pv.value, model=model)
 
         # ---- kimi ----
         if pv == Provider.KIMI:
@@ -964,7 +1374,7 @@ class ProviderAdapter:
                     returncode=1, completion_text="", status="failure",
                     error=f"gemini spawn BrokenPipeError: {exc}",
                 )
-            return _map_generic_spawn_result(result, pv.value)
+            return _map_generic_spawn_result(result, pv.value, model=model)
 
         # ---- litellm:deepseek | litellm:zai | litellm:moonshot ----
         if pv in (Provider.LITELLM_DEEPSEEK, Provider.LITELLM_ZAI, Provider.LITELLM_MOONSHOT):
@@ -997,7 +1407,7 @@ class ProviderAdapter:
                     returncode=1, completion_text="", status="failure",
                     error=f"litellm spawn BrokenPipeError: {exc}",
                 )
-            return _map_generic_spawn_result(result, pv.value)
+            return _map_generic_spawn_result(result, pv.value, model=model)
 
         # ---- deepseek-harness ----
         if pv == Provider.DEEPSEEK_HARNESS:
@@ -1018,6 +1428,7 @@ class ProviderAdapter:
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
                     cwd=cwd,
+                    total_deadline=float(plan.deadline_seconds),
                 )
             except BrokenPipeError as exc:
                 return _AdapterResult(
@@ -1032,6 +1443,7 @@ class ProviderAdapter:
                     status="failure",
                     token_usage=token_usage,
                     error=result.error,
+                    model=model,
                 )
             if result.timed_out:
                 return _AdapterResult(
@@ -1040,6 +1452,7 @@ class ProviderAdapter:
                     status="timeout",
                     token_usage=token_usage,
                     timed_out=True,
+                    model=model,
                 )
             if getattr(result, "stopped_early", False):
                 return _AdapterResult(
@@ -1047,6 +1460,7 @@ class ProviderAdapter:
                     completion_text=(result.completion_text or ""),
                     status="success",
                     token_usage=token_usage,
+                    model=model,
                 )
             _dh_text = result.completion_text or ""
             status = "success" if result.returncode == 0 else "failure"
@@ -1059,6 +1473,7 @@ class ProviderAdapter:
                 status=status,
                 token_usage=token_usage,
                 error=_dh_err,
+                model=model,
             )
 
         # ---- glm-harness ---- (codex flip-PR F2: the door normalizes GLM -> glm-harness, so the
@@ -1081,6 +1496,7 @@ class ProviderAdapter:
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
                     cwd=cwd,
+                    total_deadline=float(plan.deadline_seconds),
                 )
             except BrokenPipeError as exc:
                 return _AdapterResult(
@@ -1095,6 +1511,7 @@ class ProviderAdapter:
                     status="failure",
                     token_usage=token_usage,
                     error=result.error,
+                    model=model,
                 )
             if result.timed_out:
                 return _AdapterResult(
@@ -1103,6 +1520,7 @@ class ProviderAdapter:
                     status="timeout",
                     token_usage=token_usage,
                     timed_out=True,
+                    model=model,
                 )
             if getattr(result, "stopped_early", False):
                 return _AdapterResult(
@@ -1110,6 +1528,7 @@ class ProviderAdapter:
                     completion_text=(result.completion_text or ""),
                     status="success",
                     token_usage=token_usage,
+                    model=model,
                 )
             _gh_text = result.completion_text or ""
             status = "success" if result.returncode == 0 else "failure"
@@ -1122,6 +1541,7 @@ class ProviderAdapter:
                 status=status,
                 token_usage=token_usage,
                 error=_gh_err,
+                model=model,
             )
 
         # ---- local-gemma ----
@@ -1148,6 +1568,7 @@ class ProviderAdapter:
                     status="failure",
                     token_usage=token_usage,
                     error=result.error,
+                    model=canonical_model,
                 )
             if result.timed_out:
                 return _AdapterResult(
@@ -1156,6 +1577,7 @@ class ProviderAdapter:
                     status="timeout",
                     token_usage=token_usage,
                     timed_out=True,
+                    model=canonical_model,
                 )
             _lg_text = result.completion_text or ""
             status = "success" if result.returncode == 0 else "failure"
@@ -1168,6 +1590,7 @@ class ProviderAdapter:
                 status=status,
                 token_usage=token_usage,
                 error=_lg_err,
+                model=canonical_model,
             )
 
         # Provider.CLAUDE, Provider.AUTO, or any unexpected value — programming error
@@ -1227,7 +1650,7 @@ class ProviderAdapter:
                 returncode=1, completion_text="", status="failure",
                 error=f"kimi spawn BrokenPipeError: {exc}",
             )
-        return _map_generic_spawn_result(result, Provider.KIMI.value)
+        return _map_generic_spawn_result(result, Provider.KIMI.value, model=model)
 
 
 def run_envelope_plan(
@@ -1301,6 +1724,7 @@ def run_envelope_plan(
         pr_id=None,
         state_dir=state_dir,
         data_dir=data_dir,
+        deadline_seconds=plan.deadline_seconds,
     )
 
     enriched_instruction = _prepare(spec)
@@ -1314,6 +1738,7 @@ def run_envelope_plan(
         pr_id=spec.pr_id,
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
+        deadline_seconds=spec.deadline_seconds,
     )
 
     # INTEGRITY — the bundle dir is the pending/<id>/ that hosts instruction.md.
@@ -1372,15 +1797,21 @@ def run_envelope_plan(
         start = datetime.now(timezone.utc)
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path)
         end = datetime.now(timezone.utc)
-        # F1 (codex): capture the worker's diff from the LIVE worktree BEFORE the teardown below —
-        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id> branch, so
-        # the phantom-guard inside _govern could not otherwise resolve the provider lane's diff and
-        # would abstain, letting the exact kimi/glm/deepseek phantom slip through.
+        # F1 (codex): capture the worker's diff BEFORE the teardown below —
+        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id>
+        # branch, so the phantom-guard inside _govern could not otherwise resolve the
+        # provider lane's diff and would abstain, letting the exact kimi/glm/deepseek
+        # phantom slip through.
+        # Prefer the pushed branch (survives teardown → more durable evidence) over the
+        # live worktree diff (ephemeral, torn down in the finally block). When the worker
+        # pushed its branch, the branch diff is the more reliable evidence.
         try:
-            from phantom_guard import compute_worktree_diff  # noqa: PLC0415
-            # F3 (codex): use the plan's actual base_ref, not a hardcoded origin/main — a seeded /
-            # non-main base would make an empty worker run look non-empty and let a phantom pass.
-            _phantom_diff = compute_worktree_diff(wt_path, base_ref=plan.base_ref or "origin/main")
+            _phantom_diff = _resolve_phantom_diff(
+                plan.dispatch_id,
+                base_ref=plan.base_ref or "origin/main",
+                wt_path=wt_path,
+                repo=_consumer_project_root,
+            )
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
     finally:
@@ -1470,6 +1901,7 @@ def run_envelope_headless_plan(
         pr_id=None,
         state_dir=state_dir,
         data_dir=data_dir,
+        deadline_seconds=plan.deadline_seconds,
     )
 
     enriched_instruction = _prepare(spec)
@@ -1483,6 +1915,7 @@ def run_envelope_headless_plan(
         pr_id=spec.pr_id,
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
+        deadline_seconds=spec.deadline_seconds,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify reconstruction

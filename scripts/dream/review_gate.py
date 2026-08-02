@@ -82,8 +82,26 @@ def _load_review(state_dir: Path, cycle_id: str, project_id: str) -> dict:
     return review
 
 
+def _file_created_iso(path: Path) -> str | None:
+    """ISO-8601 UTC timestamp of when the pending-review file was written.
+
+    The pending-review.json carries no timestamp field (consolidator.py writes
+    cycle_id/project_id/consolidation only), so the review age is the file's
+    mtime — the moment the cycle completed and started waiting for T0.
+    """
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
 def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list[dict]:
-    """Return pending dream cycles awaiting operator review."""
+    """Return pending dream cycles awaiting operator review.
+
+    Each returned dict is the pending-review payload plus an additive
+    ``created_at`` key (UTC ISO from the file mtime) so readers can report the
+    age of the oldest waiting review without re-globbing the state dir.
+    """
     dr = _resolve_data_root(data_root)
     state_dir = dr / "state" / "dream"
     if not state_dir.is_dir():
@@ -95,6 +113,7 @@ def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list
         except (json.JSONDecodeError, OSError):
             continue
         if data.get("project_id") == project_id and data.get("requires_operator_review"):
+            data["created_at"] = _file_created_iso(path)
             results.append(data)
     return results
 

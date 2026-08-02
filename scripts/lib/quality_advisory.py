@@ -55,6 +55,7 @@ FILE_SIZE_ALLOWLIST: Dict[str, str] = {
     "scripts/smart_tap_json_translator": "grandfathered shell monolith; smart-tap translator",
     "dashboard/api_intelligence": "grandfathered monolith; dashboard intelligence API",
     "dashboard/api_operator": "grandfathered monolith; dashboard operator API",
+    "scripts/lib/dispatch_cli": "TEMP allowlist — mid-refactor naar submodules, zie OI-937 (slot-PR van de extractie-reeks verwijdert deze regel weer)",
 }
 
 

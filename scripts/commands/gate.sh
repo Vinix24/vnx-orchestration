@@ -11,6 +11,25 @@ _g_current_branch() {
   git -C "${PROJECT_ROOT:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null || printf ''
 }
 
+_g_pr_head_branch() {
+  # Resolve the PR's head ref from GitHub, not from the local checkout. T0
+  # routinely runs `vnx gate` from main; the local branch is then 'main' while
+  # the branch under review is the PR's headRefName. Passing the local branch
+  # to the gate worktree checks out the wrong tree for the diff being reviewed
+  # (OI-904). The diff itself is fetched via `gh pr diff`, but the gate agent's
+  # own file reads (sed/rg/cat) resolve against the worktree cwd, which must
+  # match the PR branch.
+  local pr="$1"
+  [ -n "$pr" ] || return 1
+  local head_ref
+  head_ref="$(gh pr view "$pr" --json headRefName --jq .headRefName 2>/dev/null || true)"
+  if [ -n "$head_ref" ]; then
+    printf '%s' "$head_ref"
+    return 0
+  fi
+  return 1
+}
+
 _g_required_gates() {
   # Read governance_enforcement.yaml and return comma-separated gate names
   # that are level >= 2 (soft_mandatory or hard_mandatory).
@@ -208,12 +227,22 @@ HELP
     return 0
   fi
 
-  # Auto-detect branch
+  # Auto-detect branch. Prefer the PR's head ref (gh pr view headRefName) so
+  # the gate worktree matches the diff under review; fall back to the local
+  # checkout branch only when no PR number is available or gh cannot resolve
+  # the head ref.
   local branch
-  branch=$(_g_current_branch)
-  if [ -z "$branch" ]; then
-    err "[gate] Could not determine current git branch"
-    return 1
+  if [ -n "$pr_number" ] && branch="$(_g_pr_head_branch "$pr_number")"; then
+    log "[gate] Resolved PR $pr_number head branch: $branch"
+  else
+    branch=$(_g_current_branch)
+    if [ -z "$branch" ]; then
+      err "[gate] Could not determine current git branch"
+      return 1
+    fi
+    if [ -n "$pr_number" ]; then
+      log "[gate] WARNING: could not resolve PR $pr_number head branch via gh pr view; fell back to local branch '$branch'"
+    fi
   fi
 
   local gate_script="$VNX_HOME/scripts/review_gate_manager.py"

@@ -36,7 +36,7 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from _streaming_drainer import StreamingDrainerMixin  # noqa: E402
+from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,18 @@ def normalize_litellm_event(
 
     error_type = chunk.get("error_type")
     if error_type:
-        return make("error", {"error_type": error_type, "message": chunk.get("message", "")})
+        # OI-866: carry the HTTP status through to the canonical event so the
+        # spawn-result error string (and the receipt failure_reason it feeds)
+        # can name the status code instead of dropping it. The runner emits
+        # status_code for proxy/provider HTTP errors; normalizing it here is the
+        # only place the field survives the drainer.
+        data: Dict[str, Any] = {"error_type": error_type, "message": chunk.get("message", "")}
+        status_code = chunk.get("status_code")
+        if isinstance(status_code, str) and status_code.isdigit():
+            status_code = int(status_code)
+        if isinstance(status_code, int) and 100 <= status_code <= 599:
+            data["status_code"] = status_code
+        return make("error", data)
 
     if chunk.get("event_type") == "usage_complete":
         return make("usage_complete", {"usage": chunk.get("usage") or {}})
@@ -298,6 +309,9 @@ def _consume_litellm_stream(
     timed_out = False
     _event_writer_failures = 0
     last_token_usage: Optional[Dict[str, Any]] = None
+    # OI-866: capture the first error-type event so the spawn result.error
+    # carries a classified reason, not None ("no error captured").
+    first_error_event: Optional[Dict[str, Any]] = None
 
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
@@ -314,6 +328,9 @@ def _consume_litellm_stream(
             reason = ((canonical_event.data or {}).get("reason") or "").lower()
             if "timeout" in reason or "deadline" in reason:
                 timed_out = True
+            # Capture the first error event so the caller can classify it.
+            if first_error_event is None:
+                first_error_event = dict(canonical_event.data or {})
         elif evt_type == "usage_complete":
             usage = (canonical_event.data or {}).get("usage")
             if isinstance(usage, dict):
@@ -341,7 +358,7 @@ def _consume_litellm_stream(
                     logger.debug("spawn_litellm: kill after on_event=False failed: %s", _ke)
                 break
 
-    return "".join(completion_parts), events_written, timed_out, stopped_early, _event_writer_failures, last_token_usage
+    return "".join(completion_parts), events_written, timed_out, stopped_early, _event_writer_failures, last_token_usage, first_error_event
 
 
 def _finalize_litellm_result(
@@ -353,23 +370,54 @@ def _finalize_litellm_result(
     event_writer_failures: int = 0,
     error: Optional[str] = None,
     token_usage: Optional[Dict[str, Any]] = None,
+    first_error_event: Optional[Dict[str, Any]] = None,
 ) -> LiteLLMSpawnResult:
-    """Wait for process exit and return a LiteLLMSpawnResult."""
+    """Wait for process exit and return a LiteLLMSpawnResult.
+
+    When *error* is not already set by the caller, a non-zero exit code
+    combined with a runner-emitted error event (captured during stream
+    consumption) is used to derive a structured error string so the caller
+    can classify the failure (OI-866).
+    """
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
     rc = proc.returncode if proc.returncode is not None else 1
+
+    derived_error: Optional[str] = error
+    if derived_error is None and rc != 0 and first_error_event:
+        etype = first_error_event.get("error_type", "")
+        message = first_error_event.get("message", "")
+        status_code = first_error_event.get("status_code")
+        reason = first_error_event.get("reason", "")
+        parts = []
+        if etype:
+            parts.append(f"litellm/{etype}")
+        if status_code is not None:
+            parts.append(f"HTTP {status_code}")
+        if message:
+            parts.append(message)
+        # OI-866: the drainer's synthetic error event (subprocess exited
+        # non-zero with no structured error) carries only a "reason" — without
+        # this fallback the derived error collapsed to the bare "litellm/" and
+        # the receipt classified it as unknown with no diagnostic content.
+        if not parts and reason:
+            parts.append(reason)
+        if not parts:
+            parts.append(f"runner exited with code {rc} and no error detail")
+        derived_error = ": ".join(parts)
+
     return LiteLLMSpawnResult(
-        returncode=rc if error is None else (rc if rc != 0 else 1),
+        returncode=rc if derived_error is None else (rc if rc != 0 else 1),
         completion_text=completion_text,
         events_written=events_written,
         session_id=None,
         timed_out=timed_out,
         stopped_early=stopped_early,
         event_writer_failures=event_writer_failures,
-        error=error,
+        error=derived_error,
         token_usage=token_usage,
     )
 
@@ -411,7 +459,7 @@ def _spawn_streaming(
         sub_provider=sub_provider,
         lane=lane,
     )
-    completion_text, events_written, timed_out, stopped_early, _ew_failures, token_usage = _consume_litellm_stream(
+    completion_text, events_written, timed_out, stopped_early, _ew_failures, token_usage, first_error_event = _consume_litellm_stream(
         proc=proc, host=host, on_event=on_event,
         health_monitor=health_monitor, event_writer=event_writer,
         terminal_id=terminal_id, dispatch_id=dispatch_id,
@@ -423,6 +471,7 @@ def _spawn_streaming(
         events_written=events_written, timed_out=timed_out,
         stopped_early=stopped_early, event_writer_failures=_ew_failures,
         token_usage=token_usage,
+        first_error_event=first_error_event,
     )
 
 
@@ -472,6 +521,11 @@ def spawn_litellm(
         total_deadline = float(os.environ.get("VNX_LITELLM_TIMEOUT", total_deadline))
     except (TypeError, ValueError):
         pass
+    # OI-903: scale the stall timeout with the total deadline so a long deadline
+    # stays the binding constraint. Skipped when VNX_LITELLM_STALL_THRESHOLD is set
+    # explicitly — env overrides retain precedence.
+    if "VNX_LITELLM_STALL_THRESHOLD" not in os.environ:
+        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     try:
         _validate_tool_shape(prompt, tool_call_shape)

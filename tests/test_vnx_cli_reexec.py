@@ -161,6 +161,68 @@ def test_pin_without_v_resolves_v_prefixed_dir(central_store, execv_spy, tmp_pat
     assert len(execv_spy) == 1
 
 
+def test_pin_not_satisfied_by_same_version_different_install(
+    central_store, execv_spy, tmp_path, monkeypatch
+):
+    """OI-892: a rolling dir claiming the SAME VERSION must not impersonate the
+    pinned install.
+
+    The running engine root is ``versions/edge``, whose VERSION file says
+    1.3.0 but which carries a different commit than the real
+    ``versions/v1.3.0`` (the exact doubleganger measured during the v1.4.0
+    cut). A pin on v1.3.0 must re-exec to ``versions/v1.3.0``, not trust
+    edge's VERSION string. RED on the old code: it compared VERSION strings
+    and returned early.
+    """
+    pinned = central_store / "v1.3.0"
+    (pinned / "COMMIT_SHA").write_text("6129a327\n", encoding="utf-8")
+
+    imposter = central_store / "edge"
+    (imposter / "vnx_cli").mkdir(parents=True)
+    (imposter / "vnx_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (imposter / ".vnx-install-mode").write_text("central\n", encoding="utf-8")
+    (imposter / "VERSION").write_text("1.3.0\n", encoding="utf-8")  # claims the SAME version
+    (imposter / "COMMIT_SHA").write_text("d74e0691\n", encoding="utf-8")
+
+    monkeypatch.setattr(_engine, "engine_root", lambda: imposter)
+    _pin(tmp_path, "v1.3.0")
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(tmp_path)])
+
+    assert len(execv_spy) == 1
+    _, args = execv_spy[0]
+    assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(pinned)
+
+
+def test_pin_v140_with_running_v141_reexecs(central_store, execv_spy, tmp_path):
+    """OI-892/OI-914: a v1.4.0 pin with a v1.4.1 engine running must re-exec
+    to v1.4.0 — the exact drift measured on all three consumers after the
+    v1.4.1 rollout (`cat .vnx-version` said v1.4.0 while v1.4.1 loaded)."""
+    pinned = _add_version(central_store, "v1.4.0", "1.4.0")
+    _add_version(central_store, "v1.4.1", "1.4.1")
+    _pin(tmp_path, "v1.4.0")
+    _reexec.maybe_reexec_pinned(["--project-dir", str(tmp_path)])
+
+    assert len(execv_spy) == 1
+    _, args = execv_spy[0]
+    assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(pinned)
+
+
+def test_running_edge_reports_dir_name_not_stale_version(central_store, tmp_path):
+    """OI-892: a rolling dir (edge) whose VERSION lags is reported by its dir
+    name, never by a stale VERSION — it cannot present itself as a released
+    version."""
+    edge = central_store / "edge"
+    edge.mkdir()
+    (edge / "VERSION").write_text("1.3.0\n", encoding="utf-8")
+    assert _reexec._running_version(edge) == "edge"
+
+
+def test_running_version_reads_version_file(central_store):
+    """A released version dir is still reported by its VERSION file."""
+    assert _reexec._running_version(central_store / "v1.3.0") == "1.3.0"
+
+
 def test_existing_pythonpath_preserved_after_pinned_paths(central_store, execv_spy, tmp_path, monkeypatch):
     pinned = _add_version(central_store, "v1.2.0", "1.2.0")
     _pin(tmp_path, "v1.2.0")

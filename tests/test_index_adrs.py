@@ -164,6 +164,21 @@ class TestIndexAdrs:
         # record_id must be a 64-char hex sha256
         assert len(event["record_id"]) == 64
 
+    def test_record_id_differs_across_projects(self, tmp_path):
+        """OI-004: identical ADR content in different projects must not collide on record_id."""
+        db_path = _setup_db(tmp_path)
+        adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)
+        events_file = tmp_path / "events" / "adr_index.ndjson"
+
+        index_adrs(db_path, adr_dir, events_file, project_id="proj-a")
+        index_adrs(db_path, adr_dir, events_file, project_id="proj-b")
+
+        lines = [l for l in events_file.read_text().splitlines() if l.strip()]
+        record_ids = {json.loads(l)["record_id"] for l in lines}
+        assert len(record_ids) == 2, (
+            f"same-content ADRs across projects must get distinct record_ids, got {record_ids}"
+        )
+
     def test_raises_on_event_write_failure(self, tmp_path):
         db_path = _setup_db(tmp_path)
         adr_dir = _write_adr(tmp_path, "ADR-007-multitenant.md", _FIXTURE_ADR)

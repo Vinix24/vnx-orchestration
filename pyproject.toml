@@ -98,6 +98,27 @@ vnx_orchestration = [
     "configs/**/*",
     "hooks/**/*",
     "examples/**/*",
+    # OI-921: the agents/ role registry must ship with the engine — the worker
+    # resolves its role profile from agents/<role>/CLAUDE.md and compile_plan's
+    # role-registry check reads the same dir. Without this glob a pip install
+    # fails closed on every role (empty registry → all roles rejected).
+    "agents/**/*",
+]
+
+# ---------------------------------------------------------------------------
+# pytest configuration
+# ---------------------------------------------------------------------------
+# F39 replay tests (tests/f39/test_replay_level{1,2,3}.py) shell out to a real
+# `claude -p` subprocess and start paid inference. They are gated behind the
+# `live` marker and DESELECTED by tests/f39/conftest.py unless the user opts in
+# explicitly (`-m live`, or `--dry-run` for fixture validation). The gate lives
+# in the conftest — not in addopts — because any CLI `-m` expression overrides
+# addopts, so an unrelated filter like `-m "not integration"` would silently
+# re-enable 31 real inference calls (OI-908 ronde 2; pinned by
+# tests/test_f39_live_guard.py).
+[tool.pytest.ini_options]
+markers = [
+    "live: runs real claude -p inference (F39 replay suite). Opt in with -m live.",
 ]
 
 # Exclude build artifacts, caches, and non-runtime content from the wheel.

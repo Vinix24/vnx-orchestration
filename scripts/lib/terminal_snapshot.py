@@ -113,6 +113,12 @@ def get_terminal_state_from_files(state_dir: Path) -> Dict[str, TerminalState]:
                         # Enrich with model/provider (don't overwrite status from more reliable sources)
                         states[terminal].provider = term_data.get("provider") or states[terminal].provider
                         states[terminal].model = term_data.get("model") or states[terminal].model
+                        # OI-775: claimed_by/lease_expires_at were dropped here —
+                        # a dashboard-only terminal (no terminal_state.json /
+                        # terminal_status.ndjson) silently lost its claim info.
+                        # Fill them the same way as provider/model.
+                        states[terminal].claimed_by = term_data.get("claimed_by") or states[terminal].claimed_by
+                        states[terminal].lease_expires_at = term_data.get("lease_expires_at") or states[terminal].lease_expires_at
                         if not states[terminal].last_activity or states[terminal].last_activity == "never":
                             states[terminal].last_activity = term_data.get("last_update", states[terminal].last_activity)
         except (OSError, json.JSONDecodeError):

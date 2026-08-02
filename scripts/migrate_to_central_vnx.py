@@ -117,6 +117,7 @@ from scripts.lib.migrate_schema import (  # noqa: E402
     _rebuild_fts5_code_snippets,
     _rebuild_one_table_dynamic,
 )
+from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 LOG = logging.getLogger("vnx.migrate.apply")
 
@@ -2078,6 +2079,24 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         else:
             print(msg)
 
+    # Clean up stale presnap files (rollback snapshots that were not
+    # auto-cleaned because a prior run crashed).  These are sorted by mtime
+    # (newest first) because the filename embeds a PID rather than a
+    # timestamp.
+    _presnap_keep = parse_backup_keep(os.environ.get("VNX_PRESNAP_BACKUP_KEEP"))
+    rotate_backups_safe(
+        central_state, ".presnap.", _presnap_keep,
+        sort_key=os.path.getmtime,
+    )
+    # Also clean presnap files that may be in the DB files' own directory
+    # (the pre-snapshot paths are siblings of the DB files).
+    for _db_path in (central_qi, central_rc):
+        if _db_path.exists():
+            rotate_backups_safe(
+                _db_path.parent, f"{_db_path.name}.presnap.", _presnap_keep,
+                sort_key=os.path.getmtime,
+            )
+
     # Cleanup must run last on the success path.
     _test_apply_cleanup()
     if _test_apply_tmp_dir is not None:
@@ -2163,6 +2182,18 @@ def _snapshot_central(qi: Path, rc: Path) -> dict[str, Path]:
             finally:
                 src.close()
             snapshots[label] = tmp
+    # Best-effort rotation: clean up stale presnap files from prior crashed
+    # runs. Sorted by mtime (PID isn't monotonic). The keep count is
+    # intentionally small (default 3) — presnap files are temporary
+    # rollback snapshots, not long-term archives.
+    _presnap_keep = parse_backup_keep(os.environ.get("VNX_PRESNAP_BACKUP_KEEP"))
+    for _label, _db in (("qi", qi), ("rc", rc)):
+        if _db.exists():
+            _prefix = f"{_db.name}.presnap."
+            rotate_backups_safe(
+                _db.parent, _prefix, _presnap_keep,
+                sort_key=os.path.getmtime,
+            )
     return snapshots
 
 

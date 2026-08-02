@@ -20,7 +20,11 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from project_root import resolve_project_root  # noqa: E402
+from project_root import resolve_central_data_dir, resolve_project_root  # noqa: E402
+
+# Fallback PATH for the scheduled job when the installer itself runs with an
+# empty PATH. Covers the standard macOS locations for git/kimi/vnx.
+_DEFAULT_PATH_ENV = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def _render_plist(template_path: Path, ctx: dict[str, str]) -> str:
@@ -63,11 +67,19 @@ def main() -> None:
         else resolve_project_root(__file__)
     )
 
+    # ADR-026: logs belong in the central data dir (resolve_central_data_dir),
+    # never repo-local .vnx-data. launchd does not create missing log
+    # directories, so create it here, before the operator loads the agent.
+    log_dir = resolve_central_data_dir(args.project_id) / "events" / "dream"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     template_path = Path(__file__).resolve().parent / "templates" / "com.vnx.auto-dream.plist.j2"
     ctx = {
         "vnx_bin_path": vnx_bin,
         "project_id": args.project_id,
         "project_root": str(project_root),
+        "path_env": os.environ.get("PATH") or _DEFAULT_PATH_ENV,
+        "log_dir": str(log_dir),
     }
     rendered = _render_plist(template_path, ctx)
 

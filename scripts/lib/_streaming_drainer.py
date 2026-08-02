@@ -39,6 +39,46 @@ _COMPLETE_TYPES = frozenset({"complete", "result"})
 # Default bounded queue size — large enough to buffer burst, small enough to apply backpressure
 _DEFAULT_QUEUE_MAXSIZE = 256
 
+# Stall floor for the per-chunk timeout, as a fraction of the total deadline.
+#
+# OI-903: a kimi worker with deadline_seconds=3600 was SIGTERM'd at 1890.6s by the
+# 1200s chunk timeout after a legitimate 1200s silent thinking phase — the chunk
+# timeout sat FAR below the deadline, so it (not the deadline) became the binding
+# constraint. The chunk timeout measures silence, so a fixed value far under a long
+# deadline kills legitimate long-think work and makes the deadline decorative.
+#
+# The relationship is now explicit: the effective chunk timeout is clamped into the
+# band [total_deadline * _STALL_FLOOR_FRACTION, total_deadline]:
+#   - never above the total deadline (a stall longer than the whole budget IS the
+#     deadline),
+#   - never below half the deadline (a worker that produces nothing for half its
+#     budget is genuinely stalled; anything shorter stays legitimate).
+#
+# Explicit env-var overrides (VNX_CHUNK_TIMEOUT and the per-provider
+# VNX_*_STALL_THRESHOLD vars) retain top precedence and are never floored — an
+# operator who sets a stall threshold deliberately keeps it.
+_STALL_FLOOR_FRACTION = 0.5
+
+
+def coerce_chunk_stall(chunk_timeout: float, total_deadline: float) -> float:
+    """Return *chunk_timeout* coerced into the stall band relative to *total_deadline*.
+
+    The returned value satisfies::
+
+        min(total_deadline * _STALL_FLOOR_FRACTION, chunk_timeout)
+        <= value <= total_deadline
+
+    when total_deadline > 0 and chunk_timeout > 0; otherwise *chunk_timeout* is
+    returned unchanged (a non-positive deadline means the loop below fires
+    immediately anyway, and a non-positive chunk timeout is an explicit
+    "no stall tolerance" signal). See the module constant block for the
+    rationale (OI-903).
+    """
+    if total_deadline <= 0 or chunk_timeout <= 0:
+        return chunk_timeout
+    chunk_timeout = min(chunk_timeout, total_deadline)
+    return max(chunk_timeout, total_deadline * _STALL_FLOOR_FRACTION)
+
 
 class StreamingDrainerMixin:
     """Mixin that drains provider subprocess stdout into CanonicalEvent objects.
@@ -117,6 +157,14 @@ class StreamingDrainerMixin:
             total_deadline = float(os.environ.get("VNX_TOTAL_DEADLINE", total_deadline))
         except (TypeError, ValueError):
             pass
+
+        # OI-903: tie the chunk (stall) timeout to the total deadline so a long
+        # deadline is the binding constraint, not a fixed stall value far below it.
+        # Skipped when VNX_CHUNK_TIMEOUT is set explicitly — env overrides retain
+        # top precedence (the per-provider stall env vars are handled upstream in
+        # each spawn, which then passes already-resolved values here).
+        if "VNX_CHUNK_TIMEOUT" not in os.environ:
+            chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
         result_queue: queue.Queue = queue.Queue(maxsize=_queue_maxsize)
         seen_complete = threading.Event()

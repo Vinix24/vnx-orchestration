@@ -216,6 +216,47 @@ class TestEnvelopeEmitsBothReportAndReceipt:
 # ---------------------------------------------------------------------------
 
 
+class TestEnvelopeEventArchiveClear:
+    """OI-918: the end-of-dispatch clear must only fire when archiving succeeded.
+
+    _govern's finally unconditionally truncated the live event stream even when
+    the end-of-dispatch archive had failed — destroying exactly the events it
+    was meant to preserve. _archive_dispatch_events now returns
+    (events_path, clear_ok), and the clear is gated on clear_ok.
+    """
+
+    def _run(self, spec, codex_result, archive_return):
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec)
+        mock_archive = MagicMock(return_value=archive_return)
+        mock_clear = MagicMock()
+
+        with patch("provider_spawns.codex_spawn.spawn_codex", return_value=codex_result), \
+             patch("governance_emit.emit_unified_report", mock_report), \
+             patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
+             patch("dispatch_envelope._archive_dispatch_events", mock_archive), \
+             patch("dispatch_envelope._clear_dispatch_events", mock_clear):
+            result = run_envelope(spec, lane="codex")
+
+        return result, mock_archive, mock_clear
+
+    def test_archive_failure_skips_clear(self, spec):
+        """archive raised (clear_ok=False) -> live stream must NOT be truncated."""
+        codex_result = _FakeCodexResult(returncode=0)
+        result, mock_archive, mock_clear = self._run(spec, codex_result, (None, False))
+
+        assert result.status == "success"
+        mock_archive.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
+        mock_clear.assert_not_called()
+
+    def test_archive_success_still_clears(self, spec):
+        """archive succeeded (clear_ok=True) -> clear still fires as before."""
+        codex_result = _FakeCodexResult(returncode=0)
+        result, mock_archive, mock_clear = self._run(spec, codex_result, ("/arc/path.ndjson", True))
+
+        assert result.status == "success"
+        mock_clear.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
+
+
 class TestEnvelopeFailClosed:
     """GOVERN must raise EnvelopeGovernError when receipt is missing — never silent."""
 
@@ -568,7 +609,18 @@ class TestEnvelopeIdempotentDedup:
 
 
 class TestFlagGateClaude:
-    """VNX_UNIFIED_ENVELOPE flag controls whether envelope or legacy path is used for claude."""
+    """claude via provider_dispatch is ALWAYS rejected at the door (PR-5).
+
+    The old VNX_UNIFIED_ENVELOPE flag gate for the claude lane was removed:
+    provider_dispatch is not a provider-lane for claude — the single-entry
+    dispatch door owns all claude routing (DISPATCH_RULES provider->lane rule,
+    'claude/Opus/Sonnet panelists and workers route via the tmux-spawn lane —
+    NEVER provider_dispatch'). These tests pin that the claude flag-gate no
+    longer exists: regardless of VNX_UNIFIED_ENVELOPE, claude is refused with
+    EX_USAGE and neither dispatch path is invoked. (Previously the four tests
+    here asserted a flag-gate that PR-5 deleted, leaving them permanently red
+    — OI-919.)
+    """
 
     _CLAUDE_ARGV = [
         "--provider", "claude",
@@ -577,69 +629,46 @@ class TestFlagGateClaude:
         "--instruction", "noop",
     ]
 
-    def test_flag_off_calls_legacy_dispatch_claude(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE unset -> _dispatch_claude, envelope NOT invoked."""
+    def _assert_claude_rejected(self, monkeypatch, capsys):
+        monkeypatch.setenv("VNX_SINGLE_ENTRY_DISPATCH", "0")
+        monkeypatch.delenv("VNX_BENCH_SEED_MATERIALIZE", raising=False)
+        monkeypatch.delenv("VNX_BENCH_CLAUDE_HEADLESS", raising=False)
+
+        mock_legacy = MagicMock(return_value=0)
+        mock_via_envelope = MagicMock(return_value=0)
+
+        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
+             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
+            result = provider_dispatch.main(self._CLAUDE_ARGV)
+
+        assert result == provider_dispatch._EX_USAGE
+        mock_legacy.assert_not_called()
+        mock_via_envelope.assert_not_called()
+        assert "is not a provider-lane provider" in capsys.readouterr().err
+
+    def test_flag_off_claude_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE unset: claude is still rejected, not legacy-routed."""
         monkeypatch.delenv("VNX_UNIFIED_ENVELOPE", raising=False)
         monkeypatch.delenv("VNX_UNIFIED_ENVELOPE_LANES", raising=False)
+        self._assert_claude_rejected(monkeypatch, capsys)
 
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_legacy.assert_called_once()
-        mock_via_envelope.assert_not_called()
-        assert result == 0
-
-    def test_flag_on_calls_envelope(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE=1 + claude-subprocess in lanes -> _dispatch_claude_via_envelope."""
+    def test_flag_on_claude_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE=1 + claude-subprocess in lanes: still rejected."""
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE", "1")
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE_LANES", "claude-subprocess")
+        self._assert_claude_rejected(monkeypatch, capsys)
 
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_via_envelope.assert_called_once()
-        mock_legacy.assert_not_called()
-        assert result == 0
-
-    def test_flag_on_claude_alias_calls_envelope(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE=1 + "claude" (alias) in lanes -> _dispatch_claude_via_envelope."""
+    def test_flag_on_claude_alias_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE=1 + "claude" alias in lanes: still rejected."""
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE", "1")
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE_LANES", "claude")
+        self._assert_claude_rejected(monkeypatch, capsys)
 
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_via_envelope.assert_called_once()
-        mock_legacy.assert_not_called()
-        assert result == 0
-
-    def test_flag_on_wrong_lane_calls_legacy(self, monkeypatch):
-        """VNX_UNIFIED_ENVELOPE=1 but claude NOT in lanes -> legacy _dispatch_claude."""
+    def test_flag_on_wrong_lane_claude_rejected_at_door(self, monkeypatch, capsys):
+        """VNX_UNIFIED_ENVELOPE=1 + claude NOT in lanes: still rejected."""
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE", "1")
         monkeypatch.setenv("VNX_UNIFIED_ENVELOPE_LANES", "codex,gemini")
-
-        mock_legacy = MagicMock(return_value=0)
-        mock_via_envelope = MagicMock(return_value=0)
-
-        with patch.object(provider_dispatch, "_dispatch_claude", mock_legacy), \
-             patch.object(provider_dispatch, "_dispatch_claude_via_envelope", mock_via_envelope):
-            result = provider_dispatch.main(self._CLAUDE_ARGV)
-
-        mock_legacy.assert_called_once()
-        mock_via_envelope.assert_not_called()
-        assert result == 0
+        self._assert_claude_rejected(monkeypatch, capsys)
 
 
 # ---------------------------------------------------------------------------
@@ -811,3 +840,134 @@ class TestClaudeEnvelopeToolcallSignals:
         assert mock_receipt.call_args[1]["tool_call_count"] is None
         assert mock_receipt.call_args[1]["tool_call_failures"] is None
         assert mock_receipt.call_args[1]["tool_call_retries"] is None
+
+
+class TestEnvelopeCostUsd:
+    """OI-882: the envelope must compute cost_usd from token_usage + wave7 prices.
+
+    The envelope previously hardcoded ``cost_usd=None`` in ``_govern`` even
+    though ``adapter_result.token_usage`` carried real tokens. All 45 null-cost
+    deepseek-harness receipts in the ledger came through this path.
+    """
+
+    def _run_govern(self, spec, adapter_result, tmp_path):
+        report_path = spec.data_dir / "unified_reports" / f"{spec.dispatch_id}.md"
+        receipt_path = spec.state_dir / "t0_receipts.ndjson"
+        receipt_path.write_text("")
+        mock_report = MagicMock(return_value=report_path)
+        mock_receipt = MagicMock(return_value=receipt_path)
+        mock_cost_event = MagicMock()
+
+        from datetime import datetime, timezone
+
+        with patch("governance_emit.emit_unified_report", mock_report), \
+             patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
+             patch("provider_costs.emit_provider_cost", mock_cost_event):
+            dispatch_envelope._govern(
+                spec,
+                adapter_result,
+                datetime.now(timezone.utc),
+                datetime.now(timezone.utc),
+            )
+        return mock_report, mock_receipt
+
+    def test_deepseek_harness_cost_usd_computed(self, tmp_path):
+        """deepseek-harness tokens + wave7 prices yield a real cost_usd on the receipt."""
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir(parents=True)
+        (data_dir / "unified_reports").mkdir(parents=True)
+        spec = EnvelopeSpec(
+            dispatch_id="oi882-test-001",
+            terminal_id="T1",
+            provider="deepseek-harness",
+            model="deepseek-v4-flash",
+            instruction="review",
+            role="backend-developer",
+            pr_id=None,
+            state_dir=state_dir,
+            data_dir=data_dir,
+        )
+        adapter_result = dispatch_envelope._AdapterResult(
+            returncode=0,
+            completion_text="done",
+            status="success",
+            token_usage={"input": 91439, "output": 38053, "cache_hit": 6087040},
+            model="deepseek-v4-flash",
+        )
+
+        _, mock_receipt = self._run_govern(spec, adapter_result, tmp_path)
+
+        mock_receipt.assert_called_once()
+        cost_usd = mock_receipt.call_args[1]["cost_usd"]
+        assert cost_usd is not None, "OI-882: cost_usd must no longer be hardcoded None"
+        assert cost_usd > 0
+        # flash = 0.14/0.28 per MTok; 91439 input + 38053 output ≈ $0.0235
+        assert abs(cost_usd - 0.0234563) < 1e-6
+        assert mock_receipt.call_args[1]["model"] == "deepseek-v4-flash"
+
+    def test_resolved_model_wins_over_placeholder(self, tmp_path):
+        """A placeholder spec.model is replaced by the adapter's resolved model for pricing."""
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir(parents=True)
+        (data_dir / "unified_reports").mkdir(parents=True)
+        spec = EnvelopeSpec(
+            dispatch_id="oi882-test-002",
+            terminal_id="T1",
+            provider="deepseek-harness",
+            model="default",  # placeholder — adapter resolves to v4-pro
+            instruction="review",
+            role="backend-developer",
+            pr_id=None,
+            state_dir=state_dir,
+            data_dir=data_dir,
+        )
+        adapter_result = dispatch_envelope._AdapterResult(
+            returncode=0,
+            completion_text="done",
+            status="success",
+            token_usage={"input": 1000, "output": 500, "cache_hit": 0},
+            model="deepseek-v4-pro",
+        )
+
+        _, mock_receipt = self._run_govern(spec, adapter_result, tmp_path)
+
+        mock_receipt.assert_called_once()
+        assert mock_receipt.call_args[1]["model"] == "deepseek-v4-pro"
+        cost_usd = mock_receipt.call_args[1]["cost_usd"]
+        assert cost_usd is not None
+        # pro = 0.435/0.87 per MTok; 1000 input + 500 output
+        assert abs(cost_usd - (0.435 * 0.001 + 0.87 * 0.0005)) < 1e-9
+
+    def test_claude_lane_cost_usd_computed(self, spec_claude):
+        """The claude lane through the envelope now carries a list-price estimate."""
+        from datetime import datetime, timezone
+
+        adapter_result = dispatch_envelope._AdapterResult(
+            returncode=0,
+            completion_text="done",
+            status="success",
+            token_usage={"input": 200, "output": 100, "cache_hit": 50},
+            model="sonnet",
+        )
+        report_path = spec_claude.data_dir / "unified_reports" / f"{spec_claude.dispatch_id}.md"
+        receipt_path = spec_claude.state_dir / "t0_receipts.ndjson"
+        receipt_path.write_text("")
+        mock_report = MagicMock(return_value=report_path)
+        mock_receipt = MagicMock(return_value=receipt_path)
+
+        with patch("governance_emit.emit_unified_report", mock_report), \
+             patch("governance_emit.emit_dispatch_receipt", mock_receipt):
+            dispatch_envelope._govern(
+                spec_claude,
+                adapter_result,
+                datetime.now(timezone.utc),
+                datetime.now(timezone.utc),
+            )
+
+        mock_receipt.assert_called_once()
+        cost_usd = mock_receipt.call_args[1]["cost_usd"]
+        assert cost_usd is not None
+        # sonnet = 3.00/15.00 per MTok
+        assert abs(cost_usd - (3.0 * 0.0002 + 15.0 * 0.0001)) < 1e-9

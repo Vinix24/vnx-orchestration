@@ -242,8 +242,11 @@ def validate(
     # falsely reject legitimate instructions that discuss CLI invocation patterns.
 
     # Rule 7 — role non-empty.
-    # Tight role/skill validation (against the installed skill registry) is deferred to
-    # compile_plan, which has access to runtime paths. Here we only require non-empty.
+    # Tight role/skill validation (against the agents/ registry) is deferred to
+    # compile_plan (OI-921: compile_plan enforces membership against
+    # RuntimeSnapshot.valid_roles, discovered from the agents/ dir by the door's
+    # build_runtime_snapshot). Here we only require non-empty — an unset role is
+    # itself a Reject, so a dispatch MUST carry an explicit role.
     if not spec.role or not spec.role.strip():
         return Reject("bad-role", "role must be a non-empty string")
 

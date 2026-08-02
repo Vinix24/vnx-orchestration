@@ -30,12 +30,19 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from _streaming_drainer import StreamingDrainerMixin  # noqa: E402
+from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CODEX_MODEL = "gpt-5.5"
+
+# Cap on stderr lines drained per spawn. A real codex subprocess closes its pipe,
+# so readline() returns b"" and the loop breaks on EOF. This bound is the safety
+# valve for a stream that never terminates (e.g. a mock in tests) — it must never
+# leave the daemon drain thread alive forever (OI-910). Far above any realistic
+# stderr volume, so production behavior is unchanged.
+_STDERR_DRAIN_MAX_LINES = 1_000_000
 
 
 @dataclass
@@ -415,10 +422,21 @@ def _launch_codex_proc(
     if proc.stderr is not None:
         def _drain_stderr(p, buf):
             try:
-                for line in iter(p.stderr.readline, b""):
+                for _ in range(_STDERR_DRAIN_MAX_LINES):
+                    line = p.stderr.readline()
+                    if line == b"":
+                        break
                     buf.append(line)
                     if len(buf) > 200:
                         del buf[:100]
+                else:
+                    # Loop exhausted without EOF — the stream never terminated.
+                    # Bound the leak instead of letting the daemon thread spin.
+                    logger.warning(
+                        "codex_spawn: stderr drain exceeded %d lines; "
+                        "dropping remainder (non-terminating stream)",
+                        _STDERR_DRAIN_MAX_LINES,
+                    )
             except (ValueError, OSError):
                 pass
         threading.Thread(
@@ -612,6 +630,11 @@ def spawn_codex(
         total_deadline = float(os.environ["VNX_CODEX_TIMEOUT"])
     except (KeyError, ValueError):
         pass
+    # OI-903: scale the stall timeout with the total deadline so a long deadline
+    # stays the binding constraint. Skipped when VNX_CODEX_STALL_THRESHOLD is set
+    # explicitly — env overrides retain precedence.
+    if "VNX_CODEX_STALL_THRESHOLD" not in os.environ:
+        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     proc, early_result = _launch_codex_proc(prompt, model, extra_env, cwd)
     if early_result is not None:

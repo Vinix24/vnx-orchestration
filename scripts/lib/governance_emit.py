@@ -43,6 +43,8 @@ from append_receipt_internals.receipt_finalize import (
 )
 from append_receipt_internals.validation import _validate_receipt
 from receipt_schema import ReceiptV2
+from report_body_contract import validate_body
+from token_harvest import CLAUDE_HARNESS_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,13 @@ def emit_dispatch_receipt(
     tool_call_count: Optional[int] = None,
     tool_call_failures: Optional[int] = None,
     tool_call_retries: Optional[int] = None,
+    deadline_seconds: Optional[int] = None,
+    failure_reason: Optional[str] = None,
+    failure_class: Optional[str] = None,
+    role_applied: Optional[bool] = None,
+    role_tier: Optional[str] = None,
+    role_not_applied_reason: Optional[str] = None,
+    role_source_path: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -150,9 +159,11 @@ def emit_dispatch_receipt(
     ValueError before anything is written.
 
     ``session_id``: receipt-quality PR-B1 — when the caller-supplied
-    ``token_usage`` is empty or explicitly marked ``unavailable`` (the claude
-    subscription lane has no live usage API) and ``provider`` is ``claude``,
-    the local Claude Code session transcript
+    ``token_usage`` is empty or explicitly marked ``unavailable`` (the
+    subscription/harness lanes have no live usage API) and ``provider`` is a
+    member of ``token_harvest.CLAUDE_HARNESS_PROVIDERS`` (claude,
+    deepseek-harness, glm-harness — every lane that runs through the Claude
+    Code harness), the local Claude Code session transcript
     (``~/.claude/projects/*/<session_id>.jsonl``) is harvested via
     ``token_harvest.harvest_session_tokens`` and used instead. Fail-open: any
     harvest problem (no session_id, no transcript, kimi/other providers)
@@ -172,6 +183,11 @@ def emit_dispatch_receipt(
     signals``. Only stamped when provided (None omits the field — no signal
     log means no observation, not "confirmed zero calls").
 
+    ``failure_reason`` / ``failure_class``: OI-866 failure classification —
+    stamped when the dispatch failed so the receipt carries a distinguishable
+    reason instead of a silent "(no error captured)" log line. Conditionally
+    stamped (omitted on success).
+
     Raises:
         ValueError: provider field doesn't match required pattern, or
             receipt_kind missing / outside the closed set (PR-3 lint raise)
@@ -179,13 +195,13 @@ def emit_dispatch_receipt(
     """
     _validate_provider(provider)
 
-    # Receipt-quality PR-B1: backfill token_usage for the claude lane from the
-    # local Claude Code session transcript when the caller has nothing usable
-    # (no live usage API on the subscription lane). Only ever tightens the
-    # data — a caller-supplied real token_usage is never overwritten, and any
-    # harvest failure (no session_id, no transcript, non-claude providers)
+    # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
+    # from the local Claude Code session transcript when the caller has nothing
+    # usable (no live usage API on the subscription lane). Only ever tightens
+    # the data — a caller-supplied real token_usage is never overwritten, and
+    # any harvest failure (no session_id, no transcript, non-harness providers)
     # leaves token_usage exactly as passed in.
-    if provider == "claude" and session_id and (not token_usage or token_usage.get("unavailable")):
+    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
         try:
             from token_harvest import harvest_session_tokens  # noqa: PLC0415
             harvested = harvest_session_tokens(session_id)
@@ -233,6 +249,13 @@ def emit_dispatch_receipt(
         tool_call_count=tool_call_count,
         tool_call_failures=tool_call_failures,
         tool_call_retries=tool_call_retries,
+        deadline_seconds=deadline_seconds,
+        failure_reason=failure_reason,
+        failure_class=failure_class,
+        role_applied=role_applied,
+        role_tier=role_tier,
+        role_not_applied_reason=role_not_applied_reason,
+        role_source_path=role_source_path,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
@@ -337,6 +360,7 @@ def emit_unified_report(
     frontmatter: Optional[Dict[str, Any]] = None,
     body_override: Optional[str] = None,
     overwrite: bool = False,
+    preserve_partial: bool = False,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
@@ -352,6 +376,15 @@ def emit_unified_report(
     govern() passes overwrite=True for synthesized/violated bodies to replace
     stale placeholder files that would otherwise block idempotent early-return.
 
+    When *preserve_partial* is True (failure/timeout emitters) and the existing
+    report fails the report-body contract, the partial body is preserved under
+    ``<dispatch_id>.partial.md`` and the fresh structured report is written in its
+    place. OI-903: a worker SIGTERM'd mid-report leaves a partial file that would
+    otherwise block the idempotent early-return AND satisfy nothing — the
+    preserved sidecar makes the partial output retrievable while the canonical
+    report stays contract-compliant. An existing report that PASSES the contract
+    is never touched (idempotent early-return still applies).
+
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
     violations, do not raise).  Set VNX_SCHEMA_STRICT=1 to raise on violation.
@@ -364,7 +397,38 @@ def emit_unified_report(
 
     report_path = reports_dir / f"{dispatch_id}.md"
     if report_path.exists() and not overwrite:
-        return report_path
+        if preserve_partial:
+            try:
+                existing = report_path.read_text(encoding="utf-8", errors="replace")
+            except OSError as _read_exc:
+                logger.warning(
+                    "governance_emit: could not read existing report %s for partial check (%s); "
+                    "returning as-is",
+                    report_path, _read_exc,
+                )
+                return report_path
+            if not validate_body(existing).valid:
+                # Killed-worker artifact: preserve the partial output under a
+                # .partial.md sidecar so the work is retrievable, then let the
+                # fresh structured report (written below) take the canonical path.
+                partial_path = reports_dir / f"{dispatch_id}.partial.md"
+                try:
+                    os.replace(report_path, partial_path)
+                    logger.info(
+                        "governance_emit: preserved partial report dispatch=%s at %s",
+                        dispatch_id, partial_path,
+                    )
+                except OSError as _mv_exc:
+                    logger.warning(
+                        "governance_emit: could not preserve partial report %s as %s (%s); "
+                        "returning as-is",
+                        report_path, partial_path, _mv_exc,
+                    )
+                    return report_path
+            else:
+                return report_path
+        else:
+            return report_path
 
     if body_override is not None:
         body = body_override

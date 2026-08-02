@@ -213,6 +213,17 @@ def test_receipt_v2_defaults_schema_version_event_type_and_timestamp():
     assert receipt["timestamp"]  # auto-stamped
 
 
+def test_receipt_v2_schema_version_event_type_not_overridable():
+    """OI-817: schema_version/event_type are contract identity — a caller
+    cannot stamp a non-v2 receipt or a different event_type by passing them."""
+    kw = _v2_kwargs_minimal()
+    kw["schema_version"] = 99
+    kw["event_type"] = "forged"
+    receipt = ReceiptV2(**kw).to_dict()
+    assert receipt["schema_version"] == 2
+    assert receipt["event_type"] == "task_complete"
+
+
 def test_receipt_v2_duration_rounded_three_decimals():
     kw = _v2_kwargs_minimal()
     kw["duration_seconds"] = 3.456789

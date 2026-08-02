@@ -160,7 +160,12 @@ def _registry_key_for(provider: Optional[str], sub_provider: Optional[str]) -> O
     if base_norm == "kimi":
         return "kimi_cli"
     if base_norm in ("deepseek-harness", "deepseek_harness"):
-        return "deepseek"
+        # OI-867: deepseek-harness (claude_harness_keyed, own API key, no
+        # proxy) uses its own registry key distinct from litellm:deepseek
+        # (which routes via the :4141 litellm proxy).  They must be separate
+        # so the dead proxy route can be disabled without killing the working
+        # harness lane.
+        return "deepseek_harness"
     if base_norm in ("glm-harness", "glm_harness"):
         # glm-harness runs GLM models, registered under the `zai` provider in wave7_models.yaml.
         # Without this the registry check rejects a normalized glm-harness dispatch with

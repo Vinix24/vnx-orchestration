@@ -1,31 +1,40 @@
 """plan_gate_effectiveness_probe — read-only health probe for the
 plan-gate-panel subsystem (framework-status-audit-and-cockpit PR-7).
 
-Two REAL, persisted signal sources (kimi finding — name the source):
+Three REAL, persisted signal sources (kimi finding — name the source):
 
 1. ``.vnx-attest/plan-gates.ndjson`` — the same panel attestation ledger the
-   governance probe verifies, read here for its ``resolver`` field. Per-panelist
-   pass/revise/block counts are NOT persisted anywhere (only the final resolved
-   ``plan_gate_pass`` record survives — see ``plan_gate_panel.run_panel`` /
-   ``planning_cli.py``); ``resolver`` is the only durable proxy for whether a
-   track's plan gate converged organically via the panel run (``"run"``) or
-   needed a manual operator override (``"attest"`` — ``planning_cli.py``'s
-   ``plan-gate attest`` command, the escape hatch for a panel that did not
-   converge on its own).
-2. The ``OI-PLAN-<track>`` blocker rows in ``track_open_items`` (the runtime
+   governance probe verifies, read here for its ``resolver`` field. ``resolver``
+   is a closed ``run`` | ``attest`` choice (``plan_gate_evidence``): the durable
+   proxy for whether a track's plan gate converged organically via the panel run
+   (``"run"``) or needed a manual operator override (``"attest"`` —
+   ``planning_cli.py``'s ``plan-gate attest`` command, the escape hatch for a
+   panel that did not converge on its own).
+2. ``.vnx-attest/plan-gate-seats.ndjson`` — the per-seat verdict ledger (OI-888).
+   ``plan_gate_panel.run_panel`` appends one append-only, hash-chained
+   ``plan_gate_seat`` record per panelist per run (panelist id, model, effective
+   verdict incl. abstain, and whether a report was returned at all). The
+   per-panelist pass/revise/block counts previously survived nowhere — only the
+   final resolved ``plan_gate_pass`` record was durable — so a degraded seat (3
+   of 5 responding, say) was only visible during a live run.
+3. The ``OI-PLAN-<track>`` blocker rows in ``track_open_items`` (the runtime
    coordination DB), under ``VNX_DATA_DIR`` — the same table
    ``plan_gate_enforcement.plan_gate_state()`` reads per-track, queried here
    in aggregate across every track.
 
 Health is `ok` when gates resolve without a stuck backlog and organic panel
 convergence is not swamped by manual overrides; `degraded` when a blocker has
-sat open past the staleness window, or every resolved gate on record required a
-manual attest (the panel itself never converged unassisted) — both read as
-"panel verdicts disagree" in the PRD's vocabulary.
+sat open past the staleness window, or every gate on record was resolved by
+manual attest (the panel itself never converged unassisted) — regardless of the
+OI-PLAN resolution count, because the ledger is the durable record of whether
+the panel converged (OI-888). Both read as "panel verdicts disagree" in the
+PRD's vocabulary.
 
-Deliberately NOT checked (kimi finding): whether complex tracks skip the panel
-(``VNX_PLAN_GATE_COMPLEX_ONLY``) — the scope-skip read-site does not exist yet
-(deferred to ``review-floor-enforcer``), so there is no signal to probe.
+Scope-skip signal (OI-888): whether complex tracks skip the panel
+(``VNX_PLAN_GATE_COMPLEX_ONLY``) has NO read-site yet — it is deferred to
+``review-floor-enforcer``. The probe reports that explicitly
+(``scope_skip_read_site: "missing"``) instead of staying silent about a signal
+it cannot see.
 """
 from __future__ import annotations
 
@@ -44,9 +53,20 @@ from effectiveness_probe import EffectivenessProbe, register_probe  # noqa: E402
 from ndjson_hash_chain import walk_chain  # noqa: E402
 
 LEDGER_RELPATH = ".vnx-attest/plan-gates.ndjson"
+SEAT_LEDGER_RELPATH = ".vnx-attest/plan-gate-seats.ndjson"
 COORDINATION_DB_FILENAME = "runtime_coordination.db"
 STALE_DAYS = 7
 _PLAN_OI_PREFIX = "OI-PLAN-"
+# The signal fields that count as "activity" for the unknown-vs-anything split.
+# ``scope_skip_read_site`` is deliberately excluded: its value is a constant
+# string (truthy) and would otherwise make every state look active.
+_ACTIVITY_KEYS = (
+    "ledger_total",
+    "oi_plan_unresolved",
+    "oi_plan_stale_unresolved",
+    "oi_plan_resolved",
+    "seat_total",
+)
 
 
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:
@@ -73,6 +93,9 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
     def _ledger_path(self) -> Path:
         return self._repo_root / LEDGER_RELPATH
 
+    def _seat_ledger_path(self) -> Path:
+        return self._repo_root / SEAT_LEDGER_RELPATH
+
     def _db_path(self) -> Path:
         return self._state_dir / COORDINATION_DB_FILENAME
 
@@ -87,6 +110,30 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
                 ledger_total += 1
                 if entry.get("resolver") == "attest":
                     ledger_attest_count += 1
+
+        seat_total = 0
+        seat_responded = 0
+        seat_abstain = 0
+        seat_pass = 0
+        seat_revise = 0
+        seat_block = 0
+        seat_path = self._seat_ledger_path()
+        if seat_path.exists():
+            for _line_no, entry, _hash in walk_chain(seat_path):
+                if not isinstance(entry, dict) or entry.get("type") != "plan_gate_seat":
+                    continue
+                seat_total += 1
+                if entry.get("responded"):
+                    seat_responded += 1
+                verdict = entry.get("verdict")
+                if verdict == "pass":
+                    seat_pass += 1
+                elif verdict == "revise":
+                    seat_revise += 1
+                elif verdict == "block":
+                    seat_block += 1
+                elif verdict == "abstain":
+                    seat_abstain += 1
 
         oi_plan_unresolved = 0
         oi_plan_stale_unresolved = 0
@@ -118,27 +165,52 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
             "oi_plan_unresolved": oi_plan_unresolved,
             "oi_plan_stale_unresolved": oi_plan_stale_unresolved,
             "oi_plan_resolved": oi_plan_resolved,
+            "seat_total": seat_total,
+            "seat_responded": seat_responded,
+            "seat_abstain": seat_abstain,
+            "seat_pass": seat_pass,
+            "seat_revise": seat_revise,
+            "seat_block": seat_block,
+            "scope_skip_read_site": "missing",
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:
-        if not any(raw.values()):
-            return "no plan-gate activity yet (no ledger records, no OI-PLAN blockers)"
-        return (
+        if not any(raw.get(k) for k in _ACTIVITY_KEYS):
+            return "no plan-gate activity yet (no ledger records, no OI-PLAN blockers, no seat records)"
+        parts = [
             f"{raw['ledger_total']} plan-gate-pass record(s) "
-            f"({raw['ledger_attest_count']} via manual attest); "
+            f"({raw['ledger_attest_count']} via manual attest)",
             f"{raw['oi_plan_unresolved']} unresolved OI-PLAN blocker(s) "
             f"({raw['oi_plan_stale_unresolved']} stale >{STALE_DAYS}d), "
-            f"{raw['oi_plan_resolved']} resolved"
-        )
+            f"{raw['oi_plan_resolved']} resolved",
+        ]
+        if raw["seat_total"]:
+            parts.append(
+                f"{raw['seat_total']} seat record(s) "
+                f"({raw['seat_responded']} responded, {raw['seat_abstain']} abstained, "
+                f"{raw['seat_pass']} pass/{raw['seat_revise']} revise/{raw['seat_block']} block)"
+            )
+        parts.append("VNX_PLAN_GATE_COMPLEX_ONLY read-site MISSING (no scope-skip signal to probe)")
+        return "; ".join(parts)
 
     def health(self, raw: Dict[str, Any]) -> str:
-        if not any(raw.values()):
+        if not any(raw.get(k) for k in _ACTIVITY_KEYS):
             return "unknown"
         if raw["oi_plan_stale_unresolved"] > 0:
             return "degraded"
-        if raw["ledger_total"] > 0 and raw["ledger_attest_count"] == raw["ledger_total"] and raw["oi_plan_resolved"] > 0:
+        if raw["ledger_total"] > 0 and raw["ledger_attest_count"] == raw["ledger_total"]:
+            # OI-888: every gate on record was resolved by manual attest, so the
+            # panel itself never converged unassisted. This must fire regardless of
+            # how many OI-PLAN blockers are currently resolved — the ledger is the
+            # durable record of whether the panel converged organically.
             return "degraded"
         return "ok"
 
 
-__all__ = ["PlanGateEffectivenessProbe", "LEDGER_RELPATH", "COORDINATION_DB_FILENAME", "STALE_DAYS"]
+__all__ = [
+    "PlanGateEffectivenessProbe",
+    "LEDGER_RELPATH",
+    "SEAT_LEDGER_RELPATH",
+    "COORDINATION_DB_FILENAME",
+    "STALE_DAYS",
+]

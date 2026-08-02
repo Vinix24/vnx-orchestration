@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.gate-obligation-runner</string>
+  <!--
+    Review-gate obligation fulfilment (OI-876/OI-881). Every 15 minutes,
+    fulfils pending gate obligations the dispatch door registered for specs
+    declaring gate=<name>: resolves the dispatch's PR and runs the declared
+    gate via review_gate_manager, or records a loud not_executable outcome.
+
+    Replace __VNX_REPO_ROOT__ with the repo checkout path at install time
+    (same placeholder pattern as com.vnx.producer-freshness-monitor.plist):
+
+      sed "s|__VNX_REPO_ROOT__|$HOME/Development/vnx-orchestration|g" \
+        com.vnx.gate-obligation-runner.plist > ~/Library/LaunchAgents/
+      launchctl load -w ~/Library/LaunchAgents/com.vnx.gate-obligation-runner.plist
+
+    Exit 11 (obligations still pending) is captured into job_exits.ndjson by
+    the producer-freshness monitor's launchd harvest; obligations pending
+    longer than a day are flagged per gate key by the same monitor's
+    review_gate_obligations producer — a runner that dies cannot hide behind
+    silence.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd __VNX_REPO_ROOT__ &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key><string>/tmp/vnx-gate-obligation-runner.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-gate-obligation-runner.err</string>
+</dict>
+</plist>

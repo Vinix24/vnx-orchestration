@@ -265,11 +265,51 @@ def reap(handle: WorktreeHandle, classification: str) -> ReapResult:
     pushed    → remove worktree + delete local branch (remote ref preserved)
     committed → remove worktree disk only; keep local branch
     dirty     → lock worktree in place; preserve everything
+
+    Before removing the worktree, kills any processes still running inside it
+    (OI-873): a SessionStart hook spawned from the worktree can survive the
+    dispatch and hold the coordination DB write lock.  Process cleanup runs
+    OUTSIDE the flock context so it never blocks concurrent allocations.
     """
     # Reconstruct repo_root: handle.path = root/.vnx-data/worktrees/dispatch-<id>
     root = handle.path.parent.parent.parent
     branch = handle.branch
     wt = handle.path
+
+    # OI-873: kill processes still running inside this worktree before removal.
+    # Only needed when the worktree WILL be removed (clean/pushed/committed);
+    # dirty worktrees are preserved — their processes may still be doing useful
+    # work and killing them would lose uncommitted state.
+    if classification in ("clean", "pushed", "committed"):
+        try:
+            from worktree_process_cleanup import kill_worktree_processes  # noqa: PLC0415
+            kill_worktree_processes(wt)
+        except Exception as _proc_exc:
+            logger.warning(
+                "reap: process cleanup failed for %s: %s — "
+                "continuing with worktree removal",
+                handle.dispatch_id, _proc_exc,
+            )
+        # OI-877: also reap process groups recorded for this dispatch at spawn
+        # time.  A dispatch process whose repo-root resolved to the MAIN
+        # checkout has nothing open inside the worktree, so the lsof scan
+        # cannot see it — the recorded PGID is the only handle that still
+        # reaches it (even after it was reparented to launchd / PPID 1).  The
+        # worktree scan above stays; this is a second membership source, not
+        # a replacement.
+        try:
+            from dispatch_process_registry import (  # noqa: PLC0415
+                clear_dispatch_pgids,
+                kill_dispatch_pgids,
+            )
+            kill_dispatch_pgids(handle.dispatch_id, repo_root=root)
+            clear_dispatch_pgids(handle.dispatch_id, repo_root=root)
+        except Exception as _pgid_exc:
+            logger.warning(
+                "reap: pgid-based process cleanup failed for %s: %s — "
+                "continuing with worktree removal",
+                handle.dispatch_id, _pgid_exc,
+            )
 
     with _flock_context(root):
         if classification == "clean":

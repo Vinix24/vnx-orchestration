@@ -33,7 +33,6 @@ from tmux_interactive_dispatch import (
     _default_launch_command,
     _resolve_invocation_project_root,
     _resolve_state_dir,
-    _sanitize_session_name,
     main,
 )
 from tmux_worktree import ReapResult, WorktreeAllocateError, WorktreeHandle
@@ -66,6 +65,7 @@ class FakeTmux:
         receipt_status: str = "done",
         ready_content: str = "Welcome to Claude\n? for shortcuts",
         post_paste_capture_seq: "list[str] | None" = None,
+        post_paste_content: "str | None" = None,
     ) -> None:
         self.receipts_file = receipts_file
         self.dispatch_id = dispatch_id
@@ -77,6 +77,10 @@ class FakeTmux:
         self._receipt_status = receipt_status
         self._ready_content = ready_content
         self._post_paste_seq: list[str] = list(post_paste_capture_seq or [])
+        # OI-863: persistent content for capture-pane calls AFTER the submit
+        # (once post_paste_capture_seq is exhausted), e.g. a pane that stays on
+        # a permission prompt.  None → fall back to ready_content.
+        self._post_paste_content = post_paste_content
         self.commands: list[list[str]] = []
         self.pasted: list[str] = []
         self.killed_sessions: list[str] = []
@@ -101,9 +105,14 @@ class FakeTmux:
             return TmuxResult(0, "@1\n")
 
         if cmd == "capture-pane":
-            # Post-paste: consume the staged-response queue (FIFO).
-            if self._paste_fired and self._post_paste_seq:
-                return TmuxResult(0, self._post_paste_seq.pop(0))
+            # Post-paste: consume the staged-response queue (FIFO) first, then
+            # fall back to persistent post-paste content (OI-863 permission
+            # prompts), then to ready_content.
+            if self._paste_fired:
+                if self._post_paste_seq:
+                    return TmuxResult(0, self._post_paste_seq.pop(0))
+                if self._post_paste_content is not None:
+                    return TmuxResult(0, self._post_paste_content)
             return TmuxResult(0, self._ready_content)
 
         if cmd == "load-buffer":
@@ -161,17 +170,29 @@ class FakeTmux:
 
 
 def _extract_protocol_block(text: str, block_index: int = 0) -> str:
-    """Return the raw bash code block body at ``block_index`` (0-based) from *text*.
+    """Return the raw completion-protocol bash block body at ``block_index``.
 
-    The new completion protocol emits TWO bash blocks (done / failed).
+    The completion protocol emits TWO bash blocks (done / failed):
     ``block_index=0`` → done block; ``block_index=1`` → failed block.
+
+    Blocks are selected by CONTENT (must carry ``append_receipt.py``), not by
+    raw position: the full delivered body can contain other bash blocks before
+    the protocol (e.g. the worktree-cleanup ``python3 -c`` guard), which would
+    otherwise shift every index by one (OI-657 — the two
+    ``TestSingleShotSuccess`` protocol tests were failing on main because of
+    exactly that drift).
     """
-    blocks = re.findall(r"```bash\n(.+?)\n```", text, re.DOTALL)
+    blocks = [
+        b.strip()
+        for b in re.findall(r"```bash\n(.+?)\n```", text, re.DOTALL)
+        if "append_receipt.py" in b
+    ]
     if block_index >= len(blocks):
         raise AssertionError(
-            f"Expected at least {block_index + 1} bash block(s), found {len(blocks)}"
+            f"Expected at least {block_index + 1} completion bash block(s), "
+            f"found {len(blocks)}"
         )
-    return blocks[block_index].strip()
+    return blocks[block_index]
 
 
 def _extract_protocol_receipt(text: str, block_index: int = 0) -> dict:
@@ -723,7 +744,8 @@ class TestWorkStartedGate(_LaneTestCase):
     def test_hand_deliver_renudges_when_still_staged(self):
         """Unit test of the gate directly: when no work is observed AND the instruction
         is still staged in the input region, the gate sends ONE guarded re-nudge Enter
-        and emits interactive_hand_deliver, then returns False (no work)."""
+        and emits interactive_hand_deliver, then returns WORK_START_NO_PROGRESS (the
+        staged idle pane carries no permission prompt)."""
         # Persistent staged content (would trip _verify_submit in a full dispatch, so we
         # exercise the gate method directly): capture-pane always shows the paste
         # annotation and no working indicator.
@@ -738,6 +760,7 @@ class TestWorkStartedGate(_LaneTestCase):
             "VNX_TMUX_WORK_START_TIMEOUT": "0.1",
             "VNX_TMUX_WORK_START_POLL": "0.02",
         }):
+            from tmux_interactive_dispatch import WORK_START_NO_PROGRESS
             observed = lane._await_work_started(
                 "%1",
                 self.DISPATCH_ID,
@@ -748,7 +771,7 @@ class TestWorkStartedGate(_LaneTestCase):
                 label="T1",
             )
 
-        self.assertFalse(observed, "no work was ever observed")
+        self.assertEqual(observed, WORK_START_NO_PROGRESS, "no work was ever observed")
         enters = [
             c for c in fake.commands
             if c[:1] == ["send-keys"] and c[-1] == "Enter"
@@ -757,6 +780,98 @@ class TestWorkStartedGate(_LaneTestCase):
         with get_connection(self.state_dir) as conn:
             events = get_events(conn, entity_id=self.DISPATCH_ID)
         self.assertIn("interactive_hand_deliver", {e["event_type"] for e in events})
+
+
+# The literal OI-863 pane: sfp1c stuck on a Bash(chmod:*) permission rule.
+_PERMISSION_PANE_TEXT = (
+    "Permission rule Bash(chmod:*) requires confirmation for this command.\n"
+    "\n"
+    "Do you want to proceed?\n"
+    "  1. Yes\n"
+    "  2. Yes, and don't ask again for this project\n"
+    "  3. No\n"
+)
+
+
+class TestAwaitingPermission(_LaneTestCase):
+    def test_permission_prompt_is_not_fast_aborted(self):
+        """OI-863: a worker blocked on a permission prompt at work-start must NOT be
+        fast-aborted as interactive_no_progress.  The lane proceeds to the receipt
+        wait, emits interactive_awaiting_permission, and fails at deadline with the
+        distinct awaiting_permission reason — never killing a worker one keystroke
+        would save."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            post_paste_content=_PERMISSION_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, deadline_seconds=0.3, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "awaiting_permission")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        event_types = {e["event_type"] for e in events}
+        self.assertIn("interactive_awaiting_permission", event_types)
+        self.assertNotIn("interactive_no_progress", event_types)
+
+    def test_working_worker_still_fails_as_deadline_not_permission(self):
+        """A genuinely working worker (token counter, no prompt) must NOT be
+        classified awaiting_permission — the deadline stays a plain deadline."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+        self.assertNotEqual(result.failure_reason, "awaiting_permission")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertNotIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
+
+    def test_mid_wait_permission_prompt_emits_event(self):
+        """OI-863: a permission prompt raised MID receipt-wait (after the worker had
+        started) is surfaced via interactive_awaiting_permission on the first poll
+        that sees it, well before the deadline."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            # Direct wait-loop call: the pane ALREADY shows the permission prompt
+            # (ready_content, since no paste precedes the call in this unit test).
+            ready_content=_PERMISSION_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        # baseline_backstop=True so a report left by an earlier test in the shared
+        # /var/folders temp root is treated as baseline, not fresh completion.
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.15,
+            poll_interval=0.02,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),
+            baseline_backstop=True,
+            pane_id="%1",
+            label="T1",
+        )
+        self.assertIsNone(result, "no receipt ever arrives on a blocked worker")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
 
 
 class TestHeadlessGuard(_LaneTestCase):
@@ -910,7 +1025,7 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
             # Both blocks must have the correct env prefix and python3 path.
             for block_idx, expected_status in ((0, "done"), (1, "failed")):
                 block = _extract_protocol_block(protocol, block_idx)
-                self.assertIn(f"VNX_STATE_DIR=", block)
+                self.assertIn("VNX_STATE_DIR=", block)
                 self.assertIn(str(state_dir), block)
                 self.assertIn(str(tmp_path), block)
 
@@ -1023,6 +1138,54 @@ class TestStateDirMatchesCanonical(unittest.TestCase):
             lane_path,
             f"MISMATCH: lane={lane_path!r} != canonical={canonical_path!r}",
         )
+
+
+class TestStateDirInvocationAware(unittest.TestCase):
+    """Central-mode guard: _resolve_state_dir must follow the INVOCATION project
+    root, not the lane code's __file__.
+
+    In central-install mode the lane code lives under
+    ~/.vnx-system/versions/<v>/scripts/lib/. Deriving the state root from
+    __file__ collapsed every plan-gate receipt/report into the version-dir's
+    local .vnx-data (OI-900) — a tree 'vnx update' later pruned (OI-912),
+    destroying the audit trail.
+    """
+
+    def setUp(self) -> None:
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("VNX_PROJECT_ROOT", "VNX_PROJECT_ID", "VNX_DATA_DIR",
+                      "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR")
+        }
+        for k in ("VNX_PROJECT_ROOT", "VNX_PROJECT_ID", "VNX_DATA_DIR",
+                  "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR"):
+            os.environ.pop(k, None)
+        self._cwd = Path.cwd()
+
+    def tearDown(self) -> None:
+        os.chdir(self._cwd)
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_state_dir_follows_vnx_project_root_not_file(self):
+        """VNX_PROJECT_ROOT (central-install shim export) must anchor the lane
+        state dir — even though the lane code's __file__ lives in the shared
+        engine tree (a git repo whose top-level is NOT the operator's project)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve()
+            os.environ["VNX_PROJECT_ROOT"] = str(project)
+
+            resolved = _resolve_state_dir()
+
+            self.assertEqual(
+                resolved,
+                (project / ".vnx-data" / "state").resolve(),
+                "central-mode lane state dir must resolve from the invocation "
+                "project root, never the lane code's __file__ location",
+            )
 
 
 class TestInvocationProjectRootResolution(unittest.TestCase):
@@ -1806,7 +1969,6 @@ class TestSharedPrepareWiringTmux(unittest.TestCase):
 
     def test_shared_prepare_1_smart_context_prepended(self):
         """VNX_SHARED_PREPARE=1: smart_context is prepended before the prepare() body."""
-        from dispatch_prepare import _WORKER_RULES_FOOTER_SENTINEL
         lane = self._make_lane()
         fake_skill = "SKILL_BODY"
         fake_perm = "PREAMBLE\n---\n\n" + fake_skill
@@ -2728,7 +2890,6 @@ class TestSubmitVerify(_LaneTestCase):
 
     def test_settle_and_retry_timeouts_read_from_env(self):
         """VNX_TMUX_PASTE_SETTLE_SECONDS / SUBMIT_RETRY_DELAY / SUBMIT_VERIFY_TIMEOUT read from env."""
-        import time as _time
         fake = FakeTmux(
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
@@ -4610,6 +4771,22 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
         self.assertTrue(
             any("pretooluse_worker_scope_enforce.sh" in c for c in commands),
             f"hook command not found in written settings: {commands}",
+        )
+        # OI-804 (ADR-005 audit gap): the successful settings write must emit a
+        # hook_settings_written coordination event so the mutation is audited.
+        with get_connection(self.state_dir) as conn:
+            hook_events = get_events(
+                conn, entity_id=self.DISPATCH_ID, event_type="hook_settings_written"
+            )
+        self.assertTrue(
+            hook_events,
+            "successful worker-scope hook settings write must emit "
+            "hook_settings_written",
+        )
+        self.assertIn(
+            str(settings_path),
+            hook_events[0].get("metadata_json", ""),
+            "event metadata must record the settings path written",
         )
 
     def test_dispatch_hook_settings_write_failure_does_not_abort(self):

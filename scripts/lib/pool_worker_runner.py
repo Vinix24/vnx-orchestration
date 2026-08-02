@@ -87,7 +87,8 @@ def _resolve_dispatch_dir() -> Path:
 
 
 def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
-                    model: str, role: Optional[str], gate: str) -> int:
+                    model: str, role: Optional[str], gate: str,
+                    deadline_seconds: int = 900) -> int:
     # PR-12: route through the single-entry door when VNX_SINGLE_ENTRY_DISPATCH=1; OFF default =
     # the legacy deliver_with_recovery call (the lambda), byte-identical.
     try:
@@ -97,9 +98,11 @@ def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
             lambda: deliver_with_recovery(
                 terminal_id=terminal_id, instruction=instruction, model=model,
                 dispatch_id=dispatch_id, role=role, gate=gate, max_retries=1,
+                total_deadline=float(deadline_seconds),
             ),
             instruction_text=instruction, dispatch_id=dispatch_id, role=role,
             target_slot=terminal_id, provider="claude", model=model, gate=gate,
+            deadline_seconds=deadline_seconds,
         )
         return EXIT_OK if ok else EXIT_DELIVERY_FAILED
     except Exception as exc:
@@ -108,14 +111,16 @@ def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
 
 
 def _deliver_provider(provider: str, terminal_id: str, dispatch_id: str,
-                      instruction: str, model: str, role: Optional[str], gate: str) -> int:
+                      instruction: str, model: str, role: Optional[str], gate: str,
+                      deadline_seconds: int = 900) -> int:
     try:
         import provider_dispatch as pd  # noqa: PLC0415
         import dispatch_bridge  # noqa: PLC0415
 
         def _legacy() -> bool:
             argv = ["--provider", provider, "--terminal-id", terminal_id,
-                    "--dispatch-id", dispatch_id, "--instruction", instruction, "--model", model]
+                    "--dispatch-id", dispatch_id, "--instruction", instruction, "--model", model,
+                    "--deadline-seconds", str(deadline_seconds)]
             if role:
                 argv += ["--role", role]
             if gate:
@@ -125,6 +130,7 @@ def _deliver_provider(provider: str, terminal_id: str, dispatch_id: str,
         ok = dispatch_bridge.deliver_via_door(
             _legacy, instruction_text=instruction, dispatch_id=dispatch_id, role=role,
             target_slot=terminal_id, provider=provider, model=model, gate=gate,
+            deadline_seconds=deadline_seconds,
         )
         return EXIT_OK if ok else EXIT_DELIVERY_FAILED
     except Exception as exc:
@@ -193,11 +199,29 @@ def run(terminal_id: str, project_id: str, *,
     role: Optional[str] = tp.get("role") or None
     gate = (bundle.get("gate") or "").strip()
 
-    logger.info("Executing %r provider=%r role=%r model=%r", dispatch_id, provider, role, _model)
+    # Read deadline_seconds from the staged dispatch-spec.json (default 900 matches
+    # spawn_claude's own default so dispatches without a deadline are unchanged).
+    deadline_seconds = 900
+    spec_path = broker.get_bundle_path(dispatch_id) / "dispatch-spec.json"
+    if spec_path.exists():
+        try:
+            import json as _json
+            _spec_data = _json.loads(spec_path.read_text(encoding="utf-8"))
+            deadline_seconds = int(_spec_data.get("deadline_seconds", 900))
+        except Exception:
+            logger.warning(
+                "Failed to read deadline_seconds from spec %s; falling back to 900s",
+                spec_path, exc_info=True,
+            )
+
+    logger.info("Executing %r provider=%r role=%r model=%r deadline=%ds",
+                dispatch_id, provider, role, _model, deadline_seconds)
 
     if provider == "claude":
-        return _deliver_claude(terminal_id, dispatch_id, instruction, _model, role, gate)
-    return _deliver_provider(provider, terminal_id, dispatch_id, instruction, _model, role, gate)
+        return _deliver_claude(terminal_id, dispatch_id, instruction, _model, role, gate,
+                               deadline_seconds=deadline_seconds)
+    return _deliver_provider(provider, terminal_id, dispatch_id, instruction, _model, role, gate,
+                             deadline_seconds=deadline_seconds)
 
 
 def main(argv=None) -> int:

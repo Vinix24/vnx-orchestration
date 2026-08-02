@@ -42,6 +42,13 @@ INSTALL_MODE_VALUE = "central"
 # and `vnx init --set-version`. Forbids '/' and shell metacharacters.
 _PIN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# Rolling (living-checkout) version dir names. `vnx update --to edge` materializes
+# main as ``versions/edge``; such a dir carries arbitrary commits while its VERSION
+# file can lag behind the released versions. Its VERSION must never be treated as a
+# released version (OI-892 doubleganger), so ``_running_version`` reports the dir
+# name instead of the stale VERSION file.
+_ROLLING_DIR_RE = re.compile(r"^(?:edge|latest)$", re.IGNORECASE)
+
 
 def _warn(msg: str) -> None:
     print(f"[vnx-reexec] WARNING: {msg}", file=sys.stderr)
@@ -122,7 +129,15 @@ def _is_central_install(engine_root: Path) -> bool:
 
 
 def _running_version(engine_root: Path) -> Optional[str]:
-    """The version of the code this process actually loaded (its VERSION file)."""
+    """The version of the code this process actually loaded.
+
+    For a central version dir this is its VERSION file. A rolling dir
+    (``edge``/``latest``) is reported by its dir NAME: its VERSION file is not
+    authoritative and can impersonate a released version it is not running
+    (OI-892) — the dir name is the honest identity.
+    """
+    if _ROLLING_DIR_RE.match(engine_root.name):
+        return engine_root.name
     try:
         text = (engine_root / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
@@ -209,18 +224,27 @@ def _maybe_reexec_pinned(argv: List[str]) -> None:
     if not _is_central_install(engine_root):
         return  # dev checkout / non-central install: never re-exec
 
-    running = _running_version(engine_root)
-    if running is not None and _normalize_version(running) == _normalize_version(pin):
-        return  # already running the pinned version
-
     versions_dir = _versions_dir(engine_root)
     pinned_dir = _resolve_pinned_dir(versions_dir, pin)
     if pinned_dir is None:
+        running = _running_version(engine_root)
         _warn(
             f"pinned version {pin!r} is not installed under {versions_dir}; "
             f"running current version ({running or 'unknown'})"
         )
         return
+
+    # OI-892: compare install IDENTITY (the resolved dir), not the VERSION
+    # string. A rolling dir like versions/edge carries arbitrary commits while
+    # its VERSION file stays behind, so a VERSION-string match would let it
+    # impersonate the pin and silently skip the re-exec forever. Re-exec
+    # whenever the running engine root is not the pinned dir itself.
+    try:
+        running_is_pinned = engine_root.resolve() == pinned_dir.resolve()
+    except OSError:
+        running_is_pinned = False
+    if running_is_pinned:
+        return  # already running the pinned install
 
     if not (pinned_dir / "vnx_cli" / "__init__.py").is_file():
         _warn(

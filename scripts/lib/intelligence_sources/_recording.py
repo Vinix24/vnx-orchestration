@@ -41,7 +41,13 @@ def record_injection_audit(
     state_dir: object,
     project_id: Optional[str],
 ) -> None:
-    """Insert one row into intelligence_injections in the coord DB."""
+    """Insert one row into intelligence_injections in the coord DB.
+
+    Retries with bounded deadline on sqlite lock contention (OI-868).
+    Raises :exc:`CoordinationLockError` when the lock cannot be acquired
+    within the deadline — a lost audit row must be visible, not silently
+    logged at WARNING.
+    """
     try:
         from runtime_coordination import get_connection
     except ImportError:
@@ -51,9 +57,22 @@ def record_injection_audit(
     suppressed_json = json.dumps([s.to_dict() for s in result.suppressed])
     ab_arm = getattr(result, "ab_arm", "treatment") or "treatment"
     try:
-        with get_connection(state_dir) as conn:
+        from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
+    except ImportError:
+        import time as _time
+        CoordinationLockError = Exception
+        DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
+        def deadline_for_timeout(t): return _time.monotonic() + t
+        def rearm_busy_timeout(conn, deadline): pass
+        # Degraded path: the sentinel handler below (`except CoordinationLockError:
+        # raise`) already re-raises everything, so this branch is never reached.
+        def is_lock_timeout_error(exc): return False
+    deadline = deadline_for_timeout(DEFAULT_LOCK_TIMEOUT_SECONDS)
+    try:
+        with get_connection(state_dir, timeout=DEFAULT_LOCK_TIMEOUT_SECONDS) as conn:
             has_project = _table_has_column(conn, "intelligence_injections", "project_id")
             has_ab_arm = _table_has_column(conn, "intelligence_injections", "ab_arm")
+            rearm_busy_timeout(conn, deadline)
             if has_project and has_ab_arm:
                 conn.execute(
                     """INSERT INTO intelligence_injections
@@ -98,8 +117,21 @@ def record_injection_audit(
                      result.task_class, result.items_injected, result.items_suppressed,
                      result.payload_chars, items_json, suppressed_json),
                 )
+            rearm_busy_timeout(conn, deadline)
             conn.commit()
+    except CoordinationLockError:
+        raise
     except sqlite3.Error as e:
+        # OI-880: SQLite's own lock-busy OperationalError must surface as
+        # CoordinationLockError, not vanish at WARNING.  Classification is
+        # content-based in coordination_retry.is_lock_timeout_error — a
+        # non-lock error (no such table, ...) keeps the existing swallow path.
+        if is_lock_timeout_error(e):
+            raise CoordinationLockError(
+                "Coordination DB write lock deadline exhausted — "
+                "database is locked after busy_timeout; "
+                "audit row NOT written"
+            ) from e
         logger.warning("Failed to record injection audit: %s", e)
 
 
@@ -115,7 +147,12 @@ def record_pattern_usage(
     db: sqlite3.Connection,
     has_column_fn: Callable[[str, str], bool],
 ) -> None:
-    """Write pattern_usage + dispatch_pattern_offered rows for the feedback loop."""
+    """Write pattern_usage + dispatch_pattern_offered rows for the feedback loop.
+
+    Retries with bounded deadline on sqlite lock contention (OI-868).
+    Raises :exc:`CoordinationLockError` when the lock cannot be acquired
+    within the deadline — lost feedback-loop rows must be visible.
+    """
     if db is None:
         return
     now = _now_utc()
@@ -123,6 +160,19 @@ def record_pattern_usage(
     pu_has_project = has_column_fn("pattern_usage", "project_id")
     dpo_has_project = has_column_fn("dispatch_pattern_offered", "project_id")
     try:
+        from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
+    except ImportError:
+        import time as _time
+        CoordinationLockError = Exception
+        DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
+        def deadline_for_timeout(t): return _time.monotonic() + t
+        def rearm_busy_timeout(conn, deadline): pass
+        # Degraded path: the sentinel handler below (`except CoordinationLockError:
+        # raise`) already re-raises everything, so this branch is never reached.
+        def is_lock_timeout_error(exc): return False
+    deadline = deadline_for_timeout(DEFAULT_LOCK_TIMEOUT_SECONDS)
+    try:
+        rearm_busy_timeout(db, deadline)
         db.execute(
             """CREATE TABLE IF NOT EXISTS dispatch_pattern_offered (
                 dispatch_id   TEXT NOT NULL,
@@ -157,14 +207,28 @@ def record_pattern_usage(
 
         for item in result.items:
             if pu_conflict_target is not None:
+                rearm_busy_timeout(db, deadline)
                 _upsert_pattern_usage(db, item, now, project_id, pu_has_project, pu_conflict_target)
             if dpo_conflict_target is not None:
+                rearm_busy_timeout(db, deadline)
                 _upsert_dispatch_pattern_offered(
                     db, item, result.dispatch_id, now, project_id, dpo_has_project, dpo_conflict_target,
                 )
             _stamp_source_dispatch_id(db, item, result.dispatch_id)
+        rearm_busy_timeout(db, deadline)
         db.commit()
+    except CoordinationLockError:
+        raise
     except sqlite3.Error as e:
+        # Same OI-880 classification as record_injection_audit: a lock-busy
+        # OperationalError must surface as CoordinationLockError, a real
+        # sqlite error keeps the existing swallow path.
+        if is_lock_timeout_error(e):
+            raise CoordinationLockError(
+                "Coordination DB write lock deadline exhausted — "
+                "database is locked after busy_timeout; "
+                "pattern usage rows NOT written"
+            ) from e
         logger.warning("Failed to record pattern usage: %s", e)
 
 
