@@ -12,23 +12,46 @@ from pathlib import Path
 
 import pytest
 
+from conftest import pin_vnx_data_dir
+
 # Add scripts dir to path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from pr_queue_manager import PRQueueManager
-from generate_t0_recommendations import RecommendationEngine, PR_QUEUE_STATE_FILE
+from generate_t0_recommendations import (
+    RecommendationEngine,
+    PR_QUEUE_STATE_FILE,
+    STATE_DIR as _RECS_STATE_DIR,
+    DISPATCHES_DIR as _RECS_DISPATCHES_DIR,
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_vnx_data_dir(monkeypatch):
     """Sibling of tests/test_pr_dispatch_integration.py — same PRQueueManager
     write surface, same w19c/OI-934 isolation requirement. See that file's
-    fixture docstring for the full incident writeup.
+    fixture docstring for the full incident writeup, and pin_vnx_data_dir's
+    docstring (tests/conftest.py) for why VNX_DATA_DIR alone is not enough
+    (w22/PR#1333).
+
+    Unlike test_pr_dispatch_integration.py, VNX_STATE_DIR/VNX_DISPATCH_DIR
+    are NOT re-pinned to a fresh tmp dir here: generate_t0_recommendations
+    resolves and caches STATE_DIR/DISPATCHES_DIR at import time (module-level
+    constants, scripts/generate_t0_recommendations.py), so RecommendationEngine
+    reads/writes through those frozen paths for the rest of the session. A
+    fresh-per-test VNX_STATE_DIR would desync PRQueueManager() (resolves
+    fresh every call) from RecommendationEngine (frozen at import) and break
+    every assertion that reads back what the other wrote. Re-asserting the
+    SAME already-resolved dirs here keeps both aligned; conftest.py's own
+    module-level pin (run before this module is even imported) is what keeps
+    that cached value isolated from the real central store in the first
+    place, including under an ambient-polluted VNX_STATE_DIR.
     """
     isolated = tempfile.mkdtemp(prefix="test_pr_recommendation_integration_")
-    monkeypatch.setenv("VNX_DATA_DIR", isolated)
-    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    pin_vnx_data_dir(monkeypatch, Path(isolated))
+    monkeypatch.setenv("VNX_STATE_DIR", str(_RECS_STATE_DIR))
+    monkeypatch.setenv("VNX_DISPATCH_DIR", str(_RECS_DISPATCHES_DIR))
     monkeypatch.setenv("VNX_PROJECT_ROOT", tempfile.mkdtemp(prefix="test_pr_recommendation_project_root_"))
 
 

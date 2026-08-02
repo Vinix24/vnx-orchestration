@@ -165,19 +165,26 @@ def _guard_mode_write_target(target_dir: Path) -> None:
        exactly the OI-911 test-run incident. Refuse.
     2. Test-isolation guard (w19c/OI-934). Under pytest, refuse a write into
        the REAL central store outright — even with NO env override at all
-       (nothing to "diverge" from) and even when the resolved project_id
-       happens to match, which is exactly the gap the divergence check above
-       cannot see: a completely clean test env resolves to this repo's own
-       real ``~/.vnx-data/vnx-dev`` "correctly", and correctly is still wrong
-       for a test. This is what let a suite-wide pytest run flip the live
-       mode.json from operator to starter with no divergence to catch.
+       (nothing to "diverge" from), even when the resolved project_id happens
+       to match (the gap the divergence check above cannot see: a completely
+       clean test env resolves to this repo's own real ``~/.vnx-data/vnx-dev``
+       "correctly", and correctly is still wrong for a test — this is what let
+       a suite-wide pytest run flip the live mode.json from operator to
+       starter with no divergence to catch), and even when project_id is NOT
+       resolvable at all (w22/PR#1333: a subprocess with a cleaned env has no
+       ``VNX_PROJECT_ID``, no reachable ``.vnx-project-id`` marker, and often
+       no git remote either — ``resolve_project_id()`` raising is exactly the
+       scenario this guard exists for, not a reason to skip it).
     3. Cross-project guard. A write target under ``~/.vnx-data/<other>`` while
        the resolved project_id is not ``<other>`` is a cross-project write.
 
-    When no project_id is resolvable the cross-project half cannot verify and
-    stays silent (same contract as ``data_dir_guard``); the divergence and
-    test-isolation halves are verifiable independent of project_id and always
-    run.
+    When no project_id is resolvable the cross-project half cannot verify a
+    mismatch and stays silent about THAT specifically (same contract as
+    ``data_dir_guard``) — but the test-isolation half does not need a
+    project_id at all, so it still runs and still refuses a central-store
+    write under pytest even when project_id resolution fails or returns
+    empty. The divergence half is likewise independent of project_id and
+    always runs.
     """
     try:
         target = Path(target_dir).expanduser().resolve()
@@ -204,12 +211,20 @@ def _guard_mode_write_target(target_dir: Path) -> None:
         return  # repo-local / scratch / XDG — not a central-store path
 
     from project_root import resolve_project_id
+    from vnx_paths import refuse_real_central_store_write_under_pytest
     try:
         pid = resolve_project_id()
     except RuntimeError:
-        return  # cannot verify against a project_id — allow
+        # Cannot verify the cross-project half without a project_id, but the
+        # test-isolation half (w19c/OI-934) does not depend on one: a
+        # subprocess with a cleaned env is exactly the scenario where
+        # resolve_project_id() fails, and exactly the scenario this guard
+        # exists for (w22/PR#1333). Run it before allowing the write.
+        refuse_real_central_store_write_under_pytest(target)
+        return
     pid = pid.strip()
     if not pid:
+        refuse_real_central_store_write_under_pytest(target)
         return
     expected = home_vnx / pid
     if target == expected or str(target).startswith(str(expected) + os.sep):
@@ -219,7 +234,6 @@ def _guard_mode_write_target(target_dir: Path) -> None:
         # real ~/.vnx-data/vnx-dev is exactly the gap those two checks can't
         # see, since there is neither a divergence nor a project mismatch to
         # catch.
-        from vnx_paths import refuse_real_central_store_write_under_pytest
         refuse_real_central_store_write_under_pytest(target)
         return
     raise RuntimeError(
