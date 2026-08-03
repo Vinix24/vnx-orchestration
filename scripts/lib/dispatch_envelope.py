@@ -31,7 +31,6 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -47,78 +46,18 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dispatch_internal import ExecutionPermit  # noqa: E402
 from dispatch_plan import ExecutionPlan  # noqa: E402
 
+# Runtime import (not TYPE_CHECKING): typing.get_type_hints() on functions
+# defined here (e.g. run_envelope_plan) resolves against THIS module's
+# __globals__, so these names must be bound at runtime, not just for
+# static type checkers.
+from envelope_types import (  # noqa: E402
+    EnvelopeGovernError,
+    EnvelopeResult,
+    EnvelopeSpec,
+    _AdapterResult,
+)
+
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Public types
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class EnvelopeSpec:
-    """Normalized dispatch parameters passed through PREPARE -> ROUTE -> EXECUTE -> GOVERN."""
-
-    dispatch_id: str
-    terminal_id: str
-    provider: str
-    model: str
-    instruction: str
-    role: Optional[str]
-    pr_id: Optional[str]
-    state_dir: Path
-    data_dir: Path
-    deadline_seconds: int = 900
-    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): threaded from the
-    # plan onto the receipt so the provider lane stamps the same values the
-    # door computed.
-    parent_dispatch: Optional[str] = None
-    task_class: Optional[str] = None
-    tier_from: Optional[str] = None
-    tier_to: Optional[str] = None
-
-
-@dataclass
-class EnvelopeResult:
-    """Outcome from a complete envelope run."""
-
-    status: str           # "success" | "failure" | "timeout"
-    returncode: int
-    report_path: Optional[Path]
-    receipt_path: Optional[Path]
-    completion_text: str = ""
-    error: Optional[str] = None
-
-
-class EnvelopeGovernError(RuntimeError):
-    """Raised when GOVERN cannot emit or confirm a receipt (fail-closed contract)."""
-
-
-# ---------------------------------------------------------------------------
-# Internal adapter result
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _AdapterResult:
-    returncode: int
-    completion_text: str
-    status: str           # "success" | "failure" | "timeout"
-    token_usage: Dict[str, int] = field(default_factory=dict)
-    error: Optional[str] = None
-    timed_out: bool = False
-    event_writer_failures: int = 0
-    # receipt-quality PR-B1: claude session_id (from the init event), threaded
-    # through to emit_dispatch_receipt so it can backfill token_usage from the
-    # local transcript when the spawn itself reported none. None for adapters
-    # with no session concept (e.g. codex).
-    session_id: Optional[str] = None
-    # Actual model the spawn resolved and executed (e.g. deepseek-harness
-    # resolves "default"/"sonnet" -> "deepseek-v4-pro"). Used for cost
-    # computation in _govern so the receipt's cost_usd prices the model that
-    # actually ran, not a placeholder from the dispatch spec. None when the
-    # adapter did not resolve a distinct model (caller falls back to spec.model).
-    model: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
