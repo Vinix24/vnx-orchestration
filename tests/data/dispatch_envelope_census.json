@@ -1,0 +1,819 @@
+{
+  "couplings": [
+    {
+      "file": "tests/test_dispatch_cli.py",
+      "line": 186,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_dispatch_cli.py",
+      "line": 753,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_dispatch_cli.py",
+      "line": 756,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 33,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeGovernError"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 34,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "LaneRouter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 236,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 237,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 360,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "CodexAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 365,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 557,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 591,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 593,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 784,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 866,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 891,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 926,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 947,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope.py",
+      "line": 962,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_annotations_resolve.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_annotations_resolve.py",
+      "line": 27,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 12,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 51,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 51,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 234,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 235,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 237,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 245,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 273,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 274,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 275,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 278,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 299,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 301,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_fail_loud.py",
+      "line": 32,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_fail_loud.py",
+      "line": 32,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_fail_loud.py",
+      "line": 243,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 28,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 29,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 30,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 31,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_headless_plan"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 32,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 166,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 167,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 204,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 204,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 206,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 257,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 257,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_field_propagation.py",
+      "line": 259,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 30,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeGovernError"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 31,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 32,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "LaneRouter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 33,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 34,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 166,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 167,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 396,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 433,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 472,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "CodexAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 478,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "CodexAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 478,
+      "mechanism": "monkeypatch",
+      "module_target": "dispatch_envelope",
+      "symbol": "CodexAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 483,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 522,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 523,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 550,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 578,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_plan.py",
+      "line": 579,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
+      "line": 45,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
+      "line": 46,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
+      "line": 47,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
+      "line": 48,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
+      "line": 49,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
+      "line": 239,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_envelope_role_propagation.py",
+      "line": 29,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_role_propagation.py",
+      "line": 29,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_role_propagation.py",
+      "line": 75,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_failclass_registry.py",
+      "line": 736,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_failclass_registry.py",
+      "line": 768,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_final_prompt_integrity.py",
+      "line": 374,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_glm_harness_normalization.py",
+      "line": 97,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_kimi_model_resolver.py",
+      "line": 418,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_kimi_model_resolver.py",
+      "line": 432,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_kimi_model_resolver.py",
+      "line": 446,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_kimi_model_resolver.py",
+      "line": 460,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_phantom_guard_branch_fallback.py",
+      "line": 122,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_branch_fallback.py",
+      "line": 172,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_branch_fallback.py",
+      "line": 229,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_branch_fallback.py",
+      "line": 271,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_branch_fallback.py",
+      "line": 317,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_branch_fallback.py",
+      "line": 385,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_fix_forward.py",
+      "line": 30,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_phantom_guard_fix_forward.py",
+      "line": 30,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_fix_forward_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_oi869_oi870.py",
+      "line": 101,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_oi869_oi870.py",
+      "line": 172,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_oi869_oi870.py",
+      "line": 234,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_oi869_oi870.py",
+      "line": 283,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_phantom_guard_oi869_oi870.py",
+      "line": 340,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 66,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 83,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 101,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 141,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 141,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 183,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 183,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_receipt_v2_pr4_wiring.py",
+      "line": 398,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_receipt_v2_pr4_wiring.py",
+      "line": 398,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope"
+    },
+    {
+      "file": "tests/test_receipt_v2_pr4_wiring.py",
+      "line": 453,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_verification_from_report"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 46,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 46,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 211,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 212,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 217,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    }
+  ],
+  "family": [
+    "dispatch_envelope"
+  ]
+}
