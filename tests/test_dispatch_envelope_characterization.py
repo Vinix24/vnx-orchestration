@@ -241,21 +241,35 @@ class TestLayer3ArchiveClearBinding:
 
 
 class TestLayer3Site5And6LoggerName:
-    """Sites 5 & 6 both capture via
+    """Sites 5 & 6 originally captured via
     `caplog.at_level(logging.WARNING, logger="dispatch_envelope")`:
       - site 5: tests/test_dispatch_envelope.py:557 (reached via _govern)
       - site 6: tests/test_dispatch_envelope.py:591 (direct call, dispatch_envelope.py:593)
 
-    FINDING (not corrected — see Open Items): both actually bind against
-    _receipt_exists_for_dispatch's OWN `logging.getLogger(__name__)`, i.e.
-    the SYMBOL's eventual home module — not wherever _govern (site 5's
-    caller) ends up. The PR-0 dispatch predicted site 5 breaks in "PR-3 or
-    PR-4" and site 6 in "PR-3"; since both routes execute the same
-    _receipt_exists_for_dispatch logger call, they will actually break
-    together, in whichever PR relocates _receipt_exists_for_dispatch itself.
+    CORRECTED in PR-3 (dispatch-monolith-split): _receipt_exists_for_dispatch moved
+    to envelope_govern_support.py, so its `logging.getLogger(__name__)` now reads
+    "envelope_govern_support" — both this class's own captures and the two
+    tests/test_dispatch_envelope.py sites were renamed to that logger name in the
+    SAME commit that moved the function, per the PR-0 finding this class recorded.
+
+    MEASURED CORRECTION to that PR-0 finding: the finding predicted an unrepaired
+    logger name would leave the capture empty and the assertion vacuously green.
+    That does NOT hold under pytest 8.4.1's actual caplog implementation.
+    `_pytest.logging.catching_logs` attaches the LogCaptureHandler on the ROOT
+    logger unconditionally; `caplog.at_level(level, logger=name)` only calls
+    `logging.getLogger(name).setLevel(level)` — it does not scope *which* records
+    get captured. Any record that propagates (the default) still reaches
+    caplog.records regardless of the `logger=` string, because none of these
+    tests assert `record.name == "dispatch_envelope"` — they only check
+    caplog.records membership by message content. Verified empirically before
+    applying this rename: all four sites (these two plus both in
+    tests/test_dispatch_envelope.py) still PASSED with the unrepaired
+    "dispatch_envelope" logger name. The rename is still applied — it is
+    semantically correct and PR-3's dispatch mandated it — but in this
+    environment it is not load-bearing for red/green.
     """
 
-    def test_site5_via_govern_logs_under_dispatch_envelope_logger(self, tmp_path, caplog):
+    def test_site5_via_govern_logs_under_envelope_govern_support_logger(self, tmp_path, caplog):
         spec = _make_spec(tmp_path, "layer3-site5-logger")
         result = _fake_adapter_result()
         start = end = datetime.now(timezone.utc)
@@ -270,7 +284,7 @@ class TestLayer3Site5And6LoggerName:
                 raise OSError("Permission denied")
             return _real_open(path, *args, **kwargs)
 
-        with caplog.at_level(logging.WARNING, logger="dispatch_envelope"), \
+        with caplog.at_level(logging.WARNING, logger="envelope_govern_support"), \
              patch("dispatch_envelope._archive_dispatch_events", return_value=(None, True)), \
              patch("dispatch_envelope._clear_dispatch_events"), \
              _stub_peripheral_govern_deps(receipt_path) as mock_receipt, \
@@ -285,7 +299,7 @@ class TestLayer3Site5And6LoggerName:
             for r in caplog.records
         ), f"expected a WARNING about the unreadable ledger, got: {[r.message for r in caplog.records]}"
 
-    def test_site6_direct_call_logs_under_dispatch_envelope_logger(self, tmp_path, caplog):
+    def test_site6_direct_call_logs_under_envelope_govern_support_logger(self, tmp_path, caplog):
         receipt_path = tmp_path / "t0_receipts.ndjson"
         receipt_path.write_text('{"dispatch_id":"some-id"}\n', encoding="utf-8")
 
@@ -296,7 +310,7 @@ class TestLayer3Site5And6LoggerName:
                 raise OSError("Permission denied")
             return _real_open(path, *args, **kwargs)
 
-        with caplog.at_level(logging.WARNING, logger="dispatch_envelope"), \
+        with caplog.at_level(logging.WARNING, logger="envelope_govern_support"), \
              patch("builtins.open", side_effect=_raise_oserror):
             result = dispatch_envelope._receipt_exists_for_dispatch(receipt_path, "some-id")
 

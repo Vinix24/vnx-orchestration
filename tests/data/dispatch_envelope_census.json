@@ -81,14 +81,14 @@
       "file": "tests/test_dispatch_envelope.py",
       "line": 557,
       "mechanism": "logger-name",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope.py",
       "line": 591,
       "mechanism": "logger-name",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
@@ -205,42 +205,42 @@
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 273,
+      "line": 287,
       "mechanism": "logger-name",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 274,
+      "line": 288,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 275,
+      "line": 289,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 278,
+      "line": 292,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 299,
+      "line": 313,
       "mechanism": "logger-name",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 301,
+      "line": 315,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_receipt_exists_for_dispatch"
@@ -815,6 +815,7 @@
   ],
   "family": [
     "dispatch_envelope",
+    "envelope_govern_support",
     "envelope_prepare",
     "envelope_types"
   ],
@@ -834,19 +835,19 @@
     "dispatch_envelope.LaneRouter::get",
     "dispatch_envelope.ProviderAdapter::_run_kimi",
     "dispatch_envelope.ProviderAdapter::run",
-    "dispatch_envelope::_archive_dispatch_events",
-    "dispatch_envelope::_clear_dispatch_events",
     "dispatch_envelope::_fail_loud_on_empty_success",
     "dispatch_envelope::_govern",
     "dispatch_envelope::_map_generic_spawn_result",
-    "dispatch_envelope::_receipt_exists_for_dispatch",
-    "dispatch_envelope::_resolve_fix_forward_diff",
-    "dispatch_envelope::_resolve_phantom_diff",
-    "dispatch_envelope::_unknown_verification",
-    "dispatch_envelope::_verification_from_report",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
     "dispatch_envelope::run_envelope_plan",
+    "envelope_govern_support::_archive_dispatch_events",
+    "envelope_govern_support::_clear_dispatch_events",
+    "envelope_govern_support::_receipt_exists_for_dispatch",
+    "envelope_govern_support::_resolve_fix_forward_diff",
+    "envelope_govern_support::_resolve_phantom_diff",
+    "envelope_govern_support::_unknown_verification",
+    "envelope_govern_support::_verification_from_report",
     "envelope_prepare::_prepare",
     "envelope_prepare::_record_integrity",
     "envelope_prepare::_verify_role_application",
