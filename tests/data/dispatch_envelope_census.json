@@ -815,6 +815,7 @@
   ],
   "family": [
     "dispatch_envelope",
+    "envelope_prepare",
     "envelope_types"
   ],
   "layer4_classes": [
@@ -838,17 +839,17 @@
     "dispatch_envelope::_fail_loud_on_empty_success",
     "dispatch_envelope::_govern",
     "dispatch_envelope::_map_generic_spawn_result",
-    "dispatch_envelope::_prepare",
     "dispatch_envelope::_receipt_exists_for_dispatch",
-    "dispatch_envelope::_record_integrity",
     "dispatch_envelope::_resolve_fix_forward_diff",
     "dispatch_envelope::_resolve_phantom_diff",
     "dispatch_envelope::_unknown_verification",
     "dispatch_envelope::_verification_from_report",
-    "dispatch_envelope::_verify_role_application",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
     "dispatch_envelope::run_envelope_plan",
+    "envelope_prepare::_prepare",
+    "envelope_prepare::_record_integrity",
+    "envelope_prepare::_verify_role_application",
     "envelope_types.EnvelopeResult::__eq__",
     "envelope_types.EnvelopeResult::__init__",
     "envelope_types.EnvelopeResult::__repr__",
