@@ -168,7 +168,7 @@ class TestProviderLitellmRouted:
 
     def test_various_litellm_sub_providers_route(self):
         """Various litellm:<sub> values all route to _dispatch_litellm."""
-        for provider_str in ("litellm:kimi-k2", "litellm:glm-5.1", "litellm:bedrock"):
+        for provider_str in ("litellm:kimi-k2", "litellm:glm-5.2", "litellm:bedrock"):
             argv = ["--provider", provider_str, "--terminal-id", "T1",
                     "--dispatch-id", "test-litellm-sub", "--instruction", "noop"]
             with patch("provider_dispatch._dispatch_litellm", return_value=0) as mock_dispatch:

@@ -23,7 +23,7 @@ Constraint references (provider_constraints.yaml):
   deepseek-harness-subscription-blocked: DEEPSEEK_API_KEY required; subscription-
     redirect blocked. Allowed only with via=claude_harness_keyed + own key.
   zai-via-openrouter-only: GLM only via OpenRouter (no direct Zhipu API)
-  deprecated-glm-models: GLM-4.5/4.6 blocked; use glm-5.1 via OpenRouter
+  deprecated-glm-models: GLM-4.5/4.6/5/5.1 blocked; use glm-5.2 via OpenRouter
 """
 from __future__ import annotations
 

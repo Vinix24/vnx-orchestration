@@ -129,7 +129,7 @@ CONTRACTS: Dict[str, BehaviorContract] = {
         max_context_tokens=128_000,
         max_output_tokens=16_384,
     ),
-    "litellm:zai:glm-5.1-default": BehaviorContract(
+    "litellm:zai:glm-5.2": BehaviorContract(
         provider="litellm",
         sub_provider="zai",
         supports_streaming=True,

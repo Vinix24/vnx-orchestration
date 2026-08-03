@@ -49,7 +49,7 @@ class TestBuildLaneKey:
         assert _build_lane_key("moonshot", "kimi-k2-6") == "litellm:moonshot:kimi-k2-6"
 
     def test_zai_default_alias(self):
-        assert _build_lane_key("zai", None) == "litellm:zai:glm-5.1-default"
+        assert _build_lane_key("zai", None) == "litellm:zai:glm-5.2"
 
     def test_unknown_sub_provider_uses_default_sentinel(self):
         result = _build_lane_key("bedrock", None)
@@ -200,6 +200,6 @@ class TestNormalizeLiteLLMEventAuditEnrichment:
     def test_provider_is_always_litellm(self):
         event = normalize_litellm_event(
             self._text_chunk(), "T1", "dispatch-001",
-            sub_provider="zai", lane="litellm:zai:glm-5.1-default",
+            sub_provider="zai", lane="litellm:zai:glm-5.2",
         )
         assert event.provider == "litellm"

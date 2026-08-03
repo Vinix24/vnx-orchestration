@@ -62,7 +62,6 @@ class TestInferProviderForModel:
             ("gpt-5.5", "codex"),
             ("gemini", "gemini"),
             ("gemini-2.5-pro", "gemini"),
-            ("glm-5.1", "glm-harness"),
             ("glm-5.2", "glm-harness"),
             ("zai", "glm-harness"),
             ("deepseek-harness", "deepseek-harness"),

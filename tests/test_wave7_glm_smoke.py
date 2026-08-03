@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""test_wave7_glm_smoke.py — Wave 7 PR-7.3 GLM-5.1 smoke tests.
+"""test_wave7_glm_smoke.py — Wave 7 PR-7.3 GLM-5.2 smoke tests.
 
-Verifies GLM-5.1 lane via LiteLLM OpenRouter endpoint (no real API calls):
+Verifies GLM-5.2 lane via LiteLLM OpenRouter endpoint (no real API calls):
 
   test_provider_dispatch_routes_zai_via_openrouter — litellm:zai routes to
       spawn_litellm with model containing 'openrouter'
   test_zai_requires_openrouter_key                 — missing OPENROUTER_API_KEY → non-zero exit
   test_glm45_legacy_rejected                       — --model glm-4.5 raises ValueError
-  test_glm_model_alias_resolution                  — glm-5.1-default resolves to
-      openrouter/z-ai/glm-5
+  test_glm_model_alias_resolution                  — glm-5.2 resolves to
+      openrouter/z-ai/glm-5.2
 """
 
 from __future__ import annotations
@@ -143,13 +143,13 @@ class TestGlmLegacyRejected:
     def test_validate_zai_model_not_legacy_raises_for_deprecated(self):
         from provider_dispatch import _validate_zai_model_not_legacy
 
-        with pytest.raises(ValueError, match="GLM-4.5/4.6 are LEGACY"):
-            _validate_zai_model_not_legacy("glm-4.5")
+        with pytest.raises(ValueError, match="GLM-4.5/4.6/5/5.1 are LEGACY"):
+            _validate_zai_model_not_legacy("glm-5.1")
 
     def test_validate_zai_model_not_legacy_passes_for_current(self):
         from provider_dispatch import _validate_zai_model_not_legacy
 
-        _validate_zai_model_not_legacy("glm-5.1-default")
+        _validate_zai_model_not_legacy("glm-5.2")
         _validate_zai_model_not_legacy("sonnet")
         _validate_zai_model_not_legacy("")
 
@@ -161,18 +161,18 @@ class TestGlmLegacyRejected:
 class TestGlmModelAliasResolution:
     """_resolve_zai_model correctly maps aliases to litellm model strings."""
 
-    def test_default_resolves_to_openrouter_glm5(self):
+    def test_default_resolves_to_openrouter_glm52(self):
         from provider_dispatch import _resolve_zai_model
         model = _resolve_zai_model()
-        assert model == "openrouter/z-ai/glm-5", (
-            f"expected openrouter/z-ai/glm-5 as default, got {model!r}"
+        assert model == "openrouter/z-ai/glm-5.2", (
+            f"expected openrouter/z-ai/glm-5.2 as default, got {model!r}"
         )
 
-    def test_glm51_default_alias_resolves(self):
+    def test_glm52_alias_resolves(self):
         from provider_dispatch import _resolve_zai_model
-        model = _resolve_zai_model("glm-5.1-default")
-        assert model == "openrouter/z-ai/glm-5", (
-            f"glm-5.1-default should resolve to openrouter/z-ai/glm-5, got {model!r}"
+        model = _resolve_zai_model("glm-5.2")
+        assert model == "openrouter/z-ai/glm-5.2", (
+            f"glm-5.2 should resolve to openrouter/z-ai/glm-5.2, got {model!r}"
         )
 
     def test_unknown_alias_falls_back_to_first_model(self):
@@ -193,22 +193,22 @@ class TestGlmModelAliasResolution:
         assert zai.api_key_env == "OPENROUTER_API_KEY", (
             f"unexpected api_key_env: {zai.api_key_env!r}"
         )
-        assert len(zai.models) == 3, (
-            # glm-5.1-default + glm-5.1 + glm-5.2 (grew from the original 1 as GLM versions landed)
-            f"expected 3 zai models, got {len(zai.models)}"
+        assert len(zai.models) == 1, (
+            # glm-5.2 only; glm-5.1-default and glm-5.1 removed 2026-08-03
+            f"expected 1 zai model (glm-5.2), got {len(zai.models)}"
         )
 
-    def test_glm51_default_model_schema(self):
+    def test_glm52_model_schema(self):
         from providers import provider_registry
 
         registry = provider_registry.load()
-        model = registry["zai"].models["glm-5.1-default"]
+        model = registry["zai"].models["glm-5.2"]
 
-        assert model.litellm_name == "openrouter/z-ai/glm-5", (
+        assert model.litellm_name == "openrouter/z-ai/glm-5.2", (
             f"unexpected litellm_name: {model.litellm_name!r}"
         )
-        assert model.cost_input_per_mtok == pytest.approx(0.50)
-        assert model.cost_output_per_mtok == pytest.approx(2.50)
+        assert model.cost_input_per_mtok == pytest.approx(0.60)
+        assert model.cost_output_per_mtok == pytest.approx(1.92)
         assert model.max_tokens == 8192
         assert model.supports_streaming is True
         assert model.supports_tool_calls is True

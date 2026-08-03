@@ -193,11 +193,19 @@ class TestDeprecatedGlmModels:
             real_enforcer.enforce(provider="zai", model="glm-4.6")
 
     def test_deprecated_glm_blocks(self, real_enforcer: ConstraintEnforcer):
-        with pytest.raises(HardConstraintViolation, match="glm-5.1"):
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
             real_enforcer.enforce(provider="litellm:zai", model="glm-4.6")
 
-    def test_glm51_allowed(self, real_enforcer: ConstraintEnforcer):
-        real_enforcer.enforce(provider="zai", model="glm-5.1")
+    def test_glm51_blocked(self, real_enforcer: ConstraintEnforcer):
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="zai", model="glm-5.1")
+
+    def test_glm5_blocked(self, real_enforcer: ConstraintEnforcer):
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="zai", model="glm-5")
+
+    def test_glm52_allowed(self, real_enforcer: ConstraintEnforcer):
+        real_enforcer.enforce(provider="zai", model="glm-5.2")
 
 
 # ---------------------------------------------------------------------------

@@ -86,17 +86,17 @@ Two model tiers available under `--provider litellm:moonshot`:
 - Missing `MOONSHOT_API_KEY` → immediate exit(64) before subprocess spawn
 - Context: 8,192 tokens (both models); streaming + tool calls supported
 
-## GLM-5.1 via OpenRouter / Z.AI (PR-7.3)
+## GLM-5.2 via OpenRouter / Z.AI (PR-7.3)
 
-GLM-5.1 routes through OpenRouter as `openrouter/z-ai/glm-5`:
+GLM-5.2 routes through OpenRouter as `openrouter/z-ai/glm-5.2`:
 
 | Alias | LiteLLM name | Input/MTok | Output/MTok | Task classes |
 |---|---|---|---|---|
-| glm-5.1-default | openrouter/z-ai/glm-5 | $0.50 | $2.50 | coding, review |
+| glm-5.2 | openrouter/z-ai/glm-5.2 | $0.60 | $1.92 | coding, review |
 
-- Dispatch: `--provider litellm:zai`
+- Dispatch: `--provider litellm:zai` (defaults to glm-5.2) or `--provider glm-harness` (claude-CLI harness via local litellm proxy)
 - Missing `OPENROUTER_API_KEY` → immediate exit(64) before subprocess spawn
-- Deprecated models GLM-4.5 and GLM-4.6 → ValueError on dispatch (explicit legacy guard)
+- Deprecated models GLM-4.5, GLM-4.6, GLM-5 (base), GLM-5.1 → blocked by deprecated-glm-models constraint (operator directive 2026-08-03)
 - Context: 8,192 tokens; streaming + tool calls supported
 - Direct Zhipu integration deferred to Wave 7.3.1 (see `z_ai_custom_provider.py`)
 

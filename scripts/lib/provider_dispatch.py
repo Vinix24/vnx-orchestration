@@ -61,7 +61,7 @@ _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "bedrock": "bedrock/claude-sonnet-4-6",
     "deepseek": "deepseek/deepseek-v4-pro",
     "moonshot": "moonshot/kimi-k2-0905-preview",
-    "zai": "openrouter/z-ai/glm-5",
+    "zai": "openrouter/z-ai/glm-5.2",
     "ollama": "ollama/llama3",
     "anthropic": "anthropic/claude-sonnet-4-6",
     # openrouter-arbitrary lane (PR-1 skeleton): the ONE OpenAI-compat model this
@@ -79,13 +79,14 @@ _SUB_PROVIDER_KEY_REQS: dict = {
 }
 
 # GLM model names that are LEGACY — rejected on zai dispatch (PR-7.3)
-_DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6"})
+# Extended 2026-08-03: glm-5 (base Feb 2026) and glm-5.1 blocked; only glm-5.2 allowed.
+_DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6", "glm-5", "glm-5.1"})
 
 # Default model alias per sub-provider — used to build lane key for contract lookup
 _SUB_PROVIDER_DEFAULT_ALIAS: dict = {
     "deepseek": "deepseek-v4-pro",
     "moonshot": "kimi-k2-0905-default",
-    "zai": "glm-5.1-default",
+    "zai": "glm-5.2",
     "openrouter": "gpt-4o-mini-default",
 }
 
@@ -1756,13 +1757,13 @@ def _validate_zai_model_not_legacy(model: str) -> None:
     """Raise ValueError when model names a deprecated GLM version."""
     model_lower = (model or "").lower().strip()
     if model_lower in _DEPRECATED_ZAI_MODELS:
-        raise ValueError(f"GLM-4.5/4.6 are LEGACY, use GLM-5.1 (got: {model!r})")
+        raise ValueError(f"GLM-4.5/4.6/5/5.1 are LEGACY, use GLM-5.2 (got: {model!r})")
 
 
 def _resolve_zai_model(model_alias: "str | None" = None) -> str:
-    """Load GLM-5.1 litellm_name from registry via OpenRouter.
+    """Load GLM-5.2 litellm_name from registry via OpenRouter.
 
-    Defaults to 'glm-5.1-default' (openrouter/z-ai/glm-5) when alias is absent.
+    Defaults to 'glm-5.2' (openrouter/z-ai/glm-5.2) when alias is absent.
     Falls back to hardcoded default when registry is unavailable.
     """
     from providers import provider_registry as _reg
@@ -1774,7 +1775,7 @@ def _resolve_zai_model(model_alias: "str | None" = None) -> str:
     cfg = registry.get("zai")
     if cfg is None or not cfg.enabled or not cfg.models:
         return _LITELLM_SUB_PROVIDER_DEFAULTS["zai"]
-    target_key = model_alias or "glm-5.1-default"
+    target_key = model_alias or "glm-5.2"
     if target_key in cfg.models:
         return cfg.models[target_key].litellm_name
     return next(iter(cfg.models.values())).litellm_name

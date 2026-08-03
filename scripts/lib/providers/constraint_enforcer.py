@@ -547,11 +547,11 @@ class ConstraintEnforcer:
                 message="Route forbidden: litellm:deepseek requires DEEPSEEK_API_KEY; subscription redirect is blocked.",
             ))
 
-        if _norm(effective) == "zai" and model_norm in {"glm-4.5", "glm-4.6"}:
+        if _norm(effective) == "zai" and model_norm in {"glm-4.5", "glm-4.6", "glm-5", "glm-5.1"}:
             violations.append(ConstraintViolation(
                 code="deprecated-glm-models",
                 severity="blocking",
-                message=f"Route forbidden: {model} is deprecated; use glm-5.1.",
+                message=f"Route forbidden: {model} is deprecated; use glm-5.2.",
             ))
 
         if check_registry and model:
