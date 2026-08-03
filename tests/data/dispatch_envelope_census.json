@@ -163,14 +163,14 @@
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 51,
+      "line": 50,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 51,
+      "line": 50,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
@@ -815,5 +815,47 @@
   ],
   "family": [
     "dispatch_envelope"
+  ],
+  "layer4_classes": [
+    "dispatch_envelope::ClaudeSubprocessAdapter",
+    "dispatch_envelope::CodexAdapter",
+    "dispatch_envelope::EnvelopeGovernError",
+    "dispatch_envelope::EnvelopeResult",
+    "dispatch_envelope::EnvelopeSpec",
+    "dispatch_envelope::LaneRouter",
+    "dispatch_envelope::ProviderAdapter",
+    "dispatch_envelope::_AdapterResult"
+  ],
+  "layer4_functions": [
+    "dispatch_envelope.ClaudeSubprocessAdapter::run",
+    "dispatch_envelope.CodexAdapter::run",
+    "dispatch_envelope.EnvelopeResult::__eq__",
+    "dispatch_envelope.EnvelopeResult::__init__",
+    "dispatch_envelope.EnvelopeResult::__repr__",
+    "dispatch_envelope.EnvelopeSpec::__eq__",
+    "dispatch_envelope.EnvelopeSpec::__init__",
+    "dispatch_envelope.EnvelopeSpec::__repr__",
+    "dispatch_envelope.LaneRouter::get",
+    "dispatch_envelope.ProviderAdapter::_run_kimi",
+    "dispatch_envelope.ProviderAdapter::run",
+    "dispatch_envelope._AdapterResult::__eq__",
+    "dispatch_envelope._AdapterResult::__init__",
+    "dispatch_envelope._AdapterResult::__repr__",
+    "dispatch_envelope::_archive_dispatch_events",
+    "dispatch_envelope::_clear_dispatch_events",
+    "dispatch_envelope::_fail_loud_on_empty_success",
+    "dispatch_envelope::_govern",
+    "dispatch_envelope::_map_generic_spawn_result",
+    "dispatch_envelope::_prepare",
+    "dispatch_envelope::_receipt_exists_for_dispatch",
+    "dispatch_envelope::_record_integrity",
+    "dispatch_envelope::_resolve_fix_forward_diff",
+    "dispatch_envelope::_resolve_phantom_diff",
+    "dispatch_envelope::_unknown_verification",
+    "dispatch_envelope::_verification_from_report",
+    "dispatch_envelope::_verify_role_application",
+    "dispatch_envelope::run_envelope",
+    "dispatch_envelope::run_envelope_headless_plan",
+    "dispatch_envelope::run_envelope_plan"
   ]
 }
