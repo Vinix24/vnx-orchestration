@@ -258,8 +258,9 @@ class TestPoolManagerConsumerIntegration:
 
         mgr = PoolManager("vnx-dev", "default", db_path)
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = mgr.tick()
+        with patch("pool_manager.sweep_orphan_tmux_sessions", return_value=[]):
+            with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
+                result = mgr.tick()
 
         assert len(result.spawned) >= 1
         assert len(result.errors) == 0
@@ -294,8 +295,9 @@ class TestPoolManagerConsumerIntegration:
         mgr = PoolManager("vnx-dev", "default", db_path)
 
         env = {k: v for k, v in os.environ.items() if k != "VNX_POOL_TASK_CONSUMER"}
-        with patch.dict(os.environ, env, clear=True):
-            result = mgr.tick()
+        with patch("pool_manager.sweep_orphan_tmux_sessions", return_value=[]):
+            with patch.dict(os.environ, env, clear=True):
+                result = mgr.tick()
 
         assert len(result.spawned) >= 1
         for call in mock_popen.call_args_list:

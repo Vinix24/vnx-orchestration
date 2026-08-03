@@ -35,7 +35,13 @@ from pool_provider_allocator import (  # noqa: E402
     allocate_for_scale_up,
     select_for_scale_down,
 )
-from pool_reaper import ReapConfig, ReapTarget, identify_dead_pid_targets, identify_reap_targets  # noqa: E402
+from pool_reaper import (  # noqa: E402
+    ReapConfig,
+    ReapTarget,
+    identify_dead_pid_targets,
+    identify_reap_targets,
+    sweep_orphan_tmux_sessions,
+)
 from pool_state_repo import PoolStateRepository  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -245,6 +251,9 @@ class PoolManager:
         1. PID validation — os.kill(pid, 0) probe; dead process = immediate reap
         2. Heartbeat staleness — existing threshold-based detection
 
+        After per-target teardown, orphan tmux sessions matching ``vnx-*``
+        whose dispatch is in a terminal state are swept.
+
         Returns list of successfully reaped targets for audit/observability.
         Kill failures do not block membership release — process may already be gone.
         """
@@ -268,6 +277,14 @@ class PoolManager:
                 self._kill_subprocess(target.terminal_id, target.pid)
             except Exception as exc:
                 log.warning("reap: kill failed for %s: %s", target.terminal_id, exc)
+
+            try:
+                self._kill_tmux_session(target.terminal_id)
+            except Exception as exc:
+                log.debug(
+                    "reap: tmux session cleanup failed for %s: %s",
+                    target.terminal_id, exc,
+                )
 
             try:
                 self.repo.mark_member_reaped(target.membership_id, target.reason, now)
@@ -306,6 +323,17 @@ class PoolManager:
                     exc,
                 )
 
+        # Sweep orphan tmux sessions — independent of pool membership.
+        try:
+            killed_sessions = self._sweep_orphan_tmux()
+            if killed_sessions:
+                log.info(
+                    "reap: swept %d orphan tmux session(s): %s",
+                    len(killed_sessions), ", ".join(killed_sessions),
+                )
+        except Exception as exc:
+            log.warning("reap: orphan tmux sweep failed: %s", exc)
+
         return reaped
 
     def _kill_subprocess(self, terminal_id: str, pid: Optional[int]) -> None:
@@ -333,6 +361,43 @@ class PoolManager:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass  # Exited cleanly after SIGTERM
+
+    @staticmethod
+    def _kill_tmux_session(terminal_id: str) -> None:
+        """Kill the tmux session ``vnx-<terminal_id>`` if it exists. Fail-soft."""
+        session_name = "".join(
+            "-" if c in ".:" else c for c in f"vnx-{terminal_id}"
+        )
+        subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            check=False,
+            timeout=10,
+            capture_output=True,
+        )
+
+    def _is_dispatch_terminal_in_db(self, dispatch_id: str) -> bool:
+        """Check whether *dispatch_id* is in a terminal state in the coordination DB."""
+        try:
+            conn = self.repo._connect()
+            try:
+                row = conn.execute(
+                    "SELECT state FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                    (dispatch_id, self.project_id),
+                ).fetchone()
+                if row is None:
+                    return False
+                from coordination_db import TERMINAL_DISPATCH_STATES  # noqa: E402
+                return row[0] in TERMINAL_DISPATCH_STATES
+            finally:
+                conn.close()
+        except Exception:
+            return False
+
+    def _sweep_orphan_tmux(self) -> list[str]:
+        """Sweep orphan tmux sessions with terminal dispatches. Fail-soft."""
+        return sweep_orphan_tmux_sessions(
+            is_terminal_fn=self._is_dispatch_terminal_in_db,
+        )
 
     def tick(self) -> ExecResult:
         """tick = reap → decide → execute.
