@@ -48,8 +48,14 @@ cases:
     tier: t1_trivial
     n_files: 1
     expected_tier: tier-zero
-    expected_provider: local-gemma
-    expected_lane: mlx
+    expected_provider: codex
+    expected_lane: provider
+    note: >
+      tier-zero without DEEPSEEK_API_KEY falls back to Codex. Local Gemma route
+      preserved but unused until gemma-4-12b-integration ships (operator decision
+      2026-08-02). When DEEPSEEK_API_KEY is present, the route is deepseek-v4-flash
+      via claude_harness_keyed. See test_lane_calibration_field_test.py for explicit
+      coverage of both env branches.
 
   - task_id: "04_scorer_task"
     tier: t2_medium

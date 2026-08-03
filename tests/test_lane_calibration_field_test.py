@@ -89,3 +89,33 @@ def test_cli_json_output_is_valid():
     payload = json.loads(proc.stdout)
     assert isinstance(payload, list) and payload
     assert all(row["passed"] for row in payload)
+
+
+# ── tier-zero env-branch coverage ───────────────────────────────────────────
+# resolve_tier_route('tier-zero') returns different routes depending on whether
+# DEEPSEEK_API_KEY is in the environment. The calibration corpus pins env={},
+# which exercises the no-key codex fallback. These tests explicitly cover both
+# branches so the route is verified regardless of where the suite runs.
+
+
+def test_tier_zero_without_deepseek_key_routes_to_codex():
+    """Without DEEPSEEK_API_KEY, tier-zero -> codex / gpt-5.5 / provider lane."""
+    route = lc.resolve_tier_route("tier-zero", env={})
+    assert route.tier == "tier-zero"
+    assert route.provider == "codex"
+    assert route.model == "gpt-5.5"
+    assert route.lane == "provider"
+
+
+def test_tier_zero_with_deepseek_key_routes_to_deepseek():
+    """With DEEPSEEK_API_KEY, tier-zero -> deepseek / deepseek-v4-flash / claude_harness_keyed."""
+    route = lc.resolve_tier_route("tier-zero", env={"DEEPSEEK_API_KEY": "sk-test"})
+    assert route.tier == "tier-zero"
+    assert route.provider == "deepseek"
+    assert route.model == "deepseek-v4-flash"
+    assert route.lane == "claude_harness_keyed"
+    # Fallback is codex when the primary deepseek-harness is unavailable.
+    assert route.fallback is not None
+    assert route.fallback.provider == "codex"
+    assert route.fallback.model == "gpt-5.5"
+    assert route.fallback.lane == "provider"

@@ -164,7 +164,7 @@ def test_t11_v2_receipt_no_session_object_session_id_present(tmp_path):
     # session_id is present and IS the resolved value -- the one field §4 keeps.
     assert line["session_id"] == "sess-t11-abc123"
     # model/provider -- promoted to top-level, not lost by the collapse.
-    assert line["model"] == "claude-sonnet-4-6"
+    assert line["model"] == "sonnet-4-6"
     assert line["provider"] == "claude_code"
     assert line["schema_version"] == 2
 
