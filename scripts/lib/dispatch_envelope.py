@@ -1739,7 +1739,7 @@ def run_envelope_plan(
         model=plan.model,
         instruction=instruction,
         role=plan.role,  # F2 (codex): carry the role so the phantom-guard review-exemption applies
-        pr_id=None,
+        pr_id=plan.pr_id,
         state_dir=state_dir,
         data_dir=data_dir,
         deadline_seconds=plan.deadline_seconds,
@@ -1926,10 +1926,16 @@ def run_envelope_headless_plan(
         model=plan.model,
         instruction=instruction,
         role=role,
-        pr_id=None,
+        pr_id=plan.pr_id,
         state_dir=state_dir,
         data_dir=data_dir,
         deadline_seconds=plan.deadline_seconds,
+        # Chain-link (OI-985): same four fields as run_envelope_plan —
+        # without these, every claude_headless dispatch drops the chain.
+        parent_dispatch=plan.parent_dispatch,
+        task_class=plan.task_class,
+        tier_from=plan.tier_from,
+        tier_to=plan.tier_to,
     )
 
     enriched_instruction = _prepare(spec)
@@ -1944,6 +1950,10 @@ def run_envelope_headless_plan(
         state_dir=spec.state_dir,
         data_dir=spec.data_dir,
         deadline_seconds=spec.deadline_seconds,
+        parent_dispatch=spec.parent_dispatch,
+        task_class=spec.task_class,
+        tier_from=spec.tier_from,
+        tier_to=spec.tier_to,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify reconstruction
