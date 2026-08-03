@@ -55,6 +55,39 @@ providers:
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding", "fast"]
+      # 5-series (dispatch-20260802-model-ssot-en-ketenlink): Sonnet 5, Opus 5 and
+      # Fable 5 now run in the fleet (operator + T0 run Opus 5; Fable 5 is the top
+      # rung of the climb) but were absent from the registry. Model ids + prices
+      # verified 2026-08-02 against the Anthropic first-party catalog: Sonnet 5
+      # $3/$15 per MTok, Opus 5 $5/$25, Fable 5 $10/$50. Context/max-output are the
+      # API ceilings (1M context / 128K output).
+      sonnet-5:
+        litellm_name: "anthropic/claude-sonnet-5"
+        cost_input_per_mtok: 3.00
+        cost_output_per_mtok: 15.00
+        max_tokens: 128000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+      opus-5:
+        litellm_name: "anthropic/claude-opus-5"
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 25.00
+        max_tokens: 128000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+      fable-5:
+        litellm_name: "anthropic/claude-fable-5"
+        cost_input_per_mtok: 10.00
+        cost_output_per_mtok: 50.00
+        max_tokens: 128000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
   openai:
     enabled: true
     api_key_env: OPENAI_API_KEY

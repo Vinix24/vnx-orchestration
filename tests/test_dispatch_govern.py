@@ -46,6 +46,10 @@ def tmp_state(tmp_path):
 
 
 def _make_spec(data_dir: Path, state_dir: Path, **kwargs) -> GovernSpec:
+    # Default model="sonnet": dispatch-20260802-model-ssot-en-ketenlink made the
+    # synthesized receipt fail closed on a missing/unknown model, so a spec
+    # without a model no longer produces a receipt (the test that pins that
+    # behavior sets model=None explicitly and asserts the rejection).
     return GovernSpec(
         dispatch_id=kwargs.get("dispatch_id", "test-govern-001"),
         terminal_id=kwargs.get("terminal_id", "T1"),
@@ -56,6 +60,11 @@ def _make_spec(data_dir: Path, state_dir: Path, **kwargs) -> GovernSpec:
         base_sha=kwargs.get("base_sha"),
         worktree_path=kwargs.get("worktree_path"),
         role=kwargs.get("role"),
+        model=kwargs.get("model", "sonnet"),
+        parent_dispatch=kwargs.get("parent_dispatch"),
+        task_class=kwargs.get("task_class"),
+        tier_from=kwargs.get("tier_from"),
+        tier_to=kwargs.get("tier_to"),
     )
 
 
@@ -922,18 +931,21 @@ def test_ensure_receipt_carries_terminal_id(tmp_data, tmp_state):
     assert receipt.get("terminal") == "T1", f"terminal alias missing or wrong: {receipt}"
 
 
-def test_ensure_receipt_model_unknown_when_not_set(tmp_data, tmp_state):
-    """Lane-synthesized receipt uses 'unknown' for model when spec.model is not set."""
-    spec = _make_spec(tmp_data, tmp_state)
+def test_ensure_receipt_rejected_when_model_not_set(tmp_data, tmp_state):
+    """dispatch-20260802-model-ssot-en-ketenlink: a lane-synthesized dispatch
+    receipt without a real model is REJECTED (fail-closed), never written with
+    ``model: unknown``. ensure_receipt is best-effort, so the append logs and
+    the file stays absent."""
+    spec = _make_spec(tmp_data, tmp_state, model=None)
     raw = GovernRaw(receipt=None, duration_seconds=60.0)
 
     ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
                    contract_status="synthesized", permission_enforcement="soft")
 
     receipts_file = tmp_state / "t0_receipts.ndjson"
-    receipt = json.loads(receipts_file.read_text().splitlines()[0])
-    assert receipt.get("provider") == "claude"
-    assert receipt.get("model") == "unknown"
+    assert not receipts_file.exists(), (
+        "a dispatch receipt without a model must not be appended (fail-closed)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1258,9 @@ spec = GovernSpec(
     instruction="test",
     data_dir=state_dir,
     state_dir=state_dir,
+    # A dispatch receipt must name a real model (fail-closed) — the test
+    # exercises the import path, not the model contract.
+    model="sonnet",
 )
 raw = GovernRaw(receipt=None, duration_seconds=60.0)
 

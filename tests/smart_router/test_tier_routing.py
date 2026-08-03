@@ -16,24 +16,44 @@ from providers.smart_router.cost_tier import TIER_HIGH, TIER_LOW, TIER_MID, TIER
 from providers.smart_router.tier_routing import TierRoute, resolve_tier_route
 
 
-def test_tier_zero_uses_local_gemma():
-    route = resolve_tier_route(TIER_ZERO, env={})
-    assert route.provider == "local-gemma"
-    assert route.lane == "mlx"
+def test_tier_zero_with_deepseek_key_uses_harness():
+    """tier-zero routes to DeepSeek flash via claude-harness with a codex vangnet
+    when DEEPSEEK_API_KEY is present (operator decision 2026-08-02: local models
+    skipped until gemma-4-12b-integration ships)."""
+    env = {"DEEPSEEK_API_KEY": "sk-test-123"}
+    route = resolve_tier_route(TIER_ZERO, env=env)
+    assert route.provider == "deepseek"
+    assert route.model == "deepseek-v4-flash"
+    assert route.lane == "claude_harness_keyed"
+    assert "DEEPSEEK_API_KEY" in route.env_requirements
     assert route.fallback is not None
-    assert route.fallback.provider == "ollama"
+    assert route.fallback.provider == "codex"
+    assert route.fallback.model == "gpt-5.5"
+
+
+def test_tier_zero_no_key_uses_codex():
+    """Without DEEPSEEK_API_KEY, tier-zero falls back to Codex via provider lane
+    (local-gemma route is preserved but unused until gemma-4-12b-integration)."""
+    route = resolve_tier_route(TIER_ZERO, env={})
+    assert route.provider == "codex"
+    assert route.model == "gpt-5.5"
+    assert route.lane == "provider"
 
 
 def test_tier_mid_uses_sonnet():
     route = resolve_tier_route(TIER_MID, env={})
     assert route.provider == "claude"
-    assert route.model == "claude-sonnet-4-6"
+    # canonical registry key (model-ssot-en-ketenlink) — the old claude-sonnet-4-6
+    # string is not a wave7_models.yaml key and rejected with
+    # model-not-in-current-registry the moment tier-mid actually routes.
+    assert route.model == "sonnet-5"
 
 
 def test_tier_high_uses_opus():
     route = resolve_tier_route(TIER_HIGH, env={})
     assert route.provider == "claude"
-    assert route.model == "claude-opus-4-8"
+    # canonical registry key — the fleet runs Opus 5 (model-ssot-en-ketenlink).
+    assert route.model == "opus-5"
 
 
 def test_tier_low_no_key_uses_kimi_cli():
@@ -87,7 +107,7 @@ def test_deepseek_harness_fallback_is_kimi():
 def test_unknown_tier_defaults_to_opus():
     """Unknown tier strings default to tier-high (safe over silent skip)."""
     route = resolve_tier_route("tier-unknown", env={})
-    assert route.model == "claude-opus-4-8"
+    assert route.model == "opus-5"
 
 
 def test_route_dispatch_default_off():
@@ -117,4 +137,4 @@ def test_route_dispatch_high_loc():
     result = route_dispatch({"instruction": "implement feature"}, ["x.py"], 350, env=env)
     assert result is not None
     assert result.tier == TIER_HIGH
-    assert result.model == "claude-opus-4-8"
+    assert result.model == "opus-5"

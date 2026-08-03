@@ -159,7 +159,7 @@ def test_receipt_json_structure(tmp_state):
     assert data["dispatch_id"] == "test-dispatch-001"
     assert data["terminal_id"] == "T1"
     assert data["provider"] == "claude"
-    assert data["model"] == "claude-sonnet-4-6"
+    assert data["model"] == "sonnet-4-6"
     assert data["status"] == "success"
     assert data["completion_pct"] == 100
 

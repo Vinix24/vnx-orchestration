@@ -286,6 +286,10 @@ def _validate_receipt(receipt: Dict[str, Any]) -> str:
                 "Missing required key: dispatch_id",
             )
 
+    # dispatch-20260802-model-ssot-en-ketenlink: fail-closed model check —
+    # a worker dispatch-terminal receipt must name the model that ran.
+    _validate_model_present(receipt)
+
     _warn_if_review_gate_missing_dispatch_id(event_name, receipt)
 
     return event_name
@@ -300,6 +304,65 @@ def _is_completion_event(receipt: Dict[str, Any]) -> bool:
         "complete",
         "subprocess_completion",
     )
+
+
+# dispatch-20260802-model-ssot-en-ketenlink (fail-closed model): a DISPATCH
+# receipt (receipt_kind in the worker-dispatch set) must name a real model. The
+# old silent ``model: unknown`` (368 of the last 1019 receipts) made per-model
+# confidence impossible. Receipts whose producer has no model concept by
+# construction are explicitly exempt (measured: 133 of those 1019), never
+# silently blanked.
+#
+# Gated on ``receipt_kind`` — the closed set dispatch_identity.RECEIPT_KINDS —
+# not on event_type: the dispatch worker writers (governance_emit Path 1,
+# report_to_receipt_converter, SynthesizedLaneReceipt) all stamp kind
+# "dispatch"/"sub_dispatch" and are the writers that know the model field and
+# leave it "unknown". Non-dispatch kinds (test, state_mutation, review_gate,
+# ...) keep the old tolerance.
+_MODEL_REQUIRED_RECEIPT_KINDS = frozenset({"dispatch", "sub_dispatch"})
+
+# Sources that have no model concept by construction and must never be
+# silently blanked. The three measured producers from the dispatch
+# (vnx_governance / vnx_state / context_rotation) plus the two governance
+# CORRECTIVE writers (phantom_guard / pr_enforcement): their receipts override
+# a worker's false completion claim — dropping them on a missing model would
+# lose the rejection signal, which is worse than the fail-closed gain. They
+# still carry the dispatch model when the door exported one (best-effort).
+_MODEL_EXEMPT_SOURCES = frozenset({
+    "vnx_governance",
+    "vnx_state",
+    "context_rotation",
+    "phantom_guard",
+    "pr_enforcement",
+})
+
+
+def _validate_model_present(receipt: Dict[str, Any]) -> None:
+    """Fail closed on a dispatch receipt without a real model.
+
+    Mirrors the #1312 role-validation style: no model -> no receipt, raised
+    BEFORE anything is written. Sources with no model concept by construction
+    (vnx_governance / vnx_state / context_rotation) are exempt — the exemption
+    is explicit, never an empty ``model`` value.
+    """
+    receipt_kind = str(receipt.get("receipt_kind") or "").strip()
+    if receipt_kind not in _MODEL_REQUIRED_RECEIPT_KINDS:
+        return
+    source = str(receipt.get("source") or "").strip().lower()
+    if source in _MODEL_EXEMPT_SOURCES:
+        return
+    model = receipt.get("model")
+    if model is None or not str(model).strip() or str(model).strip().lower() in {
+        "unknown", "null", "none", "n/a", "na", "unset", "-",
+    }:
+        raise AppendReceiptError(
+            "missing_model",
+            EXIT_VALIDATION_ERROR,
+            f"receipt_kind={receipt_kind!r} source={source!r} carries no real "
+            "model; refusing to write (fail-closed — a worker dispatch receipt "
+            "must name the model that ran). Set model, or set source to one of "
+            f"{sorted(_MODEL_EXEMPT_SOURCES)} for a model-less producer.",
+        )
 
 
 def _is_subprocess_intermediate_completion(receipt: Dict[str, Any]) -> bool:
