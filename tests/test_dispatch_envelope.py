@@ -233,8 +233,8 @@ class TestEnvelopeEventArchiveClear:
         with patch("provider_spawns.codex_spawn.spawn_codex", return_value=codex_result), \
              patch("governance_emit.emit_unified_report", mock_report), \
              patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
-             patch("dispatch_envelope._archive_dispatch_events", mock_archive), \
-             patch("dispatch_envelope._clear_dispatch_events", mock_clear):
+             patch("envelope_govern._archive_dispatch_events", mock_archive), \
+             patch("envelope_govern._clear_dispatch_events", mock_clear):
             result = run_envelope(spec, lane="codex")
 
         return result, mock_archive, mock_clear
