@@ -814,33 +814,25 @@
     }
   ],
   "family": [
-    "dispatch_envelope"
+    "dispatch_envelope",
+    "envelope_types"
   ],
   "layer4_classes": [
     "dispatch_envelope::ClaudeSubprocessAdapter",
     "dispatch_envelope::CodexAdapter",
-    "dispatch_envelope::EnvelopeGovernError",
-    "dispatch_envelope::EnvelopeResult",
-    "dispatch_envelope::EnvelopeSpec",
     "dispatch_envelope::LaneRouter",
     "dispatch_envelope::ProviderAdapter",
-    "dispatch_envelope::_AdapterResult"
+    "envelope_types::EnvelopeGovernError",
+    "envelope_types::EnvelopeResult",
+    "envelope_types::EnvelopeSpec",
+    "envelope_types::_AdapterResult"
   ],
   "layer4_functions": [
     "dispatch_envelope.ClaudeSubprocessAdapter::run",
     "dispatch_envelope.CodexAdapter::run",
-    "dispatch_envelope.EnvelopeResult::__eq__",
-    "dispatch_envelope.EnvelopeResult::__init__",
-    "dispatch_envelope.EnvelopeResult::__repr__",
-    "dispatch_envelope.EnvelopeSpec::__eq__",
-    "dispatch_envelope.EnvelopeSpec::__init__",
-    "dispatch_envelope.EnvelopeSpec::__repr__",
     "dispatch_envelope.LaneRouter::get",
     "dispatch_envelope.ProviderAdapter::_run_kimi",
     "dispatch_envelope.ProviderAdapter::run",
-    "dispatch_envelope._AdapterResult::__eq__",
-    "dispatch_envelope._AdapterResult::__init__",
-    "dispatch_envelope._AdapterResult::__repr__",
     "dispatch_envelope::_archive_dispatch_events",
     "dispatch_envelope::_clear_dispatch_events",
     "dispatch_envelope::_fail_loud_on_empty_success",
@@ -856,6 +848,15 @@
     "dispatch_envelope::_verify_role_application",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
-    "dispatch_envelope::run_envelope_plan"
+    "dispatch_envelope::run_envelope_plan",
+    "envelope_types.EnvelopeResult::__eq__",
+    "envelope_types.EnvelopeResult::__init__",
+    "envelope_types.EnvelopeResult::__repr__",
+    "envelope_types.EnvelopeSpec::__eq__",
+    "envelope_types.EnvelopeSpec::__init__",
+    "envelope_types.EnvelopeSpec::__repr__",
+    "envelope_types._AdapterResult::__eq__",
+    "envelope_types._AdapterResult::__init__",
+    "envelope_types._AdapterResult::__repr__"
   ]
 }
