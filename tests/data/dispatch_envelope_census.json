@@ -53,14 +53,14 @@
       "file": "tests/test_dispatch_envelope.py",
       "line": 236,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
       "line": 237,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
@@ -177,70 +177,70 @@
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 234,
+      "line": 241,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 235,
+      "line": 242,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 237,
+      "line": 244,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 245,
+      "line": 252,
       "mechanism": "logger-name",
       "module_target": "dispatch_envelope",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 287,
+      "line": 294,
       "mechanism": "logger-name",
       "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 288,
+      "line": 295,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 289,
+      "line": 296,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 292,
+      "line": 299,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 313,
+      "line": 320,
       "mechanism": "logger-name",
       "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 315,
+      "line": 322,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_receipt_exists_for_dispatch"
@@ -793,21 +793,21 @@
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",
-      "line": 211,
+      "line": 219,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",
-      "line": 212,
+      "line": 220,
       "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
+      "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",
-      "line": 217,
+      "line": 225,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -815,6 +815,7 @@
   ],
   "family": [
     "dispatch_envelope",
+    "envelope_govern",
     "envelope_govern_support",
     "envelope_prepare",
     "envelope_types"
@@ -836,11 +837,11 @@
     "dispatch_envelope.ProviderAdapter::_run_kimi",
     "dispatch_envelope.ProviderAdapter::run",
     "dispatch_envelope::_fail_loud_on_empty_success",
-    "dispatch_envelope::_govern",
     "dispatch_envelope::_map_generic_spawn_result",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
     "dispatch_envelope::run_envelope_plan",
+    "envelope_govern::_govern",
     "envelope_govern_support::_archive_dispatch_events",
     "envelope_govern_support::_clear_dispatch_events",
     "envelope_govern_support::_receipt_exists_for_dispatch",

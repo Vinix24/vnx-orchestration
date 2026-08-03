@@ -202,16 +202,23 @@ class TestLayer2Census:
 class TestLayer3ArchiveClearBinding:
     """Sites 1, 2, 3, 4 all patch the SAME two symbols
     (_archive_dispatch_events, _clear_dispatch_events) against the SAME
-    caller (_govern, dispatch_envelope.py lines ~840 and ~1070):
+    caller (_govern):
       - site 1: tests/test_dispatch_envelope.py:236  (asserted at line 248)
       - site 2: tests/test_dispatch_envelope.py:237  (sibling assert at 248)
-      - site 3: tests/test_role_applied_provider_lane.py:211 (NO assertion)
-      - site 4: tests/test_role_applied_provider_lane.py:212 (NO assertion)
-    Sites 3/4 are the ones that would go silently green after a relocation:
-    the patch stops binding, the REAL functions run instead, and nothing in
-    that test file notices because it only asserts role_applied fields. This
-    class supplies the missing assertion independently of whether either
+      - site 3: tests/test_role_applied_provider_lane.py:211 (now asserted)
+      - site 4: tests/test_role_applied_provider_lane.py:212 (now asserted)
+    Sites 3/4 were the ones that went silently green after a relocation:
+    the patch stopped binding, the REAL functions ran instead, and nothing in
+    that test file noticed because it only asserted role_applied fields. This
+    class supplies an independent assertion regardless of whether either
     pre-existing file keeps testing it.
+
+    CORRECTED in PR-4 (dispatch-monolith-split): _govern (the caller of both
+    symbols) moved to envelope_govern.py, so its calls to
+    _archive_dispatch_events / _clear_dispatch_events now resolve against
+    envelope_govern's own globals — the patch targets below, and sites 1-4,
+    were all re-targeted to envelope_govern.<name> in the SAME commit that
+    moved _govern, per this file's own binding rule.
 
     SAFETY (sites 3/4's real risk): if the patch below did NOT bind, the REAL
     _clear_dispatch_events would truncate the live event stream for
@@ -231,8 +238,8 @@ class TestLayer3ArchiveClearBinding:
         mock_archive = MagicMock(return_value=(None, True))
         mock_clear = MagicMock()
 
-        with patch("dispatch_envelope._archive_dispatch_events", mock_archive), \
-             patch("dispatch_envelope._clear_dispatch_events", mock_clear), \
+        with patch("envelope_govern._archive_dispatch_events", mock_archive), \
+             patch("envelope_govern._clear_dispatch_events", mock_clear), \
              _stub_peripheral_govern_deps(receipt_file):
             dispatch_envelope._govern(spec, result, start, end)
 
@@ -285,8 +292,8 @@ class TestLayer3Site5And6LoggerName:
             return _real_open(path, *args, **kwargs)
 
         with caplog.at_level(logging.WARNING, logger="envelope_govern_support"), \
-             patch("dispatch_envelope._archive_dispatch_events", return_value=(None, True)), \
-             patch("dispatch_envelope._clear_dispatch_events"), \
+             patch("envelope_govern._archive_dispatch_events", return_value=(None, True)), \
+             patch("envelope_govern._clear_dispatch_events"), \
              _stub_peripheral_govern_deps(receipt_path) as mock_receipt, \
              patch("builtins.open", side_effect=_selective_open):
             dispatch_envelope._govern(spec, result, start, end)

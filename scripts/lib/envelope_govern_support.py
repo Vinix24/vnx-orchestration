@@ -7,11 +7,14 @@ Moved unchanged from dispatch_envelope.py as PR-3 of the dispatch-monolith-split
 (dispatch-monolith-split, PR-3 of 6) — see dispatch_envelope.py's module
 docstring for the split's seam order.
 
-``_govern`` (the caller of four of these seven functions) stays in the facade
-until PR-4 — so every existing ``patch("dispatch_envelope._archive_dispatch_events")``
--style coupling keeps binding against the facade's globals, unchanged by this
-move. Only the couplings that bind against these functions' OWN globals (their
-``logging.getLogger(__name__)`` logger name) move with them.
+``_govern`` (the caller of four of these seven functions) moved to
+envelope_govern.py in PR-4 of the dispatch-monolith-split — every
+``patch("dispatch_envelope._archive_dispatch_events")``-style coupling that
+used to bind against the facade's globals through ``_govern`` was re-targeted
+to ``envelope_govern.<name>`` in that same PR, since a name-string coupling
+resolves against the CALLER's globals, not this module's. The couplings that
+bind against these functions' OWN globals (their
+``logging.getLogger(__name__)`` logger name) were unaffected by that move.
 """
 
 from __future__ import annotations

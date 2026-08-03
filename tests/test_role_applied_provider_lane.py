@@ -207,14 +207,24 @@ def _run_envelope_govern(tmp_path, *, instruction, role):
     )
     result = _AdapterResult(returncode=0, completion_text="all good", status="success")
     start = end = datetime.now(timezone.utc)
+    # _govern moved to envelope_govern.py (dispatch-monolith-split, PR-4 of 6) —
+    # its internal calls to _archive_dispatch_events/_clear_dispatch_events now
+    # resolve against envelope_govern's own globals, not dispatch_envelope's.
+    # These patches MUST bind (asserted below): if they didn't, the REAL
+    # _clear_dispatch_events would truncate the live event stream for
+    # spec.terminal_id under whatever VNX_DATA_DIR is ambient — run this test
+    # file only with VNX_DATA_DIR pointed at tmp_path/a throwaway dir, never
+    # against the real store.
     with (
-        patch("dispatch_envelope._archive_dispatch_events", return_value=(None, True)),
-        patch("dispatch_envelope._clear_dispatch_events"),
+        patch("envelope_govern._archive_dispatch_events", return_value=(None, True)) as mock_archive,
+        patch("envelope_govern._clear_dispatch_events") as mock_clear,
         patch("provider_costs.emit_provider_cost"),
         patch("phantom_guard.record_phantom_if_any"),
         patch("phantom_guard.record_guard_error"),
     ):
         dispatch_envelope._govern(spec, result, start, end)
+    mock_archive.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
+    mock_clear.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
     receipt_path = state / "t0_receipts.ndjson"
     assert receipt_path.exists(), "receipt must be emitted"
     lines = [ln for ln in receipt_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
