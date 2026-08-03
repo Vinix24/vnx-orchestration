@@ -19,7 +19,10 @@ file.
 from __future__ import annotations
 
 import ast
+import importlib
+import inspect
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -28,6 +31,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_LIB = REPO_ROOT / "scripts" / "lib"
 TESTS_DIR = REPO_ROOT / "tests"
 CENSUS_FIXTURE = Path(__file__).resolve().parent / "data" / "dispatch_envelope_census.json"
+
+# discover_family_functions_and_classes() imports every family module by
+# name — needed regardless of caller: tests/conftest.py already does this
+# for the pytest suite, but the documented standalone regenerate command
+# (`python3 tests/dispatch_envelope_census_scanner.py`, see __main__ below
+# and every "regenerate with:" message in the characterization suite) runs
+# with no conftest involved, so this module pins its own sys.path entry.
+if str(SCRIPTS_LIB) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_LIB))
 
 # Generic family-membership pattern — NOT built by joining a fixed list of
 # discovered names. Used only as a self-check (see verify_family_pattern_gap
@@ -47,6 +59,48 @@ def discover_family(lib_dir: Path = SCRIPTS_LIB) -> frozenset:
     for f in lib_dir.glob("envelope_*.py"):
         family.add(f.stem)
     return frozenset(family)
+
+
+def discover_family_functions_and_classes(family: Optional[frozenset] = None) -> tuple:
+    """Import every module in the envelope family and collect every function
+    and class DEFINED there — keyed by the module that actually owns it, not
+    by a fixed "dispatch_envelope" label.
+
+    This is the Layer 4 (annotation-resolution) counterpart of
+    scan_tests_dir() above: same reasoning, same discover_family() input, so
+    the two can never see a different family. get_type_hints() resolves
+    against a function/class's OWN __globals__/__module__ regardless of
+    which module re-exports it — filtering strictly on
+    ``obj.__module__ == "dispatch_envelope"`` (the pre-PR-1b bug) silently
+    drops a symbol from the parametrization the moment it moves to an
+    envelope_* sibling, because the moved object's __module__ now reads that
+    sibling's name, not "dispatch_envelope". Filtering on family membership
+    instead keeps the symbol covered — under its real module name — for
+    every step of the PR-1..PR-6 split.
+
+    Returns (funcs, classes):
+      funcs:   {(owner_label, attr_name): function}
+               owner_label is the defining module for a module-level
+               function, or "<module>.<ClassName>" for a method.
+      classes: {(module, ClassName): class}
+    """
+    if family is None:
+        family = discover_family()
+    funcs: dict = {}
+    classes: dict = {}
+    for modname in sorted(family):
+        module = importlib.import_module(modname)
+        for name, obj in vars(module).items():
+            if name.startswith("__"):
+                continue
+            if inspect.isfunction(obj) and getattr(obj, "__module__", None) == modname:
+                funcs[(modname, name)] = obj
+            elif inspect.isclass(obj) and getattr(obj, "__module__", None) == modname:
+                classes[(modname, name)] = obj
+                for meth_name, meth in vars(obj).items():
+                    if inspect.isfunction(meth):
+                        funcs[(f"{modname}.{name}", meth_name)] = meth
+    return funcs, classes
 
 
 def verify_family_pattern_gap(lib_dir: Path = SCRIPTS_LIB) -> list:
@@ -386,19 +440,28 @@ def find_facade_attribute_calls(facade_path: Path, module_alias_names: frozenset
 
 if __name__ == "__main__":
     import json
-    import sys
 
     fam = discover_family()
     results = scan_tests_dir(family=fam)
     gap = verify_family_pattern_gap()
+    layer4_funcs, layer4_classes = discover_family_functions_and_classes(family=fam)
     print("FAMILY:", sorted(fam), file=sys.stderr)
     print("TOTAL COUPLINGS:", len(results), file=sys.stderr)
+    print("LAYER4 FUNCS/CLASSES:", len(layer4_funcs), "/", len(layer4_classes), file=sys.stderr)
     if gap:
         print("FAMILY PATTERN GAP:", gap, file=sys.stderr)
     CENSUS_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "family": sorted(fam),
         "couplings": [c.to_dict() for c in results],
+        # Layer 4 floor (test_dispatch_envelope_characterization.py
+        # TestLayer4CaseCountFloor): recorded set of (owner, attr) symbol
+        # keys the annotation-resolution scan found here. Growing this set
+        # is free; if a live scan ever finds FEWER than what's recorded
+        # below, that's a silent regression (see TestLayer4CaseCountFloor's
+        # docstring) and the floor test fails loudly, naming what vanished.
+        "layer4_functions": sorted(f"{owner}::{attr}" for (owner, attr) in layer4_funcs),
+        "layer4_classes": sorted(f"{owner}::{attr}" for (owner, attr) in layer4_classes),
     }
     CENSUS_FIXTURE.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote {CENSUS_FIXTURE} ({len(results)} couplings)", file=sys.stderr)
