@@ -224,8 +224,14 @@ def test_concurrent_reap_idempotent(tmp_path):
     t2 = threading.Thread(target=run_tick)
     t1.start()
     t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
+    # join timeout must exceed PoolStateRepository's busy_timeout (30s, see
+    # pool_state_repo.py _connect()) — a shorter join lets the test inspect
+    # `errors` while a thread is still legitimately blocked on the SQLite busy
+    # handler, which is a false pass (thread hasn't appended its error yet)
+    # every bit as much as it risks a false failure.
+    t1.join(timeout=35)
+    t2.join(timeout=35)
+    assert not t1.is_alive() and not t2.is_alive(), "tick() thread did not finish within 35s"
 
     assert not errors, f"Concurrent tick errors: {errors}"
 
