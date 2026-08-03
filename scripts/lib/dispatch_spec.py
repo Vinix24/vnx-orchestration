@@ -94,6 +94,14 @@ class DispatchSpec:
     task_class: Optional[str] = None
     pr_id: Optional[str] = None
     track_id: Optional[str] = None  # structural link to a tracks-table row (TL-D1); validated at the door
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
+    # this dispatch continues (retry / fix-forward / escalation), the tier
+    # escalation signal (tier_from = parent's tier, tier_to = this tier), and
+    # the smart_router task class. All advisory — carried onto the plan and the
+    # receipt, never part of the permit fingerprint.
+    parent_dispatch: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
     deadline_seconds: int = 3600
     base_ref: str = "origin/main"
     isolation: Isolation = Isolation.WORKTREE
@@ -134,6 +142,10 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")
 _BLOCKED_FIRST_COMPONENTS = frozenset({".git", ".vnx-data"})
 
 _VALID_TARGET_SLOTS = frozenset({"T0", "T1", "T2", "T3"})
+
+# Cost-tier vocabulary (mirrors providers.smart_router.cost_tier) — the
+# escalation signal on receipts must come from this closed set.
+_VALID_TIERS = frozenset({"tier-zero", "tier-low", "tier-mid", "tier-high"})
 
 
 def _validate_dispatch_path(dp: DispatchPath) -> Optional[str]:
@@ -298,6 +310,24 @@ def validate(
         _track_id = spec.track_id.strip()
         if not _track_id or not _ID_RE.match(_track_id):
             return Reject("bad-track-id", f"track_id {spec.track_id!r} does not match id regex")
+
+    # Rule 14 — chain-link format (dispatch-20260802-model-ssot-en-ketenlink).
+    # parent_dispatch must be a well-formed dispatch id when present; tier values
+    # must come from the cost-tier vocabulary so the receipt's escalation signal
+    # is joinable (never free-text).
+    if spec.parent_dispatch is not None:
+        _parent = spec.parent_dispatch.strip()
+        if not _parent or not _ID_RE.match(_parent):
+            return Reject(
+                "bad-parent-dispatch",
+                f"parent_dispatch {spec.parent_dispatch!r} does not match id regex",
+            )
+    for _tier_field, _tier_val in (("tier_from", spec.tier_from), ("tier_to", spec.tier_to)):
+        if _tier_val is not None and _tier_val.strip() not in _VALID_TIERS:
+            return Reject(
+                "bad-tier-value",
+                f"{_tier_field} {_tier_val!r} is not one of {sorted(_VALID_TIERS)}",
+            )
 
     return ValidatedSpec(
         spec=spec,

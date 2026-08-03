@@ -41,6 +41,7 @@ were spent). Reviews are exempt; a legitimate no-op delivery uses VNX_OVERRIDE_P
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -384,6 +385,9 @@ def record_phantom_if_any(
                     "phantom_reason": verdict.reason,
                     "source": "phantom_guard",
                     "synthesized": False,
+                    # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
+                    # model when the door exported it (best-effort; exempt source).
+                    "model": os.environ.get("VNX_CURRENT_MODEL") or None,
                     "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
                 receipts_file=str(receipts_file),
@@ -427,6 +431,7 @@ def record_guard_error(
                 "guard_error": str(error),
                 "source": "phantom_guard",
                 "synthesized": False,
+                "model": os.environ.get("VNX_CURRENT_MODEL") or None,
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             receipts_file=str(receipts_file),

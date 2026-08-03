@@ -183,6 +183,10 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         task_class=(raw.get("task_class") or None),
         pr_id=(raw.get("pr_id") or None),
         track_id=(raw.get("track_id") or None),
+        # Chain-link (dispatch-20260802-model-ssot-en-ketenlink).
+        parent_dispatch=(raw.get("parent_dispatch") or None),
+        tier_from=(raw.get("tier_from") or None),
+        tier_to=(raw.get("tier_to") or None),
         deadline_seconds=int(raw.get("deadline_seconds", 3600)),
         base_ref=str(raw.get("base_ref", "origin/main")),
         isolation=Isolation(raw.get("isolation", "worktree")),
@@ -225,6 +229,14 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
     print(f"  billing:      {plan.billing}")
     print(f"  requires_mcp: {plan.requires_mcp}")
     print(f"  route_reason: {plan.route_reason}")
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): printed so a dry-run
+    # proves the spec fields landed on the plan.
+    if plan.parent_dispatch:
+        print(f"  parent_dispatch: {plan.parent_dispatch}")
+    if plan.task_class:
+        print(f"  task_class:   {plan.task_class}")
+    if plan.tier_from or plan.tier_to:
+        print(f"  tier:         {plan.tier_from or '-'} -> {plan.tier_to or '-'}")
     for w in plan.warnings:
         print(f"  [WARN] {w}")
 
@@ -401,7 +413,10 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL_PINS: dict[str, ModelPin] = {
-    "T0": ModelPin(model="opus", semantics="floor"),
+    # T0 falls back to the canonical opus-5 registry key (model-ssot-en-ketenlink);
+    # the provider_constraints.yaml t0-opus-only pin is the live SSOT and overrides
+    # this when readable.
+    "T0": ModelPin(model="opus-5", semantics="floor"),
     "T1": ModelPin(model="kimi-k3", semantics="default"),
     "T2": ModelPin(model="kimi-k3", semantics="default"),
     "T3": ModelPin(model="kimi-k3", semantics="default"),
@@ -1195,6 +1210,29 @@ def build_runtime_snapshot(
     # the registry is missing → compile_plan rejects every role (fail-closed).
     valid_roles = _discover_valid_roles(_resolve_repo_root() / "agents")
 
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): computed here,
+    # door-side (I/O + imports allowed), and passed through the snapshot so
+    # compile_plan stays pure. task_class comes from the spec when set, else the
+    # smart_router deterministic classifier (the existing vocabulary — never a
+    # second one). tier_to falls back to the model->tier reverse map so a
+    # dispatch that did not declare a tier still carries an escalation signal.
+    chain_task_class = (spec.task_class or "").strip() or None
+    if chain_task_class is None:
+        try:
+            from smart_router import classify_task  # noqa: PLC0415
+            chain_task_class = classify_task(vspec.instruction_text, spec.role)
+        except Exception:  # noqa: BLE001 — classifier is best-effort; default class is the safe fallback
+            chain_task_class = "01_code_generation"
+    chain_parent = (spec.parent_dispatch or "").strip() or None
+    chain_tier_from = (spec.tier_from or "").strip() or None
+    chain_tier_to = (spec.tier_to or "").strip() or None
+    if chain_tier_to is None:
+        try:
+            from providers.model_normalizer import tier_for_model  # noqa: PLC0415
+            chain_tier_to = tier_for_model(effective_model)
+        except Exception:  # noqa: BLE001 — tier reverse-map is best-effort
+            chain_tier_to = None
+
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
         staging_promoted=staging_promoted,
@@ -1202,6 +1240,10 @@ def build_runtime_snapshot(
         target_capable=target_capable,
         model_pins=snapshot_model_pins,
         valid_roles=valid_roles,
+        parent_dispatch=chain_parent,
+        task_class=chain_task_class,
+        tier_from=chain_tier_from,
+        tier_to=chain_tier_to,
     )
 
 
@@ -1411,6 +1453,24 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             if vspec.spec.track_id:
                 os.environ["VNX_CURRENT_TRACK_ID"] = vspec.spec.track_id
                 _persist_track_id(vspec.spec, state_dir=state_dir)
+
+            # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): export the
+            # resolved fields so the tmux worker pane (and any worker-authored
+            # receipt) inherits them — the receipt writers read these env vars as
+            # a fallback when the caller did not pass explicit values. Only set
+            # when present, so unrelated dispatches keep a clean env.
+            if plan.parent_dispatch:
+                os.environ["VNX_PARENT_DISPATCH"] = plan.parent_dispatch
+            if plan.task_class:
+                os.environ["VNX_TASK_CLASS"] = plan.task_class
+            if plan.tier_from:
+                os.environ["VNX_TIER_FROM"] = plan.tier_from
+            if plan.tier_to:
+                os.environ["VNX_TIER_TO"] = plan.tier_to
+            # The resolved model is exported too, so governance corrective
+            # receipts (phantom_guard / pr_enforcement) can record the model the
+            # dispatch ran without threading a parameter through every call site.
+            os.environ["VNX_CURRENT_MODEL"] = plan.model
 
         permit = issue_permit(plan)
         try:

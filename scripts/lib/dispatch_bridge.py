@@ -165,6 +165,13 @@ def stage_spec_bundle(
     pr_id: Optional[str] = None,
     tags: tuple[str, ...] = (),
     data_dir: Optional[Path] = None,
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
+    # this dispatch continues, the tier escalation, and the smart_router task
+    # class. Carried verbatim onto the spec; the door passes them to the receipt.
+    parent_dispatch: Optional[str] = None,
+    task_class: Optional[str] = None,
+    tier_from: Optional[str] = None,
+    tier_to: Optional[str] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
 
@@ -242,6 +249,11 @@ def stage_spec_bundle(
         "provider": _canonical_provider(provider).value,
         "model": model or None,
         "pr_id": pr_id or None,
+        # Chain-link fields (dispatch-20260802-model-ssot-en-ketenlink).
+        "task_class": (task_class or "").strip() or None,
+        "parent_dispatch": (parent_dispatch or "").strip() or None,
+        "tier_from": (tier_from or "").strip() or None,
+        "tier_to": (tier_to or "").strip() or None,
         "deadline_seconds": int(deadline_seconds),
         "base_ref": base_ref or "origin/main",
         "isolation": "worktree",
@@ -355,6 +367,10 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--gate", default="")
     parser.add_argument("--pr-id", default=None, dest="pr_id")
+    parser.add_argument("--parent-dispatch", default=None, dest="parent_dispatch")
+    parser.add_argument("--task-class", default=None, dest="task_class")
+    parser.add_argument("--tier-from", default=None, dest="tier_from")
+    parser.add_argument("--tier-to", default=None, dest="tier_to")
     parser.add_argument("--deadline-seconds", type=int, default=3600, dest="deadline_seconds")
     parser.add_argument("--requires-mcp", action="store_true", dest="requires_mcp")
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
@@ -389,6 +405,10 @@ def main(argv: Optional[list] = None) -> int:
         model=args.model,
         gate=args.gate,
         pr_id=args.pr_id,
+        parent_dispatch=args.parent_dispatch,
+        task_class=args.task_class,
+        tier_from=args.tier_from,
+        tier_to=args.tier_to,
         deadline_seconds=args.deadline_seconds,
         requires_mcp=args.requires_mcp,
         allow_headless=args.allow_headless,
