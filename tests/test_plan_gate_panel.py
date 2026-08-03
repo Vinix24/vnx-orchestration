@@ -1109,24 +1109,28 @@ def test_non_plan_role_provider_lane_passes_role_through(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# scoped-spawn fix (2026-07-14): tmux_interactive_dispatch.dispatch()'s D2.2 scoping
-# precondition (tmux_interactive_dispatch.py, "D2.2 scoping precondition" -- fail-closed:
-# a working_tree_only dispatch is refused unless the env carries VNX_WORKER_SCOPED=1 or
-# VNX_ENFORCE_WORKER_PERMISSIONS=1) is deterministic and already has direct test coverage
-# in tests/test_working_tree_only.py (test_default_env_working_tree_only_is_rejected /
-# test_scoped_opt_in_working_tree_only_is_accepted_by_precondition) -- not duplicated here.
-# What's new in THIS module: the claude/tmux-lane subprocess env plan_gate_panel builds
-# must actually set the flag so that precondition is satisfied instead of tripping it.
+# scoped-spawn fix (2026-07-14; default flipped 2026-07-30): tmux_interactive_dispatch.
+# dispatch()'s D2.2 scoping precondition (tmux_interactive_dispatch.py, "D2.2 scoping
+# precondition" -- fail-closed: a working_tree_only dispatch is refused unless scoping
+# is enabled -- scoped is now the tmux-lane default, so only an explicit
+# VNX_WORKER_SCOPED=0 opt-out or an attached run still trips it) is deterministic and
+# already has direct test coverage in tests/test_working_tree_only.py
+# (test_default_env_working_tree_only_is_accepted_by_precondition /
+# test_scoped_opt_in_working_tree_only_is_accepted_by_precondition) -- not duplicated
+# here. What's new in THIS module: plan_gate_panel explicitly pins VNX_WORKER_SCOPED=1
+# on the claude/tmux-lane subprocess env it builds, belt-and-suspenders on top of the
+# now-default scoped posture, so the precondition is satisfied even if a future default
+# change flips scoping off again.
 # --------------------------------------------------------------------------
 
 def test_claude_lane_dispatcher_sets_scoped_spawn_env(tmp_path, monkeypatch):
     """The claude/tmux-lane subprocess env must carry VNX_WORKER_SCOPED=1.
 
-    Without it, tmux_interactive_dispatch.dispatch()'s D2.2 scoping precondition
-    refuses every --working-tree-only dispatch this lane sends (working_tree_only
-    requires a scoped detached spawn) before any report is written -- the opus/claude
-    seat's silent NO-VERDICT root cause. The base env must NOT already carry the flag,
-    so a pass here proves the dispatcher sets it rather than an ambient leak.
+    Belt-and-suspenders: scoping is now the tmux-lane default even with the
+    flag unset, but plan_gate_panel pins it explicitly on the subprocess env
+    it builds so this lane stays correct independent of that default. The
+    base env must NOT already carry the flag, so a pass here proves the
+    dispatcher sets it rather than an ambient leak.
     """
     monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
     doc = tmp_path / "plan.md"

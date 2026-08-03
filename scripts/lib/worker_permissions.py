@@ -214,21 +214,25 @@ def resolve_role_mcp_config(
 
 
 def worker_scoped_enabled() -> bool:
-    """Whether headless workers spawn with scoped capabilities (default OFF).
+    """Whether headless workers spawn with scoped capabilities (default ON).
 
-    Tmux-spawn workers run in an isolated per-dispatch worktree, so the scoped
-    allow-list only stalls autonomous builds on prompts for un-allow-listed ops
-    (skills/ writes, mkdir, rm) without adding real blast-radius protection.
-    Returns False (blanket ``--dangerously-skip-permissions``) unless
-    ``VNX_WORKER_SCOPED`` is explicitly set to a truthy value (``1`` / ``true`` /
-    ``yes`` / ``on``), which opts back into the scoped posture (role allow-list +
-    empty ambient MCP).
+    A detached worker with no scoping and no blanket skip-permissions flag
+    (e.g. an unscoped path that isn't the ``skip_permissions`` branch) stalls
+    on any Bash/tool permission prompt it hits, with no TTY to answer it and
+    no receipt ever written. Scoping makes ``.vnx/worker_permissions.yaml``'s
+    role allow-list (which the OI-104 build-toolchain entries — ``rm``,
+    ``chmod``, ``mkdir``, etc. — keep functional) actually reach the worker via
+    ``--allowedTools`` instead of leaving it unenforced. Returns True (scoped:
+    role allow-list + empty ambient MCP) unless ``VNX_WORKER_SCOPED`` is
+    explicitly set to a falsy value (``0`` / ``false`` / ``no`` / ``off``),
+    which opts back out into the blanket ``--dangerously-skip-permissions``
+    posture.
     """
-    return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
