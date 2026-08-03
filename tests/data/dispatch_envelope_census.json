@@ -815,24 +815,23 @@
   ],
   "family": [
     "dispatch_envelope",
+    "envelope_adapters_claude",
     "envelope_govern",
     "envelope_govern_support",
     "envelope_prepare",
     "envelope_types"
   ],
   "layer4_classes": [
-    "dispatch_envelope::ClaudeSubprocessAdapter",
-    "dispatch_envelope::CodexAdapter",
     "dispatch_envelope::LaneRouter",
     "dispatch_envelope::ProviderAdapter",
+    "envelope_adapters_claude::ClaudeSubprocessAdapter",
+    "envelope_adapters_claude::CodexAdapter",
     "envelope_types::EnvelopeGovernError",
     "envelope_types::EnvelopeResult",
     "envelope_types::EnvelopeSpec",
     "envelope_types::_AdapterResult"
   ],
   "layer4_functions": [
-    "dispatch_envelope.ClaudeSubprocessAdapter::run",
-    "dispatch_envelope.CodexAdapter::run",
     "dispatch_envelope.LaneRouter::get",
     "dispatch_envelope.ProviderAdapter::_run_kimi",
     "dispatch_envelope.ProviderAdapter::run",
@@ -841,6 +840,8 @@
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
     "dispatch_envelope::run_envelope_plan",
+    "envelope_adapters_claude.ClaudeSubprocessAdapter::run",
+    "envelope_adapters_claude.CodexAdapter::run",
     "envelope_govern::_govern",
     "envelope_govern_support::_archive_dispatch_events",
     "envelope_govern_support::_clear_dispatch_events",
