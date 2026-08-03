@@ -52,11 +52,13 @@ constraints:
     rule: require_route
     required_route:
       role: T0
-      model: claude-opus-4-8
+      model: opus-5  # canonical registry key (wave7_models.yaml) — T0 runs Opus 5
     reason: >-
       T0 orchestrator performs gate evaluation across the full NDJSON ledger
       under multi-PR concurrency. Sonnet-grade reasoning regresses on missed
       gates; downgrade is only acceptable with explicit operator approval.
+      Model value updated 2026-08-02 from the stale claude-opus-4-8 string to
+      the canonical opus-5 registry key (model-ssot-en-ketenlink).
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true

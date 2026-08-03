@@ -30,6 +30,7 @@ gh_pr_ensure).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -128,6 +129,9 @@ def _record_corrective_receipt(
                 "branch": branch,
                 "source": "pr_enforcement",
                 "synthesized": False,
+                # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
+                # model when the door exported it (best-effort; exempt source).
+                "model": os.environ.get("VNX_CURRENT_MODEL") or None,
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             receipts_file=str(receipts_file),

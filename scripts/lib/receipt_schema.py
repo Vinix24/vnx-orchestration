@@ -143,6 +143,17 @@ class ReceiptV2:
     role_tier: Optional[str] = None
     role_not_applied_reason: Optional[str] = None
     role_source_path: Optional[str] = None
+    # dispatch-20260802-model-ssot-en-ketenlink (chain-link): the receipt says
+    # WHICH dispatch this one continues. parent_dispatch is the id of the
+    # retried/fix-forward/escalated predecessor; tier_from/tier_to record an
+    # escalation (a tier change between the predecessor and this dispatch);
+    # task_class is the deterministic smart_router class of the work. Each is
+    # stamped only when known (None omits — the ledger distinguishes "not a
+    # retry" from "retry, tier unknown").
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -223,6 +234,17 @@ class ReceiptV2:
             receipt["role_not_applied_reason"] = self.role_not_applied_reason
         if self.role_source_path is not None:
             receipt["role_source_path"] = self.role_source_path
+        # Chain-link stamps (dispatch-20260802-model-ssot-en-ketenlink) —
+        # conditional like the other optional fields: a non-retry receipt omits
+        # parent_dispatch entirely.
+        if self.parent_dispatch is not None:
+            receipt["parent_dispatch"] = self.parent_dispatch
+        if self.task_class is not None:
+            receipt["task_class"] = self.task_class
+        if self.tier_from is not None:
+            receipt["tier_from"] = self.tier_from
+        if self.tier_to is not None:
+            receipt["tier_to"] = self.tier_to
         return receipt
 
 
@@ -256,6 +278,12 @@ class SynthesizedLaneReceipt:
     provider: str = "claude"
     sub_provider: str = "anthropic"
     timestamp: Optional[str] = None  # None -> stamped with now at construction
+    # Chain-link fields (dispatch-20260802-model-ssot-en-ketenlink) — see
+    # ReceiptV2 for semantics. Conditionally stamped.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
     # Conditionally stamped (is-not-None).
     worker_permission_enforcement: Optional[str] = None
     report_path: Optional[str] = None
@@ -292,6 +320,15 @@ class SynthesizedLaneReceipt:
             receipt["worker_permission_enforcement"] = self.worker_permission_enforcement
         if self.report_path is not None:
             receipt["report_path"] = self.report_path
+        # Chain-link stamps — conditional like the other optional fields.
+        if self.parent_dispatch is not None:
+            receipt["parent_dispatch"] = self.parent_dispatch
+        if self.task_class is not None:
+            receipt["task_class"] = self.task_class
+        if self.tier_from is not None:
+            receipt["tier_from"] = self.tier_from
+        if self.tier_to is not None:
+            receipt["tier_to"] = self.tier_to
         return receipt
 
 

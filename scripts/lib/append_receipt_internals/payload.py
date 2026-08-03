@@ -322,6 +322,44 @@ def _stamp_identity(receipt: Dict[str, Any], *, identity_cwd: Optional[Path] = N
         receipt["agent_id"] = identity.agent_id
 
 
+_CHAIN_LINK_ENV_FIELDS = (
+    ("VNX_PARENT_DISPATCH", "parent_dispatch"),
+    ("VNX_TASK_CLASS", "task_class"),
+    ("VNX_TIER_FROM", "tier_from"),
+    ("VNX_TIER_TO", "tier_to"),
+)
+
+
+def _stamp_model_identity(receipt: Dict[str, Any]) -> None:
+    """Normalize model to the canonical wave7_models.yaml key + chain-link env fallback.
+
+    dispatch-20260802-model-ssot-en-ketenlink: the door exports the chain-link
+    fields (parent_dispatch / task_class / tier_from / tier_to) as env vars that
+    the tmux worker pane inherits, so a worker-authored receipt lands the same
+    values the plan carried. Explicit caller-supplied fields are never
+    overwritten. The model string is normalized to its canonical registry key
+    (deepseek/deepseek-v4-pro -> deepseek-v4-pro, kimi-code/k3 -> kimi-k3,
+    claude-sonnet-5 -> sonnet-5, ...) so the ledger is groupable per model.
+    Best-effort: a normalizer failure leaves the raw string for the fail-closed
+    validator to judge.
+    """
+    for env_name, field in _CHAIN_LINK_ENV_FIELDS:
+        if receipt.get(field):
+            continue
+        env_val = (os.environ.get(env_name) or "").strip()
+        if env_val:
+            receipt[field] = env_val
+    raw = receipt.get("model")
+    if raw is None or str(raw).strip() == "":
+        return
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
+        receipt["model"] = normalize_model_name(raw)
+    except Exception:  # noqa: BLE001 — normalization is best-effort; fail-closed validation still runs
+        log.debug("payload: model normalization skipped: %s", raw, exc_info=True)
+
+
 def _stamp_ingested_at(receipt: Dict[str, Any]) -> None:
     """Stamp the authoritative ingest time — ALWAYS set to now by this append
     layer, never preserved from a caller-supplied value.
@@ -370,6 +408,12 @@ def append_receipt_payload(
     receipts_file = _maybe_reroute_to_gate_stream(receipt, receipts_file)
     # Keep the resolved receipt path aligned with any gate-stream reroute.
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
+
+    # dispatch-20260802-model-ssot-en-ketenlink: normalize model to the
+    # canonical registry key + stamp the door's chain-link fields before the
+    # shared validator sees the receipt (the fail-closed model check runs in
+    # _validate_receipt).
+    _stamp_model_identity(receipt)
 
     # ADR-035 §9 PR-4 (fix-r1): pure classification of warnings[] (no side
     # effects — no OI-store writes, no counter increments) before the shared

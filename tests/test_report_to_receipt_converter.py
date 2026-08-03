@@ -382,7 +382,9 @@ class TestReceiptContent:
         assert r["dispatch_id"] == "20260601-content-check"
         assert r["event_type"] == "task_complete"
         assert r["terminal"] == "T2"
-        assert r["model"] == "claude-opus-4-8"
+        # dispatch-20260802-model-ssot-en-ketenlink: receipts carry the canonical
+        # wave7 registry key, not the free-form claude-* string.
+        assert r["model"] == "opus-4-8"
         assert r["status"] == "success"
         assert "timestamp" in r
         assert "report_path" in r
@@ -427,8 +429,11 @@ class TestContractValidation:
     def test_missing_content_dispatch_id_not_task_complete(self, tmp_path, state_dir):
         """Filename-only dispatch_id is a contract violation: must not be task_complete."""
         report = tmp_path / "20260601-nodid-content.md"
-        # Full valid body but no frontmatter or bold-field dispatch_id
+        # Full valid body but no frontmatter or bold-field dispatch_id. A model
+        # IS carried (fail-closed model check: dispatch receipts must name the
+        # model that ran); the contract violation is the missing dispatch_id.
         report.write_text(
+            "---\nmodel: claude-sonnet-5\n---\n\n"
             "## Summary\n\n"
             "Implemented the feature per dispatch specification. All tests pass and coverage is at target.\n\n"
             "## Changes\n\n- scripts/lib/example.py: added X\n\n"
@@ -452,9 +457,11 @@ class TestContractValidation:
     def test_body_contract_violations_not_task_complete(self, tmp_path, state_dir):
         """Content dispatch_id present but body fails contract: must not be task_complete."""
         report = tmp_path / "20260601-badbody.md"
-        # Has dispatch_id in frontmatter but missing required sections + summary too short
+        # Has dispatch_id in frontmatter but missing required sections + summary
+        # too short. A model is carried (fail-closed model check); the contract
+        # violations are the missing sections.
         report.write_text(
-            "---\ndispatch_id: 20260601-badbody\nterminal: T1\n---\n\n"
+            "---\ndispatch_id: 20260601-badbody\nterminal: T1\nmodel: claude-sonnet-5\n---\n\n"
             "## Summary\n\nShort.\n\n",
             encoding="utf-8",
         )
@@ -475,6 +482,7 @@ class TestContractValidation:
         """Both content dispatch_id and body are invalid: must not be task_complete."""
         report = tmp_path / "20260601-double-invalid.md"
         report.write_text(
+            "---\nmodel: claude-sonnet-5\n---\n\n"
             "## Summary\n\nShort.\n\n",
             encoding="utf-8",
         )
@@ -493,7 +501,7 @@ class TestContractValidation:
         """contract_invalid receipts are idempotent: second call returns duplicate."""
         report = tmp_path / "20260601-idem-invalid.md"
         report.write_text(
-            "---\ndispatch_id: 20260601-idem-invalid\n---\n\n"
+            "---\ndispatch_id: 20260601-idem-invalid\nmodel: claude-sonnet-5\n---\n\n"
             "## Summary\n\nShort.\n",
             encoding="utf-8",
         )
@@ -517,7 +525,7 @@ class TestContractValidation:
         _write_frontmatter_report(reports_dir / "20260601-sc-good.md", "20260601-sc-good")
         # Invalid report: has dispatch_id in frontmatter, body is missing sections
         (reports_dir / "20260601-sc-bad.md").write_text(
-            "---\ndispatch_id: 20260601-sc-bad\n---\n\n## Summary\n\nShort.\n",
+            "---\ndispatch_id: 20260601-sc-bad\nmodel: claude-sonnet-5\n---\n\n## Summary\n\nShort.\n",
             encoding="utf-8",
         )
 

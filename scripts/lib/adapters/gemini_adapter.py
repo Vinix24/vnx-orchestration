@@ -202,7 +202,7 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
                 start_new_session=True,
             )
         except OSError as exc:
-            yield {"type": "error", "data": {"reason": str(exc)}}
+            yield {"type": "error", "event_type": "error", "data": {"reason": str(exc)}}
             return
 
         if proc.stdin:
@@ -210,7 +210,7 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
                 proc.stdin.write(prompt.encode("utf-8"))
                 proc.stdin.close()
             except BrokenPipeError:
-                yield {"type": "error", "data": {"reason": "stdin write failed (BrokenPipeError)"}}
+                yield {"type": "error", "event_type": "error", "data": {"reason": "stdin write failed (BrokenPipeError)"}}
                 return
 
         for canonical_event in self.drain_stream(

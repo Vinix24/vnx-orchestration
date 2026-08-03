@@ -25,12 +25,19 @@ _AVG_OUTPUT_TOKENS = 2_000
 # tests/test_smart_router_cost_aware.py calls compute_cost_per_call() with these exact retired
 # strings directly against the real wave7_models.yaml and must keep resolving. New keys for the
 # current model_ids are added alongside so real enrichment doesn't silently break post-rename.
+#
+# 2026-08-02 model-ssot-en-ketenlink: the 5-series registry keys (sonnet-5 / opus-5 /
+# fable-5) are now the canonical spellings; the current model_ids resolve to them, and the
+# missing claude-opus-5 / claude-fable-5 cost lookups are added so a smart_router decision
+# on the 5-series is not cost-blind.
 _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4-6": ("anthropic", "sonnet"),
-    "claude-sonnet-5": ("anthropic", "sonnet"),
+    "claude-sonnet-5": ("anthropic", "sonnet-5"),
     "claude-opus-4-6": ("anthropic", "opus"),
     "claude-opus-4-7": ("anthropic", "opus"),
-    "claude-opus-4-8": ("anthropic", "opus"),
+    "claude-opus-4-8": ("anthropic", "opus-4-8"),
+    "claude-opus-5": ("anthropic", "opus-5"),
+    "claude-fable-5": ("anthropic", "fable-5"),
     "claude-haiku-4-5": ("anthropic", "haiku"),
     "deepseek-v4-flash": ("deepseek", "deepseek-v4-flash"),
     "deepseek-v4-pro": ("deepseek", "deepseek-v4-pro"),

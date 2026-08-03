@@ -35,10 +35,14 @@ pytestmark = pytest.mark.integration
 
 # Fake gemini subprocess: writes events then sleeps indefinitely (will be killed).
 _FAKE_GEMINI_HANG_SCRIPT = """\
-import json, sys, time
+import json, sys, time, os
 
 print(json.dumps({"type": "session_start"}), flush=True)
 print(json.dumps({"type": "message", "text": "Analyzing..."}), flush=True)
+# Signal readiness: write sentinel so test knows events have been flushed
+_ready = os.environ.get("VNX_GEMINI_READY_FILE")
+if _ready:
+    open(_ready, "w").close()
 time.sleep(300)  # will be killed before this finishes
 """
 
@@ -62,13 +66,28 @@ sys.exit(1)
 """
 
 
-def _spawn_fake_gemini(script: str) -> subprocess.Popen:
+def _spawn_fake_gemini(script: str, extra_env: dict | None = None) -> subprocess.Popen:
+    env = {**os.environ}
+    if extra_env:
+        env.update(extra_env)
     return subprocess.Popen(
         [sys.executable, "-c", script],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        env=env,
     )
+
+
+def _wait_for_readiness(ready_file: Path, deadline: float = 10.0) -> None:
+    """Poll for readiness sentinel file; raise TimeoutError if not seen."""
+    deadline_ts = time.time() + deadline
+    while not ready_file.exists():
+        if time.time() >= deadline_ts:
+            raise TimeoutError(
+                f"Fake gemini did not write readiness marker at {ready_file} within {deadline}s"
+            )
+        time.sleep(0.05)
 
 
 @pytest.fixture()
@@ -85,21 +104,30 @@ class TestGeminiCrashNegative:
         adapter._current_dispatch_id = dispatch_id
         return adapter
 
-    def test_sigkill_mid_run_emits_synthetic_error(self, event_store: EventStore):
+    def test_sigkill_mid_run_emits_synthetic_error(
+        self, tmp_path: Path, event_store: EventStore
+    ):
         """kill -9 on gemini subprocess → synthetic error event emitted."""
         terminal_id = "T-crash"
         dispatch_id = "gemini-crash-001"
         adapter = self._make_adapter(terminal_id, dispatch_id)
-        proc = _spawn_fake_gemini(_FAKE_GEMINI_HANG_SCRIPT)
+        ready_file = tmp_path / "ready_sigkill"
+        proc = _spawn_fake_gemini(
+            _FAKE_GEMINI_HANG_SCRIPT,
+            extra_env={"VNX_GEMINI_READY_FILE": str(ready_file)},
+        )
 
-        def _kill_after_delay():
-            time.sleep(0.3)
+        def _kill_when_ready():
+            try:
+                _wait_for_readiness(ready_file, deadline=10.0)
+            except TimeoutError:
+                pass
             try:
                 os.kill(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
-        killer = threading.Thread(target=_kill_after_delay, daemon=True)
+        killer = threading.Thread(target=_kill_when_ready, daemon=True)
         killer.start()
 
         events_seen = list(adapter.drain_stream(
@@ -117,21 +145,30 @@ class TestGeminiCrashNegative:
             f"Expected synthetic error after kill -9, got: {types}"
         )
 
-    def test_sigkill_archive_is_non_empty(self, event_store: EventStore):
+    def test_sigkill_archive_is_non_empty(
+        self, tmp_path: Path, event_store: EventStore
+    ):
         """Events written before kill -9 must be present in EventStore."""
         terminal_id = "T-crash-archive"
         dispatch_id = "gemini-crash-archive-001"
         adapter = self._make_adapter(terminal_id, dispatch_id)
-        proc = _spawn_fake_gemini(_FAKE_GEMINI_HANG_SCRIPT)
+        ready_file = tmp_path / "ready_archive"
+        proc = _spawn_fake_gemini(
+            _FAKE_GEMINI_HANG_SCRIPT,
+            extra_env={"VNX_GEMINI_READY_FILE": str(ready_file)},
+        )
 
-        def _kill_after_delay():
-            time.sleep(0.4)
+        def _kill_when_ready():
+            try:
+                _wait_for_readiness(ready_file, deadline=10.0)
+            except TimeoutError:
+                pass
             try:
                 os.kill(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
-        killer = threading.Thread(target=_kill_after_delay, daemon=True)
+        killer = threading.Thread(target=_kill_when_ready, daemon=True)
         killer.start()
 
         list(adapter.drain_stream(
@@ -180,21 +217,30 @@ class TestGeminiCrashNegative:
             f"Clean exit must not produce error events, got: {types}"
         )
 
-    def test_no_orphan_event_store_handles_after_crash(self, event_store: EventStore):
+    def test_no_orphan_event_store_handles_after_crash(
+        self, tmp_path: Path, event_store: EventStore
+    ):
         """After crash, EventStore file is intact and parseable (no data loss)."""
         terminal_id = "T-orphan"
         dispatch_id = "gemini-orphan-001"
         adapter = self._make_adapter(terminal_id, dispatch_id)
-        proc = _spawn_fake_gemini(_FAKE_GEMINI_HANG_SCRIPT)
+        ready_file = tmp_path / "ready_orphan"
+        proc = _spawn_fake_gemini(
+            _FAKE_GEMINI_HANG_SCRIPT,
+            extra_env={"VNX_GEMINI_READY_FILE": str(ready_file)},
+        )
 
-        def _kill():
-            time.sleep(0.3)
+        def _kill_when_ready():
+            try:
+                _wait_for_readiness(ready_file, deadline=10.0)
+            except TimeoutError:
+                pass
             try:
                 os.kill(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
-        threading.Thread(target=_kill, daemon=True).start()
+        threading.Thread(target=_kill_when_ready, daemon=True).start()
         list(adapter.drain_stream(proc, terminal_id, dispatch_id, event_store,
                                    chunk_timeout=5.0, total_deadline=10.0))
 
@@ -208,7 +254,7 @@ class TestGeminiCrashNegative:
                     )
 
     def test_stream_events_crash_mid_run_recoverable(
-        self, monkeypatch, event_store: EventStore
+        self, tmp_path: Path, monkeypatch, event_store: EventStore
     ):
         """stream_events() crash mid-run: receipt is recoverable (no unhandled exception)."""
         monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
@@ -220,17 +266,20 @@ class TestGeminiCrashNegative:
         adapter._current_terminal_id = terminal_id
         adapter._current_dispatch_id = dispatch_id
 
+        ready_file = tmp_path / "ready_se_crash"
         proc_holder: list = []
         original_popen = subprocess.Popen
 
         def fake_popen(cmd, **kwargs):
             if cmd and "gemini" in str(cmd[0]):
+                child_env = {**os.environ, "VNX_GEMINI_READY_FILE": str(ready_file)}
                 p = original_popen(
                     [sys.executable, "-c", _FAKE_GEMINI_HANG_SCRIPT],
                     stdin=kwargs.get("stdin", subprocess.PIPE),
                     stdout=kwargs.get("stdout", subprocess.PIPE),
                     stderr=kwargs.get("stderr", subprocess.PIPE),
                     start_new_session=kwargs.get("start_new_session", True),
+                    env=child_env,
                 )
                 proc_holder.append(p)
                 return p
@@ -238,15 +287,18 @@ class TestGeminiCrashNegative:
 
         monkeypatch.setattr(ga_mod.subprocess, "Popen", fake_popen)
 
-        def _kill_after_delay():
-            time.sleep(0.3)
+        def _kill_when_ready():
+            try:
+                _wait_for_readiness(ready_file, deadline=10.0)
+            except TimeoutError:
+                pass
             if proc_holder:
                 try:
                     os.kill(proc_holder[0].pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
 
-        killer = threading.Thread(target=_kill_after_delay, daemon=True)
+        killer = threading.Thread(target=_kill_when_ready, daemon=True)
         killer.start()
 
         ctx = {

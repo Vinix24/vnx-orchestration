@@ -104,6 +104,10 @@ def emit_dispatch_receipt(
     role_tier: Optional[str] = None,
     role_not_applied_reason: Optional[str] = None,
     role_source_path: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    task_class: Optional[str] = None,
+    tier_from: Optional[str] = None,
+    tier_to: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -195,6 +199,27 @@ def emit_dispatch_receipt(
     """
     _validate_provider(provider)
 
+    # dispatch-20260802-model-ssot-en-ketenlink: model identity is normalized to
+    # the canonical wave7_models.yaml key here, at the receipt boundary — the
+    # same model can no longer land in the ledger under several spellings
+    # (deepseek/deepseek-v4-pro vs deepseek-v4-pro, kimi-code/k3 vs kimi-k3,
+    # claude-sonnet-5 vs sonnet-5). Unmapped strings pass through unchanged and
+    # are caught by the fail-closed model validator downstream.
+    try:
+        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
+        model = normalize_model_name(model)
+    except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
+        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
+
+    # Chain-link fallback: the caller may not know the fields (the tmux worker
+    # path writes its own receipt via append_receipt_payload and inherits them
+    # from the door's env); the door exports them so every lane lands the same
+    # value. Explicit kwargs win over env.
+    parent_dispatch = parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+    task_class = task_class or os.environ.get("VNX_TASK_CLASS") or None
+    tier_from = tier_from or os.environ.get("VNX_TIER_FROM") or None
+    tier_to = tier_to or os.environ.get("VNX_TIER_TO") or None
+
     # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
     # from the local Claude Code session transcript when the caller has nothing
     # usable (no live usage API on the subscription lane). Only ever tightens
@@ -256,6 +281,10 @@ def emit_dispatch_receipt(
         role_tier=role_tier,
         role_not_applied_reason=role_not_applied_reason,
         role_source_path=role_source_path,
+        parent_dispatch=parent_dispatch,
+        task_class=task_class,
+        tier_from=tier_from,
+        tier_to=tier_to,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
