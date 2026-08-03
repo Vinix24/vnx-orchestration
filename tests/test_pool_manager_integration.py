@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import threading
 import time
+import unittest.mock
 from pathlib import Path
 from typing import List
 
@@ -477,3 +478,59 @@ def test_cooldown_advanced_on_successful_spawn(tmp_path):
         assert row[0] != sentinel, (
             "last_scaled_at should advance after successful spawn"
         )
+
+
+# ---------------------------------------------------------------------------
+# 14. reap_dead kills tmux session for reaped worker
+# ---------------------------------------------------------------------------
+
+def test_reap_dead_kills_tmux_session(tmp_path):
+    """reap_dead must attempt tmux kill-session for each reaped worker.
+
+    Regression: the reaper cleaned up the process and worktree but left the
+    tmux session behind.  This test fails on origin/main because reap_dead
+    never calls ``tmux kill-session``.
+    """
+    db = create_test_db_file(
+        tmp_path / "test.db", min_workers=1, max_workers=4, cooldown_seconds=0
+    )
+
+    # Insert a stale membership — no heartbeat, very old joined_at — so
+    # identify_reap_targets flags it.  PID is None so _kill_subprocess skips.
+    _insert_lease_file(db, "T-stale", last_heartbeat_at="2026-01-01T00:00:00.000000Z")
+    _insert_membership_file(
+        db, "T-stale",
+        joined_at="2026-01-01T00:00:00.000000Z",
+    )
+
+    mgr = _make_manager(db, spawn_fn=_always_succeed)
+
+    with unittest.mock.patch(
+        "pool_worktree_manager.reap_worker_worktree"
+    ) as mock_reap_wt:
+        with unittest.mock.patch(
+            "pool_manager.sweep_orphan_tmux_sessions", return_value=[]
+        ):
+            with unittest.mock.patch("pool_manager.subprocess.run") as mock_run:
+                mgr.reap_dead()
+
+    # Collect every tmux kill-session invocation.
+    tmux_kill_calls = [
+        c for c in mock_run.call_args_list
+        if len(c[0]) >= 1
+        and isinstance(c[0][0], list)
+        and len(c[0][0]) >= 3
+        and c[0][0][0] == "tmux"
+        and c[0][0][1] == "kill-session"
+    ]
+
+    assert len(tmux_kill_calls) >= 1, (
+        f"Expected at least one tmux kill-session call, got {len(tmux_kill_calls)}. "
+        f"All subprocess.run calls: {mock_run.call_args_list}"
+    )
+
+    # The session name must contain the vnx- prefix and the terminal_id.
+    session_arg = tmux_kill_calls[0][0][0][3]  # -t <session_name>
+    assert "vnx-T-stale" in session_arg or session_arg == "vnx-T-stale", (
+        f"Expected session name vnx-T-stale, got {session_arg!r}"
+    )

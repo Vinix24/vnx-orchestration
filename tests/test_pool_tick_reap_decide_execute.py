@@ -419,7 +419,10 @@ def test_kill_subprocess_pid_validation_in_reap_flow(tmp_path):
     _insert_member(db, "T-stale", heartbeat_at="2026-01-01T00:00:00.000000Z")
 
     with unittest.mock.patch("pool_manager.os.kill") as mock_kill:
-        mgr.reap_dead()
+        with unittest.mock.patch(
+            "pool_manager.sweep_orphan_tmux_sessions", return_value=[]
+        ):
+            mgr.reap_dead()
 
     # Membership dataclass has no pid → getattr returns None → no kill
     mock_kill.assert_not_called()
