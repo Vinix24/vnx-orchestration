@@ -122,12 +122,11 @@ constraints:
     rule: forbid_route
     forbidden_route:
       provider: zai
-      model: [glm-4.5, glm-4.6]
+      model: [glm-4.5, glm-4.6, glm-5, glm-5.1]
     reason: >-
-      GLM-4.5 and GLM-4.6 are legacy and superseded by the GLM-5.x line
-      (verified 2026-05-10, project_kimi_glm_integration_paths.md). The
-      provider will retire the legacy snapshots; new dispatches use a
-      current GLM-5.x key (glm-5.2 preferred, glm-5.1 available).
+      GLM-4.5 and GLM-4.6 are retired; base GLM-5 (Feb 2026) and GLM-5.1 are
+      superseded by GLM-5.2 (released 2026-06-16). Only GLM-5.2 is allowed for
+      new dispatches. Operator directive 2026-08-03: geen oudere 5-varianten.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false

@@ -70,40 +70,16 @@ models:
     cost_input_mtok: 0.00
     cost_output_mtok: 0.00
 
-  - id: glm-5
-    provider: litellm:zai   # default alias glm-5.1-default → openrouter/z-ai/glm-5 = BASE GLM-5 (Feb 2026), baseline
-    model_arg: glm-5
-    cost_input_mtok: 0.60
-    cost_output_mtok: 1.92
-
-  - id: glm-5-1
-    provider: litellm:zai:glm-5.1   # the REAL GLM-5.1 → openrouter/z-ai/glm-5.1 (was wrongly mapped to base glm-5)
-    model_arg: glm-5.1
-    cost_input_mtok: 0.60
-    cost_output_mtok: 1.92
-
   - id: glm-5-2
     provider: litellm:zai:glm-5.2   # GLM-5.2 (2026-06-16) → openrouter/z-ai/glm-5.2; satisfies zai-via-openrouter-only
     model_arg: glm-5.2
     cost_input_mtok: 0.60
     cost_output_mtok: 1.92
 
-  # GLM-harness lanes: SAME GLM models on OpenRouter, but driven by the FULL claude-CLI
-  # harness (tools/agentic loop) via a local litellm proxy → OpenRouter. Run ALONGSIDE the
-  # litellm:zai lanes above to measure "harness vs simple tool-call" for the same model.
+  # GLM-harness lane: GLM-5.2 driven by the FULL claude-CLI harness (tools/agentic loop) via
+  # a local litellm proxy → OpenRouter. glm-5 and glm-5.1 harness entries removed 2026-08-03
+  # per operator directive (only glm-5.2 allowed).
   # zai-via-openrouter-only intact (proxy fronts OpenRouter); no-anthropic-sdk intact (CLI).
-  - id: glm-5-harness
-    provider: glm-harness
-    model_arg: glm-5
-    cost_input_mtok: 0.20
-    cost_output_mtok: 0.80
-    notes: "GLM-5 (base) via full claude-CLI harness (litellm proxy → OpenRouter). Compare vs glm-5."
-  - id: glm-5-1-harness
-    provider: glm-harness
-    model_arg: glm-5.1
-    cost_input_mtok: 0.40
-    cost_output_mtok: 1.60
-    notes: "GLM-5.1 via full claude-CLI harness. Compare vs glm-5-1 (litellm tool-loop)."
   - id: glm-5-2-harness
     provider: glm-harness
     model_arg: glm-5.2

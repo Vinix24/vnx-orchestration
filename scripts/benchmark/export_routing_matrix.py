@@ -68,8 +68,6 @@ LANE = {
     "codex-gpt-5-5": ("codex-gpt-5-5", "codex-cli"),
     "codex-gpt-5-4": ("codex-gpt-5-4", "codex-cli"),
     "kimi-k2-7-code": ("kimi-k2-7-code", "kimi-cli"),
-    "glm-5": ("glm-5", "flat-runner"),
-    "glm-5-1": ("glm-5-1", "flat-runner"),
     "glm-5-2": ("glm-5-2", "flat-runner"),
     "glm-5-2-harness": ("glm-5-2", "claude-harness"),
     "deepseek-v4-flash-harness": ("deepseek-v4-flash", "claude-harness"),

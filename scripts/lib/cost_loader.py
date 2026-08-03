@@ -34,7 +34,7 @@ _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-haiku-4-5": ("anthropic", "haiku"),
     "deepseek-v4-flash": ("deepseek", "deepseek-v4-flash"),
     "deepseek-v4-pro": ("deepseek", "deepseek-v4-pro"),
-    "glm-5-1": ("zai", "glm-5.1-default"),
+    "glm-5-1": ("zai", "glm-5.2"),
     "glm-5-2": ("zai", "glm-5.2"),
     "kimi-k2-0905": ("kimi_cli", "kimi-default"),
     "kimi-k2-6": ("kimi_cli", "kimi-k2-6"),

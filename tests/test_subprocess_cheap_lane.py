@@ -476,7 +476,7 @@ class TestBuildCheapLaneArgv:
         for lane in (
             "litellm:moonshot:kimi-k2-0905-default",
             "litellm:deepseek:deepseek-v4-pro",
-            "litellm:zai:glm-5.1-default",
+            "litellm:zai:glm-5.2",
             "kimi",
         ):
             argv = _build_cheap_lane_argv(_make_args(), lane)

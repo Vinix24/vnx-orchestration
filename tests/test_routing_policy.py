@@ -214,7 +214,7 @@ def test_lane_to_claude_model_mappings() -> None:
 def test_lane_to_claude_model_litellm_returns_none() -> None:
     assert lane_to_claude_model("litellm:deepseek:deepseek-v4-pro") is None
     assert lane_to_claude_model("litellm:moonshot:kimi-k2-0905-default") is None
-    assert lane_to_claude_model("litellm:zai:glm-5.1-default") is None
+    assert lane_to_claude_model("litellm:zai:glm-5.2") is None
 
 
 # ---------------------------------------------------------------------------
