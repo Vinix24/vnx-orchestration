@@ -41,6 +41,7 @@ import argparse
 import json
 import logging
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -48,6 +49,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from xml.parsers.expat import ExpatError
 
 _LOG = logging.getLogger(__name__)
 
@@ -295,34 +297,24 @@ def resolve_interpreter_version(
     return version
 
 
-def discover_launchd_consumers(agents_dir: Path, runner: Any = None) -> List[Dict[str, Any]]:
+def discover_launchd_consumers(agents_dir: Path) -> List[Dict[str, Any]]:
     """Enumerate ``com.vnx.*.plist`` launchd agents as ``{label, argv, source}``.
 
-    Uses ``plutil -convert json`` (always present on macOS) instead of hand
-    parsing XML. Never raises — an unreadable or malformed plist is skipped,
-    not fatal to the scan.
+    Uses stdlib ``plistlib`` (reads both XML and binary plists, on any
+    platform) instead of shelling out to ``plutil``, which does not exist on
+    Linux CI. Never raises — an unreadable or malformed plist is skipped, not
+    fatal to the scan.
     """
-    run = runner or subprocess.run
     agents_dir = Path(agents_dir)
     consumers: List[Dict[str, Any]] = []
     if not agents_dir.is_dir():
         return consumers
     for plist in sorted(agents_dir.glob(_LAUNCHD_LABEL_GLOB)):
         try:
-            proc = run(
-                ["plutil", "-convert", "json", "-o", "-", str(plist)],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if proc.returncode != 0:
-            continue
-        try:
-            data = json.loads(proc.stdout)
-        except ValueError:
+            with open(plist, "rb") as fh:
+                data = plistlib.load(fh)
+        except (plistlib.InvalidFileException, ExpatError, OSError, ValueError):
+            # vnx-silent-except: unreadable/malformed plist is skipped, scan is fail-soft
             continue
         argv = data.get("ProgramArguments")
         if not argv:
@@ -570,7 +562,7 @@ def check_parity(runner: Any = None, repo_root: Optional[Path] = None) -> Dict[s
     raw = compare_parity(foreground, background)
 
     requires_python = parse_requires_python(repo_root / "pyproject.toml")
-    consumers = discover_launchd_consumers(DEFAULT_LAUNCHAGENTS_DIR, runner=runner)
+    consumers = discover_launchd_consumers(DEFAULT_LAUNCHAGENTS_DIR)
     consumers += discover_crontab_consumers(read_crontab(runner=runner))
     consumer_scan = scan_consumers(consumers, repo_root, requires_python, runner=runner)
 
