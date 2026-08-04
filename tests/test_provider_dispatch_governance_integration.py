@@ -53,6 +53,14 @@ def _make_args(provider, dispatch_id="test-integ-001", data_root=None):
     args.max_retries = 1
     args.gate = ""
     args.role = None
+    # Explicitly None so getattr(args, "x", None) returns None, not a child
+    # MagicMock. provider_dispatch._emit_governance calls getattr() for these
+    # attributes; when args is a MagicMock with no spec, getattr creates a
+    # child mock that json.dumps rejects as non-serializable (OI-1034).
+    args.mandate_id = None
+    args.deadline_seconds = 900
+    args.session_id = None
+    args.requires_mcp = False
     return args
 
 

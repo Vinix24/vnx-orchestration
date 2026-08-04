@@ -124,7 +124,6 @@ tests/test_project_status_hook.py
 tests/test_provider_dispatch_contract_integration.py
 tests/test_provider_dispatch_deepseek_harness.py
 tests/test_provider_dispatch_entry.py
-tests/test_provider_dispatch_governance_integration.py
 tests/test_quality_advisory_pipeline.py
 tests/test_queue_reconciliation_certification.py
 tests/test_quickstart_validation.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
@@ -184,17 +183,10 @@ tests/test_vnx_start_runtime.py
 tests/test_vnx_tagger.py
 tests/test_w5b_small_fixes.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
 tests/test_w_init_project_id_threading.py
-tests/test_wave4_central_install_e2e.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/test_wave4_cmd_update.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/test_wave4_path_resolver.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/test_wave4_regen_settings_target.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/test_wave4_save_restore.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/test_wave4_write_guard.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/test_wave7_deepseek_smoke.py
 tests/test_wave7_fixes.py
 tests/test_week_1_skills.py
 tests/test_wheel_install.py
 tests/test_wiring_completeness.py
 tests/test_worker_heartbeat.py
-tests/test_worker_state_dir.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/unit/test_codex_event_normalizer.py
