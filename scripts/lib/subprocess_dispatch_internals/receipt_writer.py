@@ -41,22 +41,25 @@ def _ensure_unified_report(
 ) -> "Path | None":
     """Write a stub unified report if the worker did not write one.
 
-    Workers are instructed to write <dispatch_id>_report.md to unified_reports/
+    Workers are instructed to write <dispatch_id>.md to unified_reports/
     as part of their task. This call ensures the file always exists before the
     t0_receipts.ndjson entry is written so the receipt processor never sees a
     dispatch with no corresponding report.
 
     Idempotent: returns None without modifying anything if the report already exists.
     """
+    from report_path import _FILENAME_FORMS
     try:
         reports_dir_env = os.environ.get("VNX_REPORTS_DIR", "").strip()
         if not reports_dir_env:
             logger.debug("_ensure_unified_report: VNX_REPORTS_DIR not set, skipping")
             return None
         reports_dir = Path(reports_dir_env).expanduser()
-        report_path = reports_dir / f"{dispatch_id}_report.md"
-        if report_path.exists():
-            return None
+        # Check all filename forms (canonical + two legacy) for idempotency.
+        for form in _FILENAME_FORMS:
+            if (reports_dir / form.format(dispatch_id=dispatch_id)).exists():
+                return None
+        report_path = reports_dir / f"{dispatch_id}.md"
         reports_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         stub = (

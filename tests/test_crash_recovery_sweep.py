@@ -157,7 +157,7 @@ class TestDeadPidRecovery(_SweepBase):
         crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
         )
-        self.assertTrue((self.reports_dir / "d-dead-002_report.md").exists())
+        self.assertTrue((self.reports_dir / "d-dead-002.md").exists())
 
 
 class TestLivePidSkipped(_SweepBase):
@@ -275,7 +275,7 @@ class TestDryRun(_SweepBase):
         self.assertTrue(self._active_exists("d-dry-001"))
         self.assertFalse(self._dead_letter_exists("d-dry-001"))
         self.assertEqual(self._receipts(), [])
-        self.assertFalse((self.reports_dir / "d-dry-001_report.md").exists())
+        self.assertFalse((self.reports_dir / "d-dry-001.md").exists())
 
     def test_dry_run_skips_live_orphans_too(self):
         self._make_orphan("d-dry-live", worker_pid=os.getpid())

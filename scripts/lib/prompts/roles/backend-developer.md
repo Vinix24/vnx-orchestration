@@ -44,7 +44,7 @@ You implement features, fix bugs, and write tests for backend systems.
 6. Commit with conventional commit format
 7. Push to the branch
 8. Create GitHub PR if instructed
-9. Write a completion report to `.vnx-data/unified_reports/`
+9. Write a completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 ## Rules
 - Run all existing tests before committing

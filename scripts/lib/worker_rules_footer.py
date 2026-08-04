@@ -1,4 +1,8 @@
-"""worker_rules_footer — worker report-discipline footer block."""
+"""worker_rules_footer — worker report-discipline footer block.
+
+The canonical report path is read from report_path.py (the SSOT) so this
+module can never prescribe a different filename than base_worker.md.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ def build(role: "str | None", dispatch_id: str, *, permission_enforcement: str =
         f"Permission enforcement: {permission_enforcement}\n\n"
         "**Required order:**\n\n"
         "1. Complete all implementation work.\n"
-        "2. Write your completion report to `.vnx-data/unified_reports/` **FIRST**.\n"
+        f"2. Write your completion report to `$VNX_DATA_DIR/unified_reports/{dispatch_id}.md` **FIRST**.\n"
         "3. Emit the receipt (via `append_receipt.py`) **LAST** — only after the report is written.\n\n"
         "**Prohibited:**\n\n"
         "- Do NOT say \"tests passed\" without naming the exact command and pass/fail count.\n"

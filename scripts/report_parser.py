@@ -68,6 +68,46 @@ class ReportParser:
         except Exception as e:
             return {'error': f'Error reading report: {str(e)}'}
 
+        return self._parse_content(content, markdown_path)
+
+    def parse_by_dispatch_id(
+        self, dispatch_id: str, data_dir: "Optional[Path]" = None
+    ) -> Dict[str, Any]:
+        """Resolve and parse a report from a dispatch_id.
+
+        Uses the shared report_path resolver (``resolve_report_path``) so the
+        correct report is found even when multiple filename forms exist on disk.
+
+        Args:
+            dispatch_id: The dispatch identifier string.
+            data_dir:    Override ``VNX_DATA_DIR`` (resolved from env when *None*).
+
+        Returns:
+            Dictionary with extracted fields (same shape as ``parse_report``),
+            plus ``_ambiguous_report`` and ``_report_path_candidates`` when
+            the resolver found multiple candidates.
+        """
+        try:
+            from report_path import resolve_report_path
+        except ImportError:
+            return {'error': 'report_path resolver not available'}
+
+        resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
+        if resolved is None:
+            return {'error': f'No report found for dispatch: {dispatch_id}'}
+
+        result = self.parse_report(str(resolved.path))
+        if resolved.ambiguous:
+            result['_ambiguous_report'] = True
+            result['_report_path_candidates'] = [
+                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
+                for c in resolved.candidates_found
+            ]
+        return result
+
+    def _parse_content(self, content: str, markdown_path: str) -> Dict[str, Any]:
+        """Parse report content (already read from disk) into enhanced receipt format."""
+
         # Extract all components. ADR-035 §3.3/§9 PR-5: tags/root_cause/
         # dependencies/metrics/used_pattern_hashes are dead weight (zero
         # receipt-field readers, verified) and no longer extracted;
