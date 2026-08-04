@@ -810,6 +810,13 @@ def _commit_and_push_anchor(
 
     branch_name = _seal_branch_name(identity, epoch)
 
+    # OI-975: ``git checkout -B <branch>`` creates a branch and switches to it.
+    # In a dispatch context that must happen inside the dispatch worktree, never
+    # on the main checkout — otherwise the seal parks the operator's HEAD on a
+    # chain-origin branch. Outside a dispatch context this guard is a no-op.
+    from git_target_guard import guard_git_target  # type: ignore[import]
+    project_root = guard_git_target(project_root)
+
     _git_run_checked(project_root, "checkout", "-B", branch_name)
     _git_run_checked(project_root, "add", str(ANCHOR_REL_PATH))
     _git_run_checked(
