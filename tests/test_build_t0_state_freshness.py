@@ -300,6 +300,78 @@ def test_autoclose_degraded_true_when_last_run_stale(tmp_path):
     assert health["autoclose_reason"] == "stale"
 
 
+def test_autoclose_degraded_when_finished_at_indeterminate(tmp_path):
+    """Missing or unparseable finished_at → degraded with reason=indeterminate_age.
+
+    Red on old code: age_hours=None → stale=False, and with gh=ok and no stuck
+    backlog the probe returned autoclose_degraded=False, reason=ok — falsely
+    healthy when the last-run age cannot be determined.
+    """
+    now = datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc)
+
+    # Unparseable finished_at (present but not valid ISO).
+    state_dir = tmp_path / "unparseable"
+    state_dir.mkdir(parents=True)
+    (state_dir / "reconcile_summary.json").write_text(json.dumps({
+        "finished_at": "not-a-valid-iso-timestamp",
+        "evidence_source_health": {"gh": "ok"},
+        "counts": {"nominated": 0, "closed": 0, "unverified": 0},
+    }), encoding="utf-8")
+    health = bts._autoclose_health(state_dir, now=now)
+    assert health["autoclose_degraded"] is True
+    assert health["autoclose_reason"] == "indeterminate_age"
+    assert health["last_reconcile_age_hours"] is None
+
+    # Missing finished_at entirely.
+    state_dir2 = tmp_path / "missing_ts"
+    state_dir2.mkdir(parents=True)
+    (state_dir2 / "reconcile_summary.json").write_text(json.dumps({
+        "evidence_source_health": {"gh": "ok"},
+        "counts": {"nominated": 0, "closed": 0, "unverified": 0},
+    }), encoding="utf-8")
+    health2 = bts._autoclose_health(state_dir2, now=now)
+    assert health2["autoclose_degraded"] is True
+    assert health2["autoclose_reason"] == "indeterminate_age"
+    assert health2["last_reconcile_age_hours"] is None
+
+
+def test_autoclose_degraded_when_counts_malformed(tmp_path):
+    """Non-numeric counts in a valid JSON → degraded with reason=malformed_counts.
+
+    Red on old code: int('not-a-number') raised ValueError outside the try/except
+    that only guards json.loads.  A list counts block raised AttributeError.
+    """
+    now = datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc)
+
+    # Non-numeric string value inside counts.
+    state_dir = tmp_path / "bad_string"
+    state_dir.mkdir(parents=True)
+    (state_dir / "reconcile_summary.json").write_text(json.dumps({
+        "finished_at": "2026-08-04T08:00:00Z",
+        "evidence_source_health": {"gh": "ok"},
+        "counts": {"nominated": "not-a-number", "closed": 0, "unverified": 0},
+    }), encoding="utf-8")
+    health = bts._autoclose_health(state_dir, now=now)
+    assert health["autoclose_degraded"] is True
+    assert health["autoclose_reason"] == "malformed_counts"
+    assert health["nominated_not_closed"] is None
+    # Timestamp info should still be propagated even when counts are malformed.
+    assert health["last_reconcile_at"] == "2026-08-04T08:00:00Z"
+    assert health["last_reconcile_age_hours"] == 2.0
+
+    # Counts is a list instead of a dict.
+    state_dir2 = tmp_path / "bad_list"
+    state_dir2.mkdir(parents=True)
+    (state_dir2 / "reconcile_summary.json").write_text(json.dumps({
+        "finished_at": "2026-08-04T08:00:00Z",
+        "evidence_source_health": {"gh": "ok"},
+        "counts": [1, 2, 3],
+    }), encoding="utf-8")
+    health2 = bts._autoclose_health(state_dir2, now=now)
+    assert health2["autoclose_degraded"] is True
+    assert health2["autoclose_reason"] == "malformed_counts"
+
+
 # ---------------------------------------------------------------------------
 # SessionStart hook command (F5: a quoting bug here breaks every session start)
 # ---------------------------------------------------------------------------
