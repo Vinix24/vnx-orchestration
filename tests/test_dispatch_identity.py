@@ -61,10 +61,18 @@ def test_resolve_respects_project_id_composite_key(tmp_path):
     assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
 
 
-def test_resolve_backend_developer_returns_none(tmp_path):
-    # The fake default must not be propagated into the receipt trail.
-    _make_db(tmp_path, [("disp-1", "vnx-dev", "backend-developer")])
+def test_resolve_empty_sentinel_returns_none(tmp_path):
+    # OI-981: the fake sentinel "" must not be propagated into the receipt trail.
+    _make_db(tmp_path, [("disp-1", "vnx-dev", "")])
     assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) is None
+
+
+def test_resolve_backend_developer_is_real_role(tmp_path):
+    # OI-981: backend-developer is now a REAL role, not a sentinel. A deliberately
+    # chosen backend-developer role must resolve normally — the key assertion of
+    # OI-981: a chosen role is distinguishable from a failed resolution.
+    _make_db(tmp_path, [("disp-1", "vnx-dev", "backend-developer")])
+    assert resolve_dispatch_role("disp-1", "vnx-dev", state_dir=tmp_path) == "backend-developer"
 
 
 def test_resolve_null_or_empty_role_returns_none(tmp_path):
@@ -116,9 +124,15 @@ def test_normalize_role_strips_and_keeps_real_role():
     assert normalize_role("  debugger  ") == "debugger"
 
 
-def test_normalize_role_fake_default_returns_none():
-    # The fake backend-developer default must never be persisted.
-    assert normalize_role("backend-developer") is None
+def test_normalize_role_fake_sentinel_returns_none():
+    # OI-981: the fake sentinel "" must never be persisted.
+    assert normalize_role("") is None
+
+
+def test_normalize_role_backend_developer_is_real_role():
+    # OI-981: backend-developer is now a REAL role, not a sentinel. A
+    # deliberately chosen backend-developer role must be preserved.
+    assert normalize_role("backend-developer") == "backend-developer"
 
 
 def test_normalize_role_empty_or_none_returns_none():
@@ -136,3 +150,41 @@ def test_extract_role_from_instruction_absent_returns_none():
     assert extract_role_from_instruction("no header here") is None
     assert extract_role_from_instruction("") is None
     assert extract_role_from_instruction(None) is None
+
+
+# ---------------------------------------------------------------------------
+# OI-981: sentinel "" vs deliberately-chosen backend-developer are distinguishable
+# ---------------------------------------------------------------------------
+
+
+def test_oi981_backend_developer_is_real_role_via_resolve_effective(tmp_path):
+    """OI-981 key assertion: a deliberately chosen backend-developer role is
+    distinguishable from a failed role resolution (sentinel "").
+
+    Before OI-981: backend-developer WAS the sentinel — both the chosen role
+    and the "no role resolved" case shared the same string. After the fix, the
+    sentinel is "" (empty), and backend-developer is a normal real role.
+    """
+    _make_db(tmp_path, [("disp-oi981", "vnx-dev", "backend-developer")])
+
+    # Case 1: role="" (sentinel) → falls back to dispatch_metadata or identity_unresolved.
+    # With no DB role for this dispatch: identity_unresolved.
+    from dispatch_identity import resolve_effective_role
+    assert resolve_effective_role("", "disp-oi981-missing", "vnx-dev", state_dir=tmp_path) == "identity_unresolved"
+
+    # Case 2: role="backend-developer" (real chosen role) → returns backend-developer.
+    assert resolve_effective_role("backend-developer", "disp-oi981-any", "vnx-dev", state_dir=tmp_path) == "backend-developer"
+
+    # The two outcomes are different — the sentinel and real role are now structurally distinct.
+    # Before OI-981, both would have returned "backend-developer" (indistinguishable).
+
+
+def test_oi981_sentinel_distinct_in_normalize_role():
+    """OI-981: normalize_role distinguishes the sentinel "" from the real role
+    backend-developer."""
+    # Sentinel "" → None (no real role to persist)
+    assert normalize_role("") is None
+    # Real role "backend-developer" → preserved as-is
+    assert normalize_role("backend-developer") == "backend-developer"
+    # Also test through strip: whitespace-sentinel
+    assert normalize_role("  ") is None

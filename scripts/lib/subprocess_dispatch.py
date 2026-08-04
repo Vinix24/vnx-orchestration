@@ -30,7 +30,10 @@ from pathlib import Path
 
 # OI-1107: Extract Role: header from instruction text when --role is not passed.
 _ROLE_HEADER_RE = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
-_ROLE_FALLBACK = "backend-developer"
+# OI-981: changed from "backend-developer" to "" so a deliberately-chosen
+# backend-developer role is structurally distinguishable from a failed
+# role resolution. An empty string can never be a real role.
+_ROLE_FALLBACK = ""
 
 
 def _extract_role_from_instruction(instruction: str) -> str | None:

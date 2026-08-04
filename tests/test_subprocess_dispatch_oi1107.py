@@ -62,7 +62,10 @@ class TestExtractRoleFromInstruction:
         assert _extract_role_from_instruction(instruction) is None
 
     def test_role_fallback_constant_is_documented(self):
-        assert _ROLE_FALLBACK == "backend-developer"
+        # OI-981: sentinel changed from "backend-developer" to "" so a
+        # deliberately-chosen backend-developer role is distinguishable from
+        # a failed role resolution.
+        assert _ROLE_FALLBACK == ""
 
 
 class TestMainBlockRoleResolution:

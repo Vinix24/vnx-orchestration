@@ -27,10 +27,13 @@ logger = logging.getLogger(__name__)
 
 # The fake default stamped by writers that never resolved a real role. The
 # trail must stop propagating it — treated as "no real role".
-_FAKE_DEFAULT_ROLE = "backend-developer"
+# OI-981: changed from "backend-developer" to "" so a deliberately-chosen
+# backend-developer role is structurally distinguishable from a failed
+# role resolution. An empty string can never be a real role.
+_FAKE_DEFAULT_ROLE = ""
 
 # Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
-# backend-developer default (receipt-quality track).
+# sentinel default "" (receipt-quality track, OI-981).
 _IDENTITY_UNRESOLVED = "identity_unresolved"
 
 # Receipt-quality PR-4: instruction-header source used by the write-time
@@ -42,7 +45,7 @@ def normalize_role(role: Optional[str]) -> Optional[str]:
     """Normalize a write-time role value.
 
     Returns the stripped role, or None when the value is empty/None or the
-    fake ``backend-developer`` default. Writers must persist NULL instead of
+    fake sentinel ``""`` (empty string). Writers must persist NULL instead of
     the fake literal so the emit-side resolver stamps ``identity_unresolved``
     rather than propagating a fabricated identity.
     """
@@ -131,7 +134,7 @@ def resolve_dispatch_role(
 
     Queries ``dispatch_metadata`` on the ADR-007 composite key, latest row
     wins. Returns None for missing rows, null/empty roles, and the literal
-    ``"backend-developer"`` fake default. FAIL-OPEN: never raises.
+    ``""`` fake sentinel. FAIL-OPEN: never raises.
     """
     try:
         if not dispatch_id or not project_id:
@@ -183,7 +186,7 @@ def resolve_effective_role(
     ``provider_dispatch._emit_governance``, ``report_to_receipt_converter``).
 
     Order:
-      1. A genuinely-set caller role (never the fake ``backend-developer``
+      1. A genuinely-set caller role (never the fake sentinel ``""``
          default, which writers stamp when they never resolved a real role).
       2. ``dispatch_metadata`` via the ADR-007 composite key
          (``dispatch_id``, ``project_id``) — the fallback for writers that

@@ -157,14 +157,14 @@ def test_envelope_no_role_never_stamps_backend_developer(tmp_path, monkeypatch):
 
 
 def test_envelope_sentinel_spec_role_falls_through_to_db(tmp_path, monkeypatch):
-    """A spec role of the literal fake default must fall through to the DB, not propagate."""
+    """OI-981: the sentinel "" spec role must fall through to the DB, not propagate."""
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.delenv("VNX_STATE_DIR", raising=False)
     _make_metadata_db(tmp_path / "state", [("role-prop-006", "vnx-dev", "reviewer")])
 
-    spec = _make_spec(tmp_path, role="backend-developer", dispatch_id="role-prop-006")
+    spec = _make_spec(tmp_path, role="", dispatch_id="role-prop-006")
     receipt = _run_govern(spec)
 
     assert receipt.get("role") == "reviewer", (
-        f"fake default should fall through to the DB row; got role={receipt.get('role')!r}"
+        f"sentinel should fall through to the DB row; got role={receipt.get('role')!r}"
     )

@@ -124,10 +124,8 @@ def test_metadata_row_written_when_session_id_flag_set(tmp_path, monkeypatch, fa
 
 
 def test_metadata_fake_default_role_normalized_to_null(tmp_path, monkeypatch, fake_govern):
-    """Receipt-quality PR-4: the fake backend-developer default is NEVER stored
-    verbatim — the writer normalizes it to NULL so the emit-side resolver
-    stamps identity_unresolved (new contract; supersedes the old
-    store-the-fake-literal behaviour)."""
+    """OI-981: the sentinel "" is NEVER stored verbatim — the writer normalizes
+    it to NULL so the emit-side resolver stamps identity_unresolved."""
     monkeypatch.setenv("VNX_TMUX_SESSION_ID", "1")
     state_dir = _bootstrap_state(tmp_path)
     lane = _make_lane(state_dir)
@@ -139,7 +137,7 @@ def test_metadata_fake_default_role_normalized_to_null(tmp_path, monkeypatch, fa
         receipt={"status": "done"},
         duration_seconds=1.0,
         model="sonnet",
-        role="backend-developer",
+        role="",
     )
 
     db = state_dir / "quality_intelligence.db"

@@ -137,8 +137,8 @@ def _govern(
             try:
                 # receipt-quality PR-1 + W7 fix: resolve dispatch identity
                 # (role) just before the emit. The shared resolver prefers the
-                # genuinely-set spec role (never the fake backend-developer
-                # default), falls back to dispatch_metadata, then stamps
+                # genuinely-set spec role (never the fake sentinel ""
+                # default, OI-981), falls back to dispatch_metadata, then stamps
                 # identity_unresolved. FAIL-OPEN — a resolver error must never
                 # break receipt emission.
                 try:
@@ -158,12 +158,14 @@ def _govern(
                     )
                     _role = "identity_unresolved"
 
-                # Deterministic role-applied control (dispatch-20260801-w10):
-                # did the resolved role source actually reach the enriched prompt
-                # (spec.instruction)? FAIL-OPEN — a verification error must never
-                # break receipt emission; the fields simply stay None (omitted).
+                # Deterministic role-applied control (dispatch-20260801-w10 +
+                # OI-983): did the resolved role source actually reach the enriched
+                # prompt (spec.instruction)? Verified against the SAME resolved
+                # _role that is stamped on the receipt so role_applied is truthful.
+                # FAIL-OPEN — a verification error must never break receipt
+                # emission; the fields simply stay None (omitted).
                 _role_app = _verify_role_application(
-                    spec.instruction, spec.terminal_id, spec.role,
+                    spec.instruction, spec.terminal_id, _role,
                 )
 
                 # receipt-quality PR-B2 fix-forward (Finding C): aggregate

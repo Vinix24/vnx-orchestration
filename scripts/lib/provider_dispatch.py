@@ -298,7 +298,12 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
         enriched = f"{header}\n\n{enriched}"
 
     # Deterministic control: did the resolved role source actually reach the prompt?
+    # OI-983: the verification below runs with the RAW args.role. The resolved _role
+    # (from dispatch_identity) may differ when args.role is the sentinel "" or None
+    # but dispatch_metadata carries a real role. Stash the enriched instruction so
+    # _emit_governance can re-verify with the RESOLVED role after resolution.
     args._role_application = _verify_role_application(enriched, args)
+    args._enriched_instruction = enriched
 
     args._final_prompt_integrity = _record_final_prompt_integrity(
         dispatch_id=args.dispatch_id,
@@ -584,8 +589,8 @@ def _record_provider_metadata(
         db_path = Path(state_dir) / "quality_intelligence.db"
         terminal = getattr(args, "terminal_id", "") or ""
         # Receipt-quality PR-4: capture-gap backfill at metadata-WRITE time.
-        # Derive a genuine role: normalize the fake backend-developer default
-        # away, then recover from the instruction's "Role:" header. Where no
+        # Derive a genuine role: normalize the fake sentinel "" away (OI-981),
+        # then recover from the instruction's "Role:" header. Where no
         # real role is derivable, leave null — the resolver stamps
         # identity_unresolved at emit.
         role = getattr(args, "role", None)
@@ -749,9 +754,18 @@ def _emit_governance(
     # args that never set the attribute yields a real None via vars().get().
     _role_app = vars(args).get("_role_application")
 
+    # OI-983: when the raw args.role differs from the resolved _role, re-verify
+    # with the RESOLVED role so role_applied is checked against the SAME value
+    # that is stamped as "role" on this receipt. The raw verification above (by
+    # _enrich_instruction) was against args.role — if that was the sentinel ""
+    # or None but dispatch_metadata resolved to "quality-engineer", the raw
+    # verdict and the receipt role would disagree. FAIL-OPEN — a re-verification
+    # error must never break receipt emission; fall back to the raw verdict.
+    _enriched_instruction = vars(args).get("_enriched_instruction")
+
     # receipt-quality PR-1 + W7 fix: resolve dispatch identity (role) just
     # before the emit. The shared resolver prefers the genuinely-set --role
-    # (never the fake backend-developer default), falls back to
+    # (never the fake sentinel "" default, OI-981), falls back to
     # dispatch_metadata, then stamps identity_unresolved. FAIL-OPEN — a
     # resolver error must never break receipt emission.
     try:
@@ -770,6 +784,26 @@ def _emit_governance(
             exc_info=True,
         )
         _role = "identity_unresolved"
+
+    # OI-983: re-verify role_applied with the resolved _role when the enriched
+    # instruction is available and the resolved role differs from the raw one.
+    # This guarantees the role_applied field on the receipt was checked against
+    # the SAME role value stamped as "role". FAIL-OPEN — a verification error
+    # leaves _role_app at its raw value (from _enrich_instruction).
+    if _enriched_instruction is not None and _role != getattr(args, "role", None):
+        try:
+            from role_application import verify_role_applied  # noqa: PLC0415
+            _role_app = verify_role_applied(
+                _enriched_instruction,
+                getattr(args, "terminal_id", ""),
+                _role,
+            )
+        except Exception:  # noqa: BLE001 — verification must never break a dispatch
+            logger.debug(
+                "_emit_governance: role_applied re-verify failed open dispatch=%s (non-fatal)",
+                getattr(args, "dispatch_id", "?"),
+                exc_info=True,
+            )
 
     # receipt-quality PR-B2: aggregate PreToolUse-hook tool-call signals for
     # this dispatch (scripts/lib/toolcall_signals.py). FAIL-OPEN — an
