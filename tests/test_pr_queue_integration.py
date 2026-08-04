@@ -20,6 +20,15 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from pr_queue_manager import PRQueueManager
 from generate_t0_recommendations import RecommendationEngine
 
+# Capture the pristine module-global paths at import time, before any clean_state
+# fixture can reassign them. RecommendationEngine reads these globals at call
+# time, so a leak would make it read a foreign pr_queue_state.yaml for the rest
+# of the session. test_clean_state_does_not_leak_recs_module_globals asserts the
+# fixture restores them (OI-953).
+import generate_t0_recommendations as _recs
+_RECS_STATE_DIR_AT_IMPORT = _recs.STATE_DIR
+_RECS_PR_QUEUE_STATE_FILE_AT_IMPORT = _recs.PR_QUEUE_STATE_FILE
+
 
 @pytest.fixture
 def clean_state(tmp_path, monkeypatch):
@@ -36,22 +45,29 @@ def clean_state(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "0")
 
     import generate_t0_recommendations as recs
-    recs.VNX_ROOT = Path(os.environ.get("VNX_HOME", tmp_path))
-    recs.STATE_DIR = state_dir
-    recs.DISPATCHES_DIR = tmp_path / "dispatches"
-    recs.LEGACY_STATE_DIR = recs.VNX_ROOT / "state"
-    recs.LEGACY_DISPATCHES_DIR = recs.VNX_ROOT / "dispatches"
-    recs.RECEIPTS_FILE = state_dir / "t0_receipts.ndjson"
-    recs.RECOMMENDATIONS_FILE = state_dir / "t0_recommendations.json"
-    recs.ACTIVE_CONFLICTS_FILE = state_dir / "active_conflicts.json"
-    recs.PR_QUEUE_STATE_FILE = state_dir / "pr_queue_state.yaml"
-    recs.OPEN_ITEMS_DIGEST_FILE = state_dir / "open_items_digest.json"
-    recs.STAGING_SEEN_FILE = state_dir / "staging_seen.json"
-    recs.LEGACY_RECEIPTS_FILE = recs.LEGACY_STATE_DIR / "t0_receipts.ndjson"
-    recs.LEGACY_RECOMMENDATIONS_FILE = recs.LEGACY_STATE_DIR / "t0_recommendations.json"
-    recs.LEGACY_PR_QUEUE_STATE_FILE = recs.LEGACY_STATE_DIR / "pr_queue_state.yaml"
-    recs.LEGACY_OPEN_ITEMS_DIGEST_FILE = recs.LEGACY_STATE_DIR / "open_items_digest.json"
-    recs.LEGACY_STAGING_SEEN_FILE = recs.LEGACY_STATE_DIR / "staging_seen.json"
+    # OI-953: scope the module-global reassignments to this test via monkeypatch.
+    # A bare assignment persists on generate_t0_recommendations for the rest of
+    # the session, so any later module (test_pr_recommendation_integration.py)
+    # that instantiates RecommendationEngine reads the LAST clean_state tmp dir's
+    # pr_queue_state.yaml instead of its own — the OI-953 "assert 'E2E Test
+    # Feature' == 'Test Feature'" red when test_pr_queue runs first in the CI
+    # sweep. monkeypatch restores each global after the test.
+    monkeypatch.setattr(recs, "VNX_ROOT", Path(os.environ.get("VNX_HOME", tmp_path)))
+    monkeypatch.setattr(recs, "STATE_DIR", state_dir)
+    monkeypatch.setattr(recs, "DISPATCHES_DIR", tmp_path / "dispatches")
+    monkeypatch.setattr(recs, "LEGACY_STATE_DIR", recs.VNX_ROOT / "state")
+    monkeypatch.setattr(recs, "LEGACY_DISPATCHES_DIR", recs.VNX_ROOT / "dispatches")
+    monkeypatch.setattr(recs, "RECEIPTS_FILE", state_dir / "t0_receipts.ndjson")
+    monkeypatch.setattr(recs, "RECOMMENDATIONS_FILE", state_dir / "t0_recommendations.json")
+    monkeypatch.setattr(recs, "ACTIVE_CONFLICTS_FILE", state_dir / "active_conflicts.json")
+    monkeypatch.setattr(recs, "PR_QUEUE_STATE_FILE", state_dir / "pr_queue_state.yaml")
+    monkeypatch.setattr(recs, "OPEN_ITEMS_DIGEST_FILE", state_dir / "open_items_digest.json")
+    monkeypatch.setattr(recs, "STAGING_SEEN_FILE", state_dir / "staging_seen.json")
+    monkeypatch.setattr(recs, "LEGACY_RECEIPTS_FILE", recs.LEGACY_STATE_DIR / "t0_receipts.ndjson")
+    monkeypatch.setattr(recs, "LEGACY_RECOMMENDATIONS_FILE", recs.LEGACY_STATE_DIR / "t0_recommendations.json")
+    monkeypatch.setattr(recs, "LEGACY_PR_QUEUE_STATE_FILE", recs.LEGACY_STATE_DIR / "pr_queue_state.yaml")
+    monkeypatch.setattr(recs, "LEGACY_OPEN_ITEMS_DIGEST_FILE", recs.LEGACY_STATE_DIR / "open_items_digest.json")
+    monkeypatch.setattr(recs, "LEGACY_STAGING_SEEN_FILE", recs.LEGACY_STATE_DIR / "staging_seen.json")
 
     # Clean up test files
     test_files = [
@@ -696,6 +712,31 @@ class TestWorkflowIntegration:
                 dispatch_file = staging_dir / f"{dispatch_id}.md"
                 if dispatch_file.exists():
                     dispatch_file.unlink()
+
+
+def test_clean_state_does_not_leak_recs_module_globals():
+    """OI-953 regression: clean_state's generate_t0_recommendations module-global
+    reassignments must be scoped to the fixture.
+
+    Before the monkeypatch fix, the last clean_state test left STATE_DIR and
+    PR_QUEUE_STATE_FILE pointing at its tmp dir for the rest of the session.
+    test_pr_recommendation_integration.py (which runs after this file in the CI
+    sweep, and whose RecommendationEngine reads those globals at call time) then
+    read the stale 'E2E Test Feature' queue left here — the OI-953
+    "assert 'E2E Test Feature' == 'Test Feature'" red. This test runs last in
+    this file (definition order), so every clean_state test has executed and any
+    leak would already have happened.
+    """
+    import generate_t0_recommendations as recs
+
+    assert recs.STATE_DIR == _RECS_STATE_DIR_AT_IMPORT, (
+        f"recs.STATE_DIR leaked to {recs.STATE_DIR!s}; "
+        f"expected it restored to the import-time value {_RECS_STATE_DIR_AT_IMPORT!s}"
+    )
+    assert recs.PR_QUEUE_STATE_FILE == _RECS_PR_QUEUE_STATE_FILE_AT_IMPORT, (
+        "recs.PR_QUEUE_STATE_FILE leaked out of the import-time isolation tree; "
+        "a later RecommendationEngine() would read a foreign, stale queue state"
+    )
 
 
 if __name__ == "__main__":

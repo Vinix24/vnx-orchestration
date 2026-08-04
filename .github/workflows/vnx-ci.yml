@@ -42,7 +42,10 @@ jobs:
           # nx.pagerank crashes on the missing numpy — measured 2026-08-02:
           # test_repo_map_provider_coverage.py (green on main) fails 2 tests with
           # networkx present, passes 11/11 without it.
-          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2
+          # build is required by tests/test_wheel_build.py::test_wheel_builds
+          # (python -m build --wheel); without it that test fails in this image
+          # with "No module named build" (OI-953).
+          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 build
 
       - name: Prepare expected repo layout
         run: |
