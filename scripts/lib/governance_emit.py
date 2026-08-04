@@ -108,6 +108,9 @@ def emit_dispatch_receipt(
     task_class: Optional[str] = None,
     tier_from: Optional[str] = None,
     tier_to: Optional[str] = None,
+    permission_posture: Optional[str] = None,
+    permission_profile: Optional[str] = None,
+    permission_allow_pattern_count: Optional[int] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -191,6 +194,15 @@ def emit_dispatch_receipt(
     stamped when the dispatch failed so the receipt carries a distinguishable
     reason instead of a silent "(no error captured)" log line. Conditionally
     stamped (omitted on success).
+
+    ``permission_posture`` / ``permission_profile`` / ``permission_allow_
+    pattern_count``: OI-864 — the ACTUAL spawn-time permission posture
+    (``"blanket-skip"`` | ``"scoped-allowlist"`` | ``"attached-interactive"``),
+    classified by the caller from the real launch flags/argv (see
+    ``worker_permissions.classify_permission_posture``), never re-derived from
+    env vars in this function. ``permission_profile`` / ``_allow_pattern_
+    count`` are only meaningful for ``"scoped-allowlist"``. Conditionally
+    stamped (None omits).
 
     Raises:
         ValueError: provider field doesn't match required pattern, or
@@ -285,6 +297,9 @@ def emit_dispatch_receipt(
         task_class=task_class,
         tier_from=tier_from,
         tier_to=tier_to,
+        permission_posture=permission_posture,
+        permission_profile=permission_profile,
+        permission_allow_pattern_count=permission_allow_pattern_count,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"

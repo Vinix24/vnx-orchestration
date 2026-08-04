@@ -154,6 +154,16 @@ class ReceiptV2:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    # OI-864: the ACTUAL spawn-time permission posture, classified from the
+    # real launch flags (worker_permissions.classify_permission_posture) —
+    # never from re-reading VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED.
+    # One of "blanket-skip" | "scoped-allowlist" | "attached-interactive".
+    # permission_profile / permission_allow_pattern_count are only meaningful
+    # (and only stamped) for "scoped-allowlist". Conditionally stamped (None
+    # omits), same as the other optional fields.
+    permission_posture: Optional[str] = None
+    permission_profile: Optional[str] = None
+    permission_allow_pattern_count: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -245,6 +255,12 @@ class ReceiptV2:
             receipt["tier_from"] = self.tier_from
         if self.tier_to is not None:
             receipt["tier_to"] = self.tier_to
+        if self.permission_posture is not None:
+            receipt["permission_posture"] = self.permission_posture
+        if self.permission_profile is not None:
+            receipt["permission_profile"] = self.permission_profile
+        if self.permission_allow_pattern_count is not None:
+            receipt["permission_allow_pattern_count"] = self.permission_allow_pattern_count
         return receipt
 
 
@@ -287,6 +303,12 @@ class SynthesizedLaneReceipt:
     # Conditionally stamped (is-not-None).
     worker_permission_enforcement: Optional[str] = None
     report_path: Optional[str] = None
+    # OI-864: see ReceiptV2 for semantics — same fields, same classification
+    # source (worker_permissions.classify_permission_posture from the actual
+    # spawn flags), stamped on the lane-synthesized fallback receipt too.
+    permission_posture: Optional[str] = None
+    permission_profile: Optional[str] = None
+    permission_allow_pattern_count: Optional[int] = None
 
     def __post_init__(self) -> None:
         self.receipt_kind = validate_receipt_kind(self.receipt_kind)
@@ -329,6 +351,12 @@ class SynthesizedLaneReceipt:
             receipt["tier_from"] = self.tier_from
         if self.tier_to is not None:
             receipt["tier_to"] = self.tier_to
+        if self.permission_posture is not None:
+            receipt["permission_posture"] = self.permission_posture
+        if self.permission_profile is not None:
+            receipt["permission_profile"] = self.permission_profile
+        if self.permission_allow_pattern_count is not None:
+            receipt["permission_allow_pattern_count"] = self.permission_allow_pattern_count
         return receipt
 
 

@@ -38,6 +38,7 @@ try:
     from worker_permissions import (
         worker_permission_enforcement_enabled,
         worker_scoped_enabled,
+        classify_permission_posture,
     )
 except Exception:  # pragma: no cover - sibling import is available in-tree
     def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
@@ -49,6 +50,24 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
         return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
             "1", "true", "yes", "on",
         )
+
+    def classify_permission_posture(argv, role=None):  # type: ignore[misc]
+        # OI-864 fallback: classify from actual argv tokens, not env re-reads.
+        if "--dangerously-skip-permissions" in argv:
+            return {"permission_posture": "blanket-skip"}
+        if "--permission-mode" in argv or "--allowedTools" in argv:
+            allow_count = 0
+            if "--allowedTools" in argv:
+                idx = argv.index("--allowedTools")
+                if idx + 1 < len(argv):
+                    allow_count = len([p for p in argv[idx + 1].split(",") if p.strip()])
+            return {
+                "permission_posture": "scoped-allowlist",
+                "permission_profile": role or "code-worker",
+                "permission_allow_pattern_count": allow_count,
+            }
+        return {"permission_posture": "attached-interactive"}
+
 
 # Providers whose spawn handlers exist.
 _IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "glm-harness", "local-gemma"}
@@ -634,8 +653,17 @@ def _emit_governance(
     status: str,
     *,
     event_store: "Optional[Any]" = None,
+    permission_posture: "Optional[Dict[str, Any]]" = None,
 ) -> None:
     """Emit dispatch receipt + unified report after every spawn handler call.
+
+    ``permission_posture`` (OI-864): optional dict from
+    ``worker_permissions.classify_permission_posture()``, computed by the
+    caller from the ACTUAL spawn flags/argv (e.g. the claude-benchmark path
+    in ``_dispatch_claude_benchmark``). When provided, its fields are stamped
+    onto the receipt alongside (not instead of) the existing
+    ``permission_enforcement`` marker below — which stays derived exactly as
+    before for every other caller/provider that does not pass this.
 
     When *event_store* is provided the function archives the live event stream
     (terminal → events/archive/{terminal}/{dispatch_id}.ndjson) BEFORE writing
@@ -810,6 +838,15 @@ def _emit_governance(
                 events_path=events_path,
                 permission_enforcement=(
                     "enforced" if worker_permission_enforcement_enabled() else None
+                ),
+                permission_posture=(
+                    (permission_posture or {}).get("permission_posture")
+                ),
+                permission_profile=(
+                    (permission_posture or {}).get("permission_profile")
+                ),
+                permission_allow_pattern_count=(
+                    (permission_posture or {}).get("permission_allow_pattern_count")
                 ),
                 mandate_id=getattr(args, "mandate_id", None),
                 final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
@@ -1236,6 +1273,25 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         skip_permissions = not (
             worker_permission_enforcement_enabled() or worker_scoped_enabled()
         )
+        # OI-864: classify the REAL posture from the actual argv
+        # SubprocessAdapter.deliver() will build for this spawn (same
+        # requires_mcp/role inputs), instead of a third independent read of
+        # VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED (which can diverge
+        # from `skip_permissions` above — e.g. VNX_WORKER_SCOPED=1 alone).
+        # Best-effort: a classification failure must never break the benchmark.
+        _permission_posture: "Optional[dict]" = None
+        try:
+            from subprocess_adapter import _build_worker_scope_args  # noqa: PLC0415
+            _scope_argv = _build_worker_scope_args(
+                role, requires_mcp=getattr(args, "requires_mcp", False)
+            )
+            _permission_posture = classify_permission_posture(_scope_argv, role)
+        except Exception as _posture_exc:  # noqa: BLE001
+            logger.debug(
+                "_dispatch_claude_benchmark: permission posture classification "
+                "failed for dispatch=%s (non-fatal): %s",
+                args.dispatch_id, _posture_exc,
+            )
         result = spawn_claude(
             prompt=instruction,
             model=args.model,
@@ -1252,13 +1308,22 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
 
         if result.error or result.timed_out:
             status = "timeout" if result.timed_out else "failure"
-            _emit_governance(args, "claude", args.model, result, start_time, end_time, status, event_store=event_store)
+            _emit_governance(
+                args, "claude", args.model, result, start_time, end_time, status,
+                event_store=event_store, permission_posture=_permission_posture,
+            )
             print(f"spawn_claude failed: {result.error or 'timeout'}", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, "claude", args.model, result, start_time, end_time, "failure", event_store=event_store)
+            _emit_governance(
+                args, "claude", args.model, result, start_time, end_time, "failure",
+                event_store=event_store, permission_posture=_permission_posture,
+            )
             return 1
-        _emit_governance(args, "claude", args.model, result, start_time, end_time, "success", event_store=event_store)
+        _emit_governance(
+            args, "claude", args.model, result, start_time, end_time, "success",
+            event_store=event_store, permission_posture=_permission_posture,
+        )
         return 0
     finally:
         _event_store_safety_net(event_store, args)
