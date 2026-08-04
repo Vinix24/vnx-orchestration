@@ -132,12 +132,14 @@ class ExecutionPlan:
                                         # MCP access changes worker behavior, so a permit for a
                                         # requires_mcp plan must not validate a force-empty plan.
 
-    def digest(self) -> str:
-        """Stable sha256 over the canonical, order-independent field set.
+    def canonical_dict(self) -> dict:
+        """Return the canonical, order-independent decision dict.
 
-        Excludes advisory warnings. Used by ExecutionPermit (satisfies PlanLike).
+        This is the same dict that digest() hashes — extracting it lets the door
+        persist the full routing decision alongside the fingerprint (OI-849).
+        Excludes advisory fields (warnings, role, pr_id, chain-link metadata).
         """
-        canonical = {
+        return {
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "provider": self.provider.value,
@@ -168,7 +170,13 @@ class ExecutionPlan:
                 for dp in self.dispatch_paths
             ],
         }
-        blob = json.dumps(canonical, sort_keys=True, ensure_ascii=True)
+
+    def digest(self) -> str:
+        """Stable sha256 over the canonical, order-independent field set.
+
+        Excludes advisory warnings. Used by ExecutionPermit (satisfies PlanLike).
+        """
+        blob = json.dumps(self.canonical_dict(), sort_keys=True, ensure_ascii=True)
         return hashlib.sha256(blob.encode()).hexdigest()
 
 

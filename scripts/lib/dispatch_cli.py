@@ -1371,6 +1371,70 @@ def _execute_claude_headless(
 
 
 # ---------------------------------------------------------------------------
+# OI-849 — route decision persistence
+# ---------------------------------------------------------------------------
+
+def _persist_route_decision(
+    plan: ExecutionPlan,
+    permit: ExecutionPermit,
+    *,
+    state_dir: Path,
+) -> None:
+    """Persist the canonical routing decision alongside the permit fingerprint.
+
+    Writes to two locations in the existing route_decisions stream:
+    1. state_dir/route_decisions.ndjson — append-locked NDJSON record
+    2. state_dir/route_decisions/<dispatch_id>.json — per-dispatch atomic file
+
+    The stored canonical dict is the same one digest() hashes, so the fingerprint
+    can be verified against it later — a stored decision that can't be linked to
+    its permit would repeat the same problem one layer higher (OI-849).
+
+    Never blocks the door: any failure logs a WARN and the dispatch continues.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+
+    from state_writer import append_locked
+
+    try:
+        canonical = plan.canonical_dict()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        record = {
+            "timestamp": timestamp,
+            "dispatch_id": plan.dispatch_id,
+            "fingerprint": f"{permit.plan_digest[:12]}-{permit.dispatch_id}",
+            "plan_digest": permit.plan_digest,
+            "decision": canonical,
+        }
+
+        # 1. Append to shared NDJSON under the sentinel + data-file locks.
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        append_locked(ndjson_path, record)
+
+        # 2. Write per-dispatch JSON atomically so receipt-converter and other
+        #    consumers can look up a single dispatch's decision by id.
+        per_dispatch_dir = state_dir / "route_decisions"
+        per_dispatch_dir.mkdir(parents=True, exist_ok=True)
+        per_dispatch_path = per_dispatch_dir / f"{plan.dispatch_id}.json"
+        tmp = per_dispatch_path.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(per_dispatch_path)
+
+        logger.info(
+            "[dispatch_cli] route decision persisted: dispatch=%s fingerprint=%s",
+            plan.dispatch_id,
+            f"{permit.plan_digest[:12]}-{permit.dispatch_id}",
+        )
+    except Exception as exc:  # vnx-silent-except: route-decision persistence is best-effort; must never block the door
+        logger.warning(
+            "[dispatch_cli] WARN route decision persist failed for dispatch=%s: %s",
+            plan.dispatch_id,
+            exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # run_dispatch — the single door
 # ---------------------------------------------------------------------------
 
@@ -1513,6 +1577,12 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             raise _InvariantViolation(f"permit invariant breached: {exc}") from exc
         fp = fingerprint(permit)
         logger.info("[dispatch_cli] permit fingerprint: %s", fp)
+
+        # OI-849: persist the full canonical routing decision alongside the
+        # permit fingerprint so "which model got this task and why" is
+        # answerable after the fact. Best-effort — never blocks the door.
+        if not dry_run:
+            _persist_route_decision(plan, permit, state_dir=state_dir)
 
         if dry_run:
             _print_plan(plan, fp)
