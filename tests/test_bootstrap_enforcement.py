@@ -96,12 +96,19 @@ class TestGetDirsBootOne(unittest.TestCase):
         )
 
     def test_raises_when_both_data_and_state_unset(self):
-        """Exit 1 with error message when VNX_DATA_DIR and VNX_STATE_DIR are both unset."""
+        """Compat-check succeeds via git-based resolution when env vars are unset.
+
+        The old fail-closed env-var guard has been replaced by file-based resolution
+        (resolve_state_dir / resolve_data_dir in project_root.py). When VNX_DATA_DIR
+        and VNX_STATE_DIR are both unset in a git repo, the resolver falls through to
+        ``git rev-parse --show-toplevel`` and derives a valid project root — the check
+        must complete without a crash or tmp fallback.
+        """
         result = self._run_cli({})
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0)
         combined = result.stdout + result.stderr
-        self.assertIn("VNX_STATE_DIR", combined)
-        self.assertIn("VNX_DATA_DIR", combined)
+        self.assertNotIn("/tmp/vnx-state", combined)
+        self.assertNotIn("/tmp/vnx-dispatches", combined)
 
     def test_no_tmp_fallback_in_output(self):
         """Error output must not mention /tmp as a fallback path."""
@@ -124,14 +131,20 @@ class TestGetDirsBootOne(unittest.TestCase):
             self.assertNotIn("/tmp/vnx-dispatches", result.stdout)
 
     def test_raises_when_dispatch_dir_unset_no_data_dir(self):
-        """Exit 1 when VNX_DISPATCH_DIR is absent and VNX_DATA_DIR is also absent."""
+        """Compat-check succeeds when only VNX_STATE_DIR is set (no VNX_DATA_DIR).
+
+        VNX_STATE_DIR is honored via resolve_state_dir when VNX_DATA_DIR_EXPLICIT=1
+        and the env var is set. Without VNX_DATA_DIR_EXPLICIT, the resolver falls
+        through to git-based resolution — compat-check must still complete without
+        a crash.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             result = self._run_cli(
                 {"VNX_STATE_DIR": tmp},
                 cmd=["compat-check"],
             )
-            # VNX_DISPATCH_DIR missing and VNX_DATA_DIR missing → error
-            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("/tmp/vnx-state", result.stdout)
+            self.assertNotIn("/tmp/vnx-dispatches", result.stdout)
 
 
 # ---------------------------------------------------------------------------
