@@ -573,7 +573,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     # Partial frontmatter raises SchemaViolation under VNX_SCHEMA_STRICT=1 and
     # blocks the atomic write, leaving a stale placeholder on disk.
     receipt_data = raw.receipt or {}
-    _model = (receipt_data.get("model") or "unknown")
+    # Same source order as the synthesized-receipt path above (line ~205):
+    # worker-authored receipt first, then spec.model (the real dispatch value,
+    # e.g. "sonnet"/"opus"), and only "unknown" when neither is set. Before this
+    # fix, a worker receipt with no "model" key fell straight to "unknown" even
+    # though spec.model carried the real value — OI-1001.
+    _model = receipt_data.get("model") or spec.model or "unknown"
     _exit_code = int(receipt_data.get("exit_code", 0) or 0)
     _raw_token = receipt_data.get("token_usage") or raw.token_usage or {}
     _token_usage = {

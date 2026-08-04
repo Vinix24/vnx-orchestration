@@ -22,6 +22,7 @@ from dispatch_govern import (
     dedup_completion_receipts,
     ensure_receipt,
     govern,
+    _split_yaml_frontmatter,
     _synthesize,
 )
 from report_body_contract import validate_body
@@ -208,6 +209,83 @@ def test_govern_authored_preserves_worker_body(tmp_data, tmp_state, monkeypatch)
     assert "## Open Items" in content
     # Worker's specific text content must be preserved.
     assert "Implemented the feature correctly" in content
+
+
+# ---------------------------------------------------------------------------
+# OI-1001: frontmatter "model" must fall back to spec.model, not "unknown",
+# when the worker receipt carries no model field. Mirrors the source order
+# ensure_receipt() already used for the synthesized-receipt path.
+# ---------------------------------------------------------------------------
+
+def test_govern_frontmatter_model_falls_back_to_spec_model(tmp_data, tmp_state, monkeypatch):
+    """A worker receipt with no "model" key must not stamp frontmatter model:
+    "unknown" when spec.model carries the real value — the receipt_data lookup
+    must fall back to spec.model before defaulting to "unknown"."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, model="sonnet")
+    # Worker receipt with no "model" key — the exact shape a real worker-authored
+    # completion receipt has when it never stamped a model.
+    raw = _make_raw(receipt={"status": "done"})
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    parsed, _ = _split_yaml_frontmatter(content)
+    assert parsed["model"] == "sonnet", (
+        f"expected model to fall back to spec.model='sonnet', got {parsed.get('model')!r}"
+    )
+
+
+def test_govern_frontmatter_model_prefers_worker_receipt_over_spec(tmp_data, tmp_state, monkeypatch):
+    """A worker receipt that DOES carry a model must still win over spec.model —
+    the fallback only applies when the worker receipt is silent on model."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, model="sonnet")
+    raw = _make_raw(receipt={"status": "done", "model": "opus"})
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    parsed, _ = _split_yaml_frontmatter(content)
+    assert parsed["model"] == "opus", (
+        f"worker-receipt model must take precedence over spec.model, got {parsed.get('model')!r}"
+    )
+
+
+def test_govern_frontmatter_route_decision_selected_model_matches_model(tmp_data, tmp_state, monkeypatch):
+    """route_decision.selected_model must carry the same value as the top-level
+    model field — both are stamped from the same resolved _model variable."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, model="sonnet")
+    raw = _make_raw(receipt={"status": "done"})
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    parsed, _ = _split_yaml_frontmatter(content)
+    assert parsed["model"] == "sonnet"
+    assert parsed["route_decision"]["selected_model"] == "sonnet", (
+        "route_decision.selected_model must match the resolved model, not 'unknown'"
+    )
+    assert parsed["route_decision"]["selected_model"] == parsed["model"]
 
 
 # ---------------------------------------------------------------------------
