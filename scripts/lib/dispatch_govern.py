@@ -46,11 +46,8 @@ logger = logging.getLogger(__name__)
 # since the tmux dispatch.sh sets PYTHONPATH to scripts/lib only (not scripts/).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 
-# Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
-# sentinel "" default (receipt-quality track, OI-981). The fake-default guard
-# itself lives in dispatch_identity.resolve_effective_role, the shared resolver
-# every emit path uses.
-_IDENTITY_UNRESOLVED = "identity_unresolved"
+# Single canonical sentinel — imported from dispatch_identity (dispatch-20260804-190000).
+from dispatch_identity import _IDENTITY_UNRESOLVED
 
 # The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
 _PLAN_REVIEWER_ROLE = "plan-reviewer"

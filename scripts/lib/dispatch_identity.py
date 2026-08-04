@@ -25,16 +25,19 @@ if str(_SCRIPTS_LIB) not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-# The fake default stamped by writers that never resolved a real role. The
-# trail must stop propagating it — treated as "no real role".
-# OI-981: changed from "backend-developer" to "" so a deliberately-chosen
-# backend-developer role is structurally distinguishable from a failed
-# role resolution. An empty string can never be a real role.
-_FAKE_DEFAULT_ROLE = ""
-
-# Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
-# sentinel default "" (receipt-quality track, OI-981).
+# Single canonical sentinel for "no role resolved" (dispatch-20260804-190000).
+# Every emit path reads from _IDENTITY_UNRESOLVED; there is no second copy and
+# no bare literal anywhere.  _FAKE_DEFAULT_ROLE is an internal alias — the
+# write-time sentinel that writers stamp when they never resolved a real role,
+# and which the emit-side resolver filters out.  The two MUST agree: the value
+# a writer stamps when it has no role IS the value the converter stamps when it
+# can't resolve one — one concept, one sentinel, defined once.
+#
+# OI-981: a deliberately-chosen "backend-developer" is structurally
+# distinguishable from a failed role resolution — the sentinel is
+# "identity_unresolved", never the empty string and never a real role name.
 _IDENTITY_UNRESOLVED = "identity_unresolved"
+_FAKE_DEFAULT_ROLE = _IDENTITY_UNRESOLVED
 
 # Receipt-quality PR-4: instruction-header source used by the write-time
 # capture-gap backfill (mirrors subprocess_dispatch._ROLE_HEADER_RE).
@@ -45,9 +48,9 @@ def normalize_role(role: Optional[str]) -> Optional[str]:
     """Normalize a write-time role value.
 
     Returns the stripped role, or None when the value is empty/None or the
-    fake sentinel ``""`` (empty string). Writers must persist NULL instead of
-    the fake literal so the emit-side resolver stamps ``identity_unresolved``
-    rather than propagating a fabricated identity.
+    canonical sentinel ``identity_unresolved``. Writers must persist NULL
+    instead of the sentinel so the emit-side resolver stamps
+    ``identity_unresolved`` rather than propagating a fabricated identity.
     """
     if not role:
         return None
@@ -133,8 +136,8 @@ def resolve_dispatch_role(
     """Return the real role for a dispatch, or None when unresolved.
 
     Queries ``dispatch_metadata`` on the ADR-007 composite key, latest row
-    wins. Returns None for missing rows, null/empty roles, and the literal
-    ``""`` fake sentinel. FAIL-OPEN: never raises.
+    wins. Returns None for missing rows, null/empty roles, and the canonical
+    ``identity_unresolved`` sentinel. FAIL-OPEN: never raises.
     """
     try:
         if not dispatch_id or not project_id:
@@ -186,12 +189,13 @@ def resolve_effective_role(
     ``provider_dispatch._emit_governance``, ``report_to_receipt_converter``).
 
     Order:
-      1. A genuinely-set caller role (never the fake sentinel ``""``
-         default, which writers stamp when they never resolved a real role).
+      1. A genuinely-set caller role (never the canonical ``identity_unresolved``
+         sentinel, which writers stamp when they never resolved a real role).
       2. ``dispatch_metadata`` via the ADR-007 composite key
          (``dispatch_id``, ``project_id``) — the fallback for writers that
          never carried a real role on the spec.
-      3. ``"identity_unresolved"``.
+      3. ``_IDENTITY_UNRESOLVED`` — the single canonical sentinel, imported
+         from this module by every emit path.
 
     FAIL-OPEN: never raises — receipt/report emission must not break on the
     identity join (mirrors ``resolve_dispatch_role``'s contract).

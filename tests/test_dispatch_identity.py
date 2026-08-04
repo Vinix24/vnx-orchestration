@@ -153,21 +153,22 @@ def test_extract_role_from_instruction_absent_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# OI-981: sentinel "" vs deliberately-chosen backend-developer are distinguishable
+# OI-981 + dispatch-20260804-190000: single canonical sentinel
 # ---------------------------------------------------------------------------
 
 
 def test_oi981_backend_developer_is_real_role_via_resolve_effective(tmp_path):
     """OI-981 key assertion: a deliberately chosen backend-developer role is
-    distinguishable from a failed role resolution (sentinel "").
+    distinguishable from a failed role resolution (sentinel identity_unresolved).
 
     Before OI-981: backend-developer WAS the sentinel — both the chosen role
-    and the "no role resolved" case shared the same string. After the fix, the
-    sentinel is "" (empty), and backend-developer is a normal real role.
+    and the "no role resolved" case shared the same string. dispatch-20260804-190000
+    consolidated the sentinel to identity_unresolved (one value, one definition, one
+    consumer contract).
     """
     _make_db(tmp_path, [("disp-oi981", "vnx-dev", "backend-developer")])
 
-    # Case 1: role="" (sentinel) → falls back to dispatch_metadata or identity_unresolved.
+    # Case 1: role="" (empty, falsy) → falls back to dispatch_metadata or identity_unresolved.
     # With no DB role for this dispatch: identity_unresolved.
     from dispatch_identity import resolve_effective_role
     assert resolve_effective_role("", "disp-oi981-missing", "vnx-dev", state_dir=tmp_path) == "identity_unresolved"
@@ -180,11 +181,52 @@ def test_oi981_backend_developer_is_real_role_via_resolve_effective(tmp_path):
 
 
 def test_oi981_sentinel_distinct_in_normalize_role():
-    """OI-981: normalize_role distinguishes the sentinel "" from the real role
-    backend-developer."""
-    # Sentinel "" → None (no real role to persist)
-    assert normalize_role("") is None
+    """OI-981: normalize_role filters the sentinel (identity_unresolved), preserves
+    real roles like backend-developer."""
+    # Sentinel identity_unresolved → None (no real role to persist)
+    assert normalize_role("identity_unresolved") is None
     # Real role "backend-developer" → preserved as-is
     assert normalize_role("backend-developer") == "backend-developer"
-    # Also test through strip: whitespace-sentinel
+    # Empty/whitespace → None (no real role)
+    assert normalize_role("") is None
     assert normalize_role("  ") is None
+
+
+# ---------------------------------------------------------------------------
+# dispatch-20260804-190000: one sentinel, one output
+# ---------------------------------------------------------------------------
+
+
+def test_single_sentinel_only_identity_unresolved_produced(tmp_path):
+    """Every failure mode of resolve_effective_role produces ONLY identity_unresolved.
+
+    Tests the OUTPUT of the role resolution, not the presence of a constant
+    in the source.  The sentinel must never be "" (empty string) or
+    "backend-developer" — the single canonical fallback is identity_unresolved.
+    """
+    from dispatch_identity import resolve_effective_role
+
+    # (A) Empty role, no DB — identity_unresolved
+    assert resolve_effective_role(None, "s1", "p", state_dir=tmp_path) == "identity_unresolved"
+    assert resolve_effective_role("", "s2", "p", state_dir=tmp_path) == "identity_unresolved"
+
+    # (B) Explicit sentinel role, no DB — identity_unresolved
+    assert resolve_effective_role("identity_unresolved", "s3", "p", state_dir=tmp_path) == "identity_unresolved"
+
+    # (C) Explicit sentinel role, DB also has sentinel — identity_unresolved (filtered at DB layer)
+    # (D) Sentinel in DB, empty caller role — identity_unresolved
+    #
+    # Both cases share one DB creation (helper uses bare CREATE TABLE, not IF NOT EXISTS).
+    _make_db(tmp_path, [
+        ("s4", "p", "identity_unresolved"),
+        ("s5", "p", "identity_unresolved"),
+    ])
+    assert resolve_effective_role("identity_unresolved", "s4", "p", state_dir=tmp_path) == "identity_unresolved"
+    assert resolve_effective_role("", "s5", "p", state_dir=tmp_path) == "identity_unresolved"
+
+    # (E) Real role preserved — NOT overridden by sentinel logic
+    assert resolve_effective_role("backend-developer", "s6", "p", state_dir=tmp_path) == "backend-developer"
+    assert resolve_effective_role("debugger", "s7", "p", state_dir=tmp_path) == "debugger"
+
+    # (F) Non-existent dispatch_id, no DB — identity_unresolved
+    assert resolve_effective_role(None, "s8", "p", state_dir=tmp_path) == "identity_unresolved"

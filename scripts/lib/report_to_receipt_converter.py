@@ -43,6 +43,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
+
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
 _WATERMARK_FILENAME = "report_to_receipt_processed.txt"
@@ -226,7 +228,7 @@ def _resolve_report_role(
             exc_info=True,
         )
         role = None
-    return role or "identity_unresolved"
+    return role or _IDENTITY_UNRESOLVED
 
 
 # Terminal success statuses that trigger fail-closed validation (OI-1035 et al.).

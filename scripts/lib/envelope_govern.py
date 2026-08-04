@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 from envelope_types import EnvelopeGovernError, EnvelopeSpec, _AdapterResult
 from envelope_prepare import _verify_role_application
 from envelope_govern_support import (
@@ -156,7 +157,7 @@ def _govern(
                         spec.dispatch_id,
                         exc_info=True,
                     )
-                    _role = "identity_unresolved"
+                    _role = _IDENTITY_UNRESOLVED
 
                 # Deterministic role-applied control (dispatch-20260801-w10 +
                 # OI-983): did the resolved role source actually reach the enriched

@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 logger = logging.getLogger(__name__)
 
+from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
+
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # ADR-012 worker-permission enforcement flag (default OFF). Imported defensively
@@ -783,7 +785,7 @@ def _emit_governance(
             getattr(args, "dispatch_id", "?"),
             exc_info=True,
         )
-        _role = "identity_unresolved"
+        _role = _IDENTITY_UNRESOLVED
 
     # OI-983: re-verify role_applied with the resolved _role when the enriched
     # instruction is available and the resolved role differs from the raw one.
