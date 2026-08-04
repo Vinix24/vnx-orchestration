@@ -684,6 +684,188 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
     }
 
 
+def check_ci_workflow(
+    project_root: Path,
+    *,
+    branch: Optional[str] = None,
+    head_sha: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Check that the VNX CI workflow ran successfully on this exact commit.
+
+    Three states are distinguished sharply:
+      - Never ran:   no VNX CI run for this commit → HOLD, with explicit
+                     "workflow not run" message independent of failure.
+      - Ran + failed: run exists but conclusion is not "success" → HOLD.
+      - Ran + passed: run exists with conclusion "success" → GO.
+
+    Uses ``gh run list`` to query workflow runs.  Degrades gracefully to GO
+    (skip) when the gh CLI is unavailable, unauthenticated, or the branch/HEAD
+    SHA cannot be resolved from git — the check cannot determine state in those
+    cases and must not block.
+
+    OI-931: ``gh pr checks`` can show all-green while the mandatory VNX CI
+    workflow never ran.  This check reads the workflow conclusion directly —
+    never the check-names — so the three states are distinguishable.
+    """
+    # ── Resolve head SHA ──────────────────────────────────────────────────
+    if head_sha is None:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(project_root),
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return {
+                    "check": "ci_workflow",
+                    "status": "GO",
+                    "detail": "could not resolve HEAD SHA — skipping CI workflow check",
+                    "ci_conclusion": None,
+                    "ci_ran_on_sha": False,
+                }
+            head_sha = result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return {
+                "check": "ci_workflow",
+                "status": "GO",
+                "detail": "could not resolve HEAD SHA — skipping CI workflow check",
+                "ci_conclusion": None,
+                "ci_ran_on_sha": False,
+            }
+
+    if branch is None:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(project_root),
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return {
+                    "check": "ci_workflow",
+                    "status": "GO",
+                    "detail": "could not resolve branch name — skipping CI workflow check",
+                    "ci_conclusion": None,
+                    "ci_ran_on_sha": False,
+                }
+            branch = result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return {
+                "check": "ci_workflow",
+                "status": "GO",
+                "detail": "could not resolve branch name — skipping CI workflow check",
+                "ci_conclusion": None,
+                "ci_ran_on_sha": False,
+            }
+
+    # ── Query gh for workflow runs ─────────────────────────────────────────
+    try:
+        result = subprocess.run(
+            [
+                "gh", "run", "list",
+                "--branch", branch,
+                "--workflow", "VNX CI",
+                "--limit", "10",
+                "--json", "conclusion,headSha,status,databaseId",
+            ],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {
+            "check": "ci_workflow",
+            "status": "GO",
+            "detail": "gh CLI not available — skipping CI workflow check",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        return {
+            "check": "ci_workflow",
+            "status": "GO",
+            "detail": f"gh run list failed — skipping CI workflow check: {stderr[:120]}",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
+
+    try:
+        runs = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {
+            "check": "ci_workflow",
+            "status": "GO",
+            "detail": "gh output unparseable — skipping CI workflow check",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
+
+    # ── Match run to HEAD SHA ──────────────────────────────────────────────
+    for run in runs:
+        if run.get("headSha") == head_sha:
+            conclusion = run.get("conclusion") or ""
+            if conclusion == "success":
+                return {
+                    "check": "ci_workflow",
+                    "status": "GO",
+                    "detail": (
+                        f"VNX CI succeeded on {head_sha[:12]} "
+                        f"(run {run.get('databaseId')})"
+                    ),
+                    "ci_conclusion": conclusion,
+                    "ci_ran_on_sha": True,
+                    "ci_head_sha": head_sha,
+                    "ci_run_id": run.get("databaseId"),
+                }
+            return {
+                "check": "ci_workflow",
+                "status": "HOLD",
+                "detail": (
+                    f"VNX CI conclusion is '{conclusion}' on {head_sha[:12]} "
+                    f"(run {run.get('databaseId')}) — must be 'success'"
+                ),
+                "ci_conclusion": conclusion,
+                "ci_ran_on_sha": True,
+                "ci_head_sha": head_sha,
+                "ci_run_id": run.get("databaseId"),
+            }
+
+    # No run matched the HEAD SHA — distinguish "ran on different SHA" from
+    # "never ran at all" so the two failure modes get distinct messages.
+    if runs:
+        latest_run = runs[0]
+        latest_sha = (latest_run.get("headSha") or "")[:12]
+        latest_conclusion = latest_run.get("conclusion") or "unknown"
+        return {
+            "check": "ci_workflow",
+            "status": "HOLD",
+            "detail": (
+                f"VNX CI workflow has NOT run on HEAD ({head_sha[:12]}). "
+                f"Latest run on branch '{branch}' was on {latest_sha} "
+                f"(conclusion: {latest_conclusion}). "
+                "The PR may show green checks from a prior run — re-run CI."
+            ),
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+            "ci_head_sha": head_sha,
+            "ci_latest_run_sha": latest_sha,
+        }
+    return {
+        "check": "ci_workflow",
+        "status": "HOLD",
+        "detail": (
+            f"VNX CI workflow has NEVER run on branch '{branch}'. "
+            f"No runs found for HEAD {head_sha[:12]}. "
+            "PR checks may show green from other workflows — "
+            "this is the 'green-lie' that OI-931 guards against."
+        ),
+        "ci_conclusion": None,
+        "ci_ran_on_sha": False,
+        "ci_head_sha": head_sha,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -881,6 +1063,7 @@ def run_gate_checks(
     checks.append(check_artifacts(pr_id, dispatch_dir, project_root))
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root))
+    checks.append(check_ci_workflow(project_root))
 
     if not skip_pytest:
         checks.append(check_pytest(project_root))
