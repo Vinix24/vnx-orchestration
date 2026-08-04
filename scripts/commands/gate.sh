@@ -251,6 +251,18 @@ HELP
     return 1
   fi
 
+  # OI-915: extract dispatch_id from the branch name when it follows the
+  # dispatch/<id> convention (the gate knows the branch name — use it as the
+  # canonical source, do not invent a second way to derive the same value).
+  local dispatch_id=""
+  if [[ "$branch" == dispatch/* ]]; then
+    dispatch_id="${branch#dispatch/}"
+    log "[gate] Resolved dispatch_id from branch: $dispatch_id"
+  elif [ -n "${VNX_CURRENT_DISPATCH_ID:-}" ]; then
+    dispatch_id="$VNX_CURRENT_DISPATCH_ID"
+    log "[gate] Resolved dispatch_id from env: $dispatch_id"
+  fi
+
   local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
 
   if [ -n "$only_gate" ]; then
@@ -269,7 +281,8 @@ HELP
       --branch "$branch" \
       --review-stack "$only_gate" \
       --risk-class "$risk_class" \
-      --mode "$mode"
+      --mode "$mode" \
+      --dispatch-id "$dispatch_id"
     local exit_code=$?
 
     if [ "$exit_code" -eq 0 ]; then
@@ -293,7 +306,8 @@ HELP
       --branch "$branch" \
       --review-stack "$required_gates" \
       --risk-class "$risk_class" \
-      --mode "$mode"
+      --mode "$mode" \
+      --dispatch-id "$dispatch_id"
     local exit_code=$?
 
     printf '\n'

@@ -26,6 +26,15 @@
         <string>${VNX_HOME}</string>
         <key>VNX_DATA_DIR</key>
         <string>${VNX_HOME}/.vnx-data</string>
+        <key>VNX_ANALYZER_LLM</key>
+        <string>deepseek-harness</string>
+        <!--
+            DEEPSEEK_API_KEY must be available in the launchd environment.
+            The nightly runner sources ~/.zprofile / ~/.zshrc for export VNX_*
+            lines; ensure DEEPSEEK_API_KEY is exported there or add it as an
+            explicit EnvironmentVariable below.  Do NOT commit the actual key
+            to this file.
+        -->
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>

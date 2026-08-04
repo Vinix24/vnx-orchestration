@@ -52,7 +52,7 @@ GAP_MISSING_RECEIPT = "missing_receipt"
 GAP_BROKEN_CHAIN = "broken_chain"
 GAP_CMD_ID_FALLBACK = "cmd_id_fallback"
 
-CHAIN_STATUS_COMPLETE = "complete"
+CHAIN_STATUS_COMPLETE = "receipt_and_commit"
 CHAIN_STATUS_INCOMPLETE = "incomplete"
 CHAIN_STATUS_BROKEN = "broken"
 
@@ -89,7 +89,7 @@ class ProvenanceValidation:
     trace_token: Optional[str]
     pr_number: Optional[int]
     feature_plan_pr: Optional[str]
-    chain_status: str  # complete | incomplete | broken
+    chain_status: str  # receipt_and_commit | incomplete | broken
     gaps: List[ProvenanceGap] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -669,7 +669,7 @@ def reconcile_commit_provenance(
     and register each commit's SHA against its dispatch_id in the provenance_registry.
 
     This is the merge-side half of the chain (B1 wrote dispatch_id+receipt_id at append; this writes
-    commit_sha so chain_status can reach 'complete'). Read-git + upsert-registry; best-effort — git
+    commit_sha so chain_status can reach 'receipt_and_commit'). Read-git + upsert-registry; best-effort — git
     errors yield ``{scanned: 0, linked: 0}``. Idempotent: register_provenance_link upserts per dispatch_id.
 
     D2 extension: commits that carry a PR number (``(#NNN)``) and resolve to a dispatch with a
@@ -945,8 +945,6 @@ def _calculate_chain_status(
     """Calculate chain status from merged provenance fields."""
     has_receipt = bool(merged.get("receipt_id"))
     has_commit = bool(merged.get("commit_sha"))
-    has_pr = merged.get("pr_number") is not None
-    has_fp = bool(merged.get("feature_plan_pr"))
 
     # Check for broken chains (contradictions in gaps)
     if gaps:
@@ -1171,7 +1169,7 @@ def batch_provenance_summary(
     Returns aggregate statistics and per-dispatch details.
     """
     summaries = []
-    counts = {"complete": 0, "incomplete": 0, "broken": 0}
+    counts = {"receipt_and_commit": 0, "incomplete": 0, "broken": 0}
 
     for did in dispatch_ids:
         s = provenance_summary_for_dispatch(did, receipts_path, conn)
