@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _SCRIPTS_LIB = Path(__file__).resolve().parent
 if str(_SCRIPTS_LIB) not in sys.path:
@@ -154,11 +155,32 @@ def _load_receipt_roles(receipts_file: Path) -> Dict[str, str]:
     return roles
 
 
+def _write_role_backfill_events(
+    events_file: Path, events: List[Dict[str, Any]]
+) -> None:
+    """Append role-backfill ledger events to *events_file* (ADR-005).
+
+    Best-effort: a write failure is logged but does not roll back the DB
+    commit — the DB is the authoritative record, matching the at-most-once
+    pattern of the open-item→track bridge (ADR-005 amendment 2026-06-14).
+    """
+    try:
+        with events_file.open("a", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning(
+            "role backfill: failed to write %d events to %s: %s",
+            len(events), events_file, exc,
+        )
+
+
 def backfill_dispatch_metadata_roles(
     conn: sqlite3.Connection,
     receipts_file: Optional[Path],
     *,
     dry_run: bool = False,
+    events_file: Optional[Path] = None,
 ) -> Tuple[int, int]:
     """Backfill dispatch_metadata.role for rows with NULL/empty/fake role.
 
@@ -167,11 +189,15 @@ def backfill_dispatch_metadata_roles(
     resolver stamps ``identity_unresolved`` for them. Idempotent: once a real
     role is stamped the row no longer matches the selection.
 
+    When *events_file* is provided (and this is not a dry-run), each UPDATE
+    emits an ADR-005 ledger event recording old role, new role, and reason
+    so a reader can reconstruct the provenance of every role value.
+
     Returns (checked, updated) counts.
     """
     try:
         rows = conn.execute(
-            "SELECT id, dispatch_id FROM dispatch_metadata "
+            "SELECT id, dispatch_id, role FROM dispatch_metadata "
             "WHERE role IS NULL OR role = '' OR role = ?",
             (_FAKE_DEFAULT_ROLE,),
         ).fetchall()
@@ -182,16 +208,17 @@ def backfill_dispatch_metadata_roles(
     receipt_roles = _load_receipt_roles(receipts_file) if receipts_file else {}
     checked = len(rows)
     updated = 0
+    events: List[Dict[str, Any]] = []
 
-    for row_id, dispatch_id in rows:
-        role = receipt_roles.get(dispatch_id)
-        if not role:
+    for row_id, dispatch_id, old_role in rows:
+        new_role = receipt_roles.get(dispatch_id)
+        if not new_role:
             continue
         if not dry_run:
             try:
                 conn.execute(
                     "UPDATE dispatch_metadata SET role = ? WHERE id = ?",
-                    (role, row_id),
+                    (new_role, row_id),
                 )
             except sqlite3.Error as exc:
                 logger.warning(
@@ -199,6 +226,15 @@ def backfill_dispatch_metadata_roles(
                     row_id, exc,
                 )
                 continue
+            if events_file is not None:
+                events.append({
+                    "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "event_type": "role_backfill",
+                    "dispatch_id": dispatch_id,
+                    "old_role": old_role,
+                    "new_role": new_role,
+                    "reason": "backfill from t0_receipts.ndjson",
+                })
         updated += 1
 
     if not dry_run and updated > 0:
@@ -206,6 +242,8 @@ def backfill_dispatch_metadata_roles(
             conn.commit()
         except sqlite3.Error as exc:
             logger.warning("backfill_dispatch_metadata_roles: commit failed: %s", exc)
+        if events:
+            _write_role_backfill_events(events_file, events)  # type: ignore[arg-type]
 
     return checked, updated
 
@@ -232,10 +270,12 @@ def run_backfill(db_path: Path, *, dry_run: bool = False) -> Dict[str, Dict[str,
         # Receipts live next to the DB in the state dir; absent file simply
         # yields zero updates (rows stay NULL -> identity_unresolved at emit).
         receipts_file = db_path.parent / "t0_receipts.ndjson"
+        events_file = db_path.parent / "role_backfill_events.ndjson"
         checked, updated = backfill_dispatch_metadata_roles(
             conn,
             receipts_file if receipts_file.exists() else None,
             dry_run=dry_run,
+            events_file=events_file if not dry_run else None,
         )
         results["dispatch_metadata.role"] = {"checked": checked, "updated": updated}
         logger.info(
