@@ -340,7 +340,7 @@ _ppr_process_rate_limited() {
     python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
         --state-dir "$STATE_DIR" \
         "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>/dev/null \
-        || log "DEBUG" "report_to_receipt_converter catchup scan non-fatal (exit $?)"
+        || log "ERROR" "report_to_receipt_converter catchup scan FAILED non-fatal, processor continues (exit $?)"
 }
 
 # Process all pending reports with flood protection and rate limiting.
@@ -398,7 +398,7 @@ _poll_new_reports() {
             python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
                 --state-dir "$STATE_DIR" \
                 "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>/dev/null \
-                || log "DEBUG" "report_to_receipt_converter scan non-fatal (exit $?)"
+                || log "ERROR" "report_to_receipt_converter scan FAILED non-fatal, processor continues (exit $?)"
         fi
         if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
             _retry_pending_receipts

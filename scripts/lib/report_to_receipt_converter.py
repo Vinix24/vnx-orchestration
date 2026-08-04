@@ -36,8 +36,9 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,12 @@ def _extract_body_fields(text: str) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     for m in _BOLD_KV_RE.finditer(text[:3000]):
         key = m.group(1).strip().lower().replace("-", "_").replace(" ", "_")
-        val = m.group(2).strip().splitlines()[0].strip()
+        # A bold key whose value is whitespace-only (e.g. truncated at the
+        # text[:3000] scan boundary, or genuinely empty in the source report)
+        # strips down to "" — splitlines() on "" is [], so index [0] would
+        # raise IndexError. Guard it: no non-empty first line means no value.
+        value_lines = m.group(2).strip().splitlines()
+        val = value_lines[0].strip() if value_lines else ""
         if key and val:
             fields.setdefault(key, val)
     if "dispatch_id" not in fields:
@@ -325,6 +331,93 @@ def build_receipt_from_report(
 # Single-report converter
 # ---------------------------------------------------------------------------
 
+# Outcome tags returned by _convert_one_detailed(), consumed by
+# scan_and_convert() for per-scan counting (OI-998):
+#   "appended"  — new receipt written.
+#   "duplicate" — idempotent re-send, no new receipt.
+#   "rejected"  — fail-closed refusal by append_receipt_payload's own
+#                 validation (e.g. missing Model — see AppendReceiptError
+#                 code "missing_model" in append_receipt_internals/validation.py).
+#                 A WARNING is logged here with dispatch_id + reason so the
+#                 refusal is loud, not silent.
+#   "malformed" — file unreadable, or no dispatch_id resolvable at all.
+#   "error"     — anything else: a crash while parsing/building the receipt,
+#                 or an append failure other than the fail-closed rejection.
+
+def _convert_one_detailed(
+    report_path: Path,
+    *,
+    receipts_file: Optional[str] = None,
+    cache_window_seconds: int = 300,
+) -> Tuple[Optional[Any], str]:  # (Optional[AppendResult], outcome_tag)
+    """Convert one report file to a governed receipt; classify the outcome.
+
+    Never raises — every failure mode (unreadable file, unparseable body,
+    fail-closed model rejection, append failure) is caught here and turned
+    into a (None, outcome_tag) result so a single poisoned report can never
+    propagate an exception into a caller's batch loop.
+    """
+    # Import through append_receipt.py (scripts/ root) so the facade is
+    # registered before append_receipt_payload() is called.
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+    sys.path.insert(0, str(_LIB_DIR))
+    try:
+        import append_receipt  # registers facade as side effect
+        append_receipt_payload = append_receipt.append_receipt_payload
+        AppendReceiptError = append_receipt.AppendReceiptError
+    except Exception as exc:
+        logger.warning("report_to_receipt_converter: cannot import append_receipt: %s", exc)
+        return None, "error"
+
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("report_to_receipt_converter: cannot read %s: %s", report_path.name, exc)
+        return None, "malformed"
+
+    state_dir_for_route = Path(receipts_file).parent if receipts_file else None
+    try:
+        receipt = build_receipt_from_report(report_path, text, state_dir=state_dir_for_route)
+    except Exception as exc:
+        # build_receipt_from_report() is documented "never raises" but a
+        # single poisoned report must never be trusted to honor that on its
+        # own (OI-997): one crashed report must not end the batch.
+        logger.error(
+            "report_to_receipt_converter: build_receipt_from_report crashed for %s: %s: %s",
+            report_path.name, type(exc).__name__, exc,
+        )
+        return None, "error"
+    if receipt is None:
+        return None, "malformed"
+
+    try:
+        result = append_receipt_payload(
+            receipt,
+            receipts_file=receipts_file,
+            cache_window_seconds=cache_window_seconds,
+            skip_enrichment=True,  # converter receipts skip quality advisory
+        )
+        return result, result.status
+    except AppendReceiptError as exc:
+        if exc.code == "missing_model":
+            logger.warning(
+                "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                receipt.get("dispatch_id"), report_path.name, exc.message,
+            )
+            return None, "rejected"
+        logger.warning(
+            "report_to_receipt_converter: append failed for %s: %s",
+            report_path.name, exc,
+        )
+        return None, "error"
+    except Exception as exc:
+        logger.warning(
+            "report_to_receipt_converter: append failed for %s: %s",
+            report_path.name, exc,
+        )
+        return None, "error"
+
+
 def convert_report_to_receipt(
     report_path: Path,
     *,
@@ -334,55 +427,106 @@ def convert_report_to_receipt(
     """Convert one report file to a governed receipt.
 
     Returns AppendResult (status="appended" | "duplicate") on success,
-    or None on unreadable / malformed input (warning logged, no crash).
+    or None on unreadable / malformed / rejected / errored input (warning
+    or error logged, no crash). Thin wrapper over _convert_one_detailed()
+    that preserves this exact return contract for existing callers
+    (scripts/hooks/tmux_signal_stop_receipt.sh and direct-call tests) —
+    scan_and_convert() calls _convert_one_detailed() directly for its richer
+    per-outcome counts.
     """
-    # Import through append_receipt.py (scripts/ root) so the facade is
-    # registered before append_receipt_payload() is called.
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-    sys.path.insert(0, str(_LIB_DIR))
-    try:
-        import append_receipt  # registers facade as side effect
-        append_receipt_payload = append_receipt.append_receipt_payload
-    except Exception as exc:
-        logger.warning("report_to_receipt_converter: cannot import append_receipt: %s", exc)
-        return None
-
-    try:
-        text = report_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.warning("report_to_receipt_converter: cannot read %s: %s", report_path.name, exc)
-        return None
-
-    state_dir_for_route = Path(receipts_file).parent if receipts_file else None
-    receipt = build_receipt_from_report(report_path, text, state_dir=state_dir_for_route)
-    if receipt is None:
-        return None
-
-    try:
-        return append_receipt_payload(
-            receipt,
-            receipts_file=receipts_file,
-            cache_window_seconds=cache_window_seconds,
-            skip_enrichment=True,  # converter receipts skip quality advisory
-        )
-    except Exception as exc:
-        logger.warning(
-            "report_to_receipt_converter: append failed for %s: %s",
-            report_path.name, exc,
-        )
-        return None
+    result, _outcome = _convert_one_detailed(
+        report_path,
+        receipts_file=receipts_file,
+        cache_window_seconds=cache_window_seconds,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Directory scanner
 # ---------------------------------------------------------------------------
 
+_HEALTH_COMPONENT = "report_to_receipt_converter"
+_HEALTH_EXPECTED_INTERVAL_SECONDS = 3600
+
+
+@dataclass(frozen=True)
+class ScanStats:
+    """Per-scan outcome counts, returned by scan_and_convert() (OI-998).
+
+    A scan that only tracked ``new_count`` could not distinguish "nothing to
+    do" from "reports piled up and every single one was rejected" — both
+    read as 0. The separate counters make that distinction visible to any
+    caller, and scan_and_convert() also surfaces them via a HealthBeacon
+    (see _write_scan_heartbeat) so "zero receipts" stops reading as healthy
+    when reports were actually scanned and refused.
+    """
+
+    new_count: int = 0
+    duplicate_count: int = 0
+    rejected_count: int = 0
+    malformed_count: int = 0
+    error_count: int = 0
+
+    @property
+    def attempted_count(self) -> int:
+        return (
+            self.new_count
+            + self.duplicate_count
+            + self.rejected_count
+            + self.malformed_count
+            + self.error_count
+        )
+
+
+def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
+    """Surface this scan's counts via the existing HealthBeacon channel.
+
+    Writes <state_dir>/health/report_to_receipt_converter.json — the same
+    mechanism producer_freshness_monitor.py uses for its own
+    health/producer_freshness_monitor.json heartbeat (scripts/lib/health_beacon.py),
+    auto-discovered by health_beacon.all_beacons() / beacon_summary() (consumed
+    by scripts/health_check.py, dashboard/api_health.py, vnx_cli subsystems).
+    Reusing this channel means no new monitoring surface is invented (OI-998).
+
+    status="fail" specifically for the case this dispatch closes: reports
+    were scanned this cycle (attempted_count > 0) but NONE resulted in a
+    receipt landing (new_count == duplicate_count == 0) — "zero receipts"
+    while work was actually attempted. A quiet scan with nothing new to do
+    (attempted_count == 0) stays "ok" — that is the healthy, common case.
+    Best-effort: heartbeat write failures never raise into the caller.
+    """
+    try:
+        from health_beacon import HealthBeacon  # noqa: PLC0415
+    except Exception as exc:
+        logger.warning("report_to_receipt_converter: cannot import health_beacon: %s", exc)
+        return
+
+    status = "ok"
+    if stats.attempted_count > 0 and stats.new_count == 0 and stats.duplicate_count == 0:
+        status = "fail"
+
+    beacon = HealthBeacon(
+        state_dir, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
+    )
+    beacon.heartbeat(  # best-effort: swallows OSError internally
+        status=status,
+        details={
+            "new_count": stats.new_count,
+            "duplicate_count": stats.duplicate_count,
+            "rejected_count": stats.rejected_count,
+            "malformed_count": stats.malformed_count,
+            "error_count": stats.error_count,
+        },
+    )
+
+
 def scan_and_convert(
     reports_dirs: List[Path],
     state_dir: Optional[Path] = None,
     *,
     cache_window_seconds: int = 300,
-) -> int:
+) -> ScanStats:
     """Scan report directories and convert unprocessed reports.
 
     Deduplication uses ONLY the converter's own watermark file
@@ -390,17 +534,24 @@ def scan_and_convert(
     processed_receipts.txt is intentionally NOT consulted — the two
     systems own separate dedup stores to avoid format-conflation risk.
 
-    Returns the count of newly emitted receipts (status="appended").
-    Malformed reports are skipped with a warning; they are NOT marked as
-    processed so they will be retried on the next scan (in case they are
-    still being written).
+    Returns a ScanStats with per-outcome counts (new/duplicate/rejected/
+    malformed/error) — see ScanStats and _convert_one_detailed()'s outcome
+    tags. Only newly-appended and duplicate reports are marked processed;
+    rejected, malformed, and errored reports are NOT marked processed, so
+    they are retried on the next scan once their cause is fixed.
+
+    A single poisoned report can never abort the scan (OI-997): each
+    report's conversion is wrapped in try/except here, in addition to
+    _convert_one_detailed()'s own internal guards, so an exception from
+    ANY stage of parsing/building/appending is caught, logged once, and the
+    scan continues with the next report.
     """
     if state_dir is None:
         try:
             state_dir = _resolve_state_dir()
         except Exception as exc:
             logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
-            return 0
+            return ScanStats()
 
     state_dir.mkdir(parents=True, exist_ok=True)
     receipts_file = str(state_dir / "t0_receipts.ndjson")
@@ -409,6 +560,10 @@ def scan_and_convert(
     watermark = _load_watermark(watermark_path)
 
     new_count = 0
+    duplicate_count = 0
+    rejected_count = 0
+    malformed_count = 0
+    error_count = 0
 
     for reports_dir in reports_dirs:
         if not isinstance(reports_dir, Path):
@@ -427,27 +582,58 @@ def scan_and_convert(
             if file_hash in watermark:
                 continue
 
-            result = convert_report_to_receipt(
-                report_path,
-                receipts_file=receipts_file,
-                cache_window_seconds=cache_window_seconds,
-            )
+            try:
+                result, outcome = _convert_one_detailed(
+                    report_path,
+                    receipts_file=receipts_file,
+                    cache_window_seconds=cache_window_seconds,
+                )
+            except Exception as exc:
+                # Belt-and-suspenders: _convert_one_detailed() already catches
+                # its own failure modes, but ANY report must be able to crash
+                # here without ending the scan for every report after it —
+                # that is the exact 2026-08-03 18:36 incident this closes.
+                # One ERROR line per file per scan; NOT marked processed so
+                # it is retried once the cause is fixed.
+                logger.error(
+                    "report_to_receipt_converter: unhandled exception converting %s: %s: %s",
+                    report_path.name, type(exc).__name__, exc,
+                )
+                error_count += 1
+                continue
 
-            if result is not None:
-                # Mark as processed regardless of appended/duplicate —
-                # no point re-scanning a report that's already in the system.
+            if outcome in ("appended", "duplicate"):
+                # Mark as processed — no point re-scanning a report that's
+                # already in the system.
                 _mark_processed(file_hash, watermark_path)
                 watermark.add(file_hash)
-                if result.status == "appended":
+                if outcome == "appended":
                     new_count += 1
                     logger.info(
                         "report_to_receipt_converter: receipt emitted dispatch=%s file=%s",
                         result.idempotency_key[:20],
                         report_path.name,
                     )
-            # result is None → malformed; NOT marked processed (retry on next scan)
+                else:
+                    duplicate_count += 1
+            elif outcome == "rejected":
+                rejected_count += 1
+            elif outcome == "malformed":
+                malformed_count += 1
+            else:  # "error"
+                error_count += 1
+            # rejected / malformed / error reports are NOT marked processed:
+            # retried on the next scan once the cause is fixed.
 
-    return new_count
+    stats = ScanStats(
+        new_count=new_count,
+        duplicate_count=duplicate_count,
+        rejected_count=rejected_count,
+        malformed_count=malformed_count,
+        error_count=error_count,
+    )
+    _write_scan_heartbeat(state_dir, stats)
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -500,9 +686,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error("report_to_receipt_converter: cannot resolve dirs from env: %s", exc)
             return 1
 
-    n = scan_and_convert(dirs, state_dir, cache_window_seconds=300)
-    if n:
-        logger.info("report_to_receipt_converter: %d new receipt(s) emitted", n)
+    stats = scan_and_convert(dirs, state_dir, cache_window_seconds=300)
+    if stats.new_count:
+        logger.info("report_to_receipt_converter: %d new receipt(s) emitted", stats.new_count)
+    if stats.rejected_count or stats.malformed_count or stats.error_count:
+        logger.warning(
+            "report_to_receipt_converter: %d rejected, %d malformed, %d error(s) this scan",
+            stats.rejected_count, stats.malformed_count, stats.error_count,
+        )
     return 0
 
 
