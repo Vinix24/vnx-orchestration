@@ -152,8 +152,10 @@ class TestProviderDispatchAutoRouteIntegration:
 
     def test_main_auto_route_writes_ndjson_for_kimi(self, recommendations_yaml, state_dir, monkeypatch):
         import provider_dispatch
+        import smart_router
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        monkeypatch.setattr(smart_router, "_RECOMMENDATIONS_PATH", recommendations_yaml)
 
         captured_model = {}
 
@@ -161,8 +163,7 @@ class TestProviderDispatchAutoRouteIntegration:
             captured_model["model"] = args.model
             return 0
 
-        with patch("smart_router._RECOMMENDATIONS_PATH", recommendations_yaml), \
-             patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
+        with patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
             result = provider_dispatch.main([
                 "--provider", "kimi",
                 "--terminal-id", "T1",
@@ -185,11 +186,12 @@ class TestProviderDispatchAutoRouteIntegration:
 
     def test_main_auto_route_review_decides_claude_rejected_at_door(self, recommendations_yaml, state_dir, monkeypatch):
         import provider_dispatch
+        import smart_router
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        monkeypatch.setattr(smart_router, "_RECOMMENDATIONS_PATH", recommendations_yaml)
 
-        with patch("smart_router._RECOMMENDATIONS_PATH", recommendations_yaml), \
-             patch("provider_dispatch._dispatch_kimi", return_value=0), \
+        with patch("provider_dispatch._dispatch_kimi", return_value=0), \
              patch("provider_dispatch._dispatch_litellm", return_value=0):
             result = provider_dispatch.main([
                 "--provider", "kimi",
@@ -224,14 +226,15 @@ class TestProviderDispatchAutoRouteIntegration:
 
     def test_main_auto_route_fallback_on_missing_recommendations(self, tmp_path, monkeypatch):
         import provider_dispatch
+        import smart_router
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
         _missing_path = tmp_path / "nonexistent.yaml"
+        monkeypatch.setattr(smart_router, "_RECOMMENDATIONS_PATH", _missing_path)
 
-        with patch("smart_router._RECOMMENDATIONS_PATH", _missing_path), \
-             patch("provider_dispatch._dispatch_kimi", return_value=0):
+        with patch("provider_dispatch._dispatch_kimi", return_value=0):
             result = provider_dispatch.main([
                 "--provider", "kimi",
                 "--terminal-id", "T1",

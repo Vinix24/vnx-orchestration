@@ -223,13 +223,14 @@ class TestG6NonClaudeDispatch:
     def test_kimi_auto_route_calls_dispatch_kimi(self, recs_kimi_wins, state_dir, monkeypatch):
         """When smart_router selects kimi, provider_dispatch._dispatch_kimi is called."""
         import provider_dispatch
+        import smart_router
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        monkeypatch.setattr(smart_router, "_RECOMMENDATIONS_PATH", recs_kimi_wins)
 
         deliver_calls: list = []
 
-        with patch("smart_router._RECOMMENDATIONS_PATH", recs_kimi_wins), \
-             patch("subprocess_dispatch.deliver_with_recovery",
+        with patch("subprocess_dispatch.deliver_with_recovery",
                    side_effect=lambda **kw: deliver_calls.append(kw) or True), \
              patch("provider_dispatch._dispatch_kimi", return_value=0) as mock_kimi:
             result = provider_dispatch.main([
@@ -248,13 +249,14 @@ class TestG6NonClaudeDispatch:
     def test_non_claude_auto_route_no_claude_fallback(self, recs_kimi_wins, state_dir, monkeypatch):
         """G6 regression guard: deliver_with_recovery never invoked on non-Claude path."""
         import provider_dispatch
+        import smart_router
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        monkeypatch.setattr(smart_router, "_RECOMMENDATIONS_PATH", recs_kimi_wins)
 
         deliver_was_called: list = []
 
-        with patch("smart_router._RECOMMENDATIONS_PATH", recs_kimi_wins), \
-             patch("subprocess_dispatch.deliver_with_recovery",
+        with patch("subprocess_dispatch.deliver_with_recovery",
                    side_effect=lambda **kw: deliver_was_called.append(True) or True), \
              patch("provider_dispatch._dispatch_kimi", return_value=0):
             provider_dispatch.main([
