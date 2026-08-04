@@ -147,3 +147,8 @@ scripts/benchmark/field-tests/tasks.local.yaml
 # uit de canonieke rol, niet met de hand geschreven.
 /AGENTS.md
 /GEMINI.md
+
+# Sessie-logs: eigen inhoud, maar met dagbedragen aan AI-kosten en klantcontext.
+# Deze repo is publiek, dus die gaan er niet in. Backup staat buiten git in de
+# centrale per-project store: ~/.vnx-data/<project>/daily-log/
+daily-log/
