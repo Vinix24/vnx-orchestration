@@ -76,6 +76,9 @@ class RuntimeSnapshot:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    # OI-943: worker-claude-override gate outcome, threaded from build_runtime_snapshot
+    # so the door can persist target_slot + override reason onto the dispatch row.
+    worker_claude_override_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
