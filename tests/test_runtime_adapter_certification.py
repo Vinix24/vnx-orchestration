@@ -244,6 +244,9 @@ class TestDirectCouplingFreeze:
         # The set guards against NEW, unexpected coupling outside this lane.
         # context_rotation.py — T0-initiated non-destructive rotation respawn
         # (default-OFF); first-class tmux use, added 2026-07-12.
+        # git_target_guard.py — dispatch-context git target guard (OI-975);
+        # uses subprocess and references tmux in its docstring env-var
+        # explainer, added 2026-08-04.
         known_preexisting = {
             "cleanup_worker_exit.py",
             "context_rotation.py",
@@ -251,6 +254,7 @@ class TestDirectCouplingFreeze:
             "dispatch_govern.py",
             "dispatch_prepare.py",
             "dispatch_sidedoor_audit.py",
+            "git_target_guard.py",
             "governance_emit.py",
             "plan_gate_panel.py",
             "provider_dispatch.py",
@@ -273,6 +277,9 @@ class TestDirectCouplingFreeze:
         # test_no_direct_tmux_subprocess_in_protected_modules. Kept in sync with it.
         # context_rotation.py — T0-initiated non-destructive rotation respawn
         # (default-OFF); first-class tmux use, added 2026-07-12.
+        # git_target_guard.py — dispatch-context git target guard (OI-975);
+        # uses subprocess and references tmux in its docstring env-var
+        # explainer, added 2026-08-04.
         known_files = {
             "cleanup_worker_exit.py",
             "context_rotation.py",
@@ -280,6 +287,7 @@ class TestDirectCouplingFreeze:
             "dispatch_govern.py",
             "dispatch_prepare.py",
             "dispatch_sidedoor_audit.py",
+            "git_target_guard.py",
             "governance_emit.py",
             "plan_gate_panel.py",
             "provider_dispatch.py",
