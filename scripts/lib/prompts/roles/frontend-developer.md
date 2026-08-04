@@ -34,7 +34,7 @@ You build and maintain React/Next.js dashboard interfaces and frontend component
 3. Implement UI changes in `dashboard/`
 4. Run the dev server to visually verify changes when practical
 5. Commit with conventional commit format
-6. Write a completion report to `.vnx-data/unified_reports/`
+6. Write a completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 ## Rules
 - Follow established component patterns and naming conventions

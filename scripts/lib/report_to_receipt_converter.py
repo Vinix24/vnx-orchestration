@@ -286,6 +286,17 @@ def build_receipt_from_report(
     # Use "unknown" for task_id so the idempotency key aligns with what
     # report_parser.py produces (it defaults task_id to "unknown").  This lets
     # append_receipt_payload()'s rolling cache deduplicate same-cycle runs.
+
+    # OI-989/OI-993: resolve the report path via the shared resolver instead
+    # of blindly using the scanner's current path.  When the worker wrote
+    # multiple files (e.g. <id>.md AND dispatch-<id>.md), the resolver picks
+    # the canonical form and flags ambiguity — the receipt carries the
+    # canonical path and logs the ambiguity for T0.
+    from report_path import resolve_report_path
+    resolved = resolve_report_path(dispatch_id)
+    canonical_report_path = str(resolved.path) if resolved is not None else str(report_path)
+    ambiguous_report = resolved.ambiguous if resolved is not None else False
+
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes
@@ -299,7 +310,7 @@ def build_receipt_from_report(
         "provider": merged.get("provider", "unknown"),
         "model": merged.get("model", ""),
         "timestamp": timestamp,
-        "report_path": str(report_path),
+        "report_path": canonical_report_path,
     }
 
     if contract_violations:
@@ -308,18 +319,31 @@ def build_receipt_from_report(
             " — emitting as report_contract_invalid",
             report_path.name, contract_violations,
         )
-        return {
+        receipt_out: Dict[str, Any] = {
             **base,
             "event_type": "report_contract_invalid",
             "status": "contract_invalid",
             "contract_violations": contract_violations,
         }
+        if ambiguous_report:
+            receipt_out["ambiguous_report_path"] = True
+            receipt_out["report_path_candidates"] = [
+                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
+                for c in resolved.candidates_found
+            ] if resolved is not None else []
+        return receipt_out
 
     receipt: Dict[str, Any] = {
         **base,
         "event_type": "task_complete",
         "status": merged.get("status", "unknown"),
     }
+    if ambiguous_report:
+        receipt["ambiguous_report_path"] = True
+        receipt["report_path_candidates"] = [
+            {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
+            for c in resolved.candidates_found
+        ] if resolved is not None else []
     if state_dir and dispatch_id:
         route_dec = _load_route_decision(dispatch_id, state_dir)
         if route_dec:
