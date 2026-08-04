@@ -30,6 +30,8 @@ import planning_cli  # noqa: E402
 import schema_migration  # noqa: E402
 import tracks as tracks_lib  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 PROJECT_ID = "test-proj"
 
 
@@ -67,8 +69,7 @@ def _build_db(tmp_path: Path) -> Path:
     for ver, fname in ((22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")):
         schema_migration.apply_script_if_below(conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8"))
         conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     for ver, fname in ((27, "0027_planning_horizon_and_deliverable_view.sql"),

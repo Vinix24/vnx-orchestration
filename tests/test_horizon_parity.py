@@ -46,6 +46,8 @@ for _p in (str(REPO_ROOT), str(_LIB), str(_SCRIPTS)):
 import schema_migration  # noqa: E402
 import planning_cli  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 import vnx_cli.main as vnx_main_mod  # noqa: E402
 from vnx_cli import _engine  # noqa: E402
 from vnx_cli.commands import horizon as horizon_mod  # noqa: E402
@@ -185,8 +187,7 @@ def _bootstrap_store(state_dir: Path) -> None:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.commit()
     for version, filename in [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),

@@ -35,6 +35,8 @@ if str(_SCRIPTS) not in sys.path:
 import schema_migration
 import migrate_future_system  # noqa: F401 — registers preflight hooks for v29
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,8 +89,7 @@ def _base_v28_db(tmp_path: Path) -> sqlite3.Connection:
     )
     conn.commit()
     # Mirror structural-doctor additions present in the live v26 DB.
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     schema_migration.apply_script_if_below(
