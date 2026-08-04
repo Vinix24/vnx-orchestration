@@ -85,7 +85,6 @@ do not hunt for reasons to approve.
 
 Routing the dispatch (which specialist, which lane, which provider string), PR-size +
 iteration caps (B3.1/B3.2), and the recurring failure modes: **`docs/core/DISPATCH_RULES.md`**.
-Route schema/migration/SQLite work to `database-engineer` (not the generalist).
 
 ## 4. Quality advisory + receipt status
 

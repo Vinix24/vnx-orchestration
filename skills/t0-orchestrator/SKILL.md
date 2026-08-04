@@ -102,11 +102,11 @@ When dispatching, route to the most-specific skill available. Specialists catch 
 
 | Work type | Skill | Why |
 |---|---|---|
-| Schema changes, migrations, SQLite, FTS5, multi-tenant patterns, INSERT/UPSERT design, "rows missing" / "stuck for hours" debugging | **`database-engineer`** | Has migration defense checklist + SQLite gotcha references; learned from P4's 5-round chain |
+| Schema changes, migrations, SQLite, FTS5, multi-tenant patterns, INSERT/UPSERT design, "rows missing" / "stuck for hours" debugging | **`system-architect`** | Data model and architecture work — schema/migration changes are data model design; role exists in agents/ |
 | VNX intelligence schema, central state DBs, dispatch lifecycle, code_snippets/snippet_metadata, intelligence_injections, project_id propagation | **`intelligence-engineer`** | Knows the VNX-specific table semantics and lifecycle |
 | API endpoints, scripts, refactoring, general server-side code | `backend-developer` | Generalist; has Codex Defense Checklist as baseline |
 | UI/UX, dashboards, frontend frameworks | `frontend-developer` | |
-| Code review (general) | `reviewer` | May request `database-engineer` second-opinion when PR touches `schemas/` or migration files |
+| Code review (general) | `reviewer` | May request `system-architect` second-opinion when PR touches `schemas/` or migration files |
 | API design, REST contracts | `api-developer` | |
 | Testing strategy, regression coverage | `test-engineer` | |
 | Performance profiling, bottleneck hunt | `performance-profiler` | |
@@ -114,7 +114,7 @@ When dispatching, route to the most-specific skill available. Specialists catch 
 | Architecture / design / planning | `architect` | NOT for implementation; planning only |
 | Skill creation / improvement | `skill-creator` | |
 
-**Rule:** if the dispatch involves code under `schemas/`, `scripts/migrate*`, `_import_table`-style importers, or any SQLite touching DB schema → MUST route to `database-engineer`, not `backend-developer`. The P4 chain demonstrated that generalist routing wastes 4-5x more rounds on multi-tenant DB work.
+**Rule:** if the dispatch involves code under `schemas/`, `scripts/migrate*`, `_import_table`-style importers, or any SQLite touching DB schema → route to `system-architect` (data model work), not `backend-developer` (runtime implementation). The P4 chain demonstrated that generalist routing wastes 4-5x more rounds on multi-tenant DB work.
 
 ### B3.1 sub-rule: Iteration cap on net-new findings
 
