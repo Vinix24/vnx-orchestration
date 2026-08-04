@@ -41,7 +41,13 @@ if _LIB_DIR not in sys.path:
 
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dispatch_flags import single_entry_enabled  # noqa: E402
-from dispatch_spec import _ID_RE, Gate, Provider  # noqa: E402
+from dispatch_spec import (  # noqa: E402
+    _ID_RE,
+    DEADLINE_SECONDS_MAX,
+    DEADLINE_SECONDS_MIN,
+    Gate,
+    Provider,
+)
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -187,6 +193,18 @@ def stage_spec_bundle(
         )
     staging_id = dispatch_id
 
+    # 1a. deadline bounds validated at the trust boundary — this module is the
+    # FIRST writer of a dispatch-spec.json bundle, so an out-of-range value must
+    # fail loud at staging (bridge_dispatch surfaces it as a clean reject) rather
+    # than drift silently downstream. The range is the consumer-door contract
+    # [DEADLINE_SECONDS_MIN, DEADLINE_SECONDS_MAX] — the same range validate()
+    # Rule 11 enforces, from the same constants (dispatch_spec).
+    if not (DEADLINE_SECONDS_MIN <= int(deadline_seconds) <= DEADLINE_SECONDS_MAX):
+        raise ValueError(
+            f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
+            f"got {deadline_seconds}"
+        )
+
     # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
     # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
     # (vnx-dev in a central install) while stamping the spec with the real project_id is
@@ -324,7 +342,10 @@ def deliver_via_door(
     ``deadline_seconds`` may be None: resolves to the unchanged 3600s default (matches
     ``stage_spec_bundle``'s own default) so an omitted value reproduces byte-identical
     prior behavior. Pass an explicit value (validated by the caller, e.g. dispatch-agent's
-    300-14400 range) to override the lane's receipt-wait deadline.
+    300-14400 range) to override the lane's receipt-wait deadline. ``stage_spec_bundle``
+    re-enforces the same [300, 14400] bounds at the trust boundary, so an out-of-range
+    value fails loud at staging (bridge_dispatch returns 1) even if a caller skips its own
+    validation.
 
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
@@ -383,6 +404,19 @@ def main(argv: Optional[list] = None) -> int:
     )
     parser.add_argument("--instruction", default=None, help="Inline instruction text (fallback).")
     args = parser.parse_args(argv)
+
+    # deadline bounds enforced on the CLI too (not just at stage_spec_bundle): the
+    # bridge is the trust boundary for legacy callers, so an impossible
+    # --deadline-seconds must fail loud here, not reach staging. Same constants as
+    # stage_spec_bundle / dispatch_spec.validate (single source of truth).
+    if not (DEADLINE_SECONDS_MIN <= args.deadline_seconds <= DEADLINE_SECONDS_MAX):
+        print(
+            f"[dispatch_bridge] REJECT [bad-deadline]: --deadline-seconds "
+            f"{args.deadline_seconds} is out of range "
+            f"[{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}]",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.instruction_stdin:
         instruction_text = sys.stdin.read()
