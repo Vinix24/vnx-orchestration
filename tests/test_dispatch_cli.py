@@ -2735,7 +2735,7 @@ class TestPersistRouteDecision:
             instruction_text="# Route decision persistence test\n\nDo something safe.\n",
             staging_id="20260804-staging-oi849",
             dispatch_id="20260804-oi849-integration",
-            target_slot="T1",
+            target_slot="T0",
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
