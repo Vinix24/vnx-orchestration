@@ -158,25 +158,6 @@ class TestProviderDispatchAutoRouteIntegration:
             "smart_router._RECOMMENDATIONS_PATH", recommendations_yaml
         )
 
-        import smart_router as _sr  # noqa: PLC0415
-        print(
-            "VNX-DIAG pre-patch _RECOMMENDATIONS_PATH=",
-            _sr._RECOMMENDATIONS_PATH,
-            "| decide.__globals__ is smart_router.__dict__:",
-            _sr.decide.__globals__ is _sr.__dict__,
-            "| decide.__globals__[_RECOMMENDATIONS_PATH]:",
-            _sr.decide.__globals__.get("_RECOMMENDATIONS_PATH"),
-            file=sys.stderr,
-        )
-        _diag = _sr.decide(instruction="implement feature X")
-        print(
-            "VNX-DIAG decide(implement feature X) -> primary=",
-            _diag.primary.model_id if _diag.primary else None,
-            "| task_class=", _diag.task_class,
-            "| constraints=", _diag.constraints_applied,
-            file=sys.stderr,
-        )
-
         captured_model = {}
 
         def _fake_dispatch(args, **kwargs):
