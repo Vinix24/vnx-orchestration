@@ -407,7 +407,7 @@ class TestInstructionSha256:
 # ---------------------------------------------------------------------------
 
 class TestRule11Deadline:
-    @pytest.mark.parametrize("bad_deadline", [0, 59, 14401, 99999])
+    @pytest.mark.parametrize("bad_deadline", [0, 59, 60, 299, 14401, 99999])
     def test_rejects_out_of_range_deadline(self, tmp_path, monkeypatch, bad_deadline):
         ifile = _write_instruction(tmp_path)
         spec = _valid_spec(ifile, deadline_seconds=bad_deadline)
@@ -415,7 +415,7 @@ class TestRule11Deadline:
         assert isinstance(result, Reject)
         assert result.code == "bad-deadline"
 
-    @pytest.mark.parametrize("good_deadline", [60, 3600, 14400])
+    @pytest.mark.parametrize("good_deadline", [300, 3600, 14400])
     def test_accepts_boundary_deadlines(self, tmp_path, monkeypatch, good_deadline):
         ifile = _write_instruction(tmp_path)
         spec = _valid_spec(ifile, deadline_seconds=good_deadline)

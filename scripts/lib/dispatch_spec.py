@@ -62,6 +62,20 @@ class PathAccess(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Deadline bounds — single source of truth (deadline-passthrough)
+# ---------------------------------------------------------------------------
+
+# The consumer door (`vnx dispatch-agent --deadline-seconds N`) documents and
+# enforces [300, 14400]. validate() Rule 11 and the bridge's trust boundary
+# (dispatch_bridge.stage_spec_bundle + its --deadline-seconds CLI) use these
+# constants so the ranges can never drift again — validate() previously allowed
+# [60, 14400] while the door enforced [300, 14400], and two ranges without an
+# explanation is the next drift source.
+DEADLINE_SECONDS_MIN = 300
+DEADLINE_SECONDS_MAX = 14400
+
+
+# ---------------------------------------------------------------------------
 # Path type
 # ---------------------------------------------------------------------------
 
@@ -279,11 +293,14 @@ def validate(
         norm_p = PurePosixPath(str(dp.path))
         normalized.append(DispatchPath(norm_p, dp.access, dp.materialize_at_cwd))
 
-    # Rule 11 — deadline bounds
-    if not (60 <= spec.deadline_seconds <= 14400):
+    # Rule 11 — deadline bounds. [300, 14400] is the consumer-door contract
+    # (vnx dispatch-agent); validate() enforces the SAME range the bridge's trust
+    # boundary enforces at staging time, so the two gates can never disagree.
+    if not (DEADLINE_SECONDS_MIN <= spec.deadline_seconds <= DEADLINE_SECONDS_MAX):
         return Reject(
             "bad-deadline",
-            f"deadline_seconds must be in [60, 14400], got {spec.deadline_seconds}",
+            f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
+            f"got {spec.deadline_seconds}",
         )
 
     # Rule 12 — headless opt-in requires a non-empty reason (PR-5)

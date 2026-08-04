@@ -177,6 +177,9 @@ def _resolve_agent_config(
     }, True
 
 
+# deadline-passthrough bounds. MUST match dispatch_spec.DEADLINE_SECONDS_MIN/MAX
+# (the single source of truth shared with validate() Rule 11 and the bridge trust
+# boundary) — a cross-check test pins the two to stay equal.
 _DEADLINE_SECONDS_MIN = 300
 _DEADLINE_SECONDS_MAX = 14400
 
@@ -300,6 +303,24 @@ def vnx_dispatch_agent(args) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # --deadline-seconds is honored only on the door path (deliver_via_door ->
+    # bridge_dispatch -> stage_spec_bundle). The legacy fallback lane
+    # (deliver_with_recovery / subprocess_dispatch) has no deadline knob, so with the
+    # single-entry door disabled an explicit --deadline-seconds would be silently
+    # dropped — a flag the caller set must report itself, not vanish. Mirrors the
+    # non-claude guard's framing (same VNX_DISPATCH_LEGACY / VNX_SINGLE_ENTRY_DISPATCH
+    # explanation) but warns instead of hard-erroring: the dispatch still runs, just
+    # at the lane default.
+    if deadline_seconds is not None and not single_entry_enabled():
+        print(
+            f"Warning: --deadline-seconds {deadline_seconds} is ignored because the single-entry "
+            "dispatch door is disabled (VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0). "
+            "The legacy dispatch lane does not honor a deadline override; the receipt-wait "
+            "deadline stays at the lane default. Unset VNX_DISPATCH_LEGACY / "
+            "VNX_SINGLE_ENTRY_DISPATCH to use the door and honor --deadline-seconds.",
+            file=sys.stderr,
+        )
 
     # Preflight (audit high #6): the default lane drives an installed, authenticated `claude` CLI as
     # a subprocess. A missing binary otherwise surfaces only as a bare "status: failed". Scoped to
