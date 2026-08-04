@@ -419,6 +419,12 @@ def reconcile_track(
             if _merged_pr_numbers is not None
             else _load_merged_pr_numbers(state_dir, repo_root)
         )
+        # OI-840: auto-complete deliverable stubs BEFORE computing derived_status.
+        # Deliverable dispatches (output_ref IS NOT NULL) are planning stubs, not
+        # real worker work. If all real dispatches are terminal with merged-PR
+        # evidence, the stubs should be completed — otherwise they block the
+        # track from deriving 'done' even though the code already shipped.
+        _reconcile_deliverable_dispatches(conn, track_id, project_id, merged)
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         _write_derived_status(conn, track_id, project_id, derived)
         conn.commit()
@@ -543,6 +549,166 @@ def reconcile_all_tracks(
         project_id, len(results), sum(1 for r in results if r["drifted"]),
     )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Deliverable auto-completion (OI-840)
+# ---------------------------------------------------------------------------
+
+def _reconcile_deliverable_dispatches(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+    merged_pr_numbers: FrozenSet[int] = frozenset(),
+) -> int:
+    """Auto-complete deliverable dispatch stubs when their track's real work is done.
+
+    Deliverable dispatches (output_ref IS NOT NULL) are planning stubs — they
+    represent a planned output, not real worker work. There are two paths to
+    auto-completion:
+
+    Path A (has real dispatches): ALL non-deliverable dispatches for the track
+    are in terminal states AND merged-PR evidence exists (pr_merged coordination
+    event, declared-done phase, or track pr_ref confirmed merged).
+
+    Path B (no real dispatches): the track itself carries completion evidence:
+    declared-done phase OR track pr_ref confirmed merged via all evidence sources.
+    This covers tracks whose real worker dispatches were never attributed (common
+    for historical tracks that used lane letters instead of track_ids).
+
+    Idempotent: already-completed dispatches are no-ops. Returns the number of
+    deliverable dispatches transitioned to 'completed'.
+
+    OI-840: without this, the deliverable-plane shows 'ready' items as
+    dispatchable work when the underlying code already shipped.
+    """
+    # 1. Find all non-deliverable dispatches for this track.
+    non_deliverable = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        "AND (output_ref IS NULL OR output_ref = '')",
+        (track_id, project_id),
+    ).fetchall()
+
+    # 2. Resolve the track row once (reused below).
+    track_row = conn.execute(
+        "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    track_pr_ref = track_row["pr_ref"] if track_row else None
+    track_phase = track_row["phase"] if track_row else None
+
+    # 3. Determine if merged-PR evidence exists.
+    pr_evidence = False
+
+    if non_deliverable:
+        # Path A: real dispatches exist. They must ALL be terminal.
+        all_terminal = all(
+            row["state"] in TERMINAL_DISPATCH_STATES for row in non_deliverable
+        )
+        if not all_terminal:
+            return 0
+
+        # Check pr_merged coordination event on a non-deliverable dispatch.
+        non_dlv_ids = [row["dispatch_id"] for row in non_deliverable]
+        placeholders = ",".join("?" * len(non_dlv_ids))
+        merged_event = conn.execute(
+            f"""
+            SELECT 1 FROM coordination_events
+            WHERE event_type = 'pr_merged'
+              AND project_id = ?
+              AND entity_id IN ({placeholders})
+            LIMIT 1
+            """,
+            [project_id, *non_dlv_ids],
+        ).fetchone()
+
+        if merged_event:
+            pr_evidence = True
+
+    # 4. Track-level evidence (applies to both paths).
+    if not pr_evidence:
+        if track_phase == "done":
+            pr_evidence = True
+        else:
+            nums = _parse_pr_numbers(track_pr_ref)
+            if nums and nums <= merged_pr_numbers:
+                pr_evidence = True
+
+    if not pr_evidence:
+        return 0
+
+    # 5. Transition non-terminal deliverable dispatches to 'completed'.
+    now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetchone()[0]
+    deliverable_rows = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        "AND output_ref IS NOT NULL AND output_ref != '' "
+        "AND state NOT IN ('completed', 'expired', 'dead_letter')",
+        (track_id, project_id),
+    ).fetchall()
+
+    for row in deliverable_rows:
+        conn.execute(
+            "UPDATE dispatches SET state = 'completed', updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ?",
+            (now, row["dispatch_id"], project_id),
+        )
+        _append_coordination_event(
+            conn,
+            event_type="deliverable_auto_completed",
+            entity_type="dispatch",
+            entity_id=row["dispatch_id"],
+            from_state=row["state"],
+            to_state="completed",
+            actor="reconciler",
+            reason=f"OI-840: track {track_id} real work done; auto-completing deliverable stub",
+            metadata={"track_id": track_id, "project_id": project_id},
+            project_id=project_id,
+        )
+
+    return len(deliverable_rows)
+
+
+def _append_coordination_event(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    entity_type: str = "dispatch",
+    entity_id: str,
+    from_state: Optional[str] = None,
+    to_state: Optional[str] = None,
+    actor: str = "runtime",
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
+) -> None:
+    """Best-effort append a coordination event. Never raises."""
+    import json as _json
+    try:
+        event_id = f"ce-{abs(hash(f'{event_type}{entity_id}{_now_utc()}'))}"
+        now = _now_utc()
+        conn.execute(
+            """
+            INSERT INTO coordination_events
+                (event_id, event_type, entity_type, entity_id, from_state, to_state,
+                 actor, reason, metadata_json, occurred_at, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id, event_type, entity_type, entity_id,
+                from_state, to_state, actor, reason,
+                _json.dumps(metadata or {}, sort_keys=True),
+                now, project_id,
+            ),
+        )
+    except Exception:
+        pass  # coordination events are best-effort
+
+
+def _now_utc() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
 
 
 # ---------------------------------------------------------------------------
