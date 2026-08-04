@@ -154,9 +154,6 @@ class TestProviderDispatchAutoRouteIntegration:
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        monkeypatch.setattr(
-            "smart_router._RECOMMENDATIONS_PATH", recommendations_yaml
-        )
 
         captured_model = {}
 
@@ -164,7 +161,8 @@ class TestProviderDispatchAutoRouteIntegration:
             captured_model["model"] = args.model
             return 0
 
-        with patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
+        with patch("smart_router._RECOMMENDATIONS_PATH", recommendations_yaml), \
+             patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
             result = provider_dispatch.main([
                 "--provider", "kimi",
                 "--terminal-id", "T1",
@@ -189,11 +187,9 @@ class TestProviderDispatchAutoRouteIntegration:
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        monkeypatch.setattr(
-            "smart_router._RECOMMENDATIONS_PATH", recommendations_yaml
-        )
 
-        with patch("provider_dispatch._dispatch_kimi", return_value=0), \
+        with patch("smart_router._RECOMMENDATIONS_PATH", recommendations_yaml), \
+             patch("provider_dispatch._dispatch_kimi", return_value=0), \
              patch("provider_dispatch._dispatch_litellm", return_value=0):
             result = provider_dispatch.main([
                 "--provider", "kimi",
@@ -232,12 +228,10 @@ class TestProviderDispatchAutoRouteIntegration:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        monkeypatch.setattr(
-            "smart_router._RECOMMENDATIONS_PATH",
-            tmp_path / "nonexistent.yaml",
-        )
+        _missing_path = tmp_path / "nonexistent.yaml"
 
-        with patch("provider_dispatch._dispatch_kimi", return_value=0):
+        with patch("smart_router._RECOMMENDATIONS_PATH", _missing_path), \
+             patch("provider_dispatch._dispatch_kimi", return_value=0):
             result = provider_dispatch.main([
                 "--provider", "kimi",
                 "--terminal-id", "T1",
