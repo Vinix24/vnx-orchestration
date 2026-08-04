@@ -16,6 +16,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +30,7 @@ sys.path.insert(0, str(SCRIPTS_LIB))
 from report_to_receipt_converter import (
     _WATERMARK_FILENAME,
     _compute_sha256,
+    _extract_body_fields,
     _load_route_decision,
     _load_watermark,
     build_receipt_from_report,
@@ -35,6 +38,8 @@ from report_to_receipt_converter import (
     parse_frontmatter,
     scan_and_convert,
 )
+
+_POISONED_REPORT = Path(__file__).resolve().parent / "fixtures" / "poisoned_reports" / "plangate-p0-glm-harness.md"
 
 
 # ---------------------------------------------------------------------------
@@ -236,19 +241,19 @@ class TestScanAndConvert:
         _write_frontmatter_report(reports_dir / "20260601-scan-a.md", "20260601-scan-a")
         _write_frontmatter_report(reports_dir / "20260601-scan-b.md", "20260601-scan-b")
 
-        n = scan_and_convert([reports_dir], state_dir)
+        stats = scan_and_convert([reports_dir], state_dir)
 
-        assert n == 2
+        assert stats.new_count == 2
         assert _count_receipts(state_dir) == 2
 
     def test_idempotent_rescan(self, reports_dir, state_dir):
         _write_frontmatter_report(reports_dir / "20260601-rescan.md", "20260601-rescan")
 
-        n1 = scan_and_convert([reports_dir], state_dir)
-        n2 = scan_and_convert([reports_dir], state_dir)
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
 
-        assert n1 == 1
-        assert n2 == 0  # watermark prevents re-emission
+        assert stats1.new_count == 1
+        assert stats2.new_count == 0  # watermark prevents re-emission
         assert _count_receipts(state_dir) == 1
 
     def test_malformed_report_skipped_no_crash(self, reports_dir, state_dir):
@@ -256,16 +261,18 @@ class TestScanAndConvert:
         reports_dir.joinpath("unknown.md").write_text("No dispatch ID anywhere in this file.", encoding="utf-8")
         _write_frontmatter_report(reports_dir / "20260601-good.md", "20260601-good")
 
-        n = scan_and_convert([reports_dir], state_dir)
+        stats = scan_and_convert([reports_dir], state_dir)
 
-        # Only the good report is counted
-        assert n == 1
+        # Only the good report is counted as new; the malformed one is
+        # counted separately (OI-998) and not marked processed.
+        assert stats.new_count == 1
+        assert stats.malformed_count == 1
         assert _count_receipts(state_dir) == 1
 
     def test_nonexistent_dir_no_crash(self, state_dir, tmp_path):
         nonexistent = tmp_path / "does_not_exist"
-        n = scan_and_convert([nonexistent], state_dir)
-        assert n == 0
+        stats = scan_and_convert([nonexistent], state_dir)
+        assert stats.new_count == 0
 
     def test_multiple_dirs(self, tmp_path, state_dir):
         dir_a = tmp_path / "reports_a"
@@ -275,8 +282,8 @@ class TestScanAndConvert:
         _write_frontmatter_report(dir_a / "20260601-a.md", "20260601-a")
         _write_frontmatter_report(dir_b / "20260601-b.md", "20260601-b")
 
-        n = scan_and_convert([dir_a, dir_b], state_dir)
-        assert n == 2
+        stats = scan_and_convert([dir_a, dir_b], state_dir)
+        assert stats.new_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +309,8 @@ class TestWatermarkPersistence:
 
         # Second scan with fresh in-memory state (simulates restart)
         # The watermark file on disk prevents re-processing
-        n2 = scan_and_convert([reports_dir], state_dir)
-        assert n2 == 0
+        stats2 = scan_and_convert([reports_dir], state_dir)
+        assert stats2.new_count == 0
         assert _count_receipts(state_dir) == 1
 
     def test_converter_ignores_bash_watermark(self, reports_dir, state_dir):
@@ -322,10 +329,10 @@ class TestWatermarkPersistence:
         bash_wm = state_dir / "processed_receipts.txt"
         bash_wm.write_text(file_hash + "\n", encoding="utf-8")
 
-        n = scan_and_convert([reports_dir], state_dir)
+        stats = scan_and_convert([reports_dir], state_dir)
 
         # Converter must NOT skip: it does not read the Bash watermark.
-        assert n == 1
+        assert stats.new_count == 1
         assert _count_receipts(state_dir) == 1
 
         # Converter's own watermark is now populated.
@@ -333,8 +340,8 @@ class TestWatermarkPersistence:
         assert file_hash in py_wm
 
         # Second scan: converter's own watermark prevents re-emission.
-        n2 = scan_and_convert([reports_dir], state_dir)
-        assert n2 == 0
+        stats2 = scan_and_convert([reports_dir], state_dir)
+        assert stats2.new_count == 0
         assert _count_receipts(state_dir) == 1
 
     def test_converter_does_not_read_mtime_watermark(self, reports_dir, state_dir):
@@ -351,10 +358,10 @@ class TestWatermarkPersistence:
         report = reports_dir / "20260601-mtime-isolation.md"
         _write_frontmatter_report(report, "20260601-mtime-isolation")
 
-        n = scan_and_convert([reports_dir], state_dir)
+        stats = scan_and_convert([reports_dir], state_dir)
 
         # Converter processes the report — it does not read the mtime watermark.
-        assert n == 1
+        assert stats.new_count == 1
 
         # The mtime watermark file is untouched by the converter.
         assert mtime_wm.read_text(encoding="utf-8").strip() == "9999999999"
@@ -529,10 +536,10 @@ class TestContractValidation:
             encoding="utf-8",
         )
 
-        n = scan_and_convert([reports_dir], state_dir)
+        stats = scan_and_convert([reports_dir], state_dir)
 
-        # Both get receipts emitted (appended), so n == 2
-        assert n == 2
+        # Both get receipts emitted (appended), so new_count == 2
+        assert stats.new_count == 2
         receipts = _receipts(state_dir)
         assert len(receipts) == 2
         event_types = {r["event_type"] for r in receipts}
@@ -738,3 +745,214 @@ class TestSmartRouterStrategyTag:
 
         result = _load_route_decision("bad-dispatch", state_dir)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Part 9: poisoned-report resilience (OI-997) — dispatch-20260804-064708-pra-
+# converter-resilience
+# ---------------------------------------------------------------------------
+
+class TestPoisonedReportResilience:
+    """A single crashed report must not crash the whole converter scan.
+
+    ``tests/fixtures/poisoned_reports/plangate-p0-glm-harness.md`` is a copy
+    of the real quarantined report that stopped receipt emission entirely on
+    2026-08-03 18:36: a ``**bold-key**`` whose value falls entirely inside
+    the ``text[:3000]`` scan window as trailing whitespace only —
+    ``group(2).strip()`` reduces to ``""``, and the old
+    ``.splitlines()[0]`` raised ``IndexError`` before the guard added here.
+    """
+
+    def test_poisoned_report_does_not_crash_extract_body_fields(self):
+        text = _POISONED_REPORT.read_text(encoding="utf-8")
+        fields = _extract_body_fields(text)  # must not raise
+        assert isinstance(fields, dict)
+
+    def test_poisoned_report_does_not_crash_build_receipt_from_report(self, tmp_path):
+        text = _POISONED_REPORT.read_text(encoding="utf-8")
+        dest = tmp_path / _POISONED_REPORT.name
+        dest.write_text(text, encoding="utf-8")
+
+        receipt = build_receipt_from_report(dest, text)  # must not raise
+
+        assert receipt is not None
+        assert receipt["dispatch_id"] == "plangate-p0-glm-harness"
+
+    def test_one_poisoned_report_does_not_block_the_batch(self, reports_dir, state_dir):
+        """A dir with 1 poisoned + 2 healthy reports must yield 3 receipts —
+        one per report, none dropped.
+
+        Before the OI-997 fix, the poisoned report's IndexError propagated
+        out of build_receipt_from_report() uncaught inside
+        scan_and_convert()'s loop, aborting the ENTIRE scan — every report
+        after the poisoned one in sort order was never even attempted. This
+        is the literal 2026-08-03 18:36 incident (300+ reports, 0 receipts
+        emitted until the poisoned file was quarantined by hand).
+
+        Sorted glob order places the poisoned file BEFORE both healthy
+        reports (`plangate-...` < `zzz-healthy-...`) so a regression here
+        (no try/except around the per-report conversion) reproduces the
+        original all-or-nothing failure, not a partial one.
+
+        The poisoned report itself lands as a "report_contract_invalid"
+        receipt (its body lacks the required ## Summary/## Changes/etc
+        headings — a separate, pre-existing contract check, not this
+        dispatch's concern) rather than "task_complete"; the point proven
+        here is that it no longer crashes the SCAN, so the two healthy
+        reports after it still get their receipts.
+        """
+        shutil.copy(_POISONED_REPORT, reports_dir / _POISONED_REPORT.name)
+        _write_frontmatter_report(reports_dir / "zzz-healthy-a.md", "zzz-healthy-a")
+        _write_frontmatter_report(reports_dir / "zzz-healthy-b.md", "zzz-healthy-b")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.new_count == 3
+        assert stats.error_count == 0
+        assert _count_receipts(state_dir) == 3
+        receipts = _receipts(state_dir)
+        event_types = {r["event_type"] for r in receipts}
+        assert "task_complete" in event_types
+        assert "report_contract_invalid" in event_types
+
+
+class TestScanCrashGuard:
+    """OI-997 point 2: scan_and_convert()'s OWN try/except around the
+    per-report call site must survive ANY exception — not only the specific
+    IndexError fixed in _extract_body_fields() / guarded inside
+    _convert_one_detailed(). Simulates a bug that bypasses those inner
+    guards entirely to prove the outer guard in scan_and_convert() itself
+    is what is being tested here.
+    """
+
+    def test_unhandled_exception_in_one_report_does_not_abort_the_batch(
+        self, reports_dir, state_dir, monkeypatch, caplog
+    ):
+        import report_to_receipt_converter as rtc
+
+        _write_frontmatter_report(reports_dir / "20260601-outer-a.md", "20260601-outer-a")
+        _write_frontmatter_report(reports_dir / "20260601-outer-b.md", "20260601-outer-b")
+        _write_frontmatter_report(reports_dir / "20260601-outer-c.md", "20260601-outer-c")
+
+        real_convert_one = rtc._convert_one_detailed
+
+        def _boom(report_path, **kwargs):
+            if "outer-b" in report_path.name:
+                raise RuntimeError("simulated bug bypassing _convert_one_detailed's own guards")
+            return real_convert_one(report_path, **kwargs)
+
+        monkeypatch.setattr(rtc, "_convert_one_detailed", _boom)
+
+        with caplog.at_level(logging.ERROR, logger="report_to_receipt_converter"):
+            stats = rtc.scan_and_convert([reports_dir], state_dir)
+
+        assert stats.new_count == 2
+        assert stats.error_count == 1
+        assert _count_receipts(state_dir) == 2
+        assert any(
+            "unhandled exception" in r.message and "outer-b" in r.message
+            for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# Part 10: fail-closed rejection must be counted and loud (OI-998)
+# ---------------------------------------------------------------------------
+
+def _write_report_without_model(path: Path, dispatch_id: str) -> Path:
+    """A well-formed dispatch report that omits Model — triggers the
+    fail-closed rejection in append_receipt_internals/validation.py."""
+    path.write_text(
+        f"---\ndispatch_id: {dispatch_id}\nprovider: claude\n---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestRejectionVisibility:
+    """A fail-closed rejection (no real Model) must be counted separately
+    from malformed/errored conversions and logged loudly (WARNING with
+    dispatch-id + reason) — not disappear as a silent None."""
+
+    def test_rejected_report_counted_separately_and_logs_warning(
+        self, reports_dir, state_dir, caplog
+    ):
+        _write_report_without_model(reports_dir / "20260601-no-model.md", "20260601-no-model")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.rejected_count == 1
+        assert stats.new_count == 0
+        assert stats.malformed_count == 0
+        assert stats.error_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert any(
+            "REJECTED" in r.message
+            and "20260601-no-model" in r.message
+            and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_rejected_report_retried_on_next_scan_not_watermarked(self, reports_dir, state_dir):
+        """A rejected report must NOT be marked processed — it is retried
+        every scan until the cause (missing Model) is fixed."""
+        _write_report_without_model(reports_dir / "20260601-retry-me.md", "20260601-retry-me")
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats1.rejected_count == 1
+        assert stats2.rejected_count == 1  # retried, not silently watermarked away
+
+    def test_convert_report_to_receipt_returns_none_for_rejected(
+        self, tmp_path, state_dir, caplog
+    ):
+        """convert_report_to_receipt() keeps its exact Optional[AppendResult]
+        contract for the 'rejected' outcome too — existing callers (the tmux
+        stop-hook, direct-call tests) need no changes for this dispatch."""
+        report = _write_report_without_model(tmp_path / "20260601-direct-reject.md", "20260601-direct-reject")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            result = convert_report_to_receipt(
+                report, receipts_file=str(state_dir / "t0_receipts.ndjson")
+            )
+
+        assert result is None
+        assert any("REJECTED" in r.message for r in caplog.records)
+
+    def test_zero_receipts_scan_flips_health_beacon_to_fail(self, reports_dir, state_dir):
+        """The scan's counts land on the existing HealthBeacon channel
+        (health/report_to_receipt_converter.json — health_beacon.py, the
+        same mechanism producer_freshness_monitor.py uses for its own
+        heartbeat) so a scan that attempted conversions but produced zero
+        receipts reads as unhealthy, not as a quiet no-op."""
+        _write_report_without_model(reports_dir / "20260601-no-model-2.md", "20260601-no-model-2")
+
+        scan_and_convert([reports_dir], state_dir)
+
+        beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
+        assert beacon_path.exists()
+        beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["rejected_count"] == 1
+        assert beacon["details"]["new_count"] == 0
+
+    def test_scan_with_at_least_one_success_keeps_beacon_ok(self, reports_dir, state_dir):
+        """A rejection alongside a successful receipt is normal, expected,
+        contract-driven behavior — it must NOT flip the whole scan unhealthy."""
+        _write_report_without_model(reports_dir / "20260601-no-model-3.md", "20260601-no-model-3")
+        _write_frontmatter_report(reports_dir / "20260601-healthy-c.md", "20260601-healthy-c")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+        assert stats.new_count == 1
+        assert stats.rejected_count == 1
+
+        beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
+        beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
+        assert beacon["status"] == "ok"

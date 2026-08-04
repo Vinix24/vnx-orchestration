@@ -42,6 +42,8 @@ Your report MUST contain these exact headings (aliases accepted):
 
 `## Summary` must be at least 50 non-whitespace characters. `## Open Items` may contain "None" explicitly. Include your dispatch ID as a plain-text or bold field (e.g. `Dispatch-ID: 20260601-213416-myfeature`). Full contract: `scripts/lib/report_body_contract.py`.
 
+**A dispatch report also needs an identity block, or its receipt never lands.** The table above (`validate_body()`) does not require Model or Provider — but the receipt-converter fail-closed model check does (`scripts/lib/append_receipt_internals/validation.py::_validate_model_present`): any dispatch-lane report without a real Model is REFUSED at receipt-write time, silently as far as the report contract is concerned (it can still pass `validate_body()` cleanly). Include a `Model:`/`Provider:` bold-field or frontmatter pair (e.g. `**Model**: sonnet`, `**Provider**: claude`) alongside your Dispatch-ID so the receipt actually gets written — see the fail-closed check itself (`_validate_model_present`) for the rationale, and `scripts/lib/report_to_receipt_converter.py` for how the refusal is logged (WARNING, dispatch-id + reason) and surfaced (`health/report_to_receipt_converter.json`).
+
 ## Dispatch lanes
 
 Two lanes ship on main; T0 picks per task. Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (tmux-spawn lane detail: `docs/operations/TMUX_SPAWN_LANE.md`).
