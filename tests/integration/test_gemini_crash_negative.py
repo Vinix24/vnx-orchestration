@@ -29,6 +29,7 @@ sys.path.insert(0, str(LIB_DIR))
 sys.path.insert(0, str(LIB_DIR / "adapters"))
 
 from adapters.gemini_adapter import GeminiAdapter
+from canonical_event import VALID_EVENT_TYPES
 from event_store import EventStore
 
 pytestmark = pytest.mark.integration
@@ -90,6 +91,60 @@ def _wait_for_readiness(ready_file: Path, deadline: float = 10.0) -> None:
         time.sleep(0.05)
 
 
+_READINESS_DEADLINE = 10.0
+
+
+def _spawn_kill_when_ready(
+    get_proc,
+    ready_file: Path,
+    deadline: float = _READINESS_DEADLINE,
+) -> tuple[threading.Thread, list[BaseException]]:
+    """Start a daemon thread that SIGKILLs the fake gemini once the readiness
+    marker appears.
+
+    Returns (thread, errors). A readiness timeout (marker never written) is
+    recorded in `errors` instead of swallowed, so the main thread can fail the
+    test with the real cause rather than a bare 'got: [None]'. (OI-979)
+    """
+
+    errors: list[BaseException] = []
+
+    def _kill_when_ready() -> None:
+        try:
+            _wait_for_readiness(ready_file, deadline=deadline)
+        except TimeoutError as exc:
+            errors.append(exc)
+            return
+        proc = get_proc()
+        if proc is None:
+            return
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    killer = threading.Thread(target=_kill_when_ready, daemon=True)
+    killer.start()
+    return killer, errors
+
+
+def _join_kill_when_ready(
+    killer: threading.Thread, errors: list[BaseException]
+) -> None:
+    """Join the killer for the full readiness window, then surface a missing
+    marker as a real test failure.
+
+    The join must cover the same upper bound as the waiter: a shorter join can
+    return while the killer is still waiting, which silently reintroduces the
+    wall-clock race. (OI-979)
+    """
+    killer.join(timeout=_READINESS_DEADLINE)
+    if errors:
+        pytest.fail(
+            f"Fake gemini never became ready; readiness marker was not written: {errors[0]}"
+        )
+
+
 @pytest.fixture()
 def event_store(tmp_path: Path) -> EventStore:
     return EventStore(events_dir=tmp_path / "events")
@@ -117,18 +172,7 @@ class TestGeminiCrashNegative:
             extra_env={"VNX_GEMINI_READY_FILE": str(ready_file)},
         )
 
-        def _kill_when_ready():
-            try:
-                _wait_for_readiness(ready_file, deadline=10.0)
-            except TimeoutError:
-                pass
-            try:
-                os.kill(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        killer = threading.Thread(target=_kill_when_ready, daemon=True)
-        killer.start()
+        killer, kill_errors = _spawn_kill_when_ready(lambda: proc, ready_file)
 
         events_seen = list(adapter.drain_stream(
             proc,
@@ -138,7 +182,7 @@ class TestGeminiCrashNegative:
             chunk_timeout=5.0,
             total_deadline=10.0,
         ))
-        killer.join(timeout=2)
+        _join_kill_when_ready(killer, kill_errors)
 
         types = [ev.event_type for ev in events_seen]
         assert "error" in types, (
@@ -158,24 +202,13 @@ class TestGeminiCrashNegative:
             extra_env={"VNX_GEMINI_READY_FILE": str(ready_file)},
         )
 
-        def _kill_when_ready():
-            try:
-                _wait_for_readiness(ready_file, deadline=10.0)
-            except TimeoutError:
-                pass
-            try:
-                os.kill(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        killer = threading.Thread(target=_kill_when_ready, daemon=True)
-        killer.start()
+        killer, kill_errors = _spawn_kill_when_ready(lambda: proc, ready_file)
 
         list(adapter.drain_stream(
             proc, terminal_id, dispatch_id, event_store,
             chunk_timeout=5.0, total_deadline=10.0,
         ))
-        killer.join(timeout=2)
+        _join_kill_when_ready(killer, kill_errors)
 
         count = event_store.event_count(terminal_id)
         assert count > 0, (
@@ -230,19 +263,10 @@ class TestGeminiCrashNegative:
             extra_env={"VNX_GEMINI_READY_FILE": str(ready_file)},
         )
 
-        def _kill_when_ready():
-            try:
-                _wait_for_readiness(ready_file, deadline=10.0)
-            except TimeoutError:
-                pass
-            try:
-                os.kill(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        threading.Thread(target=_kill_when_ready, daemon=True).start()
+        killer, kill_errors = _spawn_kill_when_ready(lambda: proc, ready_file)
         list(adapter.drain_stream(proc, terminal_id, dispatch_id, event_store,
                                    chunk_timeout=5.0, total_deadline=10.0))
+        _join_kill_when_ready(killer, kill_errors)
 
         event_file = event_store._terminal_path(terminal_id)
         if event_file.exists():
@@ -287,19 +311,9 @@ class TestGeminiCrashNegative:
 
         monkeypatch.setattr(ga_mod.subprocess, "Popen", fake_popen)
 
-        def _kill_when_ready():
-            try:
-                _wait_for_readiness(ready_file, deadline=10.0)
-            except TimeoutError:
-                pass
-            if proc_holder:
-                try:
-                    os.kill(proc_holder[0].pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-
-        killer = threading.Thread(target=_kill_when_ready, daemon=True)
-        killer.start()
+        killer, kill_errors = _spawn_kill_when_ready(
+            lambda: proc_holder[0] if proc_holder else None, ready_file
+        )
 
         ctx = {
             "terminal_id": terminal_id,
@@ -311,9 +325,95 @@ class TestGeminiCrashNegative:
 
         # Must not raise; crash is recovered as error events
         events = list(adapter.stream_events("test prompt", ctx))
-        killer.join(timeout=2)
+        _join_kill_when_ready(killer, kill_errors)
 
         types = [ev.get("event_type") for ev in events]
         assert "error" in types, (
             f"stream_events() crash recovery must emit error event, got: {types}"
         )
+
+    # ------------------------------------------------------------------
+    # OI-980 regression: crash-path error yields must carry event_type
+    # ------------------------------------------------------------------
+
+    def test_stream_events_oserror_yields_error_with_event_type(self, monkeypatch):
+        """Adapter Popen OSError → error event carrying event_type.
+
+        Regression for OI-980: the pre-#1338 crash path yielded a bare dict
+        ({"type": "error", ...}) with no event_type key. Consumers reading
+        event_type saw nothing exactly on the path that matters most.
+        """
+        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        import adapters.gemini_adapter as ga_mod
+
+        def raise_oserror(*args, **kwargs):
+            raise OSError("gemini binary launch failed")
+
+        monkeypatch.setattr(ga_mod.subprocess, "Popen", raise_oserror)
+
+        adapter = GeminiAdapter("T-oserror")
+        ctx = {
+            "terminal_id": "T-oserror",
+            "dispatch_id": "gemini-oserror-001",
+            "changed_files": ["__nonexistent__.txt"],
+        }
+        events = list(adapter.stream_events("test prompt", ctx))
+        assert len(events) == 1, f"Expected exactly one error event, got: {events}"
+        ev = events[0]
+        assert ev.get("event_type") == "error", (
+            f"Missing event_type on Popen OSError event: {ev}"
+        )
+        assert ev["event_type"] in VALID_EVENT_TYPES
+        assert "gemini binary launch failed" in str(ev.get("data", {}).get("reason", ""))
+
+    def test_stream_events_broken_pipe_yields_error_with_event_type(self, monkeypatch):
+        """Adapter stdin.write BrokenPipeError → error event carrying event_type."""
+        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        import adapters.gemini_adapter as ga_mod
+
+        class _BrokenStdin:
+            def write(self, data):
+                raise BrokenPipeError("pipe closed")
+
+            def close(self):
+                pass
+
+        class _FakeProc:
+            stdin = _BrokenStdin()
+
+        monkeypatch.setattr(ga_mod.subprocess, "Popen", lambda *a, **k: _FakeProc())
+
+        adapter = GeminiAdapter("T-brokenpipe")
+        ctx = {
+            "terminal_id": "T-brokenpipe",
+            "dispatch_id": "gemini-brokenpipe-001",
+            "changed_files": ["__nonexistent__.txt"],
+        }
+        events = list(adapter.stream_events("test prompt", ctx))
+        assert len(events) == 1, f"Expected exactly one error event, got: {events}"
+        ev = events[0]
+        assert ev.get("event_type") == "error", (
+            f"Missing event_type on BrokenPipeError event: {ev}"
+        )
+        assert ev["event_type"] in VALID_EVENT_TYPES
+        assert "BrokenPipeError" in str(ev.get("data", {}).get("reason", ""))
+
+    # ------------------------------------------------------------------
+    # OI-979 regression: readiness timeout must be surfaced, not swallowed
+    # ------------------------------------------------------------------
+
+    def test_missing_readiness_marker_is_surfaced_not_swallowed(self, tmp_path: Path):
+        """A missing readiness marker is recorded as a test failure cause.
+
+        The pre-fix harness swallowed TimeoutError and killed anyway: the
+        wall-clock race returned, and a regression showed up as a bare
+        'got: [None]' with no indication the marker never appeared.
+        """
+        never_ready = tmp_path / "never_ready"
+        killer, errors = _spawn_kill_when_ready(
+            lambda: None, never_ready, deadline=0.3
+        )
+        killer.join(timeout=2.0)
+        assert not killer.is_alive()
+        assert errors, "Readiness TimeoutError was swallowed by the kill thread"
+        assert isinstance(errors[0], TimeoutError)
