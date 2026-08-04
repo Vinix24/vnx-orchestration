@@ -72,7 +72,7 @@ def _v1_frontmatter_base(dispatch_id: str) -> dict:
         "model": "claude-sonnet-4-6",
         "terminal_id": "T1",
         "pool_id": "headless",
-        "role": "backend-developer",
+        "role": "identity_unresolved",  # canonical sentinel (dispatch-20260804-190000)
         "task_class": "implementation",
         "pr_id": "none",
         "duration_seconds": 12.5,
@@ -675,7 +675,9 @@ class TestIdentityPropagation:
 
     def test_receipt_never_propagates_fake_default(self, tmp_path, state_dir):
         dispatch_id = "20260728-pr4-fake-default"
-        self._make_metadata_db(state_dir, [(dispatch_id, "vnx-dev", "backend-developer")])
+        # The DB holds the canonical sentinel — it must still be filtered
+        # (never propagated as a real role, even when it IS in the DB).
+        self._make_metadata_db(state_dir, [(dispatch_id, "vnx-dev", "identity_unresolved")])
         report = tmp_path / f"{dispatch_id}.md"
         _write_frontmatter_report(report, dispatch_id, project_id="vnx-dev")
 

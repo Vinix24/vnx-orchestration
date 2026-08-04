@@ -33,9 +33,10 @@ if str(_SCRIPTS_LIB) not in sys.path:
 
 try:
     # Receipt-quality PR-4: capture-gap role backfill for dispatch_metadata.
-    from dispatch_identity import _FAKE_DEFAULT_ROLE, normalize_role
+    from dispatch_identity import _FAKE_DEFAULT_ROLE, _IDENTITY_UNRESOLVED, normalize_role
 except Exception:  # pragma: no cover - sibling module available in-tree
-    _FAKE_DEFAULT_ROLE = "backend-developer"
+    _FAKE_DEFAULT_ROLE = "identity_unresolved"
+    _IDENTITY_UNRESOLVED = "identity_unresolved"
 
     def normalize_role(role):  # type: ignore[no-redef]
         if not role:
@@ -148,7 +149,7 @@ def _load_receipt_roles(receipts_file: Path) -> Dict[str, str]:
             continue
         dispatch_id = rec.get("dispatch_id")
         role = normalize_role(rec.get("role"))
-        if role == "identity_unresolved":
+        if role == _IDENTITY_UNRESOLVED:
             role = None
         if dispatch_id and role:
             roles[str(dispatch_id)] = role

@@ -30,7 +30,12 @@ from pathlib import Path
 
 # OI-1107: Extract Role: header from instruction text when --role is not passed.
 _ROLE_HEADER_RE = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
-_ROLE_FALLBACK = "backend-developer"
+# Single canonical sentinel — imported from dispatch_identity (dispatch-20260804-190000).
+# OI-981: a deliberately-chosen "backend-developer" is structurally
+# distinguishable from a failed role resolution — the sentinel is
+# "identity_unresolved", never the empty string and never a real role name.
+from dispatch_identity import _IDENTITY_UNRESOLVED
+_ROLE_FALLBACK = _IDENTITY_UNRESOLVED
 
 
 def _extract_role_from_instruction(instruction: str) -> str | None:

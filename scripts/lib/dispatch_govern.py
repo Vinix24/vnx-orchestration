@@ -46,11 +46,8 @@ logger = logging.getLogger(__name__)
 # since the tmux dispatch.sh sets PYTHONPATH to scripts/lib only (not scripts/).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 
-# Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
-# backend-developer default (receipt-quality track). The fake-default guard
-# itself lives in dispatch_identity.resolve_effective_role, the shared resolver
-# every emit path uses.
-_IDENTITY_UNRESOLVED = "identity_unresolved"
+# Single canonical sentinel — imported from dispatch_identity (dispatch-20260804-190000).
+from dispatch_identity import _IDENTITY_UNRESOLVED
 
 # The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
 _PLAN_REVIEWER_ROLE = "plan-reviewer"
@@ -180,7 +177,7 @@ def ensure_receipt(
 
     # receipt-quality PR-2: dispatch identity on the govern-synthesized emit
     # path — real role from spec/dispatch_metadata, else identity_unresolved
-    # (fail-open; never the fake backend-developer default).
+    # (fail-open; never the fake sentinel "" default, OI-981).
     # receipt-quality PR-B0: the shape is codified in
     # receipt_schema.SynthesizedLaneReceipt; to_dict() serializes
     # byte-compatibly with the pre-PR-B0 literal.

@@ -170,70 +170,70 @@
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 241,
+      "line": 284,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 242,
+      "line": 285,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 244,
+      "line": 287,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
-    },
-    {
-      "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 252,
-      "mechanism": "logger-name",
-      "module_target": "dispatch_envelope",
-      "symbol": ""
-    },
-    {
-      "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 294,
-      "mechanism": "logger-name",
-      "module_target": "envelope_govern_support",
-      "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
       "line": 295,
-      "mechanism": "patch-string",
-      "module_target": "envelope_govern",
-      "symbol": "_archive_dispatch_events"
-    },
-    {
-      "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 296,
-      "mechanism": "patch-string",
-      "module_target": "envelope_govern",
-      "symbol": "_clear_dispatch_events"
-    },
-    {
-      "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 299,
-      "mechanism": "direct-call",
+      "mechanism": "logger-name",
       "module_target": "dispatch_envelope",
-      "symbol": "_govern"
+      "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 320,
+      "line": 337,
       "mechanism": "logger-name",
       "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope_characterization.py",
-      "line": 322,
+      "line": 338,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 339,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 342,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 363,
+      "mechanism": "logger-name",
+      "module_target": "envelope_govern_support",
+      "symbol": ""
+    },
+    {
+      "file": "tests/test_dispatch_envelope_characterization.py",
+      "line": 365,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_receipt_exists_for_dispatch"
@@ -786,21 +786,77 @@
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",
-      "line": 219,
+      "line": 220,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",
-      "line": 220,
+      "line": 221,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",
-      "line": 225,
+      "line": 226,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 456,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_verify_role_application"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 457,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 458,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 464,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 505,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_verify_role_application"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 506,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 507,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_role_applied_provider_lane.py",
+      "line": 513,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"

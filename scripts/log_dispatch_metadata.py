@@ -20,8 +20,9 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 try:
-    # Receipt-quality PR-4: normalize the fake backend-developer default to
-    # NULL at write time (resolver stamps identity_unresolved at emit).
+    # Receipt-quality PR-4 + OI-981 + dispatch-20260804-190000: normalize the
+    # canonical identity_unresolved sentinel to NULL at write time (emit-side
+    # resolver stamps the same sentinel from dispatch_identity).
     from dispatch_identity import normalize_role as _normalize_role
 except Exception:  # pragma: no cover - sibling module available in-tree
     def _normalize_role(role):

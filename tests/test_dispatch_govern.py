@@ -1181,7 +1181,7 @@ def test_ensure_receipt_fake_default_spec_role_falls_through(tmp_data, tmp_state
     _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "reviewer")])
 
     spec = _make_spec(tmp_data, tmp_state)
-    spec.role = "backend-developer"
+    spec.role = ""  # OI-981: sentinel
     receipt = _fire_ensure_receipt(spec, tmp_state)
 
     assert receipt["role"] == "reviewer"

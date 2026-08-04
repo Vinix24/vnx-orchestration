@@ -102,7 +102,9 @@ def _read_role(db: Path, dispatch_id: str):
 # ---------------------------------------------------------------------------
 
 class TestUpsertRoleNormalization:
-    def test_fake_default_normalized_to_null_on_insert(self, tmp_path):
+    def test_fake_sentinel_normalized_to_null_on_insert(self, tmp_path):
+        """OI-981: the sentinel "" must be normalized to NULL. Backend-developer
+        is now a real role and must be preserved."""
         db = tmp_path / "quality_intelligence.db"
         _make_db(db)
         ok = upsert_dispatch_provider_row(
@@ -110,11 +112,27 @@ class TestUpsertRoleNormalization:
             dispatch_id="pr4-fake-role",
             terminal="T1",
             provider="claude",
-            role="backend-developer",
+            role="",
             project_id="vnx-dev",
         )
         assert ok
         assert _read_role(db, "pr4-fake-role") is None
+
+    def test_backend_developer_is_real_role_on_insert(self, tmp_path):
+        """OI-981: backend-developer is a real role, not the sentinel. Inserting
+        it must persist it verbatim."""
+        db = tmp_path / "quality_intelligence.db"
+        _make_db(db)
+        ok = upsert_dispatch_provider_row(
+            db,
+            dispatch_id="pr4-bd-role",
+            terminal="T1",
+            provider="claude",
+            role="backend-developer",
+            project_id="vnx-dev",
+        )
+        assert ok
+        assert _read_role(db, "pr4-bd-role") == "backend-developer"
 
     def test_real_role_stamped_verbatim(self, tmp_path):
         db = tmp_path / "quality_intelligence.db"
@@ -130,7 +148,9 @@ class TestUpsertRoleNormalization:
         assert ok
         assert _read_role(db, "pr4-real-role") == "quality-engineer"
 
-    def test_update_with_fake_role_does_not_null_existing_real_role(self, tmp_path):
+    def test_update_with_sentinel_does_not_null_existing_real_role(self, tmp_path):
+        """OI-981: second write with sentinel "" must not clobber an existing
+        real role (update COALESCE guard)."""
         db = tmp_path / "quality_intelligence.db"
         _make_db(db)
         upsert_dispatch_provider_row(
@@ -141,13 +161,13 @@ class TestUpsertRoleNormalization:
             role="debugger",
             project_id="vnx-dev",
         )
-        # Second write carries only the fake default — must not clobber.
+        # Second write carries the sentinel "" — must not clobber.
         upsert_dispatch_provider_row(
             db,
             dispatch_id="pr4-keep-role",
             terminal="T1",
             provider="codex",
-            role="backend-developer",
+            role="",
             outcome_status="success",
             project_id="vnx-dev",
         )
@@ -205,14 +225,27 @@ class TestRecordProviderMetadataRoleDerivation:
         _record_provider_metadata(args, "kimi", "success", tmp_path / "report.md", state_dir)
         assert _read_role(state_dir / "quality_intelligence.db", "pr4-provider-dispatch") == "security-engineer"
 
-    def test_fake_role_falls_through_to_instruction_header(self, tmp_path):
+    def test_sentinel_falls_through_to_instruction_header(self, tmp_path):
+        """OI-981: when role is the sentinel "", normalize_role returns None,
+        and the instruction's Role: header is used as fallback."""
+        state_dir = self._state_dir(tmp_path)
+        args = self._args(
+            role="",
+            instruction="Role: data-analyst\n\nDo the thing",
+        )
+        _record_provider_metadata(args, "codex", "success", tmp_path / "report.md", state_dir)
+        assert _read_role(state_dir / "quality_intelligence.db", "pr4-provider-dispatch") == "data-analyst"
+
+    def test_backend_developer_is_real_role_not_overridden(self, tmp_path):
+        """OI-981: backend-developer is a real role now. It must NOT fall through
+        to the instruction header; the explicitly chosen role wins."""
         state_dir = self._state_dir(tmp_path)
         args = self._args(
             role="backend-developer",
             instruction="Role: data-analyst\n\nDo the thing",
         )
         _record_provider_metadata(args, "codex", "success", tmp_path / "report.md", state_dir)
-        assert _read_role(state_dir / "quality_intelligence.db", "pr4-provider-dispatch") == "data-analyst"
+        assert _read_role(state_dir / "quality_intelligence.db", "pr4-provider-dispatch") == "backend-developer"
 
     def test_real_role_wins_over_instruction_header(self, tmp_path):
         state_dir = self._state_dir(tmp_path)
@@ -224,8 +257,10 @@ class TestRecordProviderMetadataRoleDerivation:
         assert _read_role(state_dir / "quality_intelligence.db", "pr4-provider-dispatch") == "quality-engineer"
 
     def test_no_derivable_role_leaves_null(self, tmp_path):
+        """OI-981: when role is sentinel "" and instruction has no Role: header,
+        the result is NULL (no real role derivable)."""
         state_dir = self._state_dir(tmp_path)
-        args = self._args(role="backend-developer", instruction="no header here")
+        args = self._args(role="", instruction="no header here")
         _record_provider_metadata(args, "claude", "success", tmp_path / "report.md", state_dir)
         assert _read_role(state_dir / "quality_intelligence.db", "pr4-provider-dispatch") is None
 
@@ -302,18 +337,35 @@ class TestLogDispatchMetadataRole:
         assert r2.returncode == 0, f"second call failed: {r2.stderr}"
         assert _read_role(db, "pr4-log-keep") == "quality-engineer"
 
-    def test_fake_role_normalized_to_null(self, tmp_path):
+    def test_sentinel_role_normalized_to_null(self, tmp_path):
+        """OI-981: the sentinel "" must be normalized to NULL by
+        log_dispatch_metadata. Backend-developer is now a real role."""
         db = tmp_path / "state" / "quality_intelligence.db"
         self._make_log_db(db)
         r = self._run_script(
             db,
-            "--dispatch-id", "pr4-log-fake",
+            "--dispatch-id", "pr4-log-sentinel",
+            "--terminal", "T1",
+            "--track", "A",
+            "--role", "",
+        )
+        assert r.returncode == 0, f"script failed: {r.stderr}"
+        assert _read_role(db, "pr4-log-sentinel") is None
+
+    def test_backend_developer_role_preserved(self, tmp_path):
+        """OI-981: backend-developer is a real role and must be preserved
+        by log_dispatch_metadata."""
+        db = tmp_path / "state" / "quality_intelligence.db"
+        self._make_log_db(db)
+        r = self._run_script(
+            db,
+            "--dispatch-id", "pr4-log-bd",
             "--terminal", "T1",
             "--track", "A",
             "--role", "backend-developer",
         )
         assert r.returncode == 0, f"script failed: {r.stderr}"
-        assert _read_role(db, "pr4-log-fake") is None
+        assert _read_role(db, "pr4-log-bd") == "backend-developer"
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +395,7 @@ class TestIntelligenceBackfillRoles:
         db = tmp_path / "quality_intelligence.db"
         _make_db(db)
         self._seed_role(db, "pr4-bf-1", None)
-        self._seed_role(db, "pr4-bf-2", "backend-developer")  # fake default
+        self._seed_role(db, "pr4-bf-2", "")  # OI-981: sentinel
         receipts = self._write_receipts(tmp_path, [
             {"dispatch_id": "pr4-bf-1", "role": "debugger"},
             {"dispatch_id": "pr4-bf-2", "role": "reviewer"},
@@ -357,13 +409,16 @@ class TestIntelligenceBackfillRoles:
         assert _read_role(db, "pr4-bf-2") == "reviewer"
 
     def test_leaves_null_when_no_genuine_role_derivable(self, tmp_path):
+        """OI-981: rows with sentinel "" are selected for backfill, but when the
+        receipt-carried role is also non-genuine ("" or identity_unresolved),
+        no update occurs."""
         db = tmp_path / "quality_intelligence.db"
         _make_db(db)
         self._seed_role(db, "pr4-bf-3", None)
-        self._seed_role(db, "pr4-bf-4", "backend-developer")
+        self._seed_role(db, "pr4-bf-4", "")
         receipts = self._write_receipts(tmp_path, [
             {"dispatch_id": "pr4-bf-3", "role": "identity_unresolved"},
-            {"dispatch_id": "pr4-bf-4", "role": "backend-developer"},
+            {"dispatch_id": "pr4-bf-4", "role": ""},
         ])
         conn = sqlite3.connect(str(db))
         checked, updated = backfill_dispatch_metadata_roles(conn, receipts)
@@ -371,7 +426,7 @@ class TestIntelligenceBackfillRoles:
         assert checked == 2
         assert updated == 0
         assert _read_role(db, "pr4-bf-3") is None
-        assert _read_role(db, "pr4-bf-4") == "backend-developer"  # untouched (no genuine source)
+        assert _read_role(db, "pr4-bf-4") == ""  # untouched (no genuine source)
 
     def test_real_role_rows_not_selected(self, tmp_path):
         db = tmp_path / "quality_intelligence.db"
@@ -440,7 +495,7 @@ class TestIntelligenceBackfillRoles:
         db = tmp_path / "quality_intelligence.db"
         _make_db(db)
         self._seed_role(db, "oi930-null", None)
-        self._seed_role(db, "oi930-fake", "backend-developer")
+        self._seed_role(db, "oi930-fake", "")  # OI-981: sentinel
         receipts = self._write_receipts(tmp_path, [
             {"dispatch_id": "oi930-null", "role": "system-architect"},
             {"dispatch_id": "oi930-fake", "role": "quality-engineer"},
@@ -473,10 +528,10 @@ class TestIntelligenceBackfillRoles:
         assert ev["new_role"] == "system-architect"
         assert "reason" in ev
 
-        # backend-developer (fake) → quality-engineer
+        # sentinel "" → quality-engineer (OI-981)
         ev = by_did["oi930-fake"]
         assert ev["event_type"] == "role_backfill"
-        assert ev["old_role"] == "backend-developer"
+        assert ev["old_role"] == ""
         assert ev["new_role"] == "quality-engineer"
         assert "reason" in ev
 

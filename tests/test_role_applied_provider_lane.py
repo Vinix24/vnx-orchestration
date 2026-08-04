@@ -174,7 +174,8 @@ def test_real_assembly_two_roles_differ(tmp_path):
 
 def test_prompt_assembler_role_still_used(tmp_path):
     """backend-developer has a PromptAssembler prompt (prompts/roles/) — that path
-    must keep working unchanged, reported as tier='prompt_assembler'."""
+    must keep working unchanged, reported as tier='prompt_assembler'. OI-981:
+    backend-developer is now a real role, not a sentinel."""
     args = _make_args("backend-developer")
 
     prompt = _enrich(args, tmp_path)
@@ -415,3 +416,134 @@ class TestValidateSlug:
         import pytest
         with pytest.raises(ValueError, match="must not be empty"):
             _validate_slug("   ", "role")
+
+
+# ---------------------------------------------------------------------------
+# OI-983: role_applied verified against the RESOLVED role, not the raw spec.role
+# ---------------------------------------------------------------------------
+
+
+def test_oi983_envelope_verifies_role_applied_against_resolved_role(tmp_path):
+    """OI-983 key assertion: when spec.role (raw) differs from the resolved _role,
+    _verify_role_application MUST be called with the resolved _role — the same
+    value that gets stamped as "role" on the receipt.
+
+    RED before OI-983: _verify_role_application was called with spec.role (raw).
+    GREEN after: called with _role (resolved).
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    data = tmp_path / "data"
+    (data / "unified_reports").mkdir(parents=True)
+
+    spec = EnvelopeSpec(
+        dispatch_id="oi983-test",
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="some prompt body",
+        role=None,  # raw = None, resolves to identity_unresolved
+        pr_id=None,
+        state_dir=state,
+        data_dir=data,
+    )
+    result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    # Patch on the CONSUMER namespace (envelope_govern), not the source module
+    # (envelope_prepare). This is the import that _govern uses.
+    with (
+        patch("envelope_govern._verify_role_application") as mock_verify,
+        patch("envelope_govern._archive_dispatch_events", return_value=(None, True)),
+        patch("envelope_govern._clear_dispatch_events"),
+        patch("provider_costs.emit_provider_cost"),
+        patch("phantom_guard.record_phantom_if_any"),
+        patch("phantom_guard.record_guard_error"),
+    ):
+        mock_verify.return_value = None  # fail-open — fields stay None
+        dispatch_envelope._govern(spec, result, start, end)
+
+    # The mock must have been called (patch bites)
+    assert mock_verify.called, (
+        "_verify_role_application was never called — the patch did not bind"
+    )
+    # The second positional argument (role) must be the resolved role,
+    # NOT the raw spec.role (None). Since spec.role=None and dispatch_metadata
+    # is absent, resolve_effective_role returns "identity_unresolved".
+    _called_role = mock_verify.call_args[0][2]
+    assert _called_role == "identity_unresolved", (
+        f"OI-983 FAIL: _verify_role_application called with role={_called_role!r}, "
+        f"expected 'identity_unresolved' (the resolved _role). "
+        f"spec.role was None — the raw value would not match the receipt."
+    )
+
+
+def test_oi983_envelope_verifies_against_resolved_role_when_spec_role_is_sentinel(tmp_path):
+    """OI-983: when spec.role is the sentinel "" (OI-981), the receipt gets
+    identity_unresolved. role_applied must be verified against identity_unresolved,
+    not the sentinel."""
+    state = tmp_path / "state"
+    state.mkdir()
+    data = tmp_path / "data"
+    (data / "unified_reports").mkdir(parents=True)
+
+    spec = EnvelopeSpec(
+        dispatch_id="oi983-sentinel-test",
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="some prompt body",
+        role="",  # OI-981 sentinel
+        pr_id=None,
+        state_dir=state,
+        data_dir=data,
+    )
+    result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    with (
+        patch("envelope_govern._verify_role_application") as mock_verify,
+        patch("envelope_govern._archive_dispatch_events", return_value=(None, True)),
+        patch("envelope_govern._clear_dispatch_events"),
+        patch("provider_costs.emit_provider_cost"),
+        patch("phantom_guard.record_phantom_if_any"),
+        patch("phantom_guard.record_guard_error"),
+    ):
+        mock_verify.return_value = None
+        dispatch_envelope._govern(spec, result, start, end)
+
+    assert mock_verify.called, (
+        "_verify_role_application was never called"
+    )
+    _called_role = mock_verify.call_args[0][2]
+    # spec.role="" resolves to identity_unresolved (sentinel → no real role → fallback)
+    assert _called_role == "identity_unresolved", (
+        f"OI-983 FAIL: _verify_role_application called with role={_called_role!r}, "
+        f"expected 'identity_unresolved'. spec.role was '' (sentinel)."
+    )
+
+
+def test_oi983_provider_enrich_stashes_enriched_instruction(tmp_path):
+    """OI-983: _enrich_instruction must stash the enriched instruction text on
+    args._enriched_instruction so _emit_governance can re-verify with the
+    resolved _role after role resolution."""
+    args = _make_args("backend-developer")  # real role, not sentinel
+
+    with (
+        patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path),
+        patch.object(provider_dispatch, "_resolve_data_dir", return_value=tmp_path),
+        patch("subprocess_dispatch._build_intelligence_section", return_value=""),
+    ):
+        enriched = provider_dispatch._enrich_instruction(args)
+
+    # The enriched instruction must be stashed on args
+    _stashed = vars(args).get("_enriched_instruction")
+    assert _stashed is not None, (
+        "OI-983 FAIL: _enrich_instruction did not stash _enriched_instruction on args"
+    )
+    assert _stashed == enriched, (
+        "OI-983 FAIL: stashed _enriched_instruction differs from returned enriched string"
+    )
+    assert "Backend Developer" in _stashed, (
+        "OI-983 FAIL: enriched instruction does not contain role content"
+    )
