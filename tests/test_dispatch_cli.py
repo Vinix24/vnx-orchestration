@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import dispatch_cli
 from dispatch_cli import (
     _check_track_link_verdict,
     _DEFAULT_MODEL_PINS,
@@ -183,10 +184,14 @@ def _make_minimal_plan(
 # ---------------------------------------------------------------------------
 
 @patch("dispatch_cli.build_runtime_snapshot")
-@patch("dispatch_envelope.run_envelope_plan")
+@patch("dispatch_cli.run_envelope_plan")
 @patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch")
 def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, tmp_path, capsys):
     """--dry-run prints plan + fingerprint and calls NO executor."""
+    # OI-968: the envelope mock must replace dispatch_cli's bound reference.
+    # dispatch_cli.py does `from dispatch_envelope import run_envelope_plan`, so
+    # patching the source module leaves the consumer pointing at the original.
+    assert dispatch_cli.run_envelope_plan is mock_envelope
     mock_snapshot.return_value = _clean_snapshot()
     spec_file = _make_spec_file(tmp_path, provider="claude")
 
