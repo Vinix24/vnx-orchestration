@@ -177,6 +177,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         _emit("ERROR", "unexpected_error", message=str(exc))
         return EXIT_UNEXPECTED_ERROR
 
+    # OI-948: defensive — append_receipt_payload is annotated -> AppendResult
+    # and every code path returns one.  If this fires, the invariant was
+    # broken in a way that escaped the type annotation; surface it clearly.
+    if result is None:
+        _emit("ERROR", "internal_null_result",
+              message="append_receipt_payload returned None — invariant violation")
+        return EXIT_UNEXPECTED_ERROR
+
     if result.status == "duplicate":
         _emit(
             "INFO",
