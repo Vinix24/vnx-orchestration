@@ -302,3 +302,82 @@ def test_event_driven_beacon_never_stale(tmp_path: Path) -> None:
 
     result = all_beacons(tmp_path)
     assert result["evented"]["health"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Staleness dominates status (OI-1024): a beacon older than its interval is
+# stale regardless of the status it recorded at write time.
+# ---------------------------------------------------------------------------
+
+def test_stale_beacon_with_status_fail_is_stale_not_fail(tmp_path: Path) -> None:
+    """A stale beacon reporting status=fail is classified as stale, not fail.
+
+    The write-time status is untrustworthy when the reading is older than the
+    expected interval — the component could have recovered silently.
+    """
+    health_dir = tmp_path / "health"
+    health_dir.mkdir(parents=True)
+    payload = {
+        "component": "stale_failer",
+        "last_run_ts": int(time.time() - 7200),  # 2h old
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "fail",
+        "details": {"err": "ancient history"},
+        "expected_interval_seconds": 3600,  # 1h interval -> 2h > 1h
+    }
+    (health_dir / "stale_failer.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = all_beacons(tmp_path)
+    assert result["stale_failer"]["health"] == "stale"
+
+
+def test_tighter_staleness_threshold_1x_not_1_5x(tmp_path: Path) -> None:
+    """Age between 1.0x and 1.5x interval -> stale (the old 1.5x window is gone).
+
+    Before OI-1024 a beacon was stale only when age > interval * 1.5.
+    Now it is stale when age > interval (1.0x).
+    """
+    health_dir = tmp_path / "health"
+    health_dir.mkdir(parents=True)
+    payload = {
+        "component": "borderline",
+        "last_run_ts": int(time.time() - 4200),  # 70 min old
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "ok",
+        "details": {},
+        "expected_interval_seconds": 3600,  # 1h interval
+        # age = 4200 > 3600 (1.0x) but 4200/3600 = 1.167 < 1.5
+    }
+    (health_dir / "borderline.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = all_beacons(tmp_path)
+    assert result["borderline"]["health"] == "stale", (
+        f"age=4200s > interval=3600s, expected stale, got {result['borderline']['health']}"
+    )
+
+
+def test_fresh_beacon_with_status_fail_still_fail(tmp_path: Path) -> None:
+    """A fresh time-driven beacon with status=fail reports health=fail."""
+    HealthBeacon(tmp_path, "fresh_failer", expected_interval_seconds=3600).heartbeat(
+        status="fail", details={"err": "current problem"}
+    )
+    result = all_beacons(tmp_path)
+    assert result["fresh_failer"]["health"] == "fail"
+
+
+def test_event_driven_beacon_with_status_fail_is_fail(tmp_path: Path) -> None:
+    """Event-driven beacons (interval=None) trust status=fail as-is."""
+    health_dir = tmp_path / "health"
+    health_dir.mkdir(parents=True)
+    payload = {
+        "component": "evented_failer",
+        "last_run_ts": int(time.time() - 3600),  # 1h old
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "fail",
+        "details": {},
+        "expected_interval_seconds": None,
+    }
+    (health_dir / "evented_failer.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = all_beacons(tmp_path)
+    assert result["evented_failer"]["health"] == "fail"

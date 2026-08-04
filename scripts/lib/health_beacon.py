@@ -16,8 +16,10 @@ with payload:
     }
 
 CI / dashboard reads all beacons via ``all_beacons()`` and flags any whose
-age exceeds ``expected_interval_seconds * 1.5`` as ``stale``. Components
-with ``status="fail"`` are flagged as ``fail`` regardless of age.
+age exceeds ``expected_interval_seconds`` as ``stale`` — a beacon older
+than its interval is stale regardless of the status it recorded at write
+time. Event-driven components (``expected_interval_seconds=None``) are
+never stale; their ``status`` field is trusted as-is.
 
 Per the dispatch, ``state_dir`` is the VNX data root (typically
 ``.vnx-data/``), and the module owns the ``health/`` subdirectory below
@@ -110,11 +112,15 @@ def all_beacons(state_dir: Path) -> Dict[str, Dict[str, Any]]:
     """Read all beacons under ``state_dir/health`` and classify each.
 
     Classification rules (in order):
-      * ``status == "fail"``                         -> ``health = "fail"``
       * unreadable JSON                              -> ``health = "corrupt"``
       * ``expected_interval_seconds`` is None        -> ``health = "ok"``
-        (event-driven components — no staleness check)
-      * ``age > expected_interval * 1.5``            -> ``health = "stale"``
+        (event-driven components — no staleness check;
+        ``status == "fail"`` is trusted -> ``health = "fail"``)
+      * ``age > expected_interval_seconds``          -> ``health = "stale"``
+        (a beacon older than its interval is stale regardless of the
+        status it recorded at write time)
+      * ``status == "fail"``                         -> ``health = "fail"``
+        (only reached for fresh time-driven beacons)
       * otherwise                                    -> ``health = "ok"``
 
     Returns a mapping ``component_name -> beacon_dict`` (the raw payload
@@ -162,11 +168,13 @@ def all_beacons(state_dir: Path) -> Dict[str, Dict[str, Any]]:
         status = data.get("status")
         interval = data.get("expected_interval_seconds")
 
-        if status == "fail":
-            data["health"] = "fail"
-        elif interval is None:
-            # Event-driven component: track last-time only, never stale.
-            data["health"] = "ok"
+        if interval is None:
+            # Event-driven component: no staleness check — trust the
+            # status field as-is.
+            if status == "fail":
+                data["health"] = "fail"
+            else:
+                data["health"] = "ok"
         else:
             try:
                 interval_f = float(interval)
@@ -174,12 +182,15 @@ def all_beacons(state_dir: Path) -> Dict[str, Dict[str, Any]]:
                 interval_f = 86400.0
             if interval_f <= 0:
                 data["health"] = "ok"
+            elif age > interval_f:
+                # Beacon is older than its expected interval — stale,
+                # regardless of the status it recorded at write time.
+                # A reading older than its interval is untrustworthy.
+                data["health"] = "stale"
+            elif status == "fail":
+                data["health"] = "fail"
             else:
-                staleness_factor = age / interval_f
-                if staleness_factor > 1.5:
-                    data["health"] = "stale"
-                else:
-                    data["health"] = "ok"
+                data["health"] = "ok"
 
         out[component] = data
 
