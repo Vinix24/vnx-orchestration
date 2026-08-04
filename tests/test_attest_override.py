@@ -481,6 +481,13 @@ class TestBudgetEnforcement:
     def test_write_override_record_refuses_when_exhausted(self, ephemeral_key_dir, monkeypatch):
         """write_override_record enforces the budget itself (finding 4)."""
         monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+
+        # Timestamps relative to now — both stay inside the 30-day OVERRIDE_WINDOW
+        # so the budget check in write_override_record actually sees them.
+        now = datetime.now(timezone.utc)
+        ts_first = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_second = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = _init_repo(Path(tmpdir))
             base_sha = _head_sha(repo)
@@ -491,7 +498,7 @@ class TestBudgetEnforcement:
             write_override_record(
                 content_key=ck_a, reason="first", dispatch_id="D-1",
                 signer_identity=ephemeral_key_dir["identity"],
-                timestamp="2026-07-05T10:00:00Z",
+                timestamp=ts_first,
                 key_path=ephemeral_key_dir["key_path"], repo_root=repo,
                 allowed_signers=ephemeral_key_dir["allowed_signers"],
             )
@@ -502,7 +509,7 @@ class TestBudgetEnforcement:
                 write_override_record(
                     content_key=ck_b, reason="second", dispatch_id="D-2",
                     signer_identity=ephemeral_key_dir["identity"],
-                    timestamp="2026-07-05T11:00:00Z",
+                    timestamp=ts_second,
                     key_path=ephemeral_key_dir["key_path"], repo_root=repo,
                     allowed_signers=ephemeral_key_dir["allowed_signers"],
                 )
@@ -657,6 +664,13 @@ class TestVerifyPRWithOverride:
         """A validly-signed override past the rolling budget is REJECTED by the gate (finding 3)."""
         from attest_override import build_override_manifest
         from attestation import sign_manifest
+
+        # Timestamps relative to now — both stay inside the 30-day OVERRIDE_WINDOW
+        # regardless of the wall-clock date, so the test cannot become a time bomb.
+        now = datetime.now(timezone.utc)
+        ts_current = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_older = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = _init_repo(Path(tmpdir))
             base_sha = _head_sha(repo)
@@ -668,7 +682,7 @@ class TestVerifyPRWithOverride:
             write_override_record(
                 content_key=ck, reason="current", dispatch_id="D-cur",
                 signer_identity=ephemeral_key_dir["identity"],
-                timestamp="2026-07-05T11:00:00Z",
+                timestamp=ts_current,
                 key_path=ephemeral_key_dir["key_path"], repo_root=repo,
                 allowed_signers=ephemeral_key_dir["allowed_signers"],
             )
@@ -677,7 +691,7 @@ class TestVerifyPRWithOverride:
             m2 = build_override_manifest(
                 content_key="other-key", reason="older override",
                 dispatch_id="D-old", signer_identity=ephemeral_key_dir["identity"],
-                timestamp="2026-07-05T09:00:00Z",
+                timestamp=ts_older,
             )
             append_chained_entry(trail, sign_manifest(m2, ephemeral_key_dir["key_path"]))
             # Budget of 1 — the gate must reject even a validly-signed override.
