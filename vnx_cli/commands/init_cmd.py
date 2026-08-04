@@ -15,6 +15,7 @@ pin, root CLAUDE.md and FEATURE_PLAN.md via Jinja2 templates (default/minimal).
 
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -722,6 +723,73 @@ def vnx_init(args) -> int:
         return 1
 
 
+def _install_gate_obligation_runner(vnx_home: str) -> bool:
+    """Install the gate-obligation-runner launchd plist (OI-917).
+
+    Reads the plist template from the engine root's scripts/launchd/ directory,
+    substitutes ``${VNX_HOME}`` with the resolved VNX home path, writes
+    atomically to ``~/Library/LaunchAgents/``, and loads via launchctl.
+
+    Returns True if the plist was installed or reloaded.
+    Returns False if the template does not exist (not a VNX orchestration repo
+    or central install — silently skip).
+
+    Raises RuntimeError if launchctl load fails (never silent).
+    Raises OSError if the template exists but is unreadable.
+    """
+    plist_name = "com.vnx.gate-obligation-runner"
+    template = _engine.engine_root() / "scripts" / "launchd" / f"{plist_name}.plist"
+    if not template.is_file():
+        return False
+
+    dest_dir = Path.home() / "Library" / "LaunchAgents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{plist_name}.plist"
+
+    content = template.read_text(encoding="utf-8")
+    content = content.replace("${VNX_HOME}", vnx_home)
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest_dir), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp_name, str(dest))
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+    # Idempotent: unload any previously loaded instance before reloading.
+    subprocess.run(
+        ["launchctl", "unload", str(dest)], capture_output=True,
+    )
+    result = subprocess.run(
+        ["launchctl", "load", "-w", str(dest)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"launchctl load failed for {plist_name}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    # Verify the agent is registered.
+    verify = subprocess.run(
+        ["launchctl", "list"], capture_output=True, text=True,
+    )
+    if plist_name in (verify.stdout or ""):
+        print(f"  installed launchd agent: {plist_name}")
+    else:
+        print(
+            f"  warning: {plist_name} not found in launchctl list after load "
+            f"— check {dest}"
+        )
+
+    return True
+
+
 def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) -> int:
     """Scaffold body of vnx_init (split out so OSError refusals fail clean)."""
     # --- tracked, in-project config (tiny footprint) ----------------------
@@ -836,6 +904,16 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     print()
     print("Provisioning attestation gate workflow...")
     _provision_github_workflow(project_dir)
+
+    # --- OI-917: install gate-obligation-runner launchd agent -----------------
+    print()
+    print("Installing launchd agents...")
+    try:
+        installed = _install_gate_obligation_runner(str(_engine.engine_root()))
+        if not installed:
+            print("  skipped gate-obligation-runner (plist template not found)")
+    except (OSError, RuntimeError) as exc:
+        print(f"  warning: gate-obligation-runner install failed: {exc}")
 
     print()
     print(f"Runtime state: {data_root}")

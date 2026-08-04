@@ -429,6 +429,97 @@ class TestIntelligenceBackfillRoles:
         assert results["dispatch_metadata.role"] == {"checked": 1, "updated": 1}
         assert _read_role(db, "pr4-bf-8") == "debugger"
 
+    # ------------------------------------------------------------------
+    # OI-930: role backfill must emit an ADR-005 ledger event per UPDATE
+    # ------------------------------------------------------------------
+
+    def test_backfill_emits_ledger_event_per_update(self, tmp_path):
+        """OI-930: each role backfill UPDATE must produce a ledger event with
+        old role, new role, and reason — so a reader can reconstruct provenance
+        of every role value in dispatch_metadata."""
+        db = tmp_path / "quality_intelligence.db"
+        _make_db(db)
+        self._seed_role(db, "oi930-null", None)
+        self._seed_role(db, "oi930-fake", "backend-developer")
+        receipts = self._write_receipts(tmp_path, [
+            {"dispatch_id": "oi930-null", "role": "system-architect"},
+            {"dispatch_id": "oi930-fake", "role": "quality-engineer"},
+        ])
+        events_file = tmp_path / "role_backfill_events.ndjson"
+
+        conn = sqlite3.connect(str(db))
+        checked, updated = backfill_dispatch_metadata_roles(
+            conn, receipts, events_file=events_file,
+        )
+        conn.close()
+
+        assert checked == 2
+        assert updated == 2
+        # Events file must exist and contain one line per updated row.
+        assert events_file.exists(), (
+            "OI-930 FAIL: no role_backfill_events.ndjson written — "
+            "the backfill UPDATE mutates dispatch_metadata without an ADR-005 ledger event"
+        )
+        lines = events_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+
+        events = [json.loads(line) for line in lines]
+        by_did = {e["dispatch_id"]: e for e in events}
+
+        # NULL → system-architect
+        ev = by_did["oi930-null"]
+        assert ev["event_type"] == "role_backfill"
+        assert ev["old_role"] is None
+        assert ev["new_role"] == "system-architect"
+        assert "reason" in ev
+
+        # backend-developer (fake) → quality-engineer
+        ev = by_did["oi930-fake"]
+        assert ev["event_type"] == "role_backfill"
+        assert ev["old_role"] == "backend-developer"
+        assert ev["new_role"] == "quality-engineer"
+        assert "reason" in ev
+
+    def test_backfill_dry_run_writes_no_events(self, tmp_path):
+        """Dry-run must not emit ledger events (no actual mutation occurred)."""
+        db = tmp_path / "quality_intelligence.db"
+        _make_db(db)
+        self._seed_role(db, "oi930-dry", None)
+        receipts = self._write_receipts(tmp_path, [
+            {"dispatch_id": "oi930-dry", "role": "debugger"},
+        ])
+        events_file = tmp_path / "role_backfill_events.ndjson"
+
+        conn = sqlite3.connect(str(db))
+        checked, updated = backfill_dispatch_metadata_roles(
+            conn, receipts, dry_run=True, events_file=events_file,
+        )
+        conn.close()
+
+        assert checked == 1
+        assert updated == 1
+        assert not events_file.exists(), "dry-run must not write ledger events"
+
+    def test_backfill_no_update_writes_no_events(self, tmp_path):
+        """When no rows are updated, no events file is created."""
+        db = tmp_path / "quality_intelligence.db"
+        _make_db(db)
+        self._seed_role(db, "oi930-real", "quality-engineer")  # already has real role
+        receipts = self._write_receipts(tmp_path, [
+            {"dispatch_id": "oi930-real", "role": "debugger"},
+        ])
+        events_file = tmp_path / "role_backfill_events.ndjson"
+
+        conn = sqlite3.connect(str(db))
+        checked, updated = backfill_dispatch_metadata_roles(
+            conn, receipts, events_file=events_file,
+        )
+        conn.close()
+
+        assert checked == 0
+        assert updated == 0
+        assert not events_file.exists(), "no updates → no events file"
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

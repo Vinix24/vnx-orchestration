@@ -407,3 +407,120 @@ class TestRcCompositeKeysDown:
         for table, _ in _RC_TABLES_AND_KEYS:
             assert not _rc_index_exists(conn, table)
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# OI-563: unexpected per-table error must be durably tracked (not just ERROR-logged)
+# ---------------------------------------------------------------------------
+
+class TestRcCompositeKeysUnexpectedError:
+    def test_unexpected_error_is_durably_tracked(self, tmp_path, caplog):
+        """An unexpected (non-IntegrityError) per-table error must leave a durable
+        marker — user_version advancing must not silently drop the missing index."""
+        db_path = tmp_path / "rc.db"
+        conn = _make_rc_with_project_id(db_path)
+        # A table whose name collides with the would-be index makes
+        # CREATE UNIQUE INDEX raise sqlite3.OperationalError (a sqlite3.Error,
+        # NOT an IntegrityError) — the unexpected-error path of the migration.
+        conn.execute("CREATE TABLE ux_incident_log_pid (x INTEGER)")
+        conn.commit()
+
+        with caplog.at_level(logging.ERROR, logger="coordination_db"):
+            schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
+        # The migration still does not abort (existing non-destructive design).
+        assert schema_migration.get_user_version(conn) == 11
+        # The index on incident_log is genuinely missing (shadowed by a table).
+        assert not _rc_index_exists(conn, "incident_log")
+        # ...but the failure IS durably recorded.
+        failures = conn.execute(
+            "SELECT table_name, index_name, columns FROM composite_key_failures"
+        ).fetchall()
+        assert [(r[0], r[1]) for r in failures] == [("incident_log", "ux_incident_log_pid")]
+        conn.close()
+
+    def test_audit_surfaces_under_enforcement(self, tmp_path):
+        db_path = tmp_path / "rc.db"
+        conn = _make_rc_with_project_id(db_path)
+        conn.execute("CREATE TABLE ux_incident_log_pid (x INTEGER)")
+        conn.commit()
+
+        schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
+        from coordination_db import composite_index_audit
+        audit = composite_index_audit(conn)
+        missing_tables = {m["table"] for m in audit["missing"]}
+        assert "incident_log" in missing_tables
+        # The unaffected tables still got their index.
+        assert "coordination_events" not in missing_tables
+        assert "intelligence_injections" not in missing_tables
+        # The durable marker is surfaced by the audit.
+        assert any(f["table"] == "incident_log" for f in audit["failures"])
+        conn.close()
+
+
+class TestRcCompositeKeysAudit:
+    def test_clean_db_has_no_missing_indexes(self, tmp_path):
+        db_path = tmp_path / "rc.db"
+        conn = _make_rc_with_project_id(db_path)
+        schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
+        from coordination_db import composite_index_audit
+        audit = composite_index_audit(conn)
+        assert audit["missing"] == []
+        assert audit["tables_checked"] == 3
+        conn.close()
+
+    def test_detects_index_shadowed_on_wrong_table(self, tmp_path):
+        """IF NOT EXISTS silently no-ops when an index of the same name already
+        sits on a different table — the audit must catch that shadowed state."""
+        db_path = tmp_path / "rc.db"
+        conn = _make_rc_with_project_id(db_path)
+        conn.execute("CREATE TABLE other (x INTEGER)")
+        conn.execute("CREATE UNIQUE INDEX ux_coordination_events_pid ON other (x)")
+        conn.commit()
+
+        schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
+        from coordination_db import composite_index_audit
+        audit = composite_index_audit(conn)
+        missing_tables = {m["table"] for m in audit["missing"]}
+        assert "coordination_events" in missing_tables
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# OI-563 (QI mirror): unexpected per-table error must be durably tracked
+# ---------------------------------------------------------------------------
+
+class TestQiCompositeKeysUnexpectedError:
+    def test_unexpected_error_is_durably_tracked(self, tmp_path):
+        db_path = tmp_path / "qi.db"
+        conn = _make_qi_v26_with_project_id(db_path)
+        conn.execute("CREATE TABLE ux_success_patterns_pid (x INTEGER)")
+        conn.commit()
+
+        schema_migration.apply_if_below(conn, 27, qdi._migrate_v27)
+
+        assert schema_migration.get_user_version(conn) == 27
+        assert not _qi_index_exists(conn, "success_patterns")
+        failures = conn.execute(
+            "SELECT table_name, index_name FROM composite_key_failures"
+        ).fetchall()
+        assert [(r[0], r[1]) for r in failures] == [("success_patterns", "ux_success_patterns_pid")]
+        conn.close()
+
+    def test_audit_surfaces_under_enforcement(self, tmp_path):
+        db_path = tmp_path / "qi.db"
+        conn = _make_qi_v26_with_project_id(db_path)
+        conn.execute("CREATE TABLE ux_success_patterns_pid (x INTEGER)")
+        conn.commit()
+
+        schema_migration.apply_if_below(conn, 27, qdi._migrate_v27)
+
+        from quality_db_init import composite_index_audit as qi_audit
+        audit = qi_audit(conn)
+        missing_tables = {m["table"] for m in audit["missing"]}
+        assert "success_patterns" in missing_tables
+        assert "dispatch_experiments" not in missing_tables
+        conn.close()

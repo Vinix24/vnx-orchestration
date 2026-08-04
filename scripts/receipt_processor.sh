@@ -3,6 +3,8 @@
 # Prevents reprocessing of historical reports and handles pane changes gracefully
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/vnx_paths.sh
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 
 # Respect PAUSED marker: refuse to start while VNX is paused.
@@ -15,6 +17,8 @@ if [ "${_RP_LIB_MODE:-0}" != "1" ] && [ "${VNX_RESUME_IN_PROGRESS:-0}" != "1" ] 
   exit 0
 fi
 
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/receipt_terminal_detection.sh
 source "$SCRIPT_DIR/lib/receipt_terminal_detection.sh"
 
 # Base directories
@@ -26,12 +30,16 @@ SCRIPTS_DIR="$VNX_BASE/scripts"
 APPEND_RECEIPT_SCRIPT="$SCRIPTS_DIR/append_receipt.py"
 
 # PHASE 1C: Singleton enforcement - prevent duplicate processes
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=singleton_enforcer.sh
 source "$SCRIPTS_DIR/singleton_enforcer.sh"
 if [ "${_RP_LIB_MODE:-0}" != "1" ]; then
     enforce_singleton "receipt_processor.sh"
 fi
 
 # Source the smart pane manager
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=pane_manager.sh
 source "$SCRIPTS_DIR/pane_manager.sh"
 
 # Configuration (can be overridden by environment variables)
@@ -89,28 +97,38 @@ fi
 
 # ── Helper libraries ──────────────────────────────────────────────────────────
 RP_LIB="$SCRIPT_DIR/lib/receipt_processor"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_logging.sh
 source "$RP_LIB/rp_logging.sh"
 
 # Emit deferred SHA fallback warning now that log() is defined
 [ -n "$_SHA256_FALLBACK_WARN" ] && log "WARN" "$_SHA256_FALLBACK_WARN"
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_time.sh
 source "$RP_LIB/rp_time.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_dedup.sh
 source "$RP_LIB/rp_dedup.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_lock.sh
 source "$RP_LIB/rp_lock.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_extract.sh
 source "$RP_LIB/rp_extract.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_state.sh
 source "$RP_LIB/rp_state.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_pattern.sh
 source "$RP_LIB/rp_pattern.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_append.sh
 source "$RP_LIB/rp_append.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_dispatch.sh
 source "$RP_LIB/rp_dispatch.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_delivery.sh
 source "$RP_LIB/rp_delivery.sh"
 

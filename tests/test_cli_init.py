@@ -8,6 +8,7 @@ root CLAUDE.md, FEATURE_PLAN.md, and safety/idempotency semantics.
 import argparse
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -439,3 +440,283 @@ class TestVnxInitAttestDelivery:
         assert workflow.read_text() == "# custom workflow content", (
             "Re-init must not clobber an existing workflow"
         )
+
+
+class TestGateObligationRunnerInstall:
+    """OI-917: gate-obligation-runner launchd plist installation.
+
+    The install function (_install_gate_obligation_runner) is tested directly
+    with fake engine roots; integration through vnx_init uses the real engine
+    root (which has the plist template) and mocks only Path.home + subprocess.
+    """
+
+    PLIST_NAME = "com.vnx.gate-obligation-runner"
+
+    # ------------------------------------------------------------------
+    # Direct function tests
+    # ------------------------------------------------------------------
+
+    def test_install_writes_plist_and_loads(self, tmp_path, monkeypatch):
+        from vnx_cli.commands import init_cmd
+
+        engine_root = tmp_path / "engine"
+        launchd_dir = engine_root / "scripts" / "launchd"
+        launchd_dir.mkdir(parents=True)
+        (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
+            '<?xml version="1.0"?><plist><dict>'
+            "<key>Label</key><string>com.vnx.gate-obligation-runner</string>"
+            "<key>ProgramArguments</key><array>"
+            "<string>/bin/bash</string><string>-c</string>"
+            "<string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>"
+            "</array>"
+            "</dict></plist>",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: engine_root,
+        )
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        launchctl_calls = []
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stderr = ""
+            if cmd == ["launchctl", "list"]:
+                m.stdout = f"{self.PLIST_NAME}\n"
+            else:
+                m.stdout = ""
+            launchctl_calls.append(cmd)
+            return m
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", fake_run)
+
+        result = init_cmd._install_gate_obligation_runner(
+            str(engine_root)
+        )
+        assert result is True
+
+        # Plist written to fake LaunchAgents dir.
+        dest = (
+            fake_home / "Library" / "LaunchAgents"
+            / f"{self.PLIST_NAME}.plist"
+        )
+        assert dest.is_file(), (
+            f"Plist not written to {dest} — OI-917: runner was never installed"
+        )
+
+        content = dest.read_text(encoding="utf-8")
+        assert "${VNX_HOME}" not in content, (
+            "Placeholder must be substituted with the actual engine root path"
+        )
+        assert str(engine_root) in content, (
+            f"Plist must contain the engine root path {engine_root}"
+        )
+
+        # launchctl unload + load + list called.
+        cmds = [" ".join(c) for c in launchctl_calls]
+        assert any("unload" in c for c in cmds), "launchctl unload not called"
+        assert any("load" in c for c in cmds), "launchctl load not called"
+        assert any("list" in c for c in cmds), "launchctl list not called"
+
+    def test_install_returns_false_when_template_missing(self, tmp_path, monkeypatch):
+        from vnx_cli.commands import init_cmd
+
+        engine_root = tmp_path / "engine"
+        # No scripts/launchd/ directory at all.
+        engine_root.mkdir()
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: engine_root,
+        )
+
+        result = init_cmd._install_gate_obligation_runner(
+            str(engine_root)
+        )
+        assert result is False, (
+            "Must return False when plist template is absent — "
+            "non-VNX-orchestration projects should silently skip"
+        )
+
+    def test_install_raises_on_template_unreadable(self, tmp_path, monkeypatch):
+        from vnx_cli.commands import init_cmd
+        import stat
+
+        engine_root = tmp_path / "engine"
+        launchd_dir = engine_root / "scripts" / "launchd"
+        launchd_dir.mkdir(parents=True)
+        plist_path = launchd_dir / f"{self.PLIST_NAME}.plist"
+        plist_path.write_text("content", encoding="utf-8")
+        # Remove read permission.
+        plist_path.chmod(0o000)
+
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: engine_root,
+        )
+
+        # Restore permissions in teardown so tmp_path cleanup works.
+        try:
+            with pytest.raises((OSError, PermissionError)):
+                init_cmd._install_gate_obligation_runner(str(engine_root))
+        finally:
+            plist_path.chmod(0o644)
+
+    def test_install_raises_on_launchctl_load_failure(self, tmp_path, monkeypatch):
+        from vnx_cli.commands import init_cmd
+
+        engine_root = tmp_path / "engine"
+        launchd_dir = engine_root / "scripts" / "launchd"
+        launchd_dir.mkdir(parents=True)
+        (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
+            "mock plist with ${VNX_HOME}",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: engine_root,
+        )
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stderr = ""
+            m.stdout = ""
+            if "load" in cmd and "unload" not in cmd:
+                m.returncode = 1
+                m.stderr = "launchctl: service already loaded"
+            return m
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="launchctl load failed"):
+            init_cmd._install_gate_obligation_runner(str(engine_root))
+
+    def test_install_verify_warns_when_agent_not_in_list(self, tmp_path, monkeypatch, capsys):
+        from vnx_cli.commands import init_cmd
+
+        engine_root = tmp_path / "engine"
+        launchd_dir = engine_root / "scripts" / "launchd"
+        launchd_dir.mkdir(parents=True)
+        (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
+            "mock plist with ${VNX_HOME}",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: engine_root,
+        )
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stderr = ""
+            m.stdout = ""  # launchctl list is empty
+            return m
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", fake_run)
+
+        result = init_cmd._install_gate_obligation_runner(
+            str(engine_root)
+        )
+        assert result is True
+
+        out = capsys.readouterr().out
+        assert "warning" in out.lower(), (
+            "A load that produces no launchctl list entry must warn — OI-895"
+        )
+        assert self.PLIST_NAME in out
+
+    # ------------------------------------------------------------------
+    # Integration: vnx_init calls _install_gate_obligation_runner
+    # ------------------------------------------------------------------
+
+    def test_init_installs_runner_when_template_exists(self, tmp_path, monkeypatch):
+        """vnx_init in the VNX orchestration repo must install the
+        gate-obligation-runner launchd plist (OI-917 core fix).
+
+        Uses the real engine root (worktree) which has the plist template;
+        only mock Path.home() and subprocess.run to avoid touching the
+        real ~/Library/LaunchAgents/.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        launchctl_calls = []
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stderr = ""
+            if cmd == ["launchctl", "list"]:
+                m.stdout = f"{self.PLIST_NAME}\n"
+            else:
+                m.stdout = ""
+            launchctl_calls.append(cmd)
+            return m
+
+        monkeypatch.setattr(
+            "vnx_cli.commands.init_cmd.subprocess.run",
+            fake_run,
+        )
+
+        rc = vnx_init(_args(tmp_path / "project"))
+        assert rc == 0
+
+        # Plist written to fake LaunchAgents dir.
+        dest = (
+            fake_home / "Library" / "LaunchAgents"
+            / f"{self.PLIST_NAME}.plist"
+        )
+        assert dest.is_file(), (
+            f"vnx init must install {self.PLIST_NAME}.plist — "
+            "OI-917: the runner was never installed"
+        )
+
+        content = dest.read_text(encoding="utf-8")
+        assert "${VNX_HOME}" not in content, (
+            "Placeholder must be substituted"
+        )
+
+        cmds = [" ".join(c) for c in launchctl_calls]
+        assert any("unload" in c for c in cmds), "launchctl unload not called"
+        assert any("load" in c for c in cmds), "launchctl load not called"
+
+    def test_init_continues_on_launchctl_failure(self, tmp_path, monkeypatch, capsys):
+        """If launchctl load fails, vnx_init must print a warning and
+        continue — the scaffold is still valid."""
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if "load" in cmd and "unload" not in cmd:
+                m.returncode = 1
+                m.stderr = "launchctl: service already loaded"
+                m.stdout = ""
+            else:
+                m.returncode = 0
+                m.stderr = ""
+                m.stdout = "com.vnx.gate-obligation-runner\n" if cmd == ["launchctl", "list"] else ""
+            return m
+
+        monkeypatch.setattr(
+            "vnx_cli.commands.init_cmd.subprocess.run",
+            fake_run,
+        )
+
+        rc = vnx_init(_args(tmp_path / "project"))
+        assert rc == 0, (
+            "launchctl failure must not abort init"
+        )
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "gate-obligation-runner" in out

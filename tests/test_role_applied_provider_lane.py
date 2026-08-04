@@ -44,7 +44,7 @@ import dispatch_envelope
 import provider_dispatch
 import skill_context
 from dispatch_envelope import EnvelopeSpec, _AdapterResult
-from role_application import verify_role_applied
+from role_application import _validate_slug, verify_role_applied
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -306,3 +306,112 @@ def test_role_applied_true_when_resolved_source_present():
     assert verdict.role_applied is True
     assert verdict.tier == "agents"
     assert verdict.reason is None
+
+
+# ---------------------------------------------------------------------------
+# 7. path-traversal hardening (OI-932): role/terminal_id slugs must not contain
+#    '..' or path separators that would escape the intended directory trees
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_sources_rejects_path_traversal_in_role():
+    """role='../../.claude/terminals/T0' must NOT resolve to a file outside
+    agents/ / .claude/skills/ / prompts/roles/.
+
+    RED on current (unpatched) code: _candidate_sources pastes the raw role
+    string into Path components, so the '..' segments escape the intended
+    directories and a CLAUDE.md outside the role tree can be read.
+    """
+    verdict = verify_role_applied(
+        "some prompt body content that does not match anything",
+        "T1",
+        "../../.claude/terminals/T0",
+    )
+    assert verdict.role_applied is False
+    assert verdict.tier == "none", (
+        f"expected tier='none' (validation rejected the slug before tier resolution), "
+        f"got tier='{verdict.tier}'"
+    )
+    assert verdict.reason is not None
+    # The reason must mention the validation failure, not a "resolved" tier.
+    assert "path" in verdict.reason.lower() or "slug" in verdict.reason.lower() or (
+        "invalid" in verdict.reason.lower()
+    ), f"reason must mention path/slug validation, got: {verdict.reason}"
+
+
+def test_candidate_sources_rejects_path_traversal_in_terminal_id():
+    """terminal_id='../../agents/quality-engineer' must NOT resolve to a file
+    outside .claude/terminals/.
+
+    RED on current (unpatched) code: the terminal tier escapes into agents/.
+    """
+    verdict = verify_role_applied(
+        "some prompt body content that does not match anything",
+        "../../agents/quality-engineer",
+        "nonexistent-role-xyz",
+    )
+    assert verdict.role_applied is False
+    assert verdict.tier == "none", (
+        f"expected tier='none' (validation rejected the slug before tier resolution), "
+        f"got tier='{verdict.tier}'"
+    )
+    assert verdict.reason is not None
+    assert "path" in verdict.reason.lower() or "slug" in verdict.reason.lower() or (
+        "invalid" in verdict.reason.lower()
+    ), f"reason must mention path/slug validation, got: {verdict.reason}"
+
+
+def test_candidate_sources_accepts_valid_slugs():
+    """Valid role/terminal_id slugs (no '..', no path separators) must still work
+    and resolve normally — the validation must not reject legitimate values."""
+    agents_body = (REPO_ROOT / "agents" / "quality-engineer" / "CLAUDE.md").read_text()
+    final_prompt = f"{agents_body}\n\n---\n\nimplement the change"
+
+    verdict = verify_role_applied(final_prompt, "T1", "quality-engineer")
+
+    assert verdict.role_applied is True
+    assert verdict.tier == "agents"
+    assert verdict.reason is None
+
+
+# ---------------------------------------------------------------------------
+# 8. _validate_slug unit tests — direct edge-case coverage
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSlug:
+    """Direct unit tests for the slug validation guard (OI-932)."""
+
+    def test_accepts_hyphenated_role(self):
+        _validate_slug("quality-engineer", "role")  # must not raise
+
+    def test_accepts_terminal_id(self):
+        _validate_slug("T1", "terminal_id")  # must not raise
+
+    def test_accepts_dotted_slug(self):
+        _validate_slug("backend.developer", "role")  # must not raise
+
+    def test_rejects_dot_dot(self):
+        import pytest
+        with pytest.raises(ValueError, match="path traversal"):
+            _validate_slug("../../.claude/terminals/T0", "role")
+
+    def test_rejects_forward_slash(self):
+        import pytest
+        with pytest.raises(ValueError, match="path separator"):
+            _validate_slug("agents/quality-engineer", "role")
+
+    def test_rejects_backslash(self):
+        import pytest
+        with pytest.raises(ValueError, match="path separator"):
+            _validate_slug("agents\\quality-engineer", "role")
+
+    def test_rejects_empty(self):
+        import pytest
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_slug("", "role")
+
+    def test_rejects_whitespace_only(self):
+        import pytest
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_slug("   ", "role")
