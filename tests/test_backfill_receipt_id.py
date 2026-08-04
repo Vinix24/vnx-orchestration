@@ -329,7 +329,7 @@ class TestApplyBackfill:
 
     def test_recalculates_chain_status_to_complete(self, tmp_path):
         """When receipt_id is filled AND commit_sha already exists,
-        chain_status must flip from 'incomplete' to 'complete'."""
+        chain_status must flip from 'incomplete' to 'receipt_and_commit'."""
         conn = _mk_db(tmp_path)
         _seed_registry_row(
             conn, "DISP-C", receipt_id=None, commit_sha="abc123",

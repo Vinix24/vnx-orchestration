@@ -125,3 +125,30 @@ claudedocs/
 # t6 real-codebase-review tier — INTERNAL ONLY (reviews proprietary repos; never publish)
 scripts/benchmark/field-tests/tasks/t6_real_review/
 scripts/benchmark/field-tests/tasks.local.yaml
+
+# Install-artifacts: gegenereerd door `vnx init` / `vnx role sync` / bootstrap_hooks.
+# Alleen de authored bron hoort in git (.claude/skills/*/SKILL.md,
+# .claude/terminals/*/CLAUDE.md, role-orchestrator.md). De scaffolding eromheen
+# wordt per machine opnieuw uitgerold en gaf vijf dagen lang git-status-ruis.
+.claude/skills/*/references/
+.claude/skills/*/scripts/
+.claude/skills/*/template.md
+.claude/skills/*/@*.md
+.claude/skills/skills.yaml
+.claude/hooks/
+.claude/terminals/*/.claude
+.claude/terminals/*/.mcp.json
+.claude/vnx-system/security_reports/
+.agents/
+.vnx-attest/
+.vnx/config.yml
+
+# Tri-file rolbestanden in de repo-root: door `vnx role sync --apply` gegenereerd
+# uit de canonieke rol, niet met de hand geschreven.
+/AGENTS.md
+/GEMINI.md
+
+# Sessie-logs: eigen inhoud, maar met dagbedragen aan AI-kosten en klantcontext.
+# Deze repo is publiek, dus die gaan er niet in. Backup staat buiten git in de
+# centrale per-project store: ~/.vnx-data/<project>/daily-log/
+daily-log/

@@ -429,6 +429,25 @@ def _migrate_v11_composite_keys_down(conn: sqlite3.Connection) -> None:
             logger.warning("composite-keys: failed to drop %s — %s", index_name, exc)
 
 
+def _migrate_chain_status_complete_rename(conn: sqlite3.Connection) -> None:
+    """OI-830: Rename chain_status 'complete' -> 'receipt_and_commit' in provenance_registry.
+
+    Idempotent: after the first run, no rows match the WHERE clause and the
+    statement is a no-op. Only touches rows that actually have the old value.
+    The provenance_registry table may not exist yet on fresh installs — skip
+    silently when it's absent.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='provenance_registry'"
+    ).fetchone():
+        return
+    conn.execute(
+        "UPDATE provenance_registry SET chain_status = 'receipt_and_commit' "
+        "WHERE chain_status = 'complete'"
+    )
+    conn.commit()
+
+
 def _rc_project_id_present(conn: sqlite3.Connection) -> bool:
     """Return True if at least one ADR-007 target table exists and has project_id."""
     for table, _ in _RC_COMPOSITE_KEYS:
@@ -483,6 +502,10 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
         # will apply V11 after adding the column.
         if _rc_project_id_present(conn):
             schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
+        # OI-830: rename chain_status value 'complete' -> 'receipt_and_commit'.
+        # Idempotent — after the first run no rows match the WHERE clause.
+        _migrate_chain_status_complete_rename(conn)
 
 
 # ---------------------------------------------------------------------------

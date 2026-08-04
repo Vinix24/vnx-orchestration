@@ -5,7 +5,7 @@
 --
 -- Design notes:
 --   - provenance_registry tracks the bidirectional chain per dispatch
---   - Chain status: complete | incomplete | broken
+--   - Chain status: receipt_and_commit | incomplete | broken
 --   - Gaps stored as JSON array for flexible gap type tracking
 --   - One row per dispatch_id (dispatch is the provenance anchor)
 --
@@ -24,8 +24,10 @@ PRAGMA foreign_keys = ON;
 -- One row per dispatch_id — updated as links are discovered.
 --
 -- Chain status values:
---   complete   — all links (dispatch -> receipt -> commit -> PR) present and valid
---   incomplete — one or more links missing, no contradictions
+--   receipt_and_commit — receipt plus commit link present and valid (the minimum
+--                        chain that can be detected from stored data alone; a PR
+--                        link is not required for this status)
+--   incomplete         — one or more links missing, no contradictions
 --   broken     — a link contradicts another (e.g., receipt points to wrong dispatch)
 --
 -- Invariants:
