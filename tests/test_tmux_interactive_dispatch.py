@@ -37,6 +37,7 @@ from tmux_interactive_dispatch import (
 )
 from tmux_worktree import ReapResult, WorktreeAllocateError, WorktreeHandle
 from pr_enforcement import PrEnforcementResult
+from worker_permissions import classify_permission_posture
 
 
 class FakeTmux:
@@ -1046,6 +1047,132 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
                     expected_status,
                     f"block {block_idx}: status must be {expected_status!r}",
                 )
+
+
+class TestCompletionProtocolPermissionPosture(_LaneTestCase):
+    """OI-864: the completion-protocol receipt carries the ACTUAL spawn-time
+    permission posture — derived from the real launch flags, not from
+    re-reading VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED.
+    """
+
+    def test_posture_baked_into_completion_protocol_receipt(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        posture = classify_permission_posture(
+            ["claude", "--model", "sonnet", "--permission-mode", "acceptEdits",
+             "--allowedTools", "Read,Write,Edit"],
+            "backend-developer",
+        )
+        protocol = lane._build_completion_protocol(
+            self.DISPATCH_ID, "T1", model="sonnet", permission_posture=posture,
+        )
+
+        for block_idx in (0, 1):
+            receipt = _extract_protocol_receipt(protocol, block_idx)
+            self.assertEqual(receipt.get("permission_posture"), "scoped-allowlist")
+            self.assertEqual(receipt.get("permission_profile"), "backend-developer")
+            self.assertEqual(receipt.get("permission_allow_pattern_count"), 3)
+
+    def test_posture_omitted_when_not_provided(self):
+        """Byte-identical shape when permission_posture is not passed (default None) —
+        e.g. a direct unit-level call to _build_completion_protocol without the
+        real dispatch() plumbing."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1", model="sonnet")
+
+        receipt = _extract_protocol_receipt(protocol, 0)
+        self.assertNotIn("permission_posture", receipt)
+        self.assertNotIn("permission_profile", receipt)
+        self.assertNotIn("permission_allow_pattern_count", receipt)
+
+
+class TestPermissionPostureReachesReceipt(_LaneTestCase):
+    """OI-864 negative test: a spawn with the scoped flag ON must classify to a
+    DIFFERENT posture than a spawn with it OFF, and that value must actually
+    reach t0_receipts.ndjson (not just a field that exists but never varies).
+
+    Uses the deadline/synthesized-fallback path (ensure_receipt) as the
+    end-to-end vehicle: the worker never emits its own receipt, so the lane's
+    lane-synthesized completion receipt is what lands in the ledger — the same
+    mechanism every other spawn property (model, lane, role) already uses.
+    """
+
+    def _dispatch_and_read_last_receipt(self, *, scoped: bool) -> dict:
+        # Distinct dispatch_id per sub-run: the append primitive's idempotency
+        # guard (scripts/lib/append_receipt_internals/idempotency.py) dedups
+        # repeat appends carrying the same dispatch_id/terminal/event_type/
+        # source within a 300s cache window — reusing one id for both halves
+        # of this comparison would silently drop the second append and make
+        # the test compare a receipt against itself. Real dispatches always
+        # get a unique id, so this mirrors production, not a workaround.
+        dispatch_id = f"{self.DISPATCH_ID}-{'scoped' if scoped else 'blanket'}"
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1" if scoped else "0",
+            "VNX_WORKER_SCOPED": "0",
+            # Zero-out time-sensitive env vars so this runs fast (mirrors _fast_dispatch).
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+            "VNX_TMUX_WORK_START_TIMEOUT": "0.1",
+            "VNX_TMUX_WORK_START_POLL": "0.02",
+        }
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=dispatch_id,
+            emit_receipt=False,  # worker never responds -> deadline -> synthesized receipt
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        with patch.dict(os.environ, env):
+            result = lane.dispatch(
+                "Do the thing.",
+                dispatch_id,
+                role="backend-developer",
+                model="sonnet",
+                deadline_seconds=0.2,
+                poll_interval=0.02,
+                warmup_timeout=0.5,
+                warmup_poll_interval=0.01,
+                isolated_worktree=False,
+            )
+        self.assertFalse(result.success)
+
+        lines = self.receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        matching = [
+            json.loads(line) for line in lines
+            if json.loads(line).get("dispatch_id") == dispatch_id
+        ]
+        self.assertEqual(
+            len(matching), 1,
+            f"expected exactly one receipt for dispatch_id={dispatch_id}, found {len(matching)}",
+        )
+        return matching[0]
+
+    def test_posture_diverges_between_scoped_off_and_on(self):
+        """The required OI-864 negative test: same role, only the env flag
+        changes between the two runs — the classified/ledgered posture must
+        differ. A test that only asserts the field's presence (or a constant
+        value) would pass even if scoping were never actually wired to the
+        real launch flags; asserting the VALUE differs is what proves it.
+        """
+        receipt_off = self._dispatch_and_read_last_receipt(scoped=False)
+        receipt_on = self._dispatch_and_read_last_receipt(scoped=True)
+
+        self.assertEqual(receipt_off.get("permission_posture"), "blanket-skip")
+        self.assertEqual(receipt_on.get("permission_posture"), "scoped-allowlist")
+        self.assertNotEqual(
+            receipt_off.get("permission_posture"),
+            receipt_on.get("permission_posture"),
+            "permission_posture must differ between a scoped-off and a "
+            "scoped-on spawn — identical values here would mean the receipt "
+            "is not actually reflecting the real launch flags",
+        )
+        self.assertIn("permission_profile", receipt_on)
+        self.assertGreater(receipt_on.get("permission_allow_pattern_count", 0), 0)
+        self.assertNotIn("permission_profile", receipt_off)
 
 
 class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):

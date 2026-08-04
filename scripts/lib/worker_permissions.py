@@ -427,6 +427,43 @@ def validate_dispatch_permissions(
     return warnings
 
 
+def classify_permission_posture(argv: "list[str]", role: Optional[str] = None) -> dict:
+    """Classify the permission posture from ACTUAL assembled ``claude`` CLI argv.
+
+    OI-864: the spawn-time posture must be derived from what really reaches the
+    command line, never by re-reading ``VNX_ENFORCE_WORKER_PERMISSIONS`` /
+    ``VNX_WORKER_SCOPED`` a second (or third) time — two independent reads of the
+    same OR-condition can diverge from the flags a given spawn actually used
+    (e.g. ``VNX_WORKER_SCOPED=1`` with the newer flag unset). Callers pass the
+    literal tokens/argv they are about to launch (or already launched); this
+    function never touches the environment itself.
+
+    Returns a dict with a ``permission_posture`` key, one of:
+      - ``"blanket-skip"`` — ``--dangerously-skip-permissions`` present.
+      - ``"scoped-allowlist"`` — ``--permission-mode`` / ``--allowedTools``
+        present. Also includes ``permission_profile`` (the profile name that
+        was applied) and ``permission_allow_pattern_count`` (the number of
+        comma-separated entries in ``--allowedTools``, 0 if absent).
+      - ``"attached-interactive"`` — neither flag present: a human-attended
+        session that answers real permission prompts (no skip, no scoping).
+    """
+    if "--dangerously-skip-permissions" in argv:
+        return {"permission_posture": "blanket-skip"}
+    if "--permission-mode" in argv or "--allowedTools" in argv:
+        allow_count = 0
+        if "--allowedTools" in argv:
+            idx = argv.index("--allowedTools")
+            if idx + 1 < len(argv):
+                allow_count = len([p for p in argv[idx + 1].split(",") if p.strip()])
+        profile = resolve_worker_profile(role)
+        return {
+            "permission_posture": "scoped-allowlist",
+            "permission_profile": profile.role,
+            "permission_allow_pattern_count": allow_count,
+        }
+    return {"permission_posture": "attached-interactive"}
+
+
 def match_bash_deny(command: str, profile: PermissionProfile) -> Optional[str]:
     """Return the first deny pattern that matches command, or None.
 

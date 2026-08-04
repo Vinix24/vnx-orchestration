@@ -188,6 +188,12 @@ def ensure_receipt(
 
     # ADR-012 worker-permission enforcement audit marker (only when flag ON).
     worker_enforcement = "enforced" if worker_permission_enforcement_enabled() else None
+    # OI-864: the real spawn-time posture, classified from the actual launch
+    # flags by the caller (see tmux_interactive_dispatch.dispatch()) — never
+    # re-derived from env vars here. spec.permission_posture is None when the
+    # caller does not compute it, in which case these three fields stay
+    # omitted exactly as before this change.
+    _posture = spec.permission_posture or {}
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the spec carries
     # the fields when the door threaded them; otherwise the door's env vars the
     # tmux pane inherited (the worker-authored receipt path reads the same env in
@@ -210,6 +216,9 @@ def ensure_receipt(
         tier_to=spec.tier_to or os.environ.get("VNX_TIER_TO") or None,
         worker_permission_enforcement=worker_enforcement,
         report_path=str(report_path) if report_path is not None else None,
+        permission_posture=_posture.get("permission_posture"),
+        permission_profile=_posture.get("permission_profile"),
+        permission_allow_pattern_count=_posture.get("permission_allow_pattern_count"),
     ).to_dict()
 
     try:
@@ -258,6 +267,13 @@ class GovernSpec:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    # OI-864: the actual spawn-time permission posture — the dict returned by
+    # worker_permissions.classify_permission_posture() from the REAL launch
+    # flags. The tmux lane computes this once per dispatch (from launch_cmd)
+    # and threads it in; None when the caller does not compute it (e.g. other
+    # govern() callers), in which case ensure_receipt() omits the fields
+    # exactly as before this change (no default-changing behavior).
+    permission_posture: Optional[dict] = None
 
 
 @dataclass

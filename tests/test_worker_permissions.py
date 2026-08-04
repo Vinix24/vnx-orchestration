@@ -16,6 +16,7 @@ from worker_permissions import (
     EMPTY_MCP_CONFIG,
     PermissionProfile,
     build_claude_scope_args,
+    classify_permission_posture,
     generate_claude_settings,
     generate_permission_preamble,
     load_permissions,
@@ -349,3 +350,85 @@ class TestBuildClaudeScopeArgsMcpServers:
         )
         assert "--strict-mcp-config" not in args
         assert "--mcp-config" not in args
+
+
+# ---------------------------------------------------------------------------
+# classify_permission_posture (OI-864)
+# ---------------------------------------------------------------------------
+
+class TestClassifyPermissionPosture:
+    """Posture must come from the ACTUAL assembled argv, never from re-reading
+    VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED — two independent reads of
+    that OR-condition can diverge from the flags a given spawn actually used
+    (e.g. VNX_WORKER_SCOPED=1 alone with the newer flag unset)."""
+
+    # An unknown role deterministically falls back to default_code_worker_profile()
+    # (9 allowed tools, role="code-worker") regardless of this repo's real
+    # .vnx/worker_permissions.yaml content — keeps these tests independent of
+    # that file's contents.
+    UNKNOWN_ROLE = "nonexistent-role-xyz-oi864"
+
+    def test_blanket_skip_argv(self) -> None:
+        argv = ["claude", "--model", "sonnet", "--dangerously-skip-permissions"]
+        result = classify_permission_posture(argv, self.UNKNOWN_ROLE)
+        assert result == {"permission_posture": "blanket-skip"}
+
+    def test_scoped_allowlist_argv_includes_profile_and_count(self) -> None:
+        argv = [
+            "claude", "--model", "sonnet",
+            "--permission-mode", "acceptEdits",
+            "--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG,
+            "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob,Bash(git:*),Bash(gh:*)",
+        ]
+        result = classify_permission_posture(argv, self.UNKNOWN_ROLE)
+        assert result["permission_posture"] == "scoped-allowlist"
+        assert result["permission_profile"] == "code-worker"
+        assert result["permission_allow_pattern_count"] == 9
+
+    def test_attached_interactive_argv(self) -> None:
+        """Neither flag present — a human-attended session (attach=True in the
+        tmux lane), answering real permission prompts."""
+        argv = ["claude", "--model", "sonnet"]
+        result = classify_permission_posture(argv, self.UNKNOWN_ROLE)
+        assert result == {"permission_posture": "attached-interactive"}
+
+    def test_scoped_with_empty_allowlist_counts_zero(self) -> None:
+        argv = ["claude", "--model", "sonnet", "--permission-mode", "acceptEdits"]
+        result = classify_permission_posture(argv, self.UNKNOWN_ROLE)
+        assert result["permission_posture"] == "scoped-allowlist"
+        assert result["permission_allow_pattern_count"] == 0
+
+    def test_blanket_skip_wins_even_if_scoped_flags_also_present(self) -> None:
+        # --dangerously-skip-permissions is checked first: if a caller somehow
+        # assembled both (should never happen), the actually-effective claude
+        # behavior is the skip flag, so posture must report that, not scoped.
+        argv = [
+            "claude", "--model", "sonnet",
+            "--dangerously-skip-permissions",
+            "--permission-mode", "acceptEdits", "--allowedTools", "Read",
+        ]
+        result = classify_permission_posture(argv, self.UNKNOWN_ROLE)
+        assert result["permission_posture"] == "blanket-skip"
+
+    def test_posture_diverges_between_scoped_off_and_on(self) -> None:
+        """The required OI-864 negative test: same role, only the argv differs
+        (mirroring VNX_WORKER_SCOPED/VNX_ENFORCE_WORKER_PERMISSIONS off vs on)
+        — the classified posture must differ. Asserting only that the field
+        EXISTS would still pass if the classifier always returned a constant;
+        asserting the VALUE differs is what actually proves the wiring works.
+        """
+        off_argv = ["claude", "--model", "sonnet", "--dangerously-skip-permissions"]
+        on_argv = [
+            "claude", "--model", "sonnet",
+            "--permission-mode", "acceptEdits",
+            "--allowedTools", "Read,Write,Edit",
+        ]
+        posture_off = classify_permission_posture(off_argv, "backend-developer")
+        posture_on = classify_permission_posture(on_argv, "backend-developer")
+
+        assert posture_off["permission_posture"] == "blanket-skip"
+        assert posture_on["permission_posture"] == "scoped-allowlist"
+        assert posture_off["permission_posture"] != posture_on["permission_posture"]
+        assert "permission_profile" not in posture_off
+        assert posture_on["permission_profile"] == "backend-developer"
+        assert posture_on["permission_allow_pattern_count"] == 3
