@@ -12,6 +12,7 @@ Covers all dispatch rules D1-D12 including:
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -430,6 +431,61 @@ class TestDigestStableAndPermitCompatible:
         assert isinstance(plan, ExecutionPlan)
         permit = issue_permit(plan)
         require_permit(plan, permit)  # must not raise PermissionError
+
+    def test_canonical_dict_matches_digest_input(self, tmp_path: Path) -> None:
+        """OI-849: canonical_dict() returns the exact dict that digest() hashes.
+
+        Verifying that the fingerprint can be recomputed from the persisted dict
+        proves the stored decision and the permit haven't drifted apart — two
+        fields that can diverge without anything noticing is exactly the failure
+        mode this fix prevents.
+        """
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+
+        canonical = plan.canonical_dict()
+        digest = plan.digest()
+
+        # Recompute the digest from the canonical dict
+        blob = json.dumps(canonical, sort_keys=True, ensure_ascii=True)
+        recomputed = hashlib.sha256(blob.encode()).hexdigest()
+
+        assert recomputed == digest, (
+            "canonical_dict() must produce the same content digest() hashes — "
+            "a stored decision whose fingerprint doesn't match is unverifiable"
+        )
+
+    @pytest.mark.parametrize("provider", [p for p in Provider if p != Provider.AUTO])
+    def test_canonical_dict_matches_digest_all_providers(
+        self, provider: Provider, tmp_path: Path,
+    ) -> None:
+        """Every non-AUTO provider's canonical_dict must hash to its digest."""
+        vspec = _make_vspec(provider=provider, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+
+        canonical = plan.canonical_dict()
+        blob = json.dumps(canonical, sort_keys=True, ensure_ascii=True)
+        recomputed = hashlib.sha256(blob.encode()).hexdigest()
+        assert recomputed == plan.digest(), (
+            f"canonical_dict→digest mismatch for provider={provider.value}"
+        )
+
+    def test_canonical_dict_excludes_role(self, tmp_path: Path) -> None:
+        """canonical_dict() must exclude advisory fields like role — they don't
+        belong in the routing decision and must not perturb the fingerprint."""
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+
+        canonical = plan.canonical_dict()
+        assert "role" not in canonical, "role is advisory, must not be in canonical_dict"
+        assert "pr_id" not in canonical, "pr_id is advisory, must not be in canonical_dict"
+        assert "warnings" not in canonical, "warnings are advisory, must not be in canonical_dict"
+        assert "parent_dispatch" not in canonical, (
+            "chain-link metadata is advisory, must not be in canonical_dict"
+        )
 
 
 # ---------------------------------------------------------------------------

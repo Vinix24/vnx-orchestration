@@ -29,6 +29,7 @@ from dispatch_cli import (
     _execute_claude_headless,
     _has_col,
     _load_model_pins_from_yaml,
+    _persist_route_decision,
     _persist_track_id,
     _tracks_db_path,
     build_runtime_snapshot,
@@ -2635,3 +2636,148 @@ def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monk
         f"T0 pin (t0-opus-only) must be unaffected by the worker override (got {plan_arg.model!r})"
     )
     assert not any("worker-claude-override" in w for w in plan_arg.warnings)
+
+
+# ---------------------------------------------------------------------------
+# OI-849 — route decision persistence
+# ---------------------------------------------------------------------------
+
+class TestPersistRouteDecision:
+    """_persist_route_decision writes the canonical routing decision to the
+    route_decisions stream alongside the permit fingerprint."""
+
+    def test_writes_ndjson_and_per_dispatch_json(self, tmp_path):
+        """A valid plan+permit → NDJSON record appended + per-dispatch JSON written."""
+        plan = _make_minimal_plan(dispatch_id="20260804-oi849-test")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        # NDJSON must exist with one line
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        assert ndjson_path.exists()
+        lines = ndjson_path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["dispatch_id"] == "20260804-oi849-test"
+        assert record["plan_digest"] == permit.plan_digest
+        assert record["fingerprint"] == f"{permit.plan_digest[:12]}-{permit.dispatch_id}"
+        assert "decision" in record
+        assert record["decision"]["provider"] == "claude"
+        assert record["decision"]["model"] == "sonnet"
+
+        # Per-dispatch JSON must exist
+        per_dispatch = state_dir / "route_decisions" / "20260804-oi849-test.json"
+        assert per_dispatch.exists()
+        per_rec = json.loads(per_dispatch.read_text(encoding="utf-8"))
+        assert per_rec["dispatch_id"] == "20260804-oi849-test"
+
+    def test_fingerprint_verifiable_against_persisted_decision(self, tmp_path):
+        """OI-849: the stored canonical dict must hash to the same digest the
+        permit carries. Proving this link is the whole point — a stored decision
+        that can't be verified against its permit repeats the problem one layer
+        higher."""
+        plan = _make_minimal_plan(dispatch_id="20260804-oi849-verify")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
+
+        # Recompute the digest from the stored canonical decision
+        stored_canonical = record["decision"]
+        blob = json.dumps(stored_canonical, sort_keys=True, ensure_ascii=True)
+        recomputed_digest = hashlib.sha256(blob.encode()).hexdigest()
+
+        assert recomputed_digest == record["plan_digest"], (
+            "stored canonical dict must hash to the same plan_digest the permit "
+            "carries — a stored decision whose fingerprint doesn't match is "
+            "unverifiable"
+        )
+        assert recomputed_digest == permit.plan_digest, (
+            "recomputed digest must match the live permit's plan_digest"
+        )
+
+    def test_failure_does_not_raise(self, tmp_path, caplog):
+        """Write failure (e.g. permission denied on the state dir) must log a
+        WARN and never block the dispatch — route decision persistence is
+        best-effort."""
+        import logging
+
+        plan = _make_minimal_plan(dispatch_id="20260804-oi849-fail")
+        permit = issue_permit(plan)
+
+        # Point state_dir at a non-writable location
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        ndjson = state_dir / "route_decisions.ndjson"
+        ndjson.write_text("", encoding="utf-8")
+        # Make the ndjson file a directory so append_locked fails
+        ndjson.unlink()
+        ndjson.mkdir()
+
+        with caplog.at_level(logging.WARNING):
+            _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        assert any("WARN route decision persist failed" in rec.message
+                   for rec in caplog.records), (
+            "write failure must log a WARN — silence is the old bug repeated"
+        )
+
+    def test_called_during_run_dispatch(self, tmp_path, monkeypatch):
+        """run_dispatch (non-dry-run) must call _persist_route_decision after
+        the permit is issued."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Route decision persistence test\n\nDo something safe.\n",
+            staging_id="20260804-staging-oi849",
+            dispatch_id="20260804-oi849-integration",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+            with patch("dispatch_cli._persist_route_decision") as mock_persist:
+                rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_exec.assert_called_once()
+        mock_persist.assert_called_once()
+        call_args = mock_persist.call_args
+        assert call_args[0][0].dispatch_id == "20260804-oi849-integration"
+
+    def test_not_called_during_dry_run(self, tmp_path):
+        """Dry-run dispatches must NOT write route decisions — only live
+        dispatches should persist state."""
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+
+        with patch("dispatch_cli.build_runtime_snapshot",
+                   return_value=_clean_snapshot()):
+            with patch("dispatch_cli._persist_route_decision") as mock_persist:
+                rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        mock_persist.assert_not_called()
+
+    def test_codex_provider_lane_decision_persisted(self, tmp_path):
+        """A provider-lane (codex) dispatch must also persist its routing
+        decision — the fix is lane-agnostic."""
+        plan = _make_minimal_plan(
+            provider=Provider.CODEX,
+            dispatch_id="20260804-oi849-codex",
+        )
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
+        assert record["dispatch_id"] == "20260804-oi849-codex"
+        assert record["decision"]["provider"] == "codex"
+        assert record["decision"]["lane"] == "provider"
+        assert record["decision"]["billing"] == "provider_metered"
