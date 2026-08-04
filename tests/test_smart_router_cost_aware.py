@@ -263,8 +263,13 @@ class TestRecommendCostAware:
 
 class TestDecideCostAware:
 
-    def test_refactor_decision_picks_cheapest_capable(self, tmp_path):
+    def test_refactor_decision_picks_cheapest_capable(self, tmp_path, monkeypatch):
         """For refactor task class, cheapest capable model is primary."""
+        # deepseek-v4-flash is the cheapest capable candidate, but decide()'s
+        # constraint filter drops deepseek lanes when DEEPSEEK_API_KEY is absent
+        # (deepseek-harness-subscription-blocked). CI's sweep does not export the
+        # secret, so the test must pin it to stay hermetic.
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         entries = {
             "03_refactoring": [
                 {"model_id": "claude-sonnet-4-6", "composite_score": 8.5,
@@ -287,8 +292,11 @@ class TestDecideCostAware:
         assert decision.primary.cost_usd_per_call is not None
         assert decision.cost_estimate == decision.primary.cost_usd_per_call
 
-    def test_route_decision_json_for_refactor(self, tmp_path, state_dir):
+    def test_route_decision_json_for_refactor(self, tmp_path, state_dir, monkeypatch):
         """Show one example route decision JSON proving cheapest-capable selection."""
+        # Same hermeticity as test_refactor_decision_picks_cheapest_capable:
+        # deepseek lanes are constraint-filtered without DEEPSEEK_API_KEY.
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         entries = {
             "03_refactoring": [
                 {"model_id": "claude-sonnet-4-6", "composite_score": 8.5,
