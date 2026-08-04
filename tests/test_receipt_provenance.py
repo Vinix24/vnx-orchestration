@@ -1469,3 +1469,68 @@ class TestResolveDispatchProjectIdCompositeSafety:
 
         assert receipt_provenance._resolve_dispatch_project_id(conn, "dispatch-x") is None
         conn.close()
+
+
+# ============================================================================
+# OI-830: chain_status rename verification
+# ============================================================================
+
+class TestChainStatusRename:
+    """Verify the old 'complete' value is never produced and the new
+    'receipt_and_commit' value is produced in its place."""
+
+    def test_old_value_not_produced_by_validate(self):
+        """validate_receipt_provenance never returns 'complete' as chain_status."""
+        receipt = _make_receipt(
+            trace_token="Dispatch-ID: 20260329-180606-test-task-B",
+            feature_plan_pr="PR-2",
+        )
+        validation = validate_receipt_provenance(receipt)
+        assert validation.chain_status != "complete"
+        assert validation.chain_status == CHAIN_STATUS_COMPLETE
+        assert validation.chain_status == "receipt_and_commit"
+
+    def test_old_value_not_produced_by_calculate(self):
+        """_calculate_chain_status never returns 'complete'."""
+        from receipt_provenance import _calculate_chain_status
+
+        fields = {"receipt_id": "run-001", "commit_sha": "abc123"}
+        status = _calculate_chain_status(fields)
+        assert status != "complete"
+        assert status == CHAIN_STATUS_COMPLETE
+        assert status == "receipt_and_commit"
+
+    def test_old_value_not_produced_by_register(self, conn):
+        """register_provenance_link never sets chain_status to 'complete'."""
+        link = register_provenance_link(
+            conn,
+            dispatch_id="20260804-oi830-register-verify",
+            receipt_id="run-oi830",
+            commit_sha="sha-oi830",
+        )
+        conn.commit()
+        assert link.chain_status != "complete"
+        assert link.chain_status == CHAIN_STATUS_COMPLETE
+        assert link.chain_status == "receipt_and_commit"
+
+    def test_old_value_not_produced_by_batch_summary(self, receipts_path):
+        """batch_provenance_summary never counts 'complete' category."""
+        receipts = [
+            _make_receipt(
+                dispatch_id="DISP-OI830-A",
+                trace_token="Dispatch-ID: DISP-OI830-A",
+                feature_plan_pr="PR-2",
+            ),
+        ]
+        _write_receipts(receipts_path, receipts)
+        batch = batch_provenance_summary(["DISP-OI830-A"], receipts_path)
+        assert "complete" not in batch["chain_status_counts"]
+
+    def test_has_pr_has_fp_do_not_exist(self):
+        """The dead variables has_pr and has_fp are removed from the module."""
+        import inspect
+        from receipt_provenance import _calculate_chain_status
+
+        source = inspect.getsource(_calculate_chain_status)
+        assert "has_pr" not in source
+        assert "has_fp" not in source
