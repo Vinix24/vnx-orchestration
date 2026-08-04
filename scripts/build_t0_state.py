@@ -1921,9 +1921,12 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
     verify (unverified > 0 with nominated_not_closed > 0 — this is the stuck
     backlog, distinct from guard-declined closes like stale_candidate which
     keep nominated_not_closed > 0 on healthy runs), OR the last run is older
-    than _AUTOCLOSE_STALE_HOURS. A missing summary is itself a degraded signal:
-    it means the auto-close reconciler has never written a summary, and the
-    block is still emitted rather than omitted.
+    than _AUTOCLOSE_STALE_HOURS, OR the last-run age cannot be determined
+    (missing or unparseable finished_at), OR the counts block is malformed
+    (non-numeric values or wrong type in an otherwise valid JSON). A missing
+    summary is itself a degraded signal: it means the auto-close reconciler
+    has never written a summary, and the block is still emitted rather than
+    omitted.
     """
     now = now or datetime.now(timezone.utc)
     summary_path = store / _RECONCILE_SUMMARY_FILENAME
@@ -1940,11 +1943,6 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
         }
 
     gh_health = (summary.get("evidence_source_health") or {}).get("gh")
-    counts = summary.get("counts") or {}
-    nominated = int(counts.get("nominated", 0) or 0)
-    closed = int(counts.get("closed", 0) or 0)
-    unverified = int(counts.get("unverified", 0) or 0)
-    nominated_not_closed = nominated - closed
 
     finished_raw = summary.get("finished_at")
     finished_dt = _parse_reconcile_timestamp(finished_raw)
@@ -1953,9 +1951,27 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
     else:
         age_hours = None
 
+    try:
+        counts = summary.get("counts") or {}
+        nominated = int(counts.get("nominated", 0) or 0)
+        closed = int(counts.get("closed", 0) or 0)
+        unverified = int(counts.get("unverified", 0) or 0)
+    except (ValueError, TypeError, AttributeError):
+        return {
+            "last_reconcile_at": finished_raw or None,
+            "last_reconcile_age_hours": age_hours,
+            "gh_health": gh_health,
+            "nominated_not_closed": None,
+            "autoclose_degraded": True,
+            "autoclose_reason": "malformed_counts",
+        }
+
+    nominated_not_closed = nominated - closed
+
     gh_bad = gh_health != "ok"
     stuck = unverified > 0 and nominated_not_closed > 0
     stale = age_hours is not None and age_hours > _AUTOCLOSE_STALE_HOURS
+    indeterminate_age = age_hours is None
 
     if gh_bad:
         reason = "gh_absent" if gh_health == "absent" else f"gh_{gh_health or 'unknown'}"
@@ -1963,6 +1979,8 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
         reason = "nominated_not_closed"
     elif stale:
         reason = "stale"
+    elif indeterminate_age:
+        reason = "indeterminate_age"
     else:
         reason = "ok"
 
@@ -1971,7 +1989,7 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
         "last_reconcile_age_hours": age_hours,
         "gh_health": gh_health,
         "nominated_not_closed": nominated_not_closed,
-        "autoclose_degraded": gh_bad or stuck or stale,
+        "autoclose_degraded": gh_bad or stuck or stale or indeterminate_age,
         "autoclose_reason": reason,
     }
 
