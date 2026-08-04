@@ -31,6 +31,8 @@ import seed_tracks_from_roadmap as seeder
 import planning_cli
 import tracks as tracks_lib
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
+
 
 SAMPLE_ROADMAP = """
 roadmap_id: test-roadmap
@@ -85,8 +87,7 @@ def seeded_state(tmp_path: Path) -> Path:
             conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
         )
         conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     schema_migration.apply_script_if_below(
