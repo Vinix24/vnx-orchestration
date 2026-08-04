@@ -151,9 +151,6 @@ tests/test_semantics_cleanup.py
 tests/test_serve_dashboard_api.py
 tests/test_session_ids_staleness.py
 tests/test_sessionstart_hook.py  # OI-951: doc/content drift the test already asserts against, red on main too
-tests/test_smart_router_cost_aware.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
-tests/test_smart_router_e2e.py
-tests/test_smart_router_multiprovider.py
 tests/test_strategy_roadmap.py
 tests/test_strategy_roadmap_real_file.py
 tests/test_subprocess_adapter_pr3.py

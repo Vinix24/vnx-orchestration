@@ -36,6 +36,8 @@ import build_t0_state as bts  # noqa: E402
 import schema_migration  # noqa: E402
 import tracks as tracks_lib  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 PROJECT_ID = "test-proj"
 _MARKER_KEYS = {
     "derived_refreshed", "tracks", "drifted", "drifted_tracks", "reason", "seconds",
@@ -91,8 +93,7 @@ def _build_tracks_db(tmp_path: Path) -> Path:
             conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
         )
         conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     for ver, fname in (

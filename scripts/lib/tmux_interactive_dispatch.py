@@ -1892,6 +1892,8 @@ class TmuxInteractiveDispatch:
         baseline_backstop: "bool | None" = None,
         pane_id: "str | None" = None,
         label: "str | None" = None,
+        raw_log_path: "Path | None" = None,
+        session: str = "",
     ) -> "dict | None":
         """Poll signals 1–3 until a NEW completion appears beyond the baseline.
 
@@ -1907,6 +1909,16 @@ class TmuxInteractiveDispatch:
           that hangs on a prompt MID-RUN is surfaced long before the deadline,
           instead of burning the full ``deadline_seconds`` invisible.
 
+        *raw_log_path* (optional): when provided and the file exists, a
+          FileProgressHeartbeat monitors the pipe-pane log for growth.  If the log
+          stops growing for longer than the configured silence threshold, the
+          worker is killed as stuck (OI-944, OI-1007).  When absent or None
+          (e.g. VNX_TMUX_CAPTURE=0), the heartbeat is blind — the pane-content
+          fallback (permission-prompt detection) is the only guard.
+
+        *session*: tmux session name, required when raw_log_path is provided so
+          the heartbeat can kill the session on silence timeout.
+
         Priority: signal 1 (canonical) > signal 2 (pending) > signal 3 (backstop).
         Returns the best matching receipt, or None on deadline.
         """
@@ -1919,6 +1931,23 @@ class TmuxInteractiveDispatch:
             _bl_backstop: bool = self._is_report_backstop_active(dispatch_id)
         else:
             _bl_backstop = baseline_backstop
+
+        # OI-944 / OI-1007: worker heartbeat — monitor the pipe-pane log for
+        # growth.  If the log stops growing for longer than the configured silence
+        # threshold, the worker is stuck and must be killed.
+        _heartbeat = None
+        if raw_log_path is not None and raw_log_path.exists():
+            try:
+                from worker_heartbeat import FileProgressHeartbeat  # noqa: PLC0415
+                _heartbeat = FileProgressHeartbeat(
+                    raw_log_path, dispatch_id,
+                )
+            except Exception as _hb_exc:
+                logger.debug(
+                    "interactive: heartbeat init failed for %s: %s",
+                    dispatch_id, _hb_exc,
+                )
+
         while True:
             if baseline_pending_ids is not None:
                 # P0-2: per-source baseline — correct guard for each mutable source
@@ -1971,6 +2000,46 @@ class TmuxInteractiveDispatch:
                             dispatch_id, label, pane_id,
                             "permission prompt during receipt wait",
                         )
+                # OI-944 / OI-1007: heartbeat silence check.  If the pipe-pane
+                # log has stopped growing for longer than the silence threshold,
+                # the worker is stuck — kill it and write a terminal failure.
+                if _heartbeat is not None:
+                    _hb_verdict = _heartbeat.check()
+                    if _hb_verdict.is_silent:
+                        logger.warning(
+                            "interactive: heartbeat silence detected for %s "
+                            "(%.0fs silent, threshold=%.0fs) — killing worker",
+                            dispatch_id,
+                            _hb_verdict.silence_seconds,
+                            _hb_verdict.threshold_seconds,
+                        )
+                        # Write a failure report so the audit trail records
+                        # the heartbeat kill with the reason and timing.
+                        try:
+                            from worker_heartbeat import build_heartbeat_failure_report  # noqa: PLC0415
+                            _hb_report = build_heartbeat_failure_report(
+                                dispatch_id=dispatch_id,
+                                verdict=_hb_verdict,
+                                terminal_id=label or "",
+                            )
+                            _reports_dir = (
+                                self._state_dir.parent / "unified_reports"
+                            )
+                            _reports_dir.mkdir(parents=True, exist_ok=True)
+                            _report_path = _reports_dir / f"{dispatch_id}.md"
+                            _report_path.write_text(_hb_report, encoding="utf-8")
+                            logger.info(
+                                "interactive: heartbeat failure report written to %s",
+                                _report_path,
+                            )
+                        except Exception as _hb_write_exc:
+                            logger.warning(
+                                "interactive: heartbeat failure report write "
+                                "failed for %s: %s",
+                                dispatch_id,
+                                _hb_write_exc,
+                            )
+                        return None
                 time.sleep(poll_interval)
                 continue
 
@@ -2750,6 +2819,8 @@ class TmuxInteractiveDispatch:
                 baseline_backstop=baseline_backstop,
                 pane_id=pane_id,
                 label=label,
+                raw_log_path=_raw_log[0],
+                session=session,
             )
 
             if receipt is None:

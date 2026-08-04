@@ -58,7 +58,24 @@ from runtime_core import RuntimeCore, load_runtime_core
 # ---------------------------------------------------------------------------
 
 def _get_dirs() -> tuple[str, str]:
-    """Return (state_dir, dispatch_dir) resolved via git-based project root."""
+    """Return (state_dir, dispatch_dir) resolved via env vars or git-based project root.
+
+    When VNX_DATA_DIR_EXPLICIT=1, the explicit VNX_STATE_DIR / VNX_DISPATCH_DIR
+    env vars are honored directly (if set). Otherwise falls through to file-based
+    resolution via resolve_state_dir / resolve_dispatch_dir.
+    """
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    if explicit_flag:
+        vnx_state = os.environ.get("VNX_STATE_DIR")
+        vnx_dispatch = os.environ.get("VNX_DISPATCH_DIR")
+        if vnx_state and vnx_dispatch:
+            return str(Path(vnx_state).resolve()), str(Path(vnx_dispatch).resolve())
+        if vnx_state:
+            data = resolve_data_dir(__file__)
+            return str(Path(vnx_state).resolve()), str(data / "dispatches")
+        if vnx_dispatch:
+            data = resolve_data_dir(__file__)
+            return str(data / "state"), str(Path(vnx_dispatch).resolve())
     state_dir = str(resolve_state_dir(__file__))
     dispatch_dir = str(resolve_dispatch_dir(__file__))
     return state_dir, dispatch_dir

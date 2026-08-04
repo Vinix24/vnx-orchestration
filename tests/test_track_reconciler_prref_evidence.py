@@ -37,6 +37,8 @@ import track_reconciler
 from track_reconciler import _load_merged_pr_numbers, _parse_pr_number
 import tracks as tracks_lib
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
+
 
 PROJECT_ID = "test-ev-proj"
 
@@ -101,8 +103,7 @@ def _build_db(tmp_path: Path, *, deep: bool = False) -> Path:
         )
         conn.commit()
 
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
 

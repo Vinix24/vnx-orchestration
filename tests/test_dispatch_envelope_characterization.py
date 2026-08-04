@@ -142,17 +142,57 @@ class TestLayer1ImportSurface:
 # ---------------------------------------------------------------------------
 
 
+def _coupling_key(c: Coupling) -> tuple:
+    """Stable identity key for a coupling — (file, mechanism, module_target, symbol).
+
+    Line number is NOT part of the identity because it shifts when test files
+    are edited (a new line pushes every coupling below it down by one, and the
+    census went red even though no coupling actually changed — OI-1019). The
+    line number is still stored in the fixture for diagnostics, but the census
+    comparison matches on this key, not on the full Coupling object.
+    """
+    return (c.file, c.mechanism, c.module_target, c.symbol)
+
+
 def _census_diff(live: list, expected: list) -> str:
-    live_set, expected_set = set(live), set(expected)
-    added = sorted(live_set - expected_set)
-    removed = sorted(expected_set - live_set)
+    """Compare live census against expected using stable coupling keys.
+
+    Uses Counter on coupling keys so that duplicate couplings (same file,
+    mechanism, module_target, symbol on different lines) are counted
+    correctly — a file with two patches of the same symbol should survive
+    a line-number shift just as well as a file with one.
+    """
+    from collections import Counter
+    live_counts = Counter(_coupling_key(c) for c in live)
+    expected_counts = Counter(_coupling_key(c) for c in expected)
+    all_keys = sorted(set(live_counts) | set(expected_counts))
+
+    # Build a representative Coupling for each key (for diagnostic line numbers).
+    live_repr = {}
+    for c in live:
+        k = _coupling_key(c)
+        live_repr.setdefault(k, c)
+    expected_repr = {}
+    for c in expected:
+        k = _coupling_key(c)
+        expected_repr.setdefault(k, c)
+
     lines = ["census mismatch vs tests/data/dispatch_envelope_census.json"]
-    if added:
-        lines.append(f"  + {len(added)} coupling(s) the live scan found but the fixture doesn't have:")
-        lines.extend(f"      {c.file}:{c.line} [{c.mechanism}] {c.module_target}.{c.symbol}" for c in added)
-    if removed:
-        lines.append(f"  - {len(removed)} coupling(s) the fixture has but the live scan no longer finds:")
-        lines.extend(f"      {c.file}:{c.line} [{c.mechanism}] {c.module_target}.{c.symbol}" for c in removed)
+    for k in all_keys:
+        lc = live_counts.get(k, 0)
+        ec = expected_counts.get(k, 0)
+        if lc > ec:
+            rep = live_repr.get(k)
+            lines.append(
+                f"  +{lc - ec} {rep.file}:{rep.line} [{rep.mechanism}] "
+                f"{rep.module_target}.{rep.symbol}"
+            )
+        elif ec > lc:
+            rep = expected_repr.get(k)
+            lines.append(
+                f"  -{ec - lc} {rep.file}:{rep.line} [{rep.mechanism}] "
+                f"{rep.module_target}.{rep.symbol}"
+            )
     lines.append("  regenerate with: python3 tests/dispatch_envelope_census_scanner.py")
     return "\n".join(lines)
 
@@ -183,6 +223,7 @@ class TestLayer2Census:
             assert f.stem in family, f"{f} exists on disk but discover_family() missed it"
 
     def test_census_matches_fixture(self):
+        from collections import Counter
         family = discover_family()
         live = scan_tests_dir(family=family)
         fixture = json.loads(CENSUS_FIXTURE.read_text(encoding="utf-8"))
@@ -190,8 +231,10 @@ class TestLayer2Census:
             f"fixture was generated against family={sorted(fixture['family'])!r} "
             f"but the live family is {sorted(family)!r} — regenerate the fixture"
         )
-        expected = sorted(Coupling.from_dict(d) for d in fixture["couplings"])
-        assert live == expected, _census_diff(live, expected)
+        expected = [Coupling.from_dict(d) for d in fixture["couplings"]]
+        live_key_counts = Counter(_coupling_key(c) for c in live)
+        expected_key_counts = Counter(_coupling_key(c) for c in expected)
+        assert live_key_counts == expected_key_counts, _census_diff(live, expected)
 
 
 # ---------------------------------------------------------------------------

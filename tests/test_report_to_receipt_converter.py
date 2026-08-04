@@ -18,11 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
@@ -60,26 +62,88 @@ def reports_dir(tmp_path: Path) -> Path:
     return rd
 
 
-def _write_frontmatter_report(path: Path, dispatch_id: str, **extra) -> Path:
-    """Write a well-formed YAML-frontmatter report."""
-    fields = {
+def _v1_frontmatter_base(dispatch_id: str) -> dict:
+    """Minimal v1-valid frontmatter mapping (15 required fields per schemas/unified_report_v1.json)."""
+    return {
+        "schema_version": 1,
         "dispatch_id": dispatch_id,
-        "terminal": "T1",
         "provider": "claude",
+        "sub_provider": "anthropic",
         "model": "claude-sonnet-4-6",
-        "status": "complete",
+        "terminal_id": "T1",
+        "pool_id": "headless",
+        "role": "backend-developer",
+        "task_class": "implementation",
+        "pr_id": "none",
+        "duration_seconds": 12.5,
+        "exit_code": 0,
+        "token_usage": {"input": 1234, "output": 567, "cache_read": 89},
+        "cost_usd": 0.0421,
+        "route_decision": {
+            "strategy": "default",
+            "selected_provider": "claude",
+            "selected_model": "claude-sonnet-4-6",
+            "reason": "primary route",
+        },
+        "status": "unknown",
+        "terminal": "T1",
         "timestamp": "2026-06-01T21:34:16Z",
-        **extra,
     }
-    fm_lines = "\n".join(f"{k}: {v}" for k, v in fields.items())
+
+
+def _write_frontmatter_report(path: Path, dispatch_id: str, **extra) -> Path:
+    """Write a well-formed v1-valid YAML-frontmatter report.
+
+    Produces a report whose frontmatter validates against
+    schemas/unified_report_v1.json so the fail-closed gate passes.
+    ``**extra`` overrides any individual field (e.g. status, model).
+    """
+    fm = _v1_frontmatter_base(dispatch_id)
+    fm.update(extra)
+    fm_text = yaml.safe_dump(fm, sort_keys=False).strip()
     content = (
-        f"---\n{fm_lines}\n---\n\n"
+        f"---\n{fm_text}\n---\n\n"
         "## Summary\n\nImplemented the feature per dispatch specification. "
         "All tests pass and coverage is at target.\n\n"
         "## Changes\n\n- scripts/lib/example.py: added X\n\n"
         "## Verification\n\npytest tests/ -x: 42 passed\n\n"
         "## Open Items\n\nNone\n"
     )
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _write_non_v1_success_report(
+    path: Path, dispatch_id: str, *, with_headings: bool = True, **extra
+) -> Path:
+    """Write a report with non-v1 (simple flat) frontmatter claiming success.
+
+    Used to test that reports without v1 frontmatter get fail-closed rejection
+    when they carry a terminal success status.
+    """
+    fields = {
+        "dispatch_id": dispatch_id,
+        "terminal": "T1",
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "status": "success",
+        "timestamp": "2026-06-01T21:34:16Z",
+        **extra,
+    }
+    fm_lines = "\n".join(f"{k}: {v}" for k, v in fields.items())
+
+    if with_headings:
+        body = (
+            "## Summary\n\nImplemented the feature per dispatch specification. "
+            "All tests pass and coverage is at target.\n\n"
+            "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+            "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+            "## Open Items\n\nNone\n"
+        )
+    else:
+        body = "Echoed prompt — no real report content here.\n"
+
+    content = f"---\n{fm_lines}\n---\n\n{body}"
     path.write_text(content, encoding="utf-8")
     return path
 
@@ -372,7 +436,10 @@ class TestWatermarkPersistence:
 # ---------------------------------------------------------------------------
 
 class TestReceiptContent:
-    def test_receipt_has_required_fields(self, tmp_path, state_dir):
+    def test_receipt_has_required_fields(self, tmp_path, state_dir, monkeypatch):
+        import report_to_receipt_converter as rtc
+        monkeypatch.setattr(rtc, "_check_branch_on_origin", lambda _did: True)
+
         report = tmp_path / "20260601-content-check.md"
         _write_frontmatter_report(
             report,
@@ -956,3 +1023,231 @@ class TestRejectionVisibility:
         beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
         beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
         assert beacon["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Part 11: fail-closed gate — OI-1035, OI-1011, OI-1002, OI-659, OI-1017
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedV1Frontmatter:
+    """Check (a): a report with terminal success status but no v1 frontmatter
+    must produce an explicit failure receipt, not a silent success."""
+
+    def test_non_v1_frontmatter_with_success_status_becomes_failure(
+        self, tmp_path, state_dir
+    ):
+        report = tmp_path / "20260601-no-v1.md"
+        _write_non_v1_success_report(report, "20260601-no-v1")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_failed"
+        assert r["status"] == "failure"
+        assert "fail_closed_violations" in r
+        violations = r["fail_closed_violations"]
+        assert any("frontmatter_v1" in v for v in violations), (
+            f"expected frontmatter_v1 violation, got: {violations}"
+        )
+
+    def test_v1_frontmatter_with_success_status_passes(self, tmp_path, state_dir, monkeypatch):
+        import report_to_receipt_converter as rtc
+        monkeypatch.setattr(rtc, "_check_branch_on_origin", lambda _did: True)
+
+        report = tmp_path / "20260601-v1-ok.md"
+        _write_frontmatter_report(report, "20260601-v1-ok", status="success")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_complete"
+        assert r["status"] == "success"
+
+    def test_non_v1_with_unknown_status_not_affected(self, tmp_path, state_dir):
+        """Reports with non-terminal-success status (unknown) keep existing behavior."""
+        report = tmp_path / "20260601-unknown-status.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-unknown-status\n"
+            "provider: claude\nmodel: claude-sonnet-5\nstatus: unknown\n---\n\n"
+            "## Summary\n\nImplemented the feature per dispatch specification. "
+            "All tests pass and coverage is at target.\n\n"
+            "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+            "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        # "unknown" is not terminal success → passes through as task_complete
+        assert r["event_type"] == "task_complete"
+        assert r["status"] == "unknown"
+
+
+class TestFailClosedBodyContract:
+    """Check (b): a report claiming terminal success but missing mandatory
+    headings must produce an explicit failure, not contract_invalid."""
+
+    def test_success_status_without_headings_becomes_failure(
+        self, tmp_path, state_dir
+    ):
+        """A report that echoes the prompt back misses the headings entirely.
+        Even with v1 frontmatter, if the body is garbage the success claim fails."""
+        report = tmp_path / "20260601-echoed.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-echoed\n"
+            "provider: claude\nmodel: claude-sonnet-5\nstatus: success\n"
+            "terminal: T1\n---\n\n"
+            "Echoed dispatch prompt — the worker echoed the instruction "
+            "back instead of writing a real report. No headings at all.\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_failed"
+        assert r["status"] == "failure"
+        violations = r["fail_closed_violations"]
+        assert any("body_contract" in v for v in violations), (
+            f"expected body_contract violation, got: {violations}"
+        )
+
+    def test_success_status_with_too_short_summary_becomes_failure(
+        self, tmp_path, state_dir
+    ):
+        """Headings present but summary < 50 chars must still fail."""
+        report = tmp_path / "20260601-short-summary.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-short-summary\n"
+            "provider: claude\nmodel: claude-sonnet-5\nstatus: success\n"
+            "terminal: T1\n---\n\n"
+            "## Summary\n\nShort.\n\n"
+            "## Changes\n\nNone.\n\n"
+            "## Verification\n\nNone.\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_failed"
+        assert r["status"] == "failure"
+        violations = r["fail_closed_violations"]
+        assert any("body_contract" in v for v in violations), (
+            f"expected body_contract violation, got: {violations}"
+        )
+
+
+class TestFailClosedBranchNotOnOrigin:
+    """Check (c): a dispatch with a terminal success status whose branch
+    does not exist on origin must produce an explicit failure.
+
+    This is the core OI-1011 signal: worker committed locally, never pushed,
+    worktree was reaped, deur exit 0.  The test uses real ``git ls-remote``,
+    never a mock — a mock proves nothing about whether the check bites.
+    """
+
+    def test_branch_not_on_origin_rejects_success(self, tmp_path, state_dir):
+        """Use a dispatch_id that cannot possibly exist on origin."""
+        report = tmp_path / "20260601-no-branch.md"
+        _write_frontmatter_report(
+            report,
+            "20260804-zzz-nonexistent-branch-oi1011",
+            status="success",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_failed"
+        assert r["status"] == "failure"
+        violations = r["fail_closed_violations"]
+        assert any("branch_not_on_origin" in v for v in violations), (
+            f"expected branch_not_on_origin violation, got: {violations}"
+        )
+
+    def test_branch_check_uses_real_git_ls_remote(self, tmp_path):
+        """Directly test _check_branch_on_origin with a real git call.
+
+        A branch named after a random UUID cannot exist on origin.  The call
+        must return False (branch not found), proving the check does real I/O.
+        """
+        import uuid
+        from report_to_receipt_converter import _check_branch_on_origin
+
+        fake_dispatch_id = f"20260804-{uuid.uuid4().hex[:12]}-does-not-exist"
+        result = _check_branch_on_origin(fake_dispatch_id)
+        assert result is False, (
+            f"Expected _check_branch_on_origin to return False for "
+            f"nonexistent branch dispatch/{fake_dispatch_id}, got {result}"
+        )
+
+    def test_existing_branch_passes_check(self):
+        """A branch that DOES exist on origin returns True.
+
+        Finds any dispatch branch on origin via ``git ls-remote`` as a
+        positive control — no hardcoded branch name, no assumption that
+        the current worktree has been pushed.
+        """
+        from report_to_receipt_converter import _check_branch_on_origin
+
+        cwd = str(Path(__file__).resolve().parent.parent)
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin"],
+            capture_output=True, text=True, timeout=10, cwd=cwd,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            pytest.skip("git ls-remote origin returned nothing — cannot run positive test")
+
+        # Find any dispatch/ branch on origin to use as a positive control.
+        for line in result.stdout.strip().splitlines():
+            # Format: <hash>\trefs/heads/dispatch/<name>
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            ref = parts[1]
+            if not ref.startswith("refs/heads/dispatch/"):
+                continue
+            dispatch_id = ref[len("refs/heads/dispatch/"):]
+            exists = _check_branch_on_origin(dispatch_id)
+            assert exists is True, (
+                f"Expected branch dispatch/{dispatch_id} to exist on "
+                f"origin, but _check_branch_on_origin returned False"
+            )
+            return  # Found one — test passes
+
+        pytest.skip("No dispatch/* branch found on origin for positive control")
+
+    def test_non_terminal_status_skips_branch_check(self, tmp_path, state_dir):
+        """Reports with status='unknown' skip the fail-closed gate entirely,
+        so a nonexistent branch does NOT block them."""
+        report = tmp_path / "20260601-unknown-branch.md"
+        _write_frontmatter_report(
+            report,
+            "20260804-zzz-skipped-branch-check",
+            status="unknown",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        r = _receipts(state_dir)[0]
+        assert r["event_type"] == "task_complete"
+        assert r["status"] == "unknown"

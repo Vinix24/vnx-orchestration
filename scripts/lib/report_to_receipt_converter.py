@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,6 +112,10 @@ def parse_frontmatter(text: str) -> Dict[str, Any]:
 
     Only handles simple ``key: value`` lines (no nested YAML).  This covers
     the output of ``yaml.dump()`` as used by governance_emit.emit_unified_report().
+
+    Values that were quoted by a YAML emitter (e.g. timestamp-like strings)
+    have one layer of surrounding matching quotes stripped so the caller
+    receives the bare value.
     """
     m = _FRONTMATTER_RE.match(text)
     if not m:
@@ -125,6 +130,11 @@ def parse_frontmatter(text: str) -> Dict[str, Any]:
         key, _, val = line.partition(":")
         key = key.strip().lower().replace("-", "_").replace(" ", "_")
         val = val.strip()
+        # Strip one layer of surrounding matching quotes (yaml.safe_dump
+        # quotes timestamp-like strings to avoid YAML-native date parsing).
+        if len(val) >= 2:
+            if (val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'"):
+                val = val[1:-1]
         if key and val:
             fm[key] = val
     return fm
@@ -219,17 +229,87 @@ def _resolve_report_role(
     return role or "identity_unresolved"
 
 
+# Terminal success statuses that trigger fail-closed validation (OI-1035 et al.).
+# Any report claiming one of these statuses must pass all three fail-closed
+# checks before a success receipt is written.  Reports with other statuses
+# (e.g. "unknown", absent) keep the pre-existing contract-invalid semantics.
+_TERMINAL_SUCCESS_STATUSES = frozenset({"success", "done", "complete", "completed"})
+
+
+def _check_branch_on_origin(dispatch_id: str) -> bool:
+    """Return True when ``dispatch/<dispatch_id>`` exists on origin.
+
+    Uses ``git ls-remote --heads`` so the check is a real measurement against
+    the remote, not a local-ref assumption.  A branch that was committed
+    locally but never pushed returns False — this is the OI-1011 signal.
+    """
+    branch = f"dispatch/{dispatch_id}"
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def _run_fail_closed_checks(
+    text: str, dispatch_id: str, body_result: Any,
+) -> List[str]:
+    """Run the three fail-closed validation checks for terminal-success receipts.
+
+    Returns a list of violation strings.  An empty list means all checks passed
+    and the receipt may carry its claimed success status.
+
+    Checks (OI-1035, OI-1011, OI-1002, OI-659, OI-1017):
+      1. Frontmatter validates against ``schemas/unified_report_v1.json``.
+      2. The four mandatory headings are present (body contract).
+      3. The dispatch branch exists on origin (``git ls-remote``).
+    """
+    violations: List[str] = []
+
+    # Check 1: v1 frontmatter validation
+    try:
+        from unified_report_schema import validate_frontmatter, SchemaViolation
+        validate_frontmatter(text)
+    except SchemaViolation as exc:
+        violations.append(f"frontmatter_v1: {exc}")
+    except ImportError:
+        pass  # schema module not available — skip check rather than crash
+
+    # Check 2: body contract headings (re-verify via the existing validator)
+    if not body_result.valid:
+        violations.append(
+            f"body_contract: missing required sections — "
+            f"{', '.join(body_result.missing)}"
+        )
+        if body_result.placeholder:
+            violations.append("body_contract: placeholder_summary")
+
+    # Check 3: branch exists on origin (real git ls-remote, never mocked)
+    if not _check_branch_on_origin(dispatch_id):
+        violations.append(
+            f"branch_not_on_origin: dispatch/{dispatch_id} not found on origin"
+        )
+
+    return violations
+
+
 def build_receipt_from_report(
     report_path: Path, text: str, *, state_dir: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
     """Build a minimal governed receipt dict from report content.
 
     Returns:
-    - event_type="task_complete" when the report passes the body contract AND
-      carries a content-derived dispatch_id (frontmatter or bold-field body).
+    - event_type="task_complete" when the report passes all validation gates.
+    - event_type="task_failed" with status="failure" when the report claims
+      a terminal success status but fails one or more fail-closed checks
+      (v1 frontmatter, body contract, branch on origin).
     - event_type="report_contract_invalid" when a dispatch_id is resolvable
       but the report fails the body contract or lacks a content-side
-      dispatch_id.  Filename-only dispatch_id is a contract violation.
+      dispatch_id AND does NOT claim a terminal success status.
+      Filename-only dispatch_id is a contract violation.
     - None when no dispatch_id can be determined at all (warning logged).
 
     Never raises.
@@ -313,6 +393,39 @@ def build_receipt_from_report(
         "report_path": canonical_report_path,
     }
 
+    # OI-1035 fail-closed gate: when the report claims a terminal success
+    # status, all three validation checks must pass before a success receipt
+    # is written.  Failure on any check produces an explicit failure receipt
+    # with a queryable reason — never a silent skip and never the pre-existing
+    # "contract_invalid" bucket (which received 96 hits in 7 days and is
+    # invisible to any alarm).
+    status_raw = (merged.get("status") or "").strip().lower()
+    is_terminal_success = status_raw in _TERMINAL_SUCCESS_STATUSES
+
+    if is_terminal_success:
+        fail_closed_violations = _run_fail_closed_checks(
+            text, dispatch_id, body_result,
+        )
+        if fail_closed_violations:
+            logger.warning(
+                "report_to_receipt_converter: fail-closed REJECTION dispatch=%s "
+                "status=%s violations=%s",
+                dispatch_id, status_raw, fail_closed_violations,
+            )
+            receipt_out: Dict[str, Any] = {
+                **base,
+                "event_type": "task_failed",
+                "status": "failure",
+                "fail_closed_violations": fail_closed_violations,
+            }
+            if ambiguous_report:
+                receipt_out["ambiguous_report_path"] = True
+                receipt_out["report_path_candidates"] = [
+                    {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
+                    for c in resolved.candidates_found
+                ] if resolved is not None else []
+            return receipt_out
+
     if contract_violations:
         logger.warning(
             "report_to_receipt_converter: contract violations in %s: %s"
@@ -336,7 +449,7 @@ def build_receipt_from_report(
     receipt: Dict[str, Any] = {
         **base,
         "event_type": "task_complete",
-        "status": merged.get("status", "unknown"),
+        "status": status_raw,
     }
     if ambiguous_report:
         receipt["ambiguous_report_path"] = True
