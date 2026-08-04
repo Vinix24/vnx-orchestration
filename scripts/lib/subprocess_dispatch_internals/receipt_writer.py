@@ -48,19 +48,18 @@ def _ensure_unified_report(
 
     Idempotent: returns None without modifying anything if the report already exists.
     """
-    from report_path import resolve_report_path
-    resolved = resolve_report_path(dispatch_id)
-    if resolved is not None:
-        return None
+    from report_path import _FILENAME_FORMS
     try:
         reports_dir_env = os.environ.get("VNX_REPORTS_DIR", "").strip()
         if not reports_dir_env:
             logger.debug("_ensure_unified_report: VNX_REPORTS_DIR not set, skipping")
             return None
         reports_dir = Path(reports_dir_env).expanduser()
+        # Check all filename forms (canonical + two legacy) for idempotency.
+        for form in _FILENAME_FORMS:
+            if (reports_dir / form.format(dispatch_id=dispatch_id)).exists():
+                return None
         report_path = reports_dir / f"{dispatch_id}.md"
-        if report_path.exists():
-            return None
         reports_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         stub = (

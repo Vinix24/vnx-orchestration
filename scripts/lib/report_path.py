@@ -202,7 +202,7 @@ def _resolve_repo_root() -> Optional[Path]:
         )
         if result.returncode == 0:
             return Path(result.stdout.strip())
-    except Exception:
+    except Exception:  # vnx-silent-except: git not available or repo unresolvable; caller handles None return
         pass
     return None
 
