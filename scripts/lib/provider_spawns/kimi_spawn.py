@@ -52,6 +52,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -507,6 +508,108 @@ def _harvest_session_token_usage(
                 _shutil.rmtree(zip_path.parent, ignore_errors=True)
             except Exception:  # vnx-silent-except: cleanup must never raise
                 pass
+
+
+# kimi-cli persists one resumable session dir per invocation with no auto-GC,
+# TTL, or no-persist flag. One-shot --print dispatches are never resumed, so
+# without an explicit reap the session dirs (wire.jsonl + context.jsonl +
+# state.json) accrue unbounded (543 dirs / 697MB on 2026-07-28, manually
+# cleaned to 316M). OI-812: after the token harvest (which still needs the
+# export), the dead session is reaped.
+_SESSION_ID_VALUE_RE = re.compile(r"[0-9a-fA-F-]+\Z")
+
+
+def _kimi_share_dir(env: Dict[str, str]) -> Path:
+    """Resolve the kimi share dir exactly as kimi-cli 1.46.0 does.
+
+    ``kimi_cli/share.py::get_share_dir`` returns ``KIMI_SHARE_DIR`` when set,
+    else ``~/.kimi``. The reap must resolve the SAME dir the spawned kimi wrote
+    to, so it reads the env the subprocess was launched with, not the ambient
+    process env.
+    """
+    override = (env or {}).get("KIMI_SHARE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".kimi"
+
+
+def _find_kimi_session_dir(session_id: str, env: Dict[str, str]) -> Optional[Path]:
+    """Locate the on-disk session dir for *session_id*, or None.
+
+    Sessions live at ``<share_dir>/sessions/<work_dir_md5>/<session_id>/``.
+    The outer bucket is the md5 of the work-dir path, which the resume id alone
+    cannot tell us, so every bucket under ``sessions/`` is scanned for a
+    directory named exactly *session_id*. Returns None when the session is not
+    on disk (already reaped, or the share dir has no sessions subtree).
+    """
+    if not session_id or not _SESSION_ID_VALUE_RE.match(session_id):
+        return None
+    sessions_root = _kimi_share_dir(env) / "sessions"
+    if not sessions_root.is_dir():
+        return None
+    try:
+        for bucket in sessions_root.iterdir():
+            if not bucket.is_dir():
+                continue
+            candidate = bucket / session_id
+            if candidate.is_dir():
+                return candidate
+    except OSError as exc:
+        logger.debug("kimi_spawn: session-dir scan failed (fail-open): %s", exc)
+        return None
+    return None
+
+
+def _reap_kimi_session(session_id: str, env: Dict[str, str]) -> bool:
+    """Remove the on-disk session dir of a one-shot kimi dispatch.
+
+    One-shot dispatches are never resumed, so after the token harvest the
+    session dir is dead weight: reap it. Best-effort — a reap failure (or a
+    session already gone) must never break an otherwise-clean dispatch, so this
+    returns False instead of raising.
+
+    Safety: only a directory whose path is exactly
+    ``<share_dir>/sessions/<bucket>/<session_id>`` is ever removed — the leaf
+    must equal *session_id* and sit two levels under the sessions subtree, the
+    layout kimi's ``WorkDirMeta.sessions_dir`` always produces. Anything else
+    (the sessions root, a bucket dir, a depth-1 dir, a path outside the tree)
+    is refused with a warning.
+    """
+    if not session_id or not _SESSION_ID_VALUE_RE.match(session_id):
+        return False
+    share_dir = _kimi_share_dir(env)
+    sessions_root = share_dir / "sessions"
+    session_dir = _find_kimi_session_dir(session_id, env)
+    if session_dir is None:
+        return False
+    try:
+        resolved = session_dir.resolve()
+        root_resolved = sessions_root.resolve()
+    except OSError as exc:
+        logger.warning("kimi_spawn: could not resolve reap path %s: %s", session_dir, exc)
+        return False
+    try:
+        rel = resolved.relative_to(root_resolved)
+    except ValueError:
+        logger.warning(
+            "kimi_spawn: refusing to reap %s (outside kimi sessions tree %s)",
+            resolved, root_resolved,
+        )
+        return False
+    if len(rel.parts) != 2 or rel.parts[1] != session_id:
+        logger.warning(
+            "kimi_spawn: refusing to reap %s (not a two-level session dir under %s)",
+            resolved, root_resolved,
+        )
+        return False
+    try:
+        shutil.rmtree(resolved, ignore_errors=True)
+    except Exception:  # vnx-silent-except: reap must never break the dispatch
+        return False
+    reaped = not resolved.exists()
+    if reaped:
+        logger.debug("kimi_spawn: reaped one-shot kimi session dir %s", resolved)
+    return reaped
 
 
 def _worktree_has_changes(worktree: Any, base_ref: str = "origin/main") -> Optional[bool]:
@@ -995,4 +1098,11 @@ def spawn_kimi(
             harvested = _harvest_session_token_usage(session_id, env, cwd_str)
             if harvested:
                 result.token_usage = harvested
+            # OI-812: one-shot dispatches are never resumed, so the session dir
+            # (wire.jsonl + context.jsonl + state.json) is dead weight after the
+            # harvest (which already exported the token data). Reap it. Runs
+            # regardless of whether the harvest yielded tokens — a failed export
+            # still leaves a session dir behind. Best-effort: a reap failure
+            # must never break an otherwise-clean dispatch.
+            _reap_kimi_session(session_id, env)
     return result
