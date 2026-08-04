@@ -24,6 +24,8 @@ from dispatch_govern import (
     govern,
     _split_yaml_frontmatter,
     _synthesize,
+    _git_changes,
+    _git_summary,
 )
 from report_body_contract import validate_body
 
@@ -1376,3 +1378,143 @@ print("OK")
         f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
     )
     assert "OK" in result.stdout, f"Expected OK, got: {result.stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# OI-1008: a failed dispatch (no worktree yet) must never git-inspect the
+# dispatcher's own checkout and claim another dispatch's commit/diff as its own.
+# ---------------------------------------------------------------------------
+
+def test_git_changes_with_worktree_calls_subprocess_scoped_to_cwd(tmp_data, tmp_state):
+    """Positive control: proves patching dispatch_govern.subprocess.run actually
+    intercepts the call _git_changes makes, so the negative (no-worktree) test
+    below can trust assert_not_called() instead of it passing vacuously because
+    the patch target missed the real call site."""
+    worktree = tmp_data / "worktree"
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=worktree, base_sha="deadbeef")
+
+    fake = subprocess.CompletedProcess(["git"], 0, stdout="foo.py | 2 ++\n", stderr="")
+    with patch("dispatch_govern.subprocess.run", return_value=fake) as mock_run:
+        result = _git_changes(spec)
+
+    assert mock_run.called, "patch on dispatch_govern.subprocess.run did not intercept _git_changes' call"
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("cwd") == str(worktree)
+    assert result == "foo.py | 2 ++"
+
+
+def test_git_changes_no_worktree_never_calls_subprocess(tmp_data, tmp_state):
+    """RED before the fix: with worktree_path=None, _git_changes must not shell
+    out to git at all. A git call with no explicit cwd inherits the dispatcher
+    process's own working directory (the main checkout) — which is exactly how
+    a failed dispatch's synthesized report ended up carrying another dispatch's
+    diff (OI-1008)."""
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=None, base_sha="deadbeef")
+
+    with patch("dispatch_govern.subprocess.run") as mock_run:
+        result = _git_changes(spec)
+        mock_run.assert_not_called()
+
+    assert "no worktree was provisioned" in result
+    assert "|" not in result  # no leaked `git diff --stat` style content
+
+
+def test_git_summary_with_worktree_calls_subprocess_scoped_to_cwd(tmp_data, tmp_state):
+    """Positive control for _git_summary — see test_git_changes_with_worktree_... above."""
+    worktree = tmp_data / "worktree"
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=worktree)
+
+    fake = subprocess.CompletedProcess(["git"], 0, stdout="feat: add foo\n", stderr="")
+    with patch("dispatch_govern.subprocess.run", return_value=fake) as mock_run:
+        result = _git_summary(spec, status="done")
+
+    assert mock_run.called, "patch on dispatch_govern.subprocess.run did not intercept _git_summary's call"
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("cwd") == str(worktree)
+    assert "feat: add foo" in result
+
+
+def test_git_summary_no_worktree_never_calls_subprocess(tmp_data, tmp_state):
+    """RED before the fix: with worktree_path=None, _git_summary must not shell
+    out to git either — it must fall back to the same "no commit on branch"
+    text already used when a worktree exists but git has no commit yet, not a
+    commit message read out of the dispatcher's own (main) checkout."""
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=None)
+
+    with patch("dispatch_govern.subprocess.run") as mock_run:
+        result = _git_summary(spec, status="failed")
+        mock_run.assert_not_called()
+
+    assert "No commit on branch" in result
+    assert "worker emitted status=failed" in result
+
+
+def test_synthesize_no_worktree_report_has_no_foreign_diff_or_commit(tmp_data, tmp_state):
+    """Integration reproduction of the exact OI-1008 symptom: mission-control's
+    D-a239cfec.md carried PR 763's diff (scripts/cron/leads_pipe.py,
+    src/linkedin_engine/claude_cli.py) from an unrelated, earlier dispatch.
+    Even if git WOULD return that foreign content when run without an explicit
+    cwd, the guard must stop the call before it ever reaches subprocess — so
+    the fake below returning foreign content proves the guard is what's
+    keeping it out, not mere absence of test data."""
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=None, base_sha="deadbeef")
+    raw = _make_raw(receipt={"status": "failed"})
+
+    foreign_diff = "scripts/cron/leads_pipe.py | 20 ++++\nsrc/linkedin_engine/claude_cli.py | 15 ++"
+    foreign_commit = "feat(leads): unrelated PR from a different dispatch entirely"
+
+    def _fake_run(args, **kwargs):
+        if "log" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=foreign_commit, stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout=foreign_diff, stderr="")
+
+    with patch("dispatch_govern.subprocess.run", side_effect=_fake_run) as mock_run:
+        body = _synthesize(spec, raw)
+
+    mock_run.assert_not_called()
+    assert foreign_diff not in body
+    assert foreign_commit not in body
+    assert "leads_pipe.py" not in body
+    assert "claude_cli.py" not in body
+
+
+def test_git_summary_and_changes_with_real_worktree_unchanged(tmp_path):
+    """The normal path — worktree_path set — must be unchanged by the OI-1008
+    guard. Uses a real git repo (not mocks) so a regression in the refactored
+    call site (wrong cwd, dropped args) shows up as a real failure."""
+    repo = tmp_path / "worktree"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "foo.py").write_text("print('hi')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: add foo"], cwd=repo, check=True)
+
+    spec = GovernSpec(
+        dispatch_id="real-worktree-001",
+        terminal_id="T1",
+        instruction="Do the thing.",
+        data_dir=tmp_path / "data",
+        state_dir=tmp_path / "state",
+        worktree_path=repo,
+        model="sonnet",
+    )
+
+    summary = _git_summary(spec, status="done")
+    assert "feat: add foo" in summary
+    assert "Worker status: done" in summary
+
+    # No base_sha and only one commit -> honest "no diff" fallback, not an
+    # error and not a foreign diff.
+    changes = _git_changes(spec)
+    assert "No git diff available" in changes
+
+    # A second commit makes the HEAD~1..HEAD fallback produce a real stat.
+    (repo / "foo.py").write_text("print('hi again')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: tweak foo"], cwd=repo, check=True)
+
+    changes2 = _git_changes(spec)
+    assert "foo.py" in changes2
+    assert "(no base_sha; showing HEAD~1..HEAD)" in changes2

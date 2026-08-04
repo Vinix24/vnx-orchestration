@@ -733,22 +733,45 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
     return body
 
 
-def _git_summary(spec: GovernSpec, status: str) -> str:
-    """Return git log subject + body for the worker commit, or a fallback message."""
-    cwd = str(spec.worktree_path) if spec.worktree_path else None
+class _NoWorktreeError(Exception):
+    """Raised by _run_worktree_git when spec.worktree_path is None."""
+
+
+def _run_worktree_git(spec: GovernSpec, args: list, timeout: float) -> Optional[str]:
+    """Run `git <args>` scoped to spec.worktree_path and return stripped stdout, or None.
+
+    Refuses to run when spec.worktree_path is unset (OI-1008): a git call with
+    no explicit cwd inherits the dispatcher process's own working directory —
+    the main checkout — and would report on someone else's commits/diff
+    instead of this dispatch's. Every git invocation in this module MUST go
+    through this helper so that guarantee holds everywhere, not just at the
+    two call sites known today.
+    """
+    if not spec.worktree_path:
+        raise _NoWorktreeError(spec.dispatch_id)
     try:
         result = subprocess.run(
-            ["git", "log", "-1", "--format=%s%n%b"],
+            ["git", *args],
             capture_output=True,
             text=True,
-            timeout=10,
-            cwd=cwd,
+            timeout=timeout,
+            cwd=str(spec.worktree_path),
         )
-        msg = result.stdout.strip()
-        if msg:
-            return f"{msg}\n\nWorker status: {status}. Body synthesized by governance layer (no worker report file)."
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as exc:
-        logger.debug("govern._git_summary: git log failed for %s: %s", spec.dispatch_id, exc)
+        logger.debug("govern._run_worktree_git: git %s failed for %s: %s", args, spec.dispatch_id, exc)
+        return None
+    return result.stdout.strip() or None
+
+
+def _git_summary(spec: GovernSpec, status: str) -> str:
+    """Return git log subject + body for the worker commit, or a fallback message."""
+    try:
+        msg = _run_worktree_git(spec, ["log", "-1", "--format=%s%n%b"], timeout=10)
+    except _NoWorktreeError:
+        msg = None
+
+    if msg:
+        return f"{msg}\n\nWorker status: {status}. Body synthesized by governance layer (no worker report file)."
 
     return (
         f"No commit on branch; worker emitted status={status}. "
@@ -758,37 +781,22 @@ def _git_summary(spec: GovernSpec, status: str) -> str:
 
 def _git_changes(spec: GovernSpec) -> str:
     """Return git diff --stat between base_sha and HEAD, or a fallback message."""
-    cwd = str(spec.worktree_path) if spec.worktree_path else None
     base = spec.base_sha
 
-    if base:
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--stat", f"{base}..HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                cwd=cwd,
-            )
-            stat = result.stdout.strip()
+    try:
+        if base:
+            stat = _run_worktree_git(spec, ["diff", "--stat", f"{base}..HEAD"], timeout=15)
             if stat:
                 return stat
-        except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as exc:
-            logger.debug("govern._git_changes: git diff failed for %s: %s", spec.dispatch_id, exc)
 
-    # Fallback: no base_sha or git failed.
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--stat", "HEAD~1..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=cwd,
-        )
-        stat = result.stdout.strip()
+        # Fallback: no base_sha or the base_sha diff was empty.
+        stat = _run_worktree_git(spec, ["diff", "--stat", "HEAD~1..HEAD"], timeout=15)
         if stat:
             return f"(no base_sha; showing HEAD~1..HEAD)\n\n{stat}"
-    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-        pass
+    except _NoWorktreeError:
+        return (
+            "Diff unavailable: lane produced no worker report and no worktree "
+            "was provisioned for this dispatch."
+        )
 
     return "No git diff available — worktree path or base SHA not provided."
