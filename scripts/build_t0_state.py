@@ -1598,11 +1598,26 @@ def _build_system_health(
     else:
         status = "healthy"
 
-    return {
+    # R6.3: read component health beacons so stale/failing subsystems are
+    # visible in t0_state.json on every session start. Best-effort: a
+    # beacon read failure must not break the session-start hot path.
+    # Beacons live under <data_dir>/health/, one level above state_dir.
+    beacon_health: Optional[Dict[str, Any]] = None
+    try:
+        from health_beacon import beacon_summary
+        data_dir = state_dir.parent
+        beacon_health = beacon_summary(data_dir)
+    except Exception as exc:
+        log.debug("beacon_summary failed (non-critical): %s", exc)
+
+    result: Dict[str, Any] = {
         "status": status,
         "db_initialized": db_initialized,
         "uptime_seconds": uptime_seconds,
     }
+    if beacon_health is not None:
+        result["beacon_health"] = beacon_health
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2263,6 +2278,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "uptime_seconds": sh.get("uptime_seconds", 0),
             "warnings": [],
             "db_initialized": sh.get("db_initialized", False),
+            "beacon_health": sh.get("beacon_health"),
         },
     }
 

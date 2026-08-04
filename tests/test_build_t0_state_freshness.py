@@ -20,6 +20,7 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -421,3 +422,82 @@ def test_sessionstart_hook_is_valid_bash_and_de_swallows():
     assert "build_t0_state.err" in wrapper
     assert "exit 0" in wrapper
     assert ".venv/bin/python" in wrapper or "python3.12" in wrapper
+
+
+# ---------------------------------------------------------------------------
+# _build_system_health — beacon integration (OI-1028)
+# ---------------------------------------------------------------------------
+
+def test_system_health_includes_beacon_data_when_beacons_exist(tmp_path: Path) -> None:
+    """_build_system_health surfaces beacon_health when beacons are present.
+
+    Beacons live under <data_dir>/health/, one level above state_dir.
+    _build_system_health receives state_dir as <data>/state, so it reads
+    beacons from state_dir.parent/health/.
+    """
+    from health_beacon import HealthBeacon  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    state_dir = data_dir / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+
+    # Write a beacon under data_dir/health/
+    HealthBeacon(data_dir, "test_comp", expected_interval_seconds=3600).heartbeat(
+        status="ok", details={"key": "val"}
+    )
+
+    health = bts._build_system_health(state_dir, db_initialized=True)
+    assert "beacon_health" in health, (
+        f"Expected beacon_health key in system_health, got: {list(health.keys())}"
+    )
+    bh = health["beacon_health"]
+    assert bh["overall"] == "ok"
+    assert "test_comp" in bh["beacons"]
+    assert bh["beacons"]["test_comp"]["health"] == "ok"
+
+
+def test_system_health_graceful_when_no_beacons(tmp_path: Path) -> None:
+    """_build_system_health does not crash when no beacons directory exists."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+
+    health = bts._build_system_health(state_dir, db_initialized=True)
+    # beacon_health is absent when no beacons exist (beacon_summary returns
+    # empty, but we still don't add the key if overall is ok and counts are 0).
+    # The function must not raise regardless.
+    assert health["status"] in ("healthy", "degraded")
+
+
+def test_system_health_surfaces_stale_beacon(tmp_path: Path) -> None:
+    """_build_system_health picks up a stale beacon and reports it."""
+    import json as _json  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    state_dir = data_dir / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+
+    # Write a manually-aged stale beacon directly (bypass HealthBeacon so we
+    # can set an old timestamp).
+    health_dir = data_dir / "health"
+    health_dir.mkdir(parents=True)
+    stale_payload = {
+        "component": "stale_comp",
+        "last_run_ts": int(time.time() - 7200),  # 2h old
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "ok",
+        "details": {},
+        "expected_interval_seconds": 3600,  # 1h interval
+    }
+    (health_dir / "stale_comp.json").write_text(
+        _json.dumps(stale_payload), encoding="utf-8"
+    )
+
+    health = bts._build_system_health(state_dir, db_initialized=True)
+    assert "beacon_health" in health
+    bh = health["beacon_health"]
+    assert bh["overall"] == "stale"
+    assert bh["beacons"]["stale_comp"]["health"] == "stale"
+    assert bh["counts"]["stale"] >= 1
