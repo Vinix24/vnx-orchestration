@@ -30,6 +30,7 @@ from pre_merge_gate import (
     check_artifacts,
     check_shell_syntax,
     check_net_deletion,
+    check_ci_workflow,
     run_gate_checks,
     store_gate_result,
     format_human_readable,
@@ -678,6 +679,7 @@ class TestRunGateChecks:
         assert "artifact_verification" in check_names
         assert "shell_syntax" in check_names
         assert "net_deletion" in check_names
+        assert "ci_workflow" in check_names
 
     def test_pytest_included_when_not_skipped(self, state_dir, dispatch_dir, tmp_path):
         result = run_gate_checks(
@@ -823,3 +825,151 @@ class TestCheckPRSize:
         assert result["status"] == "GO"
         assert result["lines_changed"] == 4
         assert "origin/master" in result["detail"]
+
+
+# ---------------------------------------------------------------------------
+# check_ci_workflow — OI-931
+# ---------------------------------------------------------------------------
+
+class TestCheckCIWorkflow:
+    """OI-931: three-way CI state — never ran, ran+failed, ran+succeeded.
+
+    check_ci_workflow makes three subprocess calls in order:
+      1. git rev-parse HEAD       → head_sha
+      2. git rev-parse --abbrev-ref HEAD → branch
+      3. gh run list ...          → CI workflow runs
+
+    Each test provides three MagicMock results matching that order.
+    """
+
+    @staticmethod
+    def _git_head_mock(sha: str) -> MagicMock:
+        return MagicMock(returncode=0, stdout=sha + "\n", stderr="")
+
+    @staticmethod
+    def _git_branch_mock(branch: str = "feature-branch") -> MagicMock:
+        return MagicMock(returncode=0, stdout=branch + "\n", stderr="")
+
+    @staticmethod
+    def _gh_run_output(conclusion, head_sha, status="completed", database_id=12345):
+        """Build gh run list JSON output for one run."""
+        runs = [{
+            "conclusion": conclusion,
+            "headSha": head_sha,
+            "status": status,
+            "databaseId": database_id,
+        }]
+        return MagicMock(returncode=0, stdout=json.dumps(runs), stderr="")
+
+    @staticmethod
+    def _gh_empty_output():
+        """gh run list returns no runs."""
+        return MagicMock(returncode=0, stdout=json.dumps([]), stderr="")
+
+    def test_ci_succeeded(self, tmp_path):
+        """Workflow ran on HEAD with conclusion=success → GO."""
+        sha = "a" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("success", sha),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "GO"
+        assert result["ci_conclusion"] == "success"
+        assert result["ci_ran_on_sha"] is True
+
+    def test_ci_failed(self, tmp_path):
+        """Workflow ran on HEAD but conclusion=failure → HOLD."""
+        sha = "b" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("failure", sha),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "HOLD"
+        assert result["ci_conclusion"] == "failure"
+        assert result["ci_ran_on_sha"] is True
+        assert "must be 'success'" in result["detail"]
+
+    def test_ci_never_ran(self, tmp_path):
+        """No runs exist on the branch at all → HOLD with distinct message."""
+        sha = "c" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_empty_output(),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "HOLD"
+        assert result["ci_conclusion"] is None
+        assert result["ci_ran_on_sha"] is False
+        assert "NEVER run" in result["detail"]
+
+    def test_ci_ran_on_different_sha(self, tmp_path):
+        """Runs exist on the branch but not on HEAD → HOLD with SHA-mismatch detail."""
+        sha = "d" * 40
+        different_sha = "e" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("success", different_sha, database_id=99999),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "HOLD"
+        assert result["ci_ran_on_sha"] is False
+        assert result["ci_head_sha"] == sha
+        assert "NOT run on HEAD" in result["detail"]
+        assert result["ci_latest_run_sha"] == different_sha[:12]
+
+    def test_ci_conclusion_cancelled_is_hold(self, tmp_path):
+        """Cancelled workflow conclusion is not 'success' → HOLD."""
+        sha = "f" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("cancelled", sha),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "HOLD"
+        assert result["ci_conclusion"] == "cancelled"
+
+    def test_gh_not_available_skips(self, tmp_path):
+        """gh CLI missing → GO (skip, do not block)."""
+        sha = "g" * 40
+        git_head = self._git_head_mock(sha)
+        git_branch = self._git_branch_mock()
+        mocks = [git_head, git_branch, FileNotFoundError("gh not found")]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "GO"
+        assert "not available" in result["detail"]
+        assert result["ci_conclusion"] is None
+
+    def test_gh_run_list_fails_skips(self, tmp_path):
+        """gh run list non-zero exit → GO (skip)."""
+        sha = "h" * 40
+        gh_fail = MagicMock(returncode=1, stdout="", stderr="HTTP 403")
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            gh_fail,
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "GO"
+        assert "gh run list failed" in result["detail"]
+
+    def test_git_head_fails_skips(self, tmp_path):
+        """git rev-parse HEAD fails → GO (skip, cannot determine SHA)."""
+        git_fail = MagicMock(returncode=128, stdout="", stderr="fatal: not a git repository")
+        with patch("pre_merge_gate.subprocess.run", side_effect=[git_fail]):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "GO"
+        assert "could not resolve HEAD SHA" in result["detail"]

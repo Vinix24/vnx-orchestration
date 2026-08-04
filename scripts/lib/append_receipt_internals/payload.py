@@ -14,6 +14,7 @@ from .common import (
     AppendResult,
     EXIT_IO_ERROR,
     EXIT_INVALID_INPUT,
+    EXIT_UNEXPECTED_ERROR,
     REPO_ROOT,
     SCRIPTS_DIR,
     _emit,
@@ -442,6 +443,21 @@ def append_receipt_payload(
         cache_window_seconds,
         pre_write_hook=commit_receipt_v2_fields,
     )
+
+    # OI-948: _write_receipt_under_lock is annotated -> AppendResult and
+    # every code path returns an AppendResult instance.  A None here would
+    # mean a silent implicit return slipped in (e.g. a broad except that
+    # swallows the raise without replacing it).  Fail closed with a precise
+    # message so the source is traceable instead of surfacing downstream as
+    # "'NoneType' object has no attribute 'status'" at payload.py:446.
+    if result is None:
+        raise AppendReceiptError(
+            "internal_null_result",
+            EXIT_UNEXPECTED_ERROR,
+            "payload.py: _write_receipt_under_lock returned None — "
+            "this is a framework-internal invariant violation; "
+            "the append lock path exited without a result object",
+        )
 
     if result.status == "appended":
         # Phase 6 P3 dual-write: drain persisted mirror debt before attempting

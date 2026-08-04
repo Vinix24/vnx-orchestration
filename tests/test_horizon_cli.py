@@ -33,6 +33,8 @@ for _p in (str(REPO_ROOT), str(_LIB), str(_SCRIPTS)):
 
 import schema_migration  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 from vnx_cli import _engine  # noqa: E402
 from vnx_cli.main import main as vnx_main  # noqa: E402
 
@@ -75,8 +77,7 @@ def _bootstrap_store(state_dir: Path) -> None:
     # Preflight normally owned by migrate_future_system.py: 0027's deliverables
     # VIEW selects dispatches.output_ref/output_kind, which the minimal
     # dispatches table above doesn't carry yet.
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.commit()
     for version, filename in [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),

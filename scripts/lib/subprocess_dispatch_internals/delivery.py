@@ -20,7 +20,7 @@ import os
 import threading
 from pathlib import Path
 
-from .delivery_runtime import _SubprocessResult, _heartbeat_loop
+from .delivery_runtime import _SubprocessResult, _heartbeat_loop, _silence_heartbeat_loop
 from .path_utils import _extract_touched_paths_from_event, _normalize_repo_path
 from .runtime_overrides import apply_runtime_overrides
 
@@ -183,20 +183,49 @@ def _start_heartbeat(
     dispatch_id: str,
     lease_generation: "int | None",
     heartbeat_interval: float,
-) -> tuple["threading.Event | None", "threading.Thread | None"]:
-    """Start background lease-renewal thread when lease_generation is known."""
-    if lease_generation is None:
-        return None, None
-    import subprocess_dispatch as _sd
-    stop_event = threading.Event()
-    thread = threading.Thread(
-        target=_heartbeat_loop,
-        args=(terminal_id, dispatch_id, lease_generation, stop_event, _sd._default_state_dir()),
-        kwargs={"interval": heartbeat_interval},
+    *,
+    process_cell: "list | None" = None,
+) -> tuple["threading.Event | None", "threading.Thread | None", "threading.Thread | None"]:
+    """Start background lease-renewal + silence-detection threads.
+
+    When *process_cell* is provided, a second daemon thread monitors the
+    EventStore for the terminal and kills the worker if the stream falls
+    silent (OI-944 / OI-1007).  *process_cell* is a mutable list that the
+    caller populates with the spawn result after spawn_claude() completes,
+    giving the heartbeat thread access to the adapter for process kill.
+
+    Returns (lease_stop_event, lease_thread, silence_thread).
+    """
+    # Lease renewal thread.
+    lease_stop: "threading.Event | None" = None
+    lease_thread: "threading.Thread | None" = None
+    if lease_generation is not None:
+        import subprocess_dispatch as _sd
+        lease_stop = threading.Event()
+        lease_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(terminal_id, dispatch_id, lease_generation, lease_stop, _sd._default_state_dir()),
+            kwargs={"interval": heartbeat_interval},
+            daemon=True,
+        )
+        lease_thread.start()
+
+    # Silence-detection heartbeat thread (OI-944 / OI-1007).
+    silence_thread: "threading.Thread | None" = None
+    silence_stop = threading.Event()
+    silence_thread = threading.Thread(
+        target=_silence_heartbeat_loop,
+        args=(terminal_id, dispatch_id, silence_stop),
+        kwargs={
+            "interval": 30.0,
+            "process_cell": process_cell,
+        },
         daemon=True,
+        name=f"silence-hb-{terminal_id}",
     )
-    thread.start()
-    return stop_event, thread
+    silence_thread.start()
+
+    return lease_stop, lease_thread, silence_thread
 
 
 def _mark_handover_processed(pending_handover: "Path | None") -> None:
@@ -301,8 +330,12 @@ def deliver_via_subprocess(
     worker_state_dir = resolve_worker_state_dir(terminal_id)
     extra_env["VNX_WORKER_STATE_DIR"] = str(worker_state_dir)
 
-    heartbeat_stop, heartbeat_thread = _start_heartbeat(
+    # Mutable cell so the silence heartbeat thread can access the adapter
+    # reference after spawn_claude() has started the subprocess.
+    process_cell: list = [None]
+    heartbeat_stop, heartbeat_thread, silence_thread = _start_heartbeat(
         terminal_id, dispatch_id, lease_generation, heartbeat_interval,
+        process_cell=process_cell,
     )
 
     # Governance state accumulated by the per-event callback below.
@@ -346,6 +379,9 @@ def deliver_via_subprocess(
             role=role,
             requires_mcp=requires_mcp,
         )
+        # Give the silence heartbeat thread access to the adapter so it can
+        # kill the worker process on silence timeout (OI-944 / OI-1007).
+        process_cell[0] = spawn_result
 
         if spawn_result.token_usage:
             _dispatch_token_usage[dispatch_id] = spawn_result.token_usage
@@ -396,6 +432,9 @@ def deliver_via_subprocess(
             heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
+        # Stop the silence heartbeat thread.
+        if silence_thread is not None:
+            silence_thread.join(timeout=5)
         # Event archive + report-pipeline trigger using the same adapter instance
         # that ran the dispatch (via spawn_result._adapter).  This preserves
         # session_id in the trigger file — byte-identical with the pre-4.6.2 path.

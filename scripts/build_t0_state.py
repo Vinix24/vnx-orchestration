@@ -122,6 +122,25 @@ def _now_iso() -> str:
     return _now_utc().isoformat()
 
 
+def _parse_iso(ts: str) -> Optional[datetime]:
+    """Parse ISO-8601 UTC timestamp tolerating both microsecond and second
+    precision and a trailing ``Z`` suffix. Returns ``None`` on failure.
+
+    OI-949: needed for datetime-aware event sorting so mixed-precision
+    timestamps (e.g. "…00.123456Z" vs "…00Z") are ordered by actual time,
+    not by lexicographic collation where "." sorts before "Z".
+    """
+    if not ts:
+        return None
+    s = ts
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
     """Load JSON from path. Returns None on OSError (absent file).
     Raises json.JSONDecodeError if the file exists but contains malformed JSON (R7.3)."""
@@ -801,7 +820,10 @@ def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
 
     dispatch_records: Dict[str, Any] = {}
     for did, events in by_dispatch.items():
-        events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
+        events_sorted = sorted(
+            events,
+            key=lambda e: (_parse_iso(e.get("timestamp", "")) or datetime.min, e.get("timestamp", "")),
+        )
         latest = events_sorted[-1]
         latest_event = latest.get("event", "")
         status = _EVENT_TO_STATUS.get(latest_event, "unknown")
@@ -1509,7 +1531,11 @@ def _build_recent_receipts(
                 best_by_dispatch[did] = view
 
     recs = list(best_by_dispatch.values()) + no_dispatch_recs
-    return sorted(recs, key=lambda x: str(x.get("timestamp") or ""), reverse=True)[:limit]
+    return sorted(
+        recs,
+        key=lambda x: (_parse_iso(str(x.get("timestamp") or "")) or datetime.min, str(x.get("timestamp") or "")),
+        reverse=True,
+    )[:limit]
 
 
 # ---------------------------------------------------------------------------
