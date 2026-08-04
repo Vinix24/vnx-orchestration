@@ -2781,3 +2781,185 @@ class TestPersistRouteDecision:
         assert record["decision"]["provider"] == "codex"
         assert record["decision"]["lane"] == "provider"
         assert record["decision"]["billing"] == "provider_metered"
+
+
+# ---------------------------------------------------------------------------
+# OI-962: smart router resolves BEFORE validate — regression guard
+# ---------------------------------------------------------------------------
+
+
+class TestSmartRouterPreValidate:
+    """A spec without an explicit provider must pass through the door with the
+    router-chosen provider+model.  This is the regression OI-962 exists to
+    prevent: the router must fire BEFORE validate() tests the result, or it
+    never fires at all and the door rejects provider-less specs outright."""
+
+    def test_provider_auto_resolves_and_passes_door(self, tmp_path, monkeypatch):
+        """spec with provider=auto → router resolves → door accepts → plan uses resolved provider."""
+        from dispatch_cli import _resolve_router_pre_validate
+
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            # Deliberately avoids tier-high keywords (refactor, architect, security, etc.)
+            # so the classifier returns tier-low, which the router CAN resolve.
+            instruction_text="# Fix typo in docstring\n\nCorrect a spelling error in the module docstring.\n",
+            staging_id="20260802-oi962-auto",
+            dispatch_id="20260802-oi962-auto",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli.run_envelope_plan") as mock_envelope:
+            mock_snapshot.return_value = _clean_snapshot()
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.status = "success"
+            mock_envelope.return_value = mock_result
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0, f"door must accept provider=auto spec, got rc={rc}"
+        mock_envelope.assert_called_once()
+
+        args, kwargs = mock_envelope.call_args
+        plan_arg = args[0]
+        # The router must have filled in a concrete provider — not AUTO.
+        assert plan_arg.provider != Provider.AUTO, (
+            f"router did not resolve: plan still has provider={plan_arg.provider}"
+        )
+        assert plan_arg.model is not None, (
+            f"router did not resolve: plan still has model=None"
+        )
+        # route_reason must carry the router decision.
+        assert plan_arg.route_reason and "smart-router" in plan_arg.route_reason, (
+            f"route_reason must mention smart-router, got {plan_arg.route_reason!r}"
+        )
+
+    def test_provider_auto_dry_run_shows_resolved_route(self, tmp_path, monkeypatch, capsys):
+        """--dry-run with provider=auto prints the resolved provider, not AUTO."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Fix typo in comment\n\nCorrect a spelling mistake.\n",
+            staging_id="20260802-oi962-dry",
+            dispatch_id="20260802-oi962-dry",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot:
+            mock_snapshot.return_value = _clean_snapshot()
+            rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0, f"dry-run must accept provider=auto spec, got rc={rc}"
+        captured = capsys.readouterr()
+        # The dry-run output must show the router-resolved provider, not "auto".
+        assert "provider:" in captured.out, f"dry-run output missing provider line:\n{captured.out}"
+        assert "auto" not in captured.out.split("provider:")[1].split("\n")[0], (
+            f"dry-run output still shows provider=auto:\n{captured.out}"
+        )
+
+    def test_provider_none_staged_via_bridge_resolves(self, tmp_path, monkeypatch):
+        """stage_spec_bundle(provider=None) resolves to AUTO via bridge alias,
+        then the router fills in a real provider+model — door accepts."""
+        data_dir = tmp_path / "vnx-data"
+        data_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        # Simulate what dispatch_bridge.stage_spec_bundle does with provider=None.
+        from dispatch_bridge import _canonical_provider
+        canonical = _canonical_provider(None)
+        assert canonical == Provider.AUTO, (
+            f"bridge must map provider=None → AUTO, got {canonical}"
+        )
+
+        spec_file = _make_spec_file(
+            tmp_path,
+            provider="auto",  # what the bridge now writes
+            target_slot="T1",
+        )
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli.run_envelope_plan") as mock_envelope:
+            mock_snapshot.return_value = _clean_snapshot()
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.status = "success"
+            mock_envelope.return_value = mock_result
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0, f"door must accept bridge-staged provider=None spec, got rc={rc}"
+        mock_envelope.assert_called_once()
+        plan_arg = mock_envelope.call_args[0][0]
+        assert plan_arg.provider != Provider.AUTO, (
+            f"router did not resolve bridge-staged spec: provider={plan_arg.provider}"
+        )
+
+    def test_t0_never_routed_even_with_auto(self, tmp_path, monkeypatch):
+        """T0 with provider=auto must NOT be routed (t0-opus-only is a floor)."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Planning review\n\nReview the module for correctness.\n",
+            staging_id="20260802-oi962-t0",
+            dispatch_id="20260802-oi962-t0",
+            provider="auto",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+            mock_snapshot.return_value = _clean_snapshot()
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_execute.assert_called_once()
+        plan_arg = mock_execute.call_args[0][0]
+        # T0 must stay on claude (t0-opus-only), not be routed elsewhere.
+        assert plan_arg.provider == Provider.CLAUDE, (
+            f"T0 must not be routed away from claude, got {plan_arg.provider}"
+        )
+
+    def test_explicit_provider_overrides_router(self, tmp_path, monkeypatch):
+        """An explicit provider+model in the spec must NOT be touched by the router
+        (worker-provider-free-choice, pin_semantics=default)."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Explicit kimi dispatch\n\nRun a standard task.\n",
+            staging_id="20260802-oi962-explicit",
+            dispatch_id="20260802-oi962-explicit",
+            provider="kimi",
+            model="kimi-k3",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli.run_envelope_plan") as mock_envelope:
+            mock_snapshot.return_value = _clean_snapshot()
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.status = "success"
+            mock_envelope.return_value = mock_result
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_envelope.assert_called_once()
+        plan_arg = mock_envelope.call_args[0][0]
+        # Explicit provider must be preserved — router must not overwrite.
+        assert plan_arg.provider == Provider.KIMI, (
+            f"explicit provider was overwritten by router: {plan_arg.provider}"
+        )
+        assert plan_arg.model == "kimi-k3", (
+            f"explicit model was overwritten by router: {plan_arg.model}"
+        )

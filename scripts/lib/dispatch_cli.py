@@ -11,6 +11,7 @@ tmux (subscription). Provider lane executes via run_envelope_plan (provider_mete
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -992,6 +993,45 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
         return frozenset()
 
 
+def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[tuple[Provider, str, str]]":
+    """Run the smart router on a DispatchSpec BEFORE validate().
+
+    OI-962: the router must resolve provider+model BEFORE validate() tests
+    the result against constraints.  When the spec carries provider=AUTO
+    (including the empty/None→auto bridge alias), this reads the instruction
+    file and consults the tier-routing engine.
+
+    Returns (provider, model, route_reason) when the router has a
+    recommendation, or None when routing should be skipped (T0, router
+    disabled, or router error).
+
+    Fail-open: never raises — returns None on any error.
+    """
+    try:
+        from providers.smart_router.door_routing import resolve_door_route  # noqa: PLC0415
+
+        # Read instruction text (same logic as validate Rule 5 — the file
+        # has already passed staging validation so this is a cheap re-read).
+        ifile = spec.instruction_file
+        instruction_text = ifile.read_text(encoding="utf-8")
+
+        file_paths = [str(dp.path) for dp in spec.dispatch_paths]
+        return resolve_door_route(
+            spec_provider=spec.provider,
+            spec_model=spec.model,
+            target_slot=spec.target_slot,
+            instruction_text=instruction_text,
+            file_paths=file_paths,
+        )
+    except Exception:
+        logger.warning(
+            "smart-router pre-validate: router call failed, dispatch "
+            "falls through to default lane (fail-open). Error: %s",
+            exc_info=True,
+        )
+        return None
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -1493,6 +1533,30 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         print(f"[dispatch_cli] REJECT [spec-parse-error]: {exc}", file=sys.stderr)
         return 1
 
+    # OI-962: resolve provider+model via smart router BEFORE validate().
+    # The router fills in provider+model when the spec carries none (AUTO),
+    # then validate() tests the resolved values against constraints.  This
+    # keeps governance intact: a route that violates constraints is still
+    # rejected by the full validation chain — only the order changed.
+    # Deterministic fallback: when the router returns None (T0, disabled,
+    # tier-mid/high routing to claude), AUTO resolves to CLAUDE so
+    # compile_plan never sees an unresolved AUTO.  This is the same
+    # hard-default the old bridge alias provided, now applied AFTER the
+    # router had its chance to fill in a cheaper provider.
+    door_route_reason: Optional[str] = None
+    if spec.provider == Provider.AUTO:
+        result = _resolve_router_pre_validate(spec)
+        if result is not None:
+            new_provider, new_model, route_reason = result
+            spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
+            door_route_reason = route_reason
+        else:
+            # Router declined or could not resolve — fall back to CLAUDE.
+            # T0 is never routed (t0-opus-only floor), tier-mid/high route
+            # to claude which the door handles via its own lane resolution.
+            spec = dataclasses.replace(spec, provider=Provider.CLAUDE)
+            door_route_reason = "smart-router:no-route,fallback=claude"
+
     vspec = validate(spec, project_id=project_id, repo_root=repo_root)
     if isinstance(vspec, Reject):
         _emit_reject(vspec)
@@ -1506,6 +1570,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         if isinstance(plan, Reject):
             _emit_reject(plan)
             return 1
+
+        # Merge the door route reason into the plan so it's visible in dry-run
+        # output and carried on the ExecutionPlan.
+        if door_route_reason:
+            plan = dataclasses.replace(
+                plan,
+                route_reason=f"{door_route_reason};{plan.route_reason}",
+            )
 
         # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth
         # model ranks the deterministic anchors into a sidecar BEFORE the permit

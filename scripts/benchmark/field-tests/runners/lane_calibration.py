@@ -52,6 +52,7 @@ class CalibrationResult:
     expected_lane: str
     actual_lane: str
     note: Optional[str] = None
+    matches_human_tier: Optional[bool] = None
 
 
 def load_tasks_by_id(field_tests_dir: Path = FIELD_TESTS) -> dict:
@@ -92,6 +93,7 @@ def run_case(case: dict, tasks_by_id: dict, field_tests_dir: Path = FIELD_TESTS)
         expected_lane=case["expected_lane"],
         actual_lane=route.lane,
         note=case.get("note"),
+        matches_human_tier=case.get("matches_human_tier"),
     )
 
 
@@ -104,14 +106,20 @@ def run_all(field_tests_dir: Path = FIELD_TESTS) -> list[CalibrationResult]:
 def _print_table(results: list[CalibrationResult]) -> None:
     for r in results:
         status = "PASS" if r.passed else "FAIL"
-        print(f"[{status}] {r.task_id}")
+        match = (
+            "MATCH" if r.matches_human_tier is True
+            else "MISM" if r.matches_human_tier is False
+            else "N/A"
+        )
+        print(f"[{status}] {r.task_id} (human={match})")
         print(f"       tier:     expected={r.expected_tier:<10} actual={r.actual_tier}")
         print(f"       provider: expected={r.expected_provider:<10} actual={r.actual_provider}")
         print(f"       lane:     expected={r.expected_lane:<16} actual={r.actual_lane}")
         if r.note:
             print(f"       note: {r.note.strip()}")
     n_pass = sum(1 for r in results if r.passed)
-    print(f"\n{n_pass}/{len(results)} lane-calibration cases passed")
+    n_match = sum(1 for r in results if r.matches_human_tier is True)
+    print(f"\n{n_pass}/{len(results)} lane-calibration cases passed, {n_match}/{len(results)} match human tier")
 
 
 def main() -> int:
