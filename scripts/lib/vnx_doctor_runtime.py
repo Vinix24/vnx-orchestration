@@ -38,6 +38,7 @@ from vnx_doctor_checks import (  # noqa: F401
     check_incident_pressure,
     check_tmux_profile,
     check_lease_dispatch_coherence,
+    check_composite_index_coverage,
     compute_recovery_preflight,
 )
 
@@ -105,6 +106,7 @@ def run_runtime_checks(state_dir: str | Path) -> DoctorReport:
 
     # Only run deeper checks if schema is available
     if report.checks[0].status != FAIL:
+        report.checks.append(check_composite_index_coverage(sd))
         report.checks.append(check_lease_health(sd))
         report.checks.append(check_queue_health(sd))
         report.checks.append(check_incident_pressure(sd))
