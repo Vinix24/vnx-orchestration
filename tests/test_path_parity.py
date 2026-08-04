@@ -94,3 +94,245 @@ def test_probe_interpreter_flags_nonzero_exit() -> None:
 def test_background_env_uses_launchd_default_path() -> None:
     env = path_parity.background_env()
     assert env["PATH"] == path_parity.BACKGROUND_PATH
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# requires-python range parsing/checking
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_parse_requires_python_reads_pyproject(tmp_path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\nrequires-python = ">=3.11,<3.14"\n')
+    assert path_parity.parse_requires_python(pyproject) == ">=3.11,<3.14"
+
+
+def test_parse_requires_python_missing_file_returns_none(tmp_path) -> None:
+    assert path_parity.parse_requires_python(tmp_path / "nope.toml") is None
+
+
+def test_version_in_range_within_bounds() -> None:
+    assert path_parity.version_in_range("3.12", ">=3.11,<3.14") is True
+
+
+def test_version_in_range_below_minimum() -> None:
+    assert path_parity.version_in_range("3.9", ">=3.11,<3.14") is False
+
+
+def test_version_in_range_at_or_above_exclusive_max() -> None:
+    assert path_parity.version_in_range("3.14", ">=3.11,<3.14") is False
+
+
+def test_version_in_range_unparseable_returns_none() -> None:
+    assert path_parity.version_in_range("", ">=3.11,<3.14") is None
+    assert path_parity.version_in_range("3.12", "") is None
+    assert path_parity.version_in_range("3.12", None) is None
+
+
+def test_version_from_path_infers_pinned_version() -> None:
+    assert path_parity._version_from_path("/opt/homebrew/opt/python@3.12/bin/python3.12") == "3.12"
+    assert path_parity._version_from_path("/opt/homebrew/opt/python@3.9/bin/python3") == "3.9"
+
+
+def test_version_from_path_none_for_unversioned_path() -> None:
+    assert path_parity._version_from_path("/repo/.venv/bin/python") is None
+
+
+def test_resolve_interpreter_version_infers_from_path() -> None:
+    assert path_parity.resolve_interpreter_version("/opt/homebrew/opt/python@3.12/bin/python3.12") == "3.12"
+
+
+def test_resolve_interpreter_version_executes_and_caches_when_unversioned() -> None:
+    calls = []
+
+    def runner(cmd, capture_output=False, text=False, check=False, timeout=None):
+        calls.append(cmd)
+        return _FakeProc(stdout="3.11.9\n")
+
+    cache: dict = {}
+    v1 = path_parity.resolve_interpreter_version("/repo/.venv/bin/python", runner=runner, cache=cache)
+    v2 = path_parity.resolve_interpreter_version("/repo/.venv/bin/python", runner=runner, cache=cache)
+    assert v1 == "3.11"
+    assert v2 == "3.11"
+    assert len(calls) == 1  # cached, not re-executed for the same interpreter path
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Consumer discovery — launchd plists + crontab
+# ─────────────────────────────────────────────────────────────────────────
+
+_FAKE_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.vnx.fake</string>
+<key>ProgramArguments</key><array>
+<string>/opt/homebrew/opt/python@3.12/bin/python3.12</string>
+<string>/repo/script.py</string>
+</array></dict></plist>
+"""
+
+
+def test_discover_launchd_consumers_parses_plist(tmp_path) -> None:
+    agents_dir = tmp_path / "LaunchAgents"
+    agents_dir.mkdir()
+    (agents_dir / "com.vnx.fake.plist").write_text(_FAKE_PLIST)
+    (agents_dir / "com.other.ignored.plist").write_text(_FAKE_PLIST)
+
+    consumers = path_parity.discover_launchd_consumers(agents_dir)
+    assert len(consumers) == 1
+    assert consumers[0]["label"] == "com.vnx.fake"
+    assert consumers[0]["argv"][0] == "/opt/homebrew/opt/python@3.12/bin/python3.12"
+
+
+def test_discover_launchd_consumers_missing_dir_returns_empty(tmp_path) -> None:
+    assert path_parity.discover_launchd_consumers(tmp_path / "nope") == []
+
+
+def test_discover_crontab_consumers_parses_schedule_and_declared_path() -> None:
+    text = (
+        "PATH=/opt/homebrew/bin:/usr/bin:/bin\n"
+        "0 3 * * * /opt/homebrew/bin/python3 /repo/scripts/nightly.py\n"
+        "# a comment line\n"
+        "\n"
+        "@daily python3 /repo/scripts/daily.py\n"
+    )
+    consumers = path_parity.discover_crontab_consumers(text)
+    assert len(consumers) == 2
+    assert consumers[0]["argv"] == ["/opt/homebrew/bin/python3", "/repo/scripts/nightly.py"]
+    assert consumers[0]["search_path"] == "/opt/homebrew/bin:/usr/bin:/bin"
+    assert consumers[1]["argv"] == ["python3", "/repo/scripts/daily.py"]
+
+
+def test_discover_crontab_consumers_empty_text_returns_empty() -> None:
+    assert path_parity.discover_crontab_consumers("") == []
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Static interpreter resolution — never executes the target script
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_resolve_consumer_interpreter_direct_python_invocation(tmp_path) -> None:
+    outcome = path_parity.resolve_consumer_interpreter(
+        ["/opt/homebrew/opt/python@3.12/bin/python3.12", "/repo/script.py"], tmp_path
+    )
+    assert outcome["relevant"] is True
+    assert outcome["interpreter"] == "/opt/homebrew/opt/python@3.12/bin/python3.12"
+
+
+def test_resolve_consumer_interpreter_vnx_binary_is_irrelevant(tmp_path) -> None:
+    outcome = path_parity.resolve_consumer_interpreter(["/opt/homebrew/bin/vnx", "dream", "run"], tmp_path)
+    assert outcome["relevant"] is False
+    assert "#1247" in outcome["reason"]
+
+
+def test_resolve_consumer_interpreter_non_python_binary_is_irrelevant(tmp_path) -> None:
+    outcome = path_parity.resolve_consumer_interpreter(["/usr/local/bin/node", "app.js"], tmp_path)
+    assert outcome["relevant"] is False
+
+
+def test_resolve_consumer_interpreter_finds_repo_venv_script(tmp_path) -> None:
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.write_text("#!/bin/sh\n")
+    script = tmp_path / "scripts" / "nightly.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text('PY="$(dirname "$0")/../.venv/bin/python"\n"$PY" -c pass\n')
+
+    outcome = path_parity.resolve_consumer_interpreter(["/bin/bash", str(script)], tmp_path)
+    assert outcome["relevant"] is True
+    assert outcome["interpreter"] == str(venv_python)
+
+
+def test_resolve_consumer_interpreter_script_outside_repo_is_irrelevant(tmp_path) -> None:
+    other_root = tmp_path / "other-project"
+    script = other_root / "scripts" / "job.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("exec python3 -m something\n")
+    repo_root = tmp_path / "vnx-orchestration"
+    repo_root.mkdir()
+
+    outcome = path_parity.resolve_consumer_interpreter(["/bin/bash", str(script)], repo_root)
+    assert outcome["relevant"] is False
+    assert "outside" in outcome["reason"]
+
+
+def test_resolve_consumer_interpreter_inline_script_outside_repo_is_irrelevant(tmp_path) -> None:
+    outcome = path_parity.resolve_consumer_interpreter(
+        ["/bin/bash", "-c", 'exec "$SOME_OTHER_REPO/.venv/bin/python3" job.py'], tmp_path
+    )
+    assert outcome["relevant"] is False
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Consumer scan — the counter-proof pair (DoD: must be able to fail, not
+# just report green because nothing was found).
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_consumer_scan_flags_real_out_of_range_consumer(tmp_path) -> None:
+    """Negative control: a consumer pinned to a too-old interpreter MUST turn
+    the scan red. Without this, a scan that finds zero consumers would also
+    report parity=true, and a green result would be indistinguishable from a
+    blind scan that checked nothing — the exact failure mode this item exists
+    to prevent (a control that can never fail, fails silently)."""
+    consumers = [
+        {
+            "label": "com.vnx.fake-stale-job",
+            "argv": ["/opt/homebrew/opt/python@3.9/bin/python3.9", "/some/script.py"],
+            "source": "/fake/com.vnx.fake-stale-job.plist",
+            "search_path": path_parity.BACKGROUND_PATH,
+        }
+    ]
+    result = path_parity.scan_consumers(consumers, tmp_path, ">=3.11,<3.14")
+    assert result["parity"] is False
+    assert len(result["mismatches"]) == 1
+    mismatch = result["mismatches"][0]
+    assert mismatch["kind"] == "consumer_interpreter_out_of_range"
+    assert mismatch["consumer"] == "com.vnx.fake-stale-job"
+    assert mismatch["version"] == "3.9"
+    assert mismatch["interpreter"] == "/opt/homebrew/opt/python@3.9/bin/python3.9"
+
+
+def test_consumer_scan_stays_green_when_all_pinned_in_range(tmp_path) -> None:
+    """Positive control paired with the negative one above: every consumer
+    directly pins an in-range interpreter -> parity stays true, and every
+    consumer entry actually got resolved+checked (not just absent)."""
+    consumers = [
+        {
+            "label": "com.vnx.dashboard",
+            "argv": ["/opt/homebrew/opt/python@3.12/bin/python3.12", "/some/serve.py"],
+            "source": "/fake/com.vnx.dashboard.plist",
+            "search_path": path_parity.BACKGROUND_PATH,
+        },
+        {
+            "label": "com.vnx.provider-usage",
+            "argv": ["/opt/homebrew/opt/python@3.12/bin/python3.12", "/some/collect.py"],
+            "source": "/fake/com.vnx.provider-usage.plist",
+            "search_path": path_parity.BACKGROUND_PATH,
+        },
+    ]
+    result = path_parity.scan_consumers(consumers, tmp_path, ">=3.11,<3.14")
+    assert result["parity"] is True
+    assert result["mismatches"] == []
+    assert len(result["consumers"]) == 2
+    assert all(c["in_range"] for c in result["consumers"])
+
+
+def test_check_parity_raw_probe_is_informational_only(tmp_path, monkeypatch) -> None:
+    """Integration shape check: a raw foreground/background version mismatch
+    must land under raw_probe (level=info) and must NOT flip top-level
+    parity — only a real consumer out of range may do that (defect B)."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.11,<3.14"\n')
+    monkeypatch.setattr(path_parity, "DEFAULT_LAUNCHAGENTS_DIR", tmp_path / "no-such-dir")
+    monkeypatch.setattr(path_parity, "read_crontab", lambda runner=None: "")
+
+    def runner(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
+        version = "3.9.6" if (env or {}).get("PATH") == path_parity.BACKGROUND_PATH else "3.12.4"
+        payload = json.dumps({"executable": "/usr/bin/python3", "version": version, "prefix": "/x"})
+        return _FakeProc(stdout=payload + "\n")
+
+    result = path_parity.check_parity(runner=runner, repo_root=tmp_path)
+    assert result["raw_probe"]["level"] == "info"
+    assert result["raw_probe"]["mismatches"][0]["kind"] == "version_mismatch"
+    # No real consumers were discoverable in this sandboxed tmp_path -> nothing to flag.
+    assert result["parity"] is True
+    assert result["mismatches"] == []
+    assert result["consumer_scan"]["requires_python"] == ">=3.11,<3.14"
