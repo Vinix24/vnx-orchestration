@@ -2,21 +2,14 @@
   "couplings": [
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 186,
-      "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
-      "symbol": "run_envelope_plan"
-    },
-    {
-      "file": "tests/test_dispatch_cli.py",
-      "line": 753,
+      "line": 758,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 756,
+      "line": 761,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
