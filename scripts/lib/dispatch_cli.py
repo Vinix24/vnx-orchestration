@@ -749,7 +749,12 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
     )
 
 
-def _persist_dispatch_row(spec: DispatchSpec, *, state_dir: Path) -> None:
+def _persist_dispatch_row(
+    spec: DispatchSpec,
+    *,
+    state_dir: Path,
+    worker_claude_override_reason: Optional[str] = None,
+) -> None:
     """Best-effort: create the dispatches tracker row for a door-accepted dispatch.
 
     The door is the single entry point for dispatches, yet historically never
@@ -776,6 +781,11 @@ def _persist_dispatch_row(spec: DispatchSpec, *, state_dir: Path) -> None:
     Idempotent per ADR-007's composite UNIQUE(dispatch_id, project_id): a retry
     or fix-forward with the same id finds the existing row and leaves it
     untouched. Never raises: tracker bookkeeping must never block the door.
+
+    OI-943: persists target_slot and worker_claude_override_reason so the audit
+    trail can distinguish ported from unported claude dispatches. target_slot is
+    always present (required in DispatchSpec); worker_claude_override_reason is
+    only present when a build-worker override was applied.
     """
     db_path = _tracks_db_path(state_dir)
     if not db_path.exists():
@@ -817,6 +827,25 @@ def _persist_dispatch_row(spec: DispatchSpec, *, state_dir: Path) -> None:
             if track_id:
                 cols.append("track_id")
                 vals.append(track_id)
+            # OI-943: persist target_slot (always present) and the worker-claude
+            # override reason (only when an override was applied) so the audit
+            # trail can distinguish ported from unported claude dispatches.
+            target_slot = spec.target_slot.strip()
+            if target_slot and not _has_col(conn, "dispatches", "target_slot"):
+                conn.execute("ALTER TABLE dispatches ADD COLUMN target_slot TEXT")
+                conn.commit()
+            if target_slot:
+                cols.append("target_slot")
+                vals.append(target_slot)
+            override_reason = (worker_claude_override_reason or "").strip()
+            if override_reason:
+                if not _has_col(conn, "dispatches", "worker_claude_override_reason"):
+                    conn.execute(
+                        "ALTER TABLE dispatches ADD COLUMN worker_claude_override_reason TEXT"
+                    )
+                    conn.commit()
+                cols.append("worker_claude_override_reason")
+                vals.append(override_reason)
             now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
                 "+00:00", "Z"
             )
@@ -1244,6 +1273,7 @@ def build_runtime_snapshot(
         task_class=chain_task_class,
         tier_from=chain_tier_from,
         tier_to=chain_tier_to,
+        worker_claude_override_reason=worker_claude_override_reason,
     )
 
 
@@ -1439,7 +1469,11 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             # the TL-D2 pr_ref propagation all have a row to read. Idempotent
             # (retry/fix-forward safe), state='proposed' (invisible to the
             # claim/stuck/ghost sweeps), best-effort — never blocks the door.
-            _persist_dispatch_row(vspec.spec, state_dir=state_dir)
+            _persist_dispatch_row(
+                vspec.spec,
+                state_dir=state_dir,
+                worker_claude_override_reason=snapshot.worker_claude_override_reason,
+            )
 
             # OI-876/OI-881: a declared gate is an obligation, not decoration.
             # Registered here — right after the dispatch is irrevocably
