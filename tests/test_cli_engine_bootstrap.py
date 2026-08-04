@@ -154,7 +154,7 @@ class TestPoolStatusGracefulFail:
         assert rc == 1
         captured = capsys.readouterr()
         assert "not initialized" in captured.err
-        assert "migration 0020" in captured.err
+        assert "vnx migrate" in captured.err
 
     def test_status_missing_config_row_exits_nonzero(self, capsys):
         """cmd_status must return non-zero and print a guided message on RuntimeError."""

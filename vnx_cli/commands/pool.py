@@ -31,8 +31,9 @@ from pool_state_repo import PoolStateRepository  # noqa: E402
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show current pool state for a project."""
-    project_id = _resolve_project_id(args.project, args.project_dir)
-    mgr = _make_manager_for_project_id(project_id, args.pool_id, args.project_dir)
+    project_dir = getattr(args, 'project_dir', '.')
+    project_id = _resolve_project_id(args.project, project_dir)
+    mgr = _make_manager_for_project_id(project_id, args.pool_id, project_dir)
     try:
         config, state, members = mgr.load_state()
     except (sqlite3.OperationalError, RuntimeError) as exc:
@@ -77,7 +78,8 @@ def cmd_scale(args: argparse.Namespace) -> int:
     """Force scale pool to a specific worker count."""
     from pool_decision_engine import PoolDecision  # noqa: E402
 
-    mgr = _make_manager(args.project, args.pool_id, args.project_dir)
+    project_dir = getattr(args, 'project_dir', '.')
+    mgr = _make_manager(args.project, args.pool_id, project_dir)
     config, _, members = mgr.load_state()
     current = len([m for m in members if m.status == "active"])
     target = args.to
@@ -119,7 +121,8 @@ _VALID_POLICIES = frozenset({"fixed", "queue_depth_v1", "queue_aware", "cost_awa
 
 def cmd_config(args: argparse.Namespace) -> int:
     """Update pool config fields (min/max/policy/cooldown)."""
-    mgr = _make_manager(args.project, args.pool_id, args.project_dir)
+    project_dir = getattr(args, 'project_dir', '.')
+    mgr = _make_manager(args.project, args.pool_id, project_dir)
     pool_id = args.pool_id or "default"
     config = mgr.repo.get_config(pool_id)
     if not config:
@@ -171,7 +174,8 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 def cmd_reap(args: argparse.Namespace) -> int:
     """Reap stale workers; dry-run by default unless --force."""
-    mgr = _make_manager(args.project, args.pool_id, args.project_dir)
+    project_dir = getattr(args, 'project_dir', '.')
+    mgr = _make_manager(args.project, args.pool_id, project_dir)
 
     if not args.force:
         from pool_reaper import ReapConfig, identify_reap_targets  # noqa: E402
