@@ -749,6 +749,23 @@ def _run_worktree_git(spec: GovernSpec, args: list, timeout: float) -> Optional[
     """
     if not spec.worktree_path:
         raise _NoWorktreeError(spec.dispatch_id)
+    # OI-975: the worktree path itself must not resolve to the main checkout.
+    # A presence check alone is not enough — a bug that sets
+    # spec.worktree_path to the main checkout would otherwise pass the
+    # OI-1008 guard and report/act on the operator's checkout.
+    try:
+        from git_target_guard import (  # type: ignore[import]
+            DispatchTargetsMainCheckoutError,
+            guard_git_target,
+        )
+        guard_git_target(spec.worktree_path, dispatch_id=spec.dispatch_id)
+    except DispatchTargetsMainCheckoutError:
+        logger.error(
+            "govern._run_worktree_git: refusing git %s for dispatch %s — "
+            "worktree_path %s resolves to the main checkout (OI-975)",
+            args, spec.dispatch_id, spec.worktree_path,
+        )
+        return None
     try:
         result = subprocess.run(
             ["git", *args],
