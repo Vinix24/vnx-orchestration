@@ -262,6 +262,12 @@ def _run_dispatch_agent(tmp_path: Path, *, deadline_seconds=None, legacy: bool =
     return rc, captured
 
 
+# The distinctive marker of the legacy no-op warning under test — the claude-not-found
+# preflight emits its own "Warning: ..." line when the binary is absent (CI), so the
+# assertions below must target THIS text, not the bare substring "Warning".
+_LEGACY_DEADLINE_WARNING = "is ignored because the single-entry dispatch door is disabled"
+
+
 class TestLegacyDeadlineWarning:
     def test_legacy_mode_warns_when_deadline_set(self, tmp_path, monkeypatch, capsys):
         """VNX_DISPATCH_LEGACY=1 + explicit --deadline-seconds on the claude path: the
@@ -273,7 +279,7 @@ class TestLegacyDeadlineWarning:
         assert rc == 0, "a warning is not a hard-error — the dispatch still runs"
         assert captured.get("deadline_seconds") == 7200
         err = capsys.readouterr().err
-        assert "Warning" in err
+        assert _LEGACY_DEADLINE_WARNING in err
         assert "--deadline-seconds" in err
         assert "VNX_DISPATCH_LEGACY" in err
 
@@ -284,7 +290,7 @@ class TestLegacyDeadlineWarning:
         assert rc == 0
         assert captured.get("deadline_seconds") is None
         err = capsys.readouterr().err
-        assert "Warning" not in err
+        assert _LEGACY_DEADLINE_WARNING not in err
         assert "--deadline-seconds" not in err
 
     def test_door_mode_no_warning_when_deadline_set(self, tmp_path, monkeypatch, capsys):
@@ -294,4 +300,4 @@ class TestLegacyDeadlineWarning:
         assert rc == 0
         assert captured.get("deadline_seconds") == 7200
         err = capsys.readouterr().err
-        assert "Warning" not in err
+        assert _LEGACY_DEADLINE_WARNING not in err
