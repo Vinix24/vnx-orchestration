@@ -533,7 +533,15 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
     for ev in central_events:
         key = _merge_dedup_key(ev)
         merged[key] = ev  # central overwrites primary on same key
-    return sorted(merged.values(), key=lambda e: e.get("timestamp", ""))
+    # OI-949: sort datetime-aware to avoid lexicographic misordering of
+    # mixed-precision timestamps (e.g. "…00.123456Z" sorts before "…00Z"
+    # under str-collation because "." (0x2E) < "Z" (0x5A)).
+    # Fallback: unparseable timestamps land on _dt.datetime.min (year 1) so
+    # they sort before any real event rather than interleaving spuriously.
+    return sorted(
+        merged.values(),
+        key=lambda e: (_parse_iso(e.get("timestamp", "")) or _dt.datetime.min, e.get("timestamp", "")),
+    )
 
 
 # ---------------------------------------------------------------------------

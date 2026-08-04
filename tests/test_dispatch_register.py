@@ -151,6 +151,33 @@ class TestReadEventsOrder:
             "dispatch_started",
         ]
 
+    def test_mixed_precision_timestamps_sorted_by_datetime_not_lexicographic(
+        self, isolated_data_dir,
+    ):
+        """OI-949: mixed-precision timestamps must sort by actual time.
+
+        Lexicographic collation would put ``…00.123456Z`` BEFORE ``…00Z``
+        because ``.`` (0x2E) sorts before ``Z`` (0x5A), even though the
+        microsecond timestamp is 123456 µs later.  Datetime-aware sort
+        fixes this.
+        """
+        reg = _reg_path(isolated_data_dir)
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        # Chronological order: first (second-precision), second (microsecond)
+        # Lexicographic would reverse these because '.123456Z' < 'Z'
+        first_ts = "2026-07-01T10:00:00Z"
+        second_ts = "2026-07-01T10:00:00.123456Z"
+        reg.write_text(
+            json.dumps({"timestamp": first_ts, "event": "first", "dispatch_id": "d-1"}) + "\n"
+            + json.dumps({"timestamp": second_ts, "event": "second", "dispatch_id": "d-2"}) + "\n"
+        )
+        events = read_events()
+        assert len(events) == 2
+        # Datetime-aware: first (earlier) then second (later)
+        assert [e["event"] for e in events] == ["first", "second"], (
+            f"Expected ['first', 'second'] (datetime order), got {[e['event'] for e in events]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 6. read_events since_iso filter
