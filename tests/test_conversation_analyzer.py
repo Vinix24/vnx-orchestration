@@ -385,6 +385,95 @@ class TestDeepAnalyzer:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3b: LLM strategy selection (deepseek-harness)
+# ---------------------------------------------------------------------------
+
+class TestDeepAnalyzerStrategy:
+
+    def test_deepseek_harness_strategy_skips_claude_and_ollama(self):
+        """LLM_STRATEGY=deepseek-harness calls only the harness path, not claude or ollama."""
+        import conversation_analyzer.deep_analyzer as da_module
+
+        analyzer = DeepAnalyzer()
+        metrics = SessionMetrics(session_id="strat-test", total_output_tokens=5000,
+                                  tool_calls_total=20)
+        flags = SessionFlags()
+        mock_result = '{"patterns":[],"bottlenecks":[],"suggestions":[]}'
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"user","message":{"role":"user","content":"test"}}\n')
+            f.flush()
+            jsonl_path = Path(f.name)
+
+        try:
+            with patch.object(DeepAnalyzer, '_build_session_summary',
+                              return_value='test summary'), \
+                 patch.object(DeepAnalyzer, '_try_deepseek_harness',
+                              return_value=mock_result) as mock_harness, \
+                 patch.object(DeepAnalyzer, '_try_claude_max') as mock_claude, \
+                 patch.object(DeepAnalyzer, '_try_ollama') as mock_ollama, \
+                 patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'):
+
+                result = analyzer.analyze_session(jsonl_path, metrics, flags)
+
+                assert result is not None
+                assert result.get("patterns") == []
+                mock_harness.assert_called_once()
+                mock_claude.assert_not_called()
+                mock_ollama.assert_not_called()
+        finally:
+            os.unlink(jsonl_path)
+
+    def test_deepseek_harness_fail_closed_without_key(self):
+        """_try_deepseek_harness returns None when DEEPSEEK_API_KEY is unset."""
+        # Consumer-namespace patch: the method reads os.environ at call time
+        # inside deep_analyzer.py, so we patch os.environ in that module's
+        # namespace to ensure the method sees the empty key.
+        import conversation_analyzer.deep_analyzer as da_module
+
+        with patch.dict(da_module.os.environ, {}, clear=True):
+            result = DeepAnalyzer._try_deepseek_harness("test prompt")
+            assert result is None
+
+    def test_deepseek_harness_model_default(self):
+        """VNX_ANALYZER_DEEPSEEK_MODEL defaults to deepseek-v4-flash."""
+        from conversation_analyzer import DEEPSEEK_HARNESS_MODEL as DHM
+        assert DHM == "deepseek-v4-flash"
+
+    def test_ollama_only_strategy_still_works(self):
+        """LLM_STRATEGY=ollama-only (default) still dispatches correctly (no regression)."""
+        import conversation_analyzer.deep_analyzer as da_module
+
+        analyzer = DeepAnalyzer()
+        metrics = SessionMetrics(session_id="ollama-test", total_output_tokens=5000,
+                                  tool_calls_total=20)
+        flags = SessionFlags()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"user","message":{"role":"user","content":"test"}}\n')
+            f.flush()
+            jsonl_path = Path(f.name)
+
+        try:
+            with patch.object(DeepAnalyzer, '_build_session_summary',
+                              return_value='test summary'), \
+                 patch.object(DeepAnalyzer, '_try_ollama',
+                              return_value='{"result":"ok"}') as mock_ollama, \
+                 patch.object(DeepAnalyzer, '_try_claude_max') as mock_claude, \
+                 patch.object(DeepAnalyzer, '_try_deepseek_harness') as mock_harness, \
+                 patch.object(da_module, 'LLM_STRATEGY', 'ollama-only'):
+
+                result = analyzer.analyze_session(jsonl_path, metrics, flags)
+
+                assert result is not None
+                mock_ollama.assert_called_once()
+                mock_claude.assert_not_called()
+                mock_harness.assert_not_called()
+        finally:
+            os.unlink(jsonl_path)
+
+
+# ---------------------------------------------------------------------------
 # Phase 4: Storage & idempotency
 # ---------------------------------------------------------------------------
 

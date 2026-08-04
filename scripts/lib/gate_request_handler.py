@@ -124,6 +124,7 @@ class GateRequestHandlerMixin:
                 receipt_kind="review_gate",
                 status=payload["status"],
                 terminal="T0",
+                pr_id=str(pr_number),
                 pr_number=pr_number,
                 branch=branch,
                 gate=payload["gate"],

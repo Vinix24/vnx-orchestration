@@ -1,6 +1,7 @@
 """Phase 3: LLM-powered deep analysis of flagged sessions."""
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -8,12 +9,17 @@ from typing import Optional
 
 from .models import (
     SessionMetrics, SessionFlags,
-    LLM_STRATEGY, OLLAMA_MODEL,
+    LLM_STRATEGY, OLLAMA_MODEL, DEEPSEEK_HARNESS_MODEL,
     AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
     log,
 )
 from .detector import HeuristicDetector
+from provider_spawns.deepseek_harness_spawn import (
+    build_harness_env,
+    build_harness_cli_args,
+    DEEPSEEK_API_KEY_ENV,
+)
 
 
 class DeepAnalyzer:
@@ -77,10 +83,16 @@ Respond with valid JSON:
 
         result_text = None
 
+        # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
+        # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
+        # unset — never falls back to the OAuth subscription (constraint
+        # deepseek-harness-subscription-blocked).
+        if LLM_STRATEGY == "deepseek-harness":
+            result_text = self._try_deepseek_harness(prompt)
         # Billing guard: in "auto" mode, refuse the claude path when the
         # session backlog exceeds the threshold. "claude-only" bypasses
         # the guard — the operator explicitly opted in to metered spend.
-        if LLM_STRATEGY == "claude-only":
+        elif LLM_STRATEGY == "claude-only":
             result_text = self._try_claude_max(prompt)
         elif LLM_STRATEGY == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
@@ -227,6 +239,64 @@ Respond with valid JSON:
             return None
         except Exception as e:
             log("WARNING", f"Claude CLI error: {e}")
+            return None
+
+    @staticmethod
+    def _try_deepseek_harness(prompt: str) -> Optional[str]:
+        """Run deep analysis via the claude CLI driving DeepSeek's Anthropic-compatible endpoint.
+
+        Uses the measured-safe key-auth recipe from
+        ``provider_spawns.deepseek_harness_spawn``: own ``DEEPSEEK_API_KEY``,
+        ``ANTHROPIC_AUTH_TOKEN`` bearer, telemetry suppressed.  Fails closed
+        when no own key is available — never falls back to the OAuth
+        subscription (constraint deepseek-harness-subscription-blocked).
+
+        Model is ``VNX_ANALYZER_DEEPSEEK_MODEL`` (default ``deepseek-v4-flash``).
+        """
+        api_key = os.environ.get(DEEPSEEK_API_KEY_ENV, "")
+        if not (api_key or "").strip():
+            log("WARNING",
+                f"{DEEPSEEK_API_KEY_ENV} not set; "
+                f"deepseek-harness requires own API key (account safety — "
+                f"the lane must never ride the OAuth subscription)")
+            return None
+
+        harness_env = build_harness_env(api_key)
+        # Override model to the analyzer-specific default (flash, not pro).
+        harness_env["CLAUDE_CODE_MODEL"] = DEEPSEEK_HARNESS_MODEL
+
+        cli_args = ["claude", "-p", "--output-format", "json", "--max-turns", "1"]
+        cli_args.extend(build_harness_cli_args())
+
+        child_env = dict(os.environ)
+        child_env.update(harness_env)
+
+        try:
+            result = subprocess.run(
+                cli_args,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=child_env,
+            )
+            if result.returncode != 0:
+                log("WARNING", f"DeepSeek harness failed (rc={result.returncode}): "
+                               f"{result.stderr[:200]}")
+                return None
+            try:
+                output = json.loads(result.stdout)
+                return output.get("result", result.stdout)
+            except json.JSONDecodeError:
+                return result.stdout
+        except FileNotFoundError:
+            log("INFO", "Claude CLI not found for deepseek-harness")
+            return None
+        except subprocess.TimeoutExpired:
+            log("WARNING", "DeepSeek harness timed out (120s)")
+            return None
+        except Exception as e:
+            log("WARNING", f"DeepSeek harness error: {e}")
             return None
 
     @classmethod
