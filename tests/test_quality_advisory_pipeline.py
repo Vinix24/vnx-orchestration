@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import quality_advisory as quality_advisory_module
 from quality_advisory import (
+    FILE_SIZE_ALLOWLIST,
     QualityCheck,
     build_whole_repo_file_size_backlog,
     check_file_size,
@@ -522,6 +523,32 @@ class TestWholeRepoFileSizeBacklog:
 
         backlog = build_whole_repo_file_size_backlog(tmp_path)
         assert backlog["total_backlog"] == 0
+
+
+class TestDispatchCliAllowlistRemoval:
+    """OI-937 regression: the TEMP FILE_SIZE_ALLOWLIST entry for scripts/lib/dispatch_cli
+    must be gone. PR 0 of the dispatch_cli extraction series (never landed) added it as a
+    short-lived exemption for the 1200-line hard ceiling. Keeping it in place silently
+    grandfathers a 1500+ line monolith and defeats the size gate."""
+
+    def test_temp_allowlist_key_for_dispatch_cli_removed(self):
+        assert "scripts/lib/dispatch_cli" not in FILE_SIZE_ALLOWLIST, (
+            "TEMP allowlist entry for scripts/lib/dispatch_cli still present (OI-937)"
+        )
+
+    def test_dispatch_cli_no_longer_grandfathered_by_size_gate(self):
+        """check_file_size on the real dispatch_cli.py must not return the advisory
+        'grandfathered' finding. It is either a hard block (still over the 1200 ceiling,
+        the honest state) or a warning/no finding if the monolith was eventually split."""
+        dispatch_cli = SCRIPT_DIR / "lib" / "dispatch_cli.py"
+        assert dispatch_cli.exists(), f"test fixture path missing: {dispatch_cli}"
+
+        checks = check_file_size(dispatch_cli)
+
+        grandfathered = [c for c in checks if c.check_id == "file_size_grandfathered"]
+        assert grandfathered == [], (
+            f"dispatch_cli.py still allowlisted by the size gate: {grandfathered}"
+        )
 
 
 class TestTerminalSnapshot:
