@@ -1339,7 +1339,7 @@ class TestSpawnKimiChunkStallFloor(unittest.TestCase):
 
         def fake_drain(
             self, process, terminal_id, dispatch_id, event_store, *,
-            chunk_timeout, total_deadline,
+            chunk_timeout, total_deadline, raw_tee_path=None,
         ):
             captured["chunk_timeout"] = chunk_timeout
             captured["total_deadline"] = total_deadline
@@ -1384,7 +1384,7 @@ class TestSpawnKimiChunkStallFloor(unittest.TestCase):
 
         def fake_drain(
             self, process, terminal_id, dispatch_id, event_store, *,
-            chunk_timeout, total_deadline,
+            chunk_timeout, total_deadline, raw_tee_path=None,
         ):
             captured["chunk_timeout"] = chunk_timeout
             captured["total_deadline"] = total_deadline
