@@ -9,12 +9,13 @@ Each provider requires an API key set as an env var before dispatch.
 | DeepSeek | DEEPSEEK_API_KEY | platform.deepseek.com | V4-Pro $0.435/$0.87, V4-Flash $0.14/$0.28 | Wave 7 PR-7.1 |
 | Kimi CLI | *(OAuth via `kimi login`)* | — | K2.6 / K2-0905 (free tier via CLI) | Wave 7 PR-7.7 |
 | Moonshot (Kimi) via LiteLLM | MOONSHOT_API_KEY | platform.moonshot.cn | K2-0905 $0.60/$2.50 | Wave 7 PR-7.2 |
-| Z.AI (GLM) via OpenRouter | OPENROUTER_API_KEY | openrouter.ai | GLM-5.1 $0.50/$2.50 (pass-through) | Wave 7 PR-7.3 |
+| Z.AI (GLM) via OpenRouter | OPENROUTER_API_KEY | openrouter.ai | GLM-5.2 $0.60/$1.92 (pass-through) | Wave 7 PR-7.3 |
 
-**Note on GLM legacy versions:** GLM-4.5 and GLM-4.6 are deprecated. Only GLM-5.1 is
-accepted by the `litellm:zai` route. Passing `--model glm-4.5` or `--model glm-4.6`
-raises an error. Direct Zhipu API integration (no OpenRouter margin) is deferred to
-Wave 7.3.1 — see `scripts/lib/providers/z_ai_custom_provider.py`.
+**Note on GLM legacy versions:** GLM-4.5, GLM-4.6, GLM-5 (base), and GLM-5.1 are
+deprecated. Only GLM-5.2 is accepted by the `litellm:zai` route (`deprecated-glm-models`
+constraint, operator directive 2026-08-03). Passing any deprecated variant raises an
+error. Direct Zhipu API integration (no OpenRouter margin) is deferred to Wave 7.3.1 —
+see `scripts/lib/providers/z_ai_custom_provider.py`.
 
 Pricing shown as input/output per MTok. Sonnet 5 reference included for cost comparison.
 

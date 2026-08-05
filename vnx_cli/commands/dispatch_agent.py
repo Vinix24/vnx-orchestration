@@ -57,7 +57,7 @@ def _infer_provider_for_model(model: str) -> str:
     back to the same provider-signature substring convention the
     kimi-via-cli-only guard (constraint_enforcer.py) already applies to model
     strings, for provider-specific model ids that aren't themselves a bare
-    provider name (kimi-k2-6, glm-5.1, deepseek-v4-pro, gemini-2.5-pro, ...).
+    provider name (kimi-k2-6, glm-5.2, deepseek-v4-pro, gemini-2.5-pro, ...).
 
     Raises ValueError when no provider can be honored, so the caller can
     hard-error before dispatch instead of letting the provider silently
