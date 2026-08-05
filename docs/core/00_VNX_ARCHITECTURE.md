@@ -1159,7 +1159,7 @@ Two Claude worker lanes exist:
 
 Non-Claude providers (codex, gemini, kimi, deepseek-harness, litellm sub-providers,
 local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth
-only (`kimi-via-cli-only`); GLM-5.1 routes via OpenRouter (`zai-via-openrouter-only`);
+only (`kimi-via-cli-only`); GLM-5.2 routes via OpenRouter (`zai-via-openrouter-only`);
 DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subscription-blocked`
 gates the subscription variant). Full lane map: `docs/core/PROVIDER_LANES.md`;
 dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
