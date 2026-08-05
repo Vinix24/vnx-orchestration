@@ -18,6 +18,7 @@ import select
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -126,6 +127,7 @@ class StreamingDrainerMixin:
         chunk_timeout: float = 300.0,
         total_deadline: float = 900.0,
         _queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
+        raw_tee_path: Optional[Path] = None,
     ) -> Iterator[CanonicalEvent]:
         """Drain process stdout line-by-line, yielding CanonicalEvents.
 
@@ -148,6 +150,12 @@ class StreamingDrainerMixin:
             chunk_timeout: Max seconds between consecutive output lines.
             total_deadline: Max total seconds for the entire drain.
             _queue_maxsize: Bounded queue capacity (default 256 events).
+            raw_tee_path: OI-1044 — when provided, every raw byte chunk read from
+              the subprocess stdout pipe is also appended to this file, so an
+              external FileProgressHeartbeat can observe activity independently
+              of NDJSON-line parsing (mirrors the tmux-spawn lane's pipe-pane
+              capture). None (default) disables the tee — no behavior change for
+              existing callers.
         """
         try:
             chunk_timeout = float(os.environ.get("VNX_CHUNK_TIMEOUT", chunk_timeout))
@@ -185,6 +193,7 @@ class StreamingDrainerMixin:
                     timed_out=timed_out,
                     normalize_fn=self._normalize,
                     provider_name=self.provider_name,
+                    raw_tee_path=raw_tee_path,
                 )
             except Exception:
                 logger.exception(
@@ -255,6 +264,7 @@ def _run_producer(
     timed_out: threading.Event,
     normalize_fn: Callable[[Dict[str, Any]], CanonicalEvent],
     provider_name: str,
+    raw_tee_path: Optional[Path] = None,
 ) -> None:
     """Read subprocess stdout, parse NDJSON, push events to queue."""
     if process.stdout is None:
@@ -264,90 +274,137 @@ def _run_producer(
     line_buffer = b""
     start = time.monotonic()
 
-    while True:
-        elapsed = time.monotonic() - start
-        if elapsed >= total_deadline:
-            logger.warning(
-                "_streaming_drainer: total deadline (%.0fs) exceeded for %s",
-                total_deadline, terminal_id,
-            )
-            timed_out.set()
-            _kill_process(process)
-            err = _make_error_event(
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                provider=provider_name,
-                raw=None,
-                reason=f"total deadline {total_deadline:.0f}s exceeded",
-            )
-            _append_to_store(event_store, terminal_id, err, dispatch_id)
-            result_queue.put(err)
-            return
-
-        remaining = min(chunk_timeout, total_deadline - elapsed)
+    tee_fh = None
+    if raw_tee_path is not None:
         try:
-            ready, _, _ = select.select([fd], [], [], remaining)
-        except (ValueError, OSError):
-            break  # fd closed
-
-        if not ready:
+            raw_tee_path.parent.mkdir(parents=True, exist_ok=True)
+            tee_fh = open(raw_tee_path, "ab", buffering=0)
+        except OSError as exc:
             logger.warning(
-                "_streaming_drainer: chunk timeout (%.0fs) for %s",
-                chunk_timeout, terminal_id,
+                "_streaming_drainer: raw tee open failed for %s (heartbeat disabled): %s",
+                raw_tee_path, exc,
             )
-            timed_out.set()
-            _kill_process(process)
-            err = _make_error_event(
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                provider=provider_name,
-                raw=None,
-                reason=f"chunk timeout {chunk_timeout:.0f}s exceeded",
-            )
-            _append_to_store(event_store, terminal_id, err, dispatch_id)
-            result_queue.put(err)
-            return
+            tee_fh = None
 
-        try:
-            chunk = os.read(fd, 65536)
-        except OSError:
-            break  # fd closed (process killed)
+    try:
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= total_deadline:
+                logger.warning(
+                    "_streaming_drainer: total deadline (%.0fs) exceeded for %s",
+                    total_deadline, terminal_id,
+                )
+                timed_out.set()
+                _kill_process(process)
+                err = _make_error_event(
+                    terminal_id=terminal_id,
+                    dispatch_id=dispatch_id,
+                    provider=provider_name,
+                    raw=None,
+                    reason=f"total deadline {total_deadline:.0f}s exceeded",
+                )
+                _append_to_store(event_store, terminal_id, err, dispatch_id)
+                result_queue.put(err)
+                return
 
-        if not chunk:
-            # EOF — process finished cleanly
-            rc = process.poll()
-            if rc is not None:
-                pass  # returncode available for post-drain check
-            break
-
-        line_buffer += chunk
-        while b"\n" in line_buffer:
-            raw_line, line_buffer = line_buffer.split(b"\n", 1)
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-
-            event = _parse_line(
-                line=line,
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                provider_name=provider_name,
-                normalize_fn=normalize_fn,
-            )
-
-            # Stamp Tier-1 on all streaming events
-            object.__setattr__(event, "observability_tier", _STREAMING_TIER) if hasattr(type(event), "__dataclass_fields__") else None
-            # Dataclasses are not frozen, so direct assignment works
+            remaining = min(chunk_timeout, total_deadline - elapsed)
             try:
-                event.observability_tier = _STREAMING_TIER
-            except AttributeError:
+                ready, _, _ = select.select([fd], [], [], remaining)
+            except (ValueError, OSError):
+                break  # fd closed
+
+            if not ready:
+                # OI-1044 co-death investigation: when total_deadline is close,
+                # `remaining` is compressed below the configured chunk_timeout
+                # (see the min() above), so a `not ready` here can mean either a
+                # genuine full-length chunk_timeout stall OR a much shorter gap
+                # that only looks like a stall because the deadline capped the
+                # wait window. Reported gap := the actual seconds waited
+                # (`remaining`), so the log/receipt never blames a false Ns of
+                # silence — a worker that paused for 1s right as its deadline
+                # ran out must not be reported as "silent for chunk_timeout".
+                gap = remaining
+                deadline_compressed = remaining < chunk_timeout
+                logger.warning(
+                    "_streaming_drainer: %s (%.0fs) for %s",
+                    "deadline-compressed stall" if deadline_compressed else "chunk timeout",
+                    gap, terminal_id,
+                )
+                timed_out.set()
+                _kill_process(process)
+                reason = (
+                    f"total deadline reached during final stall window "
+                    f"({gap:.0f}s remaining, configured chunk_timeout={chunk_timeout:.0f}s not "
+                    f"fully elapsed)"
+                    if deadline_compressed
+                    else f"chunk timeout {chunk_timeout:.0f}s exceeded"
+                )
+                err = _make_error_event(
+                    terminal_id=terminal_id,
+                    dispatch_id=dispatch_id,
+                    provider=provider_name,
+                    raw=None,
+                    reason=reason,
+                )
+                _append_to_store(event_store, terminal_id, err, dispatch_id)
+                result_queue.put(err)
+                return
+
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break  # fd closed (process killed)
+
+            if not chunk:
+                # EOF — process finished cleanly
+                rc = process.poll()
+                if rc is not None:
+                    pass  # returncode available for post-drain check
+                break
+
+            if tee_fh is not None:
+                try:
+                    tee_fh.write(chunk)
+                except OSError as exc:
+                    logger.debug(
+                        "_streaming_drainer: raw tee write failed for %s: %s",
+                        raw_tee_path, exc,
+                    )
+
+            line_buffer += chunk
+            while b"\n" in line_buffer:
+                raw_line, line_buffer = line_buffer.split(b"\n", 1)
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+
+                event = _parse_line(
+                    line=line,
+                    terminal_id=terminal_id,
+                    dispatch_id=dispatch_id,
+                    provider_name=provider_name,
+                    normalize_fn=normalize_fn,
+                )
+
+                # Stamp Tier-1 on all streaming events
+                object.__setattr__(event, "observability_tier", _STREAMING_TIER) if hasattr(type(event), "__dataclass_fields__") else None
+                # Dataclasses are not frozen, so direct assignment works
+                try:
+                    event.observability_tier = _STREAMING_TIER
+                except AttributeError:
+                    pass
+
+                if event.event_type in _COMPLETE_TYPES:
+                    seen_complete.set()
+
+                _append_to_store(event_store, terminal_id, event, dispatch_id)
+                result_queue.put(event)  # blocks if queue full (backpressure)
+    finally:
+        if tee_fh is not None:
+            try:
+                tee_fh.close()
+            except OSError:
                 pass
-
-            if event.event_type in _COMPLETE_TYPES:
-                seen_complete.set()
-
-            _append_to_store(event_store, terminal_id, event, dispatch_id)
-            result_queue.put(event)  # blocks if queue full (backpressure)
 
 
 def _parse_line(

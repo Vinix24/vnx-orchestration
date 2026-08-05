@@ -24,6 +24,7 @@ from _streaming_drainer import (
     StreamingDrainerMixin,
     _make_error_event,
     _parse_line,
+    _run_producer,
     _STREAMING_TIER,
     coerce_chunk_stall,
 )
@@ -425,6 +426,92 @@ class TestStallSurvival:
 
         assert elapsed < 3.0, f"env override should fire fast, got {elapsed:.2f}s"
         assert any(e.event_type == "error" for e in events)
+
+
+class TestDeadlineCompressedStallLabeling:
+    """OI-1044 co-death investigation: when total_deadline is close, `remaining`
+    (the actual select() wait) is compressed below the configured chunk_timeout.
+    A `not ready` in that compressed window must never be reported as
+    "chunk timeout {chunk_timeout}s exceeded" — that overstates how long the
+    worker was actually silent and mislabels a deadline-driven kill as a
+    silence-driven one, which is exactly what made a kimi dispatch look like
+    it "died right after finishing a tool call" instead of "ran out of its
+    total budget".
+
+    Tests call ``_run_producer`` directly (not the ``drain_stream`` wrapper)
+    with post-coercion values: in a real long-running dispatch, `chunk_timeout`
+    is already floored to `<= total_deadline` by `coerce_chunk_stall` at drain
+    start, and the compression this class targets only appears once `elapsed`
+    has grown close to `total_deadline` over the dispatch's lifetime — calling
+    `_run_producer` directly lets the test represent "we are already near the
+    deadline" without an actual multi-minute wait.
+    """
+
+    @staticmethod
+    def _run_and_collect(*, chunk_timeout: float, total_deadline: float, script: str):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        result_queue: queue.Queue = queue.Queue()
+        try:
+            _run_producer(
+                process=proc,
+                terminal_id="T1",
+                dispatch_id="d-labeling",
+                event_store=None,
+                chunk_timeout=chunk_timeout,
+                total_deadline=total_deadline,
+                result_queue=result_queue,
+                seen_complete=threading.Event(),
+                timed_out=threading.Event(),
+                normalize_fn=lambda raw: CanonicalEvent(
+                    dispatch_id="d-labeling", terminal_id="T1", provider="claude",
+                    event_type=raw.get("type", "text"), data=raw.get("data", {}),
+                    observability_tier=2,
+                ),
+                provider_name="claude",
+            )
+        finally:
+            proc.wait(timeout=5)
+        events = []
+        while not result_queue.empty():
+            events.append(result_queue.get_nowait())
+        return events
+
+    def test_kill_near_deadline_reports_actual_wait_not_full_chunk_timeout(self):
+        """chunk_timeout=5.0 with only 1.0s of total budget left: the select()
+        wait is compressed to ~1.0s, not the full 5.0s chunk window. The
+        synthetic error's reason must reflect the ~1s actual gap, not falsely
+        claim a full 5s chunk_timeout elapsed."""
+        events = self._run_and_collect(
+            chunk_timeout=5.0, total_deadline=1.0,
+            script="import time\ntime.sleep(3)\n",  # never writes anything
+        )
+
+        errors = [e for e in events if e.event_type == "error"]
+        assert len(errors) == 1
+        reason = errors[0].data.get("reason", "")
+        assert reason != "chunk timeout 5s exceeded", (
+            f"deadline-compressed kill must not claim the full chunk_timeout elapsed: {reason!r}"
+        )
+        assert "deadline" in reason.lower()
+        assert "1s" in reason
+
+    def test_kill_with_no_deadline_pressure_keeps_chunk_timeout_label(self):
+        """chunk_timeout=1.0 with a roomy total_deadline=30.0: remaining ==
+        chunk_timeout (not compressed), so the ORIGINAL "chunk timeout Ns
+        exceeded" label is still correct and must be unchanged."""
+        events = self._run_and_collect(
+            chunk_timeout=1.0, total_deadline=30.0,
+            script="import time\ntime.sleep(3)\n",
+        )
+
+        errors = [e for e in events if e.event_type == "error"]
+        assert len(errors) == 1
+        reason = errors[0].data.get("reason", "")
+        assert reason == "chunk timeout 1s exceeded"
 
 
 # ---------------------------------------------------------------------------
