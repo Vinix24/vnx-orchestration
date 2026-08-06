@@ -1,0 +1,50 @@
+# VNX plan-gate panel composition — the ordered seat list the PM plan-first
+# gate dispatches before any implementation begins.
+#
+# See scripts/lib/plan_gate_panel.py (load_panel_seats) for the loader. Every
+# field here mirrors the keys DEFAULT_PANEL used historically so this file is a
+# behaviour-neutral externalisation of that constant on the day it shipped:
+# edit this file to change which seats run, leave it and the code falls back to
+# DEFAULT_PANEL.
+#
+# Each seat has the SAME three keys the in-code DEFAULT_PANEL uses:
+#   label      — the panelist identifier (stable, used by --panel-seats filtering
+#                and the per-seat verdict ledger)
+#   provider   — a member of the closed Provider enum in
+#                scripts/lib/dispatch_spec.py (claude, kimi, glm-harness,
+#                deepseek-harness, codex, ...). An unknown value fails loud at
+#                load time naming the offending seat and the valid providers.
+#   model_arg  — the model string handed to the lane (opus, kimi-k3, glm-5.2,
+#                ...). Not validated here; the lane rejects an unrunnable model.
+#
+# One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek /
+# OpenAI) so a plan is reviewed from five independent vantage points before any
+# code is written. A panelist that flakes (a down proxy, an uninstalled CLI,
+# an unparseable verdict) is RETRIED once and then ABSTAINS as a non-scoring
+# lane instead of vetoing — see apply_panel_rule's liveness quorum. Keep every
+# provider here runnable anyway; the retry only rescues transient flakes.
+# glm-harness requires the local litellm proxy on :4141.
+#
+# NOTE: gemini is intentionally omitted until the `gemini` CLI is installed —
+# an unrunnable panelist emits no verdict, which the fail-safe rule turns into an
+# unconditional REVISE. Adding a seat here is an operator decision, not a code
+# change; the default composition is whatever this file declares.
+
+version: 1
+
+seats:
+  - label: opus
+    provider: claude
+    model_arg: opus
+  - label: kimi
+    provider: kimi
+    model_arg: kimi-k3
+  - label: glm-5.2-harness
+    provider: glm-harness
+    model_arg: glm-5.2
+  - label: deepseek
+    provider: deepseek-harness
+    model_arg: deepseek-v4-pro
+  - label: codex
+    provider: codex
+    model_arg: gpt-5.5

@@ -48,6 +48,13 @@ from typing import Any, Callable, Dict, List, Optional
 HERE = Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
 TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
+_SCRIPTS_DIR = HERE.parent
+PANEL_CONFIG_RELATIVE_PATH = Path("configs") / "plan_gate_panel.yaml"
+
+# The three keys every seat declares. Kept as a tuple so the loader and its
+# validation stay in lock-step — a drift here would silently change what counts
+# as a well-formed seat.
+_SEAT_KEYS: tuple[str, ...] = ("label", "provider", "model_arg")
 
 # Per-seat verdict ledger (OI-888): one append-only, hash-chained record per
 # panelist per run, under the repo's .vnx-attest/ dir next to the plan_gate_pass
@@ -80,6 +87,116 @@ DEFAULT_PANEL: List[Dict[str, str]] = [
 ]
 
 VERDICT_FENCE = "vnx-plan-verdict"
+
+
+def _default_panel_config_path() -> Path:
+    """The on-disk seat-list config resolved the same way as the other fabric
+    configs (``configs/plan_gate_panel.yaml`` at the repo root / central install
+    root), never from this module's own location — a central install pins
+    ``__file__`` inside a read-only version tree."""
+    return _SCRIPTS_DIR.parent / PANEL_CONFIG_RELATIVE_PATH
+
+
+def _valid_provider_strings() -> List[str]:
+    """The closed set of legal ``provider`` strings (members of the ``Provider``
+    enum in dispatch_spec). Resolved lazily so this module stays importable when
+    dispatch_spec is not on the path yet, and so a future enum edit is picked up
+    without touching this loader."""
+    from dispatch_spec import Provider  # noqa: PLC0415
+    return [p.value for p in Provider]
+
+
+def _validate_seat(seat: Any, index: int, valid_providers: List[str]) -> Dict[str, str]:
+    """Validate ONE seat from the config. Raises ``ValueError`` loud when the
+    seat is malformed — never silently drops it, because a dropped seat reads as
+    an abstention and turns into a REVISE via the fail-safe rule."""
+    if not isinstance(seat, dict):
+        raise ValueError(
+            f"plan-gate panel seat #{index}: expected a mapping with keys "
+            f"{list(_SEAT_KEYS)}, got {type(seat).__name__}"
+        )
+    missing = [k for k in _SEAT_KEYS if k not in seat]
+    if missing:
+        raise ValueError(
+            f"plan-gate panel seat #{index} (label={seat.get('label', '<none>')!r}): "
+            f"missing required key(s) {missing} — each seat needs {list(_SEAT_KEYS)}"
+        )
+    provider = str(seat["provider"]).strip()
+    if provider not in valid_providers:
+        raise ValueError(
+            f"plan-gate panel seat #{index} (label={seat['label']!r}): "
+            f"unknown provider {provider!r}. Valid providers: {valid_providers}"
+        )
+    return {
+        "label": str(seat["label"]),
+        "provider": provider,
+        "model_arg": str(seat["model_arg"]),
+    }
+
+
+def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]:
+    """Load the ordered seat list from ``configs/plan_gate_panel.yaml``.
+
+    Falls back to ``DEFAULT_PANEL`` when the file is absent or unreadable (a
+    missing config never breaks the gate; the code constant is the safety net).
+    A present-but-invalid config fails LOUD: each seat must carry the three keys
+    ``label``/``provider``/``model_arg`` and ``provider`` must be a member of the
+    closed ``Provider`` enum in ``scripts/lib/dispatch_spec.py``. An invalid seat
+    is never silently dropped — a dropped seat reads as an abstention and turns
+    into a REVISE via the fail-safe rule, so misconfiguration must surface at
+    load time, not at verdict time.
+    """
+    path = Path(config_path) if config_path is not None else _default_panel_config_path()
+    if not path.is_file():
+        return list(DEFAULT_PANEL)
+    try:
+        import yaml  # noqa: PLC0415
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        warnings.warn(
+            f"plan_gate_panel: failed to load {path}: {exc} — using DEFAULT_PANEL",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return list(DEFAULT_PANEL)
+    if not isinstance(loaded, dict) or "seats" not in loaded:
+        warnings.warn(
+            f"plan_gate_panel: {path} has no 'seats' list — using DEFAULT_PANEL",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return list(DEFAULT_PANEL)
+    raw_seats = loaded["seats"]
+    if not isinstance(raw_seats, list) or not raw_seats:
+        raise ValueError(
+            f"plan_gate_panel: {path} 'seats' must be a non-empty list, got "
+            f"{type(raw_seats).__name__}"
+        )
+    valid_providers = _valid_provider_strings()
+    return [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
+
+
+def filter_panel_seats(
+    seats: List[Dict[str, str]], labels: List[str]
+) -> List[Dict[str, str]]:
+    """Filter the configured seat list to ``labels`` for a single run.
+
+    An unknown label fails loud listing the configured labels so the operator
+    sees what is available instead of running a partial panel silently. Order
+    follows the configured list (not the requested order) so a run's panel
+    composition stays stable and auditable against the config.
+    """
+    configured = {s["label"]: s for s in seats}
+    unknown = [lbl for lbl in labels if lbl not in configured]
+    if unknown:
+        raise ValueError(
+            f"plan-gate panel: unknown --panel-seats label(s): {unknown}. "
+            f"Configured labels: {list(configured.keys())}"
+        )
+    # Order follows the configured list, not the requested order, so a run's
+    # panel composition stays stable and auditable against the config.
+    wanted = set(labels)
+    return [s for s in seats if s["label"] in wanted]
 _OPEN_FENCE = "```" + VERDICT_FENCE
 _VALID_VERDICTS = {"pass", "revise", "block"}
 

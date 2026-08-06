@@ -634,6 +634,13 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     _common_horizon_args(p_prun)
     p_prun.add_argument("track_id")
     p_prun.add_argument("--doc", required=True, help="path to the plan doc under review")
+    p_prun.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run (subset of the configured panel); "
+             "unknown labels fail loud. Defaults to the full configured panel.",
+    )
 
     p_pstat = subs.add_parser(
         "status", help="show a track's plan-gate state + derived_status",
