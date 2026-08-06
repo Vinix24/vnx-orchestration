@@ -569,6 +569,34 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_reopen.add_argument("--reason", default="",
                           help="reason for reopening (REQUIRED)")
 
+    p_link_pr = subs.add_parser(
+        "link-pr",
+        help="manually link PR ref(s) to a track (retroactive/override; audited)",
+    )
+    _common_horizon_args(p_link_pr)
+    p_link_pr.add_argument("track_id", metavar="TRACK_ID")
+    p_link_pr.add_argument(
+        "pr", nargs="+", metavar="PR",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_link_pr.add_argument(
+        "--delivery", choices=("partial", "complete"), default="partial",
+        help="delivery_kind for the linked PR(s): 'partial' ships a slice of the "
+             "plan, 'complete' ships the whole thing (default: partial — fail-closed; "
+             "OI-829 auto-close requires >=1 linked PR marked 'complete')",
+    )
+
+    p_lane_hint = subs.add_parser(
+        "set-lane-hint",
+        help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
+    )
+    _common_horizon_args(p_lane_hint)
+    p_lane_hint.add_argument("track_id", metavar="TRACK_ID")
+    p_lane_hint.add_argument(
+        "lane_hint", choices=("direct", "governed", "unset"), metavar="LANE_HINT",
+        help="descriptive dispatch-routing hint (governed|direct|unset)",
+    )
+
 
 def _register_deliverable_verbs(subs: argparse.Action) -> None:
     """Register the deliverable-domain verbs shared by `vnx horizon deliverable`

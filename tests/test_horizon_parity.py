@@ -318,6 +318,8 @@ _OBJECTIVE_ARGV = {
     "reconcile-streak": [],
     "close": ["delegate-track"],
     "reopen": ["delegate-track"],
+    "link-pr": ["delegate-track", "#1234", "#1235", "--delivery", "complete"],
+    "set-lane-hint": ["delegate-track", "governed"],
 }
 _DELIVERABLE_ARGV = {
     "add": ["--objective", "delegate-track", "--output-kind", "doc", "--title", "Delegate deliverable"],
