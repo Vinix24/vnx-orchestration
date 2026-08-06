@@ -86,7 +86,9 @@ These patterns recur in codex_gate findings. Apply preemptively.
 - [ ] **Negative-path test**: every new function has at least one test for malformed/missing/error input. Crashing > silently-succeeding.
 
 ### Worker Convention
-- [ ] **Run pytest before push**: `pytest <test files> -x` succeeds. Don't push if any test red.
+- [ ] **Run pytest before push — TARGETED ONLY**: `pytest <the test files you touched> -x` succeeds. Don't push if any test red.
+- [ ] **NEVER run the full suite.** `pytest tests/` is ~19.400 tests, serial, and takes longer than a dispatch lives. CI Profile A already sweeps the whole tree on every PR — that run has an owner and it is not you. Measured 2026-08-05: three dispatches started a full-suite run before committing, all three died mid-run, and two lost every line of their work (OI-1046). Test what you touched plus its direct neighbours, then commit.
+- [ ] **Commit and push BEFORE any long-running verification.** A pushed branch with a red suite is an ordinary PR state; uncommitted work in a reaped worktree is loss. Order: targeted tests green → commit → push → anything slower.
 - [ ] **`bash -n` on shell changes**: every modified `.sh` file must pass syntax check.
 - [ ] **No TODO/FIXME**: full implementation only. If something's not done, escalate, don't comment.
 
