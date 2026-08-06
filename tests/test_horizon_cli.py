@@ -345,9 +345,30 @@ def test_horizon_help_lists_full_surface(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
+        "link-pr", "set-lane-hint",
         "deliverable", "plan-gate",
     ):
         assert verb in out, f"missing verb in `vnx horizon --help`: {verb}"
+
+
+def test_objective_and_deliverable_alias_help(monkeypatch, capsys):
+    rc, out, _ = _run(monkeypatch, capsys, ["objective", "--help"])
+    assert rc == 0
+    for verb in (
+        "add", "list", "show", "sync", "drift", "reconcile",
+        "reconcile-review", "reconcile-streak", "close", "reopen",
+        "link-pr", "set-lane-hint",
+    ):
+        assert verb in out
+    # objective is the OBJECTIVE-domain alias only — deliverable/plan-gate stay
+    # on their own top-level surfaces, matching bin/vnx's existing split.
+    assert "deliverable" not in out
+    assert "plan-gate" not in out
+
+    rc, out, _ = _run(monkeypatch, capsys, ["deliverable", "--help"])
+    assert rc == 0
+    for verb in ("add", "list", "promote"):
+        assert verb in out
 
 
 def test_horizon_deliverable_and_plan_gate_help_list_full_surface(monkeypatch, capsys):
@@ -359,25 +380,6 @@ def test_horizon_deliverable_and_plan_gate_help_list_full_surface(monkeypatch, c
     rc, out, _ = _run(monkeypatch, capsys, ["horizon", "plan-gate", "--help"])
     assert rc == 0
     for verb in ("seed", "run", "status"):
-        assert verb in out
-
-
-def test_objective_and_deliverable_alias_help(monkeypatch, capsys):
-    rc, out, _ = _run(monkeypatch, capsys, ["objective", "--help"])
-    assert rc == 0
-    for verb in (
-        "add", "list", "show", "sync", "drift", "reconcile",
-        "reconcile-review", "reconcile-streak", "close", "reopen",
-    ):
-        assert verb in out
-    # objective is the OBJECTIVE-domain alias only — deliverable/plan-gate stay
-    # on their own top-level surfaces, matching bin/vnx's existing split.
-    assert "deliverable" not in out
-    assert "plan-gate" not in out
-
-    rc, out, _ = _run(monkeypatch, capsys, ["deliverable", "--help"])
-    assert rc == 0
-    for verb in ("add", "list", "promote"):
         assert verb in out
 
 
@@ -491,3 +493,125 @@ def test_horizon_sync_reads_project_roadmap_not_central_template(project, monkey
     assert "example-feature" not in report.get("created", [])
     assert s["orphan"] == 0, report
     assert "real-track" not in report.get("orphan", [])
+
+
+# ---------------------------------------------------------------------------
+# link-pr / set-lane-hint — the two verbs planning_cli exposes that were
+# missing from the pip CLI (OI-1063). Verifies they resolve through
+# _VERB_DISPATCH, delegate to the identical cmd_* function, and round-trip
+# their arguments (multiple PR refs, --delivery default of 'partial',
+# lane_hint choices).
+# ---------------------------------------------------------------------------
+
+import planning_cli  # noqa: E402
+
+
+def test_link_pr_and_set_lane_hint_resolve_through_verb_dispatch():
+    """Both verbs are registered in _VERB_DISPATCH and delegate to the real
+    planning_cli cmd_* functions (not reimplemented)."""
+    assert _horizon._VERB_DISPATCH["link-pr"] is _horizon._cmd_link_pr
+    assert _horizon._VERB_DISPATCH["set-lane-hint"] is _horizon._cmd_set_lane_hint
+
+    # The wrappers delegate to the real planning_cli cmd_* functions.
+    assert hasattr(planning_cli, "cmd_objective_link_pr")
+    assert hasattr(planning_cli, "cmd_objective_set_lane_hint")
+
+
+def _capture_delegate(monkeypatch, name):
+    """Stub a planning_cli cmd_* function and capture the args it receives."""
+    captured = {}
+
+    def _stub(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(planning_cli, name, _stub)
+    return captured
+
+
+def test_horizon_link_pr_round_trips_multiple_prs_and_delivery_default(project, monkeypatch, capsys):
+    """`vnx horizon link-pr <track> <pr> <pr>` parses multiple PR refs and
+    defaults --delivery to 'partial' (fail-closed)."""
+    project_dir, _ = project
+    captured = _capture_delegate(monkeypatch, "cmd_objective_link_pr")
+
+    rc, _, err = _run(monkeypatch, capsys, [
+        "horizon", "link-pr", "feat-link", "#1234", "#1235",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 0, err
+
+    args = captured["args"]
+    assert args.track_id == "feat-link"
+    assert args.pr == ["#1234", "#1235"]                 # multiple refs preserved, in order
+    assert args.delivery == "partial"                    # fail-closed default
+    assert args.project_id == "horizon-test"
+    # state_dir is the central root, resolved by _prep — not planning_cli's
+    # repo-local degraded path.
+    assert args.state_dir == str(_engine.resolve_data_root(Path(project_dir)) / "state")
+
+
+def test_horizon_link_pr_explicit_delivery_and_json_round_trip(project, monkeypatch, capsys):
+    project_dir, _ = project
+    captured = _capture_delegate(monkeypatch, "cmd_objective_link_pr")
+    rc, _, err = _run(monkeypatch, capsys, [
+        "horizon", "link-pr", "feat-link", "#7777",
+        "--delivery", "complete", "--json",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 0, err
+    assert captured["args"].delivery == "complete"
+    assert captured["args"].json is True
+
+
+def test_horizon_link_pr_rejects_unknown_delivery(project, monkeypatch, capsys):
+    """argparse rejects a --delivery outside {partial,complete} (exit 2)."""
+    project_dir, _ = project
+    rc, _, err = _run(monkeypatch, capsys, [
+        "horizon", "link-pr", "feat-link", "#1",
+        "--delivery", "bogus",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 2
+
+
+def test_horizon_set_lane_hint_round_trips_choices(project, monkeypatch, capsys):
+    """`vnx horizon set-lane-hint <track> <hint>` accepts governed|direct|unset
+    and round-trips lane_hint onto the delegated args."""
+    project_dir, _ = project
+    for hint in ("governed", "direct", "unset"):
+        captured = _capture_delegate(monkeypatch, "cmd_objective_set_lane_hint")
+        rc, _, err = _run(monkeypatch, capsys, [
+            "horizon", "set-lane-hint", "feat-lane", hint,
+            "--project-id", "horizon-test", "--project-dir", str(project_dir),
+        ])
+        assert rc == 0, err
+        assert captured["args"].lane_hint == hint
+        assert captured["args"].track_id == "feat-lane"
+
+
+def test_horizon_set_lane_hint_rejects_unknown_choice(project, monkeypatch, capsys):
+    project_dir, _ = project
+    rc, _, err = _run(monkeypatch, capsys, [
+        "horizon", "set-lane-hint", "feat-lane", "bogus",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 2
+
+
+def test_horizon_link_pr_help_matches_engine_arg_surface(monkeypatch, capsys):
+    """`vnx horizon link-pr --help` accepts the same arguments as the
+    planning_cli engine (TRACK_ID, PR with nargs='+', --delivery)."""
+    rc, out, _ = _run(monkeypatch, capsys, ["horizon", "link-pr", "--help"])
+    assert rc == 0
+    assert "TRACK_ID" in out
+    assert "PR" in out
+    assert "--delivery" in out
+    assert "partial" in out and "complete" in out
+
+
+def test_horizon_set_lane_hint_help_matches_engine_arg_surface(monkeypatch, capsys):
+    rc, out, _ = _run(monkeypatch, capsys, ["horizon", "set-lane-hint", "--help"])
+    assert rc == 0
+    assert "TRACK_ID" in out
+    assert "governed" in out and "direct" in out and "unset" in out
