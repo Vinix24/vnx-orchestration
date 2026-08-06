@@ -1624,3 +1624,161 @@ class TestRunProvenanceSweepCommitFailureIsLoud:
         assert result == {"scanned": 0, "linked": 0}
         error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert not error_records, "an ordinary scan miss must stay non-fatal, not escalate to error"
+
+
+# ---------------------------------------------------------------------------
+# OI-1064: reconcile reuses the gh merge evidence it already gathered.
+# ---------------------------------------------------------------------------
+
+def test_oi1064_reconcile_closes_track_without_vnx_reconcile_git(tmp_path, monkeypatch):
+    """run_reconcile derives 'done' and closes a bare-gh-merge track WITHOUT
+    VNX_RECONCILE_GIT set.
+
+    Reproduces the background-job-liveness defect in miniature: phase=queued,
+    pr_ref with multiple PRs, all verified MERGED via gh, delivery complete,
+    zero dispatches, zero local merge evidence (no pr_merged.ndjson, no
+    coordination event, no ROADMAP entry). Pre-fix the bulk pass derived
+    'queued' and close_track_if_done refused with noop_not_terminal; the
+    evidence reconcile gathered was discarded. Post-fix the gh-confirmed
+    numbers are threaded into the derivation and the close succeeds.
+    """
+    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-oi1064", phase="queued", pr_ref="#1246,#1247,#1248")
+    # No dispatches, no local merge evidence of any kind.
+    # Mark all three delivery complete (the plan shipped across all PRs).
+    for pn in (1246, 1247, 1248):
+        _set_delivery(sd, "T-oi1064", pn, "complete")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({
+            1246: _merged_pr(1246),
+            1247: _merged_pr(1247),
+            1248: _merged_pr(1248),
+        }),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+
+    assert code == 0, f"expected exit 0, got {code}"
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert _phase(sd, "T-oi1064") == "done"
+    # derived_status persisted as 'done' (not 'queued') — the evidence reached
+    # both the bulk re-derivation and the close path.
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT derived_status FROM tracks WHERE track_id=? AND project_id=?",
+        ("T-oi1064", PROJECT_ID),
+    ).fetchone()
+    conn.close()
+    assert row["derived_status"] == "done"
+
+
+def test_oi1064_check_mode_derives_done_without_closing(tmp_path, monkeypatch):
+    """Check mode (--apply absent): the same evidence threading corrects the
+    derived_status to 'done' in the DB even though the close is skipped.
+
+    Pre-fix the bulk pass wrote 'queued' and nothing corrected it. Post-fix the
+    post-gh re-derivation writes 'done'. The declared phase stays untouched in
+    check mode.
+    """
+    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-oi1064-check", phase="queued", pr_ref="#1300,#1301")
+    for pn in (1300, 1301):
+        _set_delivery(sd, "T-oi1064-check", pn, "complete")
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1300: _merged_pr(1300), 1301: _merged_pr(1301)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=False,
+    )
+    assert code == 0
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 0  # check mode never closes
+    assert _phase(sd, "T-oi1064-check") == "queued"  # declared phase untouched
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT derived_status FROM tracks WHERE track_id=? AND project_id=?",
+        ("T-oi1064-check", PROJECT_ID),
+    ).fetchone()
+    conn.close()
+    assert row["derived_status"] == "done"
+
+
+def test_oi1064_max_gh_calls_cap_holds_across_whole_run(tmp_path, monkeypatch):
+    """The --max-gh-calls cap holds across the whole run after OI-1064.
+
+    The re-derivation + close threading must not add any gh calls beyond the
+    existing step-4b sweep. With max_gh_calls=2 and one candidate needing 3 PR
+    lookups, the candidate is deferred (3 > 2) — no gh calls for it, no
+    re-derivation, no close. The cap governs the whole run, not per phase.
+    """
+    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-cap", phase="queued", pr_ref="#1400,#1401,#1402")
+    for pn in (1400, 1401, 1402):
+        _set_delivery(sd, "T-cap", pn, "complete")
+
+    call_log: list = []
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock(
+            {1400: _merged_pr(1400), 1401: _merged_pr(1401), 1402: _merged_pr(1402)},
+            call_log=call_log,
+        ),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+        max_gh_calls=2,
+    )
+    assert code == 0
+    # 3 PRs needed, cap 2 → deferred. No close, no confirmed.
+    assert summary["counts"]["deferred"] == 1
+    assert summary["counts"]["confirmed"] == 0
+    assert summary["counts"]["closed"] == 0
+
+    # Only the gh auth status call ran; zero pr-view calls (deferred before fetch).
+    pr_view_calls = [c for c in call_log if _is_gh_pr_view(c)]
+    assert len(pr_view_calls) == 0, "OI-1064 threading must not add gh calls"
+    assert _phase(sd, "T-cap") == "queued"  # untouched
+
+
+def test_oi1064_evidence_unions_gh_with_local_in_run_reconcile(tmp_path, monkeypatch):
+    """run_reconcile unions the gh-confirmed numbers with the locally-loaded set.
+
+    Track pr_ref='#1500,#1501'. #1500 has local evidence (pr_merged.ndjson).
+    #1501 is gh-confirmed only. Both are fetched by gh (both MERGED). The
+    injected set is the union {1500, 1501}. Derived 'done' and closes. Pins
+    that local evidence is never discarded when the gh evidence is threaded.
+    """
+    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
+    sd = _build_db(tmp_path)
+    _seed_track(sd, "T-oi1064-union", phase="queued", pr_ref="#1500,#1501")
+    _set_delivery(sd, "T-oi1064-union", 1500, "complete")
+    # Local evidence for #1500 only.
+    _seed_pr_merged_ndjson(sd, 1500)
+
+    monkeypatch.setattr(
+        objective_reconcile.subprocess, "run",
+        _make_gh_mock({1500: _merged_pr(1500), 1501: _merged_pr(1501)}),
+    )
+
+    summary, code = objective_reconcile.run_reconcile(
+        sd, PROJECT_ID, repo_root=tmp_path, apply=True,
+    )
+    assert code == 0
+    assert summary["counts"]["confirmed"] == 1
+    assert summary["counts"]["closed"] == 1
+    assert _phase(sd, "T-oi1064-union") == "done"
+
