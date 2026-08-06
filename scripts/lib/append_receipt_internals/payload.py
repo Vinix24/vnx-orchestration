@@ -112,9 +112,47 @@ def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
 
 
 def resolve_central_data_dir(project_id: str) -> Path:
-    """Module-level wrapper so tests can monkeypatch ``payload_mod.resolve_central_data_dir``."""
+    """Module-level wrapper so tests can monkeypatch ``payload_mod.resolve_central_data_dir``.
+
+    OI-1043: the dual-write mirror must be pinnable. An explicit store pin —
+    ``VNX_STATE_DIR`` (the literal override ``vnx_paths.resolve_paths()``
+    honors) or ``VNX_DATA_DIR_EXPLICIT=1`` + ``VNX_DATA_DIR`` — is a
+    deliberate statement that the store lives THERE, so the mirror's central
+    base resolves through the same pin instead of blindly targeting
+    ``~/.vnx-data/<project_id>``. A receipt writer that cannot be pinned can
+    write to the wrong ledger in production too; before this fix the test
+    suite's pinned appends leaked 684+ lines into the real central ledger
+    through exactly this path. With no pin set, resolution delegates to
+    ``vnx_paths.resolve_central_data_dir`` unchanged (migration dual-write
+    semantics preserved).
+    """
+    state_pin = (os.environ.get("VNX_STATE_DIR") or "").strip()
+    if state_pin:
+        # resolve_paths() convention: VNX_STATE_DIR is <data_dir>/state, so
+        # its parent is the data dir the mirror base is derived from.
+        return Path(state_pin).expanduser().parent
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+        data_pin = (os.environ.get("VNX_DATA_DIR") or "").strip()
+        if data_pin:
+            return Path(data_pin).expanduser()
     from vnx_paths import resolve_central_data_dir as _resolve
     return _resolve(project_id)
+
+
+def _isolation_guard_error_class():
+    """Lazy import: TestIsolationGuardError for except-clauses (keeps the
+    vnx_paths import off the module import path)."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    from vnx_paths import TestIsolationGuardError
+    return TestIsolationGuardError
+
+
+def _refuse_real_store_write_under_pytest(target: Path) -> None:
+    """OI-1043 guard seam: refuse an imminent WRITE into the real central
+    store (~/.vnx-data) while running under pytest. No-op outside pytest."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse
+    _refuse(target)
 
 
 def _pending_mirror_queue_for(receipt_path: Path) -> Path:
@@ -154,10 +192,16 @@ def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: P
     Returns True on a successful central write, False on cutover skip or
     missing project_id, and raises ``OSError`` on I/O failure so the
     pending-mirror queue can retain the record for a later flush.
+
+    OI-1043: raises ``TestIsolationGuardError`` when the resolved central
+    target is the real central store and the process runs under pytest —
+    that is an isolation violation, not retryable mirror debt, and callers
+    must re-raise it rather than queue the record.
     """
     central_receipts = _resolve_central_receipts_path(receipt, primary_path)
     if central_receipts is None:
         return False
+    _refuse_real_store_write_under_pytest(central_receipts)
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dual_writer import append_record_locked
@@ -184,6 +228,8 @@ def _mirror_receipt_to_central(receipt: Dict[str, Any], primary_path: Path) -> N
         return
     try:
         _mirror_receipt_to_central_or_raise(receipt, primary_path)
+    except _isolation_guard_error_class():
+        raise
     except Exception as exc:
         log.warning("payload: central mirror failed for project %r: %s", project_id, exc)
 
@@ -268,12 +314,18 @@ def _drain_pending_mirrors_and_mirror_current(
         for entry in _load_pending_mirrors(queue_path):
             try:
                 _mirror_receipt_to_central_or_raise(entry["receipt"], primary_path)
+            except _isolation_guard_error_class():
+                # OI-1043: a test-isolation violation is not retryable mirror
+                # debt — fail the test, do not queue the record.
+                raise
             except Exception as exc:
                 last_error = exc
                 _keep_pending(entry)
 
         try:
             _mirror_receipt_to_central_or_raise(receipt, primary_path)
+        except _isolation_guard_error_class():
+            raise
         except Exception as exc:
             last_error = exc
             _keep_pending({"idempotency_key": idempotency_key, "receipt": receipt})
@@ -432,6 +484,13 @@ def append_receipt_payload(
     # dedup (IDEMPOTENCY_FIELDS does not include ingested_at).
     _stamp_ingested_at(receipt)
 
+    # OI-1043: fail loud when a test is about to WRITE the primary ledger
+    # straight into the real central store (the #1333 guard did not cover
+    # the receipt append surfaces — the suite leaked 684+ lines through the
+    # mirror, and an explicit receipts_file under ~/.vnx-data wrote through
+    # unguarded). No-op outside pytest.
+    _refuse_real_store_write_under_pytest(receipt_path)
+
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)
 
@@ -466,6 +525,9 @@ def append_receipt_payload(
         # failure (including pending-queue I/O) must never fail the append.
         try:
             _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
+        except _isolation_guard_error_class():
+            # OI-1043: never swallow a test-isolation violation as best-effort.
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning("payload: central mirror drain failed (best-effort, ignoring): %s", exc)
         if not skip_enrichment:

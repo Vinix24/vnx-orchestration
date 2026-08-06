@@ -232,6 +232,11 @@ def ensure_receipt(
             spec.dispatch_id, receipts_file,
         )
     except Exception as exc:  # noqa: BLE001
+        # OI-1043: a test-isolation guard violation is not a best-effort
+        # audit-trail failure — it must fail the test, never be swallowed.
+        from vnx_paths import TestIsolationGuardError  # noqa: PLC0415
+        if isinstance(exc, TestIsolationGuardError):
+            raise
         logger.warning(
             "ensure_receipt: failed to append synthesized receipt for dispatch=%s: %s",
             spec.dispatch_id, exc,
