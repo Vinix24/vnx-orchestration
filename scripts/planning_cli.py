@@ -2080,9 +2080,25 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
         return 1
 
     data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
+
+    # Resolve the panel composition from configs/plan_gate_panel.yaml (falling
+    # back to DEFAULT_PANEL when absent), then filter to --panel-seats for this
+    # single run. Both an invalid config and an unknown seat label fail LOUD
+    # here — a dropped seat reads as an abstention and turns into a REVISE via
+    # the fail-safe rule, so misconfiguration must surface before the panel runs.
+    try:
+        panel = plan_gate_panel.load_panel_seats()
+        if args.panel_seats:
+            requested = [s.strip() for s in args.panel_seats.split(",") if s.strip()]
+            panel = plan_gate_panel.filter_panel_seats(panel, requested)
+    except Exception as exc:
+        print(f"plan-gate run failed: {exc}", file=sys.stderr)
+        return 1
+
     try:
         result = plan_gate_panel.run_panel(
             doc, track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
+            panel=panel,
         )
     except Exception as exc:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
@@ -2558,6 +2574,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_prun)
     p_prun.add_argument("track_id")
     p_prun.add_argument("--doc", required=True, help="path to the plan doc under review")
+    p_prun.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run (subset of the configured panel); "
+             "unknown labels fail loud. Defaults to the full configured panel.",
+    )
     p_prun.set_defaults(func=cmd_plan_gate_run)
 
     p_pstat = pg_sub.add_parser(

@@ -1482,3 +1482,158 @@ def test_claude_lane_report_path_uses_resolved_data_dir_when_none(tmp_path, monk
     assert len(seen_bases) == 1
     assert seen_bases[0] == fake_base
     assert seen_bases[0] is not None
+
+
+# --------------------------------------------------------------------------
+# OI-1057: configurable panel composition (configs/plan_gate_panel.yaml).
+# The composition moved from a code constant to a config file, threaded through
+# planning_cli's plan-gate run -> run_panel. Behaviour-neutral on this PR: the
+# seeded config reproduces DEFAULT_PANEL exactly.
+# --------------------------------------------------------------------------
+
+def _write_config(tmp_path: Path, seats_yaml: str) -> Path:
+    cfg = tmp_path / "plan_gate_panel.yaml"
+    cfg.write_text(seats_yaml, encoding="utf-8")
+    return cfg
+
+
+def test_load_panel_seats_parses_config_reproducing_default_panel(tmp_path):
+    # The shipped config under configs/ must parse to the same seat list as
+    # DEFAULT_PANEL, so the PR is behaviour-neutral by default.
+    repo_root = Path(__file__).resolve().parent.parent
+    shipped = repo_root / "configs" / "plan_gate_panel.yaml"
+    assert shipped.is_file(), "configs/plan_gate_panel.yaml must exist"
+    seats = pgp.load_panel_seats(shipped)
+    assert seats == pgp.DEFAULT_PANEL
+    # every seat carries the three documented keys
+    for s in seats:
+        assert set(s.keys()) == {"label", "provider", "model_arg"}
+
+
+def test_load_panel_seats_absent_file_falls_back_to_default_panel(tmp_path):
+    absent = tmp_path / "does-not-exist.yaml"
+    assert pgp.load_panel_seats(absent) == pgp.DEFAULT_PANEL
+
+
+def test_load_panel_seats_rejects_unknown_provider_with_naming_error(tmp_path):
+    cfg = _write_config(tmp_path, (
+        "version: 1\n"
+        "seats:\n"
+        "  - label: bogus\n"
+        "    provider: not-a-real-provider\n"
+        "    model_arg: whatever\n"
+    ))
+    with pytest.raises(ValueError) as excinfo:
+        pgp.load_panel_seats(cfg)
+    msg = str(excinfo.value)
+    # names the offending seat AND lists the valid providers
+    assert "label='bogus'" in msg or "seat #0" in msg
+    assert "not-a-real-provider" in msg
+    assert "claude" in msg and "glm-harness" in msg  # a couple of valid members
+
+
+def test_load_panel_seats_rejects_missing_key(tmp_path):
+    cfg = _write_config(tmp_path, (
+        "version: 1\n"
+        "seats:\n"
+        "  - label: incomplete\n"
+        "    provider: claude\n"
+    ))
+    with pytest.raises(ValueError, match="missing required key"):
+        pgp.load_panel_seats(cfg)
+
+
+def test_filter_panel_seats_filters_to_requested_labels():
+    seats = pgp.DEFAULT_PANEL
+    filtered = pgp.filter_panel_seats(seats, ["opus", "glm-5.2-harness"])
+    labels = [s["label"] for s in filtered]
+    assert labels == ["opus", "glm-5.2-harness"]  # configured order, not request order
+
+
+def test_filter_panel_seats_rejects_unknown_label_listing_configured():
+    configured = [s["label"] for s in pgp.DEFAULT_PANEL]
+    with pytest.raises(ValueError) as excinfo:
+        pgp.filter_panel_seats(pgp.DEFAULT_PANEL, ["opus", "ghost"])
+    msg = str(excinfo.value)
+    assert "ghost" in msg
+    # lists the configured labels so the operator sees what is available
+    for lbl in configured:
+        assert lbl in msg
+
+
+def test_cmd_plan_gate_run_passes_filtered_panel_to_run_panel(tmp_path, monkeypatch):
+    """--panel-seats filters the configured panel and run_panel receives exactly
+    those seats. Asserts on the dispatcher mock's calls (the seats it was
+    dispatched with), not on a log line."""
+    import argparse
+
+    # An on-disk config that reproduces the default so load_panel_seats is
+    # deterministic and independent of the repo-root file.
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+
+    captured_seats: list = []
+
+    def _tracking_dispatcher(provider, model_arg, instruction, dispatch_id):
+        captured_seats.append({"provider": provider, "model_arg": model_arg})
+        return _make_report_with_fence("pass")
+
+    # Patch run_panel to capture the panel argument it was called with.
+    seen_panels: list = []
+
+    def _fake_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_panels.append(panel)
+        # dispatch each requested seat through the tracker so we also assert
+        # on the dispatcher mock's calls (the seats dispatched), not a log line.
+        for seat in panel:
+            _tracking_dispatcher(seat["provider"], seat["model_arg"], "", "did")
+        return {
+            "track_id": track_id, "project_id": project_id, "decision": "PASS",
+            "summary": {"decision": "PASS", "pass_count": len(panel),
+                        "revise_count": 0, "block_count": 0, "rationale": "ok"},
+            "panelists": [], "doc_truncation": {"truncated": False},
+        }
+
+    monkeypatch.setattr(pgp, "run_panel", _fake_run_panel)
+
+    # Minimal track/DB bootstrap so cmd_plan_gate_run reaches run_panel.
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-seats", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-seats", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats="opus,glm-5.2-harness",
+    )
+    # A PASS resolves the plan blocker; stub the resolver so unblock is honest.
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    rc = planning_cli.cmd_plan_gate_run(args)
+
+    assert rc == 0
+    assert len(seen_panels) == 1
+    dispatched_labels = [s["provider"] for s in captured_seats]
+    # exactly the two requested seats, in configured order
+    assert dispatched_labels == ["claude", "glm-harness"]
+    assert [s["label"] for s in seen_panels[0]] == ["opus", "glm-5.2-harness"]
+
+
+def test_cmd_plan_gate_run_rejects_unknown_panel_seat_label(tmp_path, monkeypatch):
+    """An unknown --panel-seats label fails loud (exit 1) before any panel runs."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    run_called = {"n": 0}
+    monkeypatch.setattr(pgp, "run_panel", lambda *a, **k: run_called.__setitem__("n", run_called["n"] + 1))
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-bad", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-bad", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats="opus,ghost-seat",
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 1
+    assert run_called["n"] == 0  # the panel never ran
