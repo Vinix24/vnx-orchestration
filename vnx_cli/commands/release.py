@@ -67,6 +67,41 @@ def _tag_exists(repo: str, tag: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def _read_tag_version(repo: str, tag: str) -> str:
+    """Read the ``VERSION`` file content from ``repo``'s tag tree.
+
+    Fetches only the file at the tag (no full checkout), so the version-guard
+    check runs before any materialization. Returns the trimmed content.
+    """
+    result = subprocess.run(
+        ["git", "show", f"{tag}:VERSION"],
+        cwd=repo if Path(repo).is_dir() else None,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _strip_leading_v(tag: str) -> str:
+    """Strip a single decorative ``v``/``V`` before a digit (``v1.4.5`` -> ``1.4.5``)."""
+    if len(tag) > 1 and tag[0] in "vV" and tag[1].isdigit():
+        return tag[1:]
+    return tag
+
+
+def _check_version_matches_tag(repo: str, tag: str) -> "tuple[bool, str, str]":
+    """Verify the tag tree's ``VERSION`` matches the tag name.
+
+    Returns ``(ok, tree_version, tag_version)`` where ``tag_version`` is the
+    tag with its leading ``v`` stripped. On mismatch ``ok`` is False and the
+    caller MUST refuse (no escape: a mislabeled release cannot ship).
+    """
+    tree_version = _read_tag_version(repo, tag)
+    tag_version = _strip_leading_v(tag)
+    return (tree_version == tag_version, tree_version, tag_version)
+
+
 def _materialize_from_tag(root: Path, repo: str, tag: str) -> Path:
     """Materialize ``versions/<tag>/`` from ``repo``'s tag via install-central.sh.
 
@@ -148,8 +183,39 @@ def vnx_release_publish(args) -> int:
         print(f"Error: git operation failed: {exc}", file=sys.stderr)
         return 1
 
+    # OI-1070: refuse to publish a tag whose tree VERSION disagrees with the
+    # tag name. A mislabeled release (tree says 1.4.3, tag says v1.4.4) would
+    # otherwise silently ship as the wrong version. No --force escape: this
+    # is exactly the accident the guard exists to prevent. --dry-run performs
+    # the same check and surfaces it, so the mismatch is visible before any
+    # commit to a publish.
+    try:
+        ok, tree_version, tag_version = _check_version_matches_tag(repo, tag)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"Error: cannot read VERSION from tag '{tag}' in {repo}: {exc.stderr.strip() or exc}",
+            file=sys.stderr,
+        )
+        return 1
+    except FileNotFoundError:
+        print("Error: git executable not found in PATH", file=sys.stderr)
+        return 1
+    if not ok:
+        print(
+            f"Error: VERSION mismatch for tag '{tag}': tree VERSION reads "
+            f"'{tree_version}' but tag implies '{tag_version}'. "
+            "Bump VERSION at the repo root and retag before publishing. "
+            "Refusing to ship a mislabeled release.",
+            file=sys.stderr,
+        )
+        return 1
+
     if dry_run:
         print(f"[dry-run] VNX_HOME_ROOT: {root}")
+        print(
+            f"[dry-run] Version guard OK: tag '{tag}' tree VERSION '{tree_version}' "
+            f"== tag '{tag_version}'"
+        )
         print(
             f"[dry-run] Would materialize tag '{tag}' from {repo} -> {target_dir} "
             f"(install-central.sh --version {tag} --materialize-only)"
