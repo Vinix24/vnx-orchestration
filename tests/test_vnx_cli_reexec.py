@@ -260,6 +260,51 @@ def test_fail_open_pinned_dir_missing(central_store, execv_spy, tmp_path, capsys
     assert "WARNING" in capsys.readouterr().err
 
 
+def test_fallback_warning_names_resolved_current_not_label(
+    central_store, execv_spy, tmp_path, capsys
+):
+    """OI-1070: when the pin is not installed, the fallback warning must name the
+    version the ``current`` symlink ACTUALLY resolves to, not a VERSION label.
+
+    Setup: the running engine root is ``versions/v1.3.0`` (VERSION label
+    ``1.3.0``), but ``current`` points at a DIFFERENT install ``versions/v1.4.4``
+    (VERSION label ``1.4.4``). A pin on a non-existent ``v9.9.9`` must report the
+    resolved ``current`` target (``1.4.4``), never the running engine's label
+    (``1.3.0``). RED on the old code: it read the VERSION label of the running
+    engine root and printed ``1.3.0``.
+    """
+    # A second installed version that ``current`` will point at.
+    real_current = _add_version(central_store, "v1.4.4", "1.4.4")
+    # ``current`` symlink resolves to v1.4.4 (different from the running
+    # engine root v1.3.0 whose VERSION label is 1.3.0).
+    store_root = central_store.parent
+    (store_root / "current").symlink_to(real_current)
+
+    _pin(tmp_path, "v9.9.9")
+    _reexec.maybe_reexec_pinned(["--project-dir", str(tmp_path)])
+
+    assert execv_spy == []  # no re-exec: pin not installed, fell open
+    err = capsys.readouterr().err
+    assert "is not installed" in err
+    assert "1.4.4" in err  # the resolved current target, not the label
+    assert "1.3.0" not in err  # the stale running-engine label must NOT appear
+
+
+def test_fallback_warning_unknown_when_no_current_symlink(
+    central_store, execv_spy, tmp_path, capsys
+):
+    """No ``current`` symlink -> the warning names 'unknown', not a label."""
+    _pin(tmp_path, "v9.9.9")
+    _reexec.maybe_reexec_pinned(["--project-dir", str(tmp_path)])
+    assert execv_spy == []
+    err = capsys.readouterr().err
+    assert "is not installed" in err
+    assert "unknown" in err
+    # The running engine's VERSION label (1.3.0) must not be reported as the
+    # "current version" when there is no current symlink to resolve.
+    assert "1.3.0" not in err
+
+
 @pytest.mark.parametrize("bad", ["../evil", "bad;rm", "a b", "v1.2.0/..", ".."])
 def test_fail_open_malformed_pin(central_store, execv_spy, tmp_path, capsys, bad):
     _pin(tmp_path, bad)
