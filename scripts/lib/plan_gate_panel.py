@@ -51,6 +51,20 @@ TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
 _SCRIPTS_DIR = HERE.parent
 PANEL_CONFIG_RELATIVE_PATH = Path("configs") / "plan_gate_panel.yaml"
 
+# OI-1066: the stable, greppable marker dispatch_govern stamps into every body it
+# fabricates itself (a lane that timed out, errored, or never authored a report).
+# Imported rather than re-declared so the panel's detection and the writer's stamp
+# can never drift apart. A report carrying this marker never reached a worker, so
+# it produced no verdict — the seat is "no verdict because the lane never
+# delivered", NOT "the lane answered but its fence wouldn't parse" (parse_error).
+# The import is defensive: in a stripped test context where dispatch_govern is not
+# importable, fall back to the literal so detection still works (the writer and the
+# detector stay in sync in production; the literal here is the same string).
+try:
+    from dispatch_govern import SYNTHESIZED_REPORT_MARKER  # noqa: PLC0415
+except Exception:  # vnx-silent-except: keep the panel importable without govern
+    SYNTHESIZED_REPORT_MARKER = "VNX_SYNTHESIZED_REPORT_BY_GOVERNANCE"
+
 # The three keys every seat declares. Kept as a tuple so the loader and its
 # validation stay in lock-step — a drift here would silently change what counts
 # as a well-formed seat.
@@ -509,6 +523,16 @@ class PanelistResult:
     report_path: str = ""
     dispatched: bool = False         # did the dispatch + report read succeed
     parse_error: bool = False
+    # OI-1066: the lane never produced a verdict at all because it never delivered
+    # — a timeout, a governance-synthesized report, or no report file. This is a
+    # THIRD category, distinct from ``parse_error`` (a REAL report whose verdict
+    # fence wouldn't parse) and from ``not dispatched`` (the dispatch call itself
+    # raised). A no-verdict seat MUST NOT be folded into "abstained" with a
+    # parse_error seat: "abstained" reads as "the lane declined to weigh in",
+    # but a timed-out lane never SAW the plan. The panel must not certify a PASS
+    # on the remaining seats' strength when one seat has no verdict (see
+    # apply_panel_rule).
+    no_verdict: bool = False
     error: str = ""
     raw_text: str = ""               # OI-839: the lane's raw report, kept ONLY on
                                      # parse_error so the unparseable output survives
@@ -535,6 +559,25 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     that is a liveness hole, not safety. The non-scoring lanes are named in the rationale so
     the abstention is transparent, never silent.
 
+    OI-1066: a lane that never produced a verdict AT ALL because it never delivered
+    (``PanelistResult.no_verdict`` — a timeout, a governance-synthesized report, or no
+    report file) is a THIRD category, NOT folded into the abstaining parse_error lanes.
+    "Abstained" reads as "the lane declined to weigh in"; a no-verdict lane never SAW the
+    plan. For an operator judging whether a PASS means anything that is the whole
+    difference, so the rule is:
+
+        PASS requires that NO seat is in the no-verdict category.
+
+    A panel with any no-verdict seat cannot certify a PASS on the remaining seats'
+    strength alone — it returns REVISE (or INFRA_FAIL when every seat is no-verdict /
+    there are zero readable verdicts, so an all-seats-down panel stays an infrastructure
+    outcome and never a content verdict). The reasoning is asymmetric to the
+    2026-06-24 abstain rule on purpose: a model that ANSWERED but malformed its verdict
+    still SAW the plan, so it may legitimately abstain; a lane that timed out did not,
+    so its silence is not an abstention. The no-verdict seats are named in the rationale
+    under their own label (``no-verdict (timeout/no-report)``) so the one-line summary
+    distinguishes them from the abstained seats.
+
     Over the SCORING (readable) lanes only:
     - infra floor: ZERO readable verdicts is NOT a plan judgment — the plan was never
       reviewed. That returns INFRA_FAIL (an infrastructure outcome, distinct from every
@@ -545,31 +588,57 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     - >= 2 REVISE -> REVISE.
     - <= 1 REVISE and no BLOCK, with passes OUTnumbering the dissent -> PASS (the lone dissent
       folds as a tracked note); a tie is safety-first REVISE.
+    - any no-verdict seat -> PASS is forbidden (REVISE, or INFRA_FAIL at zero readable).
     """
     if not results:
         # An empty panel must never fall through to PASS (misconfigured panel=[]).
         return _decision("REVISE", 0, 0, 0, "no panelists ran — empty panel, cannot certify")
-    # NON-SCORING: undispatched or parse_error lanes abstain (do not count toward the verdict).
-    scoring = [r for r in results if r.dispatched and not r.parse_error]
-    non_scoring = [r for r in results if not (r.dispatched and not r.parse_error)]
+    # OI-1066: three categories, not two.
+    #   scoring    — dispatched, no parse error, NOT no-verdict (the verdicts that count)
+    #   no_verdict — the lane never delivered a verdict at all (timeout/synthesized/no file)
+    #   abstained  — a real report whose fence would not parse (the 2026-06-24 non-scoring lane)
+    scoring = [r for r in results if r.dispatched and not r.parse_error and not r.no_verdict]
+    no_verdict = [r for r in results if r.no_verdict]
+    abstained = [
+        r for r in results
+        if not (r.dispatched and not r.parse_error and not r.no_verdict) and not r.no_verdict
+    ]
+    nv_note = (
+        f"; no-verdict (timeout/no-report): {', '.join(r.label for r in no_verdict)}"
+        if no_verdict else ""
+    )
     ns_note = (
-        f"; non-scoring (abstained): {', '.join(r.label for r in non_scoring)}"
-        if non_scoring else ""
+        f"; non-scoring (abstained): {', '.join(r.label for r in abstained)}"
+        if abstained else ""
     )
     block = sum(1 for r in scoring if r.verdict == "block")
     revise = sum(1 for r in scoring if r.verdict == "revise")
     passes = sum(1 for r in scoring if r.verdict == "pass")
 
     if not scoring:
-        # 0 of N readable: every lane failed to dispatch or produced an unreadable
-        # verdict. The plan was NOT reviewed — this is an infrastructure failure,
-        # not a plan verdict, and must never read as "revise the plan and re-run".
+        # 0 of N readable: every lane failed to dispatch, produced an unreadable verdict, or
+        # never delivered at all. The plan was NOT reviewed — this is an infrastructure
+        # failure, not a plan verdict, and must never read as "revise the plan and re-run".
         return _decision(
             "INFRA_FAIL", block, revise, passes,
             f"0 readable verdicts of {len(results)} — no lane produced a verdict, so "
             "the plan was NOT reviewed. This is an infrastructure failure, not a plan "
             "judgment: fix the lanes and re-run the gate"
-            f"{ns_note}",
+            f"{ns_note}{nv_note}",
+        )
+
+    # OI-1066: a panel where any seat produced NO verdict at all cannot certify a PASS
+    # on the strength of the remaining seats alone. This is REVISE (not INFRA_FAIL): at
+    # least one lane DID review the plan, so there is a plan judgment to hand back — but
+    # it cannot be a clean PASS while a seat that should have weighed in never saw the
+    # plan. An operator must re-run so every seat gets the plan.
+    if no_verdict:
+        return _decision(
+            "REVISE", block, revise, passes,
+            f"{len(no_verdict)} seat(s) produced no verdict (timeout/no-report) of "
+            f"{len(results)} — a lane that never saw the plan cannot be folded into a "
+            f"PASS; re-run the gate so every seat delivers"
+            f"{ns_note}{nv_note}",
         )
 
     # Liveness quorum: a multi-member panel must keep >= 2 readable voices to certify, so a
@@ -580,25 +649,25 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
         return _decision(
             "REVISE", block, revise, passes,
             f"only {len(scoring)} readable verdict(s) of {len(results)} — below quorum "
-            f"({required}); cannot certify{ns_note}",
+            f"({required}); cannot certify{ns_note}{nv_note}",
         )
     if block >= 1:
         return _decision(
             "REVISE", block, revise, passes,
-            f"{block} BLOCK verdict(s) — revise the blocking sections, re-run the delta only{ns_note}",
+            f"{block} BLOCK verdict(s) — revise the blocking sections, re-run the delta only{ns_note}{nv_note}",
         )
     if revise >= 2:
         return _decision(
             "REVISE", block, revise, passes,
-            f"{revise} REVISE verdicts — one revise round{ns_note}",
+            f"{revise} REVISE verdicts — one revise round{ns_note}{nv_note}",
         )
     if passes > revise:
         dissent = [r.label for r in scoring if r.verdict != "pass"]
         note = f"folded dissent (tracked): {', '.join(dissent)}" if dissent else "unanimous pass (scoring)"
-        return _decision("PASS", block, revise, passes, note + ns_note)
+        return _decision("PASS", block, revise, passes, note + ns_note + nv_note)
     return _decision(
         "REVISE", block, revise, passes,
-        f"no passing majority — the dissent is not outnumbered{ns_note}",
+        f"no passing majority — the dissent is not outnumbered{ns_note}{nv_note}",
     )
 
 
@@ -850,6 +919,18 @@ def _dispatch_one(
     (``dispatched=False``, ``error`` set); a returned report whose verdict block does not parse
     returns ``parse_error=True``. Both outcomes are RETRYABLE by ``run_panel`` before they fall
     through to the abstain path — a retry that itself errors just degrades to the same abstain.
+
+    OI-1066: a returned report that carries the governance-synthesized marker
+    (``SYNTHESIZED_REPORT_MARKER``) is a NO-VERDICT result — the lane RAN but the
+    governance layer had to fabricate the report itself because the worker never
+    authored one (a timeout, or no report file at all). This is a THIRD category,
+    distinct from ``parse_error`` (a REAL report whose fence would not parse) and
+    from a raised dispatch (``dispatched=False``): a synthesized seat saw the plan
+    dispatched but never got a verdict back, so the seat must not be folded into
+    "abstained" with a parse-flaked seat. A raised dispatch stays ``dispatched=False``
+    (the 2026-06-24 undispatched-lane non-scoring behaviour), and ``parse_error``
+    is left untouched for a real report whose fence would not parse (the 2026-06-24
+    fail-safe stays exactly as-is). All three non-scoring flavors are retryable.
     """
     try:
         report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
@@ -858,6 +939,20 @@ def _dispatch_one(
             label=member["label"], provider=member["provider"],
             model=member.get("model_arg", ""),
             dispatched=False, error=str(exc), report_path=dispatch_id,
+        )
+    # OI-1066: detect the synthesized marker BEFORE parse_verdict. A fabricated
+    # body has no verdict fence, so parse_verdict would otherwise return its
+    # parse_error fail-safe and the seat would read as "answered but malformed" —
+    # the very conflation this fix separates. The marker is the writer's own
+    # machine-readable stamp, so an exact substring match is both sufficient and
+    # stable (prose wording drifts; the marker does not).
+    if SYNTHESIZED_REPORT_MARKER in (report_text or ""):
+        return PanelistResult(
+            label=member["label"], provider=member["provider"],
+            model=member.get("model_arg", ""),
+            verdict="revise", rationale="lane produced no verdict (synthesized report)",
+            dispatched=True, parse_error=False, no_verdict=True,
+            report_path=dispatch_id,
         )
     parsed = parse_verdict(report_text)
     # OI-839: on parse_error the raw lane output is the ONLY diagnostic that tells
@@ -919,9 +1014,10 @@ def _emit_seat_records(
     Best-effort and non-raising: seat persistence must never break the gate it
     hangs off (same contract as ``plan_gate_evidence.emit_plan_gate_pass``). Each
     record carries the panelist id, model, the effective verdict (``abstain`` for
-    a non-scoring lane), and whether a report was returned at all — the durable
-    per-seat signal the effectiveness probe reads. Previously nothing survived
-    beyond the single resolved ``plan_gate_pass`` record (OI-888).
+    a non-scoring lane, ``no-verdict`` for a lane that never delivered — OI-1066),
+    and whether a report was returned at all — the durable per-seat signal the
+    effectiveness probe reads. Previously nothing survived beyond the single
+    resolved ``plan_gate_pass`` record (OI-888).
     """
     if not seat_ledger_path or not results:
         return
@@ -929,11 +1025,18 @@ def _emit_seat_records(
         from ndjson_hash_chain import append_chained_entry  # noqa: PLC0415
         now = datetime.now(timezone.utc).isoformat()
         for result in results:
-            effective_verdict = (
-                result.verdict
-                if (result.dispatched and not result.parse_error)
-                else "abstain"
-            )
+            # OI-1066: a no-verdict seat (lane timed out / synthesized / no file)
+            # records its OWN effective verdict, distinct from ``abstain`` — so
+            # historical analysis can separate "the model abstained" (it answered
+            # but its fence would not parse) from "the lane was down" (it never
+            # delivered). A scoring seat records its real verdict; a parse_error
+            # seat records ``abstain`` (unchanged 2026-06-24 behaviour).
+            if result.no_verdict:
+                effective_verdict = "no-verdict"
+            elif result.dispatched and not result.parse_error:
+                effective_verdict = result.verdict
+            else:
+                effective_verdict = "abstain"
             record = {
                 "type": SEAT_RECORD_TYPE,
                 "track_id": track_id,
@@ -943,6 +1046,7 @@ def _emit_seat_records(
                 "verdict": effective_verdict,
                 "responded": result.dispatched,
                 "parse_error": result.parse_error,
+                "no_verdict": result.no_verdict,
                 "run_at": now,
             }
             # OI-839: carry the raw lane output on parse-error records so the
@@ -994,7 +1098,12 @@ def run_panel(
         for _ in range(retries + 1):
             did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
             result = _dispatch_one(dispatcher, member, instruction, did)
-            if result.dispatched and not result.parse_error:
+            # A SCORING verdict: dispatched, no parse error, and NOT a no-verdict
+            # synthesized report. OI-1066: a no-verdict seat (lane timed out /
+            # governance-synthesized) is retryable too — the lane may deliver on
+            # a fresh dispatch id — so the retry continues past it just as it
+            # continues past a parse_error or a raised dispatch.
+            if result.dispatched and not result.parse_error and not result.no_verdict:
                 break  # readable verdict — no retry needed
         results.append(result)
 

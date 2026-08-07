@@ -16,6 +16,7 @@ sys.path.insert(0, str(_SCRIPTS / "lib"))
 sys.path.insert(0, str(_SCRIPTS))
 
 from dispatch_govern import (
+    SYNTHESIZED_REPORT_MARKER,
     GovernRaw,
     GovernSpec,
     GovernedOutcome,
@@ -636,6 +637,103 @@ def test_synthesize_fallback_when_no_commit(tmp_data, tmp_state):
         body = _synthesize(spec, raw)
 
     assert "No commit on branch" in body or "synthesized" in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# OI-1066: every body the governance layer fabricates itself must carry the
+# stable, greppable SYNTHESIZED_REPORT_MARKER so the plan-gate panel can detect
+# "the lane never delivered a verdict" by exact-match — not by string-matching
+# prose that drifts. One marker constant, exported; four writing sites.
+# ---------------------------------------------------------------------------
+
+def test_synthesize_with_commit_message_stamps_marker(tmp_data, tmp_state):
+    """The commit-message branch of _git_summary (line ~793) stamps the marker."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: implement feature\n\nWorker status: done. Body synthesized by governance layer (no worker report file)."), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        body = _synthesize(spec, raw)
+
+    assert SYNTHESIZED_REPORT_MARKER in body, (
+        f"commit-message synthesis branch missing the marker — the panel cannot "
+        f"detect a timed-out lane by exact-match. body: {body[:400]}"
+    )
+
+
+def test_synthesize_no_commit_fallback_stamps_marker(tmp_data, tmp_state):
+    """The no-commit fallback branch of _git_summary (line ~797) also stamps the marker."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=10.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit on branch; worker emitted status=timeout. Body synthesized by lane (no worker report)."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        body = _synthesize(spec, raw)
+
+    assert SYNTHESIZED_REPORT_MARKER in body, (
+        f"no-commit fallback branch missing the marker. body: {body[:400]}"
+    )
+
+
+def test_synthesize_body_header_and_open_items_carry_marker(tmp_data, tmp_state):
+    """The synthesized body header AND the Open Items/Verification prose carry the marker
+    so detection works regardless of which slice the panel greps."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary", return_value="feat: implement feature"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        body = _synthesize(spec, raw)
+
+    # The body header line stamps the marker (the most reliable single site).
+    assert f"- {SYNTHESIZED_REPORT_MARKER}" in body
+
+
+def test_govern_error_fallback_stamps_marker(tmp_data, tmp_state):
+    """The error-handler synthesized body (line ~411) carries the marker too — a
+    govern() internal error is another flavor of 'the lane never delivered'."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._govern_impl", side_effect=RuntimeError("simulated failure")):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "synthesized"
+    assert outcome.report_path is not None and outcome.report_path.exists()
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert SYNTHESIZED_REPORT_MARKER in content, (
+        f"error-handler synthesis missing the marker — a govern error is a no-verdict "
+        f"outcome the panel must also detect. content: {content[:400]}"
+    )
+
+
+def test_govern_timeout_path_stamps_marker(tmp_data, tmp_state, monkeypatch):
+    """End-to-end through govern(): a timeout (receipt=None) produces a synthesized
+    report carrying the marker — the real-world symptom OI-1066 traces."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit; timeout. Body synthesized by governance layer (no worker report)."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "synthesized"
+    assert outcome.report_path is not None and outcome.report_path.exists()
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert SYNTHESIZED_REPORT_MARKER in content
+
+
+def test_synthesized_marker_is_stable_token_not_prose():
+    """The marker is a single, uppercase, dotted token that survives copy-paste and
+    JSON embedding — it must not read as prose and must not contain spaces."""
+    assert " " not in SYNTHESIZED_REPORT_MARKER
+    assert SYNTHESIZED_REPORT_MARKER.isascii()
+    # Greppable as a whole word from a shell.
+    assert SYNTHESIZED_REPORT_MARKER.count("\n") == 0
 
 
 # ---------------------------------------------------------------------------

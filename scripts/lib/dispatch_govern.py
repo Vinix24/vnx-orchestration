@@ -52,6 +52,22 @@ from dispatch_identity import _IDENTITY_UNRESOLVED
 # The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
 _PLAN_REVIEWER_ROLE = "plan-reviewer"
 
+# OI-1066: stable, greppable marker stamped into EVERY body this module fabricates
+# itself (the governance layer writing the report file because the lane timed out,
+# errored, or simply never authored one). Prose wording drifts over time; this
+# constant does not. A consumer (the plan-gate panel) detects it by exact-match
+# to classify the seat as "no verdict because the lane never delivered" — a
+# category distinct from "the lane answered but its verdict fence wouldn't parse"
+# (parse_error). The marker is intentionally a plain, uppercase, dotted token so
+# it survives copy-paste, survives a JSON-ish embedding, and is cheap to grep:
+#
+#   grep -rn SYNTHESIZED_REPORT_BY_GOVERNANCE scripts/   # find the writing sites
+#   grep -rn VNX_SYNTHESIZED_REPORT         .vnx-data/  # find fabricated reports
+#
+# Exported so the panel imports THIS constant instead of re-declaring the
+# literal and drifting away from the writer.
+SYNTHESIZED_REPORT_MARKER = "VNX_SYNTHESIZED_REPORT_BY_GOVERNANCE"
+
 # Roles whose worker output is a free-form review/analysis, never a standard
 # ## Changes / ## Verification report — govern() must not run the report-body contract
 # over these, nor synthesize over an authored body (synthesis summarizes a git diff;
@@ -405,7 +421,8 @@ def _govern_error_fallback(
     error_body = (
         f"# Dispatch {dispatch_id}\n\n"
         f"- Lane: {lane}\n"
-        f"- contract_status: synthesized\n\n"
+        f"- contract_status: synthesized\n"
+        f"- {SYNTHESIZED_REPORT_MARKER}\n\n"
         f"## Summary\n\n"
         f"Governance error during dispatch close-out. "
         f"Report synthesized by error handler. Error: {exc}\n\n"
@@ -711,18 +728,23 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
 
     # -- ## Verification ------------------------------------------------------
     verification = (
-        "None — interactive lane (tmux-spawn). "
-        "Report synthesized by governance layer; worker did not author a report file."
+        f"None — interactive lane (tmux-spawn). "
+        f"Report synthesized by governance layer; worker did not author a report file. "
+        f"[{SYNTHESIZED_REPORT_MARKER}]"
     )
 
     # -- ## Open Items --------------------------------------------------------
-    open_items = f"Report synthesized by tmux lane; worker did not author unified_reports/{dispatch_id}.md."
+    open_items = (
+        f"Report synthesized by tmux lane; worker did not author "
+        f"unified_reports/{dispatch_id}.md. [{SYNTHESIZED_REPORT_MARKER}]"
+    )
 
     body = (
         f"# Dispatch {dispatch_id}\n\n"
         f"- Lane: tmux_interactive\n"
         f"- Status: {status}\n"
-        f"- contract_status: synthesized\n\n"
+        f"- contract_status: synthesized\n"
+        f"- {SYNTHESIZED_REPORT_MARKER}\n\n"
         f"## Summary\n\n{summary}\n\n"
         f"## Changes\n\n{changes}\n\n"
         f"## Verification\n\n{verification}\n\n"
@@ -790,11 +812,14 @@ def _git_summary(spec: GovernSpec, status: str) -> str:
         msg = None
 
     if msg:
-        return f"{msg}\n\nWorker status: {status}. Body synthesized by governance layer (no worker report file)."
+        return (
+            f"{msg}\n\nWorker status: {status}. Body synthesized by governance layer "
+            f"(no worker report file). [{SYNTHESIZED_REPORT_MARKER}]"
+        )
 
     return (
         f"No commit on branch; worker emitted status={status}. "
-        "Body synthesized by lane (no worker report)."
+        f"Body synthesized by lane (no worker report). [{SYNTHESIZED_REPORT_MARKER}]"
     )
 
 
