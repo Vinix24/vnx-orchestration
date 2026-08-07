@@ -312,27 +312,96 @@ def _check_state_root_location(data_root: Path) -> Check:
 
 
 def _check_dual_install(project_dir: Path) -> Check:
-    """Fail if both embedded and central installs are present with a scripts/ tree."""
+    """Fail only on a genuine dual install: two DISTINCT real install trees.
+
+    In a correctly configured central-mode consumer, ``.claude/vnx-system`` is a
+    symlink into the central store (``~/.vnx-system/current`` -> a version dir).
+    ``Path.is_dir()`` follows the symlink, so a naive "both have scripts/" test
+    sees the SAME tree twice and reports a conflict that does not exist — and
+    then advises a destructive repair that would delete the very symlink that
+    makes central mode work (OI-1075).
+
+    Resolution is the fix: resolve both sides to real paths and compare. A real
+    embedded copy (a directory that is NOT a symlink into the central store,
+    carrying its own ``scripts/``) still resolves to a distinct directory and
+    still FAILs with the existing, correct advice.
+    """
     embedded_path = project_dir / ".claude" / "vnx-system"
     central_path = Path.home() / ".vnx-system" / "current"
 
     embedded_active = (embedded_path / "scripts").is_dir()
     central_active = (central_path / "scripts").is_dir()
 
-    if embedded_active and central_active:
+    if not embedded_active:
+        # No embedded scripts/ tree is reachable. Distinguish a genuinely absent
+        # embedded path from a dangling symlink so the operator gets a useful
+        # verdict either way; neither is a dual-install conflict.
+        if embedded_path.is_symlink() and not embedded_path.exists():
+            resolved = embedded_path.resolve(strict=False)
+            return Check(
+                name="install:dual",
+                status=WARN,
+                detail=(
+                    f"embedded symlink {embedded_path} is dangling "
+                    f"(target {resolved} missing) — not a dual install conflict, "
+                    "but central mode is broken until the link is repaired"
+                ),
+            )
+        return Check(
+            name="install:dual",
+            status=PASS,
+            detail="no dual install conflict",
+        )
+
+    if not central_active:
+        return Check(
+            name="install:dual",
+            status=PASS,
+            detail="no dual install conflict",
+        )
+
+    # Both sides have a reachable scripts/ tree. The embedded path may be a
+    # symlink into the central store (the intended central-mode arrangement) or
+    # a real second install. Resolve both to real directories and compare.
+    try:
+        embedded_resolved = embedded_path.resolve(strict=False)
+        central_resolved = central_path.resolve(strict=False)
+    except OSError as exc:
+        # Pathological resolution failure — surface it rather than silently
+        # passing; resolution is the basis of the comparison.
         return Check(
             name="install:dual",
             status=FAIL,
             detail=(
-                f"dual install conflict: embedded at {embedded_path} "
-                f"AND central at {central_path} — "
-                "remove embedded install before using central mode"
+                f"dual install conflict: could not resolve paths to compare ({exc}) "
+                f"— embedded at {embedded_path}, central at {central_path}"
             ),
         )
+
+    if embedded_resolved == central_resolved:
+        # The embedded path is a symlink (directly or transitively) into the
+        # central store — that IS the intended central-mode arrangement, not a
+        # conflict. Name the resolved version dir for the operator.
+        return Check(
+            name="install:dual",
+            status=PASS,
+            detail=(
+                f"embedded symlink into central store: {embedded_resolved.name} "
+                f"({embedded_resolved})"
+            ),
+        )
+
+    # Genuinely distinct installs: a real embedded directory with its own
+    # scripts/, or a symlink pointing outside the central store entirely.
     return Check(
         name="install:dual",
-        status=PASS,
-        detail="no dual install conflict",
+        status=FAIL,
+        detail=(
+            f"dual install conflict: embedded at {embedded_path} "
+            f"(resolves to {embedded_resolved}) AND central at {central_path} "
+            f"(resolves to {central_resolved}) — "
+            "remove embedded install before using central mode"
+        ),
     )
 
 
