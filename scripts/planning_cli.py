@@ -2451,7 +2451,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reconcile.add_argument(
         "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
         metavar="N",
-        help="cap live gh pr view calls per run (default 50; excess → deferred)",
+        help="cap live gh pr view calls per run (default 50; excess → deferred). "
+             "Bounds ONLY gh pr view calls — other git calls (the single batched "
+             "ls-remote dispatch-branch probe, OI-1078) are not counted",
     )
     p_reconcile.add_argument(
         "--repo-root", default="", dest="repo_root",

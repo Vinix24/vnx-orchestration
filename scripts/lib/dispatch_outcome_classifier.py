@@ -411,23 +411,86 @@ def _is_active_or_orphaned(data_dir: Path, dispatch_id: str) -> bool:
     return (data_dir / "dispatches" / "active" / dispatch_id / "manifest.json").is_file()
 
 
-def _origin_branch_has_commits(repo_root: Optional[Path], dispatch_id: str) -> bool:
+# Sentinel for the run-scoped branch batch (OI-1078): distinguishes "no
+# batch supplied — single-dispatch caller, fetch on demand" from "the batch
+# ran and FAILED" (None). A failed batch and a successful-but-empty batch are
+# two different states that would otherwise both look like an empty set.
+_BATCH_NOT_PROVIDED = object()
+
+
+def _fetch_remote_dispatch_branches(repo_root: Optional[Path]) -> Optional[FrozenSet[str]]:
+    """Fetch every ``origin/dispatch/*`` branch in ONE batched ls-remote.
+
+    OI-1078: the salvage-branch check used to spawn one ``git ls-remote``
+    (one network round-trip, ~0.53s measured) per dispatch-id. With 5571
+    dispatch-ids in ``dispatch_outcomes`` that is 30–50 minutes of strictly
+    sequential network calls per reconcile run. One refspec-patterned call
+    (``git ls-remote --heads origin 'refs/heads/dispatch/*'``) returns all of
+    them at once (~0.4s measured on this repo, 2026-08-07); afterwards each
+    per-dispatch check is a set-membership test.
+
+    Returns the dispatch-id set on success — an EMPTY frozenset is a valid,
+    meaningful result (origin genuinely has no dispatch branches). Returns
+    None on ANY git/subprocess failure: the fail-safe direction of
+    :func:`_origin_branch_has_commits` (a salvage check that can't run must
+    not claim salvage exists) maps failure to False for every id, and the
+    warning logged here keeps a failed batch observable instead of silently
+    indistinguishable from a successful empty result.
+    """
+    if repo_root is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-remote", "--heads", "origin",
+             "refs/heads/dispatch/*"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning(
+            "dispatch_outcome_classifier: batched ls-remote failed (%s); "
+            "treating every dispatch-id as having no origin branch", exc,
+        )
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "dispatch_outcome_classifier: batched ls-remote exited %d (%s); "
+            "treating every dispatch-id as having no origin branch",
+            result.returncode, (result.stderr or "").strip(),
+        )
+        return None
+    prefix = "refs/heads/dispatch/"
+    ids = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].startswith(prefix):
+            ids.add(parts[1][len(prefix):])
+    return frozenset(ids)
+
+
+def _origin_branch_has_commits(
+    repo_root: Optional[Path],
+    dispatch_id: str,
+    remote_branches: Any = _BATCH_NOT_PROVIDED,
+) -> bool:
     """True iff ``origin/dispatch/<id>`` exists — the salvage-branch naming
     convention ``tmux_worktree.py`` uses (``f"dispatch/{dispatch_id}"``).
     Best-effort: any git/subprocess failure yields False (fail-safe — a
-    salvage check that can't run must not claim salvage exists)."""
-    if repo_root is None:
-        return False
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-remote", "origin", f"dispatch/{dispatch_id}"],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return False
-    if result.returncode != 0:
-        return False
-    return bool(result.stdout.strip())
+    salvage check that can't run must not claim salvage exists).
+
+    ``remote_branches``: run-scoped batch result from
+    :func:`_fetch_remote_dispatch_branches` (OI-1078). The bulk reconciler
+    fetches it ONCE per run and shares it across every per-dispatch check, so
+    N dispatch-ids cost one network call, not N. None means the batch FAILED
+    (or there is no repo) — fail-safe False for every id; an empty frozenset
+    means the batch succeeded and origin has no dispatch branches at all.
+    When omitted (single-dispatch callers), the batch is fetched on demand —
+    same one-call cost as the old per-dispatch probe.
+    """
+    if remote_branches is _BATCH_NOT_PROVIDED:
+        if repo_root is None:
+            return False
+        remote_branches = _fetch_remote_dispatch_branches(repo_root)
+    return remote_branches is not None and dispatch_id in remote_branches
 
 
 def _load_dispatch_row(
@@ -559,6 +622,7 @@ def load_evidence(
     now: Optional[datetime] = None,
     receipts_index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     merged_pr_numbers: Optional[FrozenSet[int]] = None,
+    remote_dispatch_branches: Any = _BATCH_NOT_PROVIDED,
 ) -> DispatchOutcomeEvidence:
     """Load all raw evidence for one dispatch. I/O; never raises.
 
@@ -567,6 +631,10 @@ def load_evidence(
     the receipts file / re-resolving merged PRs per dispatch — the "bounded
     evidence load" the design requires. When omitted, loaded fresh (a single-
     dispatch call is still bounded to one file read / one merged-PR scan).
+
+    ``remote_dispatch_branches``: the bulk pass's one batched ls-remote
+    result (OI-1078) — pass it to keep the branch check a set-lookup. When
+    omitted, the branch check fetches the batch on demand for this dispatch.
     """
     now = now or datetime.now(timezone.utc)
     evidence = DispatchOutcomeEvidence(dispatch_id=dispatch_id, project_id=project_id)
@@ -634,7 +702,15 @@ def load_evidence(
     evidence.terminal_receipt_failure_reason = failure_reason
 
     evidence.is_active_or_orphaned = _is_active_or_orphaned(data_dir, dispatch_id)
-    evidence.origin_branch_has_commits = _origin_branch_has_commits(repo_root, dispatch_id)
+    # Conditional call (not an unconditional keyword pass-through) so existing
+    # two-argument monkeypatches of _origin_branch_has_commits keep working
+    # when no run-scoped batch was supplied.
+    if remote_dispatch_branches is _BATCH_NOT_PROVIDED:
+        evidence.origin_branch_has_commits = _origin_branch_has_commits(repo_root, dispatch_id)
+    else:
+        evidence.origin_branch_has_commits = _origin_branch_has_commits(
+            repo_root, dispatch_id, remote_branches=remote_dispatch_branches,
+        )
 
     return evidence
 
@@ -817,6 +893,12 @@ def reconcile_all_dispatch_outcomes(
 
     merged_pr_numbers = _load_merged_pr_numbers(state_dir, repo_root)
 
+    # OI-1078: ONE batched ls-remote for the whole run instead of one
+    # network round-trip per dispatch-id (measured ~0.53s/call; 5571 ids
+    # would otherwise take 30-50 minutes). None = batch failed or no repo —
+    # fail-safe False for every dispatch-id (warning logged by the fetch).
+    remote_dispatch_branches = _fetch_remote_dispatch_branches(repo_root)
+
     qi_db = state_dir / QI_DB_FILENAME
     qi_conn: Optional[sqlite3.Connection] = None
     if qi_db.exists():
@@ -833,6 +915,7 @@ def reconcile_all_dispatch_outcomes(
                 state_dir, data_dir, project_id, dispatch_id,
                 repo_root=repo_root, now=now,
                 receipts_index=receipts_index, merged_pr_numbers=merged_pr_numbers,
+                remote_dispatch_branches=remote_dispatch_branches,
             )
             outcome = classify_outcome(evidence)
             entry: Dict[str, Any] = {
