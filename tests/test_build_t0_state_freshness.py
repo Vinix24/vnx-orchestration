@@ -9,7 +9,10 @@ hot-path advisory reconcile that keeps the t0_state projection fresh:
 - the compact index summary mirrors the full marker
 - autoclose_degraded is read from reconcile_summary.json (true when gh is
   absent, false for a healthy summary, true when the summary is missing)
-- the SessionStart hook command is valid bash, de-swallows stderr, keeps exit 0
+- the SessionStart hook command is valid bash, surfaces a failed build
+  visibly on the session's own stderr while keeping a non-blocking exit 0
+  (OI-1073: the hook ships as an install artefact and no longer swallows
+  failures into a 0-byte log nobody opens)
 """
 
 from __future__ import annotations
@@ -376,6 +379,8 @@ def test_autoclose_degraded_when_counts_malformed(tmp_path):
 
 # ---------------------------------------------------------------------------
 # SessionStart hook command (F5: a quoting bug here breaks every session start)
+# OI-1073: the hook ships as an INSTALL ARTEFACT (engine-relative), surfaces a
+# failed build visibly, and stays non-blocking.
 # ---------------------------------------------------------------------------
 
 def _t0_sessionstart_command() -> str:
@@ -399,7 +404,7 @@ def _t0_sessionstart_wrapper() -> str:
     raise AssertionError("T0 SessionStart hook not found")
 
 
-def test_sessionstart_hook_is_valid_bash_and_de_swallows():
+def test_sessionstart_hook_is_valid_bash_and_visible_failure():
     cmd = _t0_sessionstart_command()
     # 1) the whole command tokenizes (no unbalanced quotes)
     shlex.split(cmd)
@@ -412,16 +417,31 @@ def test_sessionstart_hook_is_valid_bash_and_de_swallows():
     wrapper = _t0_sessionstart_wrapper()
     rc = subprocess.run(["bash", "-n", "-c", wrapper], capture_output=True, text=True)
     assert rc.returncode == 0, f"wrapper is not valid bash: {rc.stderr}"
-    # 4) the BUILDER's stderr is captured to a log (not /dev/null), the output
-    #    lands in the CENTRAL store via the resolved $STATE (not the repo-local
-    #    .vnx-data split-brain, OI-859), an explicit interpreter is used, and
-    #    the hook never blocks.
+    # 4) the builder is resolved through the INSTALLED ENGINE via BASH_SOURCE
+    #    (HOOK_DIR/../.. -> ENGINE_ROOT), never through a repo-relative
+    #    $PROJECT_ROOT/scripts path that is absent in a pip consumer (OI-1073
+    #    defect 1). The output lands in the CENTRAL store via the resolved
+    #    $STATE (not the repo-local .vnx-data split-brain, OI-859), an explicit
+    #    interpreter is used, and the hook never blocks (exit 0).
+    assert "BASH_SOURCE" in wrapper, "hook must resolve the engine via BASH_SOURCE, not a hardcoded path"
+    assert "$ENGINE_ROOT/scripts/build_t0_state.py" in wrapper
+    assert "ENGINE_ROOT" in wrapper and '"$ROOT/scripts/' not in wrapper
     assert 'build_t0_state.py" --output "$STATE/t0_state.json"' in wrapper
     assert '"$ROOT/.vnx-data/state/t0_state.json"' not in wrapper
-    assert '2>"$LOG/build_t0_state.err"' in wrapper
-    assert "build_t0_state.err" in wrapper
-    assert "exit 0" in wrapper
+    assert "build_t0_state.err" in wrapper, "builder stderr must go to the central log, not /dev/null"
+    assert "exit 0" in wrapper, "a broken state file must never block a session (non-fatal)"
     assert ".venv/bin/python" in wrapper or "python3.12" in wrapper
+    # 5) OI-1073 defect 2: a FAILED build is VISIBLE, not swallowed. The hook
+    #    surfaces the failure to its own stderr (the mechanism the harness
+    #    surfaces on the session that fired it), not only into a 0-byte log
+    #    nobody opens. The old hook did `exit 0` UNCONDITIONALLY with no signal.
+    assert "build_t0_state_hook FAILED" in wrapper, (
+        "hook must surface a failed build visibly (OI-1073 defect 2), not swallow it"
+    )
+    assert ">&2" in wrapper, "failure message must go to the hook's own stderr"
+    # The conditional: the failure line is only printed when BUILD_RC != 0,
+    # so the hook does not noise up a healthy session.
+    assert "BUILD_RC" in wrapper
 
 
 # ---------------------------------------------------------------------------

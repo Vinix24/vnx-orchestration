@@ -286,6 +286,77 @@ def compute_staleness_seconds(
         return 0.0
 
 
+def describe_freshness(
+    state: Optional[Dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> str:
+    """Human-readable age of a t0_state snapshot (OI-1073 defect 3).
+
+    The projection carries its own build timestamp in ``generated_at`` (an
+    ISO-8601 UTC string written at build time). A reader built on a file
+    nobody writes is the actual complaint: this helper turns that timestamp
+    into a self-evident age string so "nobody wrote this since June" is
+    impossible to miss. ``None`` / a dict with no ``generated_at`` reports
+    "never built" rather than a misleading "0 seconds".
+
+    Returns one of:
+      - "never built"          — state is None or lacks a generated_at stamp
+      - "built <human age> ago" — e.g. "built 5 minutes ago", "built 3 days ago"
+      - "built just now"        — under 2 seconds old
+      - "built (age unknown)"   — generated_at present but unparseable
+
+    ``state`` is a full t0_state.json dict or the lighter t0_index.json dict
+    (both carry generated_at/timestamp); callers that only have a path should
+    load it first (see ``state_freshness_for_file``).
+    """
+    if not isinstance(state, dict):
+        return "never built"
+    ts_raw = str(state.get("generated_at") or state.get("timestamp") or "").strip()
+    if not ts_raw:
+        return "never built"
+    try:
+        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError, TypeError):
+        return "built (age unknown)"
+    actual_now = now if now is not None else _now_utc()
+    seconds = max(0.0, (actual_now - ts).total_seconds())
+    return f"built {_humanize_age(seconds)} ago"
+
+
+def _humanize_age(seconds: float) -> str:
+    """Render a duration in seconds as a short human-readable age."""
+    s = int(seconds)
+    if s < 2:
+        return "just now"
+    if s < 60:
+        return f"{s} seconds"
+    if s < 3600:
+        return f"{s // 60} minute{'s' if s // 60 != 1 else ''}"
+    if s < 86400:
+        return f"{s // 3600} hour{'s' if s // 3600 != 1 else ''}"
+    days = s // 86400
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+def state_freshness_for_file(
+    path: Path,
+    now: Optional[datetime] = None,
+) -> str:
+    """Read a t0_state.json / t0_index.json file and return its freshness.
+
+    Returns "never built" when the file is absent (the real complaint behind
+    OI-1073: a reader on a file nobody writes). A malformed file reports
+    "built (age unknown)" rather than raising — freshness is advisory.
+    """
+    try:
+        data = _safe_json(path)
+    except (OSError, json.JSONDecodeError):
+        return "built (age unknown)" if path.exists() else "never built"
+    return describe_freshness(data, now=now)
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Schema init (absorbed from runtime_coordination_init.py)
 # ---------------------------------------------------------------------------

@@ -51,6 +51,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "terminals/T0",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"{{ engine_root }}/scripts/hooks/build_t0_state_hook.sh\"'"
+          }
+        ]
+      }
     ]
   }
 }
