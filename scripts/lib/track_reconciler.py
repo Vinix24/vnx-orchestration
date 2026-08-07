@@ -401,9 +401,20 @@ def reconcile_track(
     Raises RuntimeError if derived_status column is absent (migration 0028
     must be applied first).
 
-    _merged_pr_numbers: internal kwarg — pre-loaded merged PR set. When None,
-    _load_merged_pr_numbers(state_dir) is called. Pass a pre-loaded set when
-    calling from reconcile_all_tracks to avoid per-track file I/O.
+    _merged_pr_numbers: pre-established merged-PR set. Serves TWO purposes:
+      (1) I/O optimisation — reconcile_all_tracks loads the local set once and
+          passes it to avoid per-track file I/O.
+      (2) Evidence-injection point (OI-1064) — a caller that has ALREADY
+          established merge state by other means (e.g. run_reconcile's live
+          ``gh pr view`` sweep) MUST pass the UNION of its gh-confirmed numbers
+          and the locally-loaded set here. Otherwise reconcile_track falls back
+          to _load_merged_pr_numbers, whose gh source (source 4) is opt-in
+          behind VNX_RECONCILE_GIT and OFF by default — so a track the caller
+          just confirmed merged via gh would re-derive as 'queued' from the
+          weaker local sources, and no close path could close it. The caller
+          performs the union (gh evidence is additive: it never replaces local
+          NDJSON/ROADMAP evidence, only adds what a bare ``gh pr merge`` never
+          wrote locally).
     repo_root: optional project repo root for the ROADMAP.yaml (Source-3)
     evidence path; falls back to the CWD git-root then the legacy layout.
     """
@@ -414,6 +425,12 @@ def reconcile_track(
                 "tracks.derived_status column absent; apply migration 0028 first."
             )
 
+        # OI-1064: _merged_pr_numbers is the evidence-injection point. A caller
+        # that already established merge state (gh sweep in run_reconcile) MUST
+        # pass the union of its gh-confirmed numbers and the locally-loaded set
+        # here — run_reconcile performs that union once so both the bulk pass
+        # and the close path see the same complete evidence. When None, the full
+        # local set is loaded here (the pre-OI-1064 behaviour).
         merged = (
             _merged_pr_numbers
             if _merged_pr_numbers is not None
