@@ -1157,17 +1157,35 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     if attest_reason is not None:
         return _close_with_attest(args, state_dir, track_id, project_id, attest_reason, repo_root)
 
+    # OI-1071: gather the same gh-confirmed merge evidence run_reconcile builds
+    # and thread it into every derivation step below, so a track whose PRs
+    # merged via a bare ``gh pr merge`` (no local pr_merged receipt) derives
+    # 'done' via the verb WITHOUT VNX_RECONCILE_GIT. Without this, the dry-run
+    # peek / --apply reconcile / close_track_if_done all fall back to the
+    # local-only set and re-derive 'queued', refusing the close. The helper
+    # bounds live gh calls by --max-gh-calls and reuses the per-PR cache, and
+    # degrades honestly (consulted_gh=False) when gh is unreachable.
+    max_gh_calls = int(getattr(args, "max_gh_calls", 50))
+    close_evidence = objective_reconcile.gather_close_evidence(
+        state_dir, project_id, track_id,
+        repo_root=repo_root, max_gh_calls=max_gh_calls,
+    )
+    evidence_merged_pr_numbers = close_evidence["merged_pr_numbers"]
+
     try:
         # Dry-run is READ-ONLY: peek computes derived_status without persisting.
         # --apply reconciles fresh (and persists derived_status) right before the
-        # write, so the transition acts on current state.
+        # write, so the transition acts on current state. Both paths receive the
+        # gathered evidence set so the derivation matches what the close path sees.
         if args.apply:
             result = track_reconciler.reconcile_track(
-                state_dir, track_id, project_id, repo_root=repo_root
+                state_dir, track_id, project_id, repo_root=repo_root,
+                _merged_pr_numbers=evidence_merged_pr_numbers,
             )
         else:
             result = track_reconciler.peek_derived_status(
-                state_dir, track_id, project_id, repo_root=repo_root
+                state_dir, track_id, project_id, repo_root=repo_root,
+                _merged_pr_numbers=evidence_merged_pr_numbers,
             )
     except Exception as exc:
         print(f"objective close failed: cannot reconcile {track_id}: {exc}", file=sys.stderr)
@@ -1185,6 +1203,20 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
         "action": None,
         "applied": False,
     }
+    # OI-1071: when the track has a pr_ref but gh could not be consulted, the
+    # derived_status was computed from local sources ONLY. A 'not terminal'
+    # refusal on that basis must not read as "this track is not done" — the
+    # real cause may be "could not reach GitHub". Surface it so the operator
+    # knows to re-run when gh is back (or set VNX_RECONCILE_GIT for the local
+    # gh source). consulted_gh is False both when gh was unreachable AND when
+    # the track has no pr_ref to verify; only flag the former.
+    gh_unavailable = (
+        not close_evidence["consulted_gh"]
+        and close_evidence["gh_health"] in ("absent", "auth_failed", "timeout")
+        and bool(close_evidence["pr_numbers"])
+    )
+    if gh_unavailable:
+        payload["gh_health"] = close_evidence["gh_health"]
 
     def _emit(action: str, applied: bool, message: str, rc: int) -> int:
         payload["action"] = action
@@ -1206,6 +1238,15 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
                           "(no completed dispatch, no merged PR) — likely all-failed. "
                           "Confirm this is really done before --apply.")
             print(f"  {message}\n")
+            # OI-1071: surface the gh-unavailable degradation so a 'not terminal'
+            # refusal never reads as "not done" when its real cause is "could not
+            # reach GitHub".
+            if gh_unavailable:
+                print(
+                    f"  ! NOTE: could not consult GitHub (gh={close_evidence['gh_health']}); "
+                    f"derived_status used local evidence only. If the track's PRs merged "
+                    f"via a bare `gh pr merge`, re-run when gh is reachable."
+                )
             # Surface D5's blocker hint when close is blocked (guarded: no crash
             # until D5 lands format_blocking_hint + blocking_detail).
             if action == "noop_not_terminal" and derived == "blocked":
@@ -1235,9 +1276,13 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
 
     # Surface the done-evidence so the operator gate is informed: the reconciler
     # derives 'done' from ANY terminal dispatch state, including expired/dead_letter.
-    # Thread repo_root so the dry-run merged-PR check reads the project's ROADMAP
-    # (Source-3), matching the --apply path via close_track_if_done.
-    payload["evidence"] = _close_evidence(state_dir, track_id, project_id, repo_root=repo_root)
+    # Thread the gathered evidence set so the pr_ref subset check reflects the same
+    # gh-confirmed UNION the derivation saw (OI-1071), matching the --apply path
+    # via close_track_if_done.
+    payload["evidence"] = _close_evidence(
+        state_dir, track_id, project_id, repo_root=repo_root,
+        merged_pr_numbers=evidence_merged_pr_numbers,
+    )
 
     # The state machine forbids skips (e.g. queued -> done is illegal: a track
     # must pass through 'active'). A merged track stuck at queued/parked is
@@ -1264,13 +1309,16 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
 
     # Delegate the walk (and a fresh reconcile) to the shared library function.
     # close_track_if_done reconciles fresh before walking so the transition acts on
-    # current state; the second reconcile is idempotent with the one above.
+    # current state; the second reconcile is idempotent with the one above. The
+    # gathered evidence set is forwarded so the internal reconcile_track sees the
+    # same gh-confirmed UNION (OI-1071), not the local-only fallback.
     lib = track_reconciler.close_track_if_done(
         state_dir, track_id, project_id,
         actor="operator",
         approval_id=args.approval_id,
         include_parked=getattr(args, "include_parked", False),
         repo_root=repo_root,
+        merged_pr_numbers=evidence_merged_pr_numbers,
     )
     lib_action = lib.get("action")
 
@@ -2440,6 +2488,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
              "with --attest: records the real PR as pr_ref instead of ops-attest:<date>. "
              "Without --attest, use `vnx objective link-pr` instead.",
+    )
+    p_close.add_argument(
+        "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
+        metavar="N",
+        help="cap live gh pr view calls for the track's pr_ref (default 50; a single "
+             "close handles one track so the cap is rarely reached). Bounds the "
+             "evidence gather so it is explicit rather than unbounded.",
     )
     p_close.set_defaults(func=cmd_objective_close)
 

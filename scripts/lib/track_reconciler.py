@@ -474,6 +474,7 @@ def peek_derived_status(
     project_id: str,
     *,
     repo_root: "str | Path | None" = None,
+    _merged_pr_numbers: Optional[FrozenSet[int]] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY: compute derived_status for one track WITHOUT persisting it.
 
@@ -481,6 +482,12 @@ def peek_derived_status(
     OIs, dependency tracks, and the merged-PR evidence path) but writes nothing —
     so a dry-run preview never mutates DB state. Returns the same dict shape as
     reconcile_track (track_id, project_id, derived_status, declared_phase, drifted).
+
+    _merged_pr_numbers: optional pre-established merged-PR set (OI-1071). When
+    provided, used in place of the local-only set so a dry-run close that has
+    ALREADY gathered gh-confirmed merge evidence derives 'done' WITHOUT
+    VNX_RECONCILE_GIT. Same contract as reconcile_track._merged_pr_numbers.
+    When None, loads the local sources itself (the pre-OI-1071 behaviour).
 
     Raises RuntimeError if the derived_status column is absent (migration 0028).
     """
@@ -490,7 +497,11 @@ def peek_derived_status(
             raise RuntimeError(
                 "tracks.derived_status column absent; apply migration 0028 first."
             )
-        merged = _load_merged_pr_numbers(state_dir, repo_root)
+        merged = (
+            _merged_pr_numbers
+            if _merged_pr_numbers is not None
+            else _load_merged_pr_numbers(state_dir, repo_root)
+        )
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         track_row = conn.execute(
             "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
@@ -753,12 +764,18 @@ def _close_evidence(
     track_id: str,
     project_id: str,
     repo_root: "str | Path | None" = None,
+    merged_pr_numbers: Optional[FrozenSet[int]] = None,
 ) -> Dict[str, Any]:
     """Summarize WHY a track derives terminal, so the operator gate is informed.
 
     The reconciler's 'done' counts ALL terminal dispatch states — including
     expired/dead_letter. A track whose every dispatch failed still derives 'done'.
     Surface the breakdown + a has_success_signal flag. Best-effort; never raises.
+
+    merged_pr_numbers: optional pre-established merged-PR set (OI-1071). When
+    provided, the pr_ref subset check uses it INSTEAD of re-loading the local
+    sources, so the operator-gate evidence reflects the same gh-confirmed UNION
+    the derivation saw. When None, loads the local sources itself (pre-OI-1071).
     """
     ev: Dict[str, Any] = {
         "completed": 0, "failed_terminal": 0, "in_flight": 0,
@@ -798,10 +815,18 @@ def _close_evidence(
     except Exception as exc:
         log.debug("close evidence query failed: %s", exc)
     # ALL parsed PRs must be merged (subset check), mirroring _compute_derived_status.
+    # OI-1071: use the caller-supplied evidence set when provided so the operator
+    # gate sees the same gh-confirmed UNION the derivation did; fall back to the
+    # local-only set otherwise (pre-OI-1071 behaviour).
     try:
         if ev["pr_ref"]:
             nums = _parse_pr_numbers(ev["pr_ref"])
-            if nums and nums <= _load_merged_pr_numbers(state_dir, repo_root):
+            evidence_set = (
+                merged_pr_numbers
+                if merged_pr_numbers is not None
+                else _load_merged_pr_numbers(state_dir, repo_root)
+            )
+            if nums and nums <= evidence_set:
                 ev["pr_merged"] = True
     except Exception as exc:
         log.debug("close evidence merged-PR check failed: %s", exc)
