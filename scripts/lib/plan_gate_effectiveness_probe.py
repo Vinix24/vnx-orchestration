@@ -30,11 +30,11 @@ OI-PLAN resolution count, because the ledger is the durable record of whether
 the panel converged (OI-888). Both read as "panel verdicts disagree" in the
 PRD's vocabulary.
 
-Scope-skip signal (OI-888): whether complex tracks skip the panel
-(``VNX_PLAN_GATE_COMPLEX_ONLY``) has NO read-site yet — it is deferred to
-``review-floor-enforcer``. The probe reports that explicitly
-(``scope_skip_read_site: "missing"``) instead of staying silent about a signal
-it cannot see.
+Scope-skip signal (OI-888): the ``VNX_PLAN_GATE_COMPLEX_ONLY`` read-site now
+exists in ``plan_gate_enforcement.plan_gate_scope`` + ``complex_only_active``
+(2026-08-08 dispatch) — a LIGHT-scope plan under the flag runs the reduced
+2-seat panel. The probe reports that explicitly (``scope_skip_read_site:
+"present"``) instead of staying silent about the signal.
 """
 from __future__ import annotations
 
@@ -171,7 +171,7 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
             "seat_pass": seat_pass,
             "seat_revise": seat_revise,
             "seat_block": seat_block,
-            "scope_skip_read_site": "missing",
+            "scope_skip_read_site": "present",
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:
@@ -190,7 +190,7 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
                 f"({raw['seat_responded']} responded, {raw['seat_abstain']} abstained, "
                 f"{raw['seat_pass']} pass/{raw['seat_revise']} revise/{raw['seat_block']} block)"
             )
-        parts.append("VNX_PLAN_GATE_COMPLEX_ONLY read-site MISSING (no scope-skip signal to probe)")
+        parts.append("VNX_PLAN_GATE_COMPLEX_ONLY scope-skip read-site present (light plans run a reduced panel)")
         return "; ".join(parts)
 
     def health(self, raw: Dict[str, Any]) -> str:

@@ -26,6 +26,8 @@ import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
+import plan_gate_enforcement as pge  # noqa: E402
+from ndjson_hash_chain import walk_chain  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -1882,3 +1884,88 @@ def test_cmd_plan_gate_run_rejects_unknown_panel_seat_label(tmp_path, monkeypatc
     rc = planning_cli.cmd_plan_gate_run(args)
     assert rc == 1
     assert run_called["n"] == 0  # the panel never ran
+
+
+def _fake_pass_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+    """A run_panel stub that always certifies PASS with the panel it was given."""
+    return {
+        "track_id": track_id, "project_id": project_id, "decision": "PASS",
+        "summary": {"decision": "PASS", "pass_count": len(panel),
+                    "revise_count": 0, "block_count": 0, "rationale": "ok"},
+        "panelists": [], "doc_truncation": {"truncated": False},
+    }
+
+
+def test_cmd_plan_gate_run_light_plan_runs_fewer_seats_than_heavy(tmp_path, monkeypatch):
+    """VNX_PLAN_GATE_COMPLEX_ONLY=1: a LIGHT plan runs the reduced 2-seat panel
+    while a HEAVY plan keeps the full panel — the scope read-site sizes the gate."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
+    seen_panels: list = []
+
+    def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_panels.append(panel)
+        return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
+                                    panel=panel, data_dir=data_dir, **kw)
+
+    monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-light", "p1", "t", "shipped", phase="queued")
+    tracks.create_track(state_dir, "feat-heavy", "p1", "t", "shipped", phase="queued")
+
+    light_doc = tmp_path / "light.md"
+    light_doc.write_text("## Approach\nAdd a rename button to the dashboard view.\n", encoding="utf-8")
+    heavy_doc = tmp_path / "heavy.md"
+    heavy_doc.write_text("## Approach\nTouch dispatch_cli.py and a schema migration.\n", encoding="utf-8")
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-light", project_id="p1", state_dir=str(state_dir),
+        doc=str(light_doc), json=False, panel_seats=None,
+    ))
+    assert rc == 0
+    assert [s["label"] for s in seen_panels[0]] == list(pge.LIGHT_PANEL_LABELS)
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-heavy", project_id="p1", state_dir=str(state_dir),
+        doc=str(heavy_doc), json=False, panel_seats=None,
+    ))
+    assert rc == 0
+    assert [s["label"] for s in seen_panels[1]] == [m["label"] for m in pgp.DEFAULT_PANEL]
+
+
+def test_cmd_plan_gate_run_light_pass_writes_run_evidence_with_seats(tmp_path, monkeypatch):
+    """A successful LIGHT run writes a durable plan_gate_pass with resolver=run
+    carrying the seat count + scope that certified it — a light pass is a real pass."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
+    monkeypatch.setattr(pgp, "run_panel", _fake_pass_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-light", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "light.md"
+    doc.write_text("## Approach\nAdd a rename button to the dashboard view.\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-light", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, repo_root=str(tmp_path),
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 0
+
+    ledger = tmp_path / ".vnx-attest" / "plan-gates.ndjson"
+    assert ledger.exists()
+    records = [rec for _ln, rec, _h in walk_chain(ledger)]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["type"] == "plan_gate_pass"
+    assert rec["track_id"] == "feat-light"
+    assert rec["resolver"] == "run"
+    assert rec["seats"] == len(pge.LIGHT_PANEL_LABELS)
+    assert rec["scope"] == "light"

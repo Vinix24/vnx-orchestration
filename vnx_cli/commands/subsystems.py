@@ -75,8 +75,8 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
     ),
     "plan-gate-panel": "5-model deliberation panel for plan-first enforcement.",
     "plan-gate-task-class-scope": (
-        "Restrict panel to complex features; skip trivial tracks. Enforcement "
-        "deferred to review-floor-enforcer."
+        "Restrict panel to complex features; run trivial tracks on a reduced "
+        "2-seat panel (scope read-site: plan_gate_enforcement.plan_gate_scope)."
     ),
     "cheap-recon-scout": "Cheap-model scout recon pre-pass in the dispatch door (fail-open).",
     "horizon-planning": "Autonomous roadmap auto-next loading (starts work unattended).",
