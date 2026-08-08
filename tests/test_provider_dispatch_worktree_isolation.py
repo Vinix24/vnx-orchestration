@@ -12,6 +12,8 @@ Verifies (PR-PROVIDER-ISO / PR-7):
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -120,7 +122,7 @@ class TestCodexIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-codex-001")
-        mock_remove.assert_called_once_with("iso-codex-001")
+        mock_remove.assert_called_once_with("iso-codex-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_no_isolation_when_env_unset(self):
@@ -172,7 +174,7 @@ class TestCodexIsolation:
                 with pytest.raises(RuntimeError, match="simulated"):
                     provider_dispatch._dispatch_codex(args)
 
-        mock_remove.assert_called_once_with("fail-codex")
+        mock_remove.assert_called_once_with("fail-codex", terminal_id="T1")
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +207,7 @@ class TestGeminiIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-gemini-001")
-        mock_remove.assert_called_once_with("iso-gemini-001")
+        mock_remove.assert_called_once_with("iso-gemini-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_no_isolation_when_env_unset(self):
@@ -268,7 +270,7 @@ class TestKimiIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-kimi-001")
-        mock_remove.assert_called_once_with("iso-kimi-001")
+        mock_remove.assert_called_once_with("iso-kimi-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_no_isolation_when_env_unset(self):
@@ -337,7 +339,7 @@ class TestLiteLLMIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-litellm-001")
-        mock_remove.assert_called_once_with("iso-litellm-001")
+        mock_remove.assert_called_once_with("iso-litellm-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_no_isolation_when_env_unset(self):
@@ -405,7 +407,7 @@ class TestProviderWorktreeHelpers:
         with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=consumer_root), \
              patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove:
             provider_dispatch._remove_provider_worktree("remove-ok-test")
-        mock_remove.assert_called_once_with("remove-ok-test", project_root=consumer_root)
+        mock_remove.assert_called_once_with("remove-ok-test", project_root=consumer_root, terminal_id="")
 
     def test_remove_best_effort_when_resolver_raises(self):
         """A resolver failure must also be swallowed — remove is best-effort end-to-end."""
@@ -555,3 +557,417 @@ class TestLiteLLMIsolationFailLoud:
         assert exit_code == 1
         mock_create.assert_called_once_with("fail-loud-litellm")
         assert spawn_called == [], "spawn_litellm must NOT be called when worktree creation fails"
+
+
+# ---------------------------------------------------------------------------
+# L3 provider-lane reap: classification, branch preservation, event emission
+# ---------------------------------------------------------------------------
+
+
+def _init_git_repo_with_origin(tmp_path: Path) -> Path:
+    """Create a bare origin + local clone with an initial commit.
+
+    Returns the local clone path (the project root).
+    Mirrors the fixture in test_tmux_worktree.py.
+    """
+    bare = tmp_path / "origin.git"
+    bare.mkdir()
+    subprocess.run(
+        ["git", "init", "--bare", "--initial-branch=main", str(bare)],
+        check=True, capture_output=True,
+    )
+
+    local = tmp_path / "local"
+    subprocess.run(
+        ["git", "clone", str(bare), str(local)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(local), "checkout", "-b", "main"],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(local), "config", "user.email", "test@test.local"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(local), "config", "user.name", "Test"],
+        check=True, capture_output=True,
+    )
+
+    readme = local / "README.md"
+    readme.write_text("init\n")
+    subprocess.run(
+        ["git", "-C", str(local), "add", "README.md"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(local), "commit", "-m", "initial"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(local), "push", "-u", "origin", "main"],
+        check=True, capture_output=True,
+    )
+    return local
+
+
+class TestProviderLaneReapClassification:
+    """L3: remove_dispatch_worktree must classify before removing, using the
+    single canonical classify() from tmux_worktree — no duplicate logic.
+    """
+
+    def test_committed_work_survives_teardown(self, tmp_path, monkeypatch):
+        """Provider worktree with local unpushed commits: branch preserved.
+
+        Without the L3 fix, remove_dispatch_worktree unconditionally force-deletes
+        the local branch (git branch -D).  With the fix, classify() detects local
+        commits not on origin → 'committed' → reap() keeps the branch.
+        """
+        import dispatch_worktree_isolation as dwi
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "l3-committed-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Make a local commit (not pushed).
+        (wt_path / "work.txt").write_text("unpushed work\n")
+        subprocess.run(
+            ["git", "-C", str(wt_path), "add", "work.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wt_path), "commit", "-m", "worker commit"],
+            check=True, capture_output=True,
+        )
+
+        safe_id = dwi._sanitize_dispatch_id(dispatch_id)
+        branch_name = f"dispatch/{safe_id}"
+
+        # Verify the branch exists before teardown.
+        branches_before = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert branch_name in branches_before
+
+        remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Worktree directory is gone.
+        assert not wt_path.exists()
+
+        # Branch is STILL THERE (committed → kept locally).
+        branches_after = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert branch_name in branches_after, (
+            f"L3 FAIL: branch {branch_name} was deleted — unpushed commits lost"
+        )
+
+    def test_dirty_worktree_is_preserved(self, tmp_path, monkeypatch):
+        """Provider worktree with uncommitted changes: worktree locked, not removed.
+
+        Without the L3 fix, remove_dispatch_worktree would force-remove the worktree
+        (git worktree remove --force), losing uncommitted changes.
+        """
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "l3-dirty-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Leave an uncommitted change (dirty state).
+        (wt_path / "dirty.txt").write_text("uncommitted\n")
+
+        assert wt_path.is_dir()
+        remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Worktree directory MUST still exist (dirty → preserved).
+        assert wt_path.is_dir(), (
+            "L3 FAIL: dirty worktree was removed — uncommitted changes lost"
+        )
+
+    def test_classification_reuses_single_implementation(self, tmp_path, monkeypatch):
+        """classify() is imported from tmux_worktree — no duplicate classification.
+
+        This test asserts that remove_dispatch_worktree calls the canonical
+        tmux_worktree.classify(), not a copy or reimplementation.
+        Verifies via a clean worktree: classify() returns 'clean'.
+        """
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "l3-clean-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+        safe_id = "l3-clean-1"
+        branch_name = f"dispatch/{safe_id}"
+
+        remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Clean worktree: directory gone, branch gone.
+        assert not wt_path.exists()
+        branches = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert branches == ""
+
+    def test_worktree_state_event_emitted(self, tmp_path, monkeypatch):
+        """Teardown emits provider_teardown_worktree event via EventStore.
+
+        The event must carry worktree_state, branch_kept_local,
+        branch_kept_remote, and preserved_path — the same fields as the
+        tmux lane's interactive_teardown_worktree.
+        """
+        from unittest.mock import MagicMock, patch
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        mock_store = MagicMock()
+        mock_store.append = MagicMock()
+
+        dispatch_id = "l3-event-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        with patch("event_store.EventStore", return_value=mock_store):
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Verify two append calls: provider_teardown_worktree + (not provider_teardown_preserved for clean)
+        append_calls = mock_store.append.call_args_list
+        assert len(append_calls) >= 1, "L3 FAIL: no event emitted"
+
+        # First call: provider_teardown_worktree
+        first_call_args = append_calls[0][0]
+        terminal = first_call_args[0]
+        event = first_call_args[1]
+        assert terminal == "T1"
+        assert event["type"] == "provider_teardown_worktree"
+        assert "worktree_state" in event["data"]
+        assert "branch_kept_local" in event["data"]
+        assert "branch_kept_remote" in event["data"]
+        assert "preserved_path" in event["data"]
+
+    def test_dirty_worktree_emits_preserved_event(self, tmp_path, monkeypatch):
+        """Dirty worktree emits both provider_teardown_worktree AND
+        provider_teardown_preserved events.
+        """
+        from unittest.mock import MagicMock, patch
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        mock_store = MagicMock()
+        mock_store.append = MagicMock()
+
+        dispatch_id = "l3-dirty-event-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Leave an uncommitted change.
+        (wt_path / "unsaved.txt").write_text("pending\n")
+
+        with patch("event_store.EventStore", return_value=mock_store):
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        append_calls = mock_store.append.call_args_list
+        event_types = [call[0][1]["type"] for call in append_calls]
+        assert "provider_teardown_worktree" in event_types
+        assert "provider_teardown_preserved" in event_types, (
+            "L3 FAIL: dirty worktree must emit provider_teardown_preserved"
+        )
+
+        # The teardown_worktree event must have worktree_state == "dirty"
+        teardown_event = next(
+            c[0][1] for c in append_calls
+            if c[0][1]["type"] == "provider_teardown_worktree"
+        )
+        assert teardown_event["data"]["worktree_state"] == "dirty"
+        assert teardown_event["data"]["preserved_path"] is not None
+        assert teardown_event["data"]["branch_kept_local"] is False
+        assert teardown_event["data"]["branch_kept_remote"] is False
+
+    def test_committed_worktree_emits_correct_metadata(self, tmp_path, monkeypatch):
+        """Committed worktree: event carries branch_kept_local=True."""
+        from unittest.mock import MagicMock, patch
+        import dispatch_worktree_isolation as dwi
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        mock_store = MagicMock()
+        mock_store.append = MagicMock()
+
+        dispatch_id = "l3-committed-event-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        (wt_path / "committed.txt").write_text("local only\n")
+        subprocess.run(
+            ["git", "-C", str(wt_path), "add", "committed.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wt_path), "commit", "-m", "local commit"],
+            check=True, capture_output=True,
+        )
+
+        with patch("event_store.EventStore", return_value=mock_store):
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Find the teardown event.
+        teardown_events = [
+            c[0][1] for c in mock_store.append.call_args_list
+            if c[0][1]["type"] == "provider_teardown_worktree"
+        ]
+        assert len(teardown_events) == 1
+        event = teardown_events[0]
+        assert event["data"]["worktree_state"] == "committed"
+        assert event["data"]["branch_kept_local"] is True
+        assert event["data"]["branch_kept_remote"] is False
+        assert event["data"]["preserved_path"] is None
+
+    def test_pushed_worktree_keeps_remote_branch(self, tmp_path, monkeypatch):
+        """Pushed worktree: worktree removed, branch deleted locally, remote ref intact."""
+        import dispatch_worktree_isolation as dwi
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "l3-pushed-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Make + push a commit.
+        (wt_path / "pushed.txt").write_text("pushed\n")
+        subprocess.run(
+            ["git", "-C", str(wt_path), "add", "pushed.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wt_path), "commit", "-m", "pushed work"],
+            check=True, capture_output=True,
+        )
+        safe_id = dwi._sanitize_dispatch_id(dispatch_id)
+        branch_name = f"dispatch/{safe_id}"
+        subprocess.run(
+            ["git", "-C", str(wt_path), "push", "-u", "origin", branch_name],
+            check=True, capture_output=True,
+        )
+
+        remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Worktree gone.
+        assert not wt_path.exists()
+        # Local branch gone.
+        local_branches = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert local_branches == ""
+        # Remote ref still present.
+        remote_refs = subprocess.check_output(
+            ["git", "-C", str(local), "ls-remote", "origin", branch_name],
+            text=True,
+        ).strip()
+        assert branch_name in remote_refs
+
+    def test_fail_closed_on_missing_base_sha(self, tmp_path, monkeypatch):
+        """When the claim is missing base_sha (pre-L3), derive it or treat as dirty.
+
+        Fail-closed: a control that defaults to 'proceed' on uncertainty is no
+        control at all.  Missing base_sha → fail-safe (treat as dirty).
+        """
+        from unittest.mock import patch
+        from dispatch_worktree_isolation import (
+            _sanitize_dispatch_id,
+            _claim_path,
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "l3-no-basesha-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Strip base_sha from the claim to simulate a pre-L3 claim.
+        safe_id = _sanitize_dispatch_id(dispatch_id)
+        claim_path = _claim_path(safe_id, local)
+        import json
+        claim = json.loads(claim_path.read_text())
+        del claim["base_sha"]
+        claim_path.write_text(json.dumps(claim) + "\n")
+
+        # Make a local commit so this isn't trivially clean.
+        (wt_path / "work.txt").write_text("unpushed work\n")
+        subprocess.run(
+            ["git", "-C", str(wt_path), "add", "work.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wt_path), "commit", "-m", "worker commit"],
+            check=True, capture_output=True,
+        )
+
+        # With base_sha derived from origin/main (success), classify should work.
+        remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        # Worktree should be gone (committed → disk removed).
+        assert not wt_path.exists()
+        # Branch should survive.
+        branch_name = f"dispatch/{safe_id}"
+        branches = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert branch_name in branches, (
+            "L3 FAIL: branch was deleted — missing base_sha must fail-closed"
+        )

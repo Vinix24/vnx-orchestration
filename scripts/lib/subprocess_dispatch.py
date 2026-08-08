@@ -782,7 +782,7 @@ if __name__ == "__main__":
         if _isolated and _isolation_wt_path is not None:
             _set_active_worktree(None)
             try:
-                _remove_wt(args.dispatch_id, project_root=_isolation_project_root)
+                _remove_wt(args.dispatch_id, project_root=_isolation_project_root, terminal_id=args.terminal_id)
             except Exception as _rm_exc:
                 import logging as _log_mod
                 _log_mod.getLogger(__name__).warning(

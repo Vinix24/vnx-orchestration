@@ -181,6 +181,9 @@ def _write_claim_atomic(
     *,
     worktree_path: Path,
     project_root: Path,
+    base_sha: str = "",
+    base_ref: str = "",
+    branch: str = "",
 ) -> dict:
     """Claim *worktree_path* for *dispatch_id* with an O_EXCL write.
 
@@ -188,6 +191,11 @@ def _write_claim_atomic(
     file already exists the write fails and the caller must decide whether the
     existing claim is the same dispatch (idempotent re-entry) or a different
     one (OI-861 crossing → WorktreeIdentityConflict).
+
+    *base_sha*, *base_ref*, and *branch* are stored for teardown classification
+    (L3 provider-lane reap): the claim carries enough metadata to construct a
+    ``WorktreeHandle`` for ``tmux_worktree.classify()`` without re-deriving
+    values that may have shifted since the worktree was created.
     """
     safe_id = _sanitize_dispatch_id(dispatch_id)
     path = _claim_path(safe_id, project_root)
@@ -197,6 +205,9 @@ def _write_claim_atomic(
         "safe_id": safe_id,
         "worktree_path": str(Path(worktree_path).resolve()),
         "claimed_at": time.time(),
+        "base_sha": base_sha,
+        "base_ref": base_ref,
+        "branch": branch,
     }
     try:
         with open(path, "x", encoding="utf-8") as fh:
@@ -451,6 +462,20 @@ def create_dispatch_worktree(
                 base_ref, (exc.stderr or "").strip(),
             )
 
+    # Resolve base_sha BEFORE adding the worktree — needed for teardown
+    # classification (L3 provider-lane reap).  Mirrors tmux_worktree.allocate().
+    try:
+        sha_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", base_ref],
+            check=True, capture_output=True, text=True,
+        )
+        base_sha = sha_result.stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"create_dispatch_worktree: cannot resolve {base_ref!r}: "
+            f"{(exc.stderr or '').strip()}"
+        ) from exc
+
     with _worktree_lock(root):
         # OI-861 identity check BEFORE creating: if this worktree already exists
         # and is claimed by a DIFFERENT dispatch id, refuse immediately.  A
@@ -492,9 +517,18 @@ def create_dispatch_worktree(
 
         # Claim the freshly-created worktree atomically (O_EXCL).  From here on
         # the worktree's identity is bound to dispatch_id and no other dispatch
-        # may reuse it.
+        # may reuse it.  The claim carries base_sha + base_ref + branch so
+        # teardown (L3 provider-lane reap) can construct a WorktreeHandle for
+        # classification without re-deriving values that may have shifted.
         try:
-            _write_claim_atomic(dispatch_id, worktree_path=wt_path, project_root=root)
+            _write_claim_atomic(
+                dispatch_id,
+                worktree_path=wt_path,
+                project_root=root,
+                base_sha=base_sha,
+                base_ref=base_ref,
+                branch=branch_name,
+            )
         except WorktreeClaimError:
             raced = _read_claim(dispatch_id, root)
             if raced is not None:
@@ -509,118 +543,161 @@ def remove_dispatch_worktree(
     dispatch_id: str,
     *,
     project_root: Optional[Path] = None,
+    terminal_id: str = "",
 ) -> None:
     """Remove the ephemeral dispatch worktree.  Idempotent.
 
-    Called on both success and failure paths — the worker's pushed branch
-    survives on origin; only the local working tree is removed.
+    **L3 provider-lane reap (2026-08-08):** the worktree is CLASSIFIED before
+    removal using the shared ``tmux_worktree.classify()`` — the same single
+    implementation the tmux lane uses.  The classification determines whether
+    the branch must be preserved (``committed`` → local branch kept, ``dirty``
+    → entire worktree locked).  A failed remote check (ls-remote timeout,
+    network error) is fail-closed: the classification falls back to
+    ``committed`` and the branch survives.
 
-    Before removing the worktree, kills any processes still running inside it
-    (OI-873): a SessionStart hook spawned from the worktree can survive the
-    dispatch and hold the coordination DB write lock, blocking every fleet-wide
-    track write.  Process cleanup happens OUTSIDE the worktree lock so it never
-    blocks concurrent worktree creation.
+    When *terminal_id* is provided, a ``provider_teardown_worktree`` event is
+    emitted via ``EventStore`` with the same metadata fields
+    (``worktree_state``, ``branch_kept_local``, ``branch_kept_remote``,
+    ``preserved_path``) as the tmux lane's ``interactive_teardown_worktree``.
+
+    Called on both success and failure paths.  Best-effort — never raises.
     """
     root = _resolve_project_root(project_root)
     wt_path = _dispatch_worktree_dir(root, dispatch_id)
 
     if not wt_path.exists():
-        # Nothing to remove.  Drop any stale claim so a later dispatch mapping
-        # to this safe id can claim cleanly (idempotent, never raises).
         _clear_claim(dispatch_id, root)
         log.debug("remove_dispatch_worktree: already absent: %s", wt_path)
         return
 
     # OI-861 hard refusal on teardown: never reap a worktree that is stamped
-    # for a DIFFERENT dispatch id.  This is the "one's worktree reaped
-    # mid-flight by the other's completion" half of the race.
+    # for a DIFFERENT dispatch id.
     claim = _read_claim(dispatch_id, root)
     if claim is not None:
         _claim_belongs_to_or_raise(dispatch_id, claim, wt_path)
 
-    # OI-873: kill processes still running inside this worktree BEFORE
-    # attempting removal.  A zombie hook (bash + python child) will hold
-    # the coordination DB lock and its CWD under the worktree path;
-    # lsof +D catches both.
-    try:
-        from worktree_process_cleanup import kill_worktree_processes  # noqa: PLC0415
-        kill_worktree_processes(wt_path)
-    except Exception as _proc_exc:
-        log.warning(
-            "remove_dispatch_worktree: process cleanup failed for %s: %s — "
-            "continuing with worktree removal",
-            dispatch_id, _proc_exc,
-        )
+    # ── L3: classify before removing ──────────────────────────────────────
+    # Build a WorktreeHandle from the claim so we can call the single
+    # canonical classify() in tmux_worktree — no duplicate classification.
+    # Fall back to safe defaults when the claim predates the L3 fields.
+    safe_id = _sanitize_dispatch_id(dispatch_id)
+    _claim_base_sha = (claim or {}).get("base_sha", "")
+    _claim_branch = (claim or {}).get("branch", "") or f"dispatch/{safe_id}"
+    _claim_base_ref = (claim or {}).get("base_ref", "") or "origin/main"
 
-    # OI-877: also reap process groups recorded for this dispatch at spawn
-    # time.  A dispatch process whose repo-root resolved to the MAIN checkout
-    # has nothing open inside the worktree, so the lsof scan cannot see it —
-    # the recorded PGID is the only handle that still reaches it (even after
-    # it was reparented to launchd / PPID 1).  Keep the worktree scan above;
-    # this is a second membership source, not a replacement.
-    try:
-        from dispatch_process_registry import (  # noqa: PLC0415
-            clear_dispatch_pgids,
-            kill_dispatch_pgids,
-        )
-        kill_dispatch_pgids(dispatch_id, repo_root=root)
-        clear_dispatch_pgids(dispatch_id, repo_root=root)
-    except Exception as _pgid_exc:
-        log.warning(
-            "remove_dispatch_worktree: pgid-based process cleanup failed for "
-            "%s: %s — continuing with worktree removal",
-            dispatch_id, _pgid_exc,
-        )
-
-    with _worktree_lock(root):
+    # If the claim is missing base_sha (pre-L3 claim), derive it from the
+    # base ref at teardown time.  This is a fallback: the base ref may have
+    # advanced since the worktree was created, but a stale base_sha is still
+    # safer than skipping classification entirely.
+    if not _claim_base_sha:
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(wt_path)],
-                cwd=str(root),
-                check=True,
-                capture_output=True,
-                text=True,
+            sha_result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", _claim_base_ref],
+                check=True, capture_output=True, text=True,
             )
-            log.info("dispatch worktree removed: %s", wt_path)
-        except subprocess.CalledProcessError as exc:
+            _claim_base_sha = sha_result.stdout.strip()
+        except subprocess.CalledProcessError:
             log.warning(
-                "git worktree remove failed: %s; falling back to shutil.rmtree",
-                (exc.stderr or "").strip(),
+                "remove_dispatch_worktree: cannot resolve base_ref %r for %s; "
+                "treating as dirty (fail-closed)",
+                _claim_base_ref, dispatch_id,
             )
-            resolved = wt_path.resolve()
-            # Safety: refuse to rmtree a path outside the project root.
-            resolved.relative_to(root)
-            if wt_path.is_symlink():
-                raise RuntimeError(
-                    f"refusing rmtree: {wt_path} is a symlink"
-                )
-            shutil.rmtree(str(resolved), ignore_errors=True)
+            _claim_base_sha = ""
 
+    from tmux_worktree import WorktreeHandle, classify, reap  # noqa: PLC0415
+
+    handle = WorktreeHandle(
+        path=wt_path,
+        branch=_claim_branch,
+        base_sha=_claim_base_sha,
+        base_ref=_claim_base_ref,
+        dispatch_id=safe_id,
+    )
+
+    classification = classify(handle)
+    log.info(
+        "remove_dispatch_worktree: classified %s as %s (branch=%s base_sha=%s)",
+        dispatch_id, classification, _claim_branch,
+        _claim_base_sha[:8] if _claim_base_sha else "?",
+    )
+
+    # ── OI-873 / OI-877: process cleanup ─────────────────────────────────
+    # Kill processes still running inside this worktree BEFORE removal.
+    # Only needed when the worktree WILL be removed (clean/pushed/committed);
+    # dirty worktrees are preserved — their processes may still be useful.
+    if classification in ("clean", "pushed", "committed"):
         try:
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                cwd=str(root),
-                check=True,
-                capture_output=True,
-                text=True,
+            from worktree_process_cleanup import kill_worktree_processes  # noqa: PLC0415
+            kill_worktree_processes(wt_path)
+        except Exception as _proc_exc:
+            log.warning(
+                "remove_dispatch_worktree: process cleanup failed for %s: %s — "
+                "continuing with worktree removal",
+                dispatch_id, _proc_exc,
             )
-        except subprocess.CalledProcessError as exc:
-            log.warning("git worktree prune failed: %s", (exc.stderr or "").strip())
+        try:
+            from dispatch_process_registry import (  # noqa: PLC0415
+                clear_dispatch_pgids,
+                kill_dispatch_pgids,
+            )
+            kill_dispatch_pgids(dispatch_id, repo_root=root)
+            clear_dispatch_pgids(dispatch_id, repo_root=root)
+        except Exception as _pgid_exc:
+            log.warning(
+                "remove_dispatch_worktree: pgid-based process cleanup failed for "
+                "%s: %s — continuing with worktree removal",
+                dispatch_id, _pgid_exc,
+            )
 
-        # The worktree is gone — release its identity claim so a later dispatch
-        # mapping to the same safe id can claim cleanly.
+    # ── L3: reap per classification ───────────────────────────────────────
+    reap_result = reap(handle, classification)
+
+    # Clear the claim when the worktree was removed (clean/pushed/committed).
+    # A dirty worktree stays claimed so a later dispatch mapping to the same
+    # safe id knows this slot is occupied.
+    if reap_result.removed:
         _clear_claim(dispatch_id, root)
 
-    # Best-effort: delete the local dispatch branch (it lives on origin).
-    safe_id = _sanitize_dispatch_id(dispatch_id)
-    branch_name = f"dispatch/{safe_id}"
-    try:
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-        )
-        log.debug("dispatch branch deleted locally: %s", branch_name)
-    except Exception as exc:
-        log.debug("branch deletion failed for %s: %s", branch_name, exc)
+    # ── L3: emit worktree_state event ─────────────────────────────────────
+    if terminal_id:
+        try:
+            from event_store import EventStore  # noqa: PLC0415
+            store = EventStore()
+            store.append(
+                terminal_id,
+                {
+                    "type": "provider_teardown_worktree",
+                    "dispatch_id": dispatch_id,
+                    "data": {
+                        "worktree_state": classification,
+                        "branch_kept_local": reap_result.branch_kept_local,
+                        "branch_kept_remote": reap_result.branch_kept_remote,
+                        "preserved_path": str(reap_result.preserved_path)
+                        if reap_result.preserved_path
+                        else None,
+                    },
+                },
+            )
+            if classification == "dirty":
+                store.append(
+                    terminal_id,
+                    {
+                        "type": "provider_teardown_preserved",
+                        "dispatch_id": dispatch_id,
+                        "data": {
+                            "preserved_path": str(reap_result.preserved_path)
+                            if reap_result.preserved_path
+                            else None,
+                        },
+                    },
+                )
+            log.info(
+                "remove_dispatch_worktree: emitted provider_teardown_worktree "
+                "state=%s for %s",
+                classification, dispatch_id,
+            )
+        except Exception as _event_exc:
+            log.warning(
+                "remove_dispatch_worktree: event emission failed for %s: %s",
+                dispatch_id, _event_exc,
+            )
