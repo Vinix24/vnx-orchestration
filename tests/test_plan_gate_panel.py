@@ -1969,3 +1969,33 @@ def test_cmd_plan_gate_run_light_pass_writes_run_evidence_with_seats(tmp_path, m
     assert rec["resolver"] == "run"
     assert rec["seats"] == len(pge.LIGHT_PANEL_LABELS)
     assert rec["scope"] == "light"
+
+
+def test_cmd_plan_gate_run_pass_with_failed_evidence_is_loud_not_silent(tmp_path, monkeypatch, capsys):
+    """A PASS whose durable plan_gate_pass write fails must stay a PASS (exit 0)
+    but say so loudly on stderr - a light pass is only a real pass when the record
+    lands (the merge gate checks it), so a dropped write must not be quiet."""
+    import argparse
+    import plan_gate_evidence
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setattr(pgp, "run_panel", _fake_pass_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    # The evidence write fails (returns None) while the gate itself passes.
+    monkeypatch.setattr(plan_gate_evidence, "emit_plan_gate_pass", lambda **kw: None)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-ev", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nAdd a button to the dashboard.\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-ev", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, repo_root=str(tmp_path),
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 0  # gate resolution is NOT broken by the failed evidence write
+    captured = capsys.readouterr()
+    assert "plan_gate_pass evidence NOT written" in captured.err
+    # Nothing durable landed in the repo ledger.
+    assert not (tmp_path / ".vnx-attest" / "plan-gates.ndjson").exists()

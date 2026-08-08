@@ -1795,13 +1795,17 @@ def _emit_plan_gate_pass_record(
                 ).strip() or str(Path.cwd())
             except Exception:  # noqa: BLE001
                 root = str(Path.cwd())
-        plan_gate_evidence.emit_plan_gate_pass(
+        record = plan_gate_evidence.emit_plan_gate_pass(
             repo_root=root, track_id=track_id, project_id=project_id,
             resolver=resolver, timestamp=_now_utc(),
             approval_id=approval_id, reason=reason,
             seats=seats, scope=scope,
         )
-        return True
+        # emit_plan_gate_pass returns the appended record on success, None on any
+        # failure (it never raises), so the try/except above cannot catch a failed
+        # write - the return value IS the failure signal. None means "not written"
+        # and must surface as a False, not as a silent success.
+        return record is not None
     except Exception:  # vnx-silent-except: evidence emission must never break the gate
         return False
 
@@ -2267,11 +2271,19 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             # attest` ever wrote a record, so the ledger was all-attest and the
             # effectiveness probe read every gate as manually overridden even when
             # the panel had actually converged (light and heavy alike).
-            _emit_plan_gate_pass_record(
+            wrote = _emit_plan_gate_pass_record(
                 repo_root=getattr(args, "repo_root", None),
                 track_id=args.track_id, project_id=args.project_id, resolver="run",
                 seats=len(panel), scope=scope,
             )
+            if not wrote:
+                print(
+                    f"WARNING: plan_gate_pass evidence NOT written for track "
+                    f"{args.track_id} (resolver=run, seats={len(panel)}, scope={scope}). "
+                    "The plan blocker IS resolved, but the durable pass record is "
+                    "missing - the merge gate may not recognize this pass.",
+                    file=sys.stderr,
+                )
         print(
             f"PASS — plan gate cleared. {_plan_blocker_oi(args.track_id)} "
             f"resolved={resolved}; track derived_status={derived}."
@@ -2412,11 +2424,18 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
     # record so the pass is verifiable at PR/merge time (the front link of the
     # requirements-traceability chain). Best-effort, unsigned bootstrap — the
     # runtime event above stays the authoritative audit; this never blocks attest.
-    _emit_plan_gate_pass_record(
+    wrote = _emit_plan_gate_pass_record(
         repo_root=getattr(args, "repo_root", None),
         track_id=track_id, project_id=project_id, resolver="attest",
         approval_id=approval_id, reason=reason,
     )
+    if not wrote:
+        print(
+            f"WARNING: plan_gate_pass evidence NOT written for track {track_id} "
+            "(resolver=attest). The plan blocker IS resolved, but the durable pass "
+            "record is missing - the merge gate may not recognize this attest.",
+            file=sys.stderr,
+        )
 
     post = tracks_lib.get_track(state_dir, track_id, project_id)
     derived = post.get("derived_status") if isinstance(post, dict) else None
