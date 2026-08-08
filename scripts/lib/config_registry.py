@@ -163,8 +163,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Restrict the plan-gate panel to complex features (display metadata only; "
-        "the scope-skip read-site is deferred to review-floor-enforcer).",
+        "Restrict the plan-gate panel to complex features: a LIGHT-scope plan "
+        "(read-site in plan_gate_enforcement.plan_gate_scope) runs the reduced "
+        "2-seat panel; HEAVY plans keep the full 5-seat panel.",
         # subsystem matches the docs/core/SUBSYSTEMS.md seed row
         # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
         # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the

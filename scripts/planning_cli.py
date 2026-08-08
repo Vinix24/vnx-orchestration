@@ -1764,6 +1764,52 @@ def _resolve_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bo
     return rowcount > 0
 
 
+def _emit_plan_gate_pass_record(
+    *,
+    repo_root: Optional[str],
+    track_id: str,
+    project_id: str,
+    resolver: str,
+    approval_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    seats: Optional[int] = None,
+    scope: Optional[str] = None,
+) -> bool:
+    """Best-effort durable ``plan_gate_pass`` record (ADR-030 primitive).
+
+    Shared by ``plan-gate run`` (resolver="run", with the seat count + scope that
+    certified the pass) and ``plan-gate attest`` (resolver="attest"). Resolves the
+    repo root from ``args.repo_root`` when the CLI passes one, else ``git
+    rev-parse``, else cwd. Never raises — a record failure must never break the
+    plan-gate resolution it hangs off (the runtime audit trail stays authoritative).
+    """
+    try:
+        import subprocess as _sp  # noqa: PLC0415
+        import plan_gate_evidence  # noqa: PLC0415
+        root = repo_root
+        if not root:
+            try:
+                root = _sp.check_output(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, stderr=_sp.DEVNULL,
+                ).strip() or str(Path.cwd())
+            except Exception:  # noqa: BLE001
+                root = str(Path.cwd())
+        record = plan_gate_evidence.emit_plan_gate_pass(
+            repo_root=root, track_id=track_id, project_id=project_id,
+            resolver=resolver, timestamp=_now_utc(),
+            approval_id=approval_id, reason=reason,
+            seats=seats, scope=scope,
+        )
+        # emit_plan_gate_pass returns the appended record on success, None on any
+        # failure (it never raises), so the try/except above cannot catch a failed
+        # write - the return value IS the failure signal. None means "not written"
+        # and must surface as a False, not as a silent success.
+        return record is not None
+    except Exception:  # vnx-silent-except: evidence emission must never break the gate
+        return False
+
+
 def cmd_objective_add(args: argparse.Namespace) -> int:
     """Add an ad-hoc objective (track) without a ROADMAP edit.
 
@@ -2116,6 +2162,7 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     1 = infra error (doc/track missing, panel could not run).
     """
     import plan_gate_panel
+    import plan_gate_enforcement as _pge
 
     state_dir = _resolve_state_dir(args.state_dir)
     doc = Path(args.doc)
@@ -2129,16 +2176,33 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
 
     data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
 
+    # Scope read-site (VNX_PLAN_GATE_COMPLEX_ONLY): classify the plan light/heavy
+    # from the plan doc itself (fail-closed to HEAVY on anything unjudgeable). A
+    # LIGHT plan under the flag runs the reduced panel; its PASS is still a REAL
+    # pass — it resolves the blocker AND writes a durable plan_gate_pass with
+    # resolver=run and the seat count that decided it. An unreadable doc is an
+    # infra error, never a scope decision.
+    try:
+        doc_text = doc.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"plan doc unreadable: {doc}: {exc}", file=sys.stderr)
+        return 1
+    scope = _pge.plan_gate_scope(doc_text)
+
     # Resolve the panel composition from configs/plan_gate_panel.yaml (falling
-    # back to DEFAULT_PANEL when absent), then filter to --panel-seats for this
-    # single run. Both an invalid config and an unknown seat label fail LOUD
-    # here — a dropped seat reads as an abstention and turns into a REVISE via
-    # the fail-safe rule, so misconfiguration must surface before the panel runs.
+    # back to DEFAULT_PANEL when absent). An explicit --panel-seats always wins;
+    # otherwise a LIGHT-scope plan under VNX_PLAN_GATE_COMPLEX_ONLY runs the
+    # reduced 2-seat panel automatically. Both an invalid config and an unknown
+    # seat label fail LOUD here — a dropped seat reads as an abstention and
+    # turns into a REVISE via the fail-safe rule, so misconfiguration must
+    # surface before the panel runs.
     try:
         panel = plan_gate_panel.load_panel_seats()
         if args.panel_seats:
             requested = [s.strip() for s in args.panel_seats.split(",") if s.strip()]
             panel = plan_gate_panel.filter_panel_seats(panel, requested)
+        elif _pge.complex_only_active() and scope == _pge.LIGHT:
+            panel = plan_gate_panel.filter_panel_seats(panel, list(_pge.LIGHT_PANEL_LABELS))
     except Exception as exc:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
         return 1
@@ -2200,6 +2264,26 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        if resolved:
+            # A PASS that CLEARS the gate is a real pass for both scopes: write the
+            # durable, hash-chained plan_gate_pass record with resolver="run" and the
+            # seat count + scope that certified it. Before this, only `plan-gate
+            # attest` ever wrote a record, so the ledger was all-attest and the
+            # effectiveness probe read every gate as manually overridden even when
+            # the panel had actually converged (light and heavy alike).
+            wrote = _emit_plan_gate_pass_record(
+                repo_root=getattr(args, "repo_root", None),
+                track_id=args.track_id, project_id=args.project_id, resolver="run",
+                seats=len(panel), scope=scope,
+            )
+            if not wrote:
+                print(
+                    f"WARNING: plan_gate_pass evidence NOT written for track "
+                    f"{args.track_id} (resolver=run, seats={len(panel)}, scope={scope}). "
+                    "The plan blocker IS resolved, but the durable pass record is "
+                    "missing - the merge gate may not recognize this pass.",
+                    file=sys.stderr,
+                )
         print(
             f"PASS — plan gate cleared. {_plan_blocker_oi(args.track_id)} "
             f"resolved={resolved}; track derived_status={derived}."
@@ -2340,25 +2424,18 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
     # record so the pass is verifiable at PR/merge time (the front link of the
     # requirements-traceability chain). Best-effort, unsigned bootstrap — the
     # runtime event above stays the authoritative audit; this never blocks attest.
-    try:
-        import subprocess as _sp  # noqa: PLC0415
-        import plan_gate_evidence  # noqa: PLC0415
-        _repo_root = getattr(args, "repo_root", None)
-        if not _repo_root:
-            try:
-                _repo_root = _sp.check_output(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    text=True, stderr=_sp.DEVNULL,
-                ).strip() or str(Path.cwd())
-            except Exception:  # noqa: BLE001
-                _repo_root = str(Path.cwd())
-        plan_gate_evidence.emit_plan_gate_pass(
-            repo_root=_repo_root, track_id=track_id, project_id=project_id,
-            resolver="attest", timestamp=_now_utc(),
-            approval_id=approval_id, reason=reason,
+    wrote = _emit_plan_gate_pass_record(
+        repo_root=getattr(args, "repo_root", None),
+        track_id=track_id, project_id=project_id, resolver="attest",
+        approval_id=approval_id, reason=reason,
+    )
+    if not wrote:
+        print(
+            f"WARNING: plan_gate_pass evidence NOT written for track {track_id} "
+            "(resolver=attest). The plan blocker IS resolved, but the durable pass "
+            "record is missing - the merge gate may not recognize this attest.",
+            file=sys.stderr,
         )
-    except Exception:  # vnx-silent-except: evidence emission must never break attest
-        pass
 
     post = tracks_lib.get_track(state_dir, track_id, project_id)
     derived = post.get("derived_status") if isinstance(post, dict) else None

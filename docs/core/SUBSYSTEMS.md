@@ -27,7 +27,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | injection-effectiveness-eval-loop | Instrument WHY patterns are ignored before tuning generation. | `VNX_INJECTION_WHY_ENABLED` | ACTIVATE-and-measure | unknown — probe not built yet |
 | cross-project-federation | Cross-project intelligence federation (not yet implemented). | `VNX_USE_FEDERATION` | ACTIVATE-and-measure | unknown — no probe yet |
 | plan-gate-panel | 5-model deliberation panel for plan-first enforcement. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
-| plan-gate-task-class-scope | Restrict panel to complex features; skip trivial tracks. Enforcement deferred to review-floor-enforcer. | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | unknown — read-site deferred |
+| plan-gate-task-class-scope | Restrict panel to complex features; run trivial tracks on a reduced 2-seat panel (scope read-site: plan_gate_enforcement.plan_gate_scope). | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | works — scope read-site present (light plans run 2 seats) |
 | subsystem-cockpit | SUBSYSTEMS.md + config_registry + vnx subsystems + dashboard tile. | — | COCKPIT | degraded — SSOT exists, probes partial |
 | effectiveness-probe-framework | Generic "does it produce crap?" probes per subsystem. | — | COCKPIT | unknown — framework not built yet |
 

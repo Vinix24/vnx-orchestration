@@ -46,10 +46,15 @@ def emit_plan_gate_pass(
     reason: Optional[str] = None,
     signer_identity: Optional[str] = None,
     key_path: "str | Path | None" = None,
+    seats: Optional[int] = None,
+    scope: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append a ``plan_gate_pass`` record for a track to the repo-committed ledger.
 
-    Signed when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
+    ``seats`` carries how many panel seats decided a ``run``-resolver pass and
+    ``scope`` whether it was a light or heavy run — a light pass is a REAL pass,
+    so its record must state the reduced panel size that certified it. Signed
+    when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
     otherwise appended unsigned but hash-chained (tamper-evident). Best-effort:
     returns the appended record on success, ``None`` on any failure (never raises).
     """
@@ -63,6 +68,10 @@ def emit_plan_gate_pass(
             "resolver": resolver,
             "resolved_at": timestamp,
         }
+        if seats is not None:
+            record["seats"] = seats
+        if scope:
+            record["scope"] = scope
         if approval_id:
             record["approval_id"] = approval_id
         if reason:

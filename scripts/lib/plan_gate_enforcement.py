@@ -25,8 +25,10 @@ gate-shaped result, but both share this one truth.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 PLAN_OI_PREFIX = "OI-PLAN-"
 
@@ -68,6 +70,159 @@ def enforce_mode() -> str:
 def override_active() -> bool:
     """True when the operator set ``VNX_OVERRIDE_PLAN_GATE`` to an affirmative value."""
     return (os.environ.get("VNX_OVERRIDE_PLAN_GATE") or "").strip().lower() in _TRUTHY
+
+
+# --- Scope read-site (VNX_PLAN_GATE_COMPLEX_ONLY) ----------------------------
+#
+# The operator's dividing line for plan-gate scope (2026-08-08): a plan is HEAVY
+# when it touches the dispatch-lane, store-resolution, a review-gate, or a
+# central-DB schema (ADR-007); LIGHT in all other cases. Signals are derived
+# from data that already exists on the plan — per-deliverable task_class and
+# complexity tags, and the file paths it names — never a new manual scope field.
+# Fail-closed: a plan we cannot judge resolves to HEAVY, never LIGHT.
+
+HEAVY = "heavy"
+LIGHT = "light"
+
+# The reduced panel a LIGHT-scope plan runs when VNX_PLAN_GATE_COMPLEX_ONLY is
+# on: two diverse families (Anthropic + Moonshot), the smallest panel that can
+# still certify a pass (apply_panel_rule needs >= 2 readable verdicts). Matches
+# the observed 2-seat convergences on main; an unknown label fails LOUD in
+# filter_panel_seats, so a config drift can never silently shrink the panel.
+LIGHT_PANEL_LABELS: tuple[str, ...] = ("opus", "kimi")
+
+# Substrings for the four heavy domains, matched case-insensitively against the
+# plan text + the paths it names. Deliberately module/area-specific: a generic
+# plan (add an endpoint, tweak a view) hits none of them and reads LIGHT.
+_HEAVY_MARKERS: tuple[str, ...] = (
+    # dispatch-lane
+    "dispatch_cli",
+    "provider_dispatch",
+    "tmux_interactive_dispatch",
+    "subprocess_dispatch",
+    "dispatch_bridge",
+    "dispatch-lane",
+    "dispatch lane",
+    "routing_policy",
+    "smart_router",
+    "dispatch_spec",
+    # store-resolution
+    "resolve_state_dir",
+    "resolve_data_dir",
+    "resolve_central_data_dir",
+    "project_root",
+    "vnx_paths",
+    "central store",
+    "vnx_data_dir",
+    # review-gate
+    "review-gate",
+    "review_gate",
+    "review_floor",
+    "review-floor",
+    "evidence_bound_gate",
+    "codex_gate",
+    "gemini_review",
+    "verify_pr",
+    "merge gate",
+    "merge-gate",
+    "plan_gate_evidence",
+    "phantom_guard",
+    # central-DB schema (ADR-007)
+    "adr-007",
+    "central-db",
+    "central_db",
+    "track_open_items",
+    "runtime_coordination.db",
+    "schema migration",
+    "schema change",
+    "composite key",
+    "unique constraint",
+)
+
+# task_class values that are HEAVY by construction: a code-review plan IS a
+# review-gate touchpoint, the first of the four domains. The other classes are
+# judged by what the plan actually names, not by their label.
+_HEAVY_TASK_CLASSES: frozenset[str] = frozenset({"02_code_review"})
+
+# Per-deliverable complexity levels that force HEAVY even with no domain
+# marker — a plan explicitly rated complex keeps the full panel.
+_HEAVY_COMPLEXITY: frozenset[str] = frozenset({"high", "critical", "complex"})
+
+# The `[^\n:=]*` between the label and the separator tolerates markdown bold
+# (``**Task class**: 02_code_review``) while never crossing a line break — a tag
+# belongs to one deliverable line. ``[:=]`` is required so a bare mention of the
+# word "complexity" in prose does not capture a value.
+_TASK_CLASS_RE = re.compile(r"(?i)\btask[\s_-]?class\b[^\n:=]*[:=]\s*(\d{2}_[a-z_]+)")
+_COMPLEXITY_RE = re.compile(r"(?i)\bcomplexity\b[^\n:=]*[:=]\s*([a-z][a-z0-9]*)")
+
+
+def plan_gate_scope(
+    plan_text: "str | None" = None,
+    *,
+    task_class: "str | None" = None,
+    complexity: "str | None" = None,
+    paths: "Iterable[str] | None" = None,
+) -> str:
+    """Classify a plan as HEAVY or LIGHT for the plan-first gate.
+
+    Heavy when the plan touches the dispatch-lane, store-resolution, a
+    review-gate, or a central-DB schema (ADR-007); light in all other cases.
+    Derivation order: an explicit heavy task_class/complexity, then domain
+    markers in the plan text and the paths it names, then inline per-deliverable
+    tags in the doc.
+
+    Fail-closed: a plan we cannot judge (no text, no task_class, no complexity,
+    no paths) resolves to HEAVY — a silent fallback to the cheap panel would
+    downgrade exactly the plans we failed to size.
+    """
+    if (task_class or "").strip().lower() in _HEAVY_TASK_CLASSES:
+        return HEAVY
+    if (complexity or "").strip().lower() in _HEAVY_COMPLEXITY:
+        return HEAVY
+
+    text = (plan_text or "").strip()
+    path_text = "\n".join(p for p in (paths or []) if p)
+    haystack = "\n".join(t for t in (text, path_text) if t).lower()
+
+    # Fail-closed: with NO signal at all (no plan text, no touched paths, no
+    # explicit complexity rating) we cannot judge -> HEAVY. task_class alone does
+    # not count: 01_code_generation is the classifier's catch-all default and is
+    # no evidence of lightness. An explicit non-heavy complexity rating IS a
+    # signal — the caller sized it, so fall through to LIGHT absent any marker.
+    if not haystack and not (complexity or "").strip():
+        return HEAVY
+
+    for marker in _HEAVY_MARKERS:
+        if marker in haystack:
+            return HEAVY
+
+    for tag in _TASK_CLASS_RE.findall(text):
+        if tag.lower() in _HEAVY_TASK_CLASSES:
+            return HEAVY
+    for tag in _COMPLEXITY_RE.findall(text):
+        if tag.lower() in _HEAVY_COMPLEXITY:
+            return HEAVY
+
+    return LIGHT
+
+
+def complex_only_active() -> bool:
+    """True when VNX_PLAN_GATE_COMPLEX_ONLY is set to an affirmative value.
+
+    Precedence mirrors enforce_mode: the process env var (a per-session
+    override) wins; then the persisted config-plane value via config_runtime
+    (the ``/operator/config`` surface, audited + revertible); then the registry
+    default (off). The config lookup is best-effort — a missing store leaves
+    the env/default behaviour unchanged.
+    """
+    raw = os.environ.get("VNX_PLAN_GATE_COMPLEX_ONLY")
+    if raw:
+        return raw.strip().lower() in _TRUTHY
+    try:
+        import config_runtime  # noqa: PLC0415
+        return bool(config_runtime.get_bool("VNX_PLAN_GATE_COMPLEX_ONLY"))
+    except Exception:
+        return False
 
 
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:
