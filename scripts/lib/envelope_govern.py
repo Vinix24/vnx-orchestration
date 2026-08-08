@@ -27,7 +27,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 from envelope_types import EnvelopeGovernError, EnvelopeSpec, _AdapterResult
@@ -41,6 +41,12 @@ from envelope_govern_support import (
 )
 
 logger = logging.getLogger(__name__)
+
+# OI-1017/OI-1048 L2: greppable marker for observable body-contract violations
+# on the envelope lanes. The receipt status is NOT changed (binding is a
+# separate, later PR). Consumers filter on the warning code or grep the log
+# for this prefix to distinguish observable from binding violations.
+_CONTRACT_OBSERVE_MARKER = "VNX_CONTRACT_OBSERVE_VIOLATION"
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +127,37 @@ def _govern(
             spec.dispatch_id,
             exc,
         )
+
+    # OI-1017/OI-1048 L2: observable body-contract validation on envelope lanes.
+    # The tmux lane already binds via dispatch_govern._govern_impl(); the headless
+    # and provider lanes go through here without a validate_body() call. This is
+    # the shared envelope entry point — one fix covers both non-binding lanes.
+    # Observable mode: the receipt status is NOT changed (binding is a separate,
+    # later PR). The violation is logged with a greppable marker and a filterable
+    # warning code appended to the receipt's warnings[] array so the follow-up PR
+    # only needs to flip the switch from observe to enforce.
+    _contract_warnings: List[Dict[str, Any]] = []
+    if report_path is not None:
+        try:
+            from report_body_contract import validate_body  # noqa: PLC0415
+            _report_text = report_path.read_text(encoding="utf-8", errors="replace")
+            _body_result = validate_body(_report_text)
+            if not _body_result.valid:
+                _violation_msg = (
+                    f"{_CONTRACT_OBSERVE_MARKER}: report body contract "
+                    f"violated — missing sections: {', '.join(_body_result.missing)}"
+                )
+                logger.warning(
+                    "envelope._govern: %s dispatch=%s",
+                    _violation_msg, spec.dispatch_id,
+                )
+                _contract_warnings.append({
+                    "code": "report_contract_violated",
+                    "severity": "warn",
+                    "message": _violation_msg,
+                })
+        except OSError:
+            pass  # can't read report file — skip validation, don't break receipt
 
     # RECEIPT second — fail-closed, with idempotent dedup. The end-of-dispatch
     # event clear runs in finally so the live stream is truncated even when the
@@ -303,6 +340,12 @@ def _govern(
                     task_class=spec.task_class,
                     tier_from=spec.tier_from,
                     tier_to=spec.tier_to,
+                    # OI-1017/OI-1048 L2: observable body-contract warnings.
+                    # None when the report passes or couldn't be read; a list
+                    # with a filterable warning code when violated.  The receipt
+                    # status field is NOT affected (the violation is observable,
+                    # not yet binding — a separate PR makes it binding).
+                    warnings=_contract_warnings or None,
                 )
             except Exception as exc:
                 raise EnvelopeGovernError(
