@@ -111,6 +111,9 @@ source "$RP_LIB/rp_time.sh"
 # shellcheck source=lib/receipt_processor/rp_dedup.sh
 source "$RP_LIB/rp_dedup.sh"
 # shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/receipt_processor/rp_deadletter.sh
+source "$RP_LIB/rp_deadletter.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_lock.sh
 source "$RP_LIB/rp_lock.sh"
 # shellcheck source-path=SCRIPTDIR
@@ -329,6 +332,7 @@ _ppr_collect_pending() {
             ((_PPR_QUEUE_COUNT++))
         fi
     done
+    log_too_old_cycle_summary
 }
 
 # Process reports (passed as "$@") with rate limiting and watermark update.
@@ -402,6 +406,7 @@ _poll_new_reports() {
                 fi
             fi
         done
+        log_too_old_cycle_summary
         # Update watermark once after the full sweep with the maximum mtime seen.
         if [ "$_poll_max_mtime" -gt 0 ]; then
             echo "$_poll_max_mtime" > "$WATERMARK_FILE"
@@ -440,6 +445,7 @@ _mnr_startup_catchup() {
             process_single_report "$report" && ((catchup_count++))
         fi
     done
+    log_too_old_cycle_summary
     [ "$catchup_count" -gt 0 ] && log "INFO" "Startup catchup complete: $catchup_count reports processed"
 }
 
@@ -543,6 +549,7 @@ cleanup() {
     release_receipt_lock  # Ensure lock is released
     rm -f "$PID_FILE"
     rm -f "$FLOOD_LOCKFILE"  # Clear flood lock on clean shutdown
+    rm -f "$STATE_DIR/.append_stderr.$$"  # Leftover append-stderr capture (rp_append.sh)
     # Clean up singleton lock (and legacy fswatch FIFO if it exists)
     rm -f "$STATE_DIR/.fswatch_fifo.$$"
     rm -rf "$VNX_LOCKS_DIR/receipt_processor.sh.lock"
