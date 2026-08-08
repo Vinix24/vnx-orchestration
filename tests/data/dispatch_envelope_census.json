@@ -415,80 +415,129 @@
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 396,
+      "line": 412,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 433,
+      "line": 449,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 472,
+      "line": 488,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "CodexAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 478,
+      "line": 494,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "CodexAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 478,
+      "line": 494,
       "mechanism": "monkeypatch",
       "module_target": "dispatch_envelope",
       "symbol": "CodexAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 483,
+      "line": 499,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 522,
+      "line": 538,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 523,
+      "line": 539,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 550,
+      "line": 566,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 578,
+      "line": 594,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 579,
+      "line": 595,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 34,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_CONTRACT_OBSERVE_MARKER"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 34,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 127,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 129,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_contract_observe.py",
+      "line": 131,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
     },
     {
       "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
