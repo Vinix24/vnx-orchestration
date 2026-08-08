@@ -36,6 +36,35 @@ class CheckResult:
     detail: str
 
 
+# Gates the closure verifier implements. A gate name in a review_stack that is
+# not in this set is unverifiable: the verifier can neither attest a pass nor a
+# fail for it, so it is reported as UNVERIFIED and any result file found for it
+# is ignored. This closes the leak where an unknown gate passed on file
+# presence alone.
+_KNOWN_GATES = frozenset({
+    "claude_github_optional",
+    "codex_gate",
+    "gemini_review",
+    "ci_gate",
+})
+
+
+def _is_test_run_record(data: Dict[str, Any]) -> bool:
+    """True when a gate result/request is an offline test run, not production evidence.
+
+    Offline gate runs (e.g. ``kimi_gate --diff-file`` with a synthetic pr_id)
+    are marked ``test_run: true`` by the writer. Such records must never
+    satisfy closure for a real PR. Boolean and string forms are both recognised
+    so a non-normalising writer cannot slip a truthy marker past the check.
+    """
+    value = data.get("test_run")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return False
+
+
 def _run(cmd: Sequence[str], *, cwd: Optional[Path] = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(cmd),
@@ -233,6 +262,12 @@ def _find_gate_result(
     """
 
     def _accept(data: Dict[str, Any]) -> bool:
+        # Offline test-run records must never count as evidence for a real PR.
+        # The writer (kimi_gate --diff-file) stamps them test_run: true. Reject
+        # before any pr_id/branch matching so a synthetic pr_id (0, 1, 2)
+        # cannot align with a real contract.
+        if _is_test_run_record(data):
+            return False
         # PR-scoped AND matching: if data carries pr_id it must match the queried pr_id.
         # This prevents a result from a different PR satisfying a closure check even when
         # the filename-based lookup finds a contract for the correct PR name.
@@ -315,6 +350,10 @@ def _find_gate_request_payload(
         try:
             data = json.loads(_read_text(path))
         except (json.JSONDecodeError, OSError):
+            continue
+        # Offline test-run records must never satisfy an optional-gate closure
+        # check either — same rule as _find_gate_result._accept.
+        if _is_test_run_record(data):
             continue
         # claude_github_optional payloads must carry an explicit pr_id so that a
         # file written for one PR cannot silently satisfy another PR's closure check.
@@ -445,6 +484,26 @@ def _check_single_gate(
     branch: Optional[str],
 ) -> CheckResult:
     """Check a single gate from the review stack, returning one CheckResult."""
+    if gate not in _KNOWN_GATES:
+        # Unknown gate: the verifier does not implement this gate, so it can
+        # neither pass nor fail it. Presence of a result file is not evidence —
+        # a record for an unrecognised gate is uninterpretable. UNVERIFIED (not
+        # FAIL) keeps a governance-config gap visible instead of reading as a
+        # gate that actually rejected the change; the verdict still fails
+        # because closure requires every check to be PASS.
+        if result is not None:
+            return CheckResult(
+                f"gate_{gate}",
+                "UNVERIFIED",
+                f"gate {gate} is not implemented by the closure verifier — result present "
+                f"but uninterpretable, treated as not decided",
+            )
+        return CheckResult(
+            f"gate_{gate}",
+            "UNVERIFIED",
+            f"gate {gate} is not implemented by the closure verifier — not decided, cannot pass",
+        )
+
     if gate == "claude_github_optional":
         # Fallback: explicit-absence state for the optional gate is recorded
         # in the requests directory by gate_request_handler — not as a
@@ -572,11 +631,6 @@ def _check_single_gate(
             )
         return CheckResult(f"gate_{gate}", "FAIL", f"ci_gate not passing — {reason}")
 
-    # Unknown gate
-    if result is None:
-        return CheckResult(f"gate_{gate}", "FAIL", f"no gate result for unknown gate {gate}")
-    return CheckResult(f"gate_{gate}", "PASS", f"gate {gate} result present")
-
 
 def _check_contract_hashes(contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
     """Check content hash consistency between contract and gate receipts.
@@ -586,6 +640,8 @@ def _check_contract_hashes(contract: ReviewContract, results_dir: Path) -> List[
     """
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
+        if gate not in _KNOWN_GATES:
+            continue
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result and contract.content_hash:
             result_hash = result.get("contract_hash") or result.get("content_hash") or ""
@@ -603,6 +659,8 @@ def _check_report_paths(contract: ReviewContract, results_dir: Path) -> List[Che
     """Validate that every terminal gate result carries a report_path pointing to a real file."""
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
+        if gate not in _KNOWN_GATES:
+            continue
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result is not None and gate_is_terminal(result):
             report_path = result.get("report_path", "")
@@ -883,6 +941,8 @@ def _detect_gate_report_contradictions(
     checks: List[CheckResult] = []
 
     for gate in contract.review_stack:
+        if gate not in _KNOWN_GATES:
+            continue
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result is None:
             continue

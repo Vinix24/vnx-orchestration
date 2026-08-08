@@ -156,6 +156,10 @@ def main(argv: "list[str] | None" = None) -> int:
         "gate": "kimi_gate",
         "pr_id": str(args.pr),
         "pr_number": int(args.pr) if str(args.pr).isdigit() else None,
+        # Offline runs read the diff from a file (--diff-file) and are NOT tied
+        # to a live GitHub PR; they must never count as gate evidence. The
+        # closure verifier refuses records with test_run: true.
+        "test_run": bool(args.diff_file),
         "status": status,
         "reason": "verdict" if verdict else "no_verdict",
         "duration_seconds": round(duration, 3),
