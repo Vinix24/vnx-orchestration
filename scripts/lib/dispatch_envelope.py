@@ -495,11 +495,62 @@ def run_envelope_headless_plan(
         bundle_dir=Path(plan.instruction_file).parent,
     )
 
-    start = datetime.now(timezone.utc)
-    result = ClaudeSubprocessAdapter().run(enriched_spec)
-    end = datetime.now(timezone.utc)
+    from dispatch_worktree_isolation import (  # noqa: PLC0415
+        create_dispatch_worktree,
+        remove_dispatch_worktree,
+        resolve_consumer_project_root,
+    )
 
-    report_path, receipt_path = _govern(enriched_spec, result, start, end, integrity=integrity)
+    wt_path: Optional[Path] = None
+    try:
+        _consumer_project_root = resolve_consumer_project_root()
+        wt_path = create_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
+    except Exception as _wt_exc:
+        _isolation_error = (
+            f"isolation required but worktree creation failed "
+            f"for {plan.dispatch_id}: {_wt_exc} — aborting; no shared-checkout fallback"
+        )
+        logger.error("run_envelope_headless_plan: %s", _isolation_error)
+        _fail_result = _AdapterResult(
+            returncode=1,
+            completion_text="",
+            status="failure",
+            error=_isolation_error,
+        )
+        _fail_start = _fail_end = datetime.now(timezone.utc)
+        report_path, receipt_path = _govern(
+            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
+        )
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=report_path,
+            receipt_path=receipt_path,
+            completion_text="",
+            error=_isolation_error,
+        )
+
+    _phantom_diff: Optional[str] = None
+    try:
+        start = datetime.now(timezone.utc)
+        result = ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path)
+        end = datetime.now(timezone.utc)
+        try:
+            _phantom_diff = _resolve_phantom_diff(
+                plan.dispatch_id,
+                base_ref=plan.base_ref or "origin/main",
+                wt_path=wt_path,
+                repo=_consumer_project_root,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
+            _phantom_diff = None
+    finally:
+        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
+
+    report_path, receipt_path = _govern(
+        enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
+        base_ref=plan.base_ref or "origin/main",
+    )
 
     return EnvelopeResult(
         status=result.status,
