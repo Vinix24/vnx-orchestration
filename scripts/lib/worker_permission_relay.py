@@ -339,12 +339,14 @@ def parse_pending_command(pane_text: str) -> Optional[str]:
     """Extract the command/tool a permission prompt is asking about.
 
     Returns the command string when *pane_text* shows a permission prompt, else
-    None. Three extraction strategies:
+    None. Three extraction strategies, tried in this order:
       1. The ``Bash(<cmd>)`` / ``Tool(<arg>)`` token Claude prints for tool calls.
-      2. The command echoed inside the prompt box, just above the
+      2. (OI-1007) The command embedded inline in the numbered option label
+         "… and don't ask again for: <cmd> …". Runs before the box scan because
+         its marker matches the menu line itself — scanning above it would read
+         arbitrary prior pane output as the command.
+      3. The command echoed inside the prompt box, just above the
          "Do you want to proceed?" line.
-      3. (OI-1007) The command embedded inline in the numbered option label
-         "… and don't ask again for: <cmd> …".
     """
     if not pane_text:
         return None
@@ -360,6 +362,25 @@ def parse_pending_command(pane_text: str) -> Optional[str]:
         cand = cand.strip()
         if cand:
             return cand
+
+    # Strategy 3 (OI-1007): numbered-menu format, where the pending command sits
+    # inline in the option label ("don't ask again for: <cmd>") and there is NO
+    # box above the marker to scan. Runs BEFORE the box scan: the marker matches
+    # the menu line itself, so scanning the twelve lines above it would pick up
+    # arbitrary prior pane output instead of the menu's own command. The old box
+    # format says "don't ask again for this project" (no colon) — the inline
+    # regex requires the colon, so it never fires on the box format and the box
+    # scan below stays the authority there.
+    m = _INLINE_CMD_RE.search(pane_text)
+    if m:
+        # _strip_box first: a box-rendered option line carries trailing box-drawing
+        # chars in the capture ("… for: this project │") that would otherwise slip
+        # past the degenerate guard below.
+        cmd = _strip_box(m.group(1))
+        # Refuse degenerate prose captures ("this project"/"this session") that
+        # would read as a command if a future TUI drops the colon.
+        if cmd.lower() not in ("this project", "this session", "this command"):
+            return cmd
 
     # Strategy 2: command echoed in the box above the marker line. The command
     # is the FIRST content row after the title row ("Bash command"); the prose
@@ -389,23 +410,8 @@ def parse_pending_command(pane_text: str) -> Optional[str]:
         if re.match(r"^\d+\.\s", cand):
             continue
         candidates.append(cand)
-    if candidates:
-        # First content row after the title is the command; the rest is description.
-        return candidates[0]
-
-    # Strategy 3: OI-1007 numbered-menu format, where the pending command sits
-    # inline in the option label ("don't ask again for: <cmd>") and there is no
-    # box above the marker to scan. Runs after the box strategies so the old
-    # box format (whose "don't ask again for this project" has no colon) never
-    # has "this project" captured as a command.
-    m = _INLINE_CMD_RE.search(pane_text)
-    if m:
-        cmd = m.group(1).strip()
-        # Refuse degenerate prose captures ("this project"/"this session") that
-        # would read as a command if a future TUI drops the colon.
-        if cmd.lower() not in ("this project", "this session", "this command"):
-            return cmd
-    return None
+    # First content row after the title is the command; the rest is description.
+    return candidates[0] if candidates else None
 
 
 # ---------------------------------------------------------------------------
