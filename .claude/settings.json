@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/build_t0_state_hook.sh\"'"
+            "command": "bash -c 'if [ -n \"${VNX_HOME:-}\" ] && [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING (VNX_HOME unset or hook absent); t0_state.json will not refresh\\n\" >&2; exit 0; fi'"
           }
         ]
       },

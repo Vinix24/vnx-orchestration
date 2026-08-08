@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
 from pr_enforcement import PrEnforcementResult  # noqa: E402
 from worker_pane_classifier import classify_worker_pane  # noqa: E402
+from vnx_paths import _resolve_vnx_home  # noqa: E402
 
 # Work-started gate outcome codes (OI-863): a worker blocked on a permission
 # prompt is ALIVE and recoverable — one relayed answer saves it — so it must not
@@ -338,14 +339,31 @@ def _sanitize_session_name(raw: str) -> str:
 # Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default OFF)
 # ---------------------------------------------------------------------------
 
-# Command resolves the hook relative to the worktree it fires in (git rev-parse
-# returns the worktree root there) — same pattern as the existing spawn-blocker
-# hooks in .claude/settings.json.
-_WORKER_SCOPE_HOOK_COMMAND = (
-    "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
-    "/scripts/hooks/pretooluse_worker_scope_enforce.sh\"'"
-)
+# Command anchors the hook at the FABRIC install root, never the worktree or
+# consumer root. The worker-scope enforcement script ships only with the fabric;
+# a dispatch worktree created from a consumer repo has no scripts/hooks/, so the
+# old git-rev-parse command failed with a silent "No such file or directory" per
+# tool call and the guard did nothing (OI-1089 finding 1). The command bakes in
+# the fabric-absolute path (resolved via vnx_paths._resolve_vnx_home) and fails
+# LOUD when the artifact is missing while still exiting 0, so a broken install is
+# visible but never blocks a tool call.
 _WORKER_SCOPE_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit"
+
+
+def _worker_scope_hook_command() -> str:
+    """The PreToolUse hook command, anchored at the fabric install root.
+
+    The hook path is embedded at registration time so the command needs no
+    git/consumer-relative lookup at fire time. The fail-loud guard keeps the
+    hook non-blocking (exit 0) but makes a missing artifact unmistakable.
+    """
+    hook = _resolve_vnx_home() / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+    hook_str = str(hook)
+    return (
+        "bash -c 'if [ -f \"{hook}\" ]; then exec bash \"{hook}\"; else "
+        "printf \"[vnx] worker-scope hook artifact MISSING at {hook}; "
+        "worker-scope guard is NOT enforcing\\n\" >&2; exit 0; fi'"
+    ).format(hook=hook_str)
 
 
 def _worker_scope_hook_entry() -> dict:
@@ -355,7 +373,7 @@ def _worker_scope_hook_entry() -> dict:
         "hooks": [
             {
                 "type": "command",
-                "command": _WORKER_SCOPE_HOOK_COMMAND,
+                "command": _worker_scope_hook_command(),
                 "timeout": 5000,
             }
         ],
@@ -398,7 +416,7 @@ def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
         isinstance(entry, dict)
         and any(
             isinstance(hook, dict)
-            and hook.get("command") == _WORKER_SCOPE_HOOK_COMMAND
+            and hook.get("command") == _worker_scope_hook_command()
             for hook in entry.get("hooks", [])
         )
         for entry in pre_tool_use
