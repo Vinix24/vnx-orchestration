@@ -161,11 +161,70 @@ class ReportParser:
             first_line = text.splitlines()[0].strip()
             return first_line if first_line else default
 
+        # OI-1086: parse `---` YAML frontmatter FIRST (dispatch-envelope
+        # reports stamp provider/model/role there — e.g. the headless
+        # plan-gate seats carry `model: kimi-k3` in frontmatter and no
+        # `**Model**:` body field at all). Parsed before the bold-field scan
+        # so an explicit body field always wins over the frontmatter —
+        # measured on the 2026-08-03/04 envelope series, which carries
+        # frontmatter `model: unknown` alongside a real `**Model**: sonnet`
+        # in the body. Unknown-like frontmatter scalars are skipped for the
+        # same reason: a placeholder must never shadow a real body value.
+        # Only top-level scalars are read; nested blocks (route_decision,
+        # token_usage) are not receipt metadata.
+        _UNKNOWN_LIKE = {'unknown', 'none', 'null', 'n/a', 'na', 'unset', '-'}
+        fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+        if fm_match:
+            for line in fm_match.group(1).split('\n'):
+                if ':' not in line or line[0] in (' ', '\t', '#'):
+                    continue
+                key, value = line.split(':', 1)
+                key = _normalize_meta_key(key)
+                value = value.strip()
+                if not key or not value:
+                    continue
+                if value.lower() in _UNKNOWN_LIKE:
+                    continue
+                metadata[key] = value
+
         # Extract all metadata fields
         for match in self.metadata_pattern.finditer(content[:2000]):  # Check first 2000 chars
             key = _normalize_meta_key(match.group(1))
             value = match.group(2).strip()
             metadata[key] = value
+
+        # OI-1086 fallback: reports that embed their full dispatch
+        # instruction (the "# Dispatch <id> / ## Instruction" convention)
+        # carry the door-stamped **Model**/**Provider** block MID-FILE,
+        # outside the 2000-char header window above — measured on the
+        # 2026-08-04 m-series (e.g. 20260804-m00-oi917.md, block at line
+        # 196/282). First match wins and only fills keys the header scan did
+        # not already provide, so a prose mention later in the body can
+        # never override a real header value, and a header value always
+        # beats an embedded-instruction copy.
+        for _key, _pat in (
+            ('model', r'\*\*Model\*\*:\s*(.+)'),
+            ('provider', r'\*\*Provider\*\*:\s*(.+)'),
+        ):
+            if not str(metadata.get(_key) or '').strip():
+                m = re.search(_pat, content)
+                if m:
+                    metadata[_key] = m.group(1).strip()
+
+        # Plain-text header fallback (same convention as the Dispatch-ID
+        # plain-text fallback below): reports like the 2026-08-04 triage/m-
+        # series stamp a bare `Model: X` / `Provider: Y` block at the top.
+        # Case-sensitive on purpose: lowercase `model:` is the frontmatter
+        # form handled above, and anchoring to the header window keeps prose
+        # mentions out. Only fills keys still absent.
+        for _key, _pat in (
+            ('model', r'^\s*Model:\s*(\S+)\s*$'),
+            ('provider', r'^\s*Provider:\s*(\S+)\s*$'),
+        ):
+            if not str(metadata.get(_key) or '').strip():
+                m = re.search(_pat, content[:3000], re.MULTILINE)
+                if m and m.group(1).strip().lower() not in _UNKNOWN_LIKE:
+                    metadata[_key] = m.group(1).strip()
 
         # PR #8 Fix: Extract YAML metadata block including dispatch_id
         yaml_match = re.search(r'```yaml\n(.*?)\n```', content[:2000], re.DOTALL)
@@ -525,6 +584,27 @@ class ReportParser:
             'report_file': Path(report_path).name,  # Add filename for easier tracking
             'title': metadata.get('title', 'No title')
         }
+
+        # OI-1086: lift model/provider from extracted metadata onto the receipt.
+        # extract_metadata() already captures the `**Model**:`/`**Provider**:`
+        # bold fields, but the hand-picked key list above used to drop them —
+        # which made every report-derived receipt (receipt_kind='dispatch',
+        # no exempt source) fail append_receipt's fail-closed missing_model
+        # check (#1338) and put the receipt processor into a permanent
+        # reject-retry loop.
+        #
+        # Missing-field contract: when the report carries no model/provider,
+        # the keys are OMITTED from the receipt — never written as '' or
+        # 'unknown'. For the fail-closed validator an absent key, an empty
+        # string and 'unknown' are equivalent (all refused); omitting is the
+        # honest form because it does not imply a known-but-empty value, and
+        # it keeps the refusal reason ("carries no real model") accurate.
+        _model = str(metadata.get('model') or '').strip()
+        if _model:
+            receipt['model'] = _model
+        _provider = str(metadata.get('provider') or '').strip()
+        if _provider:
+            receipt['provider'] = _provider
 
         if any(extracted['recommendations'].values()):
             receipt['recommendations'] = extracted['recommendations']

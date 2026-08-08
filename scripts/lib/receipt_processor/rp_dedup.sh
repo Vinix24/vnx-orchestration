@@ -5,6 +5,27 @@
 #           _sha256() from main, $PROCESSED_HASHES, $RECEIPT_FILE, $FLOOD_LOCKFILE,
 #           $FLOOD_LOCK_MAX_AGE, $FLOOD_THRESHOLD, get_pane_id_smart() from pane_manager
 
+# OI-1085: log-volume damping for the historical-report rescan. Every poll
+# cycle re-scans the whole reports directory, and before this damping each
+# too-old report emitted one DEBUG line PER CYCLE — measured at 93% of the
+# 4.3 GB receipt_processing.log that filled the disk on 2026-08-07. The
+# information is preserved, the repetition is not: the first skip per report
+# per process is logged with its age, later skips only bump a counter, and
+# log_too_old_cycle_summary() emits one aggregate line per scan cycle.
+# (Space-delimited memo instead of an associative array: macOS /bin/bash is
+# 3.2 and has no `declare -A`. Dispatch-generated report names never contain
+# spaces.)
+_SPR_TOO_OLD_LOGGED=" "
+_SPR_TOO_OLD_CYCLE_COUNT=0
+
+# Emit the per-cycle aggregate of suppressed too-old skips (one line per
+# scan cycle instead of one line per historical report per cycle).
+log_too_old_cycle_summary() {
+    [ "${_SPR_TOO_OLD_CYCLE_COUNT:-0}" -gt 0 ] || return 0
+    log "DEBUG" "Skipped ${_SPR_TOO_OLD_CYCLE_COUNT} too-old report(s) this cycle (per-report lines suppressed after first occurrence)"
+    _SPR_TOO_OLD_CYCLE_COUNT=0
+}
+
 # Check if report should be processed
 should_process_report() {
     local report_file="$1"
@@ -26,7 +47,15 @@ should_process_report() {
 
     if [ "$file_mtime" -lt "$cutoff_seconds" ]; then
         local age_minutes=$(( ($(date +%s) - file_mtime) / 60 ))
-        log "DEBUG" "Report too old: $report_name (age: ${age_minutes}m)"
+        case "$_SPR_TOO_OLD_LOGGED" in
+            *" $report_name "*)
+                _SPR_TOO_OLD_CYCLE_COUNT=$(( _SPR_TOO_OLD_CYCLE_COUNT + 1 ))
+                ;;
+            *)
+                _SPR_TOO_OLD_LOGGED="${_SPR_TOO_OLD_LOGGED}${report_name} "
+                log "DEBUG" "Report too old: $report_name (age: ${age_minutes}m) — first skip, further per-cycle repeats suppressed"
+                ;;
+        esac
         return 1
     fi
 
