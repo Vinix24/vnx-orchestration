@@ -121,6 +121,54 @@ IDLE_PANE = """\
 › ❯
 """
 
+# OI-1007 (dispatch 20260803-225854-pr4-envelope-govern): the newer Claude Code
+# menu carries NO prose marker line — the whole prompt is the numbered option
+# list and the pending command sits inline in the "don't ask again for:" label.
+# Both apostrophe spellings appear in the wild (straight and curly).
+OI1007_PANE = (
+    "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+OI1007_PANE_CURLY = (
+    "1. Yes / 2. Yes, and don’t ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+
+# A REAL tmux capture has prior worker output ABOVE the OI-1007 numbered menu
+# (the box scan would read that stale output as the command). Straight and curly
+# apostrophe spellings both appear in the wild.
+OI1007_PANE_WITH_PRIOR_OUTPUT = (
+    "$ echo previous work\n"
+    "previous output line\n"
+    "another output line\n"
+    "● Claude needs to run a command.\n"
+    "\n"
+    "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/govern_body.txt / 3. No\n"
+)
+OI1007_PANE_WITH_PRIOR_OUTPUT_CURLY = (
+    "$ echo previous work\n"
+    "previous output line\n"
+    "another output line\n"
+    "● Claude needs to run a command.\n"
+    "\n"
+    "1. Yes / 2. Yes, and don’t ask again for: rm -f /tmp/govern_body.txt / 3. No\n"
+)
+
+# OLD box format variant whose option-2 label spells the prose WITH a colon —
+# the exact string the inline regex keys on. The degenerate guard must refuse it
+# and the box scan must return the real command from the box, never "this project".
+BOX_PANE_COLON_PROSE_OPTION = (
+    "╭───────────────────────────────────────────────╮\n"
+    "│ Bash command                                   │\n"
+    "│                                                 │\n"
+    "│   rm -rf /tmp/scratch                           │\n"
+    "│   Delete the scratch directory                  │\n"
+    "│                                                 │\n"
+    "│ Do you want to proceed?                         │\n"
+    "│ ❯ 1. Yes                                        │\n"
+    "│   2. Yes, and don't ask again for: this project │\n"
+    "│   3. No                                         │\n"
+    "╰───────────────────────────────────────────────╯\n"
+)
+
 
 # ---------------------------------------------------------------------------
 # PermissionWindow
@@ -222,6 +270,49 @@ class TestParsePendingCommand:
 
     def test_extracts_bash_token(self):
         assert parse_pending_command(TOOL_TOKEN_PANE) == "chmod +x scripts/deploy.sh"
+
+    def test_oi1007_extracts_inline_command(self):
+        """OI-1007: the numbered-menu option label embeds the pending command
+        after 'don't ask again for:'; extraction must work for straight and
+        curly apostrophes alike."""
+        assert parse_pending_command(OI1007_PANE) == "rm -f /tmp/govern_body.txt"
+        assert parse_pending_command(OI1007_PANE_CURLY) == "rm -f /tmp/govern_body.txt"
+
+    def test_oi1007_prior_output_above_menu_uses_menu_command(self):
+        """Regression (PR #1411 codex-gate): a real pane has prior worker output
+        ABOVE the OI-1007 numbered menu. The box scan must NOT read that stale
+        output as the command — the command comes from the menu line itself
+        ("don't ask again for: <cmd>")."""
+        assert (
+            parse_pending_command(OI1007_PANE_WITH_PRIOR_OUTPUT)
+            == "rm -f /tmp/govern_body.txt"
+        )
+        assert (
+            parse_pending_command(OI1007_PANE_WITH_PRIOR_OUTPUT_CURLY)
+            == "rm -f /tmp/govern_body.txt"
+        )
+
+    def test_box_format_dont_ask_again_option_unchanged(self):
+        """The OLD box format keeps working: the command echoed in the box is
+        returned, and the colon-less 'don't ask again this session' option label
+        (which the inline regex requires a colon for) is never read as a
+        command."""
+        assert parse_pending_command(PROMPT_PANE) == "rm -rf /tmp/scratch"
+
+    def test_box_format_colon_prose_option_not_captured_as_command(self):
+        """Even when a box option spells the prose WITH a colon — the inline
+        regex's discriminator — 'this project' must never be read as a command.
+        The degenerate guard refuses it and the box scan returns the real
+        command from the box."""
+        assert (
+            parse_pending_command(BOX_PANE_COLON_PROSE_OPTION)
+            == "rm -rf /tmp/scratch"
+        )
+
+    def test_oi1007_inline_command_is_not_catastrophic(self):
+        # A plain force-delete of a /tmp file is recoverable — the relay may
+        # auto-approve it inside an open window, it does not hard-escalate.
+        assert is_catastrophic(parse_pending_command(OI1007_PANE)) is False
 
     def test_idle_returns_none(self):
         assert parse_pending_command(IDLE_PANE) is None

@@ -34,6 +34,11 @@ PROMPT_MARKERS = (
     "do you want to create",
     "requires confirmation",
     "requires your permission",
+    # OI-1007: newer Claude Code menus carry NO prose marker line — the whole
+    # prompt is the numbered option list, e.g.
+    #   "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/x / 3. No"
+    # The "don't ask again for" option label is the distinguishing phrase.
+    "don't ask again for",
 )
 
 # Version-robust "Claude is actively working" indicators (mirrors
@@ -95,7 +100,9 @@ def classify_worker_pane(content: str) -> WorkerPaneState:
     if not content.strip():
         return WorkerPaneState(STATE_DEAD, detail="empty pane capture")
 
-    lowered = content.lower()
+    # Normalize TUI-variant apostrophes (’ / ‘) to straight quotes so a pane
+    # rendered with curly glyphs still matches the straight-quote markers.
+    lowered = content.lower().replace("’", "'").replace("‘", "'")
     for marker in PROMPT_MARKERS:
         if marker in lowered:
             return WorkerPaneState(

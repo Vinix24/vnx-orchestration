@@ -793,6 +793,15 @@ _PERMISSION_PANE_TEXT = (
     "  3. No\n"
 )
 
+# OI-1007 (dispatch 20260803-225854-pr4-envelope-govern): the newer Claude Code
+# menu carries NO prose marker line — the whole prompt is the numbered option
+# list and the pending command sits inline in the "don't ask again for:" label.
+# This is the exact pane text observed; it previously classified as stalled and
+# the worker silently burned its deadline.
+_OI1007_PANE_TEXT = (
+    "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+
 
 class TestAwaitingPermission(_LaneTestCase):
     def test_permission_prompt_is_not_fast_aborted(self):
@@ -872,6 +881,144 @@ class TestAwaitingPermission(_LaneTestCase):
         self.assertIn(
             "interactive_awaiting_permission",
             {e["event_type"] for e in events},
+        )
+
+    def test_oi1007_numbered_menu_surfaces_event_and_escalation(self):
+        """OI-1007: the numbered-menu prompt (no prose marker line) is detected as
+        awaiting_permission AND surfaced as a durable escalation record — so the
+        operator sees it via `vnx permission escalations`, not only as an event."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_OI1007_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.15,
+            poll_interval=0.02,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),
+            baseline_backstop=True,
+            pane_id="%1",
+            label="T1",
+        )
+        self.assertIsNone(result, "no receipt ever arrives on a blocked worker")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
+        # Escalation bridge: a durable record was written for the inline command.
+        esc_path = self.state_dir / "permission_escalations" / f"{self.DISPATCH_ID}.json"
+        self.assertTrue(esc_path.exists(), "escalation bridge must write a record")
+        record = json.loads(esc_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["dispatch_id"], self.DISPATCH_ID)
+        self.assertEqual(record["command"], "rm -f /tmp/govern_body.txt")
+        self.assertEqual(record["reason"], "awaiting_permission")
+        self.assertEqual(record["status"], "pending")
+
+    def test_heartbeat_skips_awaiting_permission_worker(self):
+        """OI-944/OI-1007: a worker blocked on a permission prompt has a log that
+        legitimately stopped growing. The heartbeat must NOT treat it as a silent
+        stall — the prompt is recoverable (one keystroke) and escalates instead.
+        The failure report (heartbeat kill) must never be written for a recoverable
+        prompt."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_OI1007_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        # unified_reports lives under the SHARED system temp root (state_dir.parent),
+        # so a report left by an earlier test would be indistinguishable from one
+        # written by this run. Clear it first to make the assertion order-independent.
+        report_path = (
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        if report_path.exists():
+            report_path.unlink()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result, "no receipt ever arrives on a blocked worker")
+        # The heartbeat was skipped: no failure report was written, the worker was
+        # escalated (event + escalation record) and let through to the deadline.
+        self.assertFalse(
+            report_path.exists(),
+            "awaiting_permission worker must NOT be heartbeat-killed",
+        )
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
+        esc_path = self.state_dir / "permission_escalations" / f"{self.DISPATCH_ID}.json"
+        self.assertTrue(esc_path.exists(), "escalation bridge must write a record")
+
+    def test_heartbeat_kills_genuinely_stalled_worker(self):
+        """Control: a worker whose pane shows NO permission prompt (content but no
+        prompt) and whose log has stopped growing IS a true stall — the heartbeat
+        must fire, write the failure report, and return None before the deadline."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            # Stale log text, no prompt, no working indicator → stalled, NOT
+            # awaiting_permission.
+            ready_content="some stale log line\nthat is not a prompt",
+        )
+        lane = self._make_lane(fake)
+        # Clear a stale report from a sibling test in the SHARED temp root first,
+        # so the exists() assertion below proves THIS run fired the heartbeat.
+        report_path = (
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        if report_path.exists():
+            report_path.unlink()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result, "no receipt ever arrives on a stalled worker")
+        # The heartbeat DID fire: a failure report was written for the true stall.
+        self.assertTrue(
+            report_path.exists(),
+            "a genuinely stalled worker must be heartbeat-killed (failure report)",
         )
 
 

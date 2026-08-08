@@ -497,6 +497,13 @@ class TmuxInteractiveDispatch:
 
         The event is the detection surface T0 uses to answer the prompt (one
         keystroke) instead of letting the worker burn its whole deadline.
+
+        OI-1007 escalation bridge: alongside the event, a durable escalation
+        record is written via ``worker_permission_relay.write_escalation`` so the
+        prompt is ALSO surfaced to ``vnx permission escalations`` / ``vnx
+        permission approve`` — independent of the flag-gated relay, which may not
+        be running on this lane. The reason ``awaiting_permission`` records that
+        the lane's own pane detection raised it, not a relay tick.
         """
         if dispatch_id in self._awaiting_permission_emitted:
             return
@@ -508,6 +515,34 @@ class TmuxInteractiveDispatch:
             reason=reason,
             metadata={"pane_id": pane_id},
         )
+        try:
+            from worker_permission_relay import (  # noqa: PLC0415
+                parse_pending_command,
+                write_escalation,
+            )
+            cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+            content = cap.stdout if cap.returncode == 0 else ""
+            command = parse_pending_command(content)
+            if command:
+                write_escalation(
+                    dispatch_id,
+                    command,
+                    "awaiting_permission",
+                    state_dir=self._state_dir,
+                )
+                logger.info(
+                    "interactive: awaiting-permission escalation written "
+                    "dispatch=%s cmd=%r",
+                    dispatch_id,
+                    command,
+                )
+        except Exception as exc:  # noqa: BLE001 — the bridge is best-effort; never raise
+            logger.debug(
+                "interactive: awaiting-permission escalation bridge failed "
+                "for %s (%s)",
+                dispatch_id,
+                exc,
+            )
 
     @staticmethod
     def _resolve_project_root() -> Path:
@@ -2022,9 +2057,11 @@ class TmuxInteractiveDispatch:
                 # blocked on a prompt produces no receipt; surface it the moment the
                 # pane betrays it (at most once per dispatch) instead of waiting the
                 # full deadline invisible.
+                _awaiting_permission = False
                 if pane_id is not None:
                     _pane_state = self._classify_pane(pane_id)
-                    if _pane_state.is_awaiting_permission and label is not None:
+                    _awaiting_permission = _pane_state.is_awaiting_permission
+                    if _awaiting_permission and label is not None:
                         self._emit_awaiting_permission(
                             dispatch_id, label, pane_id,
                             "permission prompt during receipt wait",
@@ -2032,7 +2069,12 @@ class TmuxInteractiveDispatch:
                 # OI-944 / OI-1007: heartbeat silence check.  If the pipe-pane
                 # log has stopped growing for longer than the silence threshold,
                 # the worker is stuck — kill it and write a terminal failure.
-                if _heartbeat is not None:
+                # EXCEPTION (OI-863): a recoverable awaiting_permission worker is
+                # NOT a silent/stalled worker — its log has legitimately stopped
+                # growing while it waits on ONE keystroke. Killing it would discard
+                # a rescueable dispatch, so the heartbeat is skipped while the pane
+                # shows a permission prompt (which escalates instead).
+                if _heartbeat is not None and not _awaiting_permission:
                     _hb_verdict = _heartbeat.check()
                     if _hb_verdict.is_silent:
                         logger.warning(
