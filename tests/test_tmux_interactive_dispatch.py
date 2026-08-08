@@ -4794,7 +4794,7 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
 
     def test_write_hook_settings_fresh_worktree(self):
         from tmux_interactive_dispatch import (
-            _WORKER_SCOPE_HOOK_COMMAND,
+            _worker_scope_hook_command,
             _write_worker_scope_hook_settings,
         )
 
@@ -4809,13 +4809,156 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
         entry = pre[0]
         self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit")
         self.assertEqual(entry["hooks"][0]["type"], "command")
-        self.assertEqual(entry["hooks"][0]["command"], _WORKER_SCOPE_HOOK_COMMAND)
-        # The command resolves the hook from the worktree it fires in (cwd-based
-        # discovery), same pattern as the existing spawn-blocker hooks.
-        self.assertIn("git rev-parse --show-toplevel", entry["hooks"][0]["command"])
+        self.assertEqual(entry["hooks"][0]["command"], _worker_scope_hook_command())
+        # OI-1089 finding 1: the worker-scope script ships only with the fabric,
+        # so the command anchors at the fabric install root. It must NOT resolve
+        # against a consumer/worktree git top-level that lacks scripts/hooks/.
+        self.assertNotIn("git rev-parse", entry["hooks"][0]["command"])
         self.assertIn(
             "scripts/hooks/pretooluse_worker_scope_enforce.sh",
             entry["hooks"][0]["command"],
+        )
+        # Fail-loud guard: a missing artifact is reported, never silently ignored.
+        self.assertIn("MISSING", entry["hooks"][0]["command"])
+
+    def test_write_hook_settings_anchors_at_fabric_root_not_consumer(self):
+        """OI-1089 finding 1 regression: even when git rev-parse resolves to a
+        different (consumer) root, the hook command must fire the fabric copy."""
+        from tmux_interactive_dispatch import (
+            _worker_scope_hook_command,
+            _write_worker_scope_hook_settings,
+        )
+
+        fabric_root = self.state_dir / "fabric-root"
+        hook = fabric_root / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("#!/bin/bash\n", encoding="utf-8")
+
+        # A consumer root that would have won under the old git-rev-parse lookup
+        # and does NOT contain scripts/hooks/ — the exact failure of finding 1.
+        consumer_root = self.state_dir / "consumer-worktree"
+        consumer_root.mkdir()
+
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            command = _worker_scope_hook_command()
+
+        wt = self.state_dir / "wt-anchored"
+        wt.mkdir()
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            _write_worker_scope_hook_settings(wt)
+        data = json.loads(
+            (wt / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+        )
+        written = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(written, command)
+        # The command points at the fabric copy even when fired from the consumer.
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            cwd=str(consumer_root),
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("No such file or directory", result.stderr)
+        self.assertNotIn("MISSING", result.stderr)
+        # git-rev-parse never appears in the command string.
+        self.assertNotIn("git rev-parse", command)
+
+    def test_hook_command_fails_loud_when_artifact_missing(self):
+        """OI-1089 DoD (b): a missing fabric artifact is NOT silently ignored.
+
+        The command stays non-blocking (exit 0, no block decision) but must print
+        an unmistakable [vnx] MISSING marker to stderr.
+        """
+        from tmux_interactive_dispatch import _worker_scope_hook_command
+
+        empty_fabric = self.state_dir / "fabric-empty"
+        empty_fabric.mkdir()
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=empty_fabric
+        ):
+            command = _worker_scope_hook_command()
+
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, "fail-loud must stay non-blocking")
+        self.assertIn("MISSING", result.stderr)
+        self.assertIn("pretooluse_worker_scope_enforce.sh", result.stderr)
+        self.assertIn("NOT enforcing", result.stderr)
+
+    def test_hook_command_path_metachars_are_literal_not_executed(self):
+        """PR #1413 regression: a fabric path containing shell metacharacters
+        (space + ``$(touch ...)`` command substitution and a ``;``) must be passed
+        to the hook literally. The old implementation interpolated the path into
+        the bash -c body, so a ``$(...)`` in the path executed on every hook fire
+        and a ``;`` could start a second command.
+        """
+        from tmux_interactive_dispatch import _worker_scope_hook_command
+
+        injected_marker = self.state_dir / "injected-marker"
+        fabric_root = self.state_dir / f"fabric $(touch {injected_marker}); root"
+        hook = fabric_root / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+        hook.parent.mkdir(parents=True)
+        ran_marker = self.state_dir / "hook-executed"
+        hook.write_text(
+            f"#!/bin/bash\ntouch {shlex.quote(str(ran_marker))}\n", encoding="utf-8"
+        )
+
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            command = _worker_scope_hook_command()
+
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The hook artifact ran via the literal path, so the path resolved intact.
+        self.assertTrue(ran_marker.exists(), "hook must execute via the literal path")
+        # The $(touch ...) embedded in the path must NOT have executed. Under the
+        # pre-fix interpolation it fired on every hook run and created this file.
+        self.assertFalse(
+            injected_marker.exists(),
+            "shell metacharacters in the path must be literal, not executed",
+        )
+
+    def test_t0_state_hook_registration_anchors_at_fabric_root(self):
+        """OI-1089 finding 2: the fabric's own .claude/settings.json registers the
+        t0_brief chain's build_t0_state_hook the same way — anchored at the fabric
+        root (VNX_HOME), never a consumer/worktree git top-level, fail-loud when
+        the artifact is missing."""
+        settings_path = SCRIPT_DIR.parent / ".claude" / "settings.json"
+        self.assertTrue(settings_path.exists(), "repo settings.json must exist")
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        hooks = data["hooks"]["SessionStart"]
+        commands = [
+            h.get("command", "")
+            for e in hooks
+            if isinstance(e, dict)
+            for h in e.get("hooks", [])
+            if "build_t0_state_hook.sh" in h.get("command", "")
+        ]
+        self.assertEqual(len(commands), 1, "exactly one build_t0_state_hook registration")
+        command = commands[0]
+        self.assertIn("${VNX_HOME:-", command, "VNX_HOME must be the primary anchor")
+        self.assertIn("scripts/hooks/build_t0_state_hook.sh", command)
+        self.assertIn("MISSING", command, "fail-loud guard must be present")
+        self.assertNotIn(
+            "git rev-parse --show-toplevel",
+            command,
+            "must not resolve against a consumer git top-level",
         )
 
     def test_write_hook_settings_merges_existing_and_is_idempotent(self):
