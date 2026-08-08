@@ -103,9 +103,23 @@ def _make_db(path: Path, *, n_patterns: int = 0) -> Path:
 
 
 def _make_fresh_receipts(data_root: Path) -> None:
-    processed = data_root / "receipts" / "processed"
-    processed.mkdir(parents=True, exist_ok=True)
-    (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
+    """Append a fresh receipt line to the t0 ledger.
+
+    OI-1088: the dream preflight reads state/t0_receipts.ndjson (the ledger),
+    not receipts/processed/ (the delivery lane's staging dir). Seed the same
+    source the code reads.
+    """
+    from datetime import datetime, timezone
+
+    state_dir = data_root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "dispatch_id": "test-dispatch",
+        "status": "success",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(receipt) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +245,17 @@ class TestWriterReaderCanonicalPathAgreement:
 
 class TestDreamCycleConsolidatesSeededPatterns:
     """Seed N>=threshold patterns in the canonical db, run dream cycle → consolidates."""
+
+    @pytest.fixture(autouse=True)
+    def _dream_activation_gate_open(self, monkeypatch):
+        """PR-17 added an activation gate that defaults closed; these tests exercise
+        consolidation mechanics, so arm the scheduler and stub the probe to 'ok' —
+        the same posture as test_dream_consolidator.py's autouse fixture."""
+        monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+        import consolidator
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: "ok"
+        )
 
     def test_seeded_patterns_cause_consolidation_not_skip(self, tmp_path):
         """N>=1 success_patterns in db → dream cycle status is NOT skipped."""

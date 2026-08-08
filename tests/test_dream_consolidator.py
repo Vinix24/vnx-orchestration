@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -239,11 +240,24 @@ class TestExtractKimiText:
         assert consolidator._extract_kimi_text(stdout) == ""
 
 
-def _make_fresh_receipts(data_root: Path) -> None:
-    """Create a fresh processed receipt so the GAP-7 preflight passes."""
-    processed = data_root / "receipts" / "processed"
-    processed.mkdir(parents=True, exist_ok=True)
-    (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
+def _make_fresh_receipts(data_root: Path, *, age_hours: float = 0) -> None:
+    """Append a receipt line to the t0 ledger so the GAP-7 preflight passes.
+
+    OI-1088: the preflight reads state/t0_receipts.ndjson (the append-only
+    ledger), NOT receipts/processed/ (the delivery lane's staging dir, which no
+    longer receives files). Tests must seed the same source the code reads.
+    """
+    state_dir = data_root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    ledger = state_dir / "t0_receipts.ndjson"
+    ts = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    receipt = {
+        "dispatch_id": "test-dispatch",
+        "status": "success",
+        "timestamp": ts.isoformat(),
+    }
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(receipt) + "\n")
 
 
 def _seed_pattern(db_path: Path) -> None:
@@ -362,46 +376,90 @@ class TestDryRun:
 
 
 class TestCheckReceiptCompleteness:
-    def test_missing_processed_dir_returns_false(self, tmp_path):
-        """No receipts/processed dir → incomplete."""
+    """OI-1088: the preflight reads the t0 ledger (state/t0_receipts.ndjson),
+    not receipts/processed/. Behavior pinned: absent / empty / fresh / stale.
+    """
+
+    def test_missing_ledger_returns_false(self, tmp_path):
+        """No state/t0_receipts.ndjson → incomplete (source absent)."""
         data_root = tmp_path / ".vnx-data"
         ok, reason = consolidator._check_receipt_completeness(data_root)
         assert not ok
         assert "absent" in reason
 
-    def test_empty_processed_dir_returns_false(self, tmp_path):
-        """Empty receipts/processed dir → incomplete."""
-        (tmp_path / ".vnx-data" / "receipts" / "processed").mkdir(parents=True)
-        ok, reason = consolidator._check_receipt_completeness(tmp_path / ".vnx-data")
+    def test_empty_ledger_returns_false(self, tmp_path):
+        """A zero-byte ledger → incomplete (source empty)."""
+        data_root = tmp_path / ".vnx-data"
+        (data_root / "state").mkdir(parents=True)
+        (data_root / "state" / "t0_receipts.ndjson").write_text("", encoding="utf-8")
+        ok, reason = consolidator._check_receipt_completeness(data_root)
+        assert not ok
+        assert "empty" in reason
+
+    def test_ledger_without_parseable_timestamps_returns_false(self, tmp_path):
+        """Ledger lines that carry no usable timestamp count as empty."""
+        data_root = tmp_path / ".vnx-data"
+        (data_root / "state").mkdir(parents=True)
+        (data_root / "state" / "t0_receipts.ndjson").write_text(
+            '{"dispatch_id": "d1"}\nnot-json-at-all\n{"timestamp": "garbage"}\n',
+            encoding="utf-8",
+        )
+        ok, reason = consolidator._check_receipt_completeness(data_root)
         assert not ok
         assert "empty" in reason
 
     def test_fresh_receipt_returns_true(self, tmp_path):
-        """A recently modified receipt file → complete."""
-        processed = tmp_path / ".vnx-data" / "receipts" / "processed"
-        processed.mkdir(parents=True)
-        (processed / "receipt-001.ndjson").write_text("{}", encoding="utf-8")
-        ok, reason = consolidator._check_receipt_completeness(tmp_path / ".vnx-data")
+        """A recent receipt line in the ledger → complete."""
+        data_root = tmp_path / ".vnx-data"
+        _make_fresh_receipts(data_root)
+        ok, reason = consolidator._check_receipt_completeness(data_root)
         assert ok
         assert reason == "ok"
 
-    def test_stale_receipts_return_false(self, tmp_path):
-        """All receipts older than max_age_hours → incomplete."""
-        import time
-        processed = tmp_path / ".vnx-data" / "receipts" / "processed"
-        processed.mkdir(parents=True)
-        old_file = processed / "receipt-old.ndjson"
-        old_file.write_text("{}", encoding="utf-8")
-        # Set mtime to 200 hours ago
-        old_ts = time.time() - (200 * 3600)
-        import os
-        os.utime(str(old_file), (old_ts, old_ts))
+    def test_fresh_ledger_passes_with_processed_dir_absent(self, tmp_path):
+        """REGRESSION (OI-1088): fresh ledger line must pass even when
+        receipts/processed/ does not exist at all — the exact production
+        situation that skipped every cycle for six weeks while the ledger
+        kept growing."""
+        data_root = tmp_path / ".vnx-data"
+        _make_fresh_receipts(data_root)
+        assert not (data_root / "receipts" / "processed").exists()
+        ok, reason = consolidator._check_receipt_completeness(data_root)
+        assert ok
+        assert reason == "ok"
 
+    def test_fresh_ledger_passes_with_processed_dir_empty(self, tmp_path):
+        """REGRESSION (OI-1088): an EMPTY receipts/processed/ dir must not
+        influence the verdict either — the ledger is the only source."""
+        data_root = tmp_path / ".vnx-data"
+        (data_root / "receipts" / "processed").mkdir(parents=True)
+        _make_fresh_receipts(data_root)
+        ok, reason = consolidator._check_receipt_completeness(data_root)
+        assert ok
+        assert reason == "ok"
+
+    def test_stale_ledger_returns_false(self, tmp_path):
+        """Newest ledger receipt older than max_age_hours → incomplete."""
+        data_root = tmp_path / ".vnx-data"
+        _make_fresh_receipts(data_root, age_hours=200)
         ok, reason = consolidator._check_receipt_completeness(
-            tmp_path / ".vnx-data", max_age_hours=48
+            data_root, max_age_hours=48
         )
         assert not ok
         assert "stale" in reason
+
+    def test_z_suffixed_timestamp_parsed(self, tmp_path):
+        """The ledger writes Z-suffixed UTC timestamps — they must parse."""
+        data_root = tmp_path / ".vnx-data"
+        (data_root / "state").mkdir(parents=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (data_root / "state" / "t0_receipts.ndjson").write_text(
+            json.dumps({"dispatch_id": "d1", "timestamp": ts}) + "\n",
+            encoding="utf-8",
+        )
+        ok, reason = consolidator._check_receipt_completeness(data_root)
+        assert ok
+        assert reason == "ok"
 
 
 class TestRunDreamCycleReceiptPreflight:
@@ -502,9 +560,7 @@ def _make_db_with_receipts(tmp_path: Path, *, with_patterns: bool = False) -> tu
     conn.close()
 
     data_root = tmp_path / ".vnx-data"
-    processed = data_root / "receipts" / "processed"
-    processed.mkdir(parents=True, exist_ok=True)
-    (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
+    _make_fresh_receipts(data_root)
     return db_path, data_root
 
 

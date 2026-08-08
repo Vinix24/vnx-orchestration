@@ -289,6 +289,22 @@ def test_provider_adapter_kimi_honors_plan_deadline(tmp_path, stubbed_provider_s
     assert stubbed_provider_spawns.calls["kimi"]["kwargs"]["total_deadline"] == 1800.0
 
 
+def test_provider_adapter_kimi_passes_plan_task_class(tmp_path, stubbed_provider_spawns):
+    """OI-1087: the plan's task_class must reach spawn_kimi so the fabrication
+    guard can exempt positively-known read-only classes. The 2026-08-07
+    false-failures happened because this signal died at the adapter — pin the
+    wiring, not just the guard. The stub is bound where the name is USED
+    (provider_spawns.kimi_spawn.spawn_kimi — _run_kimi imports it at call time)
+    and the assert proves the call actually happened."""
+    adapter = ProviderAdapter()
+    plan = _make_provider_plan(tmp_path, provider=Provider.KIMI, model="default")
+    plan = dataclasses.replace(plan, task_class="review")
+    r = adapter.run(plan, "prompt")
+    assert r.status == "success", f"kimi: {r}"
+    assert "kimi" in stubbed_provider_spawns.calls, "spawn_kimi was never called"
+    assert stubbed_provider_spawns.calls["kimi"]["kwargs"]["task_class"] == "review"
+
+
 def test_provider_adapter_routes_gemini(tmp_path, stubbed_provider_spawns):
     """gemini routes to spawn_gemini; no _dispatch_* wrapper invoked."""
     adapter = ProviderAdapter()
