@@ -35,6 +35,18 @@ PERMISSION_PANE = (
     "  3. No\n"
 )
 
+# The literal OI-1007 measurement (dispatch 20260803-225854-pr4-envelope-govern):
+# the newer Claude Code menu carries NO prose marker line — the whole prompt is
+# the numbered option list and the pending command sits inline in the
+# "don't ask again for:" option label. Both apostrophe spellings appear in the
+# wild (straight and curly).
+OI1007_PANE = (
+    "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+OI1007_PANE_CURLY = (
+    "1. Yes / 2. Yes, and don’t ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+
 
 class TestAwaitingPermission:
     def test_permission_prompt_is_awaiting_permission(self):
@@ -61,6 +73,15 @@ class TestAwaitingPermission:
             "do you want to proceed",
             "requires confirmation",
         )
+
+    def test_oi1007_numbered_menu_is_awaiting_permission(self):
+        """OI-1007: the numbered-menu prompt (no prose marker line) classifies as
+        awaiting_permission, both straight- and curly-apostrophe spellings."""
+        for pane in (OI1007_PANE, OI1007_PANE_CURLY):
+            result = classify_worker_pane(pane)
+            assert result.state == STATE_AWAITING_PERMISSION
+            assert result.is_awaiting_permission
+            assert result.matched_marker == "don't ask again for"
 
 
 class TestDistinctFromDeadWorker:

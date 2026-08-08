@@ -121,6 +121,17 @@ IDLE_PANE = """\
 › ❯
 """
 
+# OI-1007 (dispatch 20260803-225854-pr4-envelope-govern): the newer Claude Code
+# menu carries NO prose marker line — the whole prompt is the numbered option
+# list and the pending command sits inline in the "don't ask again for:" label.
+# Both apostrophe spellings appear in the wild (straight and curly).
+OI1007_PANE = (
+    "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+OI1007_PANE_CURLY = (
+    "1. Yes / 2. Yes, and don’t ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+
 
 # ---------------------------------------------------------------------------
 # PermissionWindow
@@ -222,6 +233,18 @@ class TestParsePendingCommand:
 
     def test_extracts_bash_token(self):
         assert parse_pending_command(TOOL_TOKEN_PANE) == "chmod +x scripts/deploy.sh"
+
+    def test_oi1007_extracts_inline_command(self):
+        """OI-1007: the numbered-menu option label embeds the pending command
+        after 'don't ask again for:'; extraction must work for straight and
+        curly apostrophes alike."""
+        assert parse_pending_command(OI1007_PANE) == "rm -f /tmp/govern_body.txt"
+        assert parse_pending_command(OI1007_PANE_CURLY) == "rm -f /tmp/govern_body.txt"
+
+    def test_oi1007_inline_command_is_not_catastrophic(self):
+        # A plain force-delete of a /tmp file is recoverable — the relay may
+        # auto-approve it inside an open window, it does not hard-escalate.
+        assert is_catastrophic(parse_pending_command(OI1007_PANE)) is False
 
     def test_idle_returns_none(self):
         assert parse_pending_command(IDLE_PANE) is None
