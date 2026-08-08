@@ -68,6 +68,11 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, _kill_process, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
+# OI-1087: the read-only task-class list lives in ONE place — phantom_guard's
+# REVIEW_TASK_CLASSES is the fabric's SSOT for "a verdict, not a diff, is the
+# expected deliverable". The fabrication guard below keys off the same list so
+# the two guards can never drift apart.
+from phantom_guard import REVIEW_TASK_CLASSES  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1031,6 +1036,7 @@ def _finalize_kimi_result(
     raw_samples: Optional[list] = None,
     saw_tool_calls: bool = False,
     worktree: Optional[Any] = None,
+    task_class: Optional[str] = None,
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult.
 
@@ -1042,6 +1048,14 @@ def _finalize_kimi_result(
     approval defaults again). ``worktree=None`` (no isolation worktree known,
     e.g. non-worktree dispatches) skips the check gracefully — there is nothing
     to diff against.
+
+    OI-1087: ``task_class`` exempts POSITIVELY-KNOWN read-only classes (the
+    phantom_guard REVIEW_TASK_CLASSES SSOT: review/analysis/research_structured/
+    ...) from that invariant — for a read-only dispatch an unchanged worktree IS
+    the intended outcome (the report is the deliverable; the dispatch forbids
+    commits). Fail-safe direction: an empty or unknown ``task_class`` keeps the
+    guard armed exactly as before; only a recognized read-only class suppresses
+    it.
     """
     try:
         proc.wait(timeout=10)
@@ -1052,9 +1066,18 @@ def _finalize_kimi_result(
 
     empty_extraction = not (completion_text or "").strip()
 
+    _normalized_class = (task_class or "").strip().lower()
+    read_only_class = bool(_normalized_class) and _normalized_class in REVIEW_TASK_CLASSES
+
     worktree_unchanged = False
-    if saw_tool_calls and worktree is not None:
+    if saw_tool_calls and worktree is not None and not read_only_class:
         worktree_unchanged = _worktree_has_changes(worktree) is False
+    elif saw_tool_calls and worktree is not None and read_only_class:
+        logger.info(
+            "kimi_spawn: fabrication guard not applied for read-only task_class=%r "
+            "— an unchanged worktree is the expected outcome for this class",
+            task_class,
+        )
 
     if errors_captured:
         error: Optional[str] = "\n".join(errors_captured)
@@ -1118,6 +1141,7 @@ def spawn_kimi(
     chunk_timeout: float = 1200.0,
     total_deadline: float = 900.0,
     event_store: Optional[Any] = None,
+    task_class: Optional[str] = None,
     **kwargs: Any,
 ) -> KimiSpawnResult:
     """Spawn ``kimi --print --output-format stream-json --yolo -p <prompt>``.
@@ -1147,6 +1171,15 @@ def spawn_kimi(
     both. ``event_store`` is forwarded to drain_stream (writes via drainer);
     ``event_writer`` is called per-event in _consume_kimi_stream. Passing both
     causes every event to be written twice.
+
+    ``task_class`` (OI-1087) is an EXPLICIT keyword — deliberately not silently
+    absorbed by ``**kwargs``: the four review-dispatch false-failures of
+    2026-08-07 happened precisely because this signal never left the adapter.
+    A visible, typed parameter is greppable, typo-safe (a misspelled kwarg in
+    **kwargs vanishes silently), and shows up in the signature for every future
+    caller. Forwarded to _finalize_kimi_result, where a positively-known
+    read-only class exempts the dispatch from the worktree-changed fabrication
+    guard. Unknown/empty keeps the guard armed.
     """
     if event_store is not None and event_writer is not None:
         raise ValueError("Pass either event_store OR event_writer, not both")
@@ -1257,6 +1290,7 @@ def spawn_kimi(
         raw_samples=raw_samples,
         saw_tool_calls=saw_tool_calls,
         worktree=cwd,
+        task_class=task_class,
     )
     if _hb_killed.is_set():
         # The heartbeat already wrote the terminal failure report — replace the

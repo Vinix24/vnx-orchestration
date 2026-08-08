@@ -31,6 +31,7 @@ from vnx_doctor import (
     check_write_access,
     check_worktree,
     check_path_resolution,
+    check_dream_cycle,
     run_doctor,
 )
 
@@ -293,6 +294,113 @@ class TestPathResolution:
         intel = [r for r in results if "Intelligence dir" in r.message]
         assert intel, "Intelligence dir check missing"
         assert ".vnx-intelligence" in intel[0].message
+
+
+# ---------------------------------------------------------------------------
+# Dream-cycle health check (OI-1088)
+# ---------------------------------------------------------------------------
+
+def _write_dream_events(vnx_env, events, filename="2026-08-08.ndjson"):
+    """Write dream events as NDJSON lines under <data>/events/dream/."""
+    events_dir = Path(vnx_env["VNX_DATA_DIR"]) / "events" / "dream"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    with (events_dir / filename).open("a", encoding="utf-8") as fh:
+        for event in events:
+            fh.write(json.dumps(event) + "\n")
+    return events_dir
+
+
+class TestDreamCycleCheck:
+    """OI-1088: a dream cycle that keeps skipping must surface in `vnx doctor`
+    with its reason — the six-week silent no-op must not be repeatable."""
+
+    def test_no_events_dir_passes(self, vnx_env):
+        results = check_dream_cycle(vnx_env)
+        assert len(results) == 1
+        assert results[0].status == PASS
+
+    def test_latest_skip_warns_with_reason(self, vnx_env):
+        """The exact production failure shape: preflight keeps skipping on
+        'incomplete_data' — doctor must WARN and carry the reason + detail."""
+        _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_skipped",
+            "cycle_id": "dream-20260808-010005-x",
+            "project_id": "vnx-dev",
+            "reason": "incomplete_data",
+            "detail": "all receipts stale (newest 400.0h ago, threshold 48h)",
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        results = check_dream_cycle(vnx_env)
+        assert len(results) == 1
+        assert results[0].status == WARN
+        assert "incomplete_data" in results[0].message
+        assert "stale" in results[0].message
+
+    def test_scheduler_disabled_skip_passes(self, vnx_env):
+        """scheduler_disabled is the deliberate arm-switch state — not a WARN."""
+        _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_skipped",
+            "cycle_id": "dream-x",
+            "reason": "scheduler_disabled",
+            "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == PASS
+        assert "disabled" in results[0].message
+
+    def test_completed_cycle_passes(self, vnx_env):
+        _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_completed",
+            "cycle_id": "dream-ok",
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == PASS
+        assert "dream_cycle_completed" in results[0].message
+
+    def test_latest_event_wins_by_timestamp(self, vnx_env):
+        """An older completed cycle followed by a newer skip must WARN — the
+        verdict tracks the LATEST event, not the nicest one."""
+        _write_dream_events(vnx_env, [
+            {
+                "event_type": "dream_cycle_completed",
+                "cycle_id": "dream-old",
+                "timestamp": "2026-08-07T01:00:05+00:00",
+            },
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": "dream-new",
+                "reason": "probe_not_ok",
+                "detail": "injection-effectiveness probe health=produces_crap",
+                "timestamp": "2026-08-08T01:00:05+00:00",
+            },
+        ])
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == WARN
+        assert "probe_not_ok" in results[0].message
+
+    def test_timeout_event_warns(self, vnx_env):
+        _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_timeout",
+            "cycle_id": "dream-slow",
+            "timeout_seconds": 180,
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == WARN
+
+    def test_malformed_lines_do_not_crash(self, vnx_env):
+        """Negative path: torn NDJSON lines are skipped, valid ones still read."""
+        events_dir = _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_completed",
+            "cycle_id": "dream-ok",
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        with (events_dir / "2026-08-08.ndjson").open("a", encoding="utf-8") as fh:
+            fh.write("not-json\n{broken\n")
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == PASS
 
 
 # ---------------------------------------------------------------------------

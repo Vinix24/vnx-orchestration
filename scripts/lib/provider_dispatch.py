@@ -2112,6 +2112,14 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
+            # OI-1087: same read-only exemption as the envelope-adapter path — the
+            # explicit --task-class flag first, then the VNX_TASK_CLASS env the door
+            # exports (the same value append_receipt records on the receipt).
+            # Unknown/empty keeps the fabrication guard armed.
+            task_class=(
+                (getattr(args, "task_class", "") or "").strip()
+                or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
+            ) or None,
         )
         end_time = datetime.now(timezone.utc)
 

@@ -494,6 +494,12 @@ class ProviderAdapter:
                 # longer deadline (e.g. stage_spec_bundle's 3600s default) was previously
                 # silently capped short (memory: provider-lane-900s-deadline-kills-builds).
                 total_deadline=float(plan.deadline_seconds),
+                # OI-1087: hand the plan's task_class to the spawn so the fabrication
+                # guard can exempt positively-known read-only classes (review/analysis):
+                # for those, an unchanged worktree is the intended outcome, not proof
+                # of fabrication. Four review dispatches false-failed on 2026-08-07
+                # because this signal never left the adapter.
+                task_class=plan.task_class,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
