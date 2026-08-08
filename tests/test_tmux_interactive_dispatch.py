@@ -4895,6 +4895,45 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
         self.assertIn("pretooluse_worker_scope_enforce.sh", result.stderr)
         self.assertIn("NOT enforcing", result.stderr)
 
+    def test_hook_command_path_metachars_are_literal_not_executed(self):
+        """PR #1413 regression: a fabric path containing shell metacharacters
+        (space + ``$(touch ...)`` command substitution and a ``;``) must be passed
+        to the hook literally. The old implementation interpolated the path into
+        the bash -c body, so a ``$(...)`` in the path executed on every hook fire
+        and a ``;`` could start a second command.
+        """
+        from tmux_interactive_dispatch import _worker_scope_hook_command
+
+        injected_marker = self.state_dir / "injected-marker"
+        fabric_root = self.state_dir / f"fabric $(touch {injected_marker}); root"
+        hook = fabric_root / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+        hook.parent.mkdir(parents=True)
+        ran_marker = self.state_dir / "hook-executed"
+        hook.write_text(
+            f"#!/bin/bash\ntouch {shlex.quote(str(ran_marker))}\n", encoding="utf-8"
+        )
+
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            command = _worker_scope_hook_command()
+
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The hook artifact ran via the literal path, so the path resolved intact.
+        self.assertTrue(ran_marker.exists(), "hook must execute via the literal path")
+        # The $(touch ...) embedded in the path must NOT have executed. Under the
+        # pre-fix interpolation it fired on every hook run and created this file.
+        self.assertFalse(
+            injected_marker.exists(),
+            "shell metacharacters in the path must be literal, not executed",
+        )
+
     def test_t0_state_hook_registration_anchors_at_fabric_root(self):
         """OI-1089 finding 2: the fabric's own .claude/settings.json registers the
         t0_brief chain's build_t0_state_hook the same way — anchored at the fabric

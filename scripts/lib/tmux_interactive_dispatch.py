@@ -346,7 +346,10 @@ def _sanitize_session_name(raw: str) -> str:
 # tool call and the guard did nothing (OI-1089 finding 1). The command bakes in
 # the fabric-absolute path (resolved via vnx_paths._resolve_vnx_home) and fails
 # LOUD when the artifact is missing while still exiting 0, so a broken install is
-# visible but never blocks a tool call.
+# visible but never blocks a tool call. The path travels to the inner shell via
+# the VNX_WORKER_SCOPE_HOOK environment variable (shlex.quoted at the export),
+# never through bash -c string interpolation, so shell metacharacters in the
+# fabric path cannot alter the executed command (PR #1413).
 _WORKER_SCOPE_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit"
 
 
@@ -354,16 +357,24 @@ def _worker_scope_hook_command() -> str:
     """The PreToolUse hook command, anchored at the fabric install root.
 
     The hook path is embedded at registration time so the command needs no
-    git/consumer-relative lookup at fire time. The fail-loud guard keeps the
-    hook non-blocking (exit 0) but makes a missing artifact unmistakable.
+    git/consumer-relative lookup at fire time. It is handed to the inner shell
+    via an environment variable rather than interpolated into the bash -c body:
+    a fabric path containing shell metacharacters (space, ``;``, ``$(...)``) is
+    passed literally and can never change what the command executes. The value
+    is shlex.quoted at the export assignment so it survives the outer shell
+    parse intact. The fail-loud guard keeps the hook non-blocking (exit 0) but
+    makes a missing artifact unmistakable.
     """
     hook = _resolve_vnx_home() / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
-    hook_str = str(hook)
+    quoted_hook = shlex.quote(str(hook))
     return (
-        "bash -c 'if [ -f \"{hook}\" ]; then exec bash \"{hook}\"; else "
-        "printf \"[vnx] worker-scope hook artifact MISSING at {hook}; "
-        "worker-scope guard is NOT enforcing\\n\" >&2; exit 0; fi'"
-    ).format(hook=hook_str)
+        "export VNX_WORKER_SCOPE_HOOK={quoted_hook}; "
+        "bash -c 'if [ -f \"$VNX_WORKER_SCOPE_HOOK\" ]; then "
+        "exec bash \"$VNX_WORKER_SCOPE_HOOK\"; else "
+        "printf \"[vnx] worker-scope hook artifact MISSING at %s; "
+        "worker-scope guard is NOT enforcing\\n\" \"$VNX_WORKER_SCOPE_HOOK\" >&2; "
+        "exit 0; fi'"
+    ).format(quoted_hook=quoted_hook)
 
 
 def _worker_scope_hook_entry() -> dict:
