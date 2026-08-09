@@ -259,15 +259,15 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - Bewijs: `scripts/lib/pr_enforcement.py:80-164`, `scripts/lib/tmux_interactive_dispatch.py:2982-3013`
 
 **headless — bindt**
-- `run_envelope_headless_plan()` (`dispatch_envelope.py:665-672`) roept `_enforce_push_pr()` aan vóór `remove_dispatch_worktree()` (de worktree is de enige handle naar de lokale branch).
-- `_enforce_push_pr()` (`dispatch_envelope.py:101-173`) hergebruikt `pr_enforcement.enforce_pr_exists` en de gedeelde `tmux_worktree.classify_path()` — geen tweede kopie van de beslissing (OI-1099).
-- De headless-lane maakt sinds #1416 wél een worktree aan (`isolation=worktree` gehonoreerd, hard-fail bij creatie, `dispatch_envelope.py:641-660`); de matrix-tekst "maakt geen worktree aan" is daarmee achterhaald.
+- `run_envelope_headless_plan()` roept `_enforce_push_pr()` aan (`dispatch_envelope.py:706-719`) vóór `remove_dispatch_worktree()` (de worktree is de enige handle naar de lokale branch).
+- `_enforce_push_pr()` (`dispatch_envelope.py:101-181`) hergebruikt `pr_enforcement.enforce_pr_exists` en de gedeelde `tmux_worktree.classify_path()` — geen tweede kopie van de beslissing (OI-1099).
+- De headless-lane maakt sinds #1416 wél een worktree aan (`isolation=worktree` gehonoreerd, hard-fail bij creatie, `dispatch_envelope.py:664-690`); de matrix-tekst "maakt geen worktree aan" is daarmee achterhaald.
 - Een mislukte push/PR → `result.status = "failure"` → `EnvelopeResult.returncode = 1`.
-- Bewijs: `scripts/lib/dispatch_envelope.py:101-175,665-672`
+- Bewijs: `scripts/lib/dispatch_envelope.py:101-181,706-719`
 
 **provider — bindt**
-- `run_envelope_plan()` (`dispatch_envelope.py:481-488`) roept dezelfde `_enforce_push_pr()` aan, vóór `remove_dispatch_worktree()`.
-- Bewijs: `scripts/lib/dispatch_envelope.py:101-175,481-488`
+- `run_envelope_plan()` roept dezelfde `_enforce_push_pr()` aan (`dispatch_envelope.py:521-534`), vóór `remove_dispatch_worktree()`.
+- Bewijs: `scripts/lib/dispatch_envelope.py:101-181,521-534`
 
 **Gedeelde classificatie**
 - `classify_path()` (`tmux_worktree.py:211-271`) is de enige canonieke git-staat-classificatie; `classify()` (`tmux_worktree.py:195-208`) delegeert ernaar. De envelope-lanes gebruiken `classify_path()` direct (geen `WorktreeHandle`).
