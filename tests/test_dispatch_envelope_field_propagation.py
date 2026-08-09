@@ -201,8 +201,23 @@ class TestPrIdPropagation:
             captured_specs.append(spec_arg)
             return (None, fake_receipt)
 
+        # This test asserts field PROPAGATION (pr_id), not push/PR enforcement —
+        # which has its own dedicated coverage in test_pr_enforcement.py and
+        # test_lane_matrix_row7_push_pr.py (confirmed green, 27 tests). Stubbing
+        # the worktree allocator here (same form as TestPrIdPropagation's provider
+        # lane test above) narrows this test's scope to what it actually claims to
+        # test. Running the real allocator would drag in real `git worktree add`,
+        # `ls-remote`, `git push` and `gh pr create` and rewrite a genuine success
+        # to status="failure" on any CI runner where those cannot succeed — the
+        # exact CI flake this dispatch fixes.
+        _fake_consumer_root = tmp_path / "consumer-root"
         with patch.object(dispatch_envelope.ClaudeSubprocessAdapter, "run",
                           return_value=_fake_adapter_success()), \
+             patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=_fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   return_value=tmp_path / "fake-wt"), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
              patch("dispatch_envelope._govern", side_effect=capture_govern):
             result = run_envelope_headless_plan(
                 plan, permit, state_dir=state_dir, data_dir=data_dir,
@@ -254,8 +269,20 @@ class TestChainLinkPropagationHeadless:
             captured_specs.append(spec_arg)
             return (None, fake_receipt)
 
+        # Asserts chain-link field PROPAGATION, not push/PR enforcement (covered
+        # in test_pr_enforcement.py + test_lane_matrix_row7_push_pr.py, 27 green).
+        # Stub the worktree allocator in the same form as the provider-lane test
+        # in TestPrIdPropagation so the real `git worktree add`/`git push`/`gh pr
+        # create` path cannot rewrite a genuine success to failure on a CI runner
+        # that lacks git/gh/network — the source of this dispatch's CI flake.
+        _fake_consumer_root = tmp_path / "consumer-root"
         with patch.object(dispatch_envelope.ClaudeSubprocessAdapter, "run",
                           return_value=_fake_adapter_success()), \
+             patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=_fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   return_value=tmp_path / "fake-wt"), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
              patch("dispatch_envelope._govern", side_effect=capture_govern):
             result = run_envelope_headless_plan(
                 plan, permit, state_dir=state_dir, data_dir=data_dir,
