@@ -1363,7 +1363,7 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         return 0
     finally:
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _dispatch_claude(args: argparse.Namespace) -> int:
@@ -1490,19 +1490,26 @@ def _prepare_provider_workdir(
     return isolation_worktree, worker_cwd
 
 
-def _remove_provider_worktree(dispatch_id: str) -> None:
+def _remove_provider_worktree(dispatch_id: str, *, terminal_id: str = "") -> None:
     """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent.
 
     Resolves the same consumer project_root as _create_provider_worktree —
     otherwise the __file__ fallback would try to remove a worktree that was
     never created there (in a central install), silently leaking the real one.
+
+    When *terminal_id* is provided, a ``provider_teardown_worktree`` event is
+    emitted via EventStore (L3 provider-lane reap).
     """
     try:
         from dispatch_worktree_isolation import (  # noqa: PLC0415
             remove_dispatch_worktree,
             resolve_consumer_project_root,
         )
-        remove_dispatch_worktree(dispatch_id, project_root=resolve_consumer_project_root())
+        remove_dispatch_worktree(
+            dispatch_id,
+            project_root=resolve_consumer_project_root(),
+            terminal_id=terminal_id,
+        )
         logger.info("provider isolation: worktree removed (dispatch=%s)", dispatch_id)
     except Exception as exc:
         logger.warning(
@@ -1514,6 +1521,8 @@ def _remove_provider_worktree(dispatch_id: str) -> None:
 def _finish_provider_worktree(
     dispatch_id: str,
     isolation_worktree: Optional[Path],
+    *,
+    terminal_id: str = "",
 ) -> None:
     """Remove normal provider worktrees while preserving benchmark output."""
     if isolation_worktree is None:
@@ -1525,7 +1534,7 @@ def _finish_provider_worktree(
             dispatch_id,
         )
         return
-    _remove_provider_worktree(dispatch_id)
+    _remove_provider_worktree(dispatch_id, terminal_id=terminal_id)
 
 
 def _dispatch_codex(args: argparse.Namespace) -> int:
@@ -1602,7 +1611,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
@@ -2052,7 +2061,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -2147,7 +2156,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
@@ -2257,7 +2266,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _dispatch_glm_harness(args: argparse.Namespace) -> int:
@@ -2318,7 +2327,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         return 0
     finally:
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -2393,7 +2402,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         # Safety net: archive+clear when an unexpected exception bypassed
         # _emit_governance (idempotent after a normal emit — see helper).
         _event_store_safety_net(event_store, args)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 _MLX_MODEL_MAP: dict[str, str] = {

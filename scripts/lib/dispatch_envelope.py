@@ -374,7 +374,7 @@ def run_envelope_plan(
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
     finally:
-        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
+        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
     report_path, receipt_path = _govern(
         enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
@@ -545,7 +545,7 @@ def run_envelope_headless_plan(
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
     finally:
-        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
+        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
     report_path, receipt_path = _govern(
         enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
