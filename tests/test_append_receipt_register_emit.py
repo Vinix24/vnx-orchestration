@@ -242,7 +242,141 @@ def test_exception_in_append_event_returns_false_never_raises(ar):
     assert result is False
 
 
-# ── Test 15: idempotency fix — two review_gate_request with different gates ───
+# ── Test 15: contract_invalid status → dispatch_failed (OI-1105 gap) ──────────
+
+def test_task_complete_contract_invalid_emits_dispatch_failed(ar):
+    """contract_invalid = report-body-contract failure → dispatch_failed."""
+    captured = []
+    receipt = _make_receipt("task_complete", status="contract_invalid")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_failed"
+
+
+# ── Test 16: subprocess_completion + success → dispatch_completed (OI-1105) ───
+
+def test_subprocess_completion_success_emits_dispatch_completed(ar):
+    captured = []
+    receipt = _make_receipt("subprocess_completion", status="success")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_completed"
+
+
+# ── Test 17: subprocess_completion + failed → dispatch_failed (OI-1105) ───────
+
+def test_subprocess_completion_failed_emits_dispatch_failed(ar):
+    captured = []
+    receipt = _make_receipt("subprocess_completion", status="failed")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_failed"
+
+
+# ── Test 18: report_contract_invalid → dispatch_failed (OI-1105) ──────────────
+
+def test_report_contract_invalid_emits_dispatch_failed(ar):
+    captured = []
+    receipt = _make_receipt("report_contract_invalid", status="contract_invalid")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_failed"
+
+
+# ── Test 19: skip_enrichment=True still fires emit (OI-1105 regression) ───────
+
+def test_skip_enrichment_true_still_emits_dispatch_register(tmp_path, ar):
+    """The dispatch register emit must fire even when skip_enrichment=True.
+
+    OI-1105: report_to_receipt_converter.py is the primary task_complete
+    producer and passes skip_enrichment=True.  Before this fix the emit was
+    gated behind _run_post_append_hooks, so skip_enrichment=True meant the
+    register was never updated for converter-produced receipts.
+    """
+    receipts_file = tmp_path / "t0_receipts.ndjson"
+    emit_calls = []
+
+    receipt = {
+        "timestamp": "2026-08-09T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI1105-REGRESSION-001",
+        "terminal": "T1",
+        "model": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "schema_version": 1,
+    }
+
+    with patch.object(ar, "_emit_dispatch_register", side_effect=lambda r: emit_calls.append(r) or True), \
+         patch.object(ar, "_enrich_completion_receipt", side_effect=lambda r, **kw: dict(r)), \
+         patch.object(ar, "_build_git_provenance", return_value={"git_ref": "HEAD"}), \
+         patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
+         patch.object(ar, "enrich_receipt_provenance"), \
+         patch.object(ar, "generate_quality_advisory", return_value={"t0_recommendation": {"open_items": []}}), \
+         patch.object(ar, "get_changed_files", return_value=[]), \
+         patch.object(ar, "calculate_cqs", return_value=None), \
+         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
+         patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch.object(ar, "current_project_id", return_value="vnx-dev"), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"), \
+         patch.object(ar, "_trigger_receipt_classifier"), \
+         patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])):
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_file),
+                                  skip_enrichment=True)
+
+    assert len(emit_calls) == 1, (
+        f"Expected 1 emit call with skip_enrichment=True, got {len(emit_calls)}. "
+        "OI-1105 regression: _emit_dispatch_register was gated behind "
+        "_run_post_append_hooks which only runs when skip_enrichment=False."
+    )
+    assert emit_calls[0]["dispatch_id"] == "DISP-OI1105-REGRESSION-001"
+
+
+# ── Test 20: skip_enrichment=False still fires emit exactly once ──────────────
+
+def test_skip_enrichment_false_emits_exactly_once(tmp_path, ar):
+    """When skip_enrichment=False, the emit must fire exactly once (not twice
+    from both the unconditional call AND _run_post_append_hooks)."""
+    receipts_file = tmp_path / "t0_receipts.ndjson"
+    emit_calls = []
+
+    receipt = {
+        "timestamp": "2026-08-09T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI1105-NOENRICH-001",
+        "terminal": "T1",
+        "model": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "schema_version": 1,
+    }
+
+    with patch.object(ar, "_emit_dispatch_register", side_effect=lambda r: emit_calls.append(r) or True), \
+         patch.object(ar, "_enrich_completion_receipt", side_effect=lambda r, **kw: dict(r)), \
+         patch.object(ar, "_build_git_provenance", return_value={"git_ref": "HEAD"}), \
+         patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
+         patch.object(ar, "enrich_receipt_provenance"), \
+         patch.object(ar, "generate_quality_advisory", return_value={"t0_recommendation": {"open_items": []}}), \
+         patch.object(ar, "get_changed_files", return_value=[]), \
+         patch.object(ar, "calculate_cqs", return_value=None), \
+         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
+         patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch.object(ar, "current_project_id", return_value="vnx-dev"), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"), \
+         patch.object(ar, "_trigger_receipt_classifier"), \
+         patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])):
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_file),
+                                  skip_enrichment=False)
+
+    assert len(emit_calls) == 1, (
+        f"Expected exactly 1 emit call with skip_enrichment=False, got {len(emit_calls)}. "
+        "Double-emit bug: _emit_dispatch_register was moved to the unconditional path "
+        "but still remained in _run_post_append_hooks."
+    )
 #   Both must produce distinct idempotency keys and persist in t0_receipts.ndjson
 
 import subprocess
