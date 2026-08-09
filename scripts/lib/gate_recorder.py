@@ -126,6 +126,46 @@ def write_skip_rationale(
 # ---------------------------------------------------------------------------
 
 
+def record_terminal_result(
+    *,
+    gate: str,
+    pr_id: str,
+    result_path: Path,
+    payload: Dict[str, Any],
+) -> Path:
+    """Atomically persist a terminal (pass/fail) gate result at an explicit path.
+
+    Single write path for gates outside the built-in review_gate_manager
+    pipeline (codex_gate/gemini_review/ci_gate/claude_github_optional
+    already enforce contract_hash + report_path at write time via
+    gate_result_parser._validate_and_persist_result). A free-form gate like
+    kimi_gate had no such enforcement, so nothing stopped a hand-authored
+    JSON from landing in review_gates/results/ indistinguishable from a real
+    run (OI-1093: three such records surfaced in mission-control's store).
+    Refusing to write a terminal result without producer identity closes
+    that gap for every future writer that routes through this function.
+
+    Non-terminal payloads (pending/running/queued) are not gate evidence
+    yet, so they are not held to this requirement. The caller
+    resolves ``result_path`` itself — gate writers use different filename
+    conventions (legacy ``pr-N-gate.json`` vs. ``{slug}-gate-contract.json``)
+    and this function does not need to know which.
+    """
+    from gate_status import is_terminal, has_producer_identity  # noqa: PLC0415
+
+    if is_terminal(payload) and not has_producer_identity(payload):
+        raise ValueError(
+            f"{gate} result for pr_id={pr_id!r} has a terminal status "
+            f"({payload.get('status')!r}) but no producer identity "
+            f"(dispatch_id) — refusing to write unauthenticated gate evidence"
+        )
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = result_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(result_path)
+    return result_path
+
+
 def record_not_executable(
     *,
     gate: str,

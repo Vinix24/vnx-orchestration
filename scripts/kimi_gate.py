@@ -34,6 +34,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from plan_gate_panel import _make_default_dispatcher  # governed provider_dispatch lane
+from gate_recorder import record_terminal_result
 
 _VALID_VERDICTS = {"pass", "fail", "blocked"}
 
@@ -178,11 +179,10 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if data_dir:
         results_dir = Path(data_dir) / "state" / "review_gates" / "results"
-        results_dir.mkdir(parents=True, exist_ok=True)
         out = results_dir / f"pr-{args.pr}-kimi_gate.json"
-        tmp = out.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-        tmp.replace(out)
+        record_terminal_result(
+            gate="kimi_gate", pr_id=record["pr_id"], result_path=out, payload=record,
+        )
         print(f"kimi_gate: wrote {out}", file=sys.stderr)
 
     if args.json:

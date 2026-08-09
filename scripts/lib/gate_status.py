@@ -101,3 +101,23 @@ def canonical_status(result: Dict[str, Any]) -> str:
     """
     status, _ = _coerce_status(result)
     return status
+
+
+def has_producer_identity(result: Dict[str, Any]) -> bool:
+    """True when a gate result carries a producer identity (OI-1093).
+
+    Requires a non-empty ``dispatch_id``. That field is the one that ties a
+    result back to a real governed dispatch in the audit trail — every
+    process that writes through the fleet's single-entry dispatch door
+    produces one. ``provider``/``model`` alone are not sufficient: they are
+    free-text values a hand-authored JSON can carry just as easily as a real
+    writer, with no corroborating trail to check them against.
+
+    This is deliberately narrower than "is this a valid gate result" — a
+    record can be well-formed (status, contract_hash, report_path all
+    present) and still have no producer identity, e.g. a result written by
+    hand rather than by a governed gate run. Callers decide what to do with
+    that distinction; this function only answers the identity question.
+    """
+    dispatch_id = result.get("dispatch_id")
+    return isinstance(dispatch_id, str) and bool(dispatch_id.strip())
