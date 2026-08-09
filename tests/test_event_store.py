@@ -279,3 +279,83 @@ class TestLastEvent:
         store.append("T1", {"type": "result", "data": {"cost": 0.01}})
         last = store.last_event("T1")
         assert last["type"] == "result"
+
+
+# ---------------------------------------------------------------------------
+# OI-1095: size warning fires once per threshold crossing, not per write
+# ---------------------------------------------------------------------------
+
+
+class TestSizeWarning:
+    def test_warning_fires_once_per_crossing(self, store, tmp_events_dir, caplog):
+        """OI-1095: the oversize warning must fire ONCE when the threshold is
+        crossed, not on every subsequent write. The flag file doubles as the
+        "already warned" guard and is removed on clear()."""
+        import logging
+        from event_store import _OVERSIZE_FLAG_SUFFIX
+
+        caplog.set_level(logging.WARNING, logger="event_store")
+
+        # Write a single event that is itself above the 10MB threshold.
+        # We patch _SIZE_WARNING_BYTES to a small value so we don't need 10MB.
+        import event_store as es_mod
+
+        original_threshold = es_mod._SIZE_WARNING_BYTES
+        try:
+            es_mod._SIZE_WARNING_BYTES = 50  # tiny threshold — every write crosses it
+            # First write -> should warn
+            store.append("T1", {"type": "text", "data": {"text": "first"}})
+            # Second write -> should NOT warn (flag file exists)
+            store.append("T1", {"type": "text", "data": {"text": "second"}})
+            # Third write -> still no warning
+            store.append("T1", {"type": "text", "data": {"text": "third"}})
+        finally:
+            es_mod._SIZE_WARNING_BYTES = original_threshold
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        oversize_warnings = [
+            r for r in warnings if "operator intervention recommended" in r.message
+        ]
+        assert len(oversize_warnings) == 1, (
+            f"warning must fire exactly once per crossing, got {len(oversize_warnings)}: "
+            f"{[r.message for r in oversize_warnings]}"
+        )
+
+        # Flag file must exist.
+        flag_path = (tmp_events_dir / "T1.ndjson").with_suffix(_OVERSIZE_FLAG_SUFFIX)
+        assert flag_path.exists()
+
+        # After clear, the flag is removed — next dispatch gets a fresh warning.
+        store.clear("T1")
+        assert not flag_path.exists()
+
+    def test_warning_fires_again_after_clear(self, store, tmp_events_dir, caplog):
+        """After clear() removes the flag file, the warning must fire again on
+        the NEXT dispatch's threshold crossing — the warn-once guard resets."""
+        import logging
+        import event_store as es_mod
+
+        caplog.set_level(logging.WARNING, logger="event_store")
+        original_threshold = es_mod._SIZE_WARNING_BYTES
+        try:
+            es_mod._SIZE_WARNING_BYTES = 50
+            # First dispatch cycle
+            store.append("T1", {"type": "text", "data": {"text": "d1"}})
+            store.append("T1", {"type": "text", "data": {"text": "d1b"}})
+            store.clear("T1")
+
+            caplog.clear()
+
+            # Second dispatch cycle — fresh warning expected
+            store.append("T1", {"type": "text", "data": {"text": "d2"}})
+            store.append("T1", {"type": "text", "data": {"text": "d2b"}})
+        finally:
+            es_mod._SIZE_WARNING_BYTES = original_threshold
+
+        oversize_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "operator intervention recommended" in r.message
+        ]
+        assert len(oversize_warnings) == 1, (
+            "after clear, next dispatch cycle must get a fresh warning"
+        )

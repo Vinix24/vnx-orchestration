@@ -16,9 +16,9 @@
     are visible in the same stream it maintains. Its heartbeat is watched by
     the independent hooks/monitor_tripwire.sh (bash + find only).
 
-    Exit 11 (EXIT_HEALTH — findings present) is documented at line 14 of
-    producer_freshness_monitor.py. In launchctl list this reads as a
-    permanently failed job; do not interpret it as a crash.
+    OI-1039: findings are reported via the health file + NDJSON, not via
+    exit code. Exit 0 always means the sweep ran; launchctl list no longer
+    shows a permanent-failure false positive when findings exist.
   -->
   <key>ProgramArguments</key>
   <array>

@@ -275,11 +275,13 @@ def test_cli_no_write_touches_nothing_and_reports(fake_state: Path, capsys, monk
         ]
     )
     after = {p for p in fake_state.rglob("*")}
-    assert rc == cli.EXIT_HEALTH
+    assert rc == cli.EXIT_OK  # OI-1039: findings no longer drive exit code
     assert before == after, "--no-write must not create/modify any file"
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "stale"
-    assert any(f["producer"] == "review_gate_results" for f in out["findings"])
+    # OI-1041: review_gate_requests/results are one_shot — they no longer
+    # produce stale findings. The real findings now come from ongoing producers.
+    assert any(f["producer"] == "governance_metrics" for f in out["findings"])
 
 
 # ---------------------------------------------------------------------------
@@ -419,3 +421,141 @@ def test_real_config_sweep_knows_both_new_producers_and_flags_silence(
     # Per-key: the fresh reviewed dream cycle stays green.
     assert ("dream_cycles", "reviewed") not in findings_by
     assert report["status"] == "stale"
+
+
+# ---------------------------------------------------------------------------
+# OI-1041: one_shot producers — no staleness, only missing expected keys
+# ---------------------------------------------------------------------------
+
+
+def test_one_shot_producer_skips_staleness(tmp_path: Path) -> None:
+    """A one_shot producer's keys that exist are never flagged as stale.
+    Silence after a one-shot artefact's PR merges is normal, not a failure."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    gates_dir = state_dir / "review_gates" / "requests"
+    _touch(gates_dir / "pr-100-codex_gate.json", 10 * DAY)  # way past cadence
+    _touch(gates_dir / "pr-101-kimi_gate.json", 10 * DAY)
+
+    spec = {
+        "name": "review_gate_requests",
+        "kind": "one_shot",
+        "type": "directory",
+        "path": str(gates_dir),
+        "glob": "*.json",
+        "key_regex": r"^pr-[0-9]+-(?P<key>.+)\.json$",
+        "cadence_seconds": DAY,
+    }
+    section = pf.evaluate_producer(spec, now=NOW)
+    assert section["kind"] == "one_shot"
+    assert section["findings"] == [], (
+        "one_shot producer must not flag stale: silence after merge is normal"
+    )
+    assert section["status"] == "ok"
+
+
+def test_one_shot_producer_flags_missing_expected_keys(tmp_path: Path) -> None:
+    """A one_shot producer with expected_keys flags keys that NEVER wrote.
+    Absence of a mandatory artefact is still a finding, even for one-shot."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    gates_dir = state_dir / "review_gates" / "requests"
+    _touch(gates_dir / "pr-100-codex_gate.json", 0.5 * DAY)
+
+    spec = {
+        "name": "review_gate_requests",
+        "kind": "one_shot",
+        "type": "directory",
+        "path": str(gates_dir),
+        "glob": "*.json",
+        "key_regex": r"^pr-[0-9]+-(?P<key>.+)\.json$",
+        "cadence_seconds": DAY,
+        "expected_keys": ["codex_gate", "gemini_review"],
+    }
+    section = pf.evaluate_producer(spec, now=NOW)
+    assert len(section["findings"]) == 1
+    finding = section["findings"][0]
+    assert finding["key"] == "gemini_review"
+    assert finding["kind"] == "missing"
+    assert finding["expected_key_absent"] is True
+    # codex_gate exists and is NOT flagged — it's one_shot, not stale
+    assert "codex_gate" not in {f["key"] for f in section["findings"]}
+    assert section["status"] == "stale"
+
+
+def test_ongoing_producer_still_flags_staleness(tmp_path: Path) -> None:
+    """Default kind='ongoing' preserves the original cadence-based behavior.
+    Backward compat: specs without kind are treated as ongoing."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    gates_dir = state_dir / "review_gates" / "requests"
+    _touch(gates_dir / "pr-100-codex_gate.json", 10 * DAY)
+
+    spec = {
+        "name": "review_gate_requests",
+        # no 'kind' field -> defaults to "ongoing"
+        "type": "directory",
+        "path": str(gates_dir),
+        "glob": "*.json",
+        "key_regex": r"^pr-[0-9]+-(?P<key>.+)\.json$",
+        "cadence_seconds": DAY,
+    }
+    section = pf.evaluate_producer(spec, now=NOW)
+    assert section["kind"] == "ongoing"
+    assert len(section["findings"]) == 1
+    assert section["findings"][0]["key"] == "codex_gate"
+    assert section["findings"][0]["kind"] == "stale"
+    assert section["status"] == "stale"
+
+
+# ---------------------------------------------------------------------------
+# OI-1039: exit 0 on sweep with findings — health file carries the signal
+# ---------------------------------------------------------------------------
+
+
+def test_cli_exits_zero_even_with_findings(fake_state: Path, capsys, monkeypatch) -> None:
+    """OI-1039: the sweep always exits 0 when it ran successfully. Findings
+    are reported via the health file + NDJSON, not via exit code. launchd
+    interprets any non-zero exit as permanent failure."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+
+    rc = cli.main(
+        [
+            "--config",
+            str(REPO_ROOT / "configs" / "producer_freshness.yaml"),
+            "--state-dir",
+            str(fake_state),
+            "--no-write",
+        ]
+    )
+    assert rc == cli.EXIT_OK, (
+        "exit 0 always, even with findings — they're in the health file"
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["findings_count"] > 0, "sweep with real registry must find stale producers"
+
+
+def test_cli_no_write_persists_findings_in_report(fake_state: Path) -> None:
+    """The health file + NDJSON report still carries findings even when exit
+    code is always 0. The signal is not lost — it moved channels."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+
+    rc = cli.main(
+        [
+            "--config",
+            str(REPO_ROOT / "configs" / "producer_freshness.yaml"),
+            "--state-dir",
+            str(fake_state),
+        ]
+    )
+    assert rc == cli.EXIT_OK
+    # The report file must exist and contain the sweep + findings.
+    report_path = fake_state / pf.REPORT_FILENAME
+    assert report_path.exists(), "NDJSON report must be written"
+    records = [json.loads(line) for line in report_path.read_text().splitlines() if line.strip()]
+    sweep = [r for r in records if r["event_type"] == "producer_freshness_sweep"]
+    assert len(sweep) == 1
+    assert sweep[0]["findings_count"] > 0, "findings still land via NDJSON"
+    # Heartbeat also written.
+    heartbeat = fake_state.parent / "health" / "producer_freshness_monitor.json"
+    assert heartbeat.exists(), "heartbeat must be written on every run"

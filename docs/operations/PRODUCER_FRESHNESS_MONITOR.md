@@ -148,8 +148,8 @@ python3 scripts/producer_freshness_monitor.py
 python3 scripts/producer_freshness_monitor.py \
     --state-dir ~/.vnx-data/vnx-dev/state --no-write --human
 
-# Exit codes: 0=geen bevindingen, 11=stille producenten gevonden,
-#             20=IO-fout, 30=dependency/config-fout
+# Exit 0 always means the sweep ran; findings are in the health file + NDJSON.
+# OI-1039: exit 11 removed — launchd reads non-zero as permanent failure.
 ```
 
 Dagelijkse scheduling via `scripts/launchd/com.vnx.producer-freshness-monitor.plist`
