@@ -234,18 +234,28 @@ class EventStore:
         # Size warning + oversize flag file so the condition is visible to the
         # dispatcher dashboard (not just the log stream). Previously 36 warnings
         # fired without any consumer (OI-858, Cluster E1).
+        #
+        # OI-1095: the warning must fire ONCE per threshold crossing, not once
+        # per write action. A long-running provider-lane worker produces events
+        # at high frequency — six identical warnings in a six-line tail is noise,
+        # not an alarm.  The oversize flag file doubles as the "already warned"
+        # guard: it is written alongside the first warning and removed on
+        # clear(). Subsequent writes update the flag (so it always reflects the
+        # current size) but skip the log warning until the next dispatch cycle.
         try:
             st = path.stat()
             if st.st_size > _SIZE_WARNING_BYTES:
-                logger.warning(
-                    "event_store: %s exceeds %d bytes — operator intervention recommended",
-                    path,
-                    _SIZE_WARNING_BYTES,
-                )
-                # Write a flag file so the dispatcher can surface this without
-                # tailing the log. The flag is terminal-scoped and lives next to
-                # the NDJSON file so it is visible in `vnx pool status`.
                 flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
+                already_warned = flag_path.exists()
+                if not already_warned:
+                    logger.warning(
+                        "event_store: %s exceeds %d bytes — operator intervention recommended",
+                        path,
+                        _SIZE_WARNING_BYTES,
+                    )
+                # Write/update the flag file so the dispatcher can surface this
+                # without tailing the log. The flag is terminal-scoped and lives
+                # next to the NDJSON file so it is visible in `vnx pool status`.
                 flag_path.write_text(
                     f"oversize:{terminal}:{st.st_size}:{datetime.now(timezone.utc).isoformat()}\n"
                 )

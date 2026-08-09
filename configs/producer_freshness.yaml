@@ -27,6 +27,7 @@ producers:
     key_regex: '^pr-[0-9]+-(?P<key>.+)\.json$'
     timestamp: mtime
     cadence_seconds: 86400
+    kind: one_shot  # OI-1041: per-PR artefact; silence after merge is normal
     demand:
       # Evidence that work kept flowing while the producer was silent:
       # dispatch-door events newer than the key's last_seen.
@@ -42,6 +43,7 @@ producers:
     key_regex: '^pr-[0-9]+-(?P<key>.+)\.json$'
     timestamp: mtime
     cadence_seconds: 86400
+    kind: one_shot  # OI-1041: per-PR artefact; silence after merge is normal
     demand:
       type: ndjson_events
       path: "{state_dir}/dispatch_register.ndjson"
