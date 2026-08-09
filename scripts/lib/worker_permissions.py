@@ -53,13 +53,15 @@ DEFAULT_CODE_WORKER_TOOLS = [
 ]
 
 # Restrictive file_write_scope for the code-worker fallback profile.
-# Uses fnmatch patterns: each entry matches paths at a specific depth
-# (fnmatch * does NOT cross directory boundaries). Absolute paths
-# (e.g. /Users/…) never match any of these patterns because the leading
-# * does not match / — so only worktree-relative paths are in scope.
-# Depth-limit of 6 levels covers the vast majority of source paths;
-# the report obligation is exempted separately in the hook so a worker
-# can always write its completion report to $VNX_DATA_DIR/unified_reports/.
+# These are NOT used as fnmatch globs — fnmatch ``*`` matches ``/`` on Unix,
+# so ``*`` through ``*/*/*/*/*/*`` would match every file path at any depth,
+# including absolute paths.  Instead, :func:`match_file_write_scope` detects
+# this fallback list and delegates to :func:`_check_fallback_write_scope`,
+# which counts actual path segments (split on ``/``) and rejects absolute
+# paths with ``os.path.isabs()``.  Maximum depth of 6 segments covers the
+# vast majority of source paths; the report obligation is exempted separately
+# in the hook so a worker can always write its completion report to
+# $VNX_DATA_DIR/unified_reports/.
 FALLBACK_FILE_WRITE_SCOPE = [
     "*",           # root-level files
     "*/*",         # 1 level deep
