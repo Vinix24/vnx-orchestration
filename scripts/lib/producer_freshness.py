@@ -304,13 +304,26 @@ def count_demand_events(spec: Dict[str, Any], *, since_ts: Optional[float], now:
 
 
 def evaluate_producer(spec: Dict[str, Any], *, now: float) -> Dict[str, Any]:
-    """Evaluate one producer spec into a report section with findings."""
+    """Evaluate one producer spec into a report section with findings.
+
+    ``kind`` controls staleness semantics:
+
+    - ``"ongoing"`` (default): cadence-based staleness applies. A key whose
+      last_seen exceeds ``cadence_seconds`` is reported as stale. Used for
+      producers that write regularly (metrics, dispatch register, dream cycles).
+    - ``"one_shot"``: staleness is never reported. Only ``expected_keys`` that
+      never wrote trigger a "missing" finding. Used for per-PR artefacts
+      (review-gate requests/results) that are written once per PR and never
+      again — their silence after a PR merges is expected, not a failure.
+    """
     name = spec.get("name", "(unnamed)")
+    kind = spec.get("kind", "ongoing")
     cadence = float(spec.get("cadence_seconds", 86400))
     scanner = _SCANNERS.get(spec.get("type"))
     section: Dict[str, Any] = {
         "producer": name,
         "type": spec.get("type"),
+        "kind": kind,
         "cadence_seconds": cadence,
         "keys": [],
         "findings": [],
@@ -353,6 +366,28 @@ def evaluate_producer(spec: Dict[str, Any], *, now: float) -> Dict[str, Any]:
             "silence_seconds": silence,
         }
         section["keys"].append(entry)
+
+        # One-shot producers: only report expected keys that NEVER wrote.
+        # A one-shot artefact (e.g. a per-PR review-gate file) is expected to
+        # stop being written once its PR merges — silence is normal, not a
+        # failure.  Cadence-based staleness would flag every merged PR's file
+        # forever (OI-1041: 35 of 43 findings were per-PR noise).
+        if kind == "one_shot":
+            if ts is not None or key not in expected:
+                continue
+            # key is in expected_keys AND never wrote -> report as missing
+            finding: Dict[str, Any] = {
+                "producer": name,
+                "key": key,
+                "kind": "missing",
+                "last_seen": None,
+                "silence_seconds": None,
+                "silence_days": None,
+                "cadence_seconds": cadence,
+                "expected_key_absent": True,
+            }
+            section["findings"].append(finding)
+            continue
 
         stale = ts is None or (silence is not None and silence > cadence)
         if not stale:

@@ -10,8 +10,7 @@ that finds nothing and writes nothing is indistinguishable from a sweep that
 never ran. hooks/monitor_tripwire.sh watches only that heartbeat's age.
 
 Exit codes (house style, cf. check_intelligence_health.py):
-    0  EXIT_OK          sweep ran, no findings
-    11 EXIT_HEALTH      sweep ran, stale/missing producers found
+    0  EXIT_OK          sweep ran (findings reported via health file + NDJSON)
     20 EXIT_IO          state dir / report not writable
     30 EXIT_DEPENDENCY  registry missing/malformed, PyYAML unavailable
 
@@ -33,7 +32,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from cli_output import emit_json, emit_human  # noqa: E402
 
 EXIT_OK = 0
-EXIT_HEALTH = 11
+EXIT_HEALTH = 11  # Deprecated (OI-1039): findings reported via health file, not exit code
 EXIT_IO = 20
 EXIT_DEPENDENCY = 30
 
@@ -133,7 +132,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit_human(_human_lines(report))
     else:
         emit_json(report)
-    return EXIT_HEALTH if report["findings_count"] else EXIT_OK
+    return EXIT_OK  # OI-1039: findings reported via health file + NDJSON, not exit code
 
 
 if __name__ == "__main__":

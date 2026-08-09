@@ -52,7 +52,7 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "bootstrap-terminals", "bootstrap-hooks", "regen-settings", "regen-worker-permissions",
     "skills", "role",
     "patch-agent-files", "register", "list-projects", "unregister",
-    "roadmap", "insights", "objective", "deliverable",
+    "roadmap", "insights", "objective", "horizon", "deliverable",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
     "init-db",
 })
@@ -60,7 +60,7 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "start", "stop", "restart", "jump", "ps", "cleanup",
     "new-worktree", "finish-worktree", "worktree-start", "worktree-stop",
-    "worktree-refresh", "worktree-status", "merge-preflight",
+    "worktree-refresh", "worktree-status", "worktree-release", "merge-preflight",
     "smoke", "package-check", "fabric-audit", "subsystems",
     "dispatch", "gate", "dream",
     "snapshot", "restore", "quiesce-check", "pause", "resume",
@@ -282,6 +282,48 @@ def read_mode_raw(data_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
 # Command gating
 # ---------------------------------------------------------------------------
 
+# Cross-entrance name drift. The two VNX entrances (`bin/vnx` in the fabric
+# repo and the pip-installed `vnx_cli`) expose the same surface under
+# different spellings. A refused top-level name that exists as an alias or a
+# sub-verb of a working command should point the user at the working form
+# instead of only saying "requires a different mode" (OI-1084 / OI-1060).
+#
+# - ALIASES: ``vnx <name>`` is a working command in one entrance but only an
+#   alias of ``ALIASES[name]`` in the other. ``dispatch`` works in ``bin/vnx``
+#   but is ``dispatch-agent`` in the pip CLI (the pip CLI's ``dispatch`` is
+#   reserved for a future direct-SDK lane that is not wired yet).
+# - SUB_VERBS: ``vnx <name>`` is not a top-level command at all in either
+#   entrance, but it is a sub-verb of ``SUB_VERBS[name]`` (e.g.
+#   ``plan-gate`` lives under ``vnx horizon plan-gate``).
+ALIASES: Dict[str, str] = {
+    "dispatch": "dispatch-agent",
+    "dispatch-agent": "dispatch",
+}
+
+SUB_VERBS: Dict[str, str] = {
+    "plan-gate": "horizon",
+}
+
+
+def _suggest_working_form(command: str) -> str:
+    """Return a human-readable hint naming the working form of a refused
+    command, or ``""`` when no known alias/sub-verb matches.
+
+    The suggestion is entrance-agnostic on purpose: it names both spellings so
+    the user can pick whichever entrance they are in, instead of assuming a
+    specific CLI. ``plan-gate`` -> ``vnx horizon plan-gate``; ``dispatch`` ->
+    note that the pip CLI spells it ``dispatch-agent``.
+    """
+    if command in SUB_VERBS:
+        parent = SUB_VERBS[command]
+        return (f"'{command}' is a sub-verb of 'vnx {parent}' "
+                f"(try: vnx {parent} {command}).")
+    if command in ALIASES:
+        return (f"'{command}' is spelled '{ALIASES[command]}' in the other "
+                "VNX entrance (the fabric `bin/vnx` vs the pip `vnx`).")
+    return ""
+
+
 class ModeGateError(Exception):
     """Raised when a command is not available in the current mode."""
 
@@ -292,8 +334,10 @@ class ModeGateError(Exception):
             upgrade = "Run 'vnx init --operator' to upgrade."
         else:
             upgrade = ""
+        suggestion = _suggest_working_form(command)
+        suffix = f" {suggestion}" if suggestion else ""
         super().__init__(
-            f"'{command}' requires a different mode (current: {current_mode}). {upgrade}".strip()
+            f"'{command}' requires a different mode (current: {current_mode}).{suffix} {upgrade}".strip()
         )
 
 
