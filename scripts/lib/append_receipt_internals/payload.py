@@ -70,10 +70,6 @@ def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
     except Exception as exc:
         _emit("WARN", "confidence_post_hook_failed", error=str(exc))
     try:
-        facade._emit_dispatch_register(receipt)
-    except Exception as exc:
-        _emit("WARN", "dispatch_register_post_hook_failed", error=str(exc))
-    try:
         facade._maybe_trigger_state_rebuild(receipt)
     except Exception as exc:
         log.warning("payload: state rebuild hook failed: %s", exc)
@@ -530,6 +526,15 @@ def append_receipt_payload(
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("payload: central mirror drain failed (best-effort, ignoring): %s", exc)
+        # OI-1105: dispatch-register emit must fire for EVERY appended receipt,
+        # not only those that flow through the non-skip_enrichment path.  The
+        # report_to_receipt_converter is the primary task_complete producer and
+        # passes skip_enrichment=True — without this unconditional call the
+        # register has been dead since the split shipped.
+        try:
+            facade._emit_dispatch_register(receipt)
+        except Exception as exc:
+            _emit("WARN", "dispatch_register_post_hook_failed", error=str(exc))
         if not skip_enrichment:
             _run_post_append_hooks(receipt)
 

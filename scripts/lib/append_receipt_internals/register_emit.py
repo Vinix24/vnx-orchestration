@@ -8,10 +8,11 @@ from .common import REPO_ROOT
 
 
 def _emit_dispatch_register(receipt: dict) -> bool:
-    """Emit dispatch_register event for codex_gate-relevant receipts.
+    """Emit dispatch_register event for lifecycle-relevant receipts.
 
-    SCOPE: codex_gate only. gemini_review and claude_github_optional are
-    deferred until proper findings parsers exist (separate PR).
+    Maps receipt event_type → dispatch_register event (dispatch_completed,
+    dispatch_failed, dispatch_started, gate_requested).  Called unconditionally
+    for every appended receipt (before the skip_enrichment gate).
 
     Returns True on success, False on any failure (best-effort, never raises).
     """
@@ -34,10 +35,13 @@ def _emit_dispatch_register(receipt: dict) -> bool:
             pr_number = None
 
         SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
-        FAILURE_STATUSES = {"failed", "failure", "error", "blocked"}
+        # Keep in sync with payload._update_confidence_from_receipt FAILURE_STATUSES
+        # and receipt_classifier._FAILURE_STATUSES.  contract_invalid = report-body-contract
+        # failure -> semantically a failure; the register should record it as such.
+        FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "contract_invalid"}
 
         register_event = None
-        if event_type in ("task_complete", "task_completed"):
+        if event_type in ("task_complete", "task_completed", "subprocess_completion"):
             if status in FAILURE_STATUSES:
                 register_event = "dispatch_failed"
             elif status in SUCCESS_STATUSES:
@@ -54,6 +58,11 @@ def _emit_dispatch_register(receipt: dict) -> bool:
             if gate != "codex_gate":
                 return False
             register_event = "gate_requested"
+        elif event_type in ("report_contract_invalid",):
+            # report_contract_invalid = report-body-contract failure (ADR-035 §9):
+            # the worker's report didn't satisfy the contract.  Semantically a
+            # dispatch failure — the worker didn't deliver a governable report.
+            register_event = "dispatch_failed"
         else:
             return False
 

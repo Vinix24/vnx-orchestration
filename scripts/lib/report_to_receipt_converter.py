@@ -73,25 +73,31 @@ _DISPATCH_ID_KEY_RE = re.compile(
 def _is_known_dispatch(dispatch_id: str, state_dir: Optional[Path] = None) -> bool:
     """Return True when *dispatch_id* exists in the dispatch register.
 
-    Checks the NDJSON dispatch register (``dispatch_register.ndjson``) for any
-    event record whose ``dispatch_id`` field matches.  Fail-open: returns True
-    when the register file is missing or unreadable, so a transient I/O error
-    never causes a healthy report to be dead-lettered.
+    Parses each line of the NDJSON dispatch register
+    (``dispatch_register.ndjson``) as a JSON object and compares the
+    ``dispatch_id`` field.  This is robust against ANY JSON formatting
+    difference — spacing, key order, extra fields — unlike a raw substring
+    search that ties the match to a specific serialisation.
 
-    OI-1105: the dispatch register is effectively dead as of 2026-08-09.
-    The last entry is dated 2026-08-08T21:41Z; only
-    ``backfill_pr_merged_receipts.py`` still writes to it.  No dispatch lane
-    adds entries; the four lane types (tmux-spawn, provider, envelope,
-    and the subprocess adapter) are all absent.  Of the nine dispatches
-    that went through the door on 9 August, zero appear in the register.
+    Fail-open: returns True when the register file is missing or unreadable,
+    so a transient I/O error never causes a healthy report to be dead-lettered.
+
+    OI-1105: the dispatch register is sparse as of 2026-08-09.  The last
+    entry is dated 2026-08-08T21:41Z; only ``backfill_pr_merged_receipts.py``
+    still writes to it.  No dispatch lane adds entries; the four lane types
+    (tmux-spawn, provider, envelope, and the subprocess adapter) are all
+    absent.  Of the nine dispatches that went through the door on 9 August,
+    zero appear in the register.
 
     The register cross-check is only reached when the report carries no
     content-side dispatch_id (``not content_id_valid``), which is already a
     contract violation.  A false negative here dead-letters the report into
     ``receipt_deadletter/`` — quarantine, not deletion — so the direction is
-    safe.  The register's staleness means the check is structurally permissive
-    (fail-open) rather than restrictive; a reader should not assume it
-    provides a positive confirmation of dispatch existence.
+    safe.  The fail-open paths (missing/unreadable file) are structurally
+    permissive; when the register file exists and is readable, the check is
+    structural — it confirms or denies the dispatch_id against every parsed
+    record — and a reader should not assume the old fail-open label still
+    applies to the match path.
     """
     if state_dir is None:
         try:
@@ -102,11 +108,18 @@ def _is_known_dispatch(dispatch_id: str, state_dir: Optional[Path] = None) -> bo
     if not register_path.exists():
         return True  # fail-open: no register means no cross-check is possible
     try:
-        # Simple substring search: the NDJSON line is compact JSON, so
-        # "dispatch_id": "<value>" appears as one contiguous string.
-        needle = f'"dispatch_id": "{dispatch_id}"'
-        content = register_path.read_text(encoding="utf-8")
-        return needle in content
+        with register_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("dispatch_id") == dispatch_id:
+                    return True
+        return False
     except OSError:
         return True  # fail-open
 
@@ -644,6 +657,7 @@ def _convert_one_detailed(
         import append_receipt  # registers facade as side effect
         append_receipt_payload = append_receipt.append_receipt_payload
         AppendReceiptError = append_receipt.AppendReceiptError
+        AppendResult = append_receipt.AppendResult
     except Exception as exc:
         logger.warning("report_to_receipt_converter: cannot import append_receipt: %s", exc)
         return None, "error"
@@ -692,13 +706,29 @@ def _convert_one_detailed(
     ):
         try:
             _text = Path(receipts_file).read_text(encoding="utf-8", errors="replace")
-            if f'"dispatch_id": "{_guard_did}"' in _text:
-                logger.info(
-                    "report_to_receipt_converter: skipping dispatch=%s — "
-                    "receipt already exists (hot-path wrote first)",
-                    _guard_did,
-                )
-                return None, "duplicate"
+            # Parse NDJSON lines: compare the parsed dispatch_id field
+            # instead of substring-matching against a specific JSON
+            # serialisation (which differs between compact and
+            # pretty-printed formats — OI-1110 needle-fix).
+            for _line in _text.splitlines():
+                _line = _line.strip()
+                if not _line:
+                    continue
+                try:
+                    _rec = json.loads(_line)
+                except json.JSONDecodeError:
+                    continue
+                if _rec.get("dispatch_id") == _guard_did:
+                    logger.info(
+                        "report_to_receipt_converter: skipping dispatch=%s — "
+                        "receipt already exists (hot-path wrote first)",
+                        _guard_did,
+                    )
+                    return AppendResult(
+                        status="duplicate",
+                        receipts_file=Path(receipts_file),
+                        idempotency_key=_guard_did,
+                    ), "duplicate"
         except OSError:
             pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
 
