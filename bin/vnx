@@ -346,6 +346,8 @@ Gate commands (pre-merge verification):
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Planning commands (strategic-layer read surface):
+  horizon <verb>     Planning layer: objectives, deliverables, plan-gate
+                        (canonical spelling; objective is a backward-compat alias)
   objective list      List objectives (tracks) grouped by horizon (now/next/later)
                         Options: --horizon, --phase, --json
   objective show <id> Show one objective: phase/horizon/deps/pr_ref
@@ -861,6 +863,21 @@ except ModeGateError as e:
     return $?
   fi
   return 0
+}
+
+# ── Name-drift hint (OI-1084 / OI-1060) ───────────────────────────────────
+# A refused name that exists as an alias or sub-verb of a working command
+# should point at the working form instead of only "Unknown command". Mirrors
+# vnx_mode._suggest_working_form (single source of truth in scripts/lib/vnx_mode.py).
+_suggest_working_form() {
+  local cmd="$1"
+  if command -v "$VNX_PYTHON" >/dev/null 2>&1; then
+    VNX_SUGGEST_CMD="$cmd" PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" -c "
+import os
+from vnx_mode import _suggest_working_form
+print(_suggest_working_form(os.environ.get('VNX_SUGGEST_CMD', '')), end='')
+" 2>/dev/null
+  fi
 }
 
 cmd_init_db() {
@@ -2505,6 +2522,9 @@ main() {
     objective)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
+    horizon)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+      ;;
     deliverable)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
       ;;
@@ -2587,7 +2607,13 @@ main() {
       usage
       ;;
     *)
-      err "Unknown command: $cmd"
+      local hint
+      hint="$(_suggest_working_form "$cmd")"
+      if [ -n "$hint" ]; then
+        err "Unknown command: $cmd. $hint"
+      else
+        err "Unknown command: $cmd"
+      fi
       usage
       exit 1
       ;;
