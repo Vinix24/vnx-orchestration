@@ -1204,6 +1204,35 @@ def test_ensure_receipt_idempotent(tmp_data, tmp_state):
 
 
 # ---------------------------------------------------------------------------
+# OI-1080 Guard 3b: TestIsolationGuardError re-raise in ensure_receipt
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_receipt_reraises_test_isolation_guard_error(tmp_data, tmp_state):
+    """ensure_receipt must re-raise TestIsolationGuardError, never swallow it.
+
+    OI-1043: the except-clause at dispatch_govern.py lines 253-255 catches
+    TestIsolationGuardError specifically and re-raises it so a test-isolation
+    violation fails the test instead of being degraded to a log warning.
+    Other exceptions (network errors, disk full) are still swallowed as
+    best-effort — only the isolation guard must propagate.
+
+    RED if the ``if isinstance(exc, TestIsolationGuardError): raise`` block
+    is removed from ensure_receipt.
+    """
+    from vnx_paths import TestIsolationGuardError
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+    with patch("append_receipt.append_receipt_payload",
+               side_effect=TestIsolationGuardError("test isolation violation")):
+        with pytest.raises(TestIsolationGuardError, match="test isolation violation"):
+            ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                           contract_status="synthesized", permission_enforcement="soft")
+
+
+# ---------------------------------------------------------------------------
 # Receipt-quality PR-2 — role + receipt_kind on the govern-synthesized path
 # ---------------------------------------------------------------------------
 

@@ -51,3 +51,40 @@ def test_critical_rules_footer_present():
     section = _worker_dispatch_standards_section()
     for required in ("DO NOT add TODO/FIXME", "DO NOT bypass tests with --no-verify"):
         assert required in section, f"Critical-rules footer lost: {required!r}"
+
+
+def test_full_suite_prohibition_in_critical_rules():
+    """The critical rules must prohibit running the full test suite.
+
+    Pins the substantive requirement, not the exact wording: the rule tells
+    workers NOT to run ``pytest tests/``.  Checking for the literal
+    ``pytest tests/`` is the narrowest marker that is unique to this rule
+    (no other rule in the section mentions that command) and survives
+    rewording of the surrounding prose.  A worker who runs the full suite
+    before committing loses work when the dispatch ends early — two
+    incidents on 2026-08-05 alone (OI-1046).
+    """
+    section = _worker_dispatch_standards_section()
+    assert "pytest tests/" in section, (
+        "Critical rules lost the full-suite prohibition (pytest tests/). "
+        "Without it, workers run the full suite before their commit and lose "
+        "work when the dispatch worktree is reaped."
+    )
+
+
+def test_commit_order_rule_in_critical_rules():
+    """The critical rules must mandate the commit-before-push sequence.
+
+    The order rule is: targeted tests green → COMMIT → PUSH → anything slower.
+    Pins on ``targeted tests`` — a phrase unique to this rule within the
+    section (no other critical rule uses the word "targeted").  If the rule
+    is reworded but keeps the concept of running only the relevant tests
+    before committing, the marker survives.  If the rule is dropped
+    entirely, the marker disappears and the test fails.
+    """
+    section = _worker_dispatch_standards_section()
+    assert "targeted tests" in section, (
+        "Critical rules lost the commit-order precondition 'targeted tests'. "
+        "Without it, workers push before committing and uncommitted work is "
+        "lost when the worktree is reaped mid-dispatch."
+    )
