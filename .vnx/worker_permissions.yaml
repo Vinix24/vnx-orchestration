@@ -65,7 +65,7 @@ profiles:
       - "tests/**"
       - "dashboard/**"
 
-  test-engineer:
+  quality-engineer:
     allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
     denied_tools: [WebSearch, WebFetch, MultiEdit]
     bash_allow_patterns:
@@ -176,5 +176,5 @@ profiles:
 
 terminal_assignments:
   T1: backend-developer
-  T2: test-engineer
+  T2: quality-engineer
   T3: frontend-developer
