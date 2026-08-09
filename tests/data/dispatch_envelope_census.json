@@ -771,6 +771,62 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_headless_plan"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 37,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 203,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 209,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 209,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 212,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_lane_matrix_row7_push_pr.py",
+      "line": 212,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
       "file": "tests/test_phantom_guard_branch_fallback.py",
       "line": 122,
       "mechanism": "direct-call",
@@ -1044,6 +1100,9 @@
   ],
   "layer4_functions": [
     "dispatch_envelope.LaneRouter::get",
+    "dispatch_envelope::_dispatch_branch_name",
+    "dispatch_envelope::_enforce_push_pr",
+    "dispatch_envelope::_receipts_file_for",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
     "dispatch_envelope::run_envelope_plan",
