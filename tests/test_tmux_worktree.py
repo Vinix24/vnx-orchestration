@@ -234,6 +234,72 @@ def test_classify_pushed(tmp_path):
     assert classify(handle) == "pushed"
 
 
+def test_classify_clean_when_base_unresolvable(tmp_path):
+    """A commit-less worktree classifies as 'clean' when the base is unresolvable.
+
+    Regression guard for OI-1011 (faler-2 of dispatch
+    20260809-fix1419-census-headless): in a shallow PR-clone without a local
+    ``origin/main``, the envelope lanes cannot resolve the base SHA and
+    ``classify_path`` used to fall through to ``ls-remote`` — which is empty for
+    every brand-new dispatch branch — and misclassify a commit-less worktree as
+    ``committed``, triggering a false push+PR rejection. A clean tree with an
+    unresolvable base must be ``clean`` (enforcement skips), never ``committed``.
+    """
+    from tmux_worktree import classify_path
+
+    # A repo with a commit but NO remote (so origin/main is unresolvable), plus a
+    # worktree branch that carries no new commits — the exact CI shape.
+    local = tmp_path / "local"
+    subprocess.run(["git", "init", "--initial-branch=main", str(local)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(local), "config", "user.email", "t@t.local"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(local), "config", "user.name", "T"],
+                   check=True, capture_output=True)
+    (local / "README.md").write_text("init\n")
+    subprocess.run(["git", "-C", str(local), "add", "README.md"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(local), "commit", "-m", "initial"],
+                   check=True, capture_output=True)
+
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "-C", str(local), "worktree", "add", str(wt),
+         "-b", "dispatch/no-base-1", "HEAD"],
+        check=True, capture_output=True,
+    )
+    # base_sha=None and origin/main absent -> the degraded path. Must be 'clean'.
+    assert classify_path(
+        wt=wt, branch="dispatch/no-base-1", dispatch_id="no-base-1", base_sha=None,
+    ) == "clean"
+
+
+def test_classify_committed_still_enforced_when_base_known(tmp_path):
+    """When the base IS known, a committed worktree still classifies 'committed'.
+
+    Guard that the unresolvable-base clean-default (previous test) did not weaken
+    the real committed path: with base_sha passed, a worktree carrying one new
+    commit must still be 'committed' so push+PR enforcement binds on real work.
+    """
+    from tmux_worktree import classify_path
+
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
+        handle = allocate("cls-committed-known-1", repo_root=local)
+
+    (handle.path / "work.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(handle.path), "add", "work.txt"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(handle.path), "commit", "-m", "w"],
+                   check=True, capture_output=True)
+
+    # base_sha known (the allocation base) -> committed, not the clean default.
+    assert classify_path(
+        wt=handle.path, branch=handle.branch, dispatch_id="cls-committed-known-1",
+        base_sha=handle.base_sha,
+    ) == "committed"
+
+
 # ---------------------------------------------------------------------------
 # reap tests
 # ---------------------------------------------------------------------------

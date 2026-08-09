@@ -106,6 +106,7 @@ def _enforce_push_pr(
     repo_root: Path,
     receipts_file: "str | Path",
     result: "_AdapterResult",
+    base_ref: str = "origin/main",
 ) -> "_AdapterResult":
     """Enforce the rij-7 push+PR obligation on an envelope-lane worktree.
 
@@ -118,10 +119,24 @@ def _enforce_push_pr(
     A non-applicable state (clean/dirty) leaves *result* unchanged. Never raises:
     an internal error fails open (the worktree is still torn down by the caller's
     finally block), matching the tmux lane's _enforce_pr_exists contract.
+
+    ``base_ref`` is the ref ``create_dispatch_worktree`` based the branch on
+    (``origin/main`` by default; ``plan.base_ref`` when set). The envelope lanes,
+    unlike the tmux lane, do not carry a WorktreeHandle, so they resolve the base
+    SHA here and pass it to ``classify_path`` — the same value the tmux lane
+    resolves before ``git worktree add`` and threads through
+    ``WorktreeHandle.base_sha``. Without it, ``classify_path`` falls back to
+    ``merge-base origin/main HEAD``, which fails in a shallow PR-clone (CI) where
+    ``origin/main`` is absent — and then misclassifies a clean, commit-less
+    worktree as ``committed``, triggering a false push+PR rejection (OI-1011
+    regression, faler-2 of dispatch 20260809-fix1419-census-headless).
     """
     try:
+        base_sha = _resolve_base_sha(repo_root=repo_root, base_ref=base_ref)
         from tmux_worktree import classify_path  # noqa: PLC0415
-        state = classify_path(wt=wt_path, branch=branch, dispatch_id=dispatch_id)
+        state = classify_path(
+            wt=wt_path, branch=branch, dispatch_id=dispatch_id, base_sha=base_sha,
+        )
         from pr_enforcement import enforce_pr_exists  # noqa: PLC0415
         pr_result = enforce_pr_exists(
             dispatch_id=dispatch_id,
@@ -164,6 +179,35 @@ def _enforce_push_pr(
         session_id=result.session_id,
         model=result.model,
     )
+
+
+def _resolve_base_sha(*, repo_root: Path, base_ref: str) -> "str | None":
+    """Resolve the SHA of *base_ref* (``origin/main`` by default) in *repo_root*.
+
+    Mirrors the tmux lane's ``WorktreeHandle.base_sha`` resolution: the commit a
+    dispatch worktree was based on, resolved BEFORE ``git worktree add``. Returns
+    None when the ref cannot be resolved (shallow clone without ``origin/main``,
+    detached checkout, etc.) — ``classify_path`` then falls back to its own
+    merge-base logic and, failing that, to a clean-safe default rather than a
+    false ``committed``. Never raises: a resolve error is logged and treated as
+    "base unknown", which degrades to the conservative clean path.
+    """
+    import subprocess  # noqa: PLC0415
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", base_ref],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 — resolve failure degrades, never crashes
+        logger.warning("envelope: base_sha resolve raised for %s: %s", base_ref, exc)
+        return None
+    if proc.returncode != 0:
+        logger.info(
+            "envelope: base_ref %s unresolvable in %s — classify_path will fall back",
+            base_ref, repo_root,
+        )
+        return None
+    return proc.stdout.strip() or None
 
 
 def _dispatch_branch_name(dispatch_id: str) -> str:
@@ -486,6 +530,7 @@ def run_envelope_plan(
                 repo_root=_consumer_project_root,
                 receipts_file=_receipts_file_for(state_dir),
                 result=result,
+                base_ref=plan.base_ref or "origin/main",
             )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
@@ -670,6 +715,7 @@ def run_envelope_headless_plan(
                 repo_root=_consumer_project_root,
                 receipts_file=_receipts_file_for(state_dir),
                 result=result,
+                base_ref=plan.base_ref or "origin/main",
             )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)

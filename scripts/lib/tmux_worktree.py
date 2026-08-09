@@ -222,13 +222,21 @@ def classify_path(
     pr_enforcement.enforce_pr_exists runs against a single verdict source.
 
     ``base_sha`` is the worktree's base commit (origin/main at allocation time).
-    When it is unknown (the envelope lanes do not record it), the worktree's
-    merge-base with origin/main is used instead — a HEAD equal to the base means
-    "no new commits" (clean) regardless of which SHA represented the base.
+    The envelope lanes resolve it from ``base_ref`` (mirroring the tmux lane's
+    ``WorktreeHandle.base_sha``) and pass it here. When it is still unknown, the
+    worktree's merge-base with origin/main is tried as a fallback. If THAT fails
+    too (shallow PR-clone in CI without a local ``origin/main``), a clean tree is
+    classified ``clean`` rather than guessed ``committed`` — a brand-new dispatch
+    branch always has an empty ``ls-remote`` result, so the old "empty remote →
+    committed" inference turned a commit-less worktree into a false push+PR
+    rejection (OI-1011 regression, faler-2 of dispatch
+    20260809-fix1419-census-headless). A false ``clean`` misses enforcement on
+    stranded work; a false ``committed`` breaks a dispatch that committed nothing.
+    The former is recoverable (T0 salvages), the latter is a hard regression.
 
     States:
     - ``dirty``     : uncommitted tracked changes in the worktree.
-    - ``clean``     : no new commits (HEAD == base).
+    - ``clean``     : no new commits (HEAD == base), or base unresolvable and clean.
     - ``committed`` : new local commits, not yet on origin (or origin unknown).
     - ``pushed``    : new commits and the remote dispatch branch matches HEAD.
     """
@@ -248,16 +256,30 @@ def classify_path(
 
     ref_sha = base_sha
     if ref_sha is None:
-        # The envelope lanes know the base ref (origin/main) but not its SHA at
-        # allocation. Fall back to the merge-base: a clean tree's HEAD equals it.
+        # The envelope lanes normally pass base_sha (resolved from base_ref). When
+        # they do not, fall back to the merge-base: a clean tree's HEAD equals it.
         mb = _run(
             ["git", "-C", str(wt), "merge-base", "origin/main", "HEAD"],
         )
         ref_sha = mb.stdout.strip() if mb.returncode == 0 else None
     if ref_sha and local_sha == ref_sha:
         return "clean"
+    if ref_sha is None:
+        # Base unresolvable (no base_sha passed AND origin/main absent locally).
+        # A clean tree here must NOT be guessed ``committed`` from an empty
+        # ls-remote: every brand-new dispatch branch has an empty remote, so that
+        # inference is a false positive on commit-less worktrees. Treat as clean
+        # and surface the degraded resolution so it is visible, not silent.
+        logger.warning(
+            "classify_path: base unresolvable for dispatch=%s branch=%s "
+            "(no base_sha, origin/main absent) — clean tree classified 'clean' "
+            "(degraded; push+PR enforcement skips). Investigate if work was expected.",
+            dispatch_id, branch,
+        )
+        return "clean"
 
-    # New commits exist — determine whether they've been pushed to origin.
+    # New commits exist (HEAD diverged from a known base) — determine whether
+    # they've been pushed to origin.
     remote_ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
     try:
         ls_result = _run(
