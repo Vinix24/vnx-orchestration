@@ -9,6 +9,10 @@ Steps per run (executed in order):
                         track in the project (both check and apply modes).
   3. Nomination       — tracks with non-empty pr_ref, declared phase not in
                         {done, parked}.  Does NOT gate on derived_status.
+                        OI-1098: a track with ANY currently-linked PR
+                        explicitly marked delivery_kind != 'complete' is held
+                        (verdict 'delivery_hold', with reason) — never
+                        nominated, never silently dropped.
   4. Verification     — ``gh pr view <n> --json state,mergedAt`` per PR number.
                         MERGED results cached persistently (pr_state_cache.json);
                         non-MERGED states are re-checked on every run.
@@ -901,6 +905,7 @@ def run_reconcile(
             "counts": {k: 0 for k in (
                 "tracks", "nominated", "confirmed", "closed",
                 "closed_sibling", "open_pr", "unverified", "deferred", "stale",
+                "delivery_hold",
             )},
             "per_track": [],
         }
@@ -938,46 +943,69 @@ def run_reconcile(
     all_tracks = tracks_lib.list_tracks(state_dir, project_id)
     candidates: List[Dict[str, Any]] = []
     guarded_tracks: List[Dict[str, Any]] = []
-    for t in all_tracks:
-        phase = (t.get("phase") or "").strip()
-        pr_ref = (t.get("pr_ref") or "").strip()
-        if not pr_ref or phase in _SKIP_PHASES:
-            continue
-        pr_numbers = _parse_pr_numbers(pr_ref)
-        if not pr_numbers:
-            continue
+    held_tracks: List[Dict[str, Any]] = []
+    # OI-1098: one shared read-only connection for the per-track delivery-hold
+    # check (the nomination loop previously did no DB reads of its own).
+    hold_conn = track_reconciler._get_conn(state_dir)
+    try:
+        for t in all_tracks:
+            phase = (t.get("phase") or "").strip()
+            pr_ref = (t.get("pr_ref") or "").strip()
+            if not pr_ref or phase in _SKIP_PHASES:
+                continue
+            pr_numbers = _parse_pr_numbers(pr_ref)
+            if not pr_numbers:
+                continue
 
-        # Re-close guard: if a done→active reopen history row exists, compare
-        # its stamped pr_ref against the current pr_ref.
-        reopen_hist = _get_latest_done_to_active_history(state_dir, t["track_id"], project_id)
-        if reopen_hist is not None:
-            stamped_pr_ref = _parse_reopen_stamp(reopen_hist.get("reason") or "")
-            if stamped_pr_ref is None:
-                # Unparseable stamp — fail-closed.
-                guarded_tracks.append({
+            # OI-1098 fail-closed + visible: an explicit non-'complete'
+            # delivery marking on ANY currently-linked PR vetoes the
+            # nomination — and the track must stay VISIBLE in the report with
+            # the reason, never silently drop out of the candidate set.
+            hold = track_reconciler._delivery_hold(
+                hold_conn, t["track_id"], project_id, pr_ref
+            )
+            if hold is not None:
+                held_tracks.append({
                     "track_id": t["track_id"],
-                    "verdict": "reopened_guard",
+                    "verdict": "delivery_hold",
                     "pr_ref": pr_ref,
-                    "reason": "unparseable_reopen_stamp",
+                    "reason": hold["reason"],
                 })
                 continue
-            if stamped_pr_ref == pr_ref:
-                # pr_ref unchanged since reopen — skip.
-                guarded_tracks.append({
-                    "track_id": t["track_id"],
-                    "verdict": "reopened_guard",
-                    "pr_ref": pr_ref,
-                    "reason": "pr_ref_unchanged_since_reopen",
-                })
-                continue
-            # pr_ref changed — re-armed; fall through to normal nomination.
 
-        candidates.append({
-            "track_id": t["track_id"],
-            "pr_ref": pr_ref,
-            "pr_numbers": pr_numbers,
-            "phase": phase,
-        })
+            # Re-close guard: if a done→active reopen history row exists,
+            # compare its stamped pr_ref against the current pr_ref.
+            reopen_hist = _get_latest_done_to_active_history(state_dir, t["track_id"], project_id)
+            if reopen_hist is not None:
+                stamped_pr_ref = _parse_reopen_stamp(reopen_hist.get("reason") or "")
+                if stamped_pr_ref is None:
+                    # Unparseable stamp — fail-closed.
+                    guarded_tracks.append({
+                        "track_id": t["track_id"],
+                        "verdict": "reopened_guard",
+                        "pr_ref": pr_ref,
+                        "reason": "unparseable_reopen_stamp",
+                    })
+                    continue
+                if stamped_pr_ref == pr_ref:
+                    # pr_ref unchanged since reopen — skip.
+                    guarded_tracks.append({
+                        "track_id": t["track_id"],
+                        "verdict": "reopened_guard",
+                        "pr_ref": pr_ref,
+                        "reason": "pr_ref_unchanged_since_reopen",
+                    })
+                    continue
+                # pr_ref changed — re-armed; fall through to normal nomination.
+
+            candidates.append({
+                "track_id": t["track_id"],
+                "pr_ref": pr_ref,
+                "pr_numbers": pr_numbers,
+                "phase": phase,
+            })
+    finally:
+        hold_conn.close()
 
     nominated = len(candidates)
 
@@ -998,12 +1026,13 @@ def run_reconcile(
                 "reason": gh_health,
             }
             for c in candidates
-        ] + guarded_tracks
+        ] + guarded_tracks + held_tracks
         counts = {
             "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
             "closed": 0, "closed_sibling": 0, "open_pr": 0,
             "unverified": len(candidates), "deferred": 0, "stale": 0,
             "reopened_guard": len(guarded_tracks),
+            "delivery_hold": len(held_tracks),
         }
         summary = {
             "run_id": run_id, "project_id": project_id, "mode": mode,
@@ -1028,6 +1057,7 @@ def run_reconcile(
         "closed": 0, "closed_sibling": 0, "open_pr": 0,
         "unverified": 0, "deferred": 0, "stale": 0,
         "reopened_guard": len(guarded_tracks),
+        "delivery_hold": len(held_tracks),
     }
     confirmed_candidates: List[Dict[str, Any]] = []
     per_track: List[Dict[str, Any]] = []
@@ -1169,8 +1199,11 @@ def run_reconcile(
             elif action == "stale_candidate":
                 counts["stale"] += 1
 
-    # Add re-close guarded tracks to the per-track report.
+    # Add re-close guarded and delivery-held tracks to the per-track report.
+    # OI-1098: held tracks MUST stay visible — a track that silently drops
+    # out of the report is as wrong as one that closes too early.
     per_track.extend(guarded_tracks)
+    per_track.extend(held_tracks)
 
     # ------------------------------------------------------------------ step 6
     # Summary + history.

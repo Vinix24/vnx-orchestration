@@ -68,6 +68,104 @@ def _parse_pr_numbers(pr_ref: Optional[str]) -> FrozenSet[int]:
     return frozenset(nums)
 
 
+def _delivery_hold(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+    pr_ref: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """OI-1098: delivery-marking hold for the done-derivation and nomination.
+
+    Returns None when the track is NOT held; otherwise a dict::
+
+        {"held": True, "partial": N, "complete": C, "unmarked": U,
+         "total": M, "reason": "<operator-readable>"}
+
+    Rule (fail-closed, decision taken in OI-1098): a track is held when ANY
+    PR in its CURRENT pr_ref has an explicit track_pr_delivery row whose
+    delivery_kind is not 'complete' — one explicit 'partial' marking vetoes
+    every PR-evidence-based 'done' derivation and the reconcile nomination.
+
+    Legacy handling (measured on the vnx-dev tracks DB, 2026-08-09): the only
+    delivery_kind values in practice are 'partial' (29 rows) and 'complete'
+    (4 rows), enforced by the 0032 CHECK constraint. A PR with NO row is NOT
+    the same as an explicit 'partial': planning_cli's link path writes a row
+    for EVERY PR in the call (``--delivery`` defaults to 'partial'), so a
+    missing row can only mean the PR was linked before migration 0032 existed.
+    Treating such unmarked legacy PRs as 'partial' would silently freeze
+    every pre-0032 track — the same invisible-drop failure this fix exists to
+    prevent, at fleet scale. So: unmarked PRs do NOT hold; only explicit
+    non-'complete' markings do.
+
+    Fail-closed edges (mirror close_track_if_done's OI-829 gate):
+      - An unrecognized delivery_kind on an existing row is logged at ERROR
+        and treated as a hold (never silently read as 'complete').
+      - When the track_pr_delivery table is absent (pre-0032 DB), there is
+        nothing explicit to hold on: returns None (legacy behaviour).
+
+    Only rows whose pr_number is in the CURRENT pr_ref count — a stale row
+    left behind by an unlinked PR must not hold the track.
+    """
+    nums = _parse_pr_numbers(pr_ref)
+    if not nums:
+        return None
+    has_table = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='track_pr_delivery'"
+        ).fetchone()
+    )
+    if not has_table:
+        return None  # migration 0032 not applied to this DB — no explicit markings exist
+    rows = conn.execute(
+        "SELECT pr_number, delivery_kind FROM track_pr_delivery "
+        "WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchall()
+    partial = 0
+    complete = 0
+    corrupt = 0
+    for row in rows:
+        try:
+            pn = int(row["pr_number"])
+        except (TypeError, ValueError):
+            continue
+        if pn not in nums:
+            continue  # stale row from an unlinked PR — must not hold
+        kind = row["delivery_kind"]
+        if kind == "complete":
+            complete += 1
+        elif kind == "partial":
+            partial += 1
+        else:
+            corrupt += 1
+            log.error(
+                "track_pr_delivery: unrecognized delivery_kind %r for "
+                "project_id=%r track_id=%r pr_number=%r — failing closed "
+                "(delivery hold), not raising: this runs inside sweep loops "
+                "with no per-track try/except",
+                kind, project_id, track_id, row["pr_number"],
+            )
+    held_count = partial + corrupt
+    if held_count == 0:
+        return None
+    total = len(nums)
+    unmarked = total - partial - complete - corrupt
+    reason = (
+        f"delivery hold: {held_count} of {total} linked PRs not marked "
+        f"'complete' ({partial} explicit 'partial')"
+    )
+    if corrupt:
+        reason += f"; {corrupt} unrecognized delivery_kind (fail-closed)"
+    return {
+        "held": True,
+        "partial": partial,
+        "complete": complete,
+        "unmarked": unmarked,
+        "total": total,
+        "reason": reason,
+    }
+
+
 def _load_merged_prs_from_gh(state_path: Path, ttl_seconds: int = 600) -> FrozenSet[int]:
     """Opt-in git-grounded merged-PR source. Cache-first (``pr_merged_cache.json``,
     TTL ~10 min) so the SessionStart hot path rarely shells out; network call is
@@ -447,7 +545,7 @@ def reconcile_track(
         conn.commit()
 
         track_row = conn.execute(
-            "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
+            "SELECT phase, pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone()
         declared = track_row["phase"] if track_row else None
@@ -463,6 +561,15 @@ def reconcile_track(
         }
         if derived == "blocked":
             result["blocking_detail"] = _blocking_detail(conn, track_id, project_id)
+        elif derived != "done":
+            # OI-1098: a withheld nomination must be VISIBLE. When the track
+            # did not derive 'done' and an explicit delivery marking holds it,
+            # carry the operator-readable reason in the result.
+            hold = _delivery_hold(
+                conn, track_id, project_id, track_row["pr_ref"] if track_row else None
+            )
+            if hold is not None:
+                result["delivery_hold"] = hold
         return result
     finally:
         conn.close()
@@ -504,7 +611,7 @@ def peek_derived_status(
         )
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         track_row = conn.execute(
-            "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
+            "SELECT phase, pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone()
         declared = track_row["phase"] if track_row else None
@@ -517,6 +624,13 @@ def peek_derived_status(
         }
         if derived == "blocked":
             result["blocking_detail"] = _blocking_detail(conn, track_id, project_id)
+        elif derived != "done":
+            # OI-1098: same visibility contract as reconcile_track.
+            hold = _delivery_hold(
+                conn, track_id, project_id, track_row["pr_ref"] if track_row else None
+            )
+            if hold is not None:
+                result["delivery_hold"] = hold
         return result
     finally:
         conn.close()
@@ -571,6 +685,12 @@ def reconcile_all_tracks(
             hint = format_blocking_hint(result.get("blocking_detail"))
             if hint:
                 log.info("track_blocked: track=%s project=%s\n%s", track_id, project_id, hint)
+        hold = result.get("delivery_hold")
+        if hold:
+            log.info(
+                "track_delivery_hold: track=%s project=%s %s",
+                track_id, project_id, hold["reason"],
+            )
 
     log.info(
         "track_reconciler: project=%s tracks=%d drifted=%d",
