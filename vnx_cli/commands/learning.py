@@ -84,21 +84,25 @@ def _cmd_status(args) -> int:
     # Pending archival / supersede
     pending_archival = 0
     pending_supersede = 0
+    handled_archival = 0
     if pending_archival_path.exists():
         try:
             data = json.loads(pending_archival_path.read_text(encoding="utf-8"))
             candidates = data.get("pending_archival", [])
             for c in candidates:
-                if c.get("status") != "pending":
-                    continue
-                if c.get("action") == "supersede":
-                    pending_supersede += 1
+                if c.get("status") == "pending":
+                    if c.get("action") == "supersede":
+                        pending_supersede += 1
+                    else:
+                        pending_archival += 1
                 else:
-                    pending_archival += 1
+                    # approved/dismissed — no longer in the actionable queue
+                    handled_archival += 1
         except (json.JSONDecodeError, OSError):
             pass
     print(f"  Pending archival candidates:                {pending_archival}")
-    print(f"  Pending supersede candidates (G-L4 gated): {pending_supersede}")
+    print(f"  Pending supersede candidates (G-L4 gated):  {pending_supersede}")
+    print(f"  Handled (approved/dismissed, out of queue): {handled_archival}")
 
     # Skill refinements
     pending_skill_refinements_path = state_dir / "pending_skill_refinements.json"
@@ -114,6 +118,8 @@ def _cmd_status(args) -> int:
     print(f"  Pending skill refinements:                  {pending_refinements}")
     print()
     print("To review proposals: vnx learning review")
+    print("To approve a candidate:   vnx learning approve <id> --approval-id <id> --reason <text>")
+    print("To dismiss a candidate:    vnx learning dismiss <id> --approval-id <id> --reason <text>")
     print("To review skill refinements: vnx learning skill-review")
     return 0
 
@@ -159,6 +165,8 @@ def _cmd_review(args) -> int:
                 candidates = [c for c in data.get("pending_archival", []) if c.get("status") == "pending"]
                 if not candidates:
                     print("No pending archival/supersede candidates.")
+                    print("  (Handled candidates stay in pending_archival.json but are")
+                    print("   marked approved/dismissed and no longer listed here.)")
                 else:
                     print(f"Pending archival/supersede candidates ({len(candidates)}):")
                     for c in candidates:
@@ -168,6 +176,10 @@ def _cmd_review(args) -> int:
                         print(f"    Title: {(c.get('title') or '')[:80]}")
                         print(f"    Reason: {c.get('reason', '')}")
                         print()
+                    print("Approve: vnx learning approve <pattern_id>"
+                          " --approval-id <id> --reason <text>")
+                    print("Dismiss: vnx learning dismiss <pattern_id>"
+                          " --approval-id <id> --reason <text>")
             except (json.JSONDecodeError, OSError) as exc:
                 print(f"error reading pending_archival.json: {exc}", file=sys.stderr)
                 return 1
@@ -616,6 +628,89 @@ def _cmd_grounding_shadow(args) -> int:
 
 
 
+def _cmd_disposition(args, decision: str) -> int:
+    """Shared body for `vnx learning approve` and `vnx learning dismiss`.
+
+    Carries out an operator-approved disposition on a pending_archival.json
+    candidate. Mirrors the human-gated verb form used by `horizon close` /
+    `objective reopen`: --approval-id is the gate token, --reason mandatory.
+    The audit trail is the existing governed NDJSON stream
+    (intelligence_usage.ndjson) via learning_loop.apply_archival_decision.
+
+    Idempotent: a second call on an already-decided candidate prints a clear
+    message and exits non-zero without a double DB mutation.
+    """
+    project_dir = Path(getattr(args, "project_dir", "."))
+    pattern_id = getattr(args, "pattern_id", "")
+    approval_id = getattr(args, "approval_id", "") or ""
+    reason = getattr(args, "reason", "") or ""
+    source_table = getattr(args, "source_table", None)
+
+    if not pattern_id:
+        print("error: <pattern_id> is required.", file=sys.stderr)
+        return 2
+
+    state_dir = _resolve_state_dir(project_dir)
+
+    import learning_loop as ll  # type: ignore[import]
+    try:
+        result = ll.apply_archival_decision(
+            state_dir,
+            pattern_id,
+            decision,
+            approval_id=approval_id,
+            reason=reason,
+            approved_by="operator",
+            source_table=source_table,
+        )
+    except ll.ArchivalDispositionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ll.CandidateNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ll.CandidateAlreadyHandledError as exc:
+        # Idempotent second call: clear message, no double action.
+        print(f"already handled: {exc}", file=sys.stderr)
+        return 2
+
+    action = result.get("action", "archive")
+    db_applied = result.get("db_applied")
+    if decision == "approve":
+        applied_note = (
+            f"DB row superseded (valid_until set)" if action == "supersede" and db_applied
+            else "pattern_usage row archived" if action != "supersede" and db_applied
+            else "no DB row matched (already applied or absent)"
+        )
+        print(f"approved: pattern_id={pattern_id} action={action} — {applied_note}")
+    else:
+        print(f"dismissed: pattern_id={pattern_id} (no DB mutation)")
+    print(f"  decision={result['status']}  approved_by=operator"
+          f"  approval_id={approval_id}")
+    print(f"  reason: {reason}")
+    print(f"  audit: archival_decision event appended to intelligence_usage.ndjson")
+    return 0
+
+
+def _cmd_approve(args) -> int:
+    """Approve a pending_archival candidate (operator-gated, audited).
+
+    For action=supersede candidates: sets valid_until on the success_patterns
+    or prevention_rules row (idempotent). For action=archive candidates:
+    removes the pattern_usage row.
+    """
+    return _cmd_disposition(args, "approve")
+
+
+def _cmd_dismiss(args) -> int:
+    """Dismiss a pending_archival candidate (operator-gated, audited).
+
+    Removes the candidate from the actionable queue without any DB mutation.
+    Use when the operator decides NOT to act on a proposal.
+    """
+    return _cmd_disposition(args, "dismiss")
+
+
 def vnx_learning(args) -> int:
     sub = getattr(args, "learning_subcommand", None)
     dispatch = {
@@ -626,8 +721,10 @@ def vnx_learning(args) -> int:
         "tagger-ab": _cmd_tagger_ab,
         "skill-refine": _cmd_skill_refine,
         "skill-review": _cmd_skill_review,
+        "approve": _cmd_approve,
+        "dismiss": _cmd_dismiss,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx learning {run|status|review|grounding-shadow|tagger-ab|skill-refine|skill-review}")
+    print("Usage: vnx learning {run|status|review|approve|dismiss|grounding-shadow|tagger-ab|skill-refine|skill-review}")
     return 1

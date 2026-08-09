@@ -5,6 +5,7 @@ Tracks pattern usage, adjusts confidence scores, and optimizes intelligence deli
 Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 """
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -12,6 +13,7 @@ import os
 import sqlite3
 import time
 import sys
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -1220,6 +1222,356 @@ class LearningLoop:
             log.debug("HealthBeacon heartbeat skipped: %s", e)
 
         return report
+
+
+# ---------------------------------------------------------------------------
+# Operator disposition verbs (OI-1076 / OI-1038)
+# ---------------------------------------------------------------------------
+# The proposal tier writes candidates to pending_archival.json but nothing
+# consumed that file — the operator gate the design calls for did not exist,
+# so proposals stacked up with no route to execution (the loop reads as
+# dormant for exactly this reason). These module-level functions are the
+# missing consumer: `vnx learning approve <id>` / `vnx learning dismiss <id>`
+# call apply_archival_decision() to carry out the disposition.
+#
+# Form follows the existing human-gated verbs in the fabric (horizon close /
+# objective reopen): --approval-id is the operator's gate token, --reason is
+# mandatory. The audit trail is the existing governed NDJSON log
+# (intelligence_usage.ndjson) — no second logging mechanism.
+
+# Valid approver identities, mirroring regulated_strict_approval.VALID_APPROVERS
+# so the disposition verbs accept the same human-gate vocabulary fleet-wide.
+_DISPOSITION_VALID_APPROVERS = frozenset({"operator", "T0"})
+
+
+class ArchivalDispositionError(RuntimeError):
+    """Raised for malformed state or I/O failures during a disposition."""
+
+
+class CandidateNotFoundError(LookupError):
+    """Raised when the requested candidate id is not in pending_archival.json."""
+
+
+class CandidateAlreadyHandledError(RuntimeError):
+    """Raised when the candidate is no longer pending (already approved/dismissed)."""
+
+
+def load_pending_archival(state_dir: Path) -> List[Dict[str, Any]]:
+    """Read pending_archival.json under state_dir, returning the candidate list.
+
+    Returns an empty list when the file is absent or malformed (fail-open on
+    read; a malformed queue is reported by `review`/`status`, not fatal here).
+    """
+    pending_path = state_dir / "pending_archival.json"
+    if not pending_path.exists():
+        return []
+    try:
+        data = json.loads(pending_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    candidates = data.get("pending_archival", [])
+    return candidates if isinstance(candidates, list) else []
+
+
+def _save_pending_archival_atomic(
+    state_dir: Path, candidates: List[Dict[str, Any]]
+) -> None:
+    """Write pending_archival.json atomically (tmp + os.replace).
+
+    Uses fcntl.flock on the canonical file across the read-rewrite cycle the
+    callers perform, so two concurrent disposition verbs cannot lose a write.
+    """
+    pending_path = state_dir / "pending_archival.json"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = pending_path.with_suffix(".json.tmp")
+    payload = json.dumps(
+        {"pending_archival": candidates}, indent=2, ensure_ascii=False
+    )
+    # Lock the canonical file for the duration of the rewrite. Create it if
+    # absent so the lock handle exists; the atomic rename lands on the same path.
+    lock_fh = open(pending_path, "a", encoding="utf-8")  # vnx-atomic-write: pending_archival.json
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, pending_path)
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_fh.close()
+
+
+def _emit_archival_decision_event(
+    state_dir: Path,
+    *,
+    pattern_id: str,
+    decision: str,
+    approved_by: str,
+    approval_id: str,
+    reason: str,
+    action: str,
+    source_table: str,
+    db_applied: bool,
+) -> None:
+    """Append an archival_decision audit event to intelligence_usage.ndjson.
+
+    This is the governed audit trail (G-L7), the same NDJSON stream
+    _log_confidence_change writes to. fcntl-locked append, matching
+    gather_intelligence._record_injection_why_event's convention.
+    """
+    usage_log = state_dir / "intelligence_usage.ndjson"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event_type": "archival_decision",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pattern_id": pattern_id,
+        "decision": decision,
+        "action": action,
+        "source_table": source_table,
+        "approved_by": approved_by,
+        "approval_id": approval_id,
+        "reason": reason,
+        "db_applied": db_applied,
+    }
+    line = json.dumps(event, separators=(",", ":")) + "\n"
+    with open(usage_log, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _validate_disposition_inputs(
+    approved_by: str, approval_id: str, reason: str
+) -> None:
+    """Enforce the human-gate invariants shared by approve and dismiss.
+
+    Mirrors RA-1 (non-empty rationale) and RA-2 (valid approver) from
+    regulated_strict_approval. approval_id is the operator gate token the
+    horizon-close form requires.
+    """
+    if not approval_id or not approval_id.strip():
+        raise ArchivalDispositionError(
+            "--approval-id is required (the operator's gate token). "
+            "No disposition made."
+        )
+    if not reason or not reason.strip():
+        raise ArchivalDispositionError(
+            "--reason is required for every archival disposition. "
+            "No disposition made."
+        )
+    if approved_by not in _DISPOSITION_VALID_APPROVERS:
+        raise ArchivalDispositionError(
+            f"approved_by must be one of {sorted(_DISPOSITION_VALID_APPROVERS)}, "
+            f"got {approved_by!r}. Automated dispositions are forbidden."
+        )
+
+
+def _find_candidate(
+    candidates: List[Dict[str, Any]], pattern_id: str, source_table: Optional[str]
+) -> Dict[str, Any]:
+    """Locate the pending candidate matching pattern_id (and source_table if given).
+
+    Raises CandidateNotFoundError when no candidate carries that id at all, or
+    CandidateAlreadyHandledError when the only match is already non-pending.
+    """
+    matches = [
+        c for c in candidates
+        if str(c.get("pattern_id", "")) == str(pattern_id)
+        and (source_table is None
+             or str(c.get("source_table", "")) == str(source_table))
+    ]
+    if not matches:
+        raise CandidateNotFoundError(
+            f"No pending_archival candidate found for pattern_id={pattern_id!r}"
+            + (f", source_table={source_table!r}" if source_table else "")
+            + ". Run `vnx learning review --mode archival` to list current candidates."
+        )
+    pending = [c for c in matches if c.get("status") == "pending"]
+    if not pending:
+        handled = matches[0]
+        raise CandidateAlreadyHandledError(
+            f"Candidate pattern_id={pattern_id!r} is already "
+            f"{handled.get('status', 'unknown')!r} (decided at "
+            f"{handled.get('decided_at', '?')}). No second disposition applied."
+        )
+    return pending[0]
+
+
+def _apply_supersede(
+    conn: sqlite3.Connection, pattern_id: str, source_table: str, now_iso: str
+) -> bool:
+    """Set valid_until on the superseded row, idempotent on valid_until IS NULL.
+
+    Returns True when a row was updated, False when it was already superseded
+    (a concurrent disposition won the race). The WHERE clause makes the update
+    idempotent: a second approve on the same id updates zero rows.
+    """
+    if source_table not in ("success_patterns", "prevention_rules"):
+        # Unknown source table for supersede — record the decision but do not
+        # mutate a table we cannot vouch for. db_applied stays False.
+        return False
+    cur = conn.execute(
+        f"UPDATE {source_table} SET valid_until = ? "
+        f"WHERE id = ? AND valid_until IS NULL",
+        (now_iso, pattern_id),
+    )
+    return cur.rowcount > 0
+
+
+def _apply_archive(
+    conn: sqlite3.Connection, pattern_id: str, source_table: Optional[str], now_iso: str
+) -> bool:
+    """Carry out an archival (DELETE) disposition.
+
+    archive candidates (action omitted or 'archive') originate from the
+    pattern_usage table's low-confidence/stale set. They carry no
+    source_table. The pattern_usage row is removed; a missing row is a no-op
+    (idempotent). Returns True when a row was deleted.
+    """
+    cur = conn.execute(
+        "DELETE FROM pattern_usage WHERE pattern_id = ?", (pattern_id,)
+    )
+    return cur.rowcount > 0
+
+
+def apply_archival_decision(
+    state_dir: Path,
+    pattern_id: str,
+    decision: str,
+    *,
+    approval_id: str,
+    reason: str,
+    approved_by: str = "operator",
+    source_table: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Carry out an operator-approved disposition on a pending_archival candidate.
+
+    This is the consumer the proposal tier was missing (OI-1076). It:
+
+      1. Validates the human-gate inputs (--approval-id, --reason, approver).
+      2. Loads pending_archival.json and locates the pending candidate.
+      3. Carries out the action:
+         - approve + action="supersede" → set valid_until on the DB row
+           (idempotent via ``WHERE valid_until IS NULL``).
+         - approve + action="archive" (or omitted) → DELETE the pattern_usage
+           row (idempotent).
+         - dismiss (any action) → no DB mutation; the candidate is removed from
+           the queue without effect. Used to reject a proposal the operator
+           does not want to act on.
+      4. Marks the candidate decided (status=approved|dismissed, decided_at,
+         decided_by, approval_id, decision_reason) and rewrites
+         pending_archival.json atomically.
+      5. Appends an archival_decision audit event to intelligence_usage.ndjson.
+
+    Idempotency: a candidate that is no longer pending raises
+    CandidateAlreadyHandledError with a clear message — no silent no-op and no
+    double DB mutation. A supersede whose row already has valid_until set
+    updates zero rows and is recorded with db_applied=False.
+
+    Args:
+        state_dir:     VNX state directory (pending_archival.json lives here).
+        pattern_id:    The candidate pattern_id to act on.
+        decision:      "approve" or "dismiss".
+        approval_id:   Operator gate token (REQUIRED).
+        reason:        Non-empty rationale (REQUIRED).
+        approved_by:   "operator" (default) or "T0".
+        source_table:  Optional disambiguator when two candidates share a
+                       pattern_id across tables (e.g. an id present in both
+                       success_patterns and prevention_rules).
+        db_path:       quality_intelligence.db path. Defaults to
+                       state_dir/quality_intelligence.db.
+
+    Returns a result dict: {decision, pattern_id, action, source_table,
+    db_applied, status, candidate}.
+
+    Raises:
+        ArchivalDispositionError:    missing approval_id/reason or invalid approver.
+        CandidateNotFoundError:      pattern_id not in the queue.
+        CandidateAlreadyHandledError: candidate already decided.
+        ArchivalDispositionError:    DB or write failure.
+    """
+    if decision not in ("approve", "dismiss"):
+        raise ArchivalDispositionError(
+            f"decision must be 'approve' or 'dismiss', got {decision!r}"
+        )
+    _validate_disposition_inputs(approved_by, approval_id, reason)
+
+    candidates = load_pending_archival(state_dir)
+    candidate = _find_candidate(candidates, pattern_id, source_table)
+    action = candidate.get("action", "archive")
+    cand_source_table = candidate.get("source_table")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    db_applied = False
+    if decision == "approve":
+        resolved_db = db_path or (state_dir / "quality_intelligence.db")
+        try:
+            conn = sqlite3.connect(str(resolved_db), timeout=10.0)
+        except sqlite3.Error as exc:
+            raise ArchivalDispositionError(
+                f"could not open quality_intelligence.db at {resolved_db}: {exc}"
+            )
+        try:
+            if action == "supersede":
+                db_applied = _apply_supersede(
+                    conn, pattern_id, str(cand_source_table or ""), now_iso
+                )
+            else:
+                db_applied = _apply_archive(
+                    conn, pattern_id, cand_source_table, now_iso
+                )
+            conn.commit()
+        except sqlite3.Error as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise ArchivalDispositionError(
+                f"DB mutation failed for {decision} on {pattern_id!r}: {exc}"
+            )
+        finally:
+            conn.close()
+    # dismiss: no DB mutation by design.
+
+    # Rewrite the candidate as decided. It stays in pending_archival.json with
+    # a non-pending status so `status`/`review` stop surfacing it (they filter
+    # on status == "pending") and the audit trail is reconstructable from the
+    # file itself, not just the NDJSON event.
+    candidate["status"] = "approved" if decision == "approve" else "dismissed"
+    candidate["decided_at"] = now_iso
+    candidate["decided_by"] = approved_by
+    candidate["approval_id"] = approval_id
+    candidate["decision_reason"] = reason
+    candidate["db_applied"] = db_applied
+
+    _save_pending_archival_atomic(state_dir, candidates)
+
+    _emit_archival_decision_event(
+        state_dir,
+        pattern_id=pattern_id,
+        decision=decision,
+        approved_by=approved_by,
+        approval_id=approval_id,
+        reason=reason,
+        action=action,
+        source_table=str(cand_source_table or ""),
+        db_applied=db_applied,
+    )
+
+    return {
+        "decision": decision,
+        "pattern_id": pattern_id,
+        "action": action,
+        "source_table": cand_source_table,
+        "db_applied": db_applied,
+        "status": candidate["status"],
+        "candidate": candidate,
+    }
 
 
 def main():

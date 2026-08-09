@@ -940,6 +940,74 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         help="display the full unified diff for each proposal",
     )
 
+    # Operator disposition verbs (OI-1076 / OI-1038): the consumer the proposal
+    # tier was missing. Form mirrors horizon close / objective reopen —
+    # --approval-id is the gate token, --reason is mandatory.
+    lr_approve = learning_subs.add_parser(
+        "approve",
+        help=(
+            "approve a pending_archival/supersede candidate (operator-gated). "
+            "supersede → sets valid_until on the DB row; archive → removes the "
+            "pattern_usage row."
+        ),
+    )
+    lr_approve.add_argument("pattern_id", metavar="PATTERN_ID",
+                            help="candidate pattern_id from `vnx learning review`")
+    lr_approve.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_approve.add_argument(
+        "--approval-id",
+        dest="approval_id",
+        default="",
+        required=True,
+        help="operator approval token (REQUIRED — the human gate)",
+    )
+    lr_approve.add_argument(
+        "--reason",
+        dest="reason",
+        default="",
+        required=True,
+        help="non-empty rationale for the approval (REQUIRED)",
+    )
+    lr_approve.add_argument(
+        "--source-table",
+        dest="source_table",
+        default=None,
+        choices=["success_patterns", "prevention_rules"],
+        help="disambiguate when the same id appears in two tables",
+    )
+
+    lr_dismiss = learning_subs.add_parser(
+        "dismiss",
+        help=(
+            "dismiss a pending_archival/supersede candidate (operator-gated). "
+            "Removes the candidate from the queue without a DB mutation."
+        ),
+    )
+    lr_dismiss.add_argument("pattern_id", metavar="PATTERN_ID",
+                            help="candidate pattern_id from `vnx learning review`")
+    lr_dismiss.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_dismiss.add_argument(
+        "--approval-id",
+        dest="approval_id",
+        default="",
+        required=True,
+        help="operator approval token (REQUIRED — the human gate)",
+    )
+    lr_dismiss.add_argument(
+        "--reason",
+        dest="reason",
+        default="",
+        required=True,
+        help="non-empty rationale for the dismissal (REQUIRED)",
+    )
+    lr_dismiss.add_argument(
+        "--source-table",
+        dest="source_table",
+        default=None,
+        choices=["success_patterns", "prevention_rules"],
+        help="disambiguate when the same id appears in two tables",
+    )
+
 
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_parser = subparsers.add_parser(
