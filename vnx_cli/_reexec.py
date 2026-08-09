@@ -145,6 +145,22 @@ def _running_version(engine_root: Path) -> Optional[str]:
     return text or None
 
 
+def _store_root(engine_root: Path) -> Path:
+    """The central store root (the dir holding ``versions/`` and ``current``).
+
+    A central install always lives at ``<root>/versions/<v>``, so the running
+    engine root's grandparent IS the store root (this also honors custom roots
+    naturally). Fall back to ``$VNX_HOME_ROOT`` then the default
+    ``~/.vnx-system`` for non-standard layouts.
+    """
+    if engine_root.parent.name == "versions":
+        return engine_root.parent.parent
+    env_root = os.environ.get("VNX_HOME_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    return Path.home() / ".vnx-system"
+
+
 def _versions_dir(engine_root: Path) -> Path:
     """The central store's ``versions/`` dir.
 
@@ -159,6 +175,31 @@ def _versions_dir(engine_root: Path) -> Path:
     if env_root:
         return Path(env_root).expanduser().resolve() / "versions"
     return Path.home() / ".vnx-system" / "versions"
+
+
+def _resolved_current_version(engine_root: Path) -> Optional[str]:
+    """The version the ``current`` symlink ACTUALLY resolves to.
+
+    Reads the ``current`` symlink in the central store root and reports the
+    target's directory NAME (e.g. ``v1.4.4``), not a version LABEL read from
+    a VERSION file. This is the honest identity of what is running: a stale
+    VERSION file (OI-1070) can name a version that is not the one installed
+    under ``current``, so the resolved dir name is the only trustworthy value.
+
+    Returns None when ``current`` is absent, not a symlink, or unresolvable.
+    """
+    current = _store_root(engine_root) / "current"
+    if not current.is_symlink():
+        return None
+    try:
+        target = current.resolve()
+    except OSError:
+        return None
+    if not target.exists():
+        return None
+    # Report the dir name (``v1.4.4``), normalized to strip a decorative ``v``
+    # so it reads as a version the way the rest of the output does.
+    return _normalize_version(target.name) or target.name
 
 
 def _resolve_pinned_dir(versions_dir: Path, pin: str) -> Optional[Path]:
@@ -227,10 +268,12 @@ def _maybe_reexec_pinned(argv: List[str]) -> None:
     versions_dir = _versions_dir(engine_root)
     pinned_dir = _resolve_pinned_dir(versions_dir, pin)
     if pinned_dir is None:
-        running = _running_version(engine_root)
+        # OI-1070: name the version the ``current`` symlink ACTUALLY resolves
+        # to, not a VERSION label that can disagree with the installed dir.
+        resolved = _resolved_current_version(engine_root)
         _warn(
             f"pinned version {pin!r} is not installed under {versions_dir}; "
-            f"running current version ({running or 'unknown'})"
+            f"running current version ({resolved or 'unknown'})"
         )
         return
 

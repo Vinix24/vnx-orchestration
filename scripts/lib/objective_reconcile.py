@@ -491,6 +491,194 @@ def _parse_reopen_stamp(reason: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Close-evidence gathering (shared by run_reconcile and the close verb)
+# ---------------------------------------------------------------------------
+#
+# OI-1071: PR #1402 (OI-1064) threaded gh-confirmed merge evidence into the
+# ``reconcile --apply`` close path (run_reconcile step 4c + close_track_if_done),
+# but the operator-facing ``objective close`` verb did NOT call that path — it
+# peeked/reconciled with the local-only set, fell back to _load_merged_pr_numbers
+# (whose gh source is opt-in behind VNX_RECONCILE_GIT, OFF by default), and
+# re-derived 'queued' for a track whose PRs merged via a bare ``gh pr merge``.
+#
+# The two helpers below are the SINGLE source of the evidence set both code
+# paths consume, so the bulk reconcile sweep and the standalone close verb
+# cannot drift apart:
+#
+#   merge_evidence_pr_numbers — the UNION primitive. Takes a set of
+#     gh-confirmed MERGED PR numbers and returns the union with the
+#     locally-loaded set (NDJSON + ROADMAP). run_reconcile calls this after its
+#     own gh sweep; gather_close_evidence calls this after the per-track sweep.
+#
+#   gather_close_evidence — the per-track gather the close verb uses. Resolves
+#     the track's pr_ref, fetches only THAT track's PRs (bounded by max_gh_calls,
+#     cache-first), and returns the union set + a health report so the verb can
+#     degrade honestly when gh is unreachable.
+
+def merge_evidence_pr_numbers(
+    gh_confirmed_merged: "FrozenSet[int]",
+    state_dir: Path,
+    repo_root: Optional[Path] = None,
+) -> FrozenSet[int]:
+    """Return the UNION of gh-confirmed MERGED PR numbers and the local set.
+
+    gh evidence is additive: it never replaces local NDJSON/ROADMAP evidence,
+    only adds what a bare ``gh pr merge`` never wrote locally. This is the
+    exact union run_reconcile builds (step 4c) — extracted so the standalone
+    close verb and the bulk sweep reach it through the SAME function and
+    cannot drift.
+
+    Local loading reuses track_reconciler._load_merged_pr_numbers (sources
+    1-3 are local and deterministic; source 4 is the opt-in VNX_RECONCILE_GIT
+    path, OFF by default, so it does NOT double-call gh here).
+    """
+    local_merged = track_reconciler._load_merged_pr_numbers(state_dir, repo_root)
+    return frozenset(set(gh_confirmed_merged) | set(local_merged))
+
+
+def gather_close_evidence(
+    state_dir: Path,
+    project_id: str,
+    track_id: str,
+    *,
+    repo_root: Optional[Path] = None,
+    max_gh_calls: int = 50,
+    pr_ref: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Gather the same merge evidence run_reconcile does, for ONE track.
+
+    Returns::
+
+        {
+          "merged_pr_numbers": FrozenSet[int],  # gh-confirmed UNION local
+          "gh_health": "ok" | "absent" | "auth_failed" | "timeout",
+          "consulted_gh": bool,                  # False when gh unreachable / no PRs
+          "pr_results": List[Dict],              # per-PR {number, state, mergedAt}
+          "pr_ref": str,                          # the pr_ref resolved for the track
+          "pr_numbers": FrozenSet[int],           # parsed PR numbers from pr_ref
+        }
+
+    Resolves the track's ``pr_ref`` (unless ``pr_ref`` is passed), fetches only
+    that track's PRs through the per-PR cache (so a PR already verified this run
+    or recently cached is not re-fetched), and bounds live gh calls by
+    ``max_gh_calls``. When gh is absent/unauthenticated/timed out OR the track
+    has no pr_ref, falls back to the local-only set and reports
+    ``consulted_gh=False`` so the caller can SAY it could not reach GitHub
+    rather than silently behaving as if it checked.
+
+    Never raises; gh failures degrade to local-only.
+    """
+    # Resolve the track's pr_ref from the DB when the caller did not pass it.
+    if pr_ref is None:
+        try:
+            lib = tracks_lib.get_track(state_dir, track_id, project_id)
+            if lib is not None:
+                pr_ref = (lib.get("pr_ref") or "").strip()
+        except Exception:  # vnx-silent-except: best-effort pr_ref resolve
+            pr_ref = None
+    pr_ref = (pr_ref or "").strip()
+    pr_numbers: FrozenSet[int] = _parse_pr_numbers(pr_ref) if pr_ref else frozenset()
+
+    pr_results: List[Dict[str, Any]] = []
+    gh_confirmed_merged: set = set()
+
+    # No PRs to verify → nothing to fetch; the union is the local set alone.
+    # repo_root is left as-is (possibly None) so the local loader resolves it
+    # exactly as the pre-OI-1071 peek/reconcile path did — no eager git probe.
+    if not pr_numbers:
+        return {
+            "merged_pr_numbers": merge_evidence_pr_numbers(frozenset(), state_dir, repo_root),
+            "gh_health": "ok",
+            "consulted_gh": False,
+            "pr_results": [],
+            "pr_ref": pr_ref,
+            "pr_numbers": pr_numbers,
+        }
+
+    # gh probes need a concrete repo root for cwd=. Resolve once, only when
+    # there are PRs to fetch (the no-pr_ref hot path above skips this).
+    if repo_root is None:
+        repo_root = _resolve_effective_repo_root()
+
+    gh_binary = _resolve_gh_binary()
+    gh_health = _detect_gh(repo_root, gh_binary)
+    if gh_health != "ok":
+        # gh unavailable: degrade honestly to local-only. Caller MUST surface
+        # that gh could not be consulted instead of pretending it checked.
+        return {
+            "merged_pr_numbers": merge_evidence_pr_numbers(frozenset(), state_dir, repo_root),
+            "gh_health": gh_health,
+            "consulted_gh": False,
+            "pr_results": [],
+            "pr_ref": pr_ref,
+            "pr_numbers": pr_numbers,
+        }
+
+    # Cache-first fetch, bounded by max_gh_calls. Reuses the same per-PR cache
+    # run_reconcile uses so a PR already verified this run is not re-fetched.
+    repo_key = _get_repo_key(repo_root)
+    pr_cache = _load_pr_state_cache(state_dir, repo_key)
+    gh_calls_used = 0
+
+    per_pr: Dict[int, Optional[Dict[str, Any]]] = {}
+    prs_to_fetch: List[int] = []
+    for pn in pr_numbers:
+        cached = pr_cache.get(str(pn))
+        if cached and _is_merged(cached):
+            per_pr[pn] = cached
+        else:
+            prs_to_fetch.append(pn)
+
+    # Bound live calls. A single close handles ONE track, so the cap is the
+    # track's PR count at most; if the cap is lower than that, fetch what fits
+    # and report the rest as unverified (consulted_gh stays True — gh WAS
+    # reached, just budget-capped).
+    uncapped_remainder: List[int] = []
+    if len(prs_to_fetch) > max_gh_calls:
+        uncapped_remainder = prs_to_fetch[max_gh_calls:]
+        prs_to_fetch = prs_to_fetch[:max_gh_calls]
+
+    for pn in prs_to_fetch:
+        gh_calls_used += 1
+        data = _gh_pr_view(pn, repo_root, gh_binary=gh_binary)
+        per_pr[pn] = data
+        if data is not None and _is_merged(data):
+            pr_cache[str(pn)] = data
+
+    # Persist any newly cached MERGED results.
+    _save_pr_state_cache(state_dir, repo_key, pr_cache)
+
+    # Build the per-PR result list and the gh-confirmed MERGED set, mirroring
+    # run_reconcile step 4c's extraction.
+    for pn in sorted(pr_numbers):
+        data = per_pr.get(pn)
+        if data is None:
+            if pn in uncapped_remainder:
+                pr_results.append({"number": pn, "state": None, "mergedAt": None})
+            else:
+                pr_results.append({"number": pn, "state": None, "mergedAt": None})
+            continue
+        pr_results.append({
+            "number": pn,
+            "state": data.get("state"),
+            "mergedAt": data.get("mergedAt"),
+        })
+        if _is_merged(data):
+            gh_confirmed_merged.add(pn)
+
+    return {
+        "merged_pr_numbers": merge_evidence_pr_numbers(
+            frozenset(gh_confirmed_merged), state_dir, repo_root
+        ),
+        "gh_health": gh_health,
+        "consulted_gh": True,
+        "pr_results": pr_results,
+        "pr_ref": pr_ref,
+        "pr_numbers": pr_numbers,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Decision logic
 # ---------------------------------------------------------------------------
 
@@ -894,8 +1082,58 @@ def run_reconcile(
         else:
             counts[verdict] = counts.get(verdict, 0) + 1
 
+    # ------------------------------------------------------------------ step 4c
+    # OI-1064: thread the gh-confirmed merge evidence into the derived-status
+    # derivation so it is not discarded. The bulk pass (step 2) ran BEFORE the
+    # gh sweep, so a track whose pr_ref PRs were merged via a bare ``gh pr
+    # merge`` (no local pr_merged receipt) derived 'queued' there — even though
+    # reconcile itself just confirmed those PRs merged via gh. Threading the
+    # evidence here lets the close path re-derive 'done' WITHOUT the
+    # VNX_RECONCILE_GIT flag (which governs whether the reconciler makes its
+    # OWN network calls; this is about evidence it ALREADY gathered).
+    #
+    # The injected set is a UNION of the gh-confirmed MERGED PR numbers and the
+    # locally-loaded set (NDJSON + ROADMAP). Local evidence stays valid; gh
+    # only ADDS what a bare ``gh pr merge`` never wrote locally. No new gh
+    # calls: only MERGED results already fetched in step 4b are extracted, so
+    # the --max-gh-calls cap still holds for the whole run.
+    # ------------------------------------------------------------------ step 4c
+    gh_confirmed_merged: set = set()
+    for cc in confirmed_candidates:
+        for pr in cc["pr_results"]:
+            if isinstance(pr, dict) and _is_merged({
+                "state": pr.get("state"),
+                "mergedAt": pr.get("mergedAt"),
+            }):
+                try:
+                    gh_confirmed_merged.add(int(pr["number"]))
+                except (TypeError, ValueError, KeyError):
+                    pass
+    # OI-1071: the UNION of gh-confirmed MERGED PR numbers and the local set is
+    # built by the shared primitive so the standalone close verb and this bulk
+    # sweep consume the SAME function and cannot drift apart.
+    evidence_merged_pr_numbers: FrozenSet[int] = merge_evidence_pr_numbers(
+        frozenset(gh_confirmed_merged), state_dir, repo_root
+    )
+
+    # Re-derive the confirmed tracks so the bulk-pass-derived_status (which ran
+    # before the gh sweep and wrote 'queued' for bare-gh-merge tracks) is
+    # corrected in the DB with the same evidence the close path will use. This
+    # is idempotent (reconcile_track rewrites derived_status) and adds zero gh
+    # calls. Non-apply mode also benefits: the derived_status persisted for
+    # reporting matches the evidence reconcile actually gathered.
+    for cc in confirmed_candidates:
+        track_reconciler.reconcile_track(
+            state_dir, cc["track_id"], project_id,
+            repo_root=repo_root,
+            _merged_pr_numbers=evidence_merged_pr_numbers,
+        )
+
     # ------------------------------------------------------------------ step 5
-    # Close confirmed candidates (--apply only).
+    # Close confirmed candidates (--apply only). The evidence set from step 4c
+    # is forwarded so reconcile_track inside close_track_if_done sees the same
+    # complete evidence (gh-confirmed UNION local) instead of falling back to
+    # the local-only set.
     # ------------------------------------------------------------------ step 5
     if apply:
         verified_at = _now_utc()
@@ -916,6 +1154,7 @@ def run_reconcile(
                 evidence=evidence,
                 approval_id=f"auto-reconcile-{run_id}",
                 repo_root=repo_root,
+                merged_pr_numbers=evidence_merged_pr_numbers,
             )
             action = close_result.get("action", "")
 

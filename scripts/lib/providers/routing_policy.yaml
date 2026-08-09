@@ -23,14 +23,6 @@ rules:
     lane: "kimi"  # kimi CLI OAuth lane — kimi-via-cli-only constraint enforced
     rationale: "worker-provider-kimi-flip (2026-07-23): kimi is the build-worker default (proven agentic, #1210); Sonnet remains an explicit operator override, not the baseline"
 
-  - name: cost-optimized-code
-    when:
-      task_class: ["refactor", "feature-implementation"]
-      complexity: ["medium"]
-      opt_in_flag: "VNX_USE_CHEAP_LANE"  # operator opt-in only
-    lane: "litellm:deepseek:deepseek-v4-pro"  # $0.28/$0.40 - 10x cheaper input than Sonnet
-    rationale: "Mid-complexity code with operator opt-in; deepseek-v4-pro ranks competitive on coding benchmarks"
-
   - name: review-analysis
     when:
       task_class: ["code-review", "analysis", "summarization"]
@@ -62,11 +54,13 @@ rules:
 # still list kimi as A step in THEIR OWN fallback, which is unrelated to kimi's own
 # (empty) chain.
 fallback_chain:
-  "litellm:deepseek:*": ["kimi", "claude/sonnet-5"]
+  "litellm:deepseek:*": ["codex", "claude/sonnet-5"]
   "kimi": []
-  "litellm:zai:*": ["kimi", "claude/sonnet-5"]
+  "litellm:zai:*": ["codex", "claude/sonnet-5"]
   "claude/haiku-4-5": ["claude/sonnet-5"]
   # Sonnet and Opus have no fallback (they are the safety net)
+  # kimi quota exhausted 2026-08-02 (OI-940) — codex replaces kimi as vangnet
+  # for litellm:deepseek:* and litellm:zai:* chains
 
 # Lane-safety rules.
 #
@@ -128,11 +122,19 @@ lane_safety:
   # report on disk). Clean cells score top-cluster (4.79-4.93), so the lane is
   # worth keeping — but a single attempt is not a verdict. Retry once before
   # scoring a codex cell or dispatch as DNF.
+  #
+  # 2026-08-02: codex is now the tier-low vangnet (dispatch-20260802-smart-router-
+  # door-codex-fallback). When codex is invoked as a fallback — either directly
+  # (no DEEPSEEK_API_KEY) or after a primary deepseek failure — this retry-once
+  # rule MUST apply to prevent a single transient codex DNF from becoming a silent
+  # dispatch failure. Callers of the vangnet path (tier_routing.resolve_tier_route,
+  # routing_policy fallback_chain) must honour this rule.
   codex_retry_once:
     models:
       - codex-gpt-5-4
+      - codex-gpt-5-5
     max_retries: 1
-    reason: "Measured 2/8 DNF-rate 2026-06-06; clean-cell quality top-cluster"
+    reason: "Measured 2/8 DNF-rate 2026-06-06; clean-cell quality top-cluster. Extended to gpt-5.5 for vangnet (tier-low fallback, 2026-08-02)."
     review_trigger: "skill-aware re-bench 2026-06-08 DNF-rate"
 
   # Kimi CLI quota exhausts mid-billing-cycle (measured 2026-06-07: quota_or_auth

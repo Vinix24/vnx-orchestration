@@ -4,6 +4,50 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.4.3] — 2026-08-03
+
+Patch release (6 commits since 1.4.2). Headline: **CI was measuring 2% of the suite**, and
+**tests could write to the production store**. Profile A ran 18 of 933 test files; it now runs
+~763 (#1310). Widening it immediately surfaced a test that had never been CI-safe and left main
+red from 13:12 until the evening — fixed by giving the Profile A checkout full history so
+`check_pr_size` can resolve pinned SHAs (#1337). Separately, two tests wrote straight into the
+live central store: one left 14 files in `dispatches/staging/`, the other could flip `mode.json`
+from `operator` to `starter` and close the governance door for `dispatch`, `gate` and `dream`
+fleet-wide. A fail-closed guard now refuses a real-central-store write under pytest (#1333).
+
+### Fixed
+
+- **CI measured 18 of 933 test files (#1310, OI-908, OI-906)** — Profile A ran a hardcoded
+  handful while the suite grew to 933 files, so a green merge gate said almost nothing. The full
+  suite now runs in CI with the F39 replay gated behind an explicit marker (it drives `claude -p`
+  and does not belong in an unattended lane). The 213 reds this exposed were all pre-existing;
+  they are tracked as eight open items grouped by cause, not one per file.
+- **Profile A checkout could not resolve pinned SHAs (#1337, OI-838)** — the checkout ran at the
+  default shallow depth, so `check_pr_size` could not resolve the SHAs it was pinned to and the
+  workflow concluded `failure` while the individual job names read as green. Now `fetch-depth: 0`.
+  Two dead mocks repaired in the same pass.
+- **Tests could write to the production central store (#1333)** — `test_pr_dispatch_integration`
+  seeded staging dispatches into the live store, and `vnx_mode.write_mode()` could flip the live
+  `mode.json` through its resolver fallback.
+  `vnx_paths.refuse_real_central_store_write_under_pytest()` now fails loud when code under
+  pytest is about to write to the real central store. Deliberately called from write surfaces
+  rather than from path resolvers: pure resolution must keep pointing at the real store
+  (read-only tests assert that), only an imminent write is the hazard. Adopted in `vnx_mode` and
+  `pr_queue_manager`, plus an autouse fixture in `tests/conftest.py`.
+- **Merge gate blocked the whole refactor series (#1332, OI-937)** — every PR in the extraction
+  series failed the file-size gate on `dispatch_cli`, including one that made the file smaller.
+  A temporary `FILE_SIZE_ALLOWLIST` entry unblocks the series; it comes out when the extraction
+  lands.
+- **Track-reconciler test asserted a dead command form (#1331, OI-934)** — the test pinned the
+  plan-gate hint to a literal command string that no longer exists, so it verified spelling
+  instead of behaviour. It now asserts the hint's meaning.
+
+### Changed
+
+- **Per-seat distillate budget in the plan-gate panel (#1334, OI-820)** — one shared budget
+  starved the later seats, so most of the panel never reached the synthesis stage. Each seat now
+  carries its own budget: 6,000 characters reached synthesis before, 60,258 after.
+
 ## [1.4.2] — 2026-08-02
 
 Patch release (42 commits since 1.4.1). Headline: the **reconcile chain and the cleanup of the open-item administration**. Open items went **from 773 to 53 across eight triage rounds** (#1304, #1305, #1307, #1315, #1316, #1317, #1318, #1319, #1320, #1321, #1323) — not a list-tidying exercise but the repair of an administration that was reporting itself green. The automatic close-out reconciler **stood still for 31 hours on a broken `gh` lookup path** and booked that as "does not exist" instead of as an outage (#1314). The bridge between findings and planning **would have wiped all 70 plan-gate blockers the moment it was switched on**; that only surfaced because it was measured against a copy of the production database (#1322). Workers on the provider lane **ran without their role instructions** (#1313, OI-926), and role validation was a silent default instead of a check (#1312, OI-921). The **refactor program has started**: the two proof tools landed in `scripts/` with their own tests (#1325), and the first verified moves are in (#1328, #1329).

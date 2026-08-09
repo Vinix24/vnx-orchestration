@@ -70,7 +70,7 @@ class TestEnsureUnifiedReport:
         result = fn("20260501-120000-fix-test-B", "T2", "done")
 
         assert result is not None
-        report_path = reports_dir / "20260501-120000-fix-test-B_report.md"
+        report_path = reports_dir / "20260501-120000-fix-test-B.md"
         assert report_path.exists(), "Stub report must be written to unified_reports/"
         content = report_path.read_text()
         assert "20260501-120000-fix-test-B" in content
@@ -107,7 +107,7 @@ class TestEnsureUnifiedReport:
         fn = self._import()
         result = fn("20260501-120000-fix-t1-A", "T1", "done")
         assert result is not None
-        assert (reports_dir / "20260501-120000-fix-t1-A_report.md").exists()
+        assert (reports_dir / "20260501-120000-fix-t1-A.md").exists()
 
     def test_t3_also_gets_stub(self, tmp_path, monkeypatch):
         """Stub creation applies to T3 as well as T2."""
@@ -116,7 +116,7 @@ class TestEnsureUnifiedReport:
         fn = self._import()
         result = fn("20260501-120000-fix-t3-C", "T3", "done")
         assert result is not None
-        assert (reports_dir / "20260501-120000-fix-t3-C_report.md").exists()
+        assert (reports_dir / "20260501-120000-fix-t3-C.md").exists()
 
 
 # ---------------------------------------------------------------------------

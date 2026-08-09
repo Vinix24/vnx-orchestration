@@ -183,6 +183,18 @@ def _cmd_reopen(args: Any) -> int:
     return pc.cmd_objective_reopen(args)
 
 
+def _cmd_link_pr(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_link_pr(args)
+
+
+def _cmd_set_lane_hint(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_set_lane_hint(args)
+
+
 _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_add,
     "list": _cmd_list,
@@ -194,6 +206,8 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "reconcile-streak": _cmd_reconcile_streak,
     "close": _cmd_close,
     "reopen": _cmd_reopen,
+    "link-pr": _cmd_link_pr,
+    "set-lane-hint": _cmd_set_lane_hint,
 }
 
 

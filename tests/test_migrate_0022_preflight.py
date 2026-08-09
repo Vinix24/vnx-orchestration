@@ -28,6 +28,23 @@ if str(_SCRIPTS) not in sys.path:
 import schema_migration
 
 
+@pytest.fixture(autouse=True)
+def _clear_ambient_project_id(monkeypatch):
+    """OI-953: keep the fail-closed tests hermetic against an ambient tenant.
+
+    tests/test_link_sessions_dispatches_cleanup.py does
+    ``os.environ.setdefault("VNX_PROJECT_ID", "vnx-dev")`` at module import and
+    never restores it, so when that module runs first in the CI sweep the
+    variable leaks for the rest of the session. run()'s ADR-007 repair then
+    resolves that ambient tenant, adds project_id to the v9 fixture, the
+    preflight passes, and run() completes instead of raising — the OI-953
+    "DID NOT RAISE RuntimeError" red. Clearing it here makes every test in this
+    module deterministically exercise the fail-closed path (no resolvable tenant
+    → RuntimeError).
+    """
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+
+
 FIXTURE_ROADMAP = """\
 # VNX Master Roadmap — fixture
 

@@ -9,7 +9,10 @@ hot-path advisory reconcile that keeps the t0_state projection fresh:
 - the compact index summary mirrors the full marker
 - autoclose_degraded is read from reconcile_summary.json (true when gh is
   absent, false for a healthy summary, true when the summary is missing)
-- the SessionStart hook command is valid bash, de-swallows stderr, keeps exit 0
+- the SessionStart hook command is valid bash, surfaces a failed build
+  visibly on the session's own stderr while keeping a non-blocking exit 0
+  (OI-1073: the hook ships as an install artefact and no longer swallows
+  failures into a 0-byte log nobody opens)
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +39,8 @@ for p in (_LIB, _SCRIPTS):
 import build_t0_state as bts  # noqa: E402
 import schema_migration  # noqa: E402
 import tracks as tracks_lib  # noqa: E402
+
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
 
 PROJECT_ID = "test-proj"
 _MARKER_KEYS = {
@@ -91,8 +97,7 @@ def _build_tracks_db(tmp_path: Path) -> Path:
             conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
         )
         conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     for ver, fname in (
@@ -300,8 +305,82 @@ def test_autoclose_degraded_true_when_last_run_stale(tmp_path):
     assert health["autoclose_reason"] == "stale"
 
 
+def test_autoclose_degraded_when_finished_at_indeterminate(tmp_path):
+    """Missing or unparseable finished_at → degraded with reason=indeterminate_age.
+
+    Red on old code: age_hours=None → stale=False, and with gh=ok and no stuck
+    backlog the probe returned autoclose_degraded=False, reason=ok — falsely
+    healthy when the last-run age cannot be determined.
+    """
+    now = datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc)
+
+    # Unparseable finished_at (present but not valid ISO).
+    state_dir = tmp_path / "unparseable"
+    state_dir.mkdir(parents=True)
+    (state_dir / "reconcile_summary.json").write_text(json.dumps({
+        "finished_at": "not-a-valid-iso-timestamp",
+        "evidence_source_health": {"gh": "ok"},
+        "counts": {"nominated": 0, "closed": 0, "unverified": 0},
+    }), encoding="utf-8")
+    health = bts._autoclose_health(state_dir, now=now)
+    assert health["autoclose_degraded"] is True
+    assert health["autoclose_reason"] == "indeterminate_age"
+    assert health["last_reconcile_age_hours"] is None
+
+    # Missing finished_at entirely.
+    state_dir2 = tmp_path / "missing_ts"
+    state_dir2.mkdir(parents=True)
+    (state_dir2 / "reconcile_summary.json").write_text(json.dumps({
+        "evidence_source_health": {"gh": "ok"},
+        "counts": {"nominated": 0, "closed": 0, "unverified": 0},
+    }), encoding="utf-8")
+    health2 = bts._autoclose_health(state_dir2, now=now)
+    assert health2["autoclose_degraded"] is True
+    assert health2["autoclose_reason"] == "indeterminate_age"
+    assert health2["last_reconcile_age_hours"] is None
+
+
+def test_autoclose_degraded_when_counts_malformed(tmp_path):
+    """Non-numeric counts in a valid JSON → degraded with reason=malformed_counts.
+
+    Red on old code: int('not-a-number') raised ValueError outside the try/except
+    that only guards json.loads.  A list counts block raised AttributeError.
+    """
+    now = datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc)
+
+    # Non-numeric string value inside counts.
+    state_dir = tmp_path / "bad_string"
+    state_dir.mkdir(parents=True)
+    (state_dir / "reconcile_summary.json").write_text(json.dumps({
+        "finished_at": "2026-08-04T08:00:00Z",
+        "evidence_source_health": {"gh": "ok"},
+        "counts": {"nominated": "not-a-number", "closed": 0, "unverified": 0},
+    }), encoding="utf-8")
+    health = bts._autoclose_health(state_dir, now=now)
+    assert health["autoclose_degraded"] is True
+    assert health["autoclose_reason"] == "malformed_counts"
+    assert health["nominated_not_closed"] is None
+    # Timestamp info should still be propagated even when counts are malformed.
+    assert health["last_reconcile_at"] == "2026-08-04T08:00:00Z"
+    assert health["last_reconcile_age_hours"] == 2.0
+
+    # Counts is a list instead of a dict.
+    state_dir2 = tmp_path / "bad_list"
+    state_dir2.mkdir(parents=True)
+    (state_dir2 / "reconcile_summary.json").write_text(json.dumps({
+        "finished_at": "2026-08-04T08:00:00Z",
+        "evidence_source_health": {"gh": "ok"},
+        "counts": [1, 2, 3],
+    }), encoding="utf-8")
+    health2 = bts._autoclose_health(state_dir2, now=now)
+    assert health2["autoclose_degraded"] is True
+    assert health2["autoclose_reason"] == "malformed_counts"
+
+
 # ---------------------------------------------------------------------------
 # SessionStart hook command (F5: a quoting bug here breaks every session start)
+# OI-1073: the hook ships as an INSTALL ARTEFACT (engine-relative), surfaces a
+# failed build visibly, and stays non-blocking.
 # ---------------------------------------------------------------------------
 
 def _t0_sessionstart_command() -> str:
@@ -325,7 +404,7 @@ def _t0_sessionstart_wrapper() -> str:
     raise AssertionError("T0 SessionStart hook not found")
 
 
-def test_sessionstart_hook_is_valid_bash_and_de_swallows():
+def test_sessionstart_hook_is_valid_bash_and_visible_failure():
     cmd = _t0_sessionstart_command()
     # 1) the whole command tokenizes (no unbalanced quotes)
     shlex.split(cmd)
@@ -338,13 +417,107 @@ def test_sessionstart_hook_is_valid_bash_and_de_swallows():
     wrapper = _t0_sessionstart_wrapper()
     rc = subprocess.run(["bash", "-n", "-c", wrapper], capture_output=True, text=True)
     assert rc.returncode == 0, f"wrapper is not valid bash: {rc.stderr}"
-    # 4) the BUILDER's stderr is captured to a log (not /dev/null), the output
-    #    lands in the CENTRAL store via the resolved $STATE (not the repo-local
-    #    .vnx-data split-brain, OI-859), an explicit interpreter is used, and
-    #    the hook never blocks.
+    # 4) the builder is resolved through the INSTALLED ENGINE via BASH_SOURCE
+    #    (HOOK_DIR/../.. -> ENGINE_ROOT), never through a repo-relative
+    #    $PROJECT_ROOT/scripts path that is absent in a pip consumer (OI-1073
+    #    defect 1). The output lands in the CENTRAL store via the resolved
+    #    $STATE (not the repo-local .vnx-data split-brain, OI-859), an explicit
+    #    interpreter is used, and the hook never blocks (exit 0).
+    assert "BASH_SOURCE" in wrapper, "hook must resolve the engine via BASH_SOURCE, not a hardcoded path"
+    assert "$ENGINE_ROOT/scripts/build_t0_state.py" in wrapper
+    assert "ENGINE_ROOT" in wrapper and '"$ROOT/scripts/' not in wrapper
     assert 'build_t0_state.py" --output "$STATE/t0_state.json"' in wrapper
     assert '"$ROOT/.vnx-data/state/t0_state.json"' not in wrapper
-    assert '2>"$LOG/build_t0_state.err"' in wrapper
-    assert "build_t0_state.err" in wrapper
-    assert "exit 0" in wrapper
+    assert "build_t0_state.err" in wrapper, "builder stderr must go to the central log, not /dev/null"
+    assert "exit 0" in wrapper, "a broken state file must never block a session (non-fatal)"
     assert ".venv/bin/python" in wrapper or "python3.12" in wrapper
+    # 5) OI-1073 defect 2: a FAILED build is VISIBLE, not swallowed. The hook
+    #    surfaces the failure to its own stderr (the mechanism the harness
+    #    surfaces on the session that fired it), not only into a 0-byte log
+    #    nobody opens. The old hook did `exit 0` UNCONDITIONALLY with no signal.
+    assert "build_t0_state_hook FAILED" in wrapper, (
+        "hook must surface a failed build visibly (OI-1073 defect 2), not swallow it"
+    )
+    assert ">&2" in wrapper, "failure message must go to the hook's own stderr"
+    # The conditional: the failure line is only printed when BUILD_RC != 0,
+    # so the hook does not noise up a healthy session.
+    assert "BUILD_RC" in wrapper
+
+
+# ---------------------------------------------------------------------------
+# _build_system_health — beacon integration (OI-1028)
+# ---------------------------------------------------------------------------
+
+def test_system_health_includes_beacon_data_when_beacons_exist(tmp_path: Path) -> None:
+    """_build_system_health surfaces beacon_health when beacons are present.
+
+    Beacons live under <data_dir>/health/, one level above state_dir.
+    _build_system_health receives state_dir as <data>/state, so it reads
+    beacons from state_dir.parent/health/.
+    """
+    from health_beacon import HealthBeacon  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    state_dir = data_dir / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+
+    # Write a beacon under data_dir/health/
+    HealthBeacon(data_dir, "test_comp", expected_interval_seconds=3600).heartbeat(
+        status="ok", details={"key": "val"}
+    )
+
+    health = bts._build_system_health(state_dir, db_initialized=True)
+    assert "beacon_health" in health, (
+        f"Expected beacon_health key in system_health, got: {list(health.keys())}"
+    )
+    bh = health["beacon_health"]
+    assert bh["overall"] == "ok"
+    assert "test_comp" in bh["beacons"]
+    assert bh["beacons"]["test_comp"]["health"] == "ok"
+
+
+def test_system_health_graceful_when_no_beacons(tmp_path: Path) -> None:
+    """_build_system_health does not crash when no beacons directory exists."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+
+    health = bts._build_system_health(state_dir, db_initialized=True)
+    # beacon_health is absent when no beacons exist (beacon_summary returns
+    # empty, but we still don't add the key if overall is ok and counts are 0).
+    # The function must not raise regardless.
+    assert health["status"] in ("healthy", "degraded")
+
+
+def test_system_health_surfaces_stale_beacon(tmp_path: Path) -> None:
+    """_build_system_health picks up a stale beacon and reports it."""
+    import json as _json  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    state_dir = data_dir / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+
+    # Write a manually-aged stale beacon directly (bypass HealthBeacon so we
+    # can set an old timestamp).
+    health_dir = data_dir / "health"
+    health_dir.mkdir(parents=True)
+    stale_payload = {
+        "component": "stale_comp",
+        "last_run_ts": int(time.time() - 7200),  # 2h old
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "ok",
+        "details": {},
+        "expected_interval_seconds": 3600,  # 1h interval
+    }
+    (health_dir / "stale_comp.json").write_text(
+        _json.dumps(stale_payload), encoding="utf-8"
+    )
+
+    health = bts._build_system_health(state_dir, db_initialized=True)
+    assert "beacon_health" in health
+    bh = health["beacon_health"]
+    assert bh["overall"] == "stale"
+    assert bh["beacons"]["stale_comp"]["health"] == "stale"
+    assert bh["counts"]["stale"] >= 1

@@ -66,7 +66,7 @@ that affect state-tracked tables require a matching event schema definition.
 6. Run `pytest` to validate before committing
 7. Commit with conventional commit format
 8. Push to the branch
-9. Write a completion report to `.vnx-data/unified_reports/`
+9. Write a completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 ## Rules
 

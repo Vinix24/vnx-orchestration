@@ -63,7 +63,7 @@ These invariants must be preserved across all changes:
 5. Run `pytest` before committing
 6. Commit with conventional commit format
 7. Push to the branch
-8. Write a completion report to `.vnx-data/unified_reports/`
+8. Write a completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 ## Rules
 

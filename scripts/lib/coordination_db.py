@@ -248,6 +248,113 @@ _RC_COMPOSITE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("worker_pool_membership", ("project_id", "id")),
 )
 
+# Durable record of tables whose ux_<table>_pid index could not be created due to
+# an UNEXPECTED (non-IntegrityError) sqlite3 error. user_version still advances
+# (the migration is non-destructive and non-aborting), so this marker — plus
+# composite_index_audit() — is what surfaces the under-enforcement (OI-563).
+_COMPOSITE_KEY_FAILURES_TABLE = "composite_key_failures"
+
+
+def _record_composite_index_failure(
+    conn: sqlite3.Connection,
+    table: str,
+    cols: tuple[str, ...],
+    error: sqlite3.Error,
+) -> None:
+    """Durably record an unexpected composite UNIQUE index creation failure.
+
+    Upserts one row per table (latest error wins) into
+    ``composite_key_failures``. Best-effort by design: the migration stays
+    non-destructive even if the marker write itself fails — the original error
+    is still ERROR-logged by the caller. Stale rows for tables that later get
+    their index are filtered out by ``composite_index_audit``.
+    """
+    try:
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {_COMPOSITE_KEY_FAILURES_TABLE} ("
+            "table_name TEXT PRIMARY KEY, "
+            "index_name TEXT NOT NULL, "
+            "columns TEXT NOT NULL, "
+            "error TEXT NOT NULL, "
+            "occurred_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            f"INSERT OR REPLACE INTO {_COMPOSITE_KEY_FAILURES_TABLE} "
+            "(table_name, index_name, columns, error, occurred_at) VALUES (?, ?, ?, ?, ?)",
+            (table, f"ux_{table}_pid", ", ".join(cols), str(error), _now_utc()),
+        )
+    except sqlite3.Error as exc:
+        logger.error(
+            "composite-keys: failed to record durable failure marker for %s — %s",
+            table, exc,
+        )
+
+
+def composite_index_audit(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Return ADR-007 composite UNIQUE index coverage for the coordination DB.
+
+    A table counts as under-enforced when it exists in the schema but has no
+    ``ux_<table>_pid`` index attached to it — either absent, or shadowed by an
+    index of the same name on a different table (which ``CREATE UNIQUE INDEX IF
+    NOT EXISTS`` silently accepts as a no-op). Durable failure markers recorded
+    by ``_migrate_v11_composite_keys`` for unexpected per-table errors are
+    surfaced for tables still missing their index, so past under-enforcement
+    stays visible even after user_version has advanced (OI-563).
+
+    Returns:
+      {
+        "missing":  [{"table", "index", "columns"}, ...],
+        "failures": [{"table", "index", "columns", "error", "occurred_at"}, ...],
+        "tables_checked": int,
+      }
+    """
+    missing: List[Dict[str, str]] = []
+    tables_checked = 0
+    for table, cols in _RC_COMPOSITE_KEYS:
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            continue
+        tables_checked += 1
+        index_name = f"ux_{table}_pid"
+        row = conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
+            (index_name,),
+        ).fetchone()
+        owner = None if row is None else (
+            row[0] if not isinstance(row, sqlite3.Row) else row["tbl_name"]
+        )
+        if owner != table:
+            missing.append({"table": table, "index": index_name, "columns": ", ".join(cols)})
+
+    failures: List[Dict[str, str]] = []
+    missing_tables = {m["table"] for m in missing}
+    try:
+        marker_rows = conn.execute(
+            f"SELECT table_name, index_name, columns, error, occurred_at "
+            f"FROM {_COMPOSITE_KEY_FAILURES_TABLE} ORDER BY occurred_at DESC"
+        ).fetchall()
+    except sqlite3.Error:
+        marker_rows = []
+    for row in marker_rows:
+        table_name = row[0] if not isinstance(row, sqlite3.Row) else row["table_name"]
+        if table_name not in missing_tables:
+            # Stale marker: the table has its index again — don't surface it.
+            continue
+        failures.append({
+            "table": table_name,
+            "index": row[1] if not isinstance(row, sqlite3.Row) else row["index_name"],
+            "columns": row[2] if not isinstance(row, sqlite3.Row) else row["columns"],
+            "error": row[3] if not isinstance(row, sqlite3.Row) else row["error"],
+            "occurred_at": row[4] if not isinstance(row, sqlite3.Row) else row["occurred_at"],
+        })
+
+    return {
+        "missing": missing,
+        "failures": failures,
+        "tables_checked": tables_checked,
+    }
+
 
 def _migrate_v11_composite_keys(conn: sqlite3.Connection) -> None:
     """V11: ADR-007 composite UNIQUE indexes over project_id (non-destructive).
@@ -257,6 +364,11 @@ def _migrate_v11_composite_keys(conn: sqlite3.Connection) -> None:
     try/except: a missing column or existing duplicate rows in a given table only
     skips that one table and logs a clear warning. The migration never aborts,
     never deletes rows, and never rewrites data.
+
+    An UNEXPECTED per-table error (non-IntegrityError) is ERROR-logged and
+    durably recorded via ``_record_composite_index_failure`` so the missing
+    index — which user_version still advances past — surfaces through
+    ``composite_index_audit()`` instead of being silently dropped (OI-563).
     """
     for table, cols in _RC_COMPOSITE_KEYS:
         if not conn.execute(
@@ -294,12 +406,13 @@ def _migrate_v11_composite_keys(conn: sqlite3.Connection) -> None:
             )
         except sqlite3.Error as exc:
             # Unexpected (e.g. a migration bug / bad column) — must NOT be swallowed as a
-            # data-violation skip. Surface at ERROR level so it is investigated; still do
-            # not abort the whole migration run.
+            # data-violation skip. Surface at ERROR level AND durably so it is investigated
+            # even though user_version advances; still do not abort the whole migration run.
             logger.error(
                 "composite-keys: UNEXPECTED error on %s — index NOT created; investigate (%s)",
                 table, exc,
             )
+            _record_composite_index_failure(conn, table, cols, exc)
 
 
 def _migrate_v11_composite_keys_down(conn: sqlite3.Connection) -> None:
@@ -314,6 +427,25 @@ def _migrate_v11_composite_keys_down(conn: sqlite3.Connection) -> None:
             logger.info("composite-keys: dropped %s (V11 down)", index_name)
         except sqlite3.Error as exc:
             logger.warning("composite-keys: failed to drop %s — %s", index_name, exc)
+
+
+def _migrate_chain_status_complete_rename(conn: sqlite3.Connection) -> None:
+    """OI-830: Rename chain_status 'complete' -> 'receipt_and_commit' in provenance_registry.
+
+    Idempotent: after the first run, no rows match the WHERE clause and the
+    statement is a no-op. Only touches rows that actually have the old value.
+    The provenance_registry table may not exist yet on fresh installs — skip
+    silently when it's absent.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='provenance_registry'"
+    ).fetchone():
+        return
+    conn.execute(
+        "UPDATE provenance_registry SET chain_status = 'receipt_and_commit' "
+        "WHERE chain_status = 'complete'"
+    )
+    conn.commit()
 
 
 def _rc_project_id_present(conn: sqlite3.Connection) -> bool:
@@ -370,6 +502,10 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
         # will apply V11 after adding the column.
         if _rc_project_id_present(conn):
             schema_migration.apply_if_below(conn, 11, _migrate_v11_composite_keys)
+
+        # OI-830: rename chain_status value 'complete' -> 'receipt_and_commit'.
+        # Idempotent — after the first run no rows match the WHERE clause.
+        _migrate_chain_status_complete_rename(conn)
 
 
 # ---------------------------------------------------------------------------

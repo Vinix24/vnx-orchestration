@@ -408,6 +408,8 @@ Every dispatch instruction MUST include the following footer (codified — don't
 - DO NOT add TODO/FIXME — full implementation
 - DO NOT modify .vnx-data/ runtime state directly
 - DO NOT bypass tests with --no-verify
+- DO NOT run the full suite (`pytest tests/`) — test ONLY the files you touched plus their direct neighbours. CI Profile A sweeps the whole tree on every PR; that run is not yours to duplicate
+- Order is: targeted tests green → COMMIT → PUSH → anything slower. A pushed branch with a red suite is an ordinary PR state; uncommitted work in a reaped worktree is loss
 - DO NOT abort if first sub-task succeeds — continue with rest
 - After commit: PUSH and CREATE PR (or update if existing) — dispatch is INCOMPLETE without PR
 - DO NOT suppress with `# noqa:` — the Lint Patterns gate rejects it. Use a PLAIN marker comment on the line: `# vnx-silent-except: <reason>` (silent except) / `# vnx-atomic-write: <reason>` (non-atomic state write)

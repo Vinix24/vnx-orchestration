@@ -143,6 +143,27 @@ class ReceiptV2:
     role_tier: Optional[str] = None
     role_not_applied_reason: Optional[str] = None
     role_source_path: Optional[str] = None
+    # dispatch-20260802-model-ssot-en-ketenlink (chain-link): the receipt says
+    # WHICH dispatch this one continues. parent_dispatch is the id of the
+    # retried/fix-forward/escalated predecessor; tier_from/tier_to record an
+    # escalation (a tier change between the predecessor and this dispatch);
+    # task_class is the deterministic smart_router class of the work. Each is
+    # stamped only when known (None omits — the ledger distinguishes "not a
+    # retry" from "retry, tier unknown").
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
+    # OI-864: the ACTUAL spawn-time permission posture, classified from the
+    # real launch flags (worker_permissions.classify_permission_posture) —
+    # never from re-reading VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED.
+    # One of "blanket-skip" | "scoped-allowlist" | "attached-interactive".
+    # permission_profile / permission_allow_pattern_count are only meaningful
+    # (and only stamped) for "scoped-allowlist". Conditionally stamped (None
+    # omits), same as the other optional fields.
+    permission_posture: Optional[str] = None
+    permission_profile: Optional[str] = None
+    permission_allow_pattern_count: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -223,6 +244,23 @@ class ReceiptV2:
             receipt["role_not_applied_reason"] = self.role_not_applied_reason
         if self.role_source_path is not None:
             receipt["role_source_path"] = self.role_source_path
+        # Chain-link stamps (dispatch-20260802-model-ssot-en-ketenlink) —
+        # conditional like the other optional fields: a non-retry receipt omits
+        # parent_dispatch entirely.
+        if self.parent_dispatch is not None:
+            receipt["parent_dispatch"] = self.parent_dispatch
+        if self.task_class is not None:
+            receipt["task_class"] = self.task_class
+        if self.tier_from is not None:
+            receipt["tier_from"] = self.tier_from
+        if self.tier_to is not None:
+            receipt["tier_to"] = self.tier_to
+        if self.permission_posture is not None:
+            receipt["permission_posture"] = self.permission_posture
+        if self.permission_profile is not None:
+            receipt["permission_profile"] = self.permission_profile
+        if self.permission_allow_pattern_count is not None:
+            receipt["permission_allow_pattern_count"] = self.permission_allow_pattern_count
         return receipt
 
 
@@ -256,9 +294,21 @@ class SynthesizedLaneReceipt:
     provider: str = "claude"
     sub_provider: str = "anthropic"
     timestamp: Optional[str] = None  # None -> stamped with now at construction
+    # Chain-link fields (dispatch-20260802-model-ssot-en-ketenlink) — see
+    # ReceiptV2 for semantics. Conditionally stamped.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
     # Conditionally stamped (is-not-None).
     worker_permission_enforcement: Optional[str] = None
     report_path: Optional[str] = None
+    # OI-864: see ReceiptV2 for semantics — same fields, same classification
+    # source (worker_permissions.classify_permission_posture from the actual
+    # spawn flags), stamped on the lane-synthesized fallback receipt too.
+    permission_posture: Optional[str] = None
+    permission_profile: Optional[str] = None
+    permission_allow_pattern_count: Optional[int] = None
 
     def __post_init__(self) -> None:
         self.receipt_kind = validate_receipt_kind(self.receipt_kind)
@@ -292,6 +342,21 @@ class SynthesizedLaneReceipt:
             receipt["worker_permission_enforcement"] = self.worker_permission_enforcement
         if self.report_path is not None:
             receipt["report_path"] = self.report_path
+        # Chain-link stamps — conditional like the other optional fields.
+        if self.parent_dispatch is not None:
+            receipt["parent_dispatch"] = self.parent_dispatch
+        if self.task_class is not None:
+            receipt["task_class"] = self.task_class
+        if self.tier_from is not None:
+            receipt["tier_from"] = self.tier_from
+        if self.tier_to is not None:
+            receipt["tier_to"] = self.tier_to
+        if self.permission_posture is not None:
+            receipt["permission_posture"] = self.permission_posture
+        if self.permission_profile is not None:
+            receipt["permission_profile"] = self.permission_profile
+        if self.permission_allow_pattern_count is not None:
+            receipt["permission_allow_pattern_count"] = self.permission_allow_pattern_count
         return receipt
 
 

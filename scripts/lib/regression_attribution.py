@@ -222,6 +222,13 @@ def attribute_regression(
         RegressionAttributionError: git/bisect failed unexpectedly.
     """
     root = Path(repo_root).resolve() if repo_root is not None else Path.cwd().resolve()
+    # OI-975: attribute_regression checks out arbitrary refs (bad_sha, good_sha,
+    # bisect candidates) and restores the original ref. In a dispatch context
+    # that must happen inside the dispatch worktree, never on the main checkout
+    # — a branch switch under the operator's hands moves HEAD onto a PR branch.
+    # Outside a dispatch context (operator/tooling) this guard is a no-op.
+    from git_target_guard import guard_git_target  # type: ignore[import]
+    root = guard_git_target(root)
     _require_clean_worktree(root)
 
     good_sha = _rev_parse(root, good_ref)

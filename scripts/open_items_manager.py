@@ -19,13 +19,18 @@ import sys
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
-    from vnx_paths import ensure_env
+    from vnx_paths import ensure_env, resolve_data_root
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 _PATHS = ensure_env()
 VNX_ROOT = Path(_PATHS["VNX_HOME"]).expanduser().resolve()
-STATE_DIR = Path(_PATHS["VNX_STATE_DIR"]).expanduser().resolve()
+# OI-941: resolve STATE_DIR from CWD so .vnx-project-id markers in the
+# calling project are honoured (ADR-007).  Using resolve_data_root(cwd)
+# instead of _PATHS["VNX_STATE_DIR"] prevents silent fallback to vnx-dev
+# when open_items_manager is invoked from a different project directory
+# (e.g. mission-control, SEOcrawler, sales-copilot).
+STATE_DIR = resolve_data_root(Path.cwd()) / "state"
 LEGACY_STATE_DIR = (VNX_ROOT / "state").resolve()
 OPEN_ITEMS_FILE = STATE_DIR / "open_items.json"
 DIGEST_FILE = STATE_DIR / "open_items_digest.json"

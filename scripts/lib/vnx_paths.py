@@ -313,6 +313,18 @@ def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
     return None
 
 
+class TestIsolationGuardError(RuntimeError):
+    """Raised when a write targets the real central store while under pytest.
+
+    Distinct RuntimeError subclass so best-effort write wrappers — the
+    central-mirror drain in append_receipt_internals.payload,
+    dispatch_govern.ensure_receipt, dual_writer's never-raises API — can
+    re-raise it instead of swallowing it as a routine I/O failure: a
+    test-isolation violation must FAIL the test, not queue as retryable
+    debt or degrade to a log warning (OI-1043).
+    """
+
+
 def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
     """Fail loud when code is ABOUT TO WRITE under the real central store
     while running under pytest (w19c / test-store-isolation class guard).
@@ -361,7 +373,7 @@ def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
     if str(resolved) == str(real_home_vnx_data) or str(resolved).startswith(
         str(real_home_vnx_data) + sep
     ):
-        raise RuntimeError(
+        raise TestIsolationGuardError(
             f"[TEST ISOLATION GUARD] about to write under the real central "
             f"store '{resolved}' while running under pytest. A test lost its "
             "isolation. Set VNX_DATA_DIR_EXPLICIT=1 with a tmp_path-based "

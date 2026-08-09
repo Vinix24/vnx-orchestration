@@ -736,6 +736,99 @@ def check_state_root_location(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Dream-cycle health check
+# ---------------------------------------------------------------------------
+
+def _parse_dream_event_ts(value: object) -> Optional[datetime]:
+    """Parse a dream-event timestamp; None on missing/unparseable input."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def check_dream_cycle(paths: Dict[str, str]) -> List[CheckResult]:
+    """Surface the latest dream-cycle event so a silently-skipping scheduled job
+    becomes visible where the operator actually looks.
+
+    OI-1088: the consolidator skips cleanly (stale ledger, probe not ok,
+    scheduler disabled) and records every skip as an NDJSON event under
+    events/dream/ — but nothing surfaced those events, so a preflight that
+    measured the wrong directory no-opt'd for six weeks before anyone noticed.
+    The event stream already exists; this check is the cheapest possible reader:
+    it reports the most recent dream event and WARNs on any skip that is not the
+    deliberate scheduler_disabled arm-switch.
+    """
+    events_dir = Path(paths["VNX_DATA_DIR"]) / "events" / "dream"
+    if not events_dir.is_dir():
+        return [CheckResult("dream", PASS,
+                            "No dream events recorded (dream scheduler has not run yet)")]
+
+    latest: Optional[dict] = None
+    latest_ts: Optional[datetime] = None
+    fallback: Optional[dict] = None  # last parseable line of the newest file, ts or not
+    for event_file in sorted(events_dir.glob("*.ndjson")):
+        try:
+            lines = event_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            fallback = event
+            ts = _parse_dream_event_ts(event.get("timestamp"))
+            if ts is not None and (latest_ts is None or ts > latest_ts):
+                latest_ts = ts
+                latest = event
+
+    if latest is None:
+        latest = fallback
+    if latest is None:
+        return [CheckResult("dream", PASS,
+                            "No dream events recorded (dream scheduler has not run yet)")]
+
+    event_type = str(latest.get("event_type") or "unknown")
+    reason = str(latest.get("reason") or "")
+    detail = str(latest.get("detail") or "")
+    cycle_id = str(latest.get("cycle_id") or "")
+    age = ""
+    if latest_ts is not None:
+        age_h = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 3600
+        age = f", {age_h:.1f}h ago"
+
+    if event_type == "dream_cycle_skipped":
+        if reason == "scheduler_disabled":
+            return [CheckResult(
+                "dream", PASS,
+                f"Dream scheduler deliberately disabled (VNX_DREAM_SCHEDULER_ENABLED=0{age})",
+            )]
+        return [CheckResult(
+            "dream", WARN,
+            f"Latest dream cycle SKIPPED: {reason} — {detail} (cycle {cycle_id}{age})",
+            "A scheduled job that keeps no-op'ing must not stay invisible. "
+            f"Inspect {events_dir} for the skip history and fix the stated reason.",
+        )]
+    if event_type in ("dream_cycle_timeout", "dream_cycle_failed"):
+        return [CheckResult(
+            "dream", WARN,
+            f"Latest dream cycle {event_type.replace('dream_cycle_', '').upper()}: "
+            f"{detail or latest.get('error') or reason} (cycle {cycle_id}{age})",
+            f"Inspect {events_dir} for details.",
+        )]
+    return [CheckResult("dream", PASS, f"Latest dream event: {event_type} ({cycle_id}{age})")]
+
+
+# ---------------------------------------------------------------------------
 # Runtime checks (delegates to vnx_doctor_runtime.py)
 # ---------------------------------------------------------------------------
 
@@ -796,6 +889,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_path_hygiene(paths))
     results.extend(check_contamination(paths))
     results.extend(check_state_root_location(paths))
+    results.extend(check_dream_cycle(paths))
 
     if package_check:
         vnx_home = Path(paths["VNX_HOME"])

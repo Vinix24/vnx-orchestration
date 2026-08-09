@@ -14,6 +14,7 @@ from .common import (
     AppendResult,
     EXIT_IO_ERROR,
     EXIT_INVALID_INPUT,
+    EXIT_UNEXPECTED_ERROR,
     REPO_ROOT,
     SCRIPTS_DIR,
     _emit,
@@ -111,9 +112,47 @@ def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
 
 
 def resolve_central_data_dir(project_id: str) -> Path:
-    """Module-level wrapper so tests can monkeypatch ``payload_mod.resolve_central_data_dir``."""
+    """Module-level wrapper so tests can monkeypatch ``payload_mod.resolve_central_data_dir``.
+
+    OI-1043: the dual-write mirror must be pinnable. An explicit store pin —
+    ``VNX_STATE_DIR`` (the literal override ``vnx_paths.resolve_paths()``
+    honors) or ``VNX_DATA_DIR_EXPLICIT=1`` + ``VNX_DATA_DIR`` — is a
+    deliberate statement that the store lives THERE, so the mirror's central
+    base resolves through the same pin instead of blindly targeting
+    ``~/.vnx-data/<project_id>``. A receipt writer that cannot be pinned can
+    write to the wrong ledger in production too; before this fix the test
+    suite's pinned appends leaked 684+ lines into the real central ledger
+    through exactly this path. With no pin set, resolution delegates to
+    ``vnx_paths.resolve_central_data_dir`` unchanged (migration dual-write
+    semantics preserved).
+    """
+    state_pin = (os.environ.get("VNX_STATE_DIR") or "").strip()
+    if state_pin:
+        # resolve_paths() convention: VNX_STATE_DIR is <data_dir>/state, so
+        # its parent is the data dir the mirror base is derived from.
+        return Path(state_pin).expanduser().parent
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+        data_pin = (os.environ.get("VNX_DATA_DIR") or "").strip()
+        if data_pin:
+            return Path(data_pin).expanduser()
     from vnx_paths import resolve_central_data_dir as _resolve
     return _resolve(project_id)
+
+
+def _isolation_guard_error_class():
+    """Lazy import: TestIsolationGuardError for except-clauses (keeps the
+    vnx_paths import off the module import path)."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    from vnx_paths import TestIsolationGuardError
+    return TestIsolationGuardError
+
+
+def _refuse_real_store_write_under_pytest(target: Path) -> None:
+    """OI-1043 guard seam: refuse an imminent WRITE into the real central
+    store (~/.vnx-data) while running under pytest. No-op outside pytest."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse
+    _refuse(target)
 
 
 def _pending_mirror_queue_for(receipt_path: Path) -> Path:
@@ -153,10 +192,16 @@ def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: P
     Returns True on a successful central write, False on cutover skip or
     missing project_id, and raises ``OSError`` on I/O failure so the
     pending-mirror queue can retain the record for a later flush.
+
+    OI-1043: raises ``TestIsolationGuardError`` when the resolved central
+    target is the real central store and the process runs under pytest —
+    that is an isolation violation, not retryable mirror debt, and callers
+    must re-raise it rather than queue the record.
     """
     central_receipts = _resolve_central_receipts_path(receipt, primary_path)
     if central_receipts is None:
         return False
+    _refuse_real_store_write_under_pytest(central_receipts)
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dual_writer import append_record_locked
@@ -183,6 +228,8 @@ def _mirror_receipt_to_central(receipt: Dict[str, Any], primary_path: Path) -> N
         return
     try:
         _mirror_receipt_to_central_or_raise(receipt, primary_path)
+    except _isolation_guard_error_class():
+        raise
     except Exception as exc:
         log.warning("payload: central mirror failed for project %r: %s", project_id, exc)
 
@@ -267,12 +314,18 @@ def _drain_pending_mirrors_and_mirror_current(
         for entry in _load_pending_mirrors(queue_path):
             try:
                 _mirror_receipt_to_central_or_raise(entry["receipt"], primary_path)
+            except _isolation_guard_error_class():
+                # OI-1043: a test-isolation violation is not retryable mirror
+                # debt — fail the test, do not queue the record.
+                raise
             except Exception as exc:
                 last_error = exc
                 _keep_pending(entry)
 
         try:
             _mirror_receipt_to_central_or_raise(receipt, primary_path)
+        except _isolation_guard_error_class():
+            raise
         except Exception as exc:
             last_error = exc
             _keep_pending({"idempotency_key": idempotency_key, "receipt": receipt})
@@ -320,6 +373,44 @@ def _stamp_identity(receipt: Dict[str, Any], *, identity_cwd: Optional[Path] = N
         receipt["orchestrator_id"] = identity.orchestrator_id
     if not receipt.get("agent_id") and identity.agent_id:
         receipt["agent_id"] = identity.agent_id
+
+
+_CHAIN_LINK_ENV_FIELDS = (
+    ("VNX_PARENT_DISPATCH", "parent_dispatch"),
+    ("VNX_TASK_CLASS", "task_class"),
+    ("VNX_TIER_FROM", "tier_from"),
+    ("VNX_TIER_TO", "tier_to"),
+)
+
+
+def _stamp_model_identity(receipt: Dict[str, Any]) -> None:
+    """Normalize model to the canonical wave7_models.yaml key + chain-link env fallback.
+
+    dispatch-20260802-model-ssot-en-ketenlink: the door exports the chain-link
+    fields (parent_dispatch / task_class / tier_from / tier_to) as env vars that
+    the tmux worker pane inherits, so a worker-authored receipt lands the same
+    values the plan carried. Explicit caller-supplied fields are never
+    overwritten. The model string is normalized to its canonical registry key
+    (deepseek/deepseek-v4-pro -> deepseek-v4-pro, kimi-code/k3 -> kimi-k3,
+    claude-sonnet-5 -> sonnet-5, ...) so the ledger is groupable per model.
+    Best-effort: a normalizer failure leaves the raw string for the fail-closed
+    validator to judge.
+    """
+    for env_name, field in _CHAIN_LINK_ENV_FIELDS:
+        if receipt.get(field):
+            continue
+        env_val = (os.environ.get(env_name) or "").strip()
+        if env_val:
+            receipt[field] = env_val
+    raw = receipt.get("model")
+    if raw is None or str(raw).strip() == "":
+        return
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
+        receipt["model"] = normalize_model_name(raw)
+    except Exception:  # noqa: BLE001 — normalization is best-effort; fail-closed validation still runs
+        log.debug("payload: model normalization skipped: %s", raw, exc_info=True)
 
 
 def _stamp_ingested_at(receipt: Dict[str, Any]) -> None:
@@ -371,6 +462,12 @@ def append_receipt_payload(
     # Keep the resolved receipt path aligned with any gate-stream reroute.
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
+    # dispatch-20260802-model-ssot-en-ketenlink: normalize model to the
+    # canonical registry key + stamp the door's chain-link fields before the
+    # shared validator sees the receipt (the fail-closed model check runs in
+    # _validate_receipt).
+    _stamp_model_identity(receipt)
+
     # ADR-035 §9 PR-4 (fix-r1): pure classification of warnings[] (no side
     # effects — no OI-store writes, no counter increments) before the shared
     # validator sees it. Both write paths call this same classify step
@@ -387,6 +484,13 @@ def append_receipt_payload(
     # dedup (IDEMPOTENCY_FIELDS does not include ingested_at).
     _stamp_ingested_at(receipt)
 
+    # OI-1043: fail loud when a test is about to WRITE the primary ledger
+    # straight into the real central store (the #1333 guard did not cover
+    # the receipt append surfaces — the suite leaked 684+ lines through the
+    # mirror, and an explicit receipts_file under ~/.vnx-data wrote through
+    # unguarded). No-op outside pytest.
+    _refuse_real_store_write_under_pytest(receipt_path)
+
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)
 
@@ -399,6 +503,21 @@ def append_receipt_payload(
         pre_write_hook=commit_receipt_v2_fields,
     )
 
+    # OI-948: _write_receipt_under_lock is annotated -> AppendResult and
+    # every code path returns an AppendResult instance.  A None here would
+    # mean a silent implicit return slipped in (e.g. a broad except that
+    # swallows the raise without replacing it).  Fail closed with a precise
+    # message so the source is traceable instead of surfacing downstream as
+    # "'NoneType' object has no attribute 'status'" at payload.py:446.
+    if result is None:
+        raise AppendReceiptError(
+            "internal_null_result",
+            EXIT_UNEXPECTED_ERROR,
+            "payload.py: _write_receipt_under_lock returned None — "
+            "this is a framework-internal invariant violation; "
+            "the append lock path exited without a result object",
+        )
+
     if result.status == "appended":
         # Phase 6 P3 dual-write: drain persisted mirror debt before attempting
         # the current central write so transient mirror failures are repaired.
@@ -406,6 +525,9 @@ def append_receipt_payload(
         # failure (including pending-queue I/O) must never fail the append.
         try:
             _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
+        except _isolation_guard_error_class():
+            # OI-1043: never swallow a test-isolation violation as best-effort.
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning("payload: central mirror drain failed (best-effort, ignoring): %s", exc)
         if not skip_enrichment:

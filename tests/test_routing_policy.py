@@ -169,10 +169,12 @@ def test_fallback_chain_resolution_deepseek() -> None:
 
 
 def test_fallback_chain_wildcard_deepseek() -> None:
-    """Wildcard pattern litellm:deepseek:* resolves correctly."""
+    """Wildcard pattern litellm:deepseek:* resolves codex as first fallback (was
+    kimi; OI-940 kimi quota exhausted 2026-08-02)."""
     policy = load_routing_policy(_POLICY_PATH)
     fallback_map = policy.get("fallback_chain", {})
     chain = _resolve_fallback_chain("litellm:deepseek:deepseek-v4-pro", fallback_map)
+    assert chain[0] == "codex"
     assert "claude/sonnet-5" in chain
     assert len(chain) >= 2
 
@@ -214,7 +216,7 @@ def test_lane_to_claude_model_mappings() -> None:
 def test_lane_to_claude_model_litellm_returns_none() -> None:
     assert lane_to_claude_model("litellm:deepseek:deepseek-v4-pro") is None
     assert lane_to_claude_model("litellm:moonshot:kimi-k2-0905-default") is None
-    assert lane_to_claude_model("litellm:zai:glm-5.1-default") is None
+    assert lane_to_claude_model("litellm:zai:glm-5.2") is None
 
 
 # ---------------------------------------------------------------------------

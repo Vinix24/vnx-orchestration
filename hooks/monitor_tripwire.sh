@@ -19,9 +19,9 @@ set -u
 # Drain the hook payload from stdin.
 cat >/dev/null 2>&1 || true
 
-# Max heartbeat age in minutes before the tripwire fires (default: 26h — the
-# sweep is scheduled daily, so 26h allows schedule jitter, never a lost day).
-MAX_AGE_MIN="${VNX_TRIPWIRE_MAX_AGE_MIN:-1560}"
+# Max heartbeat age in minutes before the tripwire fires (default: 8h — the
+# sweep runs every 6h, so 8h allows schedule jitter + a single missed cycle).
+MAX_AGE_MIN="${VNX_TRIPWIRE_MAX_AGE_MIN:-480}"
 
 # Heartbeat locations to check. Test override: VNX_TRIPWIRE_HEARTBEAT_GLOB.
 if [ -n "${VNX_TRIPWIRE_HEARTBEAT_GLOB:-}" ]; then

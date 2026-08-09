@@ -80,7 +80,7 @@ Key deliverables: `pool_manager.py`, `vnx_workers.yaml`, ADR-018.
 ### Wave 7 — Multi-Provider via LiteLLM
 **Status**: `Completed` — SHIPPED 2026-05-17
 
-Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.1 via OpenRouter). Uniform receipt + report shape across all 5 providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite: 9 models × 7 tasks with routing recommendations.
+Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.2 via OpenRouter). Uniform receipt + report shape across all 5 providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite: 9 models × 7 tasks with routing recommendations.
 
 Key deliverables: `litellm_spawn.py`, `provider_governance.py`, `vnx.env`, `routing_recommendations.yaml`, ADR-015.
 

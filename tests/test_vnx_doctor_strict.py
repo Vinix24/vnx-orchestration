@@ -241,6 +241,7 @@ class TestCentralMode:
 
 class TestDualInstall:
     def test_dual_install_is_fail(self, tmp_path, monkeypatch):
+        """Real embedded dir (own scripts/) distinct from central -> FAIL."""
         project = _make_project(tmp_path)
         (project / ".claude" / "vnx-system" / "scripts").mkdir(parents=True)
         central = tmp_path / "home" / ".vnx-system" / "current"
@@ -254,8 +255,11 @@ class TestDualInstall:
         assert "dual install" in result.detail
         assert "embedded" in result.detail
         assert "central" in result.detail
+        # OI-1075: the destructive advice is correct only in the genuine-conflict case
+        assert "remove embedded install" in result.detail
 
     def test_dual_install_strict_exit_1(self, tmp_path, monkeypatch, capsys):
+        """Real embedded dir distinct from central -> --strict returns exit 1."""
         project = _make_project(tmp_path)
         (project / ".claude" / "vnx-system" / "scripts").mkdir(parents=True)
         central = tmp_path / "home" / ".vnx-system" / "current"
@@ -270,6 +274,7 @@ class TestDualInstall:
         assert "dual install" in out
 
     def test_no_dual_install_passes(self, tmp_path, monkeypatch):
+        """Embedded-only (no central) -> PASS."""
         project = _make_project(tmp_path)
         (project / ".claude" / "vnx-system" / "scripts").mkdir(parents=True)
 
@@ -278,6 +283,101 @@ class TestDualInstall:
         result = _check_dual_install(project)
 
         assert result.status == PASS
+
+    def test_no_embedded_path_passes(self, tmp_path, monkeypatch):
+        """No embedded path at all -> PASS."""
+        project = _make_project(tmp_path)
+        central = tmp_path / "home" / ".vnx-system" / "current"
+        (central / "scripts").mkdir(parents=True)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == PASS
+        assert "no dual install conflict" in result.detail
+
+    def test_symlink_into_central_passes_names_version(self, tmp_path, monkeypatch):
+        """Symlink into the central store -> PASS, detail names resolved version.
+
+        OI-1075: the intended central-mode arrangement. A naive is_dir() test
+        followed the symlink and saw the same scripts/ twice, falsely FAILing.
+        """
+        project = _make_project(tmp_path)
+        central_root = tmp_path / "home" / ".vnx-system"
+        version_dir = central_root / "versions" / "v1.4.5"
+        (version_dir / "scripts").mkdir(parents=True)
+        (central_root / "current").symlink_to(version_dir)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(central_root / "current")
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == PASS
+        assert "v1.4.5" in result.detail
+        assert "central store" in result.detail
+
+    def test_dangling_symlink_is_warn_not_crash(self, tmp_path, monkeypatch):
+        """Dangling symlink -> WARN, non-crashing.
+
+        Chosen verdict: WARN (not FAIL). A dangling embedded symlink is not a
+        dual-install conflict (there is no second tree), but central mode is
+        broken until the link is repaired, so it must not pass silently either.
+        """
+        project = _make_project(tmp_path)
+        central = tmp_path / "home" / ".vnx-system" / "current"
+        (central / "scripts").mkdir(parents=True)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(project / "missing-target")
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == WARN
+        assert "dangling" in result.detail
+        assert "missing-target" in result.detail
+
+    def test_symlink_outside_central_is_fail(self, tmp_path, monkeypatch):
+        """Symlink pointing outside ~/.vnx-system entirely -> FAIL (genuine 2nd install)."""
+        project = _make_project(tmp_path)
+        outside = tmp_path / "outside-install"
+        (outside / "scripts").mkdir(parents=True)
+        central = tmp_path / "home" / ".vnx-system" / "current"
+        (central / "scripts").mkdir(parents=True)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(outside)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == FAIL
+        assert "dual install" in result.detail
+        assert "remove embedded install" in result.detail
+
+    def test_fabric_repo_real_dir_no_scripts_passes(self, tmp_path, monkeypatch):
+        """Fabric source repo: real .claude/vnx-system dir WITHOUT scripts/ -> PASS.
+
+        The fabric repo carries a real (non-symlink) .claude/vnx-system by
+        design, holding hooks/ and security_reports/ but no scripts/. This is
+        NOT a consumer dual install and must not be flagged. Preserves the
+        pre-OI-1075 behaviour verified on the live fabric repo.
+        """
+        project = _make_project(tmp_path)
+        (project / ".claude" / "vnx-system" / "hooks").mkdir(parents=True)
+        (project / ".claude" / "vnx-system" / "security_reports").mkdir(parents=True)
+        central = tmp_path / "home" / ".vnx-system" / "current"
+        (central / "scripts").mkdir(parents=True)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == PASS
+        assert "no dual install conflict" in result.detail
 
 
 # ---------------------------------------------------------------------------

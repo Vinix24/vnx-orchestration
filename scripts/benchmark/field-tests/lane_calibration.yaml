@@ -1,35 +1,41 @@
-# lane_calibration.yaml — documented expected outcome for the lane-calibration field-test
+# lane_calibration.yaml — calibratietoets voor de smart-router cost-tier classifier
 #
-# Each case feeds a REAL field-tests task (its actual instruction.md text + the
-# target_loc from tasks.yaml) through the production smart-router pipeline
-# (providers.smart_router.cost_tier.classify_dispatch -> tier_routing.resolve_tier_route)
-# and asserts the tier/provider/lane it selects. This is a regression fixture, not
-# an aspirational spec: expected_* values are the classifier's ACTUAL current
-# output on this corpus, captured 2026-07-11 against smart_router as of #1121.
+# Elke case voedt een ECHTE field-tests taak (instruction.md tekst + target_loc uit
+# tasks.yaml) door de productie-pipeline:
+#   providers.smart_router.cost_tier.classify_dispatch → tier_routing.resolve_tier_route
 #
-# n_files is the count of files listed under the task's "## Files you may
-# create/modify" heading in instruction.md (required files only; optional
-# extras excluded) - hand-counted once per task, not re-derived at runtime.
+# expected_* waarden zijn de classifier's actuele uitvoer na de laatste router-wijziging.
+# matches_human_tier geeft aan of de gekozen tier overeenkomt met de menselijke
+# inschatting in het `tier`-veld (t1_trivial / t2_medium / t3_complex):
+#   t1_trivial → tier-zero of tier-low (goedkope tiers)
+#   t2_medium  → tier-low of tier-mid   (midden-tiers)
+#   t3_complex → tier-mid of tier-high  (premium-tiers)
 #
-# A run of runners/lane_calibration.py that diverges from this table means the
-# router's routing behavior drifted for these realistic tasks - update the
-# table deliberately after confirming the new behavior is intended.
+# n_files is handgeteld: alleen required files uit de "## Files you may create/modify"
+# heading in instruction.md, exclusief optionele extras.
+#
+# Herkalibratie: 2026-08-02 na keyword-reorder + deepseek-flash als instapmodel.
+# Vorige vastlegging: 2026-07-11 (#1121).
 
-version: 1
+version: 2
 
 cases:
   - task_id: "01_yaml_config_refactor"
     tier: t1_trivial
     n_files: 2
-    expected_tier: tier-high
+    expected_tier: tier-mid
     expected_provider: claude
     expected_lane: tmux_interactive
+    matches_human_tier: false
     note: >
-      Known miscalibration: single-file 60-LOC config refactor gets tier-high
-      because the instruction text contains the word "refactor", which matches
-      the arch-keyword pattern intended for architectural rewrites. Flagged as
-      a follow-up (keyword over-triggers on task-title vocabulary), not fixed
-      by this field-test.
+      Arch-keyword fix (OI-963): "refactor" matched _ARCH_KEYWORDS vóór de
+      keyword-reorder → tier-high was onterecht.  De fix vereist arch-keyword
+      én LOC > 150; deze 60-LOC taak valt daar niet onder.  De taak landt nu
+      op tier-mid via het schema-keyword "interface" (regel 24: "Keep the
+      public interface intact").  Een 60-LOC config-refactor blijft overrated
+      — de keyword-match op "interface" triggert hier te breed — maar dit is
+      een kleinere fout (mid i.p.v. high) en zekerder te repareren dan een
+      volledige architectuur-keyword.
 
   - task_id: "02_rls_policy"
     tier: t1_trivial
@@ -37,19 +43,28 @@ cases:
     expected_tier: tier-mid
     expected_provider: claude
     expected_lane: tmux_interactive
+    matches_human_tier: false
     note: >
-      Known miscalibration: this is a Postgres Row Level Security policy
-      (security-sensitive by construction) but the instruction never spells
-      out "security"/"auth"/etc. literally - only "RLS" - so the security
-      keyword filter misses it. Falls through to the schema/migration keyword
-      match (tier-mid) instead of tier-high.
+      Blijvende miscalibratie: een Postgres RLS-policy is security-gevoelig
+      maar de instructie gebruikt nooit "security"/"auth"/etc. letterlijk —
+      alleen "RLS".  De security-keyword filter mist het; de taak valt door
+      naar schema-keyword "migration" → tier-mid.  Te repareren door "rls"
+      toe te voegen aan _SECURITY_KEYWORDS of een aparte RLS-detectie toe te
+      voegen, maar de dispatch instrueert _SECURITY_KEYWORDS met rust te laten.
 
   - task_id: "03_dotenv_script"
     tier: t1_trivial
     n_files: 1
     expected_tier: tier-zero
-    expected_provider: local-gemma
-    expected_lane: mlx
+    expected_provider: codex
+    expected_lane: provider
+    matches_human_tier: true
+    note: >
+      tier-zero without DEEPSEEK_API_KEY falls back to Codex. Local Gemma route
+      preserved but unused until gemma-4-12b-integration ships (operator decision
+      2026-08-02). When DEEPSEEK_API_KEY is present, the route is deepseek-v4-flash
+      via claude_harness_keyed. See test_lane_calibration_field_test.py for explicit
+      coverage of both env branches.
 
   - task_id: "04_scorer_task"
     tier: t2_medium
@@ -57,6 +72,12 @@ cases:
     expected_tier: tier-high
     expected_provider: claude
     expected_lane: tmux_interactive
+    matches_human_tier: false
+    note: >
+      Blijvende miscalibratie: 5 bestanden, 350 LOC → loc_estimate > 300
+      forceert tier-high.  De menselijke inschatting is t2_medium; de
+      classifier overschat door pure omvang.  Dit is een inherente grens van
+      een puur deterministische classifier — omvang alleen zegt niet alles.
 
   - task_id: "05_extractor_subclass"
     tier: t2_medium
@@ -64,6 +85,7 @@ cases:
     expected_tier: tier-mid
     expected_provider: claude
     expected_lane: tmux_interactive
+    matches_human_tier: true
 
   - task_id: "06_flaky_mock_fix"
     tier: t2_medium
@@ -71,11 +93,14 @@ cases:
     expected_tier: tier-mid
     expected_provider: claude
     expected_lane: tmux_interactive
+    matches_human_tier: false
     note: >
-      Known miscalibration: single-file 80-LOC mock fix gets tier-mid because
-      the instruction describes a chained `.table().select()...` mock API and
-      "table" matches the schema keyword list (intended for database-schema
-      work, not a Supabase mock method name).
+      Blijvende miscalibratie: de instructie beschrijft een
+      `.table().select()...` mock-API en "table" matcht _SCHEMA_KEYWORDS
+      (bedoeld voor database-schema werk, niet voor Supabase mock-methoden).
+      Een 80-LOC single-file mock-fix hoort tier-low te zijn.  De dispatch
+      instrueert _SCHEMA_KEYWORDS met rust te laten; dit is een apart
+      vervolg-item.
 
   - task_id: "08_ssrf_async_fetch"
     tier: t3_complex
@@ -83,3 +108,4 @@ cases:
     expected_tier: tier-high
     expected_provider: claude
     expected_lane: tmux_interactive
+    matches_human_tier: true

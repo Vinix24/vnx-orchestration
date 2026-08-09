@@ -44,7 +44,7 @@ import dispatch_envelope
 import provider_dispatch
 import skill_context
 from dispatch_envelope import EnvelopeSpec, _AdapterResult
-from role_application import verify_role_applied
+from role_application import _validate_slug, verify_role_applied
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -174,7 +174,8 @@ def test_real_assembly_two_roles_differ(tmp_path):
 
 def test_prompt_assembler_role_still_used(tmp_path):
     """backend-developer has a PromptAssembler prompt (prompts/roles/) — that path
-    must keep working unchanged, reported as tier='prompt_assembler'."""
+    must keep working unchanged, reported as tier='prompt_assembler'. OI-981:
+    backend-developer is now a real role, not a sentinel."""
     args = _make_args("backend-developer")
 
     prompt = _enrich(args, tmp_path)
@@ -207,14 +208,24 @@ def _run_envelope_govern(tmp_path, *, instruction, role):
     )
     result = _AdapterResult(returncode=0, completion_text="all good", status="success")
     start = end = datetime.now(timezone.utc)
+    # _govern moved to envelope_govern.py (dispatch-monolith-split, PR-4 of 6) —
+    # its internal calls to _archive_dispatch_events/_clear_dispatch_events now
+    # resolve against envelope_govern's own globals, not dispatch_envelope's.
+    # These patches MUST bind (asserted below): if they didn't, the REAL
+    # _clear_dispatch_events would truncate the live event stream for
+    # spec.terminal_id under whatever VNX_DATA_DIR is ambient — run this test
+    # file only with VNX_DATA_DIR pointed at tmp_path/a throwaway dir, never
+    # against the real store.
     with (
-        patch("dispatch_envelope._archive_dispatch_events", return_value=(None, True)),
-        patch("dispatch_envelope._clear_dispatch_events"),
+        patch("envelope_govern._archive_dispatch_events", return_value=(None, True)) as mock_archive,
+        patch("envelope_govern._clear_dispatch_events") as mock_clear,
         patch("provider_costs.emit_provider_cost"),
         patch("phantom_guard.record_phantom_if_any"),
         patch("phantom_guard.record_guard_error"),
     ):
         dispatch_envelope._govern(spec, result, start, end)
+    mock_archive.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
+    mock_clear.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
     receipt_path = state / "t0_receipts.ndjson"
     assert receipt_path.exists(), "receipt must be emitted"
     lines = [ln for ln in receipt_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -296,3 +307,243 @@ def test_role_applied_true_when_resolved_source_present():
     assert verdict.role_applied is True
     assert verdict.tier == "agents"
     assert verdict.reason is None
+
+
+# ---------------------------------------------------------------------------
+# 7. path-traversal hardening (OI-932): role/terminal_id slugs must not contain
+#    '..' or path separators that would escape the intended directory trees
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_sources_rejects_path_traversal_in_role():
+    """role='../../.claude/terminals/T0' must NOT resolve to a file outside
+    agents/ / .claude/skills/ / prompts/roles/.
+
+    RED on current (unpatched) code: _candidate_sources pastes the raw role
+    string into Path components, so the '..' segments escape the intended
+    directories and a CLAUDE.md outside the role tree can be read.
+    """
+    verdict = verify_role_applied(
+        "some prompt body content that does not match anything",
+        "T1",
+        "../../.claude/terminals/T0",
+    )
+    assert verdict.role_applied is False
+    assert verdict.tier == "none", (
+        f"expected tier='none' (validation rejected the slug before tier resolution), "
+        f"got tier='{verdict.tier}'"
+    )
+    assert verdict.reason is not None
+    # The reason must mention the validation failure, not a "resolved" tier.
+    assert "path" in verdict.reason.lower() or "slug" in verdict.reason.lower() or (
+        "invalid" in verdict.reason.lower()
+    ), f"reason must mention path/slug validation, got: {verdict.reason}"
+
+
+def test_candidate_sources_rejects_path_traversal_in_terminal_id():
+    """terminal_id='../../agents/quality-engineer' must NOT resolve to a file
+    outside .claude/terminals/.
+
+    RED on current (unpatched) code: the terminal tier escapes into agents/.
+    """
+    verdict = verify_role_applied(
+        "some prompt body content that does not match anything",
+        "../../agents/quality-engineer",
+        "nonexistent-role-xyz",
+    )
+    assert verdict.role_applied is False
+    assert verdict.tier == "none", (
+        f"expected tier='none' (validation rejected the slug before tier resolution), "
+        f"got tier='{verdict.tier}'"
+    )
+    assert verdict.reason is not None
+    assert "path" in verdict.reason.lower() or "slug" in verdict.reason.lower() or (
+        "invalid" in verdict.reason.lower()
+    ), f"reason must mention path/slug validation, got: {verdict.reason}"
+
+
+def test_candidate_sources_accepts_valid_slugs():
+    """Valid role/terminal_id slugs (no '..', no path separators) must still work
+    and resolve normally — the validation must not reject legitimate values."""
+    agents_body = (REPO_ROOT / "agents" / "quality-engineer" / "CLAUDE.md").read_text()
+    final_prompt = f"{agents_body}\n\n---\n\nimplement the change"
+
+    verdict = verify_role_applied(final_prompt, "T1", "quality-engineer")
+
+    assert verdict.role_applied is True
+    assert verdict.tier == "agents"
+    assert verdict.reason is None
+
+
+# ---------------------------------------------------------------------------
+# 8. _validate_slug unit tests — direct edge-case coverage
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSlug:
+    """Direct unit tests for the slug validation guard (OI-932)."""
+
+    def test_accepts_hyphenated_role(self):
+        _validate_slug("quality-engineer", "role")  # must not raise
+
+    def test_accepts_terminal_id(self):
+        _validate_slug("T1", "terminal_id")  # must not raise
+
+    def test_accepts_dotted_slug(self):
+        _validate_slug("backend.developer", "role")  # must not raise
+
+    def test_rejects_dot_dot(self):
+        import pytest
+        with pytest.raises(ValueError, match="path traversal"):
+            _validate_slug("../../.claude/terminals/T0", "role")
+
+    def test_rejects_forward_slash(self):
+        import pytest
+        with pytest.raises(ValueError, match="path separator"):
+            _validate_slug("agents/quality-engineer", "role")
+
+    def test_rejects_backslash(self):
+        import pytest
+        with pytest.raises(ValueError, match="path separator"):
+            _validate_slug("agents\\quality-engineer", "role")
+
+    def test_rejects_empty(self):
+        import pytest
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_slug("", "role")
+
+    def test_rejects_whitespace_only(self):
+        import pytest
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_slug("   ", "role")
+
+
+# ---------------------------------------------------------------------------
+# OI-983: role_applied verified against the RESOLVED role, not the raw spec.role
+# ---------------------------------------------------------------------------
+
+
+def test_oi983_envelope_verifies_role_applied_against_resolved_role(tmp_path):
+    """OI-983 key assertion: when spec.role (raw) differs from the resolved _role,
+    _verify_role_application MUST be called with the resolved _role — the same
+    value that gets stamped as "role" on the receipt.
+
+    RED before OI-983: _verify_role_application was called with spec.role (raw).
+    GREEN after: called with _role (resolved).
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    data = tmp_path / "data"
+    (data / "unified_reports").mkdir(parents=True)
+
+    spec = EnvelopeSpec(
+        dispatch_id="oi983-test",
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="some prompt body",
+        role=None,  # raw = None, resolves to identity_unresolved
+        pr_id=None,
+        state_dir=state,
+        data_dir=data,
+    )
+    result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    # Patch on the CONSUMER namespace (envelope_govern), not the source module
+    # (envelope_prepare). This is the import that _govern uses.
+    with (
+        patch("envelope_govern._verify_role_application") as mock_verify,
+        patch("envelope_govern._archive_dispatch_events", return_value=(None, True)),
+        patch("envelope_govern._clear_dispatch_events"),
+        patch("provider_costs.emit_provider_cost"),
+        patch("phantom_guard.record_phantom_if_any"),
+        patch("phantom_guard.record_guard_error"),
+    ):
+        mock_verify.return_value = None  # fail-open — fields stay None
+        dispatch_envelope._govern(spec, result, start, end)
+
+    # The mock must have been called (patch bites)
+    assert mock_verify.called, (
+        "_verify_role_application was never called — the patch did not bind"
+    )
+    # The second positional argument (role) must be the resolved role,
+    # NOT the raw spec.role (None). Since spec.role=None and dispatch_metadata
+    # is absent, resolve_effective_role returns "identity_unresolved".
+    _called_role = mock_verify.call_args[0][2]
+    assert _called_role == "identity_unresolved", (
+        f"OI-983 FAIL: _verify_role_application called with role={_called_role!r}, "
+        f"expected 'identity_unresolved' (the resolved _role). "
+        f"spec.role was None — the raw value would not match the receipt."
+    )
+
+
+def test_oi983_envelope_verifies_against_resolved_role_when_spec_role_is_sentinel(tmp_path):
+    """OI-983: when spec.role is the sentinel "" (OI-981), the receipt gets
+    identity_unresolved. role_applied must be verified against identity_unresolved,
+    not the sentinel."""
+    state = tmp_path / "state"
+    state.mkdir()
+    data = tmp_path / "data"
+    (data / "unified_reports").mkdir(parents=True)
+
+    spec = EnvelopeSpec(
+        dispatch_id="oi983-sentinel-test",
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="some prompt body",
+        role="",  # OI-981 sentinel
+        pr_id=None,
+        state_dir=state,
+        data_dir=data,
+    )
+    result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    with (
+        patch("envelope_govern._verify_role_application") as mock_verify,
+        patch("envelope_govern._archive_dispatch_events", return_value=(None, True)),
+        patch("envelope_govern._clear_dispatch_events"),
+        patch("provider_costs.emit_provider_cost"),
+        patch("phantom_guard.record_phantom_if_any"),
+        patch("phantom_guard.record_guard_error"),
+    ):
+        mock_verify.return_value = None
+        dispatch_envelope._govern(spec, result, start, end)
+
+    assert mock_verify.called, (
+        "_verify_role_application was never called"
+    )
+    _called_role = mock_verify.call_args[0][2]
+    # spec.role="" resolves to identity_unresolved (sentinel → no real role → fallback)
+    assert _called_role == "identity_unresolved", (
+        f"OI-983 FAIL: _verify_role_application called with role={_called_role!r}, "
+        f"expected 'identity_unresolved'. spec.role was '' (sentinel)."
+    )
+
+
+def test_oi983_provider_enrich_stashes_enriched_instruction(tmp_path):
+    """OI-983: _enrich_instruction must stash the enriched instruction text on
+    args._enriched_instruction so _emit_governance can re-verify with the
+    resolved _role after role resolution."""
+    args = _make_args("backend-developer")  # real role, not sentinel
+
+    with (
+        patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path),
+        patch.object(provider_dispatch, "_resolve_data_dir", return_value=tmp_path),
+        patch("subprocess_dispatch._build_intelligence_section", return_value=""),
+    ):
+        enriched = provider_dispatch._enrich_instruction(args)
+
+    # The enriched instruction must be stashed on args
+    _stashed = vars(args).get("_enriched_instruction")
+    assert _stashed is not None, (
+        "OI-983 FAIL: _enrich_instruction did not stash _enriched_instruction on args"
+    )
+    assert _stashed == enriched, (
+        "OI-983 FAIL: stashed _enriched_instruction differs from returned enriched string"
+    )
+    assert "Backend Developer" in _stashed, (
+        "OI-983 FAIL: enriched instruction does not contain role content"
+    )

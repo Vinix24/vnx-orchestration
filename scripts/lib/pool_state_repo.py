@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from coordination_retry import is_lock_timeout_error
 from pool_decision_engine import (
     POOL_HEARTBEAT_STALE_SECONDS,
     Membership,
@@ -29,6 +30,12 @@ from pool_decision_engine import (
 )
 
 log = logging.getLogger(__name__)
+
+# How long _ensure_wal() retries the journal_mode=WAL conversion before giving
+# up and raising loud. Only the very first connection(s) ever opened against a
+# given DB file hit this path — once one connection succeeds, the mode is
+# persisted in the file header and every later connection sees 'wal' already.
+_WAL_CONVERT_DEADLINE_SECONDS = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -91,13 +98,55 @@ class PoolStateRepository:
         # our explicit BEGIN IMMEDIATE calls when two threads race on the same DB.
         conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
         # Belt-and-suspenders: set busy_timeout via PRAGMA in addition to the connect-level
         # timeout so SQLite retries on SQLITE_BUSY regardless of how the busy handler was
         # previously configured on this connection.
         conn.execute("PRAGMA busy_timeout = 30000")
+        self._ensure_wal(conn)
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    def _ensure_wal(self, conn: sqlite3.Connection) -> None:
+        """Switch *conn* to WAL journal mode, tolerating the transient BUSY that
+        the conversion pragma can raise under concurrency.
+
+        Measured (dispatch 20260803-215135): ``PRAGMA journal_mode = WAL`` does
+        NOT go through SQLite's busy-handler — two connections racing to
+        convert a freshly created (still rollback-journal) DB file get an
+        immediate ``sqlite3.OperationalError: database is locked`` in well
+        under a millisecond, regardless of ``busy_timeout``. That is what
+        made ``test_concurrent_ticks_dont_double_scale`` /
+        ``test_concurrent_reap_idempotent`` flake: the very first tick() on a
+        brand-new pool DB, racing across two threads, both hit this pragma
+        before either has converted the file.
+
+        Once one connection succeeds, WAL is persisted in the file header and
+        every later connection already sees 'wal' — the cheap read-only check
+        below skips the exclusive-lock-requiring conversion entirely for the
+        overwhelming majority of calls, so this only ever retries during that
+        one-time first-conversion race.
+        """
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(mode).lower() == "wal":
+            return
+
+        deadline = time.monotonic() + _WAL_CONVERT_DEADLINE_SECONDS
+        delay = 0.005
+        while True:
+            try:
+                mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                if not is_lock_timeout_error(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
+                continue
+            if str(mode).lower() != "wal":
+                log.warning(
+                    "pool_state_repo: journal_mode=WAL not honored for %s (got %r)",
+                    self.db_path, mode,
+                )
+            return
 
     # ------------------------------------------------------------------
     # Read methods

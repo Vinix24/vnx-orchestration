@@ -29,6 +29,8 @@ import planning_cli  # noqa: E402
 import schema_migration  # noqa: E402
 import tracks as tracks_lib  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 PROJECT_ID = "test-proj"
 
 
@@ -67,8 +69,7 @@ def _build_db(tmp_path: Path) -> Path:
     for ver, fname in ((22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")):
         schema_migration.apply_script_if_below(conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8"))
         conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     for ver, fname in ((27, "0027_planning_horizon_and_deliverable_view.sql"),
@@ -593,3 +594,60 @@ def test_plan_gate_attest_still_blocked_reports_plainly(tmp_path, capsys):
     assert _derived_status(sd, "T") == "blocked"  # but still blocked by the dependency
     assert len(_track_events(sd, "T", "plan_gate_attest")) == 1
     assert "STILL" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# _emit_plan_gate_pass_record return-value contract
+# ---------------------------------------------------------------------------
+
+def test_emit_plan_gate_pass_record_returns_false_when_evidence_not_written(tmp_path, monkeypatch):
+    """emit_plan_gate_pass returning None (a failed write, which never raises)
+    must surface as False - the old code ignored the return and always True.
+
+    Regression for the PR #1412 codex finding: emit_plan_gate_pass is documented
+    to return the appended record on success and None on any failure, so the
+    try/except around it cannot catch a failed write. None IS the failure signal.
+    """
+    import plan_gate_evidence
+    monkeypatch.setattr(plan_gate_evidence, "emit_plan_gate_pass", lambda **kw: None)
+
+    ok = planning_cli._emit_plan_gate_pass_record(
+        repo_root=str(tmp_path),
+        track_id="T", project_id="p1", resolver="run", seats=2, scope="light",
+    )
+    assert ok is False
+
+
+def test_emit_plan_gate_pass_record_returns_true_when_record_appended(tmp_path, monkeypatch):
+    """A successful append (a record comes back) reports True."""
+    import plan_gate_evidence
+    monkeypatch.setattr(
+        plan_gate_evidence, "emit_plan_gate_pass",
+        lambda **kw: {"type": "plan_gate_pass", "track_id": kw["track_id"]},
+    )
+
+    ok = planning_cli._emit_plan_gate_pass_record(
+        repo_root=str(tmp_path),
+        track_id="T", project_id="p1", resolver="run", seats=2, scope="light",
+    )
+    assert ok is True
+
+
+def test_plan_gate_attest_failed_evidence_write_is_loud_not_silent(tmp_path, capsys, monkeypatch):
+    """A failed durable write must not break attest (exit 0, blocker resolved)
+    but must be reported loudly on stderr - never a silent success."""
+    import plan_gate_evidence
+    monkeypatch.setattr(plan_gate_evidence, "emit_plan_gate_pass", lambda **kw: None)
+
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="shipped", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    assert _derived_status(sd, "T") == "blocked"
+
+    rc = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="shipped pre-gate", approval_id="APR-2")
+    )
+    assert rc == 0  # gate resolution not broken by the failed evidence write
+    assert _plan_oi_resolved_at(sd, "T") is not None
+    captured = capsys.readouterr()
+    assert "plan_gate_pass evidence NOT written" in captured.err

@@ -31,6 +31,8 @@ for p in (_LIB, _SCRIPTS):
 
 import schema_migration
 import tracks as tracks_lib
+
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
 import seed_tracks_from_roadmap as seeder
 
 
@@ -95,8 +97,7 @@ def _make_db(tmp_path: Path) -> Path:
         conn, 24, (_MIGRATIONS / "0024_tracks_tenant_scoping.sql").read_text(encoding="utf-8")
     )
     conn.commit()
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     schema_migration.apply_script_if_below(

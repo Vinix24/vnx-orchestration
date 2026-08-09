@@ -51,8 +51,8 @@ four families:
 |---|---|---|
 | Claude (subscription) | `claude-opus-4-8/4-7/4-6`, `claude-sonnet-4-6` | interactive `claude` CLI in an isolated worktree |
 | Codex | `codex-gpt-5-4`, `codex-gpt-5-5` | `codex exec --json` |
-| Open models (runner) | `glm-5`, `glm-5-1`, `glm-5-2`, `kimi-k2-7-code` | provider CLI / flat agentic runner |
-| Open models (harness) | `glm-5-harness`, `glm-5-1-harness`, `glm-5-2-harness`, `deepseek-v4-pro-harness`, `deepseek-v4-flash-harness` | the **full `claude` CLI harness** pointed at the model via a local proxy |
+| Open models (runner) | `glm-5-2`, `kimi-k2-7-code` | provider CLI / flat agentic runner |
+| Open models (harness) | `glm-5-2-harness`, `deepseek-v4-pro-harness`, `deepseek-v4-flash-harness` | the **full `claude` CLI harness** pointed at the model via a local proxy |
 
 The **harness-vs-runner split is deliberate and is itself a measurement.** The
 same model (e.g. GLM-5.2) is run twice: once through a thin agentic loop

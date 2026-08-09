@@ -10,28 +10,31 @@
     declaring gate=<name>: resolves the dispatch's PR and runs the declared
     gate via review_gate_manager, or records a loud not_executable outcome.
 
-    Replace __VNX_REPO_ROOT__ with the repo checkout path at install time
-    (same placeholder pattern as com.vnx.producer-freshness-monitor.plist):
-
-      sed "s|__VNX_REPO_ROOT__|$HOME/Development/vnx-orchestration|g" \
-        com.vnx.gate-obligation-runner.plist > ~/Library/LaunchAgents/
-      launchctl load -w ~/Library/LaunchAgents/com.vnx.gate-obligation-runner.plist
+    Installed automatically by vnx init for the VNX orchestration repo.
+    Also installable manually via reload_plist.sh:
+      bash scripts/launchd/reload_plist.sh com.vnx.gate-obligation-runner
 
     Exit 11 (obligations still pending) is captured into job_exits.ndjson by
     the producer-freshness monitor's launchd harvest; obligations pending
     longer than a day are flagged per gate key by the same monitor's
-    review_gate_obligations producer — a runner that dies cannot hide behind
-    silence.
+    review_gate_obligations producer.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd __VNX_REPO_ROOT__ &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
   <key>StandardOutPath</key><string>/tmp/vnx-gate-obligation-runner.log</string>
   <key>StandardErrorPath</key><string>/tmp/vnx-gate-obligation-runner.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
 </dict>
 </plist>

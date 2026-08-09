@@ -41,7 +41,13 @@ if _LIB_DIR not in sys.path:
 
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dispatch_flags import single_entry_enabled  # noqa: E402
-from dispatch_spec import _ID_RE, Gate, Provider  # noqa: E402
+from dispatch_spec import (  # noqa: E402
+    _ID_RE,
+    DEADLINE_SECONDS_MAX,
+    DEADLINE_SECONDS_MIN,
+    Gate,
+    Provider,
+)
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -73,7 +79,11 @@ _PROVIDER_ALIASES = {
     "deepseek-harness": "deepseek-harness",
     "local-gemma": "local-gemma",
     "auto": "auto",
-    "": "claude",
+    # OI-962: empty/None provider must resolve to AUTO so the smart router can
+    # fill in provider+model BEFORE validation.  Previously this resolved to
+    # "claude", which meant the router never saw the dispatch and kimi-pinned
+    # workers rejected provider=claude + model=kimi-k3 on constraint violation.
+    "": "auto",
 }
 
 
@@ -165,6 +175,13 @@ def stage_spec_bundle(
     pr_id: Optional[str] = None,
     tags: tuple[str, ...] = (),
     data_dir: Optional[Path] = None,
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
+    # this dispatch continues, the tier escalation, and the smart_router task
+    # class. Carried verbatim onto the spec; the door passes them to the receipt.
+    parent_dispatch: Optional[str] = None,
+    task_class: Optional[str] = None,
+    tier_from: Optional[str] = None,
+    tier_to: Optional[str] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
 
@@ -179,6 +196,18 @@ def stage_spec_bundle(
             "stage a bundle with an unsafe directory name"
         )
     staging_id = dispatch_id
+
+    # 1a. deadline bounds validated at the trust boundary — this module is the
+    # FIRST writer of a dispatch-spec.json bundle, so an out-of-range value must
+    # fail loud at staging (bridge_dispatch surfaces it as a clean reject) rather
+    # than drift silently downstream. The range is the consumer-door contract
+    # [DEADLINE_SECONDS_MIN, DEADLINE_SECONDS_MAX] — the same range validate()
+    # Rule 11 enforces, from the same constants (dispatch_spec).
+    if not (DEADLINE_SECONDS_MIN <= int(deadline_seconds) <= DEADLINE_SECONDS_MAX):
+        raise ValueError(
+            f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
+            f"got {deadline_seconds}"
+        )
 
     # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
     # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
@@ -242,6 +271,11 @@ def stage_spec_bundle(
         "provider": _canonical_provider(provider).value,
         "model": model or None,
         "pr_id": pr_id or None,
+        # Chain-link fields (dispatch-20260802-model-ssot-en-ketenlink).
+        "task_class": (task_class or "").strip() or None,
+        "parent_dispatch": (parent_dispatch or "").strip() or None,
+        "tier_from": (tier_from or "").strip() or None,
+        "tier_to": (tier_to or "").strip() or None,
         "deadline_seconds": int(deadline_seconds),
         "base_ref": base_ref or "origin/main",
         "isolation": "worktree",
@@ -312,7 +346,10 @@ def deliver_via_door(
     ``deadline_seconds`` may be None: resolves to the unchanged 3600s default (matches
     ``stage_spec_bundle``'s own default) so an omitted value reproduces byte-identical
     prior behavior. Pass an explicit value (validated by the caller, e.g. dispatch-agent's
-    300-14400 range) to override the lane's receipt-wait deadline.
+    300-14400 range) to override the lane's receipt-wait deadline. ``stage_spec_bundle``
+    re-enforces the same [300, 14400] bounds at the trust boundary, so an out-of-range
+    value fails loud at staging (bridge_dispatch returns 1) even if a caller skips its own
+    validation.
 
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
@@ -355,6 +392,10 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--gate", default="")
     parser.add_argument("--pr-id", default=None, dest="pr_id")
+    parser.add_argument("--parent-dispatch", default=None, dest="parent_dispatch")
+    parser.add_argument("--task-class", default=None, dest="task_class")
+    parser.add_argument("--tier-from", default=None, dest="tier_from")
+    parser.add_argument("--tier-to", default=None, dest="tier_to")
     parser.add_argument("--deadline-seconds", type=int, default=3600, dest="deadline_seconds")
     parser.add_argument("--requires-mcp", action="store_true", dest="requires_mcp")
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
@@ -367,6 +408,19 @@ def main(argv: Optional[list] = None) -> int:
     )
     parser.add_argument("--instruction", default=None, help="Inline instruction text (fallback).")
     args = parser.parse_args(argv)
+
+    # deadline bounds enforced on the CLI too (not just at stage_spec_bundle): the
+    # bridge is the trust boundary for legacy callers, so an impossible
+    # --deadline-seconds must fail loud here, not reach staging. Same constants as
+    # stage_spec_bundle / dispatch_spec.validate (single source of truth).
+    if not (DEADLINE_SECONDS_MIN <= args.deadline_seconds <= DEADLINE_SECONDS_MAX):
+        print(
+            f"[dispatch_bridge] REJECT [bad-deadline]: --deadline-seconds "
+            f"{args.deadline_seconds} is out of range "
+            f"[{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}]",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.instruction_stdin:
         instruction_text = sys.stdin.read()
@@ -389,6 +443,10 @@ def main(argv: Optional[list] = None) -> int:
         model=args.model,
         gate=args.gate,
         pr_id=args.pr_id,
+        parent_dispatch=args.parent_dispatch,
+        task_class=args.task_class,
+        tier_from=args.tier_from,
+        tier_to=args.tier_to,
         deadline_seconds=args.deadline_seconds,
         requires_mcp=args.requires_mcp,
         allow_headless=args.allow_headless,

@@ -35,11 +35,16 @@ for p in (str(_SCRIPTS), str(_LIB)):
 
 import backfill_dispatch_track_linkage as bf  # noqa: E402
 import track_reconciler  # noqa: E402
+import schema_manifest  # noqa: E402
 
 PROJECT_ID = "vnx-dev"
 
 # ---------------------------------------------------------------------------
-# Minimal schema mirroring runtime_coordination.db (only what the code touches)
+# Minimal schema mirroring runtime_coordination.db (only what the code touches).
+# The dispatches table is NOT hand-written here: it is rendered from
+# schema_manifest (the schema SSOT) in _dispatches_ddl() so a future column
+# addition there can no longer leave this fixture querying a stale table —
+# exactly the drift that produced OI-840's 'no such column: output_ref' reds.
 # ---------------------------------------------------------------------------
 
 SCHEMA = """
@@ -52,14 +57,6 @@ CREATE TABLE tracks (
     pr_ref       TEXT,
     derived_status TEXT,
     PRIMARY KEY (track_id, project_id)
-);
-CREATE TABLE dispatches (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    dispatch_id TEXT NOT NULL,
-    state       TEXT,
-    track       TEXT,
-    pr_ref      TEXT,
-    project_id  TEXT NOT NULL DEFAULT 'vnx-dev'
 );
 CREATE TABLE coordination_events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,9 +122,35 @@ features:
 """
 
 
+_TS = "2026-01-01T00:00:00.000000Z"
+
+
+def _dispatches_ddl() -> str:
+    """Render the dispatches CREATE TABLE from schema_manifest (the schema SSOT).
+
+    A hand-written copy of this table lived here and silently drifted when
+    output_ref/output_kind landed (manifest _DISPATCH_COLS_V27) — that produced
+    the 'no such column: output_ref' CI reds in OI-840. Deriving the DDL from
+    the manifest keeps the fixture on the declared shape: the next dispatches
+    column change updates this test automatically instead of breaking it.
+    Indexes are omitted — they are performance artifacts the fixture's queries
+    do not depend on.
+    """
+    tbl = schema_manifest.table_at(schema_manifest.TERMINAL_VERSION, "dispatches")
+    assert tbl is not None, "schema_manifest must declare the dispatches table"
+    body: list[str] = []
+    for col in tbl.columns.values():
+        notnull = " NOT NULL" if col.notnull else ""
+        body.append(f"    {col.name} {col.affinity}{notnull}")
+    body.append(f"    PRIMARY KEY ({', '.join(tbl.pk)})")
+    for uk in tbl.unique_keys:
+        body.append(f"    UNIQUE ({', '.join(uk)})")
+    return "CREATE TABLE dispatches (\n" + ",\n".join(body) + "\n);"
+
+
 def _make_db(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA + "\n" + _dispatches_ddl())
     # Tracks: launch-readme has pr_ref already; launch-renames pr_ref empty (to be set).
     conn.executemany(
         "INSERT INTO tracks (track_id, project_id, title, phase, sort_order, pr_ref, derived_status) "
@@ -144,12 +167,14 @@ def _make_db(db_path: Path) -> None:
     #   d3 -> pr #757, track ALREADY 'C', term  -> must NOT be overwritten
     #   d4 -> pr #900 (open PR), track NULL      -> no merged mapping, stays NULL
     conn.executemany(
-        "INSERT INTO dispatches (dispatch_id, state, track, pr_ref, project_id) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO dispatches "
+        "(dispatch_id, project_id, state, track, pr_ref, attempt_count, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("d1-readme", "completed", None, "#757", PROJECT_ID),
-            ("d2-renames", "completed", None, "#759", PROJECT_ID),
-            ("d3-readme-lane", "completed", "C", "#757", PROJECT_ID),
-            ("d4-open", "completed", None, "#900", PROJECT_ID),
+            ("d1-readme", PROJECT_ID, "completed", None, "#757", 0, _TS, _TS),
+            ("d2-renames", PROJECT_ID, "completed", None, "#759", 0, _TS, _TS),
+            ("d3-readme-lane", PROJECT_ID, "completed", "C", "#757", 0, _TS, _TS),
+            ("d4-open", PROJECT_ID, "completed", None, "#900", 0, _TS, _TS),
         ],
     )
     conn.commit()

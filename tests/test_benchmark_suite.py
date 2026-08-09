@@ -424,13 +424,12 @@ def test_claude_model_arg_passed_via_cmd_not_env(tmp_path: Path, tmp_prompts: Pa
 
 def test_glm_uses_zai_provider():
     models = run_benchmark.load_models()
-    glm = next((m for m in models if m["id"] == "glm-5-1"), None)
-    assert glm is not None, "glm-5-1 not found in models.yaml"
-    # glm-5-1 was corrected in models.yaml to map to the REAL GLM-5.1 (litellm:zai:glm-5.1 /
-    # model_arg glm-5.1), not the base glm-5 alias. The zai sub-provider prefix is what satisfies
-    # zai-via-openrouter-only; the :glm-5.1 suffix selects the real model.
+    glm = next((m for m in models if m["id"] == "glm-5-2"), None)
+    assert glm is not None, "glm-5-2 not found in models.yaml"
+    # glm-5-2 is the only allowed GLM version per operator directive 2026-08-03.
+    # The zai sub-provider prefix satisfies zai-via-openrouter-only.
     assert glm["provider"].startswith("litellm:zai"), f"Expected litellm:zai*, got {glm['provider']}"
-    assert glm["model_arg"] == "glm-5.1", f"Expected glm-5.1, got {glm['model_arg']}"
+    assert glm["model_arg"] == "glm-5.2", f"Expected glm-5.2, got {glm['model_arg']}"
 
 
 # ---------------------------------------------------------------------------

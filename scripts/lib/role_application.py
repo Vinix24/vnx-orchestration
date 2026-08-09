@@ -103,15 +103,41 @@ def _normalize_ws(text: str) -> str:
     return _WS_RE.sub(" ", text).strip()
 
 
+def _validate_slug(name: str, context: str) -> None:
+    """Raise ValueError if *name* contains '..' or path separators.
+
+    Path traversal via ``role`` or ``terminal_id`` slugs would let a dispatch
+    escape the intended directory trees (agents/, .claude/skills/,
+    prompt_assembler prompts, .claude/terminals/) and read arbitrary files.
+    This guard rejects such slugs before any path is constructed (OI-932).
+    """
+    if not name or not name.strip():
+        raise ValueError(f"{context} must not be empty")
+    stripped = name.strip()
+    if ".." in stripped:
+        raise ValueError(
+            f"{context} contains path traversal '..': {stripped!r}"
+        )
+    if "/" in stripped or "\\" in stripped:
+        raise ValueError(
+            f"{context} contains path separator: {stripped!r}"
+        )
+
+
 def _candidate_sources(terminal_id: str, role: str, project_root: Path):
-    """Yield (tier, path) candidates in the injector's resolution precedence."""
+    """Yield (tier, path) candidates in the injector's resolution precedence.
+
+    Slugs are validated against path traversal before path construction (OI-932).
+    """
     _prompts_dir = Path(__file__).resolve().parent / "prompts" / "roles"
     if role:
+        _validate_slug(role, "role")
         yield TIER_PROMPT_ASSEMBLER, _prompts_dir / f"{role}.md"
     if role:
         yield TIER_AGENTS, project_root / "agents" / role / "CLAUDE.md"
     if role:
         yield TIER_SKILLS, project_root / ".claude" / "skills" / role / "CLAUDE.md"
+    _validate_slug(terminal_id, "terminal_id")
     yield TIER_TERMINAL, project_root / ".claude" / "terminals" / terminal_id / "CLAUDE.md"
 
 

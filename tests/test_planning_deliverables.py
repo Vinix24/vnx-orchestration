@@ -30,6 +30,8 @@ import schema_migration
 import planning_cli
 import tracks as tracks_lib
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
+
 
 PROJECT_ID = "test-proj"
 
@@ -100,8 +102,7 @@ def _build_db(tmp_path: Path) -> Path:
         conn.commit()
 
     # Pre-add output_ref + output_kind (as structural-doctor would on live DB)
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
 

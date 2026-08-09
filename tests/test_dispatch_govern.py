@@ -16,13 +16,17 @@ sys.path.insert(0, str(_SCRIPTS / "lib"))
 sys.path.insert(0, str(_SCRIPTS))
 
 from dispatch_govern import (
+    SYNTHESIZED_REPORT_MARKER,
     GovernRaw,
     GovernSpec,
     GovernedOutcome,
     dedup_completion_receipts,
     ensure_receipt,
     govern,
+    _split_yaml_frontmatter,
     _synthesize,
+    _git_changes,
+    _git_summary,
 )
 from report_body_contract import validate_body
 
@@ -46,6 +50,10 @@ def tmp_state(tmp_path):
 
 
 def _make_spec(data_dir: Path, state_dir: Path, **kwargs) -> GovernSpec:
+    # Default model="sonnet": dispatch-20260802-model-ssot-en-ketenlink made the
+    # synthesized receipt fail closed on a missing/unknown model, so a spec
+    # without a model no longer produces a receipt (the test that pins that
+    # behavior sets model=None explicitly and asserts the rejection).
     return GovernSpec(
         dispatch_id=kwargs.get("dispatch_id", "test-govern-001"),
         terminal_id=kwargs.get("terminal_id", "T1"),
@@ -56,6 +64,11 @@ def _make_spec(data_dir: Path, state_dir: Path, **kwargs) -> GovernSpec:
         base_sha=kwargs.get("base_sha"),
         worktree_path=kwargs.get("worktree_path"),
         role=kwargs.get("role"),
+        model=kwargs.get("model", "sonnet"),
+        parent_dispatch=kwargs.get("parent_dispatch"),
+        task_class=kwargs.get("task_class"),
+        tier_from=kwargs.get("tier_from"),
+        tier_to=kwargs.get("tier_to"),
     )
 
 
@@ -199,6 +212,83 @@ def test_govern_authored_preserves_worker_body(tmp_data, tmp_state, monkeypatch)
     assert "## Open Items" in content
     # Worker's specific text content must be preserved.
     assert "Implemented the feature correctly" in content
+
+
+# ---------------------------------------------------------------------------
+# OI-1001: frontmatter "model" must fall back to spec.model, not "unknown",
+# when the worker receipt carries no model field. Mirrors the source order
+# ensure_receipt() already used for the synthesized-receipt path.
+# ---------------------------------------------------------------------------
+
+def test_govern_frontmatter_model_falls_back_to_spec_model(tmp_data, tmp_state, monkeypatch):
+    """A worker receipt with no "model" key must not stamp frontmatter model:
+    "unknown" when spec.model carries the real value — the receipt_data lookup
+    must fall back to spec.model before defaulting to "unknown"."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, model="sonnet")
+    # Worker receipt with no "model" key — the exact shape a real worker-authored
+    # completion receipt has when it never stamped a model.
+    raw = _make_raw(receipt={"status": "done"})
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    parsed, _ = _split_yaml_frontmatter(content)
+    assert parsed["model"] == "sonnet", (
+        f"expected model to fall back to spec.model='sonnet', got {parsed.get('model')!r}"
+    )
+
+
+def test_govern_frontmatter_model_prefers_worker_receipt_over_spec(tmp_data, tmp_state, monkeypatch):
+    """A worker receipt that DOES carry a model must still win over spec.model —
+    the fallback only applies when the worker receipt is silent on model."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, model="sonnet")
+    raw = _make_raw(receipt={"status": "done", "model": "opus"})
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    parsed, _ = _split_yaml_frontmatter(content)
+    assert parsed["model"] == "opus", (
+        f"worker-receipt model must take precedence over spec.model, got {parsed.get('model')!r}"
+    )
+
+
+def test_govern_frontmatter_route_decision_selected_model_matches_model(tmp_data, tmp_state, monkeypatch):
+    """route_decision.selected_model must carry the same value as the top-level
+    model field — both are stamped from the same resolved _model variable."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, model="sonnet")
+    raw = _make_raw(receipt={"status": "done"})
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    parsed, _ = _split_yaml_frontmatter(content)
+    assert parsed["model"] == "sonnet"
+    assert parsed["route_decision"]["selected_model"] == "sonnet", (
+        "route_decision.selected_model must match the resolved model, not 'unknown'"
+    )
+    assert parsed["route_decision"]["selected_model"] == parsed["model"]
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +637,103 @@ def test_synthesize_fallback_when_no_commit(tmp_data, tmp_state):
         body = _synthesize(spec, raw)
 
     assert "No commit on branch" in body or "synthesized" in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# OI-1066: every body the governance layer fabricates itself must carry the
+# stable, greppable SYNTHESIZED_REPORT_MARKER so the plan-gate panel can detect
+# "the lane never delivered a verdict" by exact-match — not by string-matching
+# prose that drifts. One marker constant, exported; four writing sites.
+# ---------------------------------------------------------------------------
+
+def test_synthesize_with_commit_message_stamps_marker(tmp_data, tmp_state):
+    """The commit-message branch of _git_summary (line ~793) stamps the marker."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: implement feature\n\nWorker status: done. Body synthesized by governance layer (no worker report file)."), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        body = _synthesize(spec, raw)
+
+    assert SYNTHESIZED_REPORT_MARKER in body, (
+        f"commit-message synthesis branch missing the marker — the panel cannot "
+        f"detect a timed-out lane by exact-match. body: {body[:400]}"
+    )
+
+
+def test_synthesize_no_commit_fallback_stamps_marker(tmp_data, tmp_state):
+    """The no-commit fallback branch of _git_summary (line ~797) also stamps the marker."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=10.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit on branch; worker emitted status=timeout. Body synthesized by lane (no worker report)."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        body = _synthesize(spec, raw)
+
+    assert SYNTHESIZED_REPORT_MARKER in body, (
+        f"no-commit fallback branch missing the marker. body: {body[:400]}"
+    )
+
+
+def test_synthesize_body_header_and_open_items_carry_marker(tmp_data, tmp_state):
+    """The synthesized body header AND the Open Items/Verification prose carry the marker
+    so detection works regardless of which slice the panel greps."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary", return_value="feat: implement feature"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        body = _synthesize(spec, raw)
+
+    # The body header line stamps the marker (the most reliable single site).
+    assert f"- {SYNTHESIZED_REPORT_MARKER}" in body
+
+
+def test_govern_error_fallback_stamps_marker(tmp_data, tmp_state):
+    """The error-handler synthesized body (line ~411) carries the marker too — a
+    govern() internal error is another flavor of 'the lane never delivered'."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._govern_impl", side_effect=RuntimeError("simulated failure")):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "synthesized"
+    assert outcome.report_path is not None and outcome.report_path.exists()
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert SYNTHESIZED_REPORT_MARKER in content, (
+        f"error-handler synthesis missing the marker — a govern error is a no-verdict "
+        f"outcome the panel must also detect. content: {content[:400]}"
+    )
+
+
+def test_govern_timeout_path_stamps_marker(tmp_data, tmp_state, monkeypatch):
+    """End-to-end through govern(): a timeout (receipt=None) produces a synthesized
+    report carrying the marker — the real-world symptom OI-1066 traces."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit; timeout. Body synthesized by governance layer (no worker report)."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "synthesized"
+    assert outcome.report_path is not None and outcome.report_path.exists()
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert SYNTHESIZED_REPORT_MARKER in content
+
+
+def test_synthesized_marker_is_stable_token_not_prose():
+    """The marker is a single, uppercase, dotted token that survives copy-paste and
+    JSON embedding — it must not read as prose and must not contain spaces."""
+    assert " " not in SYNTHESIZED_REPORT_MARKER
+    assert SYNTHESIZED_REPORT_MARKER.isascii()
+    # Greppable as a whole word from a shell.
+    assert SYNTHESIZED_REPORT_MARKER.count("\n") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -922,18 +1109,21 @@ def test_ensure_receipt_carries_terminal_id(tmp_data, tmp_state):
     assert receipt.get("terminal") == "T1", f"terminal alias missing or wrong: {receipt}"
 
 
-def test_ensure_receipt_model_unknown_when_not_set(tmp_data, tmp_state):
-    """Lane-synthesized receipt uses 'unknown' for model when spec.model is not set."""
-    spec = _make_spec(tmp_data, tmp_state)
+def test_ensure_receipt_rejected_when_model_not_set(tmp_data, tmp_state):
+    """dispatch-20260802-model-ssot-en-ketenlink: a lane-synthesized dispatch
+    receipt without a real model is REJECTED (fail-closed), never written with
+    ``model: unknown``. ensure_receipt is best-effort, so the append logs and
+    the file stays absent."""
+    spec = _make_spec(tmp_data, tmp_state, model=None)
     raw = GovernRaw(receipt=None, duration_seconds=60.0)
 
     ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
                    contract_status="synthesized", permission_enforcement="soft")
 
     receipts_file = tmp_state / "t0_receipts.ndjson"
-    receipt = json.loads(receipts_file.read_text().splitlines()[0])
-    assert receipt.get("provider") == "claude"
-    assert receipt.get("model") == "unknown"
+    assert not receipts_file.exists(), (
+        "a dispatch receipt without a model must not be appended (fail-closed)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1089,7 +1279,7 @@ def test_ensure_receipt_fake_default_spec_role_falls_through(tmp_data, tmp_state
     _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "reviewer")])
 
     spec = _make_spec(tmp_data, tmp_state)
-    spec.role = "backend-developer"
+    spec.role = ""  # OI-981: sentinel
     receipt = _fire_ensure_receipt(spec, tmp_state)
 
     assert receipt["role"] == "reviewer"
@@ -1246,6 +1436,9 @@ spec = GovernSpec(
     instruction="test",
     data_dir=state_dir,
     state_dir=state_dir,
+    # A dispatch receipt must name a real model (fail-closed) — the test
+    # exercises the import path, not the model contract.
+    model="sonnet",
 )
 raw = GovernRaw(receipt=None, duration_seconds=60.0)
 
@@ -1283,3 +1476,143 @@ print("OK")
         f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
     )
     assert "OK" in result.stdout, f"Expected OK, got: {result.stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# OI-1008: a failed dispatch (no worktree yet) must never git-inspect the
+# dispatcher's own checkout and claim another dispatch's commit/diff as its own.
+# ---------------------------------------------------------------------------
+
+def test_git_changes_with_worktree_calls_subprocess_scoped_to_cwd(tmp_data, tmp_state):
+    """Positive control: proves patching dispatch_govern.subprocess.run actually
+    intercepts the call _git_changes makes, so the negative (no-worktree) test
+    below can trust assert_not_called() instead of it passing vacuously because
+    the patch target missed the real call site."""
+    worktree = tmp_data / "worktree"
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=worktree, base_sha="deadbeef")
+
+    fake = subprocess.CompletedProcess(["git"], 0, stdout="foo.py | 2 ++\n", stderr="")
+    with patch("dispatch_govern.subprocess.run", return_value=fake) as mock_run:
+        result = _git_changes(spec)
+
+    assert mock_run.called, "patch on dispatch_govern.subprocess.run did not intercept _git_changes' call"
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("cwd") == str(worktree)
+    assert result == "foo.py | 2 ++"
+
+
+def test_git_changes_no_worktree_never_calls_subprocess(tmp_data, tmp_state):
+    """RED before the fix: with worktree_path=None, _git_changes must not shell
+    out to git at all. A git call with no explicit cwd inherits the dispatcher
+    process's own working directory (the main checkout) — which is exactly how
+    a failed dispatch's synthesized report ended up carrying another dispatch's
+    diff (OI-1008)."""
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=None, base_sha="deadbeef")
+
+    with patch("dispatch_govern.subprocess.run") as mock_run:
+        result = _git_changes(spec)
+        mock_run.assert_not_called()
+
+    assert "no worktree was provisioned" in result
+    assert "|" not in result  # no leaked `git diff --stat` style content
+
+
+def test_git_summary_with_worktree_calls_subprocess_scoped_to_cwd(tmp_data, tmp_state):
+    """Positive control for _git_summary — see test_git_changes_with_worktree_... above."""
+    worktree = tmp_data / "worktree"
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=worktree)
+
+    fake = subprocess.CompletedProcess(["git"], 0, stdout="feat: add foo\n", stderr="")
+    with patch("dispatch_govern.subprocess.run", return_value=fake) as mock_run:
+        result = _git_summary(spec, status="done")
+
+    assert mock_run.called, "patch on dispatch_govern.subprocess.run did not intercept _git_summary's call"
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("cwd") == str(worktree)
+    assert "feat: add foo" in result
+
+
+def test_git_summary_no_worktree_never_calls_subprocess(tmp_data, tmp_state):
+    """RED before the fix: with worktree_path=None, _git_summary must not shell
+    out to git either — it must fall back to the same "no commit on branch"
+    text already used when a worktree exists but git has no commit yet, not a
+    commit message read out of the dispatcher's own (main) checkout."""
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=None)
+
+    with patch("dispatch_govern.subprocess.run") as mock_run:
+        result = _git_summary(spec, status="failed")
+        mock_run.assert_not_called()
+
+    assert "No commit on branch" in result
+    assert "worker emitted status=failed" in result
+
+
+def test_synthesize_no_worktree_report_has_no_foreign_diff_or_commit(tmp_data, tmp_state):
+    """Integration reproduction of the exact OI-1008 symptom: mission-control's
+    D-a239cfec.md carried PR 763's diff (scripts/cron/leads_pipe.py,
+    src/linkedin_engine/claude_cli.py) from an unrelated, earlier dispatch.
+    Even if git WOULD return that foreign content when run without an explicit
+    cwd, the guard must stop the call before it ever reaches subprocess — so
+    the fake below returning foreign content proves the guard is what's
+    keeping it out, not mere absence of test data."""
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=None, base_sha="deadbeef")
+    raw = _make_raw(receipt={"status": "failed"})
+
+    foreign_diff = "scripts/cron/leads_pipe.py | 20 ++++\nsrc/linkedin_engine/claude_cli.py | 15 ++"
+    foreign_commit = "feat(leads): unrelated PR from a different dispatch entirely"
+
+    def _fake_run(args, **kwargs):
+        if "log" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=foreign_commit, stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout=foreign_diff, stderr="")
+
+    with patch("dispatch_govern.subprocess.run", side_effect=_fake_run) as mock_run:
+        body = _synthesize(spec, raw)
+
+    mock_run.assert_not_called()
+    assert foreign_diff not in body
+    assert foreign_commit not in body
+    assert "leads_pipe.py" not in body
+    assert "claude_cli.py" not in body
+
+
+def test_git_summary_and_changes_with_real_worktree_unchanged(tmp_path):
+    """The normal path — worktree_path set — must be unchanged by the OI-1008
+    guard. Uses a real git repo (not mocks) so a regression in the refactored
+    call site (wrong cwd, dropped args) shows up as a real failure."""
+    repo = tmp_path / "worktree"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "foo.py").write_text("print('hi')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: add foo"], cwd=repo, check=True)
+
+    spec = GovernSpec(
+        dispatch_id="real-worktree-001",
+        terminal_id="T1",
+        instruction="Do the thing.",
+        data_dir=tmp_path / "data",
+        state_dir=tmp_path / "state",
+        worktree_path=repo,
+        model="sonnet",
+    )
+
+    summary = _git_summary(spec, status="done")
+    assert "feat: add foo" in summary
+    assert "Worker status: done" in summary
+
+    # No base_sha and only one commit -> honest "no diff" fallback, not an
+    # error and not a foreign diff.
+    changes = _git_changes(spec)
+    assert "No git diff available" in changes
+
+    # A second commit makes the HEAD~1..HEAD fallback produce a real stat.
+    (repo / "foo.py").write_text("print('hi again')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: tweak foo"], cwd=repo, check=True)
+
+    changes2 = _git_changes(spec)
+    assert "foo.py" in changes2
+    assert "(no base_sha; showing HEAD~1..HEAD)" in changes2

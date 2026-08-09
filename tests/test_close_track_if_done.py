@@ -28,6 +28,8 @@ import schema_migration  # noqa: E402
 import track_reconciler  # noqa: E402
 import tracks as tracks_lib  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 PROJECT_ID = "test-close-proj"
 
 
@@ -76,8 +78,7 @@ def _build_db(tmp_path: Path) -> Path:
         )
         conn.commit()
 
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    ensure_dispatches_columns(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
 
@@ -722,3 +723,229 @@ def test_oi829_evidence_none_path_closes_unchanged_without_any_marking(tmp_path)
     assert result["action"] == "closed"
     assert result["applied"] is True
     assert _phase(sd, "T-manual-close") == "done"
+
+
+# ---------------------------------------------------------------------------
+# OI-1064: evidence threading — merged_pr_numbers forwarded into reconcile_track
+# ---------------------------------------------------------------------------
+
+def test_close_forwards_merged_pr_numbers_into_reconcile_track(tmp_path, monkeypatch):
+    """close_track_if_done forwards a passed merged set into reconcile_track.
+
+    Asserts on the reconcile_track CALL (the kwarg value), not on a log line.
+    The merged_pr_numbers kwarg must reach reconcile_track verbatim; default
+    None keeps the old behaviour (reconcile_track loads the local set itself).
+    """
+    import track_reconciler_closure
+
+    sd = _build_db(tmp_path)
+    _seed_done_track(sd, "T-fwd", phase="active")
+
+    captured: dict = {}
+
+    real_reconcile = track_reconciler.reconcile_track
+
+    def _spy(state_dir, track_id, project_id, **kw):
+        captured["merged_pr_numbers"] = kw.get("_merged_pr_numbers")
+        return real_reconcile(state_dir, track_id, project_id, **kw)
+
+    # Patch the name close_track_if_done resolves at call time (it imports
+    # reconcile_track from track_reconciler at module load — late binding
+    # resolves globals at call time, so patching the closure module's
+    # reference is the faithful target).
+    monkeypatch.setattr(track_reconciler_closure, "reconcile_track", _spy)
+
+    injected = frozenset({4242})
+    result = track_reconciler.close_track_if_done(
+        sd, "T-fwd", PROJECT_ID, actor="operator", approval_id="X",
+        merged_pr_numbers=injected,
+    )
+    assert result["action"] == "closed"
+    assert captured["merged_pr_numbers"] == injected
+
+
+def test_close_default_none_keeps_old_behaviour(tmp_path, monkeypatch):
+    """Without merged_pr_numbers, reconcile_track receives None (loads local itself).
+
+    Pins that the fix is the threading, not a weakened check: the default path
+    is byte-for-byte the pre-OI-1064 behaviour.
+    """
+    import track_reconciler_closure
+
+    sd = _build_db(tmp_path)
+    _seed_done_track(sd, "T-default", phase="active")
+
+    captured: dict = {}
+    real_reconcile = track_reconciler.reconcile_track
+
+    def _spy(state_dir, track_id, project_id, **kw):
+        captured["merged_pr_numbers"] = kw.get("_merged_pr_numbers")
+        return real_reconcile(state_dir, track_id, project_id, **kw)
+
+    monkeypatch.setattr(track_reconciler_closure, "reconcile_track", _spy)
+
+    track_reconciler.close_track_if_done(
+        sd, "T-default", PROJECT_ID, actor="operator", approval_id="X",
+    )
+    assert captured["merged_pr_numbers"] is None
+
+
+def test_close_with_injected_set_derives_done_and_closes(tmp_path):
+    """A track whose pr_ref PRs are ABSENT from local sources but PRESENT in
+    the injected set derives 'done' and the close succeeds — without
+    VNX_RECONCILE_GIT set.
+
+    This is the core OI-1064 case: zero dispatches, no pr_merged.ndjson, no
+    ROADMAP entry, no coordination event. The only merge evidence is the
+    injected set (the gh numbers run_reconcile gathered). Pre-fix this track
+    derived 'queued' and could not be closed.
+    """
+    import os
+    assert "VNX_RECONCILE_GIT" not in os.environ, (
+        "this test asserts the OFF-by-default behaviour; unset VNX_RECONCILE_GIT"
+    )
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-injected", PROJECT_ID, title="injected", goal_state="y",
+        phase="active", pr_ref="#5150,#5151",
+    )
+    # Mark delivery complete so the OI-829 gate passes (#5150 ships the plan).
+    _set_delivery(sd, "T-injected", 5150, "complete")
+
+    # No local merge evidence of any kind. Inject the gh-confirmed union.
+    injected = frozenset({5150, 5151})
+    evidence = {
+        "pr_ref": "#5150,#5151",
+        "pr_results": [
+            {"number": 5150, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+            {"number": 5151, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+        ],
+        "verified_at": "2026-08-06T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-injected", PROJECT_ID, actor="system", approval_id="APR-INJ",
+        evidence=evidence, merged_pr_numbers=injected,
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert _phase(sd, "T-injected") == "done"
+    assert _derived_status(sd, "T-injected") == "done"
+
+
+def test_close_without_injected_set_still_queued(tmp_path):
+    """Without the injected set the old behaviour is unchanged: still 'queued'.
+
+    Same track shape as above but merged_pr_numbers omitted. Pre-fix and
+    post-fix, this must stay 'queued' (not closed) — the fix is the threading,
+    not a weakened derivation rule.
+    """
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-no-inj", PROJECT_ID, title="no inj", goal_state="y",
+        phase="queued", pr_ref="#5152,#5153",
+    )
+    _set_delivery(sd, "T-no-inj", 5152, "complete")
+
+    evidence = {
+        "pr_ref": "#5152,#5153",
+        "pr_results": [
+            {"number": 5152, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+            {"number": 5153, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+        ],
+        "verified_at": "2026-08-06T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-no-inj", PROJECT_ID, actor="system", approval_id="APR-NOINJ",
+        evidence=evidence,
+    )
+    # gh evidence in pr_results authorizes the close directly via the
+    # _skip_derived_gate path, so this still closes. Assert the derived_status
+    # the close saw was the OLD one (queued) — proving the injected set was
+    # the only thing that would have changed the derivation. This mirrors the
+    # real background-job-liveness defect (phase=queued, bare gh merge).
+    assert result["derived_status"] == "queued"
+
+
+def test_injected_set_unions_with_local_evidence(tmp_path):
+    """The union is a union: a PR present locally but absent from the injected
+    gh set is still counted.
+
+    Track pr_ref='#6000,#6001'. #6000 is in local pr_merged.ndjson (local
+    evidence). #6001 is ONLY in the injected set (gh-confirmed, no local
+    receipt). The injected set (what run_reconcile would pass) is the UNION of
+    gh-confirmed {6001} and local {6000} = {6000, 6001}. Derived 'done'. Pins
+    that the caller's union preserves local evidence rather than replacing it
+    with the gh set alone — a caller that passed only the gh set {6001} would
+    leave #6000 uncounted.
+    """
+    import json
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-union", PROJECT_ID, title="union", goal_state="y",
+        phase="active", pr_ref="#6000,#6001",
+    )
+    _set_delivery(sd, "T-union", 6000, "complete")
+    # Local evidence for #6000 only.
+    events_dir = sd.parent / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    (events_dir / "pr_merged.ndjson").write_text(
+        json.dumps({"event_type": "pr_merged", "pr_number": 6000}) + "\n",
+        encoding="utf-8",
+    )
+
+    # run_reconcile unions gh-confirmed {6001} with local {6000} = {6000, 6001}.
+    injected_union = frozenset({6000, 6001})
+    evidence = {
+        "pr_ref": "#6000,#6001",
+        "pr_results": [
+            {"number": 6000, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+            {"number": 6001, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+        ],
+        "verified_at": "2026-08-06T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-union", PROJECT_ID, actor="system", approval_id="APR-UNION",
+        evidence=evidence, merged_pr_numbers=injected_union,
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert _derived_status(sd, "T-union") == "done"
+
+
+def test_injected_gh_only_set_without_union_leaves_local_pr_uncounted(tmp_path):
+    """Counter-pin for the union: passing ONLY the gh set (no union with local)
+    leaves a local-only PR uncounted → derived 'in_progress', not 'done'.
+
+    This proves the union with local evidence is load-bearing, not decorative:
+    a caller that passed only the gh-confirmed numbers (forgetting the local
+    set) would regress the defect for any track with mixed local/gh evidence.
+    """
+    import json
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T-gh-only-set", PROJECT_ID, title="gh only set", goal_state="y",
+        phase="active", pr_ref="#6002,#6003",
+    )
+    _set_delivery(sd, "T-gh-only-set", 6002, "complete")
+    events_dir = sd.parent / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    (events_dir / "pr_merged.ndjson").write_text(
+        json.dumps({"event_type": "pr_merged", "pr_number": 6002}) + "\n",
+        encoding="utf-8",
+    )
+    evidence = {
+        "pr_ref": "#6002,#6003",
+        "pr_results": [
+            {"number": 6002, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+            {"number": 6003, "state": "MERGED", "mergedAt": "2026-08-06T10:00:00Z"},
+        ],
+        "verified_at": "2026-08-06T10:00:00Z",
+    }
+    result = track_reconciler.close_track_if_done(
+        sd, "T-gh-only-set", PROJECT_ID, actor="system", approval_id="APR-GHONLY",
+        evidence=evidence, merged_pr_numbers=frozenset({6003}),  # gh-only, no union
+    )
+    # gh evidence bypasses the derived gate so the close still happens, but the
+    # derived_status reflects the MISSING local PR #6002 → 'in_progress'.
+    assert result["derived_status"] == "in_progress"
+

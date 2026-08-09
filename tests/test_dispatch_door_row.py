@@ -29,7 +29,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
-from dispatch_cli import _persist_track_id, load_spec, run_dispatch
+from dispatch_cli import _persist_dispatch_row, _persist_track_id, load_spec, run_dispatch
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +89,7 @@ def _make_bundle(
     dispatch_id: str,
     track_id: "str | None" = "oi-847-track",
     schema_version: int = 1,
+    target_slot: str = "T0",
 ) -> "tuple[Path, Path]":
     """A promoted-style staged bundle (spec + instruction inside the bundle dir).
 
@@ -106,7 +107,7 @@ def _make_bundle(
         "staging_id": staging_id,
         "instruction_file": str(instruction),
         "role": "backend-developer",
-        "target_slot": "T0",
+        "target_slot": target_slot,
         "gate": "human-promoted",
         "dispatch_paths": [],
         "provider": "claude",
@@ -278,3 +279,115 @@ def test_rejected_dispatch_creates_no_row(tmp_path, monkeypatch):
     )
     assert _read_row(db_path, "20260731-oi847-rejected") is None
     assert _read_row(db_path, "20260731-oi847-accepted") is not None
+
+
+# ---------------------------------------------------------------------------
+# 5. OI-943: _persist_dispatch_row writes target_slot so the audit trail can
+#    distinguish ported from unported claude dispatches.
+# ---------------------------------------------------------------------------
+
+def test_oi943_persists_target_slot(tmp_path):
+    """_persist_dispatch_row must write spec.target_slot to the dispatch row."""
+    state_dir = tmp_path / "state"
+    db_path = _make_coordination_db(state_dir)
+    data_dir = tmp_path / "vnx-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260804-staging-oi943-ts",
+        dispatch_id="20260804-oi943-target-slot",
+    )
+    spec = load_spec(spec_file)
+    assert spec.target_slot == "T0", "fixture default is T0"
+
+    _persist_dispatch_row(spec, state_dir=state_dir)
+
+    row = _read_row(db_path, "20260804-oi943-target-slot")
+    assert row is not None, "door must create a dispatches row"
+    assert row["target_slot"] == "T0", (
+        "OI-943: target_slot must be persisted on the dispatch row so the audit "
+        "trail can distinguish ported from unported claude dispatches"
+    )
+
+
+def test_oi943_persists_override_reason(tmp_path):
+    """_persist_dispatch_row must write worker_claude_override_reason when provided."""
+    state_dir = tmp_path / "state"
+    db_path = _make_coordination_db(state_dir)
+    data_dir = tmp_path / "vnx-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260804-staging-oi943-or",
+        dispatch_id="20260804-oi943-override-reason",
+    )
+    spec = load_spec(spec_file)
+
+    _persist_dispatch_row(
+        spec,
+        state_dir=state_dir,
+        worker_claude_override_reason="testing override gate audit",
+    )
+
+    row = _read_row(db_path, "20260804-oi943-override-reason")
+    assert row is not None, "door must create a dispatches row"
+    assert row["target_slot"] == "T0"
+    assert row["worker_claude_override_reason"] == "testing override gate audit", (
+        "OI-943: worker_claude_override_reason must be persisted so the override "
+        "outcome is auditable"
+    )
+
+
+def test_oi943_override_reason_none_is_omitted(tmp_path):
+    """When no override is applied, the row omits worker_claude_override_reason."""
+    state_dir = tmp_path / "state"
+    db_path = _make_coordination_db(state_dir)
+    data_dir = tmp_path / "vnx-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260804-staging-oi943-no",
+        dispatch_id="20260804-oi943-no-override",
+    )
+    spec = load_spec(spec_file)
+
+    # No override reason passed — the default None applies.
+    _persist_dispatch_row(spec, state_dir=state_dir)
+
+    row = _read_row(db_path, "20260804-oi943-no-override")
+    assert row is not None, "door must create a dispatches row"
+    assert row["target_slot"] == "T0"
+    # The column may not exist (row_factory returns None for missing columns)
+    # or it may be NULL — either way the override reason is absent.
+    try:
+        override_val = row["worker_claude_override_reason"]
+    except IndexError:
+        override_val = None
+    assert override_val is None or override_val == "", (
+        "OI-943: worker_claude_override_reason must be absent when no override was applied"
+    )
+
+
+def test_oi943_target_slot_survives_through_door(tmp_path, monkeypatch):
+    """Integration: a dispatch through the full door persists target_slot."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260804-staging-oi943-int",
+        dispatch_id="20260804-oi943-integration",
+        target_slot="T0",  # T0 is a valid claude lane without override
+    )
+    db_path = _make_coordination_db(
+        data_dir / "state", tracks={"oi-847-track": "active"}
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    row = _read_row(db_path, "20260804-oi943-integration")
+    assert row is not None, "door must create a dispatches row"
+    assert row["target_slot"] == "T0", (
+        "OI-943: target_slot must survive the full door path"
+    )

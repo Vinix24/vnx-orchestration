@@ -52,9 +52,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,8 +66,13 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
+from _streaming_drainer import StreamingDrainerMixin, _kill_process, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
+# OI-1087: the read-only task-class list lives in ONE place — phantom_guard's
+# REVIEW_TASK_CLASSES is the fabric's SSOT for "a verdict, not a diff, is the
+# expected deliverable". The fabrication guard below keys off the same list so
+# the two guards can never drift apart.
+from phantom_guard import REVIEW_TASK_CLASSES  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -509,6 +516,108 @@ def _harvest_session_token_usage(
                 pass
 
 
+# kimi-cli persists one resumable session dir per invocation with no auto-GC,
+# TTL, or no-persist flag. One-shot --print dispatches are never resumed, so
+# without an explicit reap the session dirs (wire.jsonl + context.jsonl +
+# state.json) accrue unbounded (543 dirs / 697MB on 2026-07-28, manually
+# cleaned to 316M). OI-812: after the token harvest (which still needs the
+# export), the dead session is reaped.
+_SESSION_ID_VALUE_RE = re.compile(r"[0-9a-fA-F-]+\Z")
+
+
+def _kimi_share_dir(env: Dict[str, str]) -> Path:
+    """Resolve the kimi share dir exactly as kimi-cli 1.46.0 does.
+
+    ``kimi_cli/share.py::get_share_dir`` returns ``KIMI_SHARE_DIR`` when set,
+    else ``~/.kimi``. The reap must resolve the SAME dir the spawned kimi wrote
+    to, so it reads the env the subprocess was launched with, not the ambient
+    process env.
+    """
+    override = (env or {}).get("KIMI_SHARE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".kimi"
+
+
+def _find_kimi_session_dir(session_id: str, env: Dict[str, str]) -> Optional[Path]:
+    """Locate the on-disk session dir for *session_id*, or None.
+
+    Sessions live at ``<share_dir>/sessions/<work_dir_md5>/<session_id>/``.
+    The outer bucket is the md5 of the work-dir path, which the resume id alone
+    cannot tell us, so every bucket under ``sessions/`` is scanned for a
+    directory named exactly *session_id*. Returns None when the session is not
+    on disk (already reaped, or the share dir has no sessions subtree).
+    """
+    if not session_id or not _SESSION_ID_VALUE_RE.match(session_id):
+        return None
+    sessions_root = _kimi_share_dir(env) / "sessions"
+    if not sessions_root.is_dir():
+        return None
+    try:
+        for bucket in sessions_root.iterdir():
+            if not bucket.is_dir():
+                continue
+            candidate = bucket / session_id
+            if candidate.is_dir():
+                return candidate
+    except OSError as exc:
+        logger.debug("kimi_spawn: session-dir scan failed (fail-open): %s", exc)
+        return None
+    return None
+
+
+def _reap_kimi_session(session_id: str, env: Dict[str, str]) -> bool:
+    """Remove the on-disk session dir of a one-shot kimi dispatch.
+
+    One-shot dispatches are never resumed, so after the token harvest the
+    session dir is dead weight: reap it. Best-effort — a reap failure (or a
+    session already gone) must never break an otherwise-clean dispatch, so this
+    returns False instead of raising.
+
+    Safety: only a directory whose path is exactly
+    ``<share_dir>/sessions/<bucket>/<session_id>`` is ever removed — the leaf
+    must equal *session_id* and sit two levels under the sessions subtree, the
+    layout kimi's ``WorkDirMeta.sessions_dir`` always produces. Anything else
+    (the sessions root, a bucket dir, a depth-1 dir, a path outside the tree)
+    is refused with a warning.
+    """
+    if not session_id or not _SESSION_ID_VALUE_RE.match(session_id):
+        return False
+    share_dir = _kimi_share_dir(env)
+    sessions_root = share_dir / "sessions"
+    session_dir = _find_kimi_session_dir(session_id, env)
+    if session_dir is None:
+        return False
+    try:
+        resolved = session_dir.resolve()
+        root_resolved = sessions_root.resolve()
+    except OSError as exc:
+        logger.warning("kimi_spawn: could not resolve reap path %s: %s", session_dir, exc)
+        return False
+    try:
+        rel = resolved.relative_to(root_resolved)
+    except ValueError:
+        logger.warning(
+            "kimi_spawn: refusing to reap %s (outside kimi sessions tree %s)",
+            resolved, root_resolved,
+        )
+        return False
+    if len(rel.parts) != 2 or rel.parts[1] != session_id:
+        logger.warning(
+            "kimi_spawn: refusing to reap %s (not a two-level session dir under %s)",
+            resolved, root_resolved,
+        )
+        return False
+    try:
+        shutil.rmtree(resolved, ignore_errors=True)
+    except Exception:  # vnx-silent-except: reap must never break the dispatch
+        return False
+    reaped = not resolved.exists()
+    if reaped:
+        logger.debug("kimi_spawn: reaped one-shot kimi session dir %s", resolved)
+    return reaped
+
+
 def _worktree_has_changes(worktree: Any, base_ref: str = "origin/main") -> Optional[bool]:
     """Return True/False for REAL git work in *worktree*, or None if unknown.
 
@@ -608,6 +717,151 @@ def _isolate_kimi_env(env: Dict[str, str]) -> Dict[str, str]:
     return {k: v for k, v in env.items() if k not in _VENV_POLLUTION_VARS}
 
 
+# OI-1044: the worker-heartbeat silence detector (#1387, OI-944/OI-1007) is wired
+# into the tmux-spawn lane (FileProgressHeartbeat on the pipe-pane log) and the
+# subprocess lane (EventStreamHeartbeat on the EventStore stream) but not the
+# provider lane — kimi, the fleet-default build-worker, had no external liveness
+# signal at all. `~/.kimi/logs/kimi.log` is a single file shared by every
+# concurrent kimi dispatch, so it cannot be the signal: two dispatches running at
+# once would mask each other's death (one keeps writing while the other is gone).
+# The tee below gives each dispatch its own file (keyed by dispatch_id, the one
+# identifier guaranteed unique across concurrent dispatches — terminal_id is not,
+# since provider-lane dispatches are not necessarily terminal-pinned).
+_DISPATCH_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# How often the monitor thread polls the tee file for growth. Matches the
+# subprocess lane's _silence_heartbeat_loop default (delivery_runtime.py).
+_HEARTBEAT_POLL_INTERVAL_SECONDS = 30.0
+
+
+def _resolve_heartbeat_log_path(dispatch_id: str) -> Optional[Path]:
+    """Per-dispatch raw-stdout tee path for the FileProgressHeartbeat (OI-1044).
+
+    Same directory convention as the tmux lane's pipe-pane capture
+    (``logs/conversations/{dispatch_id}.log`` — see
+    ``tmux_interactive_dispatch.py::_start_pipe_pane``) so a dispatch's raw
+    activity log lives in one predictable place regardless of which lane ran
+    it. Returns None (heartbeat disabled, fail-open) when dispatch_id fails
+    the same path-safety check the tmux lane applies, or when VNX_DATA_DIR
+    cannot be resolved — a missing heartbeat must never break the dispatch
+    itself, only leave it unmonitored.
+    """
+    if not dispatch_id or not _DISPATCH_ID_SAFE_RE.match(dispatch_id):
+        logger.warning(
+            "kimi_spawn: heartbeat disabled — unsafe dispatch_id %r", dispatch_id,
+        )
+        return None
+    try:
+        from vnx_paths import resolve_paths  # noqa: PLC0415
+        data_dir = Path(resolve_paths()["VNX_DATA_DIR"])
+    except Exception as exc:  # noqa: BLE001 — heartbeat setup must never break the dispatch
+        logger.warning(
+            "kimi_spawn: heartbeat disabled — VNX_DATA_DIR resolution failed: %s", exc,
+        )
+        return None
+    log_dir = data_dir / "logs" / "conversations"
+    raw_log = (log_dir / f"{dispatch_id}.log").resolve()
+    try:
+        raw_log.relative_to(log_dir.resolve())
+    except ValueError:
+        logger.warning(
+            "kimi_spawn: heartbeat disabled — log path %s escaped %s", raw_log, log_dir,
+        )
+        return None
+    return raw_log
+
+
+def _write_heartbeat_report(dispatch_id: str, report_text: str) -> None:
+    """Atomically write the heartbeat failure report to unified_reports.
+
+    The stuck worker never gets to write its own report, so the heartbeat
+    writes a substitute directly — same responsibility the tmux lane
+    (``tmux_interactive_dispatch.py::_wait_for_receipt``) and the subprocess
+    lane (``delivery_runtime.py::_silence_heartbeat_loop``) already carry.
+    ``emit_unified_report`` is idempotent (it never overwrites an existing
+    contract-valid report), so this write is safe even if it races a governance
+    emit downstream — write-tmp-then-replace so a concurrent reader never sees
+    a partial file.
+    """
+    from vnx_paths import resolve_paths  # noqa: PLC0415
+
+    data_dir = Path(resolve_paths()["VNX_DATA_DIR"])
+    reports_dir = data_dir / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"{dispatch_id}.md"
+    tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")
+    tmp_path.write_text(report_text, encoding="utf-8")
+    os.replace(tmp_path, report_path)
+
+
+def _heartbeat_monitor_loop(
+    proc: subprocess.Popen,
+    heartbeat_log_path: Path,
+    dispatch_id: str,
+    terminal_id: str,
+    model: str,
+    stop_event: threading.Event,
+    killed_event: threading.Event,
+    poll_interval: float = _HEARTBEAT_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Poll the per-dispatch tee file for silence; kill + report if stuck.
+
+    Same module (``worker_heartbeat.FileProgressHeartbeat``), same threshold
+    (``VNX_WORKER_HEARTBEAT_SILENCE_SECONDS``, default 600s), same failure-report
+    shape (``build_heartbeat_failure_report``) as the tmux-spawn and subprocess
+    lanes, so the audit trail is uniform regardless of which lane ran the
+    dispatch (OI-944, OI-1007, OI-1044).
+
+    The 600s default tolerates kimi's measured cadence: a healthy worker can go
+    22 minutes between *file writes* while doing nothing but Read/Grep, but its
+    stdout stream (which this tee mirrors) carries a tool_call/tool_result pair
+    for every one of those reads — measured gaps between kimi's own LLM steps
+    topped out at 209s, well under the threshold. FileProgressHeartbeat watches
+    that raw stdout tee, not worktree file mutations, precisely so read-only
+    activity keeps counting as progress.
+
+    Liveness is verified on the real OS process throughout: the kill path
+    (``_kill_process``) uses ``os.getpgid``/``os.killpg``/``proc.wait()``, never
+    a pidfile (OI-1044 finding: a stale pidfile reads as "running" forever;
+    only the kernel's own view of the pid is trustworthy).
+    """
+    from worker_heartbeat import (  # noqa: PLC0415
+        FileProgressHeartbeat,
+        build_heartbeat_failure_report,
+    )
+
+    hb = FileProgressHeartbeat(heartbeat_log_path, dispatch_id)
+    while not stop_event.wait(timeout=poll_interval):
+        verdict = hb.check()
+        if not verdict.is_silent:
+            continue
+        logger.warning(
+            "kimi_spawn: heartbeat silence detected for %s (%.0fs silent, "
+            "threshold=%.0fs) — killing worker",
+            dispatch_id, verdict.silence_seconds, verdict.threshold_seconds,
+        )
+        _kill_process(proc)
+        try:
+            report = build_heartbeat_failure_report(
+                dispatch_id=dispatch_id,
+                verdict=verdict,
+                model=model,
+                provider="kimi",
+                terminal_id=terminal_id,
+            )
+            _write_heartbeat_report(dispatch_id, report)
+            logger.info(
+                "kimi_spawn: heartbeat failure report written for %s", dispatch_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — report write must never raise past this thread
+            logger.warning(
+                "kimi_spawn: heartbeat failure report write failed for %s: %s",
+                dispatch_id, exc,
+            )
+        killed_event.set()
+        return
+
+
 def _start_kimi_subprocess(
     cmd: list,
     env: Dict[str, str],
@@ -663,6 +917,7 @@ def _consume_kimi_stream(
     event_store: Optional[Any],
     chunk_timeout: float,
     total_deadline: float,
+    heartbeat_log_path: Optional[Path] = None,
 ) -> "tuple[str, int, Optional[Dict], bool, bool, int, list, bool, list, bool]":
     """Drain the stream.
 
@@ -697,6 +952,7 @@ def _consume_kimi_stream(
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
         chunk_timeout=chunk_timeout, total_deadline=total_deadline,
+        raw_tee_path=heartbeat_log_path,
     ):
         events_written += 1
         evt_type = canonical_event.event_type
@@ -780,6 +1036,7 @@ def _finalize_kimi_result(
     raw_samples: Optional[list] = None,
     saw_tool_calls: bool = False,
     worktree: Optional[Any] = None,
+    task_class: Optional[str] = None,
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult.
 
@@ -791,6 +1048,14 @@ def _finalize_kimi_result(
     approval defaults again). ``worktree=None`` (no isolation worktree known,
     e.g. non-worktree dispatches) skips the check gracefully — there is nothing
     to diff against.
+
+    OI-1087: ``task_class`` exempts POSITIVELY-KNOWN read-only classes (the
+    phantom_guard REVIEW_TASK_CLASSES SSOT: review/analysis/research_structured/
+    ...) from that invariant — for a read-only dispatch an unchanged worktree IS
+    the intended outcome (the report is the deliverable; the dispatch forbids
+    commits). Fail-safe direction: an empty or unknown ``task_class`` keeps the
+    guard armed exactly as before; only a recognized read-only class suppresses
+    it.
     """
     try:
         proc.wait(timeout=10)
@@ -801,9 +1066,18 @@ def _finalize_kimi_result(
 
     empty_extraction = not (completion_text or "").strip()
 
+    _normalized_class = (task_class or "").strip().lower()
+    read_only_class = bool(_normalized_class) and _normalized_class in REVIEW_TASK_CLASSES
+
     worktree_unchanged = False
-    if saw_tool_calls and worktree is not None:
+    if saw_tool_calls and worktree is not None and not read_only_class:
         worktree_unchanged = _worktree_has_changes(worktree) is False
+    elif saw_tool_calls and worktree is not None and read_only_class:
+        logger.info(
+            "kimi_spawn: fabrication guard not applied for read-only task_class=%r "
+            "— an unchanged worktree is the expected outcome for this class",
+            task_class,
+        )
 
     if errors_captured:
         error: Optional[str] = "\n".join(errors_captured)
@@ -867,6 +1141,7 @@ def spawn_kimi(
     chunk_timeout: float = 1200.0,
     total_deadline: float = 900.0,
     event_store: Optional[Any] = None,
+    task_class: Optional[str] = None,
     **kwargs: Any,
 ) -> KimiSpawnResult:
     """Spawn ``kimi --print --output-format stream-json --yolo -p <prompt>``.
@@ -896,6 +1171,15 @@ def spawn_kimi(
     both. ``event_store`` is forwarded to drain_stream (writes via drainer);
     ``event_writer`` is called per-event in _consume_kimi_stream. Passing both
     causes every event to be written twice.
+
+    ``task_class`` (OI-1087) is an EXPLICIT keyword — deliberately not silently
+    absorbed by ``**kwargs``: the four review-dispatch false-failures of
+    2026-08-07 happened precisely because this signal never left the adapter.
+    A visible, typed parameter is greppable, typo-safe (a misspelled kwarg in
+    **kwargs vanishes silently), and shows up in the signature for every future
+    caller. Forwarded to _finalize_kimi_result, where a positively-known
+    read-only class exempts the dispatch from the worktree-changed fabrication
+    guard. Unknown/empty keeps the guard armed.
     """
     if event_store is not None and event_writer is not None:
         raise ValueError("Pass either event_store OR event_writer, not both")
@@ -956,18 +1240,46 @@ def spawn_kimi(
     if err_result is not None:
         return err_result
 
+    # OI-1044: external worker heartbeat — the provider lane had no liveness
+    # signal a supervisor could observe from outside the process. The monitor
+    # thread watches the per-dispatch stdout tee (written by drain_stream below)
+    # and kills+reports a stuck worker independently of the internal
+    # chunk_timeout/total_deadline stall guard (which only fires on a fixed,
+    # deadline-scaled window and never writes the standard heartbeat report).
+    heartbeat_log_path = _resolve_heartbeat_log_path(dispatch_id)
+    _hb_stop = threading.Event()
+    _hb_killed = threading.Event()
+    _hb_thread: Optional[threading.Thread] = None
+    if heartbeat_log_path is not None:
+        _hb_thread = threading.Thread(
+            target=_heartbeat_monitor_loop,
+            args=(
+                proc, heartbeat_log_path, dispatch_id, terminal_id,
+                model or "unknown", _hb_stop, _hb_killed,
+            ),
+            daemon=True,
+            name=f"kimi-heartbeat-{dispatch_id}",
+        )
+        _hb_thread.start()
+
     host = _KimiNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
-    (
-        completion_text, events_written, token_usage, timed_out, stopped_early,
-        _event_writer_failures, errors_captured, saw_stream_output, raw_samples,
-        saw_tool_calls,
-    ) = _consume_kimi_stream(
-        proc=proc, host=host, on_event=on_event,
-        health_monitor=health_monitor, event_writer=event_writer,
-        terminal_id=terminal_id, dispatch_id=dispatch_id,
-        event_store=event_store, chunk_timeout=chunk_timeout,
-        total_deadline=total_deadline,
-    )
+    try:
+        (
+            completion_text, events_written, token_usage, timed_out, stopped_early,
+            _event_writer_failures, errors_captured, saw_stream_output, raw_samples,
+            saw_tool_calls,
+        ) = _consume_kimi_stream(
+            proc=proc, host=host, on_event=on_event,
+            health_monitor=health_monitor, event_writer=event_writer,
+            terminal_id=terminal_id, dispatch_id=dispatch_id,
+            event_store=event_store, chunk_timeout=chunk_timeout,
+            total_deadline=total_deadline, heartbeat_log_path=heartbeat_log_path,
+        )
+    finally:
+        _hb_stop.set()
+        if _hb_thread is not None:
+            _hb_thread.join(timeout=5.0)
+
     result = _finalize_kimi_result(
         proc=proc, completion_text=completion_text,
         events_written=events_written, token_usage=token_usage,
@@ -978,7 +1290,18 @@ def spawn_kimi(
         raw_samples=raw_samples,
         saw_tool_calls=saw_tool_calls,
         worktree=cwd,
+        task_class=task_class,
     )
+    if _hb_killed.is_set():
+        # The heartbeat already wrote the terminal failure report — replace the
+        # generic "kimi exited with code N" message with the real reason so the
+        # receipt's failure_reason is diagnosable without cross-referencing logs.
+        result.error = (
+            f"worker heartbeat: killed due to silence exceeding threshold "
+            f"(dispatch={dispatch_id}); see unified_reports/{dispatch_id}.md"
+        )
+        if result.returncode == 0:
+            result.returncode = 1
 
     # Post-run token harvest. stream-json carries no token accounting (measured
     # on kimi-cli 1.46.0), so on a clean run the session is exported and the
@@ -995,4 +1318,11 @@ def spawn_kimi(
             harvested = _harvest_session_token_usage(session_id, env, cwd_str)
             if harvested:
                 result.token_usage = harvested
+            # OI-812: one-shot dispatches are never resumed, so the session dir
+            # (wire.jsonl + context.jsonl + state.json) is dead weight after the
+            # harvest (which already exported the token data). Reap it. Runs
+            # regardless of whether the harvest yielded tokens — a failed export
+            # still leaves a session dir behind. Best-effort: a reap failure
+            # must never break an otherwise-clean dispatch.
+            _reap_kimi_session(session_id, env)
     return result

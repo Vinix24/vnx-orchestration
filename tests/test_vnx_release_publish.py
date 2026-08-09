@@ -45,13 +45,24 @@ echo "stub-materialized ${VERSION}"
 """
 
 
-def _git_repo_with_tag(path: Path, tag: str, *, extra_tags=()) -> Path:
+def _strip_v(tag: str) -> str:
+    if len(tag) > 1 and tag[0] in "vV" and tag[1].isdigit():
+        return tag[1:]
+    return tag
+
+
+def _git_repo_with_tag(path: Path, tag: str, *, extra_tags=(), version: "str | None" = None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "tester"], cwd=path, check=True)
     (path / "README.md").write_text("test\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    # Write a VERSION file matching the tag (stripped of the decorative v) so the
+    # publish version-guard finds an agreeing tree. ``version`` overrides when a
+    # mismatch is desired (the guard-refusal tests).
+    version_content = version if version is not None else _strip_v(tag)
+    (path / "VERSION").write_text(f"{version_content}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md", "VERSION"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
     for t in (tag, *extra_tags):
         subprocess.run(["git", "tag", t], cwd=path, check=True)
@@ -319,3 +330,107 @@ def test_release_dispatches_publish(tmp_path, central_root, monkeypatch):
 
     assert rc == 0
     assert "[dry-run]" in buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# OI-1070: version-guard — refuse a mislabeled release (VERSION != tag)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_publish_refuses_version_mismatch(tmp_path, central_root, capsys, dry_run):
+    """Tree VERSION disagrees with the tag -> refuse, exit 1, nothing materialized."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.4.4", version="1.4.3")
+
+    rc = vnx_release_publish(_publish_args(tag="v1.4.4", repo=str(repo), dry_run=dry_run))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "VERSION mismatch" in captured.err
+    assert "1.4.3" in captured.err  # tree version named
+    assert "1.4.4" in captured.err  # tag-implied version named
+    assert "v1.4.4" in captured.err  # tag named
+    assert "Refusing to ship a mislabeled release" in captured.err
+    # Nothing materialized.
+    assert not (central_root / "versions" / "v1.4.4").exists()
+
+
+def test_publish_refuses_version_mismatch_unprefixed_tag(tmp_path, central_root, capsys):
+    """Tag without a decorative v must still compare stripped-of-nothing."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "1.4.4", version="1.4.3")
+
+    rc = vnx_release_publish(_publish_args(tag="1.4.4", repo=str(repo)))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "VERSION mismatch" in captured.err
+    assert "1.4.3" in captured.err
+    assert "1.4.4" in captured.err
+    assert not (central_root / "versions" / "1.4.4").exists()
+
+
+def test_publish_dry_run_surfaces_mismatch_and_exits_nonzero(tmp_path, central_root, capsys):
+    """--dry-run performs the same check and reports it before any commit."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.4.4", version="1.4.3")
+
+    rc = vnx_release_publish(_publish_args(tag="v1.4.4", repo=str(repo), dry_run=True))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "VERSION mismatch" in captured.err
+    # Dry-run mutates nothing.
+    assert not (central_root / "versions").exists()
+
+
+def test_publish_dry_run_reports_guard_ok_when_match(tmp_path, central_root, capsys):
+    """--dry-run on a matching tree reports the guard passed."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.4.5")
+    out, rc = _capture(_publish_args(tag="v1.4.5", repo=str(repo), dry_run=True))
+
+    assert rc == 0
+    assert "Version guard OK" in out
+    assert "1.4.5" in out
+
+
+def test_publish_proceeds_when_version_matches_tag(
+    tmp_path, central_root, stub_install_central
+):
+    """Matching tree VERSION + tag publishes successfully (prefixed tag)."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.4.5", version="1.4.5")
+    out, rc = _capture(_publish_args(tag="v1.4.5", repo=str(repo)))
+
+    assert rc == 0
+    assert (central_root / "versions" / "v1.4.5").is_dir()
+    assert "Published:" in out
+
+
+def test_publish_proceeds_when_version_matches_unprefixed_tag(
+    tmp_path, central_root, stub_install_central
+):
+    """Unprefixed tag with matching VERSION publishes (decorative-v symmetric)."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "1.4.5", version="1.4.5")
+    out, rc = _capture(_publish_args(tag="1.4.5", repo=str(repo)))
+
+    assert rc == 0
+    assert (central_root / "versions" / "1.4.5").is_dir()
+    assert "Published:" in out
+
+
+def test_publish_refuses_missing_version_file(tmp_path, central_root, capsys):
+    """A tag tree with no VERSION file at all cannot be verified -> refuse."""
+    # Build a repo without a VERSION file via the raw path (bypass the helper).
+    repo = tmp_path / "origin"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=repo, check=True)
+    (repo / "README.md").write_text("no version file\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    subprocess.run(["git", "tag", "v1.4.5"], cwd=repo, check=True)
+
+    rc = vnx_release_publish(_publish_args(tag="v1.4.5", repo=str(repo)))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "cannot read VERSION" in captured.err
+    assert not (central_root / "versions" / "v1.4.5").exists()

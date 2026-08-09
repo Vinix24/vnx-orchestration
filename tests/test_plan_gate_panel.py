@@ -26,6 +26,8 @@ import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
+import plan_gate_enforcement as pge  # noqa: E402
+from ndjson_hash_chain import walk_chain  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -183,10 +185,10 @@ def test_parse_verdict_all_fences_unparseable_still_failsafe_revise():
 # apply_panel_rule
 # --------------------------------------------------------------------------
 
-def _r(label, verdict, dispatched=True, parse_error=False):
+def _r(label, verdict, dispatched=True, parse_error=False, no_verdict=False):
     return pgp.PanelistResult(
         label=label, provider="x", verdict=verdict,
-        dispatched=dispatched, parse_error=parse_error,
+        dispatched=dispatched, parse_error=parse_error, no_verdict=no_verdict,
     )
 
 
@@ -261,6 +263,85 @@ def test_rule_zero_readable_verdicts_is_infra_fail_not_revise():
     # (content) REVISE — the INFRA_FAIL floor only fires at ZERO readable voices.
     d1 = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "x", dispatched=False), _r("c", "x", parse_error=True)])
     assert d1["decision"] == "REVISE"
+
+
+# --------------------------------------------------------------------------
+# OI-1066: a lane that never produced a verdict (timeout / governance-
+# synthesized / no report) is a THIRD category, not folded into "abstained".
+# "Abstained" reads as "the lane declined to weigh in"; a no-verdict lane
+# never SAW the plan. PASS is forbidden while any seat is no-verdict.
+# --------------------------------------------------------------------------
+
+def test_rule_no_verdict_seat_blocks_pass():
+    # 4 PASS + 1 no-verdict -> NOT a PASS. A lane that never saw the plan cannot
+    # be folded into a clean PASS on the remaining seats' strength alone.
+    d = pgp.apply_panel_rule([
+        _r("a", "pass"), _r("b", "pass"), _r("c", "pass"), _r("d", "pass"),
+        _r("down", "revise", no_verdict=True),
+    ])
+    assert d["decision"] == "REVISE"
+    # The no-verdict seat is named under its own label, NOT under "abstained".
+    assert "no-verdict (timeout/no-report): down" in d["rationale"]
+    assert "non-scoring (abstained): down" not in d["rationale"]
+
+
+def test_rule_no_verdict_seat_is_named_separately_from_abstained():
+    # A panel with BOTH a no-verdict seat and a parse_error seat must name them
+    # under separate labels in the one-line summary — an operator must be able to
+    # tell "the lane was down" apart from "the lane answered but malformed".
+    d = pgp.apply_panel_rule([
+        _r("a", "pass"), _r("b", "pass"),
+        _r("malformed", "revise", parse_error=True),
+        _r("down", "revise", no_verdict=True),
+    ])
+    assert d["decision"] == "REVISE"  # no-verdict blocks PASS
+    assert "no-verdict (timeout/no-report): down" in d["rationale"]
+    assert "non-scoring (abstained): malformed" in d["rationale"]
+
+
+def test_rule_all_no_verdict_returns_infra_fail():
+    # Every seat is no-verdict: the plan was NOT reviewed at all. This is the
+    # infrastructure floor (INFRA_FAIL), never a content verdict — so an
+    # all-seats-down panel does not read as "revise the plan".
+    d = pgp.apply_panel_rule([
+        _r("a", "revise", no_verdict=True),
+        _r("b", "revise", no_verdict=True),
+        _r("c", "revise", no_verdict=True),
+    ])
+    assert d["decision"] == "INFRA_FAIL"
+    assert "NOT reviewed" in d["rationale"]
+    assert "infrastructure failure" in d["rationale"]
+    assert "no-verdict (timeout/no-report): a, b, c" in d["rationale"]
+
+
+def test_rule_parse_error_still_abstains_unchanged():
+    # The 2026-06-24 behaviour is unchanged: a REAL report whose fence would not
+    # parse still abstains (non-scoring) and does NOT block a substantive PASS.
+    # This is the core distinction — parse_error and no_verdict are separate.
+    d = pgp.apply_panel_rule([_r("a", "pass"), _r("b", "pass"), _r("c", "revise", parse_error=True)])
+    assert d["decision"] == "PASS"
+    assert "non-scoring (abstained): c" in d["rationale"]
+    assert "no-verdict" not in d["rationale"]
+
+
+def test_rule_no_verdict_with_zero_readable_is_infra_fail_not_revise():
+    # 1 parse_error (abstained) + 2 no-verdict -> 0 readable -> INFRA_FAIL, and
+    # the summary names both categories separately.
+    d = pgp.apply_panel_rule([
+        _r("malformed", "revise", parse_error=True),
+        _r("down1", "revise", no_verdict=True),
+        _r("down2", "revise", no_verdict=True),
+    ])
+    assert d["decision"] == "INFRA_FAIL"
+    assert "non-scoring (abstained): malformed" in d["rationale"]
+    assert "no-verdict (timeout/no-report): down1, down2" in d["rationale"]
+
+
+def test_rule_solo_no_verdict_is_infra_fail():
+    # A single-seat panel where that seat is no-verdict -> 0 readable -> INFRA_FAIL.
+    d = pgp.apply_panel_rule([_r("solo", "revise", no_verdict=True)])
+    assert d["decision"] == "INFRA_FAIL"
+    assert "no-verdict (timeout/no-report): solo" in d["rationale"]
 
 
 def test_run_panel_all_lanes_down_returns_infra_fail(tmp_path, monkeypatch):
@@ -861,24 +942,28 @@ def test_worker_authored_report_with_fence_is_parsed_not_overridden(tmp_path):
 
 
 def test_missing_report_maps_to_parse_error_revise(tmp_path):
-    """When the worker-authored report has no verdict fence, parse_error -> revise.
+    """When the worker-authored report has no verdict fence (and is NOT a
+    governance-synthesized body), parse_error -> revise.
 
-    The synthesized fallback (from govern) also has no fence. Either way
-    _read_report returns a fenceless body and parse_verdict must surface a clean
-    parse_error — not raise, not return a phantom pass.
+    A REAL worker report that answered but forgot the fence is a parse_error
+    (the 2026-06-24 fail-safe). A governance-SYNTHESIZED body (the lane timed out)
+    is a no-verdict — tested separately in test_synthesized_report_is_no_verdict.
+    Both surface as non-passing; the distinction matters for the summary line and
+    the seat ledger.
     """
     did = "plan-gate-feat-nofence-abc12345"
 
     def _dispatching_worker(provider, model_arg, instruction, dispatch_id):
-        # Simulate: the dispatcher returns a synthesized body (no verdict fence).
+        # A real worker report with no verdict fence — and NO synthesized marker,
+        # so this is a parse_error, not a no-verdict.
         return (
             "# Dispatch plan-gate-feat-nofence-abc12345\n\n"
             "- Lane: tmux_interactive\n"
-            "- contract_status: synthesized\n\n"
-            "## Summary\n\nNo commit on branch; worker emitted status=timeout.\n\n"
+            "- contract_status: authored\n\n"
+            "## Summary\n\nI reviewed the plan but forgot the verdict fence.\n\n"
             "## Changes\n\nNo git diff available.\n\n"
-            "## Verification\n\nNone — synthesized.\n\n"
-            "## Open Items\n\nWorker did not author unified_reports/{}.md.\n".format(did)
+            "## Verification\n\nNone.\n\n"
+            "## Open Items\n\nNone.\n"
         )
 
     doc = tmp_path / "plan.md"
@@ -893,6 +978,7 @@ def test_missing_report_maps_to_parse_error_revise(tmp_path):
     )
     opus = next(p for p in out["panelists"] if p["label"] == "opus")
     assert opus["parse_error"] is True
+    assert opus["no_verdict"] is False
     # A single-panelist panel with a parse_error cannot pass (no_verdict guard) —
     # and with ZERO readable verdicts the outcome is the infrastructure floor
     # (INFRA_FAIL: the plan was not reviewed), not a content REVISE.
@@ -917,6 +1003,167 @@ def test_fenceless_lane_abstains_not_counted_as_phantom_pass(tmp_path):
     assert glm["parse_error"] is True
     assert glm["verdict"] != "pass", "a fenceless lane must never be counted as a pass"
     assert "non-scoring (abstained): glm-5.2-harness" in out["summary"]["rationale"]
+
+
+# --------------------------------------------------------------------------
+# OI-1066: a governance-synthesized report (the lane timed out / never
+# authored a file) is detected as NO-VERDICT by the marker, NOT as a parse
+# error. A panel where one seat is no-verdict cannot certify a PASS.
+# --------------------------------------------------------------------------
+
+def _make_synthesized_report(dispatch_id: str) -> str:
+    """A body identical in shape to what dispatch_govern._synthesize writes:
+    valid contract headings, NO verdict fence, and the SYNTHESIZED_REPORT_MARKER
+    the panel detects by exact-match."""
+    return (
+        f"# Dispatch {dispatch_id}\n\n"
+        "- Lane: tmux_interactive\n"
+        "- Status: timeout\n"
+        "- contract_status: synthesized\n"
+        f"- {pgp.SYNTHESIZED_REPORT_MARKER}\n\n"
+        "## Summary\n\n"
+        "No commit on branch; worker emitted status=timeout. "
+        f"Body synthesized by governance layer (no worker report file). [{pgp.SYNTHESIZED_REPORT_MARKER}]\n\n"
+        "## Changes\n\nNo git diff available.\n\n"
+        "## Verification\n\nNone — interactive lane (tmux-spawn). "
+        f"Report synthesized by governance layer; worker did not author a report file. [{pgp.SYNTHESIZED_REPORT_MARKER}]\n\n"
+        f"## Open Items\n\nReport synthesized by tmux lane; worker did not author "
+        f"unified_reports/{dispatch_id}.md. [{pgp.SYNTHESIZED_REPORT_MARKER}]\n"
+    )
+
+
+def test_synthesized_report_is_no_verdict_not_parse_error(tmp_path):
+    """A synthesized report (marker present, no fence) is classified no_verdict,
+    NOT parse_error. parse_error is reserved for a REAL report whose fence
+    would not parse (unchanged 2026-06-24 behaviour)."""
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "claude":
+            return _make_synthesized_report(dispatch_id)
+        return _make_report_with_fence("pass")
+
+    out = pgp.run_panel(doc, track_id="feat-synth", project_id="p1", dispatcher=_disp)
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["no_verdict"] is True, "a synthesized report must classify as no-verdict"
+    assert opus["parse_error"] is False, (
+        "a synthesized report must NOT be a parse_error — that conflates "
+        "'the lane never saw the plan' with 'the lane answered but malformed'"
+    )
+
+
+def test_panel_with_one_synthesized_seat_does_not_pass(tmp_path):
+    """A panel of five where one seat timed out (synthesized report) and the rest
+    pass does NOT certify a PASS — the measured OI-1066 symptom on
+    mission-control. The summary distinguishes no-verdict from abstained."""
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "claude":
+            return _make_synthesized_report(dispatch_id)  # timed out
+        return _make_report_with_fence("pass")
+
+    out = pgp.run_panel(doc, track_id="feat-5panel", project_id="p1", dispatcher=_disp)
+    assert out["decision"] != "PASS", "a panel with a no-verdict seat must not PASS"
+    assert out["decision"] == "REVISE"
+    summary = out["summary"]["rationale"]
+    assert "no-verdict (timeout/no-report): opus" in summary
+    # The other four seats are not folded into "abstained".
+    assert "non-scoring (abstained)" not in summary
+
+
+def test_panel_all_synthesized_returns_infra_fail(tmp_path):
+    """A panel where every seat is a synthesized (no-verdict) report returns
+    INFRA_FAIL — the plan was never reviewed."""
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        return _make_synthesized_report(dispatch_id)
+
+    out = pgp.run_panel(doc, track_id="feat-alldown", project_id="p1", dispatcher=_disp)
+    assert out["decision"] == "INFRA_FAIL"
+    assert all(p["no_verdict"] for p in out["panelists"])
+    assert "NOT reviewed" in out["summary"]["rationale"]
+
+
+def test_synthesized_no_verdict_is_retryable(tmp_path, monkeypatch):
+    """A no-verdict seat is retryable just like a parse_error: a lane that
+    times out once may deliver on a fresh dispatch id. The retry must continue
+    past a no-verdict result, not treat it as a final readable verdict."""
+    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls = {"claude": 0}
+
+    def _disp(provider, model_arg, instruction, dispatch_id):
+        if provider == "claude":
+            calls["claude"] += 1
+            if calls["claude"] == 1:
+                return _make_synthesized_report(dispatch_id)  # first attempt: timeout
+            return _make_report_with_fence("pass")  # retry succeeds
+        return _make_report_with_fence("pass")
+
+    out = pgp.run_panel(doc, track_id="feat-retry", project_id="p1", dispatcher=_disp)
+    assert calls["claude"] == 2  # initial + one retry
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["no_verdict"] is False  # retry recovered a readable verdict
+    assert opus["verdict"] == "pass"
+    assert out["decision"] == "PASS"
+
+
+def test_seat_ledger_records_distinct_value_for_no_verdict(tmp_path):
+    """The seat ledger records its own value for a no-verdict seat so historical
+    analysis can separate 'the model abstained' (parse_error) from 'the lane was
+    down' (no-verdict)."""
+    import json
+
+    ledger = tmp_path / "seats.ndjson"
+    # A repo root is needed for _resolve_seat_ledger_path; pass the path explicitly.
+    results = [
+        pgp.PanelistResult(label="a", provider="claude", verdict="pass", dispatched=True),
+        pgp.PanelistResult(label="malformed", provider="kimi", verdict="revise",
+                           dispatched=True, parse_error=True, raw_text="bad json"),
+        pgp.PanelistResult(label="down", provider="glm-harness", verdict="revise",
+                           dispatched=True, no_verdict=True),
+    ]
+    pgp._emit_seat_records(
+        results, track_id="feat-ledger", project_id="p1", seat_ledger_path=ledger,
+    )
+    lines = [json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+    assert len(lines) == 3
+    by_label = {r["panelist_id"]: r for r in lines}
+    # Scoring seat records its real verdict.
+    assert by_label["a"]["verdict"] == "pass"
+    assert by_label["a"]["no_verdict"] is False
+    # Parse-error seat records abstain (unchanged 2026-06-24 behaviour).
+    assert by_label["malformed"]["verdict"] == "abstain"
+    assert by_label["malformed"]["parse_error"] is True
+    assert by_label["malformed"]["no_verdict"] is False
+    # No-verdict seat records its OWN value, distinct from abstain.
+    assert by_label["down"]["verdict"] == "no-verdict"
+    assert by_label["down"]["no_verdict"] is True
+
+
+def test_seat_ledger_no_verdict_value_is_not_abstain(tmp_path):
+    """Regression guard: the no-verdict seat's ledger value must NEVER be 'abstain'
+    — that was the exact conflation OI-1066 fixes."""
+    import json
+
+    ledger = tmp_path / "seats.ndjson"
+    results = [
+        pgp.PanelistResult(label="down", provider="claude", verdict="revise",
+                           dispatched=True, no_verdict=True),
+    ]
+    pgp._emit_seat_records(
+        results, track_id="feat-ledger2", project_id="p1", seat_ledger_path=ledger,
+    )
+    record = json.loads(ledger.read_text().splitlines()[0])
+    assert record["verdict"] != "abstain"
+    assert record["verdict"] == "no-verdict"
 
 
 # --------------------------------------------------------------------------
@@ -1482,3 +1729,273 @@ def test_claude_lane_report_path_uses_resolved_data_dir_when_none(tmp_path, monk
     assert len(seen_bases) == 1
     assert seen_bases[0] == fake_base
     assert seen_bases[0] is not None
+
+
+# --------------------------------------------------------------------------
+# OI-1057: configurable panel composition (configs/plan_gate_panel.yaml).
+# The composition moved from a code constant to a config file, threaded through
+# planning_cli's plan-gate run -> run_panel. Behaviour-neutral on this PR: the
+# seeded config reproduces DEFAULT_PANEL exactly.
+# --------------------------------------------------------------------------
+
+def _write_config(tmp_path: Path, seats_yaml: str) -> Path:
+    cfg = tmp_path / "plan_gate_panel.yaml"
+    cfg.write_text(seats_yaml, encoding="utf-8")
+    return cfg
+
+
+def test_load_panel_seats_parses_config_reproducing_default_panel(tmp_path):
+    # The shipped config under configs/ must parse to the same seat list as
+    # DEFAULT_PANEL, so the PR is behaviour-neutral by default.
+    repo_root = Path(__file__).resolve().parent.parent
+    shipped = repo_root / "configs" / "plan_gate_panel.yaml"
+    assert shipped.is_file(), "configs/plan_gate_panel.yaml must exist"
+    seats = pgp.load_panel_seats(shipped)
+    assert seats == pgp.DEFAULT_PANEL
+    # every seat carries the three documented keys
+    for s in seats:
+        assert set(s.keys()) == {"label", "provider", "model_arg"}
+
+
+def test_load_panel_seats_absent_file_falls_back_to_default_panel(tmp_path):
+    absent = tmp_path / "does-not-exist.yaml"
+    assert pgp.load_panel_seats(absent) == pgp.DEFAULT_PANEL
+
+
+def test_load_panel_seats_rejects_unknown_provider_with_naming_error(tmp_path):
+    cfg = _write_config(tmp_path, (
+        "version: 1\n"
+        "seats:\n"
+        "  - label: bogus\n"
+        "    provider: not-a-real-provider\n"
+        "    model_arg: whatever\n"
+    ))
+    with pytest.raises(ValueError) as excinfo:
+        pgp.load_panel_seats(cfg)
+    msg = str(excinfo.value)
+    # names the offending seat AND lists the valid providers
+    assert "label='bogus'" in msg or "seat #0" in msg
+    assert "not-a-real-provider" in msg
+    assert "claude" in msg and "glm-harness" in msg  # a couple of valid members
+
+
+def test_load_panel_seats_rejects_missing_key(tmp_path):
+    cfg = _write_config(tmp_path, (
+        "version: 1\n"
+        "seats:\n"
+        "  - label: incomplete\n"
+        "    provider: claude\n"
+    ))
+    with pytest.raises(ValueError, match="missing required key"):
+        pgp.load_panel_seats(cfg)
+
+
+def test_filter_panel_seats_filters_to_requested_labels():
+    seats = pgp.DEFAULT_PANEL
+    filtered = pgp.filter_panel_seats(seats, ["opus", "glm-5.2-harness"])
+    labels = [s["label"] for s in filtered]
+    assert labels == ["opus", "glm-5.2-harness"]  # configured order, not request order
+
+
+def test_filter_panel_seats_rejects_unknown_label_listing_configured():
+    configured = [s["label"] for s in pgp.DEFAULT_PANEL]
+    with pytest.raises(ValueError) as excinfo:
+        pgp.filter_panel_seats(pgp.DEFAULT_PANEL, ["opus", "ghost"])
+    msg = str(excinfo.value)
+    assert "ghost" in msg
+    # lists the configured labels so the operator sees what is available
+    for lbl in configured:
+        assert lbl in msg
+
+
+def test_cmd_plan_gate_run_passes_filtered_panel_to_run_panel(tmp_path, monkeypatch):
+    """--panel-seats filters the configured panel and run_panel receives exactly
+    those seats. Asserts on the dispatcher mock's calls (the seats it was
+    dispatched with), not on a log line."""
+    import argparse
+
+    # An on-disk config that reproduces the default so load_panel_seats is
+    # deterministic and independent of the repo-root file.
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+
+    captured_seats: list = []
+
+    def _tracking_dispatcher(provider, model_arg, instruction, dispatch_id):
+        captured_seats.append({"provider": provider, "model_arg": model_arg})
+        return _make_report_with_fence("pass")
+
+    # Patch run_panel to capture the panel argument it was called with.
+    seen_panels: list = []
+
+    def _fake_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_panels.append(panel)
+        # dispatch each requested seat through the tracker so we also assert
+        # on the dispatcher mock's calls (the seats dispatched), not a log line.
+        for seat in panel:
+            _tracking_dispatcher(seat["provider"], seat["model_arg"], "", "did")
+        return {
+            "track_id": track_id, "project_id": project_id, "decision": "PASS",
+            "summary": {"decision": "PASS", "pass_count": len(panel),
+                        "revise_count": 0, "block_count": 0, "rationale": "ok"},
+            "panelists": [], "doc_truncation": {"truncated": False},
+        }
+
+    monkeypatch.setattr(pgp, "run_panel", _fake_run_panel)
+
+    # Minimal track/DB bootstrap so cmd_plan_gate_run reaches run_panel.
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-seats", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-seats", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats="opus,glm-5.2-harness",
+    )
+    # A PASS resolves the plan blocker; stub the resolver so unblock is honest.
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    rc = planning_cli.cmd_plan_gate_run(args)
+
+    assert rc == 0
+    assert len(seen_panels) == 1
+    dispatched_labels = [s["provider"] for s in captured_seats]
+    # exactly the two requested seats, in configured order
+    assert dispatched_labels == ["claude", "glm-harness"]
+    assert [s["label"] for s in seen_panels[0]] == ["opus", "glm-5.2-harness"]
+
+
+def test_cmd_plan_gate_run_rejects_unknown_panel_seat_label(tmp_path, monkeypatch):
+    """An unknown --panel-seats label fails loud (exit 1) before any panel runs."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    run_called = {"n": 0}
+    monkeypatch.setattr(pgp, "run_panel", lambda *a, **k: run_called.__setitem__("n", run_called["n"] + 1))
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-bad", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-bad", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats="opus,ghost-seat",
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 1
+    assert run_called["n"] == 0  # the panel never ran
+
+
+def _fake_pass_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+    """A run_panel stub that always certifies PASS with the panel it was given."""
+    return {
+        "track_id": track_id, "project_id": project_id, "decision": "PASS",
+        "summary": {"decision": "PASS", "pass_count": len(panel),
+                    "revise_count": 0, "block_count": 0, "rationale": "ok"},
+        "panelists": [], "doc_truncation": {"truncated": False},
+    }
+
+
+def test_cmd_plan_gate_run_light_plan_runs_fewer_seats_than_heavy(tmp_path, monkeypatch):
+    """VNX_PLAN_GATE_COMPLEX_ONLY=1: a LIGHT plan runs the reduced 2-seat panel
+    while a HEAVY plan keeps the full panel — the scope read-site sizes the gate."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
+    seen_panels: list = []
+
+    def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_panels.append(panel)
+        return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
+                                    panel=panel, data_dir=data_dir, **kw)
+
+    monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-light", "p1", "t", "shipped", phase="queued")
+    tracks.create_track(state_dir, "feat-heavy", "p1", "t", "shipped", phase="queued")
+
+    light_doc = tmp_path / "light.md"
+    light_doc.write_text("## Approach\nAdd a rename button to the dashboard view.\n", encoding="utf-8")
+    heavy_doc = tmp_path / "heavy.md"
+    heavy_doc.write_text("## Approach\nTouch dispatch_cli.py and a schema migration.\n", encoding="utf-8")
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-light", project_id="p1", state_dir=str(state_dir),
+        doc=str(light_doc), json=False, panel_seats=None,
+    ))
+    assert rc == 0
+    assert [s["label"] for s in seen_panels[0]] == list(pge.LIGHT_PANEL_LABELS)
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-heavy", project_id="p1", state_dir=str(state_dir),
+        doc=str(heavy_doc), json=False, panel_seats=None,
+    ))
+    assert rc == 0
+    assert [s["label"] for s in seen_panels[1]] == [m["label"] for m in pgp.DEFAULT_PANEL]
+
+
+def test_cmd_plan_gate_run_light_pass_writes_run_evidence_with_seats(tmp_path, monkeypatch):
+    """A successful LIGHT run writes a durable plan_gate_pass with resolver=run
+    carrying the seat count + scope that certified it — a light pass is a real pass."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
+    monkeypatch.setattr(pgp, "run_panel", _fake_pass_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-light", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "light.md"
+    doc.write_text("## Approach\nAdd a rename button to the dashboard view.\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-light", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, repo_root=str(tmp_path),
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 0
+
+    ledger = tmp_path / ".vnx-attest" / "plan-gates.ndjson"
+    assert ledger.exists()
+    records = [rec for _ln, rec, _h in walk_chain(ledger)]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["type"] == "plan_gate_pass"
+    assert rec["track_id"] == "feat-light"
+    assert rec["resolver"] == "run"
+    assert rec["seats"] == len(pge.LIGHT_PANEL_LABELS)
+    assert rec["scope"] == "light"
+
+
+def test_cmd_plan_gate_run_pass_with_failed_evidence_is_loud_not_silent(tmp_path, monkeypatch, capsys):
+    """A PASS whose durable plan_gate_pass write fails must stay a PASS (exit 0)
+    but say so loudly on stderr - a light pass is only a real pass when the record
+    lands (the merge gate checks it), so a dropped write must not be quiet."""
+    import argparse
+    import plan_gate_evidence
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setattr(pgp, "run_panel", _fake_pass_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    # The evidence write fails (returns None) while the gate itself passes.
+    monkeypatch.setattr(plan_gate_evidence, "emit_plan_gate_pass", lambda **kw: None)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-ev", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nAdd a button to the dashboard.\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        track_id="feat-ev", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, repo_root=str(tmp_path),
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 0  # gate resolution is NOT broken by the failed evidence write
+    captured = capsys.readouterr()
+    assert "plan_gate_pass evidence NOT written" in captured.err
+    # Nothing durable landed in the repo ledger.
+    assert not (tmp_path / ".vnx-attest" / "plan-gates.ndjson").exists()

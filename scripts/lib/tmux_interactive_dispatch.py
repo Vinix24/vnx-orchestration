@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
 from pr_enforcement import PrEnforcementResult  # noqa: E402
 from worker_pane_classifier import classify_worker_pane  # noqa: E402
+from vnx_paths import _resolve_vnx_home  # noqa: E402
 
 # Work-started gate outcome codes (OI-863): a worker blocked on a permission
 # prompt is ALIVE and recoverable — one relayed answer saves it — so it must not
@@ -64,11 +65,30 @@ try:
         worker_permission_enforcement_enabled,
         build_claude_scope_args as _wp_build_claude_scope_args,
         resolve_worker_profile as _wp_resolve_worker_profile,
+        classify_permission_posture,
     )
     _WP_AVAILABLE = True
 except Exception:  # pragma: no cover - sibling import is available in-tree
     EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
     _WP_AVAILABLE = False
+
+    def classify_permission_posture(argv, role=None):  # type: ignore[misc]
+        # OI-864 fallback: classify from the actual argv tokens, never by
+        # re-reading env vars. Mirrors worker_permissions.classify_permission_posture.
+        if "--dangerously-skip-permissions" in argv:
+            return {"permission_posture": "blanket-skip"}
+        if "--permission-mode" in argv or "--allowedTools" in argv:
+            allow_count = 0
+            if "--allowedTools" in argv:
+                idx = argv.index("--allowedTools")
+                if idx + 1 < len(argv):
+                    allow_count = len([p for p in argv[idx + 1].split(",") if p.strip()])
+            return {
+                "permission_posture": "scoped-allowlist",
+                "permission_profile": role or "code-worker",
+                "permission_allow_pattern_count": allow_count,
+            }
+        return {"permission_posture": "attached-interactive"}
 
     def worker_scoped_enabled() -> bool:  # type: ignore[misc]
         return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
@@ -319,14 +339,42 @@ def _sanitize_session_name(raw: str) -> str:
 # Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default OFF)
 # ---------------------------------------------------------------------------
 
-# Command resolves the hook relative to the worktree it fires in (git rev-parse
-# returns the worktree root there) — same pattern as the existing spawn-blocker
-# hooks in .claude/settings.json.
-_WORKER_SCOPE_HOOK_COMMAND = (
-    "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
-    "/scripts/hooks/pretooluse_worker_scope_enforce.sh\"'"
-)
+# Command anchors the hook at the FABRIC install root, never the worktree or
+# consumer root. The worker-scope enforcement script ships only with the fabric;
+# a dispatch worktree created from a consumer repo has no scripts/hooks/, so the
+# old git-rev-parse command failed with a silent "No such file or directory" per
+# tool call and the guard did nothing (OI-1089 finding 1). The command bakes in
+# the fabric-absolute path (resolved via vnx_paths._resolve_vnx_home) and fails
+# LOUD when the artifact is missing while still exiting 0, so a broken install is
+# visible but never blocks a tool call. The path travels to the inner shell via
+# the VNX_WORKER_SCOPE_HOOK environment variable (shlex.quoted at the export),
+# never through bash -c string interpolation, so shell metacharacters in the
+# fabric path cannot alter the executed command (PR #1413).
 _WORKER_SCOPE_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit"
+
+
+def _worker_scope_hook_command() -> str:
+    """The PreToolUse hook command, anchored at the fabric install root.
+
+    The hook path is embedded at registration time so the command needs no
+    git/consumer-relative lookup at fire time. It is handed to the inner shell
+    via an environment variable rather than interpolated into the bash -c body:
+    a fabric path containing shell metacharacters (space, ``;``, ``$(...)``) is
+    passed literally and can never change what the command executes. The value
+    is shlex.quoted at the export assignment so it survives the outer shell
+    parse intact. The fail-loud guard keeps the hook non-blocking (exit 0) but
+    makes a missing artifact unmistakable.
+    """
+    hook = _resolve_vnx_home() / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+    quoted_hook = shlex.quote(str(hook))
+    return (
+        "export VNX_WORKER_SCOPE_HOOK={quoted_hook}; "
+        "bash -c 'if [ -f \"$VNX_WORKER_SCOPE_HOOK\" ]; then "
+        "exec bash \"$VNX_WORKER_SCOPE_HOOK\"; else "
+        "printf \"[vnx] worker-scope hook artifact MISSING at %s; "
+        "worker-scope guard is NOT enforcing\\n\" \"$VNX_WORKER_SCOPE_HOOK\" >&2; "
+        "exit 0; fi'"
+    ).format(quoted_hook=quoted_hook)
 
 
 def _worker_scope_hook_entry() -> dict:
@@ -336,7 +384,7 @@ def _worker_scope_hook_entry() -> dict:
         "hooks": [
             {
                 "type": "command",
-                "command": _WORKER_SCOPE_HOOK_COMMAND,
+                "command": _worker_scope_hook_command(),
                 "timeout": 5000,
             }
         ],
@@ -379,7 +427,7 @@ def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
         isinstance(entry, dict)
         and any(
             isinstance(hook, dict)
-            and hook.get("command") == _WORKER_SCOPE_HOOK_COMMAND
+            and hook.get("command") == _worker_scope_hook_command()
             for hook in entry.get("hooks", [])
         )
         for entry in pre_tool_use
@@ -449,6 +497,13 @@ class TmuxInteractiveDispatch:
 
         The event is the detection surface T0 uses to answer the prompt (one
         keystroke) instead of letting the worker burn its whole deadline.
+
+        OI-1007 escalation bridge: alongside the event, a durable escalation
+        record is written via ``worker_permission_relay.write_escalation`` so the
+        prompt is ALSO surfaced to ``vnx permission escalations`` / ``vnx
+        permission approve`` — independent of the flag-gated relay, which may not
+        be running on this lane. The reason ``awaiting_permission`` records that
+        the lane's own pane detection raised it, not a relay tick.
         """
         if dispatch_id in self._awaiting_permission_emitted:
             return
@@ -460,6 +515,34 @@ class TmuxInteractiveDispatch:
             reason=reason,
             metadata={"pane_id": pane_id},
         )
+        try:
+            from worker_permission_relay import (  # noqa: PLC0415
+                parse_pending_command,
+                write_escalation,
+            )
+            cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+            content = cap.stdout if cap.returncode == 0 else ""
+            command = parse_pending_command(content)
+            if command:
+                write_escalation(
+                    dispatch_id,
+                    command,
+                    "awaiting_permission",
+                    state_dir=self._state_dir,
+                )
+                logger.info(
+                    "interactive: awaiting-permission escalation written "
+                    "dispatch=%s cmd=%r",
+                    dispatch_id,
+                    command,
+                )
+        except Exception as exc:  # noqa: BLE001 — the bridge is best-effort; never raise
+            logger.debug(
+                "interactive: awaiting-permission escalation bridge failed "
+                "for %s (%s)",
+                dispatch_id,
+                exc,
+            )
 
     @staticmethod
     def _resolve_project_root() -> Path:
@@ -760,6 +843,7 @@ class TmuxInteractiveDispatch:
         token_usage: "dict | None" = None,
         role: "str | None" = None,
         session_id: "str | None" = None,
+        permission_posture: "dict | None" = None,
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
@@ -775,6 +859,11 @@ class TmuxInteractiveDispatch:
 
         ``session_id``: pre-assigned worker session UUID (F1.1), threaded through to
         the dispatch_metadata stamp.
+
+        ``permission_posture`` (OI-864): forwarded to GovernSpec so a
+        lane-synthesized fallback receipt (worker never emitted its own,
+        ``ensure_receipt``) still carries the real spawn-time posture instead
+        of omitting it or re-deriving it from env vars a second time.
         """
         try:
             from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
@@ -796,6 +885,7 @@ class TmuxInteractiveDispatch:
             worktree_path=worktree_path,
             model=model,
             role=role,
+            permission_posture=permission_posture,
         )
         raw = GovernRaw(
             receipt=receipt,
@@ -1008,7 +1098,13 @@ class TmuxInteractiveDispatch:
         return result
 
     def _build_completion_protocol(
-        self, dispatch_id: str, label: str, model: str = "unknown", *, integrity=None
+        self,
+        dispatch_id: str,
+        label: str,
+        model: str = "unknown",
+        *,
+        integrity=None,
+        permission_posture: "dict | None" = None,
     ) -> str:
         """Footer instructing the worker to emit a clean receipt directly.
 
@@ -1021,6 +1117,15 @@ class TmuxInteractiveDispatch:
         - ``timestamp`` is NOT generated at body-assembly time: each command uses
           shell ``$(date -u +%Y-%m-%dT%H:%M:%SZ)`` so the timestamp records the
           execution moment, not when the dispatch was launched.
+
+        ``permission_posture`` (OI-864): the dict returned by
+        ``classify_permission_posture()`` from the ACTUAL flags assembled for
+        this spawn's ``launch_cmd`` — never re-derived from env vars here.
+        Baked in as ``permission_posture`` / ``permission_profile`` /
+        ``permission_allow_pattern_count`` alongside the other spawn
+        properties (model/lane/terminal) this receipt already carries. Only
+        stamped when provided, so callers that do not compute it (e.g. direct
+        unit tests of this method) keep a byte-identical receipt shape.
         """
         append_receipt = self._project_root / "scripts" / "append_receipt.py"
         # report_path is deterministic — include it so the receipt->report linkage
@@ -1065,6 +1170,24 @@ class TmuxInteractiveDispatch:
             # Only emitted when the flag is ON so flag-off receipts are byte-identical.
             if worker_permission_enforcement_enabled():
                 receipt_dict["permission_enforcement"] = "enforced"
+            # OI-864: the actual spawn-time permission posture, derived from the
+            # real launch flags (see classify_permission_posture). Distinct from
+            # (and more precise than) permission_enforcement above, which only
+            # ever says "enforced" or omits itself — it cannot show blanket-skip
+            # vs scoped-allowlist, and re-reads the env independently of what
+            # flags this spawn actually used.
+            if permission_posture:
+                receipt_dict["permission_posture"] = permission_posture.get(
+                    "permission_posture"
+                )
+                if permission_posture.get("permission_profile") is not None:
+                    receipt_dict["permission_profile"] = permission_posture[
+                        "permission_profile"
+                    ]
+                if permission_posture.get("permission_allow_pattern_count") is not None:
+                    receipt_dict["permission_allow_pattern_count"] = permission_posture[
+                        "permission_allow_pattern_count"
+                    ]
             # Input-side audit closure (final_prompt_integrity). Only baked in when
             # integrity was computed so the receipt shape stays byte-identical
             # otherwise. The worker echoes these back verbatim in its receipt.
@@ -1833,6 +1956,8 @@ class TmuxInteractiveDispatch:
         baseline_backstop: "bool | None" = None,
         pane_id: "str | None" = None,
         label: "str | None" = None,
+        raw_log_path: "Path | None" = None,
+        session: str = "",
     ) -> "dict | None":
         """Poll signals 1–3 until a NEW completion appears beyond the baseline.
 
@@ -1848,6 +1973,16 @@ class TmuxInteractiveDispatch:
           that hangs on a prompt MID-RUN is surfaced long before the deadline,
           instead of burning the full ``deadline_seconds`` invisible.
 
+        *raw_log_path* (optional): when provided and the file exists, a
+          FileProgressHeartbeat monitors the pipe-pane log for growth.  If the log
+          stops growing for longer than the configured silence threshold, the
+          worker is killed as stuck (OI-944, OI-1007).  When absent or None
+          (e.g. VNX_TMUX_CAPTURE=0), the heartbeat is blind — the pane-content
+          fallback (permission-prompt detection) is the only guard.
+
+        *session*: tmux session name, required when raw_log_path is provided so
+          the heartbeat can kill the session on silence timeout.
+
         Priority: signal 1 (canonical) > signal 2 (pending) > signal 3 (backstop).
         Returns the best matching receipt, or None on deadline.
         """
@@ -1860,6 +1995,23 @@ class TmuxInteractiveDispatch:
             _bl_backstop: bool = self._is_report_backstop_active(dispatch_id)
         else:
             _bl_backstop = baseline_backstop
+
+        # OI-944 / OI-1007: worker heartbeat — monitor the pipe-pane log for
+        # growth.  If the log stops growing for longer than the configured silence
+        # threshold, the worker is stuck and must be killed.
+        _heartbeat = None
+        if raw_log_path is not None and raw_log_path.exists():
+            try:
+                from worker_heartbeat import FileProgressHeartbeat  # noqa: PLC0415
+                _heartbeat = FileProgressHeartbeat(
+                    raw_log_path, dispatch_id,
+                )
+            except Exception as _hb_exc:
+                logger.debug(
+                    "interactive: heartbeat init failed for %s: %s",
+                    dispatch_id, _hb_exc,
+                )
+
         while True:
             if baseline_pending_ids is not None:
                 # P0-2: per-source baseline — correct guard for each mutable source
@@ -1905,13 +2057,60 @@ class TmuxInteractiveDispatch:
                 # blocked on a prompt produces no receipt; surface it the moment the
                 # pane betrays it (at most once per dispatch) instead of waiting the
                 # full deadline invisible.
+                _awaiting_permission = False
                 if pane_id is not None:
                     _pane_state = self._classify_pane(pane_id)
-                    if _pane_state.is_awaiting_permission and label is not None:
+                    _awaiting_permission = _pane_state.is_awaiting_permission
+                    if _awaiting_permission and label is not None:
                         self._emit_awaiting_permission(
                             dispatch_id, label, pane_id,
                             "permission prompt during receipt wait",
                         )
+                # OI-944 / OI-1007: heartbeat silence check.  If the pipe-pane
+                # log has stopped growing for longer than the silence threshold,
+                # the worker is stuck — kill it and write a terminal failure.
+                # EXCEPTION (OI-863): a recoverable awaiting_permission worker is
+                # NOT a silent/stalled worker — its log has legitimately stopped
+                # growing while it waits on ONE keystroke. Killing it would discard
+                # a rescueable dispatch, so the heartbeat is skipped while the pane
+                # shows a permission prompt (which escalates instead).
+                if _heartbeat is not None and not _awaiting_permission:
+                    _hb_verdict = _heartbeat.check()
+                    if _hb_verdict.is_silent:
+                        logger.warning(
+                            "interactive: heartbeat silence detected for %s "
+                            "(%.0fs silent, threshold=%.0fs) — killing worker",
+                            dispatch_id,
+                            _hb_verdict.silence_seconds,
+                            _hb_verdict.threshold_seconds,
+                        )
+                        # Write a failure report so the audit trail records
+                        # the heartbeat kill with the reason and timing.
+                        try:
+                            from worker_heartbeat import build_heartbeat_failure_report  # noqa: PLC0415
+                            _hb_report = build_heartbeat_failure_report(
+                                dispatch_id=dispatch_id,
+                                verdict=_hb_verdict,
+                                terminal_id=label or "",
+                            )
+                            _reports_dir = (
+                                self._state_dir.parent / "unified_reports"
+                            )
+                            _reports_dir.mkdir(parents=True, exist_ok=True)
+                            _report_path = _reports_dir / f"{dispatch_id}.md"
+                            _report_path.write_text(_hb_report, encoding="utf-8")
+                            logger.info(
+                                "interactive: heartbeat failure report written to %s",
+                                _report_path,
+                            )
+                        except Exception as _hb_write_exc:
+                            logger.warning(
+                                "interactive: heartbeat failure report write "
+                                "failed for %s: %s",
+                                dispatch_id,
+                                _hb_write_exc,
+                            )
+                        return None
                 time.sleep(poll_interval)
                 continue
 
@@ -2335,6 +2534,21 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                 )
 
+            # OI-864: classify the permission posture from the REAL flags this
+            # spawn is about to launch with — not by re-reading
+            # VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED a second time (two
+            # independent env reads can diverge from what the builder actually
+            # assembled). Computed once here from the guard-validated launch_cmd
+            # and threaded to both the completion-protocol receipt (worker-authored
+            # path) and every govern()/ensure_receipt call (synthesized fallback
+            # path) below, so both receipt paths agree on the same single source
+            # of truth.
+            try:
+                _launch_tokens = shlex.split(launch_cmd)
+            except ValueError:
+                _launch_tokens = launch_cmd.split()
+            permission_posture = classify_permission_posture(_launch_tokens, role)
+
             # Inject hook-signal env so the worker's SessionStart/UserPromptSubmit/Stop
             # hooks fire (they are guarded by these two vars). Prepended as an export
             # so it applies across the whole compound command (source …; claude …),
@@ -2405,6 +2619,7 @@ class TmuxInteractiveDispatch:
                     failure_reason="interactive_ready_timeout",
                     role=role,
                     session_id=session_uuid,
+                    permission_posture=permission_posture,
                 )
                 _teardown("ready_timeout")
                 return InteractiveDispatchResult(
@@ -2509,7 +2724,8 @@ class TmuxInteractiveDispatch:
                 body = (
                     _context_body
                     + self._build_completion_protocol(
-                        dispatch_id, label, model=model, integrity=_integrity
+                        dispatch_id, label, model=model, integrity=_integrity,
+                        permission_posture=permission_posture,
                     )
                     + f"\n\n{_TRAILER}\n"
                 )
@@ -2519,7 +2735,8 @@ class TmuxInteractiveDispatch:
                     _context_body
                     + self._scope_note(dispatch_paths)
                     + self._build_completion_protocol(
-                        dispatch_id, label, model=model, integrity=_integrity
+                        dispatch_id, label, model=model, integrity=_integrity,
+                        permission_posture=permission_posture,
                     )
                 )
 
@@ -2572,6 +2789,7 @@ class TmuxInteractiveDispatch:
                     failure_reason="submit_failed",
                     role=role,
                     session_id=session_uuid,
+                    permission_posture=permission_posture,
                 )
                 _teardown("submit_failed")
                 return InteractiveDispatchResult(
@@ -2641,6 +2859,7 @@ class TmuxInteractiveDispatch:
                     failure_reason="interactive_no_progress",
                     role=role,
                     session_id=session_uuid,
+                    permission_posture=permission_posture,
                 )
                 _teardown("no_progress")
                 return InteractiveDispatchResult(
@@ -2671,6 +2890,8 @@ class TmuxInteractiveDispatch:
                 baseline_backstop=baseline_backstop,
                 pane_id=pane_id,
                 label=label,
+                raw_log_path=_raw_log[0],
+                session=session,
             )
 
             if receipt is None:
@@ -2701,6 +2922,7 @@ class TmuxInteractiveDispatch:
                     failure_reason=_deadline_reason,
                     role=role,
                     session_id=session_uuid,
+                    permission_posture=permission_posture,
                 )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
@@ -2778,6 +3000,7 @@ class TmuxInteractiveDispatch:
                 token_usage=_pane_tokens,
                 role=role,
                 session_id=session_uuid,
+                permission_posture=permission_posture,
                 **(
                     {"failure_reason": f"pushed_branch_no_pr: {_autopr_failure_reason}"}
                     if _autopr_failure_reason

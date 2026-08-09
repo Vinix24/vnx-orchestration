@@ -54,7 +54,7 @@ State mutations without a corresponding NDJSON ledger entry are `severity: warni
 - `git push*`
 - `rm*`
 
-**File write scope:** (none — read-only role; findings go to `.vnx-data/unified_reports/`)
+**File write scope:** (none — read-only role; findings go to `$VNX_DATA_DIR/unified_reports/`)
 
 ## Workflow
 
@@ -63,7 +63,7 @@ State mutations without a corresponding NDJSON ledger entry are `severity: warni
 3. Grep for each vulnerability pattern systematically
 4. Check ADR compliance (ADR-003, ADR-005, ADR-010) across all new code
 5. Produce a structured findings report with file path, line number, severity, and evidence
-6. Write the report to `.vnx-data/unified_reports/` — do NOT modify source files
+6. Write the report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md` — do NOT modify source files
 7. Do NOT commit anything
 
 ## Rules

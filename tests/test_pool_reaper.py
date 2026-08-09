@@ -24,7 +24,12 @@ _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 if str(_FIXTURES) not in sys.path:
     sys.path.insert(0, str(_FIXTURES))
 
-from pool_reaper import ReapConfig, ReapTarget, identify_reap_targets  # noqa: E402
+from pool_reaper import (  # noqa: E402
+    ReapConfig,
+    ReapTarget,
+    identify_orphan_tmux_sessions,
+    identify_reap_targets,
+)
 from pool_state_fixtures import make_member, create_test_db_file  # noqa: E402
 from pool_manager import PoolManager, SpawnResult  # noqa: E402
 
@@ -287,3 +292,113 @@ def test_pid_negative_not_killed(tmp_path):
         mgr._kill_subprocess("T1", pid=-1)
 
     mock_kill.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 10. Orphan tmux session sweep — pure function tests
+# ---------------------------------------------------------------------------
+
+def _always_terminal(_dispatch_id: str) -> bool:
+    return True
+
+
+def _never_terminal(_dispatch_id: str) -> bool:
+    return False
+
+
+def _has_children(_session_name: str) -> bool:
+    return True
+
+
+def _no_children(_session_name: str) -> bool:
+    return False
+
+
+def test_orphan_sweep_kills_session_without_children_terminal_dispatch():
+    """A vnx-* session with no children and a terminal dispatch is identified."""
+    sessions = ["vnx-D-87cd1e1f"]
+    orphans = identify_orphan_tmux_sessions(
+        sessions,
+        has_children_fn=_no_children,
+        is_terminal_fn=_always_terminal,
+    )
+    assert len(orphans) == 1
+    assert orphans[0][0] == "vnx-D-87cd1e1f"
+    assert "orphan_tmux_session" in orphans[0][1]
+
+
+def test_orphan_sweep_preserves_session_with_living_children():
+    """A session WITH living children must never be touched, regardless of dispatch state."""
+    sessions = ["vnx-D-b2d941ee"]
+    orphans = identify_orphan_tmux_sessions(
+        sessions,
+        has_children_fn=_has_children,
+        is_terminal_fn=_always_terminal,
+    )
+    assert orphans == [], (
+        "Session with living children must not be identified as orphan"
+    )
+
+
+def test_orphan_sweep_preserves_session_non_terminal_dispatch():
+    """A session with no children but a non-terminal dispatch is skipped."""
+    sessions = ["vnx-D-pending"]
+    orphans = identify_orphan_tmux_sessions(
+        sessions,
+        has_children_fn=_no_children,
+        is_terminal_fn=_never_terminal,
+    )
+    assert orphans == [], (
+        "Session with non-terminal dispatch must not be cleaned up"
+    )
+
+
+def test_orphan_sweep_skips_non_vnx_sessions():
+    """Sessions without the vnx- prefix are never touched."""
+    sessions = ["orch-t0", "mc-t0", "vnx-D-dead"]
+    orphans = identify_orphan_tmux_sessions(
+        sessions,
+        has_children_fn=_no_children,
+        is_terminal_fn=_always_terminal,
+    )
+    assert len(orphans) == 1
+    assert orphans[0][0] == "vnx-D-dead"
+    # orch-t0 and mc-t0 are operator sessions — never touched.
+
+
+def test_orphan_sweep_empty_prefix_skip():
+    """A session named exactly 'vnx-' (empty dispatch_id) is skipped."""
+    sessions = ["vnx-"]
+    orphans = identify_orphan_tmux_sessions(
+        sessions,
+        has_children_fn=_no_children,
+        is_terminal_fn=_always_terminal,
+    )
+    assert orphans == []
+
+
+def test_orphan_sweep_multiple_sessions_mixed():
+    """Mixed set: only qualifying orphans are returned."""
+    sessions = [
+        "orch-t0",              # non-vnx prefix — skip
+        "vnx-D-dead",           # vnx-, no children, terminal → kill
+        "vnx-D-alive",          # vnx-, has children → preserve
+        "vnx-D-pending",        # vnx-, no children, not terminal → preserve
+        "vnx-D-dead2",          # vnx-, no children, terminal → kill
+    ]
+
+    def selective_children(name: str) -> bool:
+        return name == "vnx-D-alive"
+
+    def selective_terminal(dispatch_id: str) -> bool:
+        return dispatch_id in ("D-dead", "D-dead2")
+
+    orphans = identify_orphan_tmux_sessions(
+        sessions,
+        has_children_fn=selective_children,
+        is_terminal_fn=selective_terminal,
+    )
+    orphan_names = [o[0] for o in orphans]
+    assert sorted(orphan_names) == sorted(["vnx-D-dead", "vnx-D-dead2"]), (
+        f"Expected vnx-D-dead and vnx-D-dead2, got {orphan_names}"
+    )

@@ -2,6 +2,23 @@
 
 T1 ships: build_directive() — the required-sections directive workers receive.
 T2 ships: validate_body() — the heading-scan validator with alias acceptance.
+
+Contract gap (documented, not enforced here — dispatch-20260804-064708-pra-
+converter-resilience / OI-998): this module's contract requires Summary,
+Changes, Verification, Open Items, and a Dispatch-ID. It does NOT require a
+Model or Provider field. But scripts/lib/append_receipt_internals/validation.py
+(``_validate_model_present``) fail-closed-refuses to WRITE a receipt for any
+dispatch-lane report that lacks a real Model — a report can pass
+``validate_body()`` here cleanly and still never produce a receipt. That
+refusal is intentional (a worker dispatch receipt must name the model that
+ran) and is logged loudly by the converter (WARNING, dispatch-id + reason;
+scripts/lib/report_to_receipt_converter.py), not silently. The fix for the
+gap is documentation, not validation: ``validate_body()`` is deliberately
+NOT made to enforce Model/Provider, since that would break every existing
+report producer that predates the fail-closed check. A dispatch-lane report
+therefore needs an identity block (Model + Provider, bold-field or
+frontmatter) IN ADDITION TO the sections below — see the CLAUDE.md "Mandatory
+Report Contract" section, which documents both.
 """
 
 from __future__ import annotations

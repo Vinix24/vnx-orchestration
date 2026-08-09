@@ -8,7 +8,7 @@
 
 ### Always-on (default active)
 
-- **5-provider dispatch**: Claude (subscription tmux lane + subprocess burst), Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.1 via OpenRouter)
+- **5-provider dispatch**: Claude (subscription tmux lane + subprocess burst), Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.2 via OpenRouter)
 - **Governance receipts**: append-only NDJSON audit trail, uniform receipt + unified-report shape across all providers
 - **Intelligence injection**: context bundles, ADR injection, repo-map enrichment for all providers (#712), kimi intelligence wiring (#701)
 - **GOV-1 PreToolUse hook**: blocks raw worker spawns, enforces subprocess_dispatch path (#656)

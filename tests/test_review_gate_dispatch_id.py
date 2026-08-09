@@ -84,6 +84,7 @@ def test_request_reviews_propagates_dispatch_id_to_receipt(review_env, monkeypat
     receipt = captured[0]
     assert receipt["event_type"] == "review_gate_request"
     assert receipt["dispatch_id"] == "abc-123"
+    assert receipt.get("pr_id") == "99", "pr_id must be present in the receipt (OI-915)"
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +120,9 @@ def test_request_reviews_without_dispatch_id_preserves_backwards_compat(review_e
     assert receipt["event_type"] == "review_gate_request"
     # dispatch_id is passed as empty string — present but falsy, not absent
     assert receipt.get("dispatch_id", None) == ""
+    # OI-915: pr_id must always be present in the receipt, even when
+    # dispatch_id is missing — the PR number is available regardless.
+    assert receipt.get("pr_id") == "100", "pr_id must be present even when dispatch_id is absent"
 
 
 # ---------------------------------------------------------------------------
@@ -328,3 +332,174 @@ def test_emit_governance_receipt_with_dispatch_id_routes_to_t0_receipts(review_e
     if gate_events.exists():
         gate_lines = [ln for ln in gate_events.read_text().splitlines() if ln.strip()]
         assert len(gate_lines) == 0, "receipt must NOT appear in gate_events.ndjson when dispatch_id is real"
+
+
+# ---------------------------------------------------------------------------
+# Test 9: OI-915 — pr_id must be set when request_reviews dispatches codex_gate
+# ---------------------------------------------------------------------------
+
+def test_request_reviews_propagates_pr_id_for_codex_gate(review_env, monkeypatch):
+    """OI-915: pr_id must land in the review_gate_request receipt for codex_gate."""
+    captured: List[Dict[str, Any]] = []
+
+    def fake_emit(event_type, **kwargs):
+        captured.append({"event_type": event_type, **kwargs})
+        return {"append_status": "appended", "idempotency_key": "k"}
+
+    monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+
+    manager = rgm.ReviewGateManager()
+    manager.request_reviews(
+        pr_number=1286,
+        branch="dispatch/20260804-102001-gate-receipt-koppeling",
+        review_stack=["codex_gate"],
+        risk_class="medium",
+        changed_files=["scripts/lib/gate_request_handler.py"],
+        mode="final",
+        dispatch_id="20260804-102001-gate-receipt-koppeling",
+    )
+
+    assert len(captured) == 1
+    receipt = captured[0]
+    assert receipt["event_type"] == "review_gate_request"
+    assert receipt["gate"] == "codex_gate"
+    assert receipt["dispatch_id"] == "20260804-102001-gate-receipt-koppeling"
+    assert receipt.get("pr_id") == "1286", (
+        "OI-915: pr_id must be present in the review_gate_request receipt "
+        "so the gate is linkable to its PR in the audit trail"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 10: OI-915 — pr_id must be set when request_reviews dispatches gemini_review
+# ---------------------------------------------------------------------------
+
+def test_request_reviews_propagates_pr_id_for_gemini_review(review_env, monkeypatch):
+    """OI-915: pr_id must land in the review_gate_request receipt for gemini_review."""
+    captured: List[Dict[str, Any]] = []
+
+    def fake_emit(event_type, **kwargs):
+        captured.append({"event_type": event_type, **kwargs})
+        return {"append_status": "appended", "idempotency_key": "k"}
+
+    monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
+    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+
+    manager = rgm.ReviewGateManager()
+    manager.request_reviews(
+        pr_number=1286,
+        branch="dispatch/20260804-102001-gate-receipt-koppeling",
+        review_stack=["gemini_review"],
+        risk_class="medium",
+        changed_files=["scripts/lib/gate_request_handler.py"],
+        mode="per_pr",
+        dispatch_id="20260804-102001-gate-receipt-koppeling",
+    )
+
+    assert len(captured) == 1
+    receipt = captured[0]
+    assert receipt["event_type"] == "review_gate_request"
+    assert receipt["gate"] == "gemini_review"
+    assert receipt.get("pr_id") == "1286", (
+        "OI-915: pr_id must be present for gemini_review receipts too — "
+        "the fix applies to all gates dispatched through request_reviews()"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: OI-915 — negative path: ghost receipt now carries pr_id when dispatch_id is absent
+# ---------------------------------------------------------------------------
+
+def test_request_reviews_sets_pr_id_even_when_dispatch_id_absent(review_env, monkeypatch):
+    """OI-915: pr_id is set in the receipt even when dispatch_id is not available.
+
+    When the gate is run outside a dispatch context (no dispatch/<id> branch),
+    pr_id must still be present — it comes from the PR number, which is always
+    available. The dispatch_id can legitimately be absent when the gate is
+    invoked manually.
+    """
+    captured: List[Dict[str, Any]] = []
+
+    def fake_emit(event_type, **kwargs):
+        captured.append({"event_type": event_type, **kwargs})
+        return {"append_status": "appended", "idempotency_key": "k"}
+
+    monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
+    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+
+    manager = rgm.ReviewGateManager()
+    # No dispatch_id, branch is not dispatch/<id>
+    manager.request_reviews(
+        pr_number=42,
+        branch="fix/some-other-branch",
+        review_stack=["gemini_review"],
+        risk_class="low",
+        changed_files=["docs/guide.md"],
+        mode="per_pr",
+        # dispatch_id omitted → defaults to ""
+    )
+
+    assert len(captured) == 1
+    receipt = captured[0]
+    assert receipt["event_type"] == "review_gate_request"
+    assert receipt.get("dispatch_id", None) == ""
+    assert receipt.get("pr_id") == "42", (
+        "OI-915: pr_id must be present even when dispatch_id is absent — "
+        "the PR number is the fallback identifier for audit linkage"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: OI-915 — gate.sh extracts dispatch_id from dispatch/<id> branch
+# ---------------------------------------------------------------------------
+
+def test_gate_sh_extracts_dispatch_id_from_branch():
+    """OI-915: verify the bash extraction logic for dispatch_id from branch name.
+
+    Does NOT shell out — directly tests the pattern-match logic used in the
+    gate.sh extraction block. The pattern is: if branch starts with ``dispatch/``,
+    strip that prefix to get the dispatch_id. Falls back to VNX_CURRENT_DISPATCH_ID
+    when the branch does not follow the convention.
+    """
+    import re
+
+    def extract_dispatch_id(branch: str, env_dispatch_id: str = "") -> str:
+        """Mirror the logic from gate.sh:
+            if [[ "$branch" == dispatch/* ]]; then
+              dispatch_id="${branch#dispatch/}"
+            elif [ -n "${VNX_CURRENT_DISPATCH_ID:-}" ]; then
+              dispatch_id="$VNX_CURRENT_DISPATCH_ID"
+            fi
+        """
+        if branch.startswith("dispatch/"):
+            return branch[len("dispatch/"):]
+        if env_dispatch_id:
+            return env_dispatch_id
+        return ""
+
+    # Standard dispatch branch
+    assert extract_dispatch_id("dispatch/20260804-102001-gate-receipt-koppeling") == \
+        "20260804-102001-gate-receipt-koppeling"
+
+    # Non-dispatch branch with env fallback
+    assert extract_dispatch_id("fix/some-bug", "env-dispatch-123") == "env-dispatch-123"
+
+    # Non-dispatch branch without env fallback — empty
+    assert extract_dispatch_id("main") == ""
+    assert extract_dispatch_id("feature/my-feature") == ""
+
+    # Edge case: branch named exactly "dispatch/" (strips to empty string)
+    assert extract_dispatch_id("dispatch/") == ""
+
+    # Edge case: empty branch
+    assert extract_dispatch_id("") == ""

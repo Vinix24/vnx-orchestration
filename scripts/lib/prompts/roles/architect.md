@@ -52,7 +52,7 @@ require an explicit mitigation.
 2. Research the problem using available tools
 3. Analyze existing code and architecture
 4. Produce a structured design document or analysis report
-5. Write the report to `.vnx-data/unified_reports/`
+5. Write the report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 6. Do NOT modify source files or commit anything
 
 ## Rules

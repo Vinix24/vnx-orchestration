@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import dispatch_cli
 from dispatch_cli import (
     _check_track_link_verdict,
     _DEFAULT_MODEL_PINS,
@@ -28,6 +29,7 @@ from dispatch_cli import (
     _execute_claude_headless,
     _has_col,
     _load_model_pins_from_yaml,
+    _persist_route_decision,
     _persist_track_id,
     _tracks_db_path,
     build_runtime_snapshot,
@@ -183,10 +185,14 @@ def _make_minimal_plan(
 # ---------------------------------------------------------------------------
 
 @patch("dispatch_cli.build_runtime_snapshot")
-@patch("dispatch_envelope.run_envelope_plan")
+@patch("dispatch_cli.run_envelope_plan")
 @patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch")
 def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, tmp_path, capsys):
     """--dry-run prints plan + fingerprint and calls NO executor."""
+    # OI-968: the envelope mock must replace dispatch_cli's bound reference.
+    # dispatch_cli.py does `from dispatch_envelope import run_envelope_plan`, so
+    # patching the source module leaves the consumer pointing at the original.
+    assert dispatch_cli.run_envelope_plan is mock_envelope
     mock_snapshot.return_value = _clean_snapshot()
     spec_file = _make_spec_file(tmp_path, provider="claude")
 
@@ -1116,9 +1122,11 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 def test_default_model_pins_flip_workers_to_kimi_k3():
     """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus.
     WPFC PR-4: worker pins carry default semantics (spec.model wins over the pin);
-    T0 stays floor (pin always wins). ModelPin, not a bare string."""
+    T0 stays floor (pin always wins). ModelPin, not a bare string.
+    dispatch-20260802-model-ssot-en-ketenlink: T0's fallback is the canonical
+    opus-5 registry key (the fleet runs Opus 5), not the bare opus alias."""
     assert _DEFAULT_MODEL_PINS == {
-        "T0": ModelPin(model="opus", semantics="floor"),
+        "T0": ModelPin(model="opus-5", semantics="floor"),
         "T1": ModelPin(model="kimi-k3", semantics="default"),
         "T2": ModelPin(model="kimi-k3", semantics="default"),
         "T3": ModelPin(model="kimi-k3", semantics="default"),
@@ -1132,7 +1140,9 @@ def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
     provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only.
     WPFC PR-4: workers carry pin_semantics: default; T0 stays floor."""
     pins = _load_model_pins_from_yaml()
-    assert pins["T0"] == ModelPin(model="claude-opus-4-8", semantics="floor")
+    # dispatch-20260802-model-ssot-en-ketenlink: t0-opus-only now pins the
+    # canonical opus-5 registry key.
+    assert pins["T0"] == ModelPin(model="opus-5", semantics="floor")
     assert pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
     assert pins["T2"] == ModelPin(model="kimi-k3", semantics="default")
     assert pins["T3"] == ModelPin(model="kimi-k3", semantics="default")
@@ -1238,7 +1248,7 @@ def test_load_model_pins_unreadable_yaml_fails_loud_and_falls_back(tmp_path, cap
             pins = _load_model_pins_from_yaml()
 
     assert pins == _DEFAULT_MODEL_PINS
-    assert pins["T0"] == ModelPin(model="opus", semantics="floor")
+    assert pins["T0"] == ModelPin(model="opus-5", semantics="floor")
     assert any("model-pins YAML unreadable" in rec.message for rec in caplog.records), (
         "unreadable YAML must log loudly, not silently fall back"
     )
@@ -2620,7 +2630,336 @@ def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monk
     assert rc == 0
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
-    assert plan_arg.model == "claude-opus-4-8", (
+    # dispatch-20260802-model-ssot-en-ketenlink: t0-opus-only pins the canonical
+    # opus-5 registry key.
+    assert plan_arg.model == "opus-5", (
         f"T0 pin (t0-opus-only) must be unaffected by the worker override (got {plan_arg.model!r})"
     )
     assert not any("worker-claude-override" in w for w in plan_arg.warnings)
+
+
+# ---------------------------------------------------------------------------
+# OI-849 — route decision persistence
+# ---------------------------------------------------------------------------
+
+class TestPersistRouteDecision:
+    """_persist_route_decision writes the canonical routing decision to the
+    route_decisions stream alongside the permit fingerprint."""
+
+    def test_writes_ndjson_and_per_dispatch_json(self, tmp_path):
+        """A valid plan+permit → NDJSON record appended + per-dispatch JSON written."""
+        plan = _make_minimal_plan(dispatch_id="20260804-oi849-test")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        # NDJSON must exist with one line
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        assert ndjson_path.exists()
+        lines = ndjson_path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["dispatch_id"] == "20260804-oi849-test"
+        assert record["plan_digest"] == permit.plan_digest
+        assert record["fingerprint"] == f"{permit.plan_digest[:12]}-{permit.dispatch_id}"
+        assert "decision" in record
+        assert record["decision"]["provider"] == "claude"
+        assert record["decision"]["model"] == "sonnet"
+
+        # Per-dispatch JSON must exist
+        per_dispatch = state_dir / "route_decisions" / "20260804-oi849-test.json"
+        assert per_dispatch.exists()
+        per_rec = json.loads(per_dispatch.read_text(encoding="utf-8"))
+        assert per_rec["dispatch_id"] == "20260804-oi849-test"
+
+    def test_fingerprint_verifiable_against_persisted_decision(self, tmp_path):
+        """OI-849: the stored canonical dict must hash to the same digest the
+        permit carries. Proving this link is the whole point — a stored decision
+        that can't be verified against its permit repeats the problem one layer
+        higher."""
+        plan = _make_minimal_plan(dispatch_id="20260804-oi849-verify")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
+
+        # Recompute the digest from the stored canonical decision
+        stored_canonical = record["decision"]
+        blob = json.dumps(stored_canonical, sort_keys=True, ensure_ascii=True)
+        recomputed_digest = hashlib.sha256(blob.encode()).hexdigest()
+
+        assert recomputed_digest == record["plan_digest"], (
+            "stored canonical dict must hash to the same plan_digest the permit "
+            "carries — a stored decision whose fingerprint doesn't match is "
+            "unverifiable"
+        )
+        assert recomputed_digest == permit.plan_digest, (
+            "recomputed digest must match the live permit's plan_digest"
+        )
+
+    def test_failure_does_not_raise(self, tmp_path, caplog):
+        """Write failure (e.g. permission denied on the state dir) must log a
+        WARN and never block the dispatch — route decision persistence is
+        best-effort."""
+        import logging
+
+        plan = _make_minimal_plan(dispatch_id="20260804-oi849-fail")
+        permit = issue_permit(plan)
+
+        # Point state_dir at a non-writable location
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        ndjson = state_dir / "route_decisions.ndjson"
+        ndjson.write_text("", encoding="utf-8")
+        # Make the ndjson file a directory so append_locked fails
+        ndjson.unlink()
+        ndjson.mkdir()
+
+        with caplog.at_level(logging.WARNING):
+            _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        assert any("WARN route decision persist failed" in rec.message
+                   for rec in caplog.records), (
+            "write failure must log a WARN — silence is the old bug repeated"
+        )
+
+    def test_called_during_run_dispatch(self, tmp_path, monkeypatch):
+        """run_dispatch (non-dry-run) must call _persist_route_decision after
+        the permit is issued."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Route decision persistence test\n\nDo something safe.\n",
+            staging_id="20260804-staging-oi849",
+            dispatch_id="20260804-oi849-integration",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+            with patch("dispatch_cli._persist_route_decision") as mock_persist:
+                rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_exec.assert_called_once()
+        mock_persist.assert_called_once()
+        call_args = mock_persist.call_args
+        assert call_args[0][0].dispatch_id == "20260804-oi849-integration"
+
+    def test_not_called_during_dry_run(self, tmp_path):
+        """Dry-run dispatches must NOT write route decisions — only live
+        dispatches should persist state."""
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+
+        with patch("dispatch_cli.build_runtime_snapshot",
+                   return_value=_clean_snapshot()):
+            with patch("dispatch_cli._persist_route_decision") as mock_persist:
+                rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        mock_persist.assert_not_called()
+
+    def test_codex_provider_lane_decision_persisted(self, tmp_path):
+        """A provider-lane (codex) dispatch must also persist its routing
+        decision — the fix is lane-agnostic."""
+        plan = _make_minimal_plan(
+            provider=Provider.CODEX,
+            dispatch_id="20260804-oi849-codex",
+        )
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _persist_route_decision(plan, permit, state_dir=state_dir)
+
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
+        assert record["dispatch_id"] == "20260804-oi849-codex"
+        assert record["decision"]["provider"] == "codex"
+        assert record["decision"]["lane"] == "provider"
+        assert record["decision"]["billing"] == "provider_metered"
+
+
+# ---------------------------------------------------------------------------
+# OI-962: smart router resolves BEFORE validate — regression guard
+# ---------------------------------------------------------------------------
+
+
+class TestSmartRouterPreValidate:
+    """A spec without an explicit provider must pass through the door with the
+    router-chosen provider+model.  This is the regression OI-962 exists to
+    prevent: the router must fire BEFORE validate() tests the result, or it
+    never fires at all and the door rejects provider-less specs outright."""
+
+    def test_provider_auto_resolves_and_passes_door(self, tmp_path, monkeypatch):
+        """spec with provider=auto → router resolves → door accepts → plan uses resolved provider."""
+        from dispatch_cli import _resolve_router_pre_validate
+
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            # Deliberately avoids tier-high keywords (refactor, architect, security, etc.)
+            # so the classifier returns tier-low, which the router CAN resolve.
+            instruction_text="# Fix typo in docstring\n\nCorrect a spelling error in the module docstring.\n",
+            staging_id="20260802-oi962-auto",
+            dispatch_id="20260802-oi962-auto",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli.run_envelope_plan") as mock_envelope:
+            mock_snapshot.return_value = _clean_snapshot()
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.status = "success"
+            mock_envelope.return_value = mock_result
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0, f"door must accept provider=auto spec, got rc={rc}"
+        mock_envelope.assert_called_once()
+
+        args, kwargs = mock_envelope.call_args
+        plan_arg = args[0]
+        # The router must have filled in a concrete provider — not AUTO.
+        assert plan_arg.provider != Provider.AUTO, (
+            f"router did not resolve: plan still has provider={plan_arg.provider}"
+        )
+        assert plan_arg.model is not None, (
+            f"router did not resolve: plan still has model=None"
+        )
+        # route_reason must carry the router decision.
+        assert plan_arg.route_reason and "smart-router" in plan_arg.route_reason, (
+            f"route_reason must mention smart-router, got {plan_arg.route_reason!r}"
+        )
+
+    def test_provider_auto_dry_run_shows_resolved_route(self, tmp_path, monkeypatch, capsys):
+        """--dry-run with provider=auto prints the resolved provider, not AUTO."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Fix typo in comment\n\nCorrect a spelling mistake.\n",
+            staging_id="20260802-oi962-dry",
+            dispatch_id="20260802-oi962-dry",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot:
+            mock_snapshot.return_value = _clean_snapshot()
+            rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0, f"dry-run must accept provider=auto spec, got rc={rc}"
+        captured = capsys.readouterr()
+        # The dry-run output must show the router-resolved provider, not "auto".
+        assert "provider:" in captured.out, f"dry-run output missing provider line:\n{captured.out}"
+        assert "auto" not in captured.out.split("provider:")[1].split("\n")[0], (
+            f"dry-run output still shows provider=auto:\n{captured.out}"
+        )
+
+    def test_provider_none_staged_via_bridge_resolves(self, tmp_path, monkeypatch):
+        """stage_spec_bundle(provider=None) resolves to AUTO via bridge alias,
+        then the router fills in a real provider+model — door accepts."""
+        data_dir = tmp_path / "vnx-data"
+        data_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        # Simulate what dispatch_bridge.stage_spec_bundle does with provider=None.
+        from dispatch_bridge import _canonical_provider
+        canonical = _canonical_provider(None)
+        assert canonical == Provider.AUTO, (
+            f"bridge must map provider=None → AUTO, got {canonical}"
+        )
+
+        spec_file = _make_spec_file(
+            tmp_path,
+            provider="auto",  # what the bridge now writes
+            target_slot="T1",
+        )
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli.run_envelope_plan") as mock_envelope:
+            mock_snapshot.return_value = _clean_snapshot()
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.status = "success"
+            mock_envelope.return_value = mock_result
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0, f"door must accept bridge-staged provider=None spec, got rc={rc}"
+        mock_envelope.assert_called_once()
+        plan_arg = mock_envelope.call_args[0][0]
+        assert plan_arg.provider != Provider.AUTO, (
+            f"router did not resolve bridge-staged spec: provider={plan_arg.provider}"
+        )
+
+    def test_t0_never_routed_even_with_auto(self, tmp_path, monkeypatch):
+        """T0 with provider=auto must NOT be routed (t0-opus-only is a floor)."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Planning review\n\nReview the module for correctness.\n",
+            staging_id="20260802-oi962-t0",
+            dispatch_id="20260802-oi962-t0",
+            provider="auto",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+            mock_snapshot.return_value = _clean_snapshot()
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_execute.assert_called_once()
+        plan_arg = mock_execute.call_args[0][0]
+        # T0 must stay on claude (t0-opus-only), not be routed elsewhere.
+        assert plan_arg.provider == Provider.CLAUDE, (
+            f"T0 must not be routed away from claude, got {plan_arg.provider}"
+        )
+
+    def test_explicit_provider_overrides_router(self, tmp_path, monkeypatch):
+        """An explicit provider+model in the spec must NOT be touched by the router
+        (worker-provider-free-choice, pin_semantics=default)."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Explicit kimi dispatch\n\nRun a standard task.\n",
+            staging_id="20260802-oi962-explicit",
+            dispatch_id="20260802-oi962-explicit",
+            provider="kimi",
+            model="kimi-k3",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
+             patch("dispatch_cli.run_envelope_plan") as mock_envelope:
+            mock_snapshot.return_value = _clean_snapshot()
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.status = "success"
+            mock_envelope.return_value = mock_result
+
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_envelope.assert_called_once()
+        plan_arg = mock_envelope.call_args[0][0]
+        # Explicit provider must be preserved — router must not overwrite.
+        assert plan_arg.provider == Provider.KIMI, (
+            f"explicit provider was overwritten by router: {plan_arg.provider}"
+        )
+        assert plan_arg.model == "kimi-k3", (
+            f"explicit model was overwritten by router: {plan_arg.model}"
+        )

@@ -369,6 +369,9 @@ class TestFreshInstallPathResolution:
         xdg_root = tmp_path / "xdg_pool"
         monkeypatch.setenv("VNX_DATA_DIR", str(xdg_root))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        # Clear the autouse fixture's VNX_STATE_DIR so _default_db_path falls
+        # through to the VNX_DATA_DIR branch (it checks VNX_STATE_DIR first).
+        monkeypatch.delenv("VNX_STATE_DIR")
 
         from pool_manager import _default_db_path
         db_path = _default_db_path("test-project")

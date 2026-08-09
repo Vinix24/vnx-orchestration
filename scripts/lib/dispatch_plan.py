@@ -68,6 +68,17 @@ class RuntimeSnapshot:
     # membership: an empty set rejects every role, so an undiscoverable registry
     # fails closed instead of silently accepting anything.
     valid_roles: Optional[frozenset[str]] = None
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
+    # dispatch this one continues, the tier escalation, and the smart_router
+    # task class. Computed by the door (build_runtime_snapshot) and passed in so
+    # compile_plan stays pure — it only copies them onto the plan.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
+    # OI-943: worker-claude-override gate outcome, threaded from build_runtime_snapshot
+    # so the door can persist target_slot + override reason onto the dispatch row.
+    worker_claude_override_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +112,16 @@ class ExecutionPlan:
     role: Optional[str] = None          # carried from DispatchSpec for the phantom-guard review
                                         # exemption (codex P0.2 F2). NOT in digest() — advisory only,
                                         # must not perturb the permit fingerprint.
+    pr_id: Optional[str] = None         # OI-982: carried from DispatchSpec so the fix-forward
+                                        # diff fallback in _resolve_fix_forward_diff works.
+                                        # NOT in digest() — advisory only.
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): advisory receipt
+    # metadata, NOT in digest() — like ``role``, it must not perturb the permit
+    # fingerprint. parent_dispatch / tier_from / tier_to / task_class.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
     requires_mcp: bool = False          # OI-865: True keeps the worker's ambient MCP config instead
                                         # of the force-empty scoped posture. Default False is the
                                         # choice for a MISSING spec field: DispatchSpec.requires_mcp
@@ -111,12 +132,14 @@ class ExecutionPlan:
                                         # MCP access changes worker behavior, so a permit for a
                                         # requires_mcp plan must not validate a force-empty plan.
 
-    def digest(self) -> str:
-        """Stable sha256 over the canonical, order-independent field set.
+    def canonical_dict(self) -> dict:
+        """Return the canonical, order-independent decision dict.
 
-        Excludes advisory warnings. Used by ExecutionPermit (satisfies PlanLike).
+        This is the same dict that digest() hashes — extracting it lets the door
+        persist the full routing decision alongside the fingerprint (OI-849).
+        Excludes advisory fields (warnings, role, pr_id, chain-link metadata).
         """
-        canonical = {
+        return {
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "provider": self.provider.value,
@@ -147,7 +170,13 @@ class ExecutionPlan:
                 for dp in self.dispatch_paths
             ],
         }
-        blob = json.dumps(canonical, sort_keys=True, ensure_ascii=True)
+
+    def digest(self) -> str:
+        """Stable sha256 over the canonical, order-independent field set.
+
+        Excludes advisory warnings. Used by ExecutionPermit (satisfies PlanLike).
+        """
+        blob = json.dumps(self.canonical_dict(), sort_keys=True, ensure_ascii=True)
         return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -340,6 +369,14 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         instruction_file=spec.instruction_file,
         route_reason=",".join(fired),
         role=spec.role,
+        pr_id=spec.pr_id,
+        # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): copied from the
+        # door-computed snapshot so the receipt can say which dispatch this one
+        # continues and on which tier.
+        parent_dispatch=snapshot.parent_dispatch,
+        task_class=snapshot.task_class,
+        tier_from=snapshot.tier_from,
+        tier_to=snapshot.tier_to,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )

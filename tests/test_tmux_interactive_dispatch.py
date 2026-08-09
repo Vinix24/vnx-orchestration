@@ -37,6 +37,7 @@ from tmux_interactive_dispatch import (
 )
 from tmux_worktree import ReapResult, WorktreeAllocateError, WorktreeHandle
 from pr_enforcement import PrEnforcementResult
+from worker_permissions import classify_permission_posture
 
 
 class FakeTmux:
@@ -792,6 +793,15 @@ _PERMISSION_PANE_TEXT = (
     "  3. No\n"
 )
 
+# OI-1007 (dispatch 20260803-225854-pr4-envelope-govern): the newer Claude Code
+# menu carries NO prose marker line — the whole prompt is the numbered option
+# list and the pending command sits inline in the "don't ask again for:" label.
+# This is the exact pane text observed; it previously classified as stalled and
+# the worker silently burned its deadline.
+_OI1007_PANE_TEXT = (
+    "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/govern_body.txt / 3. No"
+)
+
 
 class TestAwaitingPermission(_LaneTestCase):
     def test_permission_prompt_is_not_fast_aborted(self):
@@ -871,6 +881,144 @@ class TestAwaitingPermission(_LaneTestCase):
         self.assertIn(
             "interactive_awaiting_permission",
             {e["event_type"] for e in events},
+        )
+
+    def test_oi1007_numbered_menu_surfaces_event_and_escalation(self):
+        """OI-1007: the numbered-menu prompt (no prose marker line) is detected as
+        awaiting_permission AND surfaced as a durable escalation record — so the
+        operator sees it via `vnx permission escalations`, not only as an event."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_OI1007_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        result = lane._wait_for_receipt(
+            self.DISPATCH_ID,
+            deadline_seconds=0.15,
+            poll_interval=0.02,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES,
+            baseline_count=0,
+            baseline_pending_ids=frozenset(),
+            baseline_backstop=True,
+            pane_id="%1",
+            label="T1",
+        )
+        self.assertIsNone(result, "no receipt ever arrives on a blocked worker")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
+        # Escalation bridge: a durable record was written for the inline command.
+        esc_path = self.state_dir / "permission_escalations" / f"{self.DISPATCH_ID}.json"
+        self.assertTrue(esc_path.exists(), "escalation bridge must write a record")
+        record = json.loads(esc_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["dispatch_id"], self.DISPATCH_ID)
+        self.assertEqual(record["command"], "rm -f /tmp/govern_body.txt")
+        self.assertEqual(record["reason"], "awaiting_permission")
+        self.assertEqual(record["status"], "pending")
+
+    def test_heartbeat_skips_awaiting_permission_worker(self):
+        """OI-944/OI-1007: a worker blocked on a permission prompt has a log that
+        legitimately stopped growing. The heartbeat must NOT treat it as a silent
+        stall — the prompt is recoverable (one keystroke) and escalates instead.
+        The failure report (heartbeat kill) must never be written for a recoverable
+        prompt."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content=_OI1007_PANE_TEXT,
+        )
+        lane = self._make_lane(fake)
+        # unified_reports lives under the SHARED system temp root (state_dir.parent),
+        # so a report left by an earlier test would be indistinguishable from one
+        # written by this run. Clear it first to make the assertion order-independent.
+        report_path = (
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        if report_path.exists():
+            report_path.unlink()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result, "no receipt ever arrives on a blocked worker")
+        # The heartbeat was skipped: no failure report was written, the worker was
+        # escalated (event + escalation record) and let through to the deadline.
+        self.assertFalse(
+            report_path.exists(),
+            "awaiting_permission worker must NOT be heartbeat-killed",
+        )
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_awaiting_permission",
+            {e["event_type"] for e in events},
+        )
+        esc_path = self.state_dir / "permission_escalations" / f"{self.DISPATCH_ID}.json"
+        self.assertTrue(esc_path.exists(), "escalation bridge must write a record")
+
+    def test_heartbeat_kills_genuinely_stalled_worker(self):
+        """Control: a worker whose pane shows NO permission prompt (content but no
+        prompt) and whose log has stopped growing IS a true stall — the heartbeat
+        must fire, write the failure report, and return None before the deadline."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            # Stale log text, no prompt, no working indicator → stalled, NOT
+            # awaiting_permission.
+            ready_content="some stale log line\nthat is not a prompt",
+        )
+        lane = self._make_lane(fake)
+        # Clear a stale report from a sibling test in the SHARED temp root first,
+        # so the exists() assertion below proves THIS run fired the heartbeat.
+        report_path = (
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        if report_path.exists():
+            report_path.unlink()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result, "no receipt ever arrives on a stalled worker")
+        # The heartbeat DID fire: a failure report was written for the true stall.
+        self.assertTrue(
+            report_path.exists(),
+            "a genuinely stalled worker must be heartbeat-killed (failure report)",
         )
 
 
@@ -976,7 +1124,9 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
         lane = self._make_lane(fake)
 
-        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+        # model passed explicitly — a dispatch receipt must name the model that
+        # ran (fail-closed), and production always passes the resolved model.
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1", model="sonnet")
 
         for block_idx, expected_status in ((0, "done"), (1, "failed")):
             receipt = _extract_protocol_receipt(protocol, block_idx)
@@ -1046,6 +1196,132 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
                 )
 
 
+class TestCompletionProtocolPermissionPosture(_LaneTestCase):
+    """OI-864: the completion-protocol receipt carries the ACTUAL spawn-time
+    permission posture — derived from the real launch flags, not from
+    re-reading VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED.
+    """
+
+    def test_posture_baked_into_completion_protocol_receipt(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        posture = classify_permission_posture(
+            ["claude", "--model", "sonnet", "--permission-mode", "acceptEdits",
+             "--allowedTools", "Read,Write,Edit"],
+            "backend-developer",
+        )
+        protocol = lane._build_completion_protocol(
+            self.DISPATCH_ID, "T1", model="sonnet", permission_posture=posture,
+        )
+
+        for block_idx in (0, 1):
+            receipt = _extract_protocol_receipt(protocol, block_idx)
+            self.assertEqual(receipt.get("permission_posture"), "scoped-allowlist")
+            self.assertEqual(receipt.get("permission_profile"), "backend-developer")
+            self.assertEqual(receipt.get("permission_allow_pattern_count"), 3)
+
+    def test_posture_omitted_when_not_provided(self):
+        """Byte-identical shape when permission_posture is not passed (default None) —
+        e.g. a direct unit-level call to _build_completion_protocol without the
+        real dispatch() plumbing."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1", model="sonnet")
+
+        receipt = _extract_protocol_receipt(protocol, 0)
+        self.assertNotIn("permission_posture", receipt)
+        self.assertNotIn("permission_profile", receipt)
+        self.assertNotIn("permission_allow_pattern_count", receipt)
+
+
+class TestPermissionPostureReachesReceipt(_LaneTestCase):
+    """OI-864 negative test: a spawn with the scoped flag ON must classify to a
+    DIFFERENT posture than a spawn with it OFF, and that value must actually
+    reach t0_receipts.ndjson (not just a field that exists but never varies).
+
+    Uses the deadline/synthesized-fallback path (ensure_receipt) as the
+    end-to-end vehicle: the worker never emits its own receipt, so the lane's
+    lane-synthesized completion receipt is what lands in the ledger — the same
+    mechanism every other spawn property (model, lane, role) already uses.
+    """
+
+    def _dispatch_and_read_last_receipt(self, *, scoped: bool) -> dict:
+        # Distinct dispatch_id per sub-run: the append primitive's idempotency
+        # guard (scripts/lib/append_receipt_internals/idempotency.py) dedups
+        # repeat appends carrying the same dispatch_id/terminal/event_type/
+        # source within a 300s cache window — reusing one id for both halves
+        # of this comparison would silently drop the second append and make
+        # the test compare a receipt against itself. Real dispatches always
+        # get a unique id, so this mirrors production, not a workaround.
+        dispatch_id = f"{self.DISPATCH_ID}-{'scoped' if scoped else 'blanket'}"
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1" if scoped else "0",
+            "VNX_WORKER_SCOPED": "0",
+            # Zero-out time-sensitive env vars so this runs fast (mirrors _fast_dispatch).
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+            "VNX_TMUX_WORK_START_TIMEOUT": "0.1",
+            "VNX_TMUX_WORK_START_POLL": "0.02",
+        }
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=dispatch_id,
+            emit_receipt=False,  # worker never responds -> deadline -> synthesized receipt
+            ready_content=_READY_AND_WORKING,
+        )
+        lane = self._make_lane(fake)
+        with patch.dict(os.environ, env):
+            result = lane.dispatch(
+                "Do the thing.",
+                dispatch_id,
+                role="backend-developer",
+                model="sonnet",
+                deadline_seconds=0.2,
+                poll_interval=0.02,
+                warmup_timeout=0.5,
+                warmup_poll_interval=0.01,
+                isolated_worktree=False,
+            )
+        self.assertFalse(result.success)
+
+        lines = self.receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        matching = [
+            json.loads(line) for line in lines
+            if json.loads(line).get("dispatch_id") == dispatch_id
+        ]
+        self.assertEqual(
+            len(matching), 1,
+            f"expected exactly one receipt for dispatch_id={dispatch_id}, found {len(matching)}",
+        )
+        return matching[0]
+
+    def test_posture_diverges_between_scoped_off_and_on(self):
+        """The required OI-864 negative test: same role, only the env flag
+        changes between the two runs — the classified/ledgered posture must
+        differ. A test that only asserts the field's presence (or a constant
+        value) would pass even if scoping were never actually wired to the
+        real launch flags; asserting the VALUE differs is what proves it.
+        """
+        receipt_off = self._dispatch_and_read_last_receipt(scoped=False)
+        receipt_on = self._dispatch_and_read_last_receipt(scoped=True)
+
+        self.assertEqual(receipt_off.get("permission_posture"), "blanket-skip")
+        self.assertEqual(receipt_on.get("permission_posture"), "scoped-allowlist")
+        self.assertNotEqual(
+            receipt_off.get("permission_posture"),
+            receipt_on.get("permission_posture"),
+            "permission_posture must differ between a scoped-off and a "
+            "scoped-on spawn — identical values here would mean the receipt "
+            "is not actually reflecting the real launch flags",
+        )
+        self.assertIn("permission_profile", receipt_on)
+        self.assertGreater(receipt_on.get("permission_allow_pattern_count", 0), 0)
+        self.assertNotIn("permission_profile", receipt_off)
+
+
 class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
     def test_completion_protocol_env_pins_receipts_file_landing(self):
         """Env-pin: VNX_STATE_DIR/VNX_DATA_DIR are prepended to the python3 command.
@@ -1072,7 +1348,9 @@ class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
                 project_root=real_project_root,
             )
 
-            protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+            # model passed explicitly — a dispatch receipt must name the model
+            # that ran (fail-closed).
+            protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1", model="sonnet")
 
             # Part 1: env vars and python3 path present in the done block (index 0).
             done_block = _extract_protocol_block(protocol, 0)
@@ -4663,7 +4941,7 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
 
     def test_write_hook_settings_fresh_worktree(self):
         from tmux_interactive_dispatch import (
-            _WORKER_SCOPE_HOOK_COMMAND,
+            _worker_scope_hook_command,
             _write_worker_scope_hook_settings,
         )
 
@@ -4678,13 +4956,156 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
         entry = pre[0]
         self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit")
         self.assertEqual(entry["hooks"][0]["type"], "command")
-        self.assertEqual(entry["hooks"][0]["command"], _WORKER_SCOPE_HOOK_COMMAND)
-        # The command resolves the hook from the worktree it fires in (cwd-based
-        # discovery), same pattern as the existing spawn-blocker hooks.
-        self.assertIn("git rev-parse --show-toplevel", entry["hooks"][0]["command"])
+        self.assertEqual(entry["hooks"][0]["command"], _worker_scope_hook_command())
+        # OI-1089 finding 1: the worker-scope script ships only with the fabric,
+        # so the command anchors at the fabric install root. It must NOT resolve
+        # against a consumer/worktree git top-level that lacks scripts/hooks/.
+        self.assertNotIn("git rev-parse", entry["hooks"][0]["command"])
         self.assertIn(
             "scripts/hooks/pretooluse_worker_scope_enforce.sh",
             entry["hooks"][0]["command"],
+        )
+        # Fail-loud guard: a missing artifact is reported, never silently ignored.
+        self.assertIn("MISSING", entry["hooks"][0]["command"])
+
+    def test_write_hook_settings_anchors_at_fabric_root_not_consumer(self):
+        """OI-1089 finding 1 regression: even when git rev-parse resolves to a
+        different (consumer) root, the hook command must fire the fabric copy."""
+        from tmux_interactive_dispatch import (
+            _worker_scope_hook_command,
+            _write_worker_scope_hook_settings,
+        )
+
+        fabric_root = self.state_dir / "fabric-root"
+        hook = fabric_root / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("#!/bin/bash\n", encoding="utf-8")
+
+        # A consumer root that would have won under the old git-rev-parse lookup
+        # and does NOT contain scripts/hooks/ — the exact failure of finding 1.
+        consumer_root = self.state_dir / "consumer-worktree"
+        consumer_root.mkdir()
+
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            command = _worker_scope_hook_command()
+
+        wt = self.state_dir / "wt-anchored"
+        wt.mkdir()
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            _write_worker_scope_hook_settings(wt)
+        data = json.loads(
+            (wt / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+        )
+        written = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(written, command)
+        # The command points at the fabric copy even when fired from the consumer.
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            cwd=str(consumer_root),
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("No such file or directory", result.stderr)
+        self.assertNotIn("MISSING", result.stderr)
+        # git-rev-parse never appears in the command string.
+        self.assertNotIn("git rev-parse", command)
+
+    def test_hook_command_fails_loud_when_artifact_missing(self):
+        """OI-1089 DoD (b): a missing fabric artifact is NOT silently ignored.
+
+        The command stays non-blocking (exit 0, no block decision) but must print
+        an unmistakable [vnx] MISSING marker to stderr.
+        """
+        from tmux_interactive_dispatch import _worker_scope_hook_command
+
+        empty_fabric = self.state_dir / "fabric-empty"
+        empty_fabric.mkdir()
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=empty_fabric
+        ):
+            command = _worker_scope_hook_command()
+
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, "fail-loud must stay non-blocking")
+        self.assertIn("MISSING", result.stderr)
+        self.assertIn("pretooluse_worker_scope_enforce.sh", result.stderr)
+        self.assertIn("NOT enforcing", result.stderr)
+
+    def test_hook_command_path_metachars_are_literal_not_executed(self):
+        """PR #1413 regression: a fabric path containing shell metacharacters
+        (space + ``$(touch ...)`` command substitution and a ``;``) must be passed
+        to the hook literally. The old implementation interpolated the path into
+        the bash -c body, so a ``$(...)`` in the path executed on every hook fire
+        and a ``;`` could start a second command.
+        """
+        from tmux_interactive_dispatch import _worker_scope_hook_command
+
+        injected_marker = self.state_dir / "injected-marker"
+        fabric_root = self.state_dir / f"fabric $(touch {injected_marker}); root"
+        hook = fabric_root / "scripts" / "hooks" / "pretooluse_worker_scope_enforce.sh"
+        hook.parent.mkdir(parents=True)
+        ran_marker = self.state_dir / "hook-executed"
+        hook.write_text(
+            f"#!/bin/bash\ntouch {shlex.quote(str(ran_marker))}\n", encoding="utf-8"
+        )
+
+        with patch(
+            "tmux_interactive_dispatch._resolve_vnx_home", return_value=fabric_root
+        ):
+            command = _worker_scope_hook_command()
+
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The hook artifact ran via the literal path, so the path resolved intact.
+        self.assertTrue(ran_marker.exists(), "hook must execute via the literal path")
+        # The $(touch ...) embedded in the path must NOT have executed. Under the
+        # pre-fix interpolation it fired on every hook run and created this file.
+        self.assertFalse(
+            injected_marker.exists(),
+            "shell metacharacters in the path must be literal, not executed",
+        )
+
+    def test_t0_state_hook_registration_anchors_at_fabric_root(self):
+        """OI-1089 finding 2: the fabric's own .claude/settings.json registers the
+        t0_brief chain's build_t0_state_hook the same way — anchored at the fabric
+        root (VNX_HOME), never a consumer/worktree git top-level, fail-loud when
+        the artifact is missing."""
+        settings_path = SCRIPT_DIR.parent / ".claude" / "settings.json"
+        self.assertTrue(settings_path.exists(), "repo settings.json must exist")
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        hooks = data["hooks"]["SessionStart"]
+        commands = [
+            h.get("command", "")
+            for e in hooks
+            if isinstance(e, dict)
+            for h in e.get("hooks", [])
+            if "build_t0_state_hook.sh" in h.get("command", "")
+        ]
+        self.assertEqual(len(commands), 1, "exactly one build_t0_state_hook registration")
+        command = commands[0]
+        self.assertIn("${VNX_HOME:-", command, "VNX_HOME must be the primary anchor")
+        self.assertIn("scripts/hooks/build_t0_state_hook.sh", command)
+        self.assertIn("MISSING", command, "fail-loud guard must be present")
+        self.assertNotIn(
+            "git rev-parse --show-toplevel",
+            command,
+            "must not resolve against a consumer git top-level",
         )
 
     def test_write_hook_settings_merges_existing_and_is_idempotent(self):

@@ -63,6 +63,13 @@ del _env_key, _subdir
 # Tests that exercise the guard override this explicitly.
 os.environ.setdefault("VNX_DATA_DIR_GUARD", "off")
 
+# OI-975 git-target guard: disabled for the suite by default. When the suite
+# runs INSIDE a dispatch worker the lanes export VNX_CURRENT_DISPATCH_ID /
+# VNX_DISPATCH_ID, and the guard would refuse every tmp repo in the suite (a
+# tmp repo is structurally the main checkout of its own repo). The guard's own
+# tests (tests/test_git_target_guard.py) set VNX_GIT_TARGET_GUARD=1 explicitly.
+os.environ.setdefault("VNX_GIT_TARGET_GUARD", "0")
+
 # Make the repo root importable for all tests. pytest's prepend import mode
 # only inserts the first non-package dir (tests/) into sys.path, so top-level
 # packages like scripts.* are unreachable when pytest is invoked on an absolute

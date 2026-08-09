@@ -139,7 +139,7 @@ class TestLiteLLMLanesNoCacheControl:
         assert contract.cache_control_supported is False
 
     def test_glm_no_cache_control(self):
-        contract = get_contract("litellm:zai:glm-5.1-default")
+        contract = get_contract("litellm:zai:glm-5.2")
         assert contract.cache_control_supported is False
 
     def test_all_litellm_lanes_no_cache_control(self):

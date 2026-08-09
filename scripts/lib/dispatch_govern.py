@@ -46,14 +46,27 @@ logger = logging.getLogger(__name__)
 # since the tmux dispatch.sh sets PYTHONPATH to scripts/lib only (not scripts/).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 
-# Stamped when no real role is resolvable — NEVER "unknown", NEVER the fake
-# backend-developer default (receipt-quality track). The fake-default guard
-# itself lives in dispatch_identity.resolve_effective_role, the shared resolver
-# every emit path uses.
-_IDENTITY_UNRESOLVED = "identity_unresolved"
+# Single canonical sentinel — imported from dispatch_identity (dispatch-20260804-190000).
+from dispatch_identity import _IDENTITY_UNRESOLVED
 
 # The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
 _PLAN_REVIEWER_ROLE = "plan-reviewer"
+
+# OI-1066: stable, greppable marker stamped into EVERY body this module fabricates
+# itself (the governance layer writing the report file because the lane timed out,
+# errored, or simply never authored one). Prose wording drifts over time; this
+# constant does not. A consumer (the plan-gate panel) detects it by exact-match
+# to classify the seat as "no verdict because the lane never delivered" — a
+# category distinct from "the lane answered but its verdict fence wouldn't parse"
+# (parse_error). The marker is intentionally a plain, uppercase, dotted token so
+# it survives copy-paste, survives a JSON-ish embedding, and is cheap to grep:
+#
+#   grep -rn SYNTHESIZED_REPORT_BY_GOVERNANCE scripts/   # find the writing sites
+#   grep -rn VNX_SYNTHESIZED_REPORT         .vnx-data/  # find fabricated reports
+#
+# Exported so the panel imports THIS constant instead of re-declaring the
+# literal and drifting away from the writer.
+SYNTHESIZED_REPORT_MARKER = "VNX_SYNTHESIZED_REPORT_BY_GOVERNANCE"
 
 # Roles whose worker output is a free-form review/analysis, never a standard
 # ## Changes / ## Verification report — govern() must not run the report-body contract
@@ -180,7 +193,7 @@ def ensure_receipt(
 
     # receipt-quality PR-2: dispatch identity on the govern-synthesized emit
     # path — real role from spec/dispatch_metadata, else identity_unresolved
-    # (fail-open; never the fake backend-developer default).
+    # (fail-open; never the fake sentinel "" default, OI-981).
     # receipt-quality PR-B0: the shape is codified in
     # receipt_schema.SynthesizedLaneReceipt; to_dict() serializes
     # byte-compatibly with the pre-PR-B0 literal.
@@ -188,6 +201,17 @@ def ensure_receipt(
 
     # ADR-012 worker-permission enforcement audit marker (only when flag ON).
     worker_enforcement = "enforced" if worker_permission_enforcement_enabled() else None
+    # OI-864: the real spawn-time posture, classified from the actual launch
+    # flags by the caller (see tmux_interactive_dispatch.dispatch()) — never
+    # re-derived from env vars here. spec.permission_posture is None when the
+    # caller does not compute it, in which case these three fields stay
+    # omitted exactly as before this change.
+    _posture = spec.permission_posture or {}
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the spec carries
+    # the fields when the door threaded them; otherwise the door's env vars the
+    # tmux pane inherited (the worker-authored receipt path reads the same env in
+    # append_receipt_internals.payload._stamp_model_identity). The model string
+    # is left for the append primitive to normalize.
     synthesized_receipt = SynthesizedLaneReceipt(
         dispatch_id=spec.dispatch_id,
         terminal_id=spec.terminal_id,
@@ -197,8 +221,17 @@ def ensure_receipt(
         contract_status=contract_status,
         permission_enforcement=permission_enforcement,
         role=_resolve_govern_role(spec),
+        parent_dispatch=(
+            spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+        ),
+        task_class=spec.task_class or os.environ.get("VNX_TASK_CLASS") or None,
+        tier_from=spec.tier_from or os.environ.get("VNX_TIER_FROM") or None,
+        tier_to=spec.tier_to or os.environ.get("VNX_TIER_TO") or None,
         worker_permission_enforcement=worker_enforcement,
         report_path=str(report_path) if report_path is not None else None,
+        permission_posture=_posture.get("permission_posture"),
+        permission_profile=_posture.get("permission_profile"),
+        permission_allow_pattern_count=_posture.get("permission_allow_pattern_count"),
     ).to_dict()
 
     try:
@@ -215,6 +248,11 @@ def ensure_receipt(
             spec.dispatch_id, receipts_file,
         )
     except Exception as exc:  # noqa: BLE001
+        # OI-1043: a test-isolation guard violation is not a best-effort
+        # audit-trail failure — it must fail the test, never be swallowed.
+        from vnx_paths import TestIsolationGuardError  # noqa: PLC0415
+        if isinstance(exc, TestIsolationGuardError):
+            raise
         logger.warning(
             "ensure_receipt: failed to append synthesized receipt for dispatch=%s: %s",
             spec.dispatch_id, exc,
@@ -239,6 +277,21 @@ class GovernSpec:
     # receipt-quality PR-2: a genuinely-set spec role also threads through into
     # govern-emitted receipts and report frontmatter (see _resolve_govern_role).
     role: Optional[str] = None
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): which dispatch
+    # this one continues, the tier escalation, and the task class. The tmux lane
+    # does not know these (the worker pane inherits them from the door's env);
+    # ensure_receipt falls back to the env when the spec does not carry them.
+    parent_dispatch: Optional[str] = None
+    task_class: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
+    # OI-864: the actual spawn-time permission posture — the dict returned by
+    # worker_permissions.classify_permission_posture() from the REAL launch
+    # flags. The tmux lane computes this once per dispatch (from launch_cmd)
+    # and threads it in; None when the caller does not compute it (e.g. other
+    # govern() callers), in which case ensure_receipt() omits the fields
+    # exactly as before this change (no default-changing behavior).
+    permission_posture: Optional[dict] = None
 
 
 @dataclass
@@ -368,7 +421,8 @@ def _govern_error_fallback(
     error_body = (
         f"# Dispatch {dispatch_id}\n\n"
         f"- Lane: {lane}\n"
-        f"- contract_status: synthesized\n\n"
+        f"- contract_status: synthesized\n"
+        f"- {SYNTHESIZED_REPORT_MARKER}\n\n"
         f"## Summary\n\n"
         f"Governance error during dispatch close-out. "
         f"Report synthesized by error handler. Error: {exc}\n\n"
@@ -410,14 +464,6 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     from governance_emit import emit_unified_report  # noqa: PLC0415
 
     dispatch_id = spec.dispatch_id
-    reports_dir = Path(spec.data_dir) / "unified_reports"
-    worker_report_path = reports_dir / f"{dispatch_id}.md"
-    # Legacy subprocess-lane worker convention (receipt_writer._ensure_unified_report)
-    # instructs workers to write "<dispatch_id>_report.md" — a naming divergence from
-    # the "<dispatch_id>.md" convention govern() and the tmux lane use. Checked as a
-    # fallback so authored-report detection works for the subprocess lane too, without
-    # requiring every existing worker template to be renamed in this same PR.
-    legacy_report_path = reports_dir / f"{dispatch_id}_report.md"
 
     # Determine enforcement mode: tmux=shadow, subprocess=enforce (when flag on).
     contract_validate = os.environ.get("VNX_CONTRACT_VALIDATE", "shadow").strip().lower()
@@ -427,10 +473,18 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     body: Optional[str] = None
     contract_status = "synthesized"
 
-    candidate_path = (
-        worker_report_path if worker_report_path.exists()
-        else (legacy_report_path if legacy_report_path.exists() else None)
+    # OI-989/OI-993: use the shared resolver instead of hand-rolling path
+    # candidates. The resolver checks all three filename forms (canonical
+    # <id>.md, legacy dispatch-<id>.md, legacy <id>_report.md) and sets
+    # ambiguous=True when more than one exists — govern() logs that so the
+    # receipt never silently picks the wrong file.
+    from report_path import resolve_report_path
+    resolved = resolve_report_path(
+        dispatch_id, data_dir=spec.data_dir,
+        repo_root=spec.worktree_path,
     )
+    candidate_path = resolved.path if resolved is not None else None
+
     if candidate_path is not None:
         try:
             candidate = candidate_path.read_text(encoding="utf-8")
@@ -538,7 +592,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     # Partial frontmatter raises SchemaViolation under VNX_SCHEMA_STRICT=1 and
     # blocks the atomic write, leaving a stale placeholder on disk.
     receipt_data = raw.receipt or {}
-    _model = (receipt_data.get("model") or "unknown")
+    # Same source order as the synthesized-receipt path above (line ~205):
+    # worker-authored receipt first, then spec.model (the real dispatch value,
+    # e.g. "sonnet"/"opus"), and only "unknown" when neither is set. Before this
+    # fix, a worker receipt with no "model" key fell straight to "unknown" even
+    # though spec.model carried the real value — OI-1001.
+    _model = receipt_data.get("model") or spec.model or "unknown"
     _exit_code = int(receipt_data.get("exit_code", 0) or 0)
     _raw_token = receipt_data.get("token_usage") or raw.token_usage or {}
     _token_usage = {
@@ -549,6 +608,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         ),
     }
     _cost_usd = float(receipt_data.get("cost_usd") or 0.0)
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): resolve from the
+    # spec first, then the door's env vars (the tmux pane inherits them).
+    _parent_dispatch = spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+    _task_class = spec.task_class or os.environ.get("VNX_TASK_CLASS") or None
+    _tier_from = spec.tier_from or os.environ.get("VNX_TIER_FROM") or None
+    _tier_to = spec.tier_to or os.environ.get("VNX_TIER_TO") or None
     frontmatter = {
         "schema_version": 1,
         "dispatch_id": dispatch_id,
@@ -560,7 +625,9 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         # receipt-quality PR-2: resolved dispatch identity, not the hardcoded
         # fake default the converter would otherwise drop/misread.
         "role": _resolve_govern_role(spec),
-        "task_class": "implementation",
+        # dispatch-20260802-model-ssot-en-ketenlink: real task class instead of
+        # the old unconditional "implementation"; chain-link stamped when known.
+        "task_class": _task_class or "implementation",
         "pr_id": spec.pr_id or "none",
         "duration_seconds": float(raw.duration_seconds),
         "exit_code": _exit_code,
@@ -578,6 +645,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         "contract_status": contract_status,
         "permission_enforcement": permission_enforcement,
     }
+    if _parent_dispatch is not None:
+        frontmatter["parent_dispatch"] = _parent_dispatch
+    if _tier_from is not None:
+        frontmatter["tier_from"] = _tier_from
+    if _tier_to is not None:
+        frontmatter["tier_to"] = _tier_to
 
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 
@@ -655,18 +728,23 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
 
     # -- ## Verification ------------------------------------------------------
     verification = (
-        "None — interactive lane (tmux-spawn). "
-        "Report synthesized by governance layer; worker did not author a report file."
+        f"None — interactive lane (tmux-spawn). "
+        f"Report synthesized by governance layer; worker did not author a report file. "
+        f"[{SYNTHESIZED_REPORT_MARKER}]"
     )
 
     # -- ## Open Items --------------------------------------------------------
-    open_items = f"Report synthesized by tmux lane; worker did not author unified_reports/{dispatch_id}.md."
+    open_items = (
+        f"Report synthesized by tmux lane; worker did not author "
+        f"unified_reports/{dispatch_id}.md. [{SYNTHESIZED_REPORT_MARKER}]"
+    )
 
     body = (
         f"# Dispatch {dispatch_id}\n\n"
         f"- Lane: tmux_interactive\n"
         f"- Status: {status}\n"
-        f"- contract_status: synthesized\n\n"
+        f"- contract_status: synthesized\n"
+        f"- {SYNTHESIZED_REPORT_MARKER}\n\n"
         f"## Summary\n\n{summary}\n\n"
         f"## Changes\n\n{changes}\n\n"
         f"## Verification\n\n{verification}\n\n"
@@ -679,62 +757,90 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
     return body
 
 
-def _git_summary(spec: GovernSpec, status: str) -> str:
-    """Return git log subject + body for the worker commit, or a fallback message."""
-    cwd = str(spec.worktree_path) if spec.worktree_path else None
+class _NoWorktreeError(Exception):
+    """Raised by _run_worktree_git when spec.worktree_path is None."""
+
+
+def _run_worktree_git(spec: GovernSpec, args: list, timeout: float) -> Optional[str]:
+    """Run `git <args>` scoped to spec.worktree_path and return stripped stdout, or None.
+
+    Refuses to run when spec.worktree_path is unset (OI-1008): a git call with
+    no explicit cwd inherits the dispatcher process's own working directory —
+    the main checkout — and would report on someone else's commits/diff
+    instead of this dispatch's. Every git invocation in this module MUST go
+    through this helper so that guarantee holds everywhere, not just at the
+    two call sites known today.
+    """
+    if not spec.worktree_path:
+        raise _NoWorktreeError(spec.dispatch_id)
+    # OI-975: the worktree path itself must not resolve to the main checkout.
+    # A presence check alone is not enough — a bug that sets
+    # spec.worktree_path to the main checkout would otherwise pass the
+    # OI-1008 guard and report/act on the operator's checkout.
+    try:
+        from git_target_guard import (  # type: ignore[import]
+            DispatchTargetsMainCheckoutError,
+            guard_git_target,
+        )
+        guard_git_target(spec.worktree_path, dispatch_id=spec.dispatch_id)
+    except DispatchTargetsMainCheckoutError:
+        logger.error(
+            "govern._run_worktree_git: refusing git %s for dispatch %s — "
+            "worktree_path %s resolves to the main checkout (OI-975)",
+            args, spec.dispatch_id, spec.worktree_path,
+        )
+        return None
     try:
         result = subprocess.run(
-            ["git", "log", "-1", "--format=%s%n%b"],
+            ["git", *args],
             capture_output=True,
             text=True,
-            timeout=10,
-            cwd=cwd,
+            timeout=timeout,
+            cwd=str(spec.worktree_path),
         )
-        msg = result.stdout.strip()
-        if msg:
-            return f"{msg}\n\nWorker status: {status}. Body synthesized by governance layer (no worker report file)."
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as exc:
-        logger.debug("govern._git_summary: git log failed for %s: %s", spec.dispatch_id, exc)
+        logger.debug("govern._run_worktree_git: git %s failed for %s: %s", args, spec.dispatch_id, exc)
+        return None
+    return result.stdout.strip() or None
+
+
+def _git_summary(spec: GovernSpec, status: str) -> str:
+    """Return git log subject + body for the worker commit, or a fallback message."""
+    try:
+        msg = _run_worktree_git(spec, ["log", "-1", "--format=%s%n%b"], timeout=10)
+    except _NoWorktreeError:
+        msg = None
+
+    if msg:
+        return (
+            f"{msg}\n\nWorker status: {status}. Body synthesized by governance layer "
+            f"(no worker report file). [{SYNTHESIZED_REPORT_MARKER}]"
+        )
 
     return (
         f"No commit on branch; worker emitted status={status}. "
-        "Body synthesized by lane (no worker report)."
+        f"Body synthesized by lane (no worker report). [{SYNTHESIZED_REPORT_MARKER}]"
     )
 
 
 def _git_changes(spec: GovernSpec) -> str:
     """Return git diff --stat between base_sha and HEAD, or a fallback message."""
-    cwd = str(spec.worktree_path) if spec.worktree_path else None
     base = spec.base_sha
 
-    if base:
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--stat", f"{base}..HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                cwd=cwd,
-            )
-            stat = result.stdout.strip()
+    try:
+        if base:
+            stat = _run_worktree_git(spec, ["diff", "--stat", f"{base}..HEAD"], timeout=15)
             if stat:
                 return stat
-        except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as exc:
-            logger.debug("govern._git_changes: git diff failed for %s: %s", spec.dispatch_id, exc)
 
-    # Fallback: no base_sha or git failed.
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--stat", "HEAD~1..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=cwd,
-        )
-        stat = result.stdout.strip()
+        # Fallback: no base_sha or the base_sha diff was empty.
+        stat = _run_worktree_git(spec, ["diff", "--stat", "HEAD~1..HEAD"], timeout=15)
         if stat:
             return f"(no base_sha; showing HEAD~1..HEAD)\n\n{stat}"
-    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-        pass
+    except _NoWorktreeError:
+        return (
+            "Diff unavailable: lane produced no worker report and no worktree "
+            "was provisioned for this dispatch."
+        )
 
     return "No git diff available — worktree path or base SHA not provided."

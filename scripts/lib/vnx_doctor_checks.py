@@ -445,6 +445,68 @@ def check_incident_pressure(state_dir: Path) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Check: ADR-007 composite UNIQUE index coverage
+# ---------------------------------------------------------------------------
+
+def check_composite_index_coverage(state_dir: Path) -> CheckResult:
+    """Validate ADR-007 composite UNIQUE index coverage (ux_<table>_pid).
+
+    Flags any ADR-007 target table that exists but lacks its ux_*_pid index
+    (absent, or shadowed by an index of the same name on a different table),
+    plus any durable failure markers recorded for unexpected migration errors
+    (OI-563). Under-enforcement is surfaced as WARN — indexes are a governance
+    hardening, not a data-loss condition.
+    """
+    db_path = state_dir / DB_FILENAME
+    if not db_path.exists():
+        return CheckResult(
+            name="composite_index_coverage",
+            status=FAIL,
+            message="Runtime coordination database not found",
+            details=[f"Expected: {db_path}"],
+        )
+
+    try:
+        with get_connection(state_dir) as conn:
+            from coordination_db import composite_index_audit
+
+            audit = composite_index_audit(conn)
+            missing = audit["missing"]
+            failures = audit["failures"]
+
+            if not missing:
+                return CheckResult(
+                    name="composite_index_coverage",
+                    status=PASS,
+                    message=(
+                        f"ADR-007 composite UNIQUE indexes present on "
+                        f"{audit['tables_checked']} table(s)"
+                    ),
+                )
+
+            details = [
+                f"Missing index: {m['table']}.{m['index']} on columns {m['columns']}"
+                for m in missing
+            ]
+            details.extend(
+                f"Unexpected failure on {f['table']} ({f['occurred_at']}): {f['error']}"
+                for f in failures
+            )
+            return CheckResult(
+                name="composite_index_coverage",
+                status=WARN,
+                message=f"{len(missing)} table(s) missing their ux_*_pid index",
+                details=details,
+            )
+    except Exception as exc:
+        return CheckResult(
+            name="composite_index_coverage",
+            status=FAIL,
+            message=f"Composite index coverage check error: {exc}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Check: tmux session profile consistency
 # ---------------------------------------------------------------------------
 

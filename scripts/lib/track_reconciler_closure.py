@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
 
@@ -51,6 +51,7 @@ def close_track_if_done(
     approval_id: Optional[str] = None,
     include_parked: bool = False,
     repo_root: "str | Path | None" = None,
+    merged_pr_numbers: Optional[FrozenSet[int]] = None,
 ) -> Dict[str, Any]:
     """Attempt to close a track by walking its declared phase to 'done'.
 
@@ -97,6 +98,14 @@ def close_track_if_done(
     repo_root: optional project repo root, forwarded to the internal
     reconcile_track call for its ROADMAP.yaml (Source-3) evidence path; falls
     back to the CWD git-root then the legacy layout (see reconcile_track).
+
+    merged_pr_numbers: optional pre-established merged-PR set (OI-1064). When
+    provided, forwarded to the internal reconcile_track call so a caller that
+    has ALREADY established merge state (run_reconcile's gh sweep) does not
+    discard it — the set must be the UNION of the caller's gh-confirmed numbers
+    and the locally-loaded set (run_reconcile performs that union). Default
+    None keeps every existing caller behaviour-identical: reconcile_track loads
+    the local sources itself. See reconcile_track's _merged_pr_numbers contract.
 
     Returns a dict with keys: track_id, project_id, action, applied, declared_phase,
     derived_status, path (when applicable), evidence (when computed), error (on failure).
@@ -328,7 +337,11 @@ def close_track_if_done(
     # When _skip_derived_gate is True, reconcile_track still runs for the derived
     # refresh (persists derived_status for reporting) but its result does not gate
     # the walk — gh evidence already authorized the close.
-    result = reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
+    result = reconcile_track(
+        state_dir, track_id, project_id,
+        repo_root=repo_root,
+        _merged_pr_numbers=merged_pr_numbers,
+    )
     derived = result["derived_status"]
     declared = result["declared_phase"]
     target = "done"

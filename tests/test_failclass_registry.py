@@ -335,7 +335,7 @@ class TestRegistryDeepseekRoute:
         deepseek litellm route is disabled)."""
         from providers.constraint_enforcer import _model_in_registry
 
-        result = _model_in_registry("litellm", "zai", "glm-5.1")
+        result = _model_in_registry("litellm", "zai", "glm-5.2")
         assert result is True, (
             f"Expected glm-harness/zai to still be allowed, got {result}"
         )

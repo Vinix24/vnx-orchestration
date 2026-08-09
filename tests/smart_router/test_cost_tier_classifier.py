@@ -38,10 +38,12 @@ _CASES = [
     ({"instruction": "edit function"}, ["a.py"], 200, TIER_MID),
     ({"instruction": "add adr for caching"}, ["docs/adr.md"], 80, TIER_MID),
     ({"instruction": "update interface contract"}, ["api.py"], 40, TIER_MID),
-    # tier-high (security, arch, or LOC > 300)
+    # tier-high (security, arch+>150 LOC, or LOC > 300)
     ({"instruction": "fix auth token validation"}, ["auth.py"], 20, TIER_HIGH),
     ({"instruction": "patch security vulnerability"}, ["core.py"], 10, TIER_HIGH),
-    ({"instruction": "rewrite the orchestrator"}, ["core.py"], 100, TIER_HIGH),
+    # Arch keyword only escalates when LOC justifies it (LOC > 150).
+    # A 100-LOC "rewrite" is a word, not an architecture change.
+    ({"instruction": "rewrite the orchestrator"}, ["core.py"], 200, TIER_HIGH),
     ({"instruction": "add feature"}, [], 350, TIER_HIGH),
     ({"instruction": "add button", "tags": ["security"]}, ["ui.py"], 5, TIER_HIGH),
     ({"instruction": "update rbac permission check"}, ["perm.py"], 30, TIER_HIGH),
@@ -99,3 +101,44 @@ def test_loc_301_forces_high():
 def test_loc_300_mid():
     """LOC = 300 stays at tier-mid (boundary inclusive)."""
     assert classify_dispatch({"instruction": "add feature"}, ["x.py"], 300) == TIER_MID
+
+
+def test_arch_keyword_without_scope_does_not_escalate():
+    """A short instruction containing 'refactor' must NOT become tier-high.
+
+    Regression test for the keyword-order bug: before the fix, architecture
+    keywords were tested BEFORE any LOC check, so a 60-LOC config refactor
+    containing the word "refactor" was classified tier-high.  After the fix,
+    arch keywords only escalate when LOC > 150 (the tier-low ceiling).
+    """
+    # Measured: "Refactor a typo in a docstring." was tier-high, now tier-low.
+    assert (
+        classify_dispatch(
+            {"instruction": "Refactor a typo in a docstring."}, ["foo.py"], 60
+        )
+        == TIER_LOW
+    )
+
+
+def test_arch_keyword_with_scope_escalates():
+    """When an arch keyword coincides with substantial scope, it escalates to tier-high."""
+    assert (
+        classify_dispatch(
+            {"instruction": "Refactor the entire orchestration layer"},
+            ["core.py", "dispatch.py"],
+            200,
+        )
+        == TIER_HIGH
+    )
+
+
+def test_small_refactor_is_tier_low_not_high():
+    """A realistic 60-LOC single-file refactor must stay tier-low, not tier-high."""
+    assert (
+        classify_dispatch(
+            {"instruction": "Refactor the YAML config loader to use a typed container"},
+            ["config_loader.py"],
+            60,
+        )
+        == TIER_LOW
+    )

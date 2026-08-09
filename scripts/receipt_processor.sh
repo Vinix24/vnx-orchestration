@@ -3,6 +3,8 @@
 # Prevents reprocessing of historical reports and handles pane changes gracefully
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/vnx_paths.sh
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 
 # Respect PAUSED marker: refuse to start while VNX is paused.
@@ -15,6 +17,8 @@ if [ "${_RP_LIB_MODE:-0}" != "1" ] && [ "${VNX_RESUME_IN_PROGRESS:-0}" != "1" ] 
   exit 0
 fi
 
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/receipt_terminal_detection.sh
 source "$SCRIPT_DIR/lib/receipt_terminal_detection.sh"
 
 # Base directories
@@ -26,12 +30,16 @@ SCRIPTS_DIR="$VNX_BASE/scripts"
 APPEND_RECEIPT_SCRIPT="$SCRIPTS_DIR/append_receipt.py"
 
 # PHASE 1C: Singleton enforcement - prevent duplicate processes
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=singleton_enforcer.sh
 source "$SCRIPTS_DIR/singleton_enforcer.sh"
 if [ "${_RP_LIB_MODE:-0}" != "1" ]; then
     enforce_singleton "receipt_processor.sh"
 fi
 
 # Source the smart pane manager
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=pane_manager.sh
 source "$SCRIPTS_DIR/pane_manager.sh"
 
 # Configuration (can be overridden by environment variables)
@@ -89,28 +97,41 @@ fi
 
 # ── Helper libraries ──────────────────────────────────────────────────────────
 RP_LIB="$SCRIPT_DIR/lib/receipt_processor"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_logging.sh
 source "$RP_LIB/rp_logging.sh"
 
 # Emit deferred SHA fallback warning now that log() is defined
 [ -n "$_SHA256_FALLBACK_WARN" ] && log "WARN" "$_SHA256_FALLBACK_WARN"
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_time.sh
 source "$RP_LIB/rp_time.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_dedup.sh
 source "$RP_LIB/rp_dedup.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/receipt_processor/rp_deadletter.sh
+source "$RP_LIB/rp_deadletter.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_lock.sh
 source "$RP_LIB/rp_lock.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_extract.sh
 source "$RP_LIB/rp_extract.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_state.sh
 source "$RP_LIB/rp_state.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_pattern.sh
 source "$RP_LIB/rp_pattern.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_append.sh
 source "$RP_LIB/rp_append.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_dispatch.sh
 source "$RP_LIB/rp_dispatch.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_delivery.sh
 source "$RP_LIB/rp_delivery.sh"
 
@@ -311,6 +332,7 @@ _ppr_collect_pending() {
             ((_PPR_QUEUE_COUNT++))
         fi
     done
+    log_too_old_cycle_summary
 }
 
 # Process reports (passed as "$@") with rate limiting and watermark update.
@@ -340,7 +362,7 @@ _ppr_process_rate_limited() {
     python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
         --state-dir "$STATE_DIR" \
         "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>/dev/null \
-        || log "DEBUG" "report_to_receipt_converter catchup scan non-fatal (exit $?)"
+        || log "ERROR" "report_to_receipt_converter catchup scan FAILED non-fatal, processor continues (exit $?)"
 }
 
 # Process all pending reports with flood protection and rate limiting.
@@ -384,6 +406,7 @@ _poll_new_reports() {
                 fi
             fi
         done
+        log_too_old_cycle_summary
         # Update watermark once after the full sweep with the maximum mtime seen.
         if [ "$_poll_max_mtime" -gt 0 ]; then
             echo "$_poll_max_mtime" > "$WATERMARK_FILE"
@@ -398,7 +421,7 @@ _poll_new_reports() {
             python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
                 --state-dir "$STATE_DIR" \
                 "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>/dev/null \
-                || log "DEBUG" "report_to_receipt_converter scan non-fatal (exit $?)"
+                || log "ERROR" "report_to_receipt_converter scan FAILED non-fatal, processor continues (exit $?)"
         fi
         if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
             _retry_pending_receipts
@@ -422,6 +445,7 @@ _mnr_startup_catchup() {
             process_single_report "$report" && ((catchup_count++))
         fi
     done
+    log_too_old_cycle_summary
     [ "$catchup_count" -gt 0 ] && log "INFO" "Startup catchup complete: $catchup_count reports processed"
 }
 
@@ -525,6 +549,7 @@ cleanup() {
     release_receipt_lock  # Ensure lock is released
     rm -f "$PID_FILE"
     rm -f "$FLOOD_LOCKFILE"  # Clear flood lock on clean shutdown
+    rm -f "$STATE_DIR/.append_stderr.$$"  # Leftover append-stderr capture (rp_append.sh)
     # Clean up singleton lock (and legacy fswatch FIFO if it exists)
     rm -f "$STATE_DIR/.fswatch_fifo.$$"
     rm -rf "$VNX_LOCKS_DIR/receipt_processor.sh.lock"

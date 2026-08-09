@@ -53,7 +53,7 @@ _LOG = logging.getLogger(__name__)
 
 REPORT_FILENAME = "producer_freshness.ndjson"
 HEARTBEAT_COMPONENT = "producer_freshness_monitor"
-HEARTBEAT_INTERVAL_SECONDS = 86400
+HEARTBEAT_INTERVAL_SECONDS = 28800  # 8h — 6h cadence + 2h margin (matching tripwire)
 
 _STATUS_OK = "ok"
 _STATUS_STALE = "stale"

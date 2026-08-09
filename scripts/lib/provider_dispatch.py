@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 logger = logging.getLogger(__name__)
 
+from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
+
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # ADR-012 worker-permission enforcement flag (default OFF). Imported defensively
@@ -38,6 +40,7 @@ try:
     from worker_permissions import (
         worker_permission_enforcement_enabled,
         worker_scoped_enabled,
+        classify_permission_posture,
     )
 except Exception:  # pragma: no cover - sibling import is available in-tree
     def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
@@ -50,6 +53,24 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
             "1", "true", "yes", "on",
         )
 
+    def classify_permission_posture(argv, role=None):  # type: ignore[misc]
+        # OI-864 fallback: classify from actual argv tokens, not env re-reads.
+        if "--dangerously-skip-permissions" in argv:
+            return {"permission_posture": "blanket-skip"}
+        if "--permission-mode" in argv or "--allowedTools" in argv:
+            allow_count = 0
+            if "--allowedTools" in argv:
+                idx = argv.index("--allowedTools")
+                if idx + 1 < len(argv):
+                    allow_count = len([p for p in argv[idx + 1].split(",") if p.strip()])
+            return {
+                "permission_posture": "scoped-allowlist",
+                "permission_profile": role or "code-worker",
+                "permission_allow_pattern_count": allow_count,
+            }
+        return {"permission_posture": "attached-interactive"}
+
+
 # Providers whose spawn handlers exist.
 _IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness", "glm-harness", "local-gemma"}
 
@@ -61,7 +82,7 @@ _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "bedrock": "bedrock/claude-sonnet-4-6",
     "deepseek": "deepseek/deepseek-v4-pro",
     "moonshot": "moonshot/kimi-k2-0905-preview",
-    "zai": "openrouter/z-ai/glm-5",
+    "zai": "openrouter/z-ai/glm-5.2",
     "ollama": "ollama/llama3",
     "anthropic": "anthropic/claude-sonnet-4-6",
     # openrouter-arbitrary lane (PR-1 skeleton): the ONE OpenAI-compat model this
@@ -79,13 +100,14 @@ _SUB_PROVIDER_KEY_REQS: dict = {
 }
 
 # GLM model names that are LEGACY — rejected on zai dispatch (PR-7.3)
-_DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6"})
+# Extended 2026-08-03: glm-5 (base Feb 2026) and glm-5.1 blocked; only glm-5.2 allowed.
+_DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6", "glm-5", "glm-5.1"})
 
 # Default model alias per sub-provider — used to build lane key for contract lookup
 _SUB_PROVIDER_DEFAULT_ALIAS: dict = {
     "deepseek": "deepseek-v4-pro",
     "moonshot": "kimi-k2-0905-default",
-    "zai": "glm-5.1-default",
+    "zai": "glm-5.2",
     "openrouter": "gpt-4o-mini-default",
 }
 
@@ -278,7 +300,12 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
         enriched = f"{header}\n\n{enriched}"
 
     # Deterministic control: did the resolved role source actually reach the prompt?
+    # OI-983: the verification below runs with the RAW args.role. The resolved _role
+    # (from dispatch_identity) may differ when args.role is the sentinel "" or None
+    # but dispatch_metadata carries a real role. Stash the enriched instruction so
+    # _emit_governance can re-verify with the RESOLVED role after resolution.
     args._role_application = _verify_role_application(enriched, args)
+    args._enriched_instruction = enriched
 
     args._final_prompt_integrity = _record_final_prompt_integrity(
         dispatch_id=args.dispatch_id,
@@ -564,8 +591,8 @@ def _record_provider_metadata(
         db_path = Path(state_dir) / "quality_intelligence.db"
         terminal = getattr(args, "terminal_id", "") or ""
         # Receipt-quality PR-4: capture-gap backfill at metadata-WRITE time.
-        # Derive a genuine role: normalize the fake backend-developer default
-        # away, then recover from the instruction's "Role:" header. Where no
+        # Derive a genuine role: normalize the fake sentinel "" away (OI-981),
+        # then recover from the instruction's "Role:" header. Where no
         # real role is derivable, leave null — the resolver stamps
         # identity_unresolved at emit.
         role = getattr(args, "role", None)
@@ -633,8 +660,17 @@ def _emit_governance(
     status: str,
     *,
     event_store: "Optional[Any]" = None,
+    permission_posture: "Optional[Dict[str, Any]]" = None,
 ) -> None:
     """Emit dispatch receipt + unified report after every spawn handler call.
+
+    ``permission_posture`` (OI-864): optional dict from
+    ``worker_permissions.classify_permission_posture()``, computed by the
+    caller from the ACTUAL spawn flags/argv (e.g. the claude-benchmark path
+    in ``_dispatch_claude_benchmark``). When provided, its fields are stamped
+    onto the receipt alongside (not instead of) the existing
+    ``permission_enforcement`` marker below — which stays derived exactly as
+    before for every other caller/provider that does not pass this.
 
     When *event_store* is provided the function archives the live event stream
     (terminal → events/archive/{terminal}/{dispatch_id}.ndjson) BEFORE writing
@@ -720,9 +756,18 @@ def _emit_governance(
     # args that never set the attribute yields a real None via vars().get().
     _role_app = vars(args).get("_role_application")
 
+    # OI-983: when the raw args.role differs from the resolved _role, re-verify
+    # with the RESOLVED role so role_applied is checked against the SAME value
+    # that is stamped as "role" on this receipt. The raw verification above (by
+    # _enrich_instruction) was against args.role — if that was the sentinel ""
+    # or None but dispatch_metadata resolved to "quality-engineer", the raw
+    # verdict and the receipt role would disagree. FAIL-OPEN — a re-verification
+    # error must never break receipt emission; fall back to the raw verdict.
+    _enriched_instruction = vars(args).get("_enriched_instruction")
+
     # receipt-quality PR-1 + W7 fix: resolve dispatch identity (role) just
     # before the emit. The shared resolver prefers the genuinely-set --role
-    # (never the fake backend-developer default), falls back to
+    # (never the fake sentinel "" default, OI-981), falls back to
     # dispatch_metadata, then stamps identity_unresolved. FAIL-OPEN — a
     # resolver error must never break receipt emission.
     try:
@@ -740,7 +785,27 @@ def _emit_governance(
             getattr(args, "dispatch_id", "?"),
             exc_info=True,
         )
-        _role = "identity_unresolved"
+        _role = _IDENTITY_UNRESOLVED
+
+    # OI-983: re-verify role_applied with the resolved _role when the enriched
+    # instruction is available and the resolved role differs from the raw one.
+    # This guarantees the role_applied field on the receipt was checked against
+    # the SAME role value stamped as "role". FAIL-OPEN — a verification error
+    # leaves _role_app at its raw value (from _enrich_instruction).
+    if _enriched_instruction is not None and _role != getattr(args, "role", None):
+        try:
+            from role_application import verify_role_applied  # noqa: PLC0415
+            _role_app = verify_role_applied(
+                _enriched_instruction,
+                getattr(args, "terminal_id", ""),
+                _role,
+            )
+        except Exception:  # noqa: BLE001 — verification must never break a dispatch
+            logger.debug(
+                "_emit_governance: role_applied re-verify failed open dispatch=%s (non-fatal)",
+                getattr(args, "dispatch_id", "?"),
+                exc_info=True,
+            )
 
     # receipt-quality PR-B2: aggregate PreToolUse-hook tool-call signals for
     # this dispatch (scripts/lib/toolcall_signals.py). FAIL-OPEN — an
@@ -809,6 +874,15 @@ def _emit_governance(
                 events_path=events_path,
                 permission_enforcement=(
                     "enforced" if worker_permission_enforcement_enabled() else None
+                ),
+                permission_posture=(
+                    (permission_posture or {}).get("permission_posture")
+                ),
+                permission_profile=(
+                    (permission_posture or {}).get("permission_profile")
+                ),
+                permission_allow_pattern_count=(
+                    (permission_posture or {}).get("permission_allow_pattern_count")
                 ),
                 mandate_id=getattr(args, "mandate_id", None),
                 final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
@@ -1235,6 +1309,25 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         skip_permissions = not (
             worker_permission_enforcement_enabled() or worker_scoped_enabled()
         )
+        # OI-864: classify the REAL posture from the actual argv
+        # SubprocessAdapter.deliver() will build for this spawn (same
+        # requires_mcp/role inputs), instead of a third independent read of
+        # VNX_ENFORCE_WORKER_PERMISSIONS/VNX_WORKER_SCOPED (which can diverge
+        # from `skip_permissions` above — e.g. VNX_WORKER_SCOPED=1 alone).
+        # Best-effort: a classification failure must never break the benchmark.
+        _permission_posture: "Optional[dict]" = None
+        try:
+            from subprocess_adapter import _build_worker_scope_args  # noqa: PLC0415
+            _scope_argv = _build_worker_scope_args(
+                role, requires_mcp=getattr(args, "requires_mcp", False)
+            )
+            _permission_posture = classify_permission_posture(_scope_argv, role)
+        except Exception as _posture_exc:  # noqa: BLE001
+            logger.debug(
+                "_dispatch_claude_benchmark: permission posture classification "
+                "failed for dispatch=%s (non-fatal): %s",
+                args.dispatch_id, _posture_exc,
+            )
         result = spawn_claude(
             prompt=instruction,
             model=args.model,
@@ -1251,13 +1344,22 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
 
         if result.error or result.timed_out:
             status = "timeout" if result.timed_out else "failure"
-            _emit_governance(args, "claude", args.model, result, start_time, end_time, status, event_store=event_store)
+            _emit_governance(
+                args, "claude", args.model, result, start_time, end_time, status,
+                event_store=event_store, permission_posture=_permission_posture,
+            )
             print(f"spawn_claude failed: {result.error or 'timeout'}", file=sys.stderr)
             return 1
         if result.returncode != 0:
-            _emit_governance(args, "claude", args.model, result, start_time, end_time, "failure", event_store=event_store)
+            _emit_governance(
+                args, "claude", args.model, result, start_time, end_time, "failure",
+                event_store=event_store, permission_posture=_permission_posture,
+            )
             return 1
-        _emit_governance(args, "claude", args.model, result, start_time, end_time, "success", event_store=event_store)
+        _emit_governance(
+            args, "claude", args.model, result, start_time, end_time, "success",
+            event_store=event_store, permission_posture=_permission_posture,
+        )
         return 0
     finally:
         _event_store_safety_net(event_store, args)
@@ -1756,13 +1858,13 @@ def _validate_zai_model_not_legacy(model: str) -> None:
     """Raise ValueError when model names a deprecated GLM version."""
     model_lower = (model or "").lower().strip()
     if model_lower in _DEPRECATED_ZAI_MODELS:
-        raise ValueError(f"GLM-4.5/4.6 are LEGACY, use GLM-5.1 (got: {model!r})")
+        raise ValueError(f"GLM-4.5/4.6/5/5.1 are LEGACY, use GLM-5.2 (got: {model!r})")
 
 
 def _resolve_zai_model(model_alias: "str | None" = None) -> str:
-    """Load GLM-5.1 litellm_name from registry via OpenRouter.
+    """Load GLM-5.2 litellm_name from registry via OpenRouter.
 
-    Defaults to 'glm-5.1-default' (openrouter/z-ai/glm-5) when alias is absent.
+    Defaults to 'glm-5.2' (openrouter/z-ai/glm-5.2) when alias is absent.
     Falls back to hardcoded default when registry is unavailable.
     """
     from providers import provider_registry as _reg
@@ -1774,7 +1876,7 @@ def _resolve_zai_model(model_alias: "str | None" = None) -> str:
     cfg = registry.get("zai")
     if cfg is None or not cfg.enabled or not cfg.models:
         return _LITELLM_SUB_PROVIDER_DEFAULTS["zai"]
-    target_key = model_alias or "glm-5.1-default"
+    target_key = model_alias or "glm-5.2"
     if target_key in cfg.models:
         return cfg.models[target_key].litellm_name
     return next(iter(cfg.models.values())).litellm_name
@@ -2010,6 +2112,14 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
+            # OI-1087: same read-only exemption as the envelope-adapter path — the
+            # explicit --task-class flag first, then the VNX_TASK_CLASS env the door
+            # exports (the same value append_receipt records on the receipt).
+            # Unknown/empty keeps the fabrication guard armed.
+            task_class=(
+                (getattr(args, "task_class", "") or "").strip()
+                or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
+            ) or None,
         )
         end_time = datetime.now(timezone.utc)
 

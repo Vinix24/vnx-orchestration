@@ -13,6 +13,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        # Full history (fetch-depth: 0): the profile-a suite includes
+        # test_pre_merge_gate.py::TestCheckPRSize, which pins real commit
+        # SHAs (9e0813e2..5ab8fe8c) to verify merge-base range counting
+        # (OI-838). A depth-1 clone cannot resolve those refs and the test
+        # fails with a loud HOLD. Same pattern as the trace-token-check and
+        # slug-match-check jobs below.
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,7 +42,10 @@ jobs:
           # nx.pagerank crashes on the missing numpy — measured 2026-08-02:
           # test_repo_map_provider_coverage.py (green on main) fails 2 tests with
           # networkx present, passes 11/11 without it.
-          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2
+          # build is required by tests/test_wheel_build.py::test_wheel_builds
+          # (python -m build --wheel); without it that test fails in this image
+          # with "No module named build" (OI-953).
+          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 build
 
       - name: Prepare expected repo layout
         run: |

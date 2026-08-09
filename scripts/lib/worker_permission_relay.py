@@ -82,12 +82,30 @@ def _safe_dispatch_id(dispatch_id: str) -> str:
 # Prompt markers the Claude Code TUI prints when it needs confirmation. Matched
 # case-insensitively and kept tolerant: never pinned to one Claude Code version's
 # exact wording (the lane has been burned by version-specific TUI scraping before).
+# Keep in parity with worker_pane_classifier.PROMPT_MARKERS (parity test).
 PROMPT_MARKERS = (
     "do you want to proceed",
     "do you want to make this edit",
     "do you want to create",
     "requires confirmation",
     "requires your permission",
+    # OI-1007: newer Claude Code menus carry NO prose marker line — the whole
+    # prompt is the numbered option list, e.g.
+    #   "1. Yes / 2. Yes, and don't ask again for: rm -f /tmp/x / 3. No"
+    # The "don't ask again for" option label is the distinguishing phrase.
+    "don't ask again for",
+)
+
+# OI-1007 inline command, extracted from the numbered-option label that embeds
+# the pending command after the colon:
+#   "2. Yes, and don't ask again for: rm -f /tmp/x / 3. No"
+# The old box format says "don't ask again for this project / this session"
+# (no colon, prose object) — requiring the colon keeps the two formats apart so
+# "this project" is never captured as a command. The lookahead stops the capture
+# at the next numbered-option separator (" / 3.") or end of line.
+_INLINE_CMD_RE = re.compile(
+    r"don['’]t\s+ask\s+again\s+for\s*:\s*(.+?)(?:\s+/\s*\d+\.|(?:\r?\n)|$)",
+    re.IGNORECASE,
 )
 
 # Box-drawing / prompt-glyph characters stripped when recovering an echoed command.
@@ -321,14 +339,20 @@ def parse_pending_command(pane_text: str) -> Optional[str]:
     """Extract the command/tool a permission prompt is asking about.
 
     Returns the command string when *pane_text* shows a permission prompt, else
-    None. Two extraction strategies:
+    None. Three extraction strategies, tried in this order:
       1. The ``Bash(<cmd>)`` / ``Tool(<arg>)`` token Claude prints for tool calls.
-      2. The command echoed inside the prompt box, just above the
+      2. (OI-1007) The command embedded inline in the numbered option label
+         "… and don't ask again for: <cmd> …". Runs before the box scan because
+         its marker matches the menu line itself — scanning above it would read
+         arbitrary prior pane output as the command.
+      3. The command echoed inside the prompt box, just above the
          "Do you want to proceed?" line.
     """
     if not pane_text:
         return None
-    low = pane_text.lower()
+    # Normalize TUI-variant apostrophes (’ / ‘) to straight quotes so a pane
+    # rendered with curly glyphs still matches the straight-quote markers.
+    low = pane_text.lower().replace("’", "'").replace("‘", "'")
     if not any(marker in low for marker in PROMPT_MARKERS):
         return None
 
@@ -339,6 +363,25 @@ def parse_pending_command(pane_text: str) -> Optional[str]:
         if cand:
             return cand
 
+    # Strategy 3 (OI-1007): numbered-menu format, where the pending command sits
+    # inline in the option label ("don't ask again for: <cmd>") and there is NO
+    # box above the marker to scan. Runs BEFORE the box scan: the marker matches
+    # the menu line itself, so scanning the twelve lines above it would pick up
+    # arbitrary prior pane output instead of the menu's own command. The old box
+    # format says "don't ask again for this project" (no colon) — the inline
+    # regex requires the colon, so it never fires on the box format and the box
+    # scan below stays the authority there.
+    m = _INLINE_CMD_RE.search(pane_text)
+    if m:
+        # _strip_box first: a box-rendered option line carries trailing box-drawing
+        # chars in the capture ("… for: this project │") that would otherwise slip
+        # past the degenerate guard below.
+        cmd = _strip_box(m.group(1))
+        # Refuse degenerate prose captures ("this project"/"this session") that
+        # would read as a command if a future TUI drops the colon.
+        if cmd.lower() not in ("this project", "this session", "this command"):
+            return cmd
+
     # Strategy 2: command echoed in the box above the marker line. The command
     # is the FIRST content row after the title row ("Bash command"); the prose
     # description follows it. Scan the lines just above the marker, resetting on
@@ -346,7 +389,8 @@ def parse_pending_command(pane_text: str) -> Optional[str]:
     lines = pane_text.splitlines()
     marker_idx = None
     for i, ln in enumerate(lines):
-        if any(mk in ln.lower() for mk in PROMPT_MARKERS):
+        ln_low = ln.lower().replace("’", "'").replace("‘", "'")
+        if any(mk in ln_low for mk in PROMPT_MARKERS):
             marker_idx = i
             break
     if marker_idx is None:
@@ -407,7 +451,12 @@ def write_escalation(
     state_dir: "str | Path | None" = None,
     now: "float | None" = None,
 ) -> Path:
-    """Write a pending escalation record (atomic). *reason* ∈ {catastrophic, window_closed}.
+    """Write a pending escalation record (atomic).
+
+    *reason* ∈ {catastrophic, window_closed, awaiting_permission}: the first two
+    come from a relay tick; ``awaiting_permission`` records that the lane's own
+    pane detection raised the escalation (tmux_interactive_dispatch's
+    awaiting-permission bridge), independent of the flag-gated relay.
 
     Idempotent: if a pending record for the same command already exists it is
     left untouched (so a repeated tick does not churn captured_at).

@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 from append_receipt_internals import enrichment  # noqa: E402
-from receipt_provenance import reconcile_commit_provenance  # noqa: E402
+from receipt_provenance import CHAIN_STATUS_COMPLETE, reconcile_commit_provenance  # noqa: E402
 
 _REGISTRY_SCHEMA = """
 CREATE TABLE provenance_registry (
@@ -180,7 +180,7 @@ def test_real_receipt_id_takes_priority_over_synthetic_fallback(tmp_path):
 def test_receipt_id_fallback_lets_chain_reach_complete(tmp_path):
     """End-to-end: a lane-synthesized receipt (no run_id/task_id) registers
     with the synthetic fallback, and once the merge-side commit scan fills
-    commit_sha, chain_status reaches 'complete' -- unreachable before this
+    commit_sha, chain_status reaches 'receipt_and_commit' -- unreachable before this
     fix because has_receipt could never be True for such a dispatch."""
     sd = _state_dir(tmp_path)
     dispatch_id = "20260729-seam3-complete"
@@ -202,7 +202,7 @@ def test_receipt_id_fallback_lets_chain_reach_complete(tmp_path):
     assert row is not None
     assert row[1] == f"synthetic:{dispatch_id}:subprocess_completion"
     assert row[2] is not None
-    assert row[0] == "complete"
+    assert row[0] == CHAIN_STATUS_COMPLETE
 
 
 def _git_repo_with_commit(tmp_path, body: str) -> Path:

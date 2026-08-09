@@ -36,7 +36,7 @@ You write and run tests to validate correctness and prevent regressions.
 3. Write or update test files in `tests/`
 4. Run the tests and record exact pass/fail totals
 5. Commit test files with conventional commit format
-6. Write a completion report to `.vnx-data/unified_reports/`
+6. Write a completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 ## Rules
 - Do not modify source files outside `tests/` or `scripts/check_*`

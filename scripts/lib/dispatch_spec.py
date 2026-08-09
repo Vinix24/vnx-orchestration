@@ -62,6 +62,20 @@ class PathAccess(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Deadline bounds — single source of truth (deadline-passthrough)
+# ---------------------------------------------------------------------------
+
+# The consumer door (`vnx dispatch-agent --deadline-seconds N`) documents and
+# enforces [300, 14400]. validate() Rule 11 and the bridge's trust boundary
+# (dispatch_bridge.stage_spec_bundle + its --deadline-seconds CLI) use these
+# constants so the ranges can never drift again — validate() previously allowed
+# [60, 14400] while the door enforced [300, 14400], and two ranges without an
+# explanation is the next drift source.
+DEADLINE_SECONDS_MIN = 300
+DEADLINE_SECONDS_MAX = 14400
+
+
+# ---------------------------------------------------------------------------
 # Path type
 # ---------------------------------------------------------------------------
 
@@ -94,6 +108,14 @@ class DispatchSpec:
     task_class: Optional[str] = None
     pr_id: Optional[str] = None
     track_id: Optional[str] = None  # structural link to a tracks-table row (TL-D1); validated at the door
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
+    # this dispatch continues (retry / fix-forward / escalation), the tier
+    # escalation signal (tier_from = parent's tier, tier_to = this tier), and
+    # the smart_router task class. All advisory — carried onto the plan and the
+    # receipt, never part of the permit fingerprint.
+    parent_dispatch: Optional[str] = None
+    tier_from: Optional[str] = None
+    tier_to: Optional[str] = None
     deadline_seconds: int = 3600
     base_ref: str = "origin/main"
     isolation: Isolation = Isolation.WORKTREE
@@ -134,6 +156,10 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")
 _BLOCKED_FIRST_COMPONENTS = frozenset({".git", ".vnx-data"})
 
 _VALID_TARGET_SLOTS = frozenset({"T0", "T1", "T2", "T3"})
+
+# Cost-tier vocabulary (mirrors providers.smart_router.cost_tier) — the
+# escalation signal on receipts must come from this closed set.
+_VALID_TIERS = frozenset({"tier-zero", "tier-low", "tier-mid", "tier-high"})
 
 
 def _validate_dispatch_path(dp: DispatchPath) -> Optional[str]:
@@ -267,11 +293,14 @@ def validate(
         norm_p = PurePosixPath(str(dp.path))
         normalized.append(DispatchPath(norm_p, dp.access, dp.materialize_at_cwd))
 
-    # Rule 11 — deadline bounds
-    if not (60 <= spec.deadline_seconds <= 14400):
+    # Rule 11 — deadline bounds. [300, 14400] is the consumer-door contract
+    # (vnx dispatch-agent); validate() enforces the SAME range the bridge's trust
+    # boundary enforces at staging time, so the two gates can never disagree.
+    if not (DEADLINE_SECONDS_MIN <= spec.deadline_seconds <= DEADLINE_SECONDS_MAX):
         return Reject(
             "bad-deadline",
-            f"deadline_seconds must be in [60, 14400], got {spec.deadline_seconds}",
+            f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
+            f"got {spec.deadline_seconds}",
         )
 
     # Rule 12 — headless opt-in requires a non-empty reason (PR-5)
@@ -298,6 +327,24 @@ def validate(
         _track_id = spec.track_id.strip()
         if not _track_id or not _ID_RE.match(_track_id):
             return Reject("bad-track-id", f"track_id {spec.track_id!r} does not match id regex")
+
+    # Rule 14 — chain-link format (dispatch-20260802-model-ssot-en-ketenlink).
+    # parent_dispatch must be a well-formed dispatch id when present; tier values
+    # must come from the cost-tier vocabulary so the receipt's escalation signal
+    # is joinable (never free-text).
+    if spec.parent_dispatch is not None:
+        _parent = spec.parent_dispatch.strip()
+        if not _parent or not _ID_RE.match(_parent):
+            return Reject(
+                "bad-parent-dispatch",
+                f"parent_dispatch {spec.parent_dispatch!r} does not match id regex",
+            )
+    for _tier_field, _tier_val in (("tier_from", spec.tier_from), ("tier_to", spec.tier_to)):
+        if _tier_val is not None and _tier_val.strip() not in _VALID_TIERS:
+            return Reject(
+                "bad-tier-value",
+                f"{_tier_field} {_tier_val!r} is not one of {sorted(_VALID_TIERS)}",
+            )
 
     return ValidatedSpec(
         spec=spec,

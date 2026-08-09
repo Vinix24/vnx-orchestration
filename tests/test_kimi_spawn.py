@@ -19,6 +19,7 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+from phantom_guard import REVIEW_TASK_CLASSES  # noqa: E402
 from provider_spawns.kimi_spawn import (  # noqa: E402
     KimiSpawnResult,
     _build_kimi_cmd,
@@ -508,6 +509,7 @@ class TestSpawnKimiSubprocess(unittest.TestCase):
 
 def _spawn_kimi_with_events(
     events: list, returncode: int = 0, cwd=None, event_writer=None,
+    task_class=None,
 ) -> KimiSpawnResult:
     """Run spawn_kimi with a real-pipe-backed fake process emitting the given events.
 
@@ -540,7 +542,7 @@ def _spawn_kimi_with_events(
             mock_start.return_value = (fake_proc, None)
             result = spawn_kimi(
                 "prompt", dispatch_id="d1", terminal_id="T1", cwd=cwd,
-                event_writer=event_writer,
+                event_writer=event_writer, task_class=task_class,
             )
     finally:
         writer_thread.join(timeout=5)
@@ -1266,6 +1268,133 @@ class TestFabricationInvariant(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(result.returncode, 0)
 
+    # ------------------------------------------------------------------
+    # OI-1087: read-only task classes exempt from the fabrication guard
+    # ------------------------------------------------------------------
+
+    def test_read_only_task_class_unchanged_worktree_passes(self) -> None:
+        """OI-1087 regression: a review dispatch whose deliverable IS the report
+        leaves the worktree unchanged BY DESIGN — that must not read as
+        fabrication. Four review dispatches false-failed on 2026-08-07 because
+        the guard did not know the read-only class."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes") as mock_check:
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="## Review report\n\nFindings: ...",
+                events_written=5,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                task_class="review",
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+        # The git probe is not even consulted for a known read-only class.
+        mock_check.assert_not_called()
+
+    def test_every_known_read_only_class_suppresses_guard(self) -> None:
+        """The exemption keys off phantom_guard.REVIEW_TASK_CLASSES (SSOT) —
+        every member of that list must suppress the guard, so the two guards
+        cannot drift apart."""
+        for read_only_class in sorted(REVIEW_TASK_CLASSES):
+            with self.subTest(task_class=read_only_class):
+                with patch(
+                    "provider_spawns.kimi_spawn._worktree_has_changes", return_value=False
+                ):
+                    result = _finalize_kimi_result(
+                        proc=self._mock_proc(0),
+                        completion_text="Analysis complete.",
+                        events_written=3,
+                        token_usage=None,
+                        timed_out=False,
+                        stopped_early=False,
+                        event_writer_failures=0,
+                        errors_captured=[],
+                        saw_stream_output=True,
+                        raw_samples=[],
+                        saw_tool_calls=True,
+                        worktree=Path("/tmp/fake-worktree"),
+                        task_class=read_only_class,
+                    )
+                self.assertIsNone(result.error)
+                self.assertEqual(result.returncode, 0)
+
+    def test_writing_task_class_unchanged_worktree_still_fails(self) -> None:
+        """A class whose behavior is to MODIFY the worktree keeps the guard:
+        unchanged worktree + tool calls = fabrication, exactly as before."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False):
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                task_class="implementation",
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_unknown_task_class_unchanged_worktree_still_fails(self) -> None:
+        """Fail-safe direction: an UNRECOGNIZED task_class must be treated as
+        writing — the guard exists to catch fabrication, so doubt never
+        disables it."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False):
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                task_class="never-heard-of-this-class",
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_empty_task_class_unchanged_worktree_still_fails(self) -> None:
+        """Fail-safe direction: an empty task_class string behaves like a
+        missing one — the guard stays armed."""
+        with patch("provider_spawns.kimi_spawn._worktree_has_changes", return_value=False):
+            result = _finalize_kimi_result(
+                proc=self._mock_proc(0),
+                completion_text="I fixed the bug and wrote the file.",
+                events_written=3,
+                token_usage=None,
+                timed_out=False,
+                stopped_early=False,
+                event_writer_failures=0,
+                errors_captured=[],
+                saw_stream_output=True,
+                raw_samples=[],
+                saw_tool_calls=True,
+                worktree=Path("/tmp/fake-worktree"),
+                task_class="",
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
     def test_no_tool_calls_skips_check_even_with_known_worktree(self) -> None:
         """A pure-text response (no tool_calls) never triggers the git check —
         it only guards the specific completion-without-execution pattern."""
@@ -1329,6 +1458,30 @@ class TestKimiFabricationInvariantEndToEnd(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(result.returncode, 0)
 
+    def test_read_only_task_class_threaded_end_to_end(self) -> None:
+        """OI-1087: task_class must survive the full spawn_kimi() ->
+        _consume_kimi_stream() -> _finalize_kimi_result() wiring — a review
+        dispatch with tool calls and an unchanged REAL git worktree passes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            result = _spawn_kimi_with_events(
+                self._TOOL_CALL_EVENTS, cwd=tmp, task_class="review",
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(result.returncode, 0)
+
+    def test_writing_task_class_threaded_end_to_end_still_fails(self) -> None:
+        """OI-1087 other leg: a writing class through the same wiring with an
+        unchanged REAL git worktree still trips the fabrication guard."""
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+            result = _spawn_kimi_with_events(
+                self._TOOL_CALL_EVENTS, cwd=tmp, task_class="implementation",
+            )
+        self.assertIsNotNone(result.error)
+        self.assertIn("fabrication", result.error.lower())
+        self.assertNotEqual(result.returncode, 0)
+
 
 class TestSpawnKimiChunkStallFloor(unittest.TestCase):
     """OI-903: spawn_kimi scales the chunk (stall) timeout with the total deadline."""
@@ -1339,7 +1492,7 @@ class TestSpawnKimiChunkStallFloor(unittest.TestCase):
 
         def fake_drain(
             self, process, terminal_id, dispatch_id, event_store, *,
-            chunk_timeout, total_deadline,
+            chunk_timeout, total_deadline, raw_tee_path=None,
         ):
             captured["chunk_timeout"] = chunk_timeout
             captured["total_deadline"] = total_deadline
@@ -1384,7 +1537,7 @@ class TestSpawnKimiChunkStallFloor(unittest.TestCase):
 
         def fake_drain(
             self, process, terminal_id, dispatch_id, event_store, *,
-            chunk_timeout, total_deadline,
+            chunk_timeout, total_deadline, raw_tee_path=None,
         ):
             captured["chunk_timeout"] = chunk_timeout
             captured["total_deadline"] = total_deadline

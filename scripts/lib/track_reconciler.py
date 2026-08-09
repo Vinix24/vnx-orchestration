@@ -401,9 +401,20 @@ def reconcile_track(
     Raises RuntimeError if derived_status column is absent (migration 0028
     must be applied first).
 
-    _merged_pr_numbers: internal kwarg — pre-loaded merged PR set. When None,
-    _load_merged_pr_numbers(state_dir) is called. Pass a pre-loaded set when
-    calling from reconcile_all_tracks to avoid per-track file I/O.
+    _merged_pr_numbers: pre-established merged-PR set. Serves TWO purposes:
+      (1) I/O optimisation — reconcile_all_tracks loads the local set once and
+          passes it to avoid per-track file I/O.
+      (2) Evidence-injection point (OI-1064) — a caller that has ALREADY
+          established merge state by other means (e.g. run_reconcile's live
+          ``gh pr view`` sweep) MUST pass the UNION of its gh-confirmed numbers
+          and the locally-loaded set here. Otherwise reconcile_track falls back
+          to _load_merged_pr_numbers, whose gh source (source 4) is opt-in
+          behind VNX_RECONCILE_GIT and OFF by default — so a track the caller
+          just confirmed merged via gh would re-derive as 'queued' from the
+          weaker local sources, and no close path could close it. The caller
+          performs the union (gh evidence is additive: it never replaces local
+          NDJSON/ROADMAP evidence, only adds what a bare ``gh pr merge`` never
+          wrote locally).
     repo_root: optional project repo root for the ROADMAP.yaml (Source-3)
     evidence path; falls back to the CWD git-root then the legacy layout.
     """
@@ -414,11 +425,23 @@ def reconcile_track(
                 "tracks.derived_status column absent; apply migration 0028 first."
             )
 
+        # OI-1064: _merged_pr_numbers is the evidence-injection point. A caller
+        # that already established merge state (gh sweep in run_reconcile) MUST
+        # pass the union of its gh-confirmed numbers and the locally-loaded set
+        # here — run_reconcile performs that union once so both the bulk pass
+        # and the close path see the same complete evidence. When None, the full
+        # local set is loaded here (the pre-OI-1064 behaviour).
         merged = (
             _merged_pr_numbers
             if _merged_pr_numbers is not None
             else _load_merged_pr_numbers(state_dir, repo_root)
         )
+        # OI-840: auto-complete deliverable stubs BEFORE computing derived_status.
+        # Deliverable dispatches (output_ref IS NOT NULL) are planning stubs, not
+        # real worker work. If all real dispatches are terminal with merged-PR
+        # evidence, the stubs should be completed — otherwise they block the
+        # track from deriving 'done' even though the code already shipped.
+        _reconcile_deliverable_dispatches(conn, track_id, project_id, merged)
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         _write_derived_status(conn, track_id, project_id, derived)
         conn.commit()
@@ -451,6 +474,7 @@ def peek_derived_status(
     project_id: str,
     *,
     repo_root: "str | Path | None" = None,
+    _merged_pr_numbers: Optional[FrozenSet[int]] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY: compute derived_status for one track WITHOUT persisting it.
 
@@ -458,6 +482,12 @@ def peek_derived_status(
     OIs, dependency tracks, and the merged-PR evidence path) but writes nothing —
     so a dry-run preview never mutates DB state. Returns the same dict shape as
     reconcile_track (track_id, project_id, derived_status, declared_phase, drifted).
+
+    _merged_pr_numbers: optional pre-established merged-PR set (OI-1071). When
+    provided, used in place of the local-only set so a dry-run close that has
+    ALREADY gathered gh-confirmed merge evidence derives 'done' WITHOUT
+    VNX_RECONCILE_GIT. Same contract as reconcile_track._merged_pr_numbers.
+    When None, loads the local sources itself (the pre-OI-1071 behaviour).
 
     Raises RuntimeError if the derived_status column is absent (migration 0028).
     """
@@ -467,7 +497,11 @@ def peek_derived_status(
             raise RuntimeError(
                 "tracks.derived_status column absent; apply migration 0028 first."
             )
-        merged = _load_merged_pr_numbers(state_dir, repo_root)
+        merged = (
+            _merged_pr_numbers
+            if _merged_pr_numbers is not None
+            else _load_merged_pr_numbers(state_dir, repo_root)
+        )
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         track_row = conn.execute(
             "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
@@ -546,6 +580,166 @@ def reconcile_all_tracks(
 
 
 # ---------------------------------------------------------------------------
+# Deliverable auto-completion (OI-840)
+# ---------------------------------------------------------------------------
+
+def _reconcile_deliverable_dispatches(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+    merged_pr_numbers: FrozenSet[int] = frozenset(),
+) -> int:
+    """Auto-complete deliverable dispatch stubs when their track's real work is done.
+
+    Deliverable dispatches (output_ref IS NOT NULL) are planning stubs — they
+    represent a planned output, not real worker work. There are two paths to
+    auto-completion:
+
+    Path A (has real dispatches): ALL non-deliverable dispatches for the track
+    are in terminal states AND merged-PR evidence exists (pr_merged coordination
+    event, declared-done phase, or track pr_ref confirmed merged).
+
+    Path B (no real dispatches): the track itself carries completion evidence:
+    declared-done phase OR track pr_ref confirmed merged via all evidence sources.
+    This covers tracks whose real worker dispatches were never attributed (common
+    for historical tracks that used lane letters instead of track_ids).
+
+    Idempotent: already-completed dispatches are no-ops. Returns the number of
+    deliverable dispatches transitioned to 'completed'.
+
+    OI-840: without this, the deliverable-plane shows 'ready' items as
+    dispatchable work when the underlying code already shipped.
+    """
+    # 1. Find all non-deliverable dispatches for this track.
+    non_deliverable = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        "AND (output_ref IS NULL OR output_ref = '')",
+        (track_id, project_id),
+    ).fetchall()
+
+    # 2. Resolve the track row once (reused below).
+    track_row = conn.execute(
+        "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    track_pr_ref = track_row["pr_ref"] if track_row else None
+    track_phase = track_row["phase"] if track_row else None
+
+    # 3. Determine if merged-PR evidence exists.
+    pr_evidence = False
+
+    if non_deliverable:
+        # Path A: real dispatches exist. They must ALL be terminal.
+        all_terminal = all(
+            row["state"] in TERMINAL_DISPATCH_STATES for row in non_deliverable
+        )
+        if not all_terminal:
+            return 0
+
+        # Check pr_merged coordination event on a non-deliverable dispatch.
+        non_dlv_ids = [row["dispatch_id"] for row in non_deliverable]
+        placeholders = ",".join("?" * len(non_dlv_ids))
+        merged_event = conn.execute(
+            f"""
+            SELECT 1 FROM coordination_events
+            WHERE event_type = 'pr_merged'
+              AND project_id = ?
+              AND entity_id IN ({placeholders})
+            LIMIT 1
+            """,
+            [project_id, *non_dlv_ids],
+        ).fetchone()
+
+        if merged_event:
+            pr_evidence = True
+
+    # 4. Track-level evidence (applies to both paths).
+    if not pr_evidence:
+        if track_phase == "done":
+            pr_evidence = True
+        else:
+            nums = _parse_pr_numbers(track_pr_ref)
+            if nums and nums <= merged_pr_numbers:
+                pr_evidence = True
+
+    if not pr_evidence:
+        return 0
+
+    # 5. Transition non-terminal deliverable dispatches to 'completed'.
+    now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetchone()[0]
+    deliverable_rows = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        "AND output_ref IS NOT NULL AND output_ref != '' "
+        "AND state NOT IN ('completed', 'expired', 'dead_letter')",
+        (track_id, project_id),
+    ).fetchall()
+
+    for row in deliverable_rows:
+        conn.execute(
+            "UPDATE dispatches SET state = 'completed', updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ?",
+            (now, row["dispatch_id"], project_id),
+        )
+        _append_coordination_event(
+            conn,
+            event_type="deliverable_auto_completed",
+            entity_type="dispatch",
+            entity_id=row["dispatch_id"],
+            from_state=row["state"],
+            to_state="completed",
+            actor="reconciler",
+            reason=f"OI-840: track {track_id} real work done; auto-completing deliverable stub",
+            metadata={"track_id": track_id, "project_id": project_id},
+            project_id=project_id,
+        )
+
+    return len(deliverable_rows)
+
+
+def _append_coordination_event(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    entity_type: str = "dispatch",
+    entity_id: str,
+    from_state: Optional[str] = None,
+    to_state: Optional[str] = None,
+    actor: str = "runtime",
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
+) -> None:
+    """Best-effort append a coordination event. Never raises."""
+    import json as _json
+    try:
+        event_id = f"ce-{abs(hash(f'{event_type}{entity_id}{_now_utc()}'))}"
+        now = _now_utc()
+        conn.execute(
+            """
+            INSERT INTO coordination_events
+                (event_id, event_type, entity_type, entity_id, from_state, to_state,
+                 actor, reason, metadata_json, occurred_at, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id, event_type, entity_type, entity_id,
+                from_state, to_state, actor, reason,
+                _json.dumps(metadata or {}, sort_keys=True),
+                now, project_id,
+            ),
+        )
+    except Exception:
+        pass  # coordination events are best-effort
+
+
+def _now_utc() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
+
+
+# ---------------------------------------------------------------------------
 # Shared close-walk helpers
 # ---------------------------------------------------------------------------
 
@@ -570,12 +764,18 @@ def _close_evidence(
     track_id: str,
     project_id: str,
     repo_root: "str | Path | None" = None,
+    merged_pr_numbers: Optional[FrozenSet[int]] = None,
 ) -> Dict[str, Any]:
     """Summarize WHY a track derives terminal, so the operator gate is informed.
 
     The reconciler's 'done' counts ALL terminal dispatch states — including
     expired/dead_letter. A track whose every dispatch failed still derives 'done'.
     Surface the breakdown + a has_success_signal flag. Best-effort; never raises.
+
+    merged_pr_numbers: optional pre-established merged-PR set (OI-1071). When
+    provided, the pr_ref subset check uses it INSTEAD of re-loading the local
+    sources, so the operator-gate evidence reflects the same gh-confirmed UNION
+    the derivation saw. When None, loads the local sources itself (pre-OI-1071).
     """
     ev: Dict[str, Any] = {
         "completed": 0, "failed_terminal": 0, "in_flight": 0,
@@ -615,10 +815,18 @@ def _close_evidence(
     except Exception as exc:
         log.debug("close evidence query failed: %s", exc)
     # ALL parsed PRs must be merged (subset check), mirroring _compute_derived_status.
+    # OI-1071: use the caller-supplied evidence set when provided so the operator
+    # gate sees the same gh-confirmed UNION the derivation did; fall back to the
+    # local-only set otherwise (pre-OI-1071 behaviour).
     try:
         if ev["pr_ref"]:
             nums = _parse_pr_numbers(ev["pr_ref"])
-            if nums and nums <= _load_merged_pr_numbers(state_dir, repo_root):
+            evidence_set = (
+                merged_pr_numbers
+                if merged_pr_numbers is not None
+                else _load_merged_pr_numbers(state_dir, repo_root)
+            )
+            if nums and nums <= evidence_set:
                 ev["pr_merged"] = True
     except Exception as exc:
         log.debug("close evidence merged-PR check failed: %s", exc)

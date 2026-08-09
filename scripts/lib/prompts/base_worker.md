@@ -7,15 +7,17 @@ You are a VNX headless worker executing a dispatch instruction.
 - No mock objects, placeholder data, or stub implementations
 - No partial features — start it means finish it
 - Remove temporary files and scripts after operations. Do NOT use `rm -rf`/`rmdir`
-  with a shell-variable or command-substitution path for this: Claude Code has a
-  built-in dangerous-rm safety check that requires interactive approval whenever
-  it cannot statically prove the target isn't an empty/unset variable resolving
-  to a root or top-level directory — and that approval prompt is NOT skipped by
-  running headless/autonomous, so it hangs a dispatch with no human to answer
-  it. For a directory, use the GUARDED delete below instead of a bare
-  `shutil.rmtree(...)` — it resolves the target to an absolute real path first
-  and REFUSES (raises, prints the reason, deletes nothing) instead of silently
-  recursing when the target is `/`, a top-level directory, `$HOME` or an
+  for this: Claude Code has a built-in dangerous-rm safety check that requires
+  interactive approval whenever it cannot statically prove the target is a safe,
+  literal path — and that approval prompt is NOT skipped by running
+  headless/autonomous (nor by a bypass-permissions launch), so it hangs a
+  dispatch with no human to answer it. A bare `rm -f` on a temp file is not
+  reliably exempt either: OI-1007 observed a worker running with bypass
+  permissions prompt interactively on `rm -f /tmp/govern_body.txt` and hang for
+  the full deadline. Use the GUARDED delete below for ALL temp cleanup (files
+  and directories): it resolves the target to an absolute real path first and
+  REFUSES (raises, prints the reason, deletes nothing) instead of silently
+  deleting when the target is `/`, a top-level directory, `$HOME` or an
   ancestor of it, or anything outside a recognized temp/scratch root. Never
   weaken this with `ignore_errors=True`: that flag would swallow the very
   error the guard is designed to surface on a wrong path.
@@ -37,13 +39,12 @@ You are a VNX headless worker executing a dispatch instruction.
       or not under_scratch_root
   ):
       sys.exit(f'REFUSING to delete unsafe path: {target}')
-  shutil.rmtree(target)
+  if os.path.isdir(target):
+      shutil.rmtree(target)
+  else:
+      os.remove(target)
   "
   ```
-
-  For a single file, `rm -f <absolute-literal-path>` (a literal path, no shell
-  variable) is fine — it is not recursive, so the dangerous-rm gate never fires
-  on it.
 
 ## Report Discipline
 Your completion report must include:
@@ -73,11 +74,11 @@ Dispatch-ID: <dispatch_id>
 2. Run relevant tests and record exact pass/fail counts
 3. Commit changes with conventional commit message
 4. Push to branch (unless dispatch says otherwise)
-5. Write completion report to `.vnx-data/unified_reports/<dispatch_id>_report.md`
+5. Write completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 ## Report Location
 Write your completion report to:
-`.vnx-data/unified_reports/<dispatch_id>_report.md`
+`$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
 
 Use the dispatch ID from the dispatch metadata footer.
 

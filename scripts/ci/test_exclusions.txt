@@ -103,7 +103,6 @@ tests/test_learning_loop_exception_handling.py  # OI-947: learning_loop.ensure_e
 tests/test_learning_loop_tz.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
 tests/test_litellm_agentic_runner.py
 tests/test_llm_decision_router.py
-tests/test_migrate_0022_preflight.py  # OI-953: misc independent red, confirmed red on main too
 tests/test_migrate_future_system.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_migrate_pool_seed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_observability_linkage.py
@@ -121,7 +120,6 @@ tests/test_pool_provider_mix_integration.py
 tests/test_pool_state_repo.py
 tests/test_pr10_provider_string_canon.py
 tests/test_pr2_requeue_clear_context.py
-tests/test_pr_recommendation_integration.py  # OI-953: misc independent red, confirmed red on main too
 tests/test_project_status_hook.py
 tests/test_provider_dispatch_contract_integration.py
 tests/test_provider_dispatch_deepseek_harness.py
@@ -153,9 +151,6 @@ tests/test_semantics_cleanup.py
 tests/test_serve_dashboard_api.py
 tests/test_session_ids_staleness.py
 tests/test_sessionstart_hook.py  # OI-951: doc/content drift the test already asserts against, red on main too
-tests/test_smart_router_cost_aware.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
-tests/test_smart_router_e2e.py
-tests/test_smart_router_multiprovider.py
 tests/test_strategy_roadmap.py
 tests/test_strategy_roadmap_real_file.py
 tests/test_subprocess_adapter_pr3.py
@@ -195,7 +190,6 @@ tests/test_wave4_write_guard.py  # OI-950: wave4 central-install assumes GH Acti
 tests/test_wave7_deepseek_smoke.py
 tests/test_wave7_fixes.py
 tests/test_week_1_skills.py
-tests/test_wheel_build.py  # OI-953: misc independent red, confirmed red on main too
 tests/test_wheel_install.py
 tests/test_wiring_completeness.py
 tests/test_worker_heartbeat.py

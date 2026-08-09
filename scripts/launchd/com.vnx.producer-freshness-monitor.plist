@@ -5,31 +5,54 @@
 <dict>
   <key>Label</key><string>com.vnx.producer-freshness-monitor</string>
   <!--
-    Daily producer-freshness sweep. Replace __VNX_REPO_ROOT__ with the repo
-    checkout path at install time (same placeholder pattern as
-    com.vnx.nightly-intelligence-pipeline.plist), e.g.:
+    Every-6h producer-freshness sweep. Installed via reload_plist.sh which
+    substitutes ${VNX_HOME} and ${PATH}:
 
-      sed "s|__VNX_REPO_ROOT__|$HOME/Development/vnx-orchestration|g" \
-        com.vnx.producer-freshness-monitor.plist > ~/Library/LaunchAgents/
+      bash scripts/launchd/reload_plist.sh com.vnx.producer-freshness-monitor
       launchctl load -w ~/Library/LaunchAgents/com.vnx.producer-freshness-monitor.plist
 
     The sweep's own exit status is captured back into job_exits.ndjson by the
     launchd harvest inside the next run — the monitor's scheduling failures
     are visible in the same stream it maintains. Its heartbeat is watched by
     the independent hooks/monitor_tripwire.sh (bash + find only).
+
+    Exit 11 (EXIT_HEALTH — findings present) is documented at line 14 of
+    producer_freshness_monitor.py. In launchctl list this reads as a
+    permanently failed job; do not interpret it as a crash.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd __VNX_REPO_ROOT__ &amp;&amp; exec python3 scripts/producer_freshness_monitor.py</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec ${VNX_HOME}/.venv/bin/python3 scripts/producer_freshness_monitor.py</string>
   </array>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>6</integer>
-    <key>Minute</key><integer>0</integer>
-  </dict>
+  <array>
+    <dict>
+      <key>Hour</key><integer>0</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>6</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>18</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+  </array>
   <key>StandardOutPath</key><string>/tmp/vnx-producer-freshness.log</string>
   <key>StandardErrorPath</key><string>/tmp/vnx-producer-freshness.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
 </dict>
 </plist>

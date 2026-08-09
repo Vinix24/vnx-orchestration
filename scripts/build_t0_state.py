@@ -122,6 +122,25 @@ def _now_iso() -> str:
     return _now_utc().isoformat()
 
 
+def _parse_iso(ts: str) -> Optional[datetime]:
+    """Parse ISO-8601 UTC timestamp tolerating both microsecond and second
+    precision and a trailing ``Z`` suffix. Returns ``None`` on failure.
+
+    OI-949: needed for datetime-aware event sorting so mixed-precision
+    timestamps (e.g. "…00.123456Z" vs "…00Z") are ordered by actual time,
+    not by lexicographic collation where "." sorts before "Z".
+    """
+    if not ts:
+        return None
+    s = ts
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
     """Load JSON from path. Returns None on OSError (absent file).
     Raises json.JSONDecodeError if the file exists but contains malformed JSON (R7.3)."""
@@ -265,6 +284,77 @@ def compute_staleness_seconds(
         return max(0.0, (actual_now - ts).total_seconds())
     except (ValueError, AttributeError, TypeError):
         return 0.0
+
+
+def describe_freshness(
+    state: Optional[Dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> str:
+    """Human-readable age of a t0_state snapshot (OI-1073 defect 3).
+
+    The projection carries its own build timestamp in ``generated_at`` (an
+    ISO-8601 UTC string written at build time). A reader built on a file
+    nobody writes is the actual complaint: this helper turns that timestamp
+    into a self-evident age string so "nobody wrote this since June" is
+    impossible to miss. ``None`` / a dict with no ``generated_at`` reports
+    "never built" rather than a misleading "0 seconds".
+
+    Returns one of:
+      - "never built"          — state is None or lacks a generated_at stamp
+      - "built <human age> ago" — e.g. "built 5 minutes ago", "built 3 days ago"
+      - "built just now"        — under 2 seconds old
+      - "built (age unknown)"   — generated_at present but unparseable
+
+    ``state`` is a full t0_state.json dict or the lighter t0_index.json dict
+    (both carry generated_at/timestamp); callers that only have a path should
+    load it first (see ``state_freshness_for_file``).
+    """
+    if not isinstance(state, dict):
+        return "never built"
+    ts_raw = str(state.get("generated_at") or state.get("timestamp") or "").strip()
+    if not ts_raw:
+        return "never built"
+    try:
+        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError, TypeError):
+        return "built (age unknown)"
+    actual_now = now if now is not None else _now_utc()
+    seconds = max(0.0, (actual_now - ts).total_seconds())
+    return f"built {_humanize_age(seconds)} ago"
+
+
+def _humanize_age(seconds: float) -> str:
+    """Render a duration in seconds as a short human-readable age."""
+    s = int(seconds)
+    if s < 2:
+        return "just now"
+    if s < 60:
+        return f"{s} seconds"
+    if s < 3600:
+        return f"{s // 60} minute{'s' if s // 60 != 1 else ''}"
+    if s < 86400:
+        return f"{s // 3600} hour{'s' if s // 3600 != 1 else ''}"
+    days = s // 86400
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+def state_freshness_for_file(
+    path: Path,
+    now: Optional[datetime] = None,
+) -> str:
+    """Read a t0_state.json / t0_index.json file and return its freshness.
+
+    Returns "never built" when the file is absent (the real complaint behind
+    OI-1073: a reader on a file nobody writes). A malformed file reports
+    "built (age unknown)" rather than raising — freshness is advisory.
+    """
+    try:
+        data = _safe_json(path)
+    except (OSError, json.JSONDecodeError):
+        return "built (age unknown)" if path.exists() else "never built"
+    return describe_freshness(data, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +891,10 @@ def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
 
     dispatch_records: Dict[str, Any] = {}
     for did, events in by_dispatch.items():
-        events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
+        events_sorted = sorted(
+            events,
+            key=lambda e: (_parse_iso(e.get("timestamp", "")) or datetime.min, e.get("timestamp", "")),
+        )
         latest = events_sorted[-1]
         latest_event = latest.get("event", "")
         status = _EVENT_TO_STATUS.get(latest_event, "unknown")
@@ -1509,7 +1602,11 @@ def _build_recent_receipts(
                 best_by_dispatch[did] = view
 
     recs = list(best_by_dispatch.values()) + no_dispatch_recs
-    return sorted(recs, key=lambda x: str(x.get("timestamp") or ""), reverse=True)[:limit]
+    return sorted(
+        recs,
+        key=lambda x: (_parse_iso(str(x.get("timestamp") or "")) or datetime.min, str(x.get("timestamp") or "")),
+        reverse=True,
+    )[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -1572,11 +1669,26 @@ def _build_system_health(
     else:
         status = "healthy"
 
-    return {
+    # R6.3: read component health beacons so stale/failing subsystems are
+    # visible in t0_state.json on every session start. Best-effort: a
+    # beacon read failure must not break the session-start hot path.
+    # Beacons live under <data_dir>/health/, one level above state_dir.
+    beacon_health: Optional[Dict[str, Any]] = None
+    try:
+        from health_beacon import beacon_summary
+        data_dir = state_dir.parent
+        beacon_health = beacon_summary(data_dir)
+    except Exception as exc:
+        log.debug("beacon_summary failed (non-critical): %s", exc)
+
+    result: Dict[str, Any] = {
         "status": status,
         "db_initialized": db_initialized,
         "uptime_seconds": uptime_seconds,
     }
+    if beacon_health is not None:
+        result["beacon_health"] = beacon_health
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1921,9 +2033,12 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
     verify (unverified > 0 with nominated_not_closed > 0 — this is the stuck
     backlog, distinct from guard-declined closes like stale_candidate which
     keep nominated_not_closed > 0 on healthy runs), OR the last run is older
-    than _AUTOCLOSE_STALE_HOURS. A missing summary is itself a degraded signal:
-    it means the auto-close reconciler has never written a summary, and the
-    block is still emitted rather than omitted.
+    than _AUTOCLOSE_STALE_HOURS, OR the last-run age cannot be determined
+    (missing or unparseable finished_at), OR the counts block is malformed
+    (non-numeric values or wrong type in an otherwise valid JSON). A missing
+    summary is itself a degraded signal: it means the auto-close reconciler
+    has never written a summary, and the block is still emitted rather than
+    omitted.
     """
     now = now or datetime.now(timezone.utc)
     summary_path = store / _RECONCILE_SUMMARY_FILENAME
@@ -1940,11 +2055,6 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
         }
 
     gh_health = (summary.get("evidence_source_health") or {}).get("gh")
-    counts = summary.get("counts") or {}
-    nominated = int(counts.get("nominated", 0) or 0)
-    closed = int(counts.get("closed", 0) or 0)
-    unverified = int(counts.get("unverified", 0) or 0)
-    nominated_not_closed = nominated - closed
 
     finished_raw = summary.get("finished_at")
     finished_dt = _parse_reconcile_timestamp(finished_raw)
@@ -1953,9 +2063,27 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
     else:
         age_hours = None
 
+    try:
+        counts = summary.get("counts") or {}
+        nominated = int(counts.get("nominated", 0) or 0)
+        closed = int(counts.get("closed", 0) or 0)
+        unverified = int(counts.get("unverified", 0) or 0)
+    except (ValueError, TypeError, AttributeError):
+        return {
+            "last_reconcile_at": finished_raw or None,
+            "last_reconcile_age_hours": age_hours,
+            "gh_health": gh_health,
+            "nominated_not_closed": None,
+            "autoclose_degraded": True,
+            "autoclose_reason": "malformed_counts",
+        }
+
+    nominated_not_closed = nominated - closed
+
     gh_bad = gh_health != "ok"
     stuck = unverified > 0 and nominated_not_closed > 0
     stale = age_hours is not None and age_hours > _AUTOCLOSE_STALE_HOURS
+    indeterminate_age = age_hours is None
 
     if gh_bad:
         reason = "gh_absent" if gh_health == "absent" else f"gh_{gh_health or 'unknown'}"
@@ -1963,6 +2091,8 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
         reason = "nominated_not_closed"
     elif stale:
         reason = "stale"
+    elif indeterminate_age:
+        reason = "indeterminate_age"
     else:
         reason = "ok"
 
@@ -1971,7 +2101,7 @@ def _autoclose_health(store: Path, now: Optional[datetime] = None) -> Dict[str, 
         "last_reconcile_age_hours": age_hours,
         "gh_health": gh_health,
         "nominated_not_closed": nominated_not_closed,
-        "autoclose_degraded": gh_bad or stuck or stale,
+        "autoclose_degraded": gh_bad or stuck or stale or indeterminate_age,
         "autoclose_reason": reason,
     }
 
@@ -2219,6 +2349,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "uptime_seconds": sh.get("uptime_seconds", 0),
             "warnings": [],
             "db_initialized": sh.get("db_initialized", False),
+            "beacon_health": sh.get("beacon_health"),
         },
     }
 

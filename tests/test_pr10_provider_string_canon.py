@@ -214,10 +214,17 @@ class TestGlmRouting:
         with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
             enforcer.enforce(provider="litellm", sub_provider="zai", model="glm-4.6")
 
-    def test_glm_5_allowed_via_zai(self, enforcer):
-        """glm-5 via litellm:zai must not be blocked."""
+    def test_glm_5_blocked_via_zai(self, enforcer):
+        """glm-5 via litellm:zai must be blocked (deprecated 2026-08-03)."""
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            enforcer.enforce(
+                provider="litellm", sub_provider="zai", model="glm-5",
+            )
+
+    def test_glm_52_allowed_via_zai(self, enforcer):
+        """glm-5.2 via litellm:zai must be allowed."""
         violations = enforcer.check_constraints(
-            provider="litellm", sub_provider="zai", model="glm-5",
+            provider="litellm", sub_provider="zai", model="glm-5.2",
         )
         blocking = [v for v in violations if v.severity == "blocking"]
         assert not blocking, [v.code for v in blocking]

@@ -233,8 +233,8 @@ class TestEnvelopeEventArchiveClear:
         with patch("provider_spawns.codex_spawn.spawn_codex", return_value=codex_result), \
              patch("governance_emit.emit_unified_report", mock_report), \
              patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
-             patch("dispatch_envelope._archive_dispatch_events", mock_archive), \
-             patch("dispatch_envelope._clear_dispatch_events", mock_clear):
+             patch("envelope_govern._archive_dispatch_events", mock_archive), \
+             patch("envelope_govern._clear_dispatch_events", mock_clear):
             result = run_envelope(spec, lane="codex")
 
         return result, mock_archive, mock_clear
@@ -554,7 +554,7 @@ class TestEnvelopeIdempotentDedup:
             return _real_open(path, *args, **kwargs)
 
         import logging
-        with caplog.at_level(logging.WARNING, logger="dispatch_envelope"):
+        with caplog.at_level(logging.WARNING, logger="envelope_govern_support"):
             with patch("provider_spawns.claude_spawn.spawn_claude", return_value=claude_result), \
                  patch("governance_emit.emit_unified_report", mock_report), \
                  patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
@@ -588,7 +588,7 @@ class TestEnvelopeIdempotentDedup:
             return _real_open(path, *args, **kwargs)
 
         import logging
-        with caplog.at_level(logging.WARNING, logger="dispatch_envelope"):
+        with caplog.at_level(logging.WARNING, logger="envelope_govern_support"):
             with patch("builtins.open", side_effect=_raise_oserror):
                 result = dispatch_envelope._receipt_exists_for_dispatch(
                     receipt_path, "some-id"

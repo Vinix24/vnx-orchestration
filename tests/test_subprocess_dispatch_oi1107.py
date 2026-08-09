@@ -62,7 +62,11 @@ class TestExtractRoleFromInstruction:
         assert _extract_role_from_instruction(instruction) is None
 
     def test_role_fallback_constant_is_documented(self):
-        assert _ROLE_FALLBACK == "backend-developer"
+        # OI-981 + dispatch-20260804-190000: the single canonical sentinel is
+        # identity_unresolved, imported from dispatch_identity. A deliberately-chosen
+        # backend-developer role is structurally distinguishable from a failed
+        # role resolution.
+        assert _ROLE_FALLBACK == "identity_unresolved"
 
 
 class TestMainBlockRoleResolution:

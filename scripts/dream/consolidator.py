@@ -70,29 +70,55 @@ def _injection_probe_health(state_dir: Path) -> str:
 def _check_receipt_completeness(
     data_root: Path, max_age_hours: int = 48
 ) -> tuple[bool, str]:
-    """GAP-7 preflight: verify recent processed receipts exist and are not stale.
+    """GAP-7 preflight: verify recent receipts arrived in the t0 ledger.
 
-    Checks {data_root}/receipts/processed/ for any file modified within max_age_hours.
-    Returns (True, "ok") when fresh receipts are found, (False, reason) otherwise.
+    OI-1088: reads the append-only ledger ``state/t0_receipts.ndjson`` under the
+    resolved data root — the source of truth for receipt arrivals — instead of
+    ``receipts/processed/``. That directory is the delivery lane's staging area,
+    not the ledger: it stopped receiving files (receipts/pending/ drained for the
+    last time on 2026-07-23) while the ledger kept appending, so this preflight
+    measured a dead mailbox and silently skipped every cycle for weeks even
+    though no receipt was ever missing.
+
+    The check's meaning is unchanged: "are there receipts from the last
+    max_age_hours". Only the source moved. Three distinct failure states, each
+    with its own reason string: ledger absent, ledger without a single parseable
+    receipt timestamp, ledger present but stale.
+
+    Returns (True, "ok") when a fresh receipt is found, (False, reason) otherwise.
     """
-    processed_dir = data_root / "receipts" / "processed"
-    if not processed_dir.exists():
-        return False, f"receipts/processed directory absent: {processed_dir}"
+    ledger_path = data_root / "state" / "t0_receipts.ndjson"
+    if not ledger_path.exists():
+        return False, f"receipts ledger absent: {ledger_path}"
 
-    files = list(processed_dir.iterdir())
-    if not files:
-        return False, "receipts/processed is empty — no dispatch receipts found"
+    newest: "datetime | None" = None
+    with ledger_path.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # skip a torn/partial append; one bad line never fails the check
+            ts_raw = record.get("timestamp")
+            if not ts_raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)  # ledger timestamps are UTC
+            if newest is None or ts > newest:
+                newest = ts
+
+    if newest is None:
+        return False, "receipts ledger empty — no dispatch receipts found"
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    fresh = [
-        f for f in files
-        if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) >= cutoff
-    ]
-    if not fresh:
-        most_recent_ts = max(
-            datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) for f in files
-        )
-        age_h = (datetime.now(timezone.utc) - most_recent_ts).total_seconds() / 3600
+    if newest < cutoff:
+        age_h = (datetime.now(timezone.utc) - newest).total_seconds() / 3600
         return (
             False,
             f"all receipts stale (newest {age_h:.1f}h ago, threshold {max_age_hours}h)",

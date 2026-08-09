@@ -14,6 +14,7 @@ salvage check, active/orphan check) and the FPY/rework-rate metrics query.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import subprocess
 import sys
@@ -564,6 +565,108 @@ def test_origin_branch_has_commits_true_with_real_remote(tmp_path):
 
     assert doc._origin_branch_has_commits(work, "d-salvage-test") is True
     assert doc._origin_branch_has_commits(work, "d-nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# OI-1078 — batched ls-remote: one network call per run, not one per dispatch
+# ---------------------------------------------------------------------------
+
+def _make_origin_with_branches(tmp_path: Path, branches: list[str]) -> Path:
+    """Build a work repo whose `origin` (a local bare repo) carries ``branches``."""
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q", str(work)], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@example.com"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
+    (work / "f.txt").write_text("hi", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "f.txt"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(work), "remote", "add", "origin", str(bare)], check=True)
+    for branch in branches:
+        subprocess.run(["git", "-C", str(work), "push", "-q", "origin",
+                         f"HEAD:refs/heads/{branch}"], check=True)
+    return work
+
+
+def test_fetch_remote_dispatch_branches_parses_only_dispatch_refs(tmp_path):
+    work = _make_origin_with_branches(
+        tmp_path, ["dispatch/d-one", "dispatch/d-two", "main"],
+    )
+    assert doc._fetch_remote_dispatch_branches(work) == frozenset({"d-one", "d-two"})
+
+
+def test_fetch_remote_dispatch_branches_empty_success_is_not_failure(tmp_path):
+    """A successful batch with zero dispatch branches is an EMPTY SET, not
+    None — the two states must stay distinguishable (failed vs none-exist)."""
+    work = _make_origin_with_branches(tmp_path, ["main"])
+    assert doc._fetch_remote_dispatch_branches(work) == frozenset()
+
+
+def test_fetch_remote_dispatch_branches_failure_returns_none_and_warns(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="dispatch_outcome_classifier"):
+        assert doc._fetch_remote_dispatch_branches(tmp_path / "not-a-repo") is None
+    assert any("ls-remote" in rec.message for rec in caplog.records)
+
+
+def test_origin_branch_has_commits_against_batch_set():
+    """Existing branch -> True, non-existing -> False, failed batch (None) ->
+    False for every id — the fail-safe direction, with no git call at all."""
+    batch = frozenset({"d-exists"})
+    assert doc._origin_branch_has_commits(None, "d-exists", remote_branches=batch) is True
+    assert doc._origin_branch_has_commits(None, "d-missing", remote_branches=batch) is False
+    assert doc._origin_branch_has_commits(None, "d-exists", remote_branches=None) is False
+
+
+def test_bulk_run_does_one_batched_lsremote_for_n_dispatches(tmp_path, monkeypatch):
+    """Regression guard for OI-1078: N dispatch-ids cost exactly ONE batched
+    ls-remote fetch per run, not N. Patched at the module attribute the bulk
+    pass binds the name through, and asserted to actually have been called."""
+    state_dir, data_dir = _build_state(tmp_path)
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
+    for i in range(5):
+        _insert_dispatch(state_dir, f"d-{i}", state="completed")
+        _write_receipt(state_dir, f"d-{i}", "done")
+
+    fetch_calls = []
+
+    def counting_fetch(repo_root):
+        fetch_calls.append(repo_root)
+        return frozenset()
+
+    monkeypatch.setattr(doc, "_fetch_remote_dispatch_branches", counting_fetch)
+    results = doc.reconcile_all_dispatch_outcomes(
+        state_dir, data_dir, PROJECT_ID, repo_root=tmp_path, now=NOW,
+    )
+    assert len(results) == 5
+    assert len(fetch_calls) == 1  # one batched call for the whole run, not 5
+
+
+def test_bulk_run_failed_batch_failsafe_false_for_every_dispatch(tmp_path, monkeypatch):
+    """A failed batch (None) must never claim salvage exists: an old,
+    receipt-less, lease-less dispatch classifies abandoned, NOT
+    preserved-no-pr — for every id. Contrast leg proves the same dispatch
+    WOULD be preserved-no-pr had the batch succeeded with its branch present."""
+    state_dir, data_dir = _build_state(tmp_path)
+    monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
+    old_ts = (NOW - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    _insert_dispatch(state_dir, "d-old", state="active", created_at=old_ts)
+
+    monkeypatch.setattr(doc, "_fetch_remote_dispatch_branches", lambda rr: None)
+    results = doc.reconcile_all_dispatch_outcomes(
+        state_dir, data_dir, PROJECT_ID, repo_root=tmp_path, now=NOW,
+    )
+    assert [r["outcome"] for r in results] == ["abandoned"]
+
+    monkeypatch.setattr(
+        doc, "_fetch_remote_dispatch_branches", lambda rr: frozenset({"d-old"}),
+    )
+    results = doc.reconcile_all_dispatch_outcomes(
+        state_dir, data_dir, PROJECT_ID, repo_root=tmp_path, now=NOW,
+    )
+    assert [r["outcome"] for r in results] == ["preserved-no-pr"]
 
 
 # ---------------------------------------------------------------------------

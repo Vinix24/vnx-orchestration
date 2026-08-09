@@ -127,7 +127,7 @@ def test_compute_cost_rate_table_fallback_on_registry_miss():
     """When the registry has no entry, the provider_costs rate table resolves it."""
     from provider_costs import resolve_cost_usd
     # litellm:zai is in the rate table but not necessarily resolvable via registry
-    cost = resolve_cost_usd("litellm:zai", "glm-5.1-default", 1_000_000, 1_000_000)
+    cost = resolve_cost_usd("litellm:zai", "glm-5.2", 1_000_000, 1_000_000)
     assert cost is not None and cost > 0
 
 
@@ -331,8 +331,8 @@ def test_cross_tenant_upsert_does_not_overwrite_other_project(tmp_path):
 
 @pytest.mark.parametrize("provider", [
     "litellm:deepseek:deepseek-v4-pro",
-    "litellm:zai:glm-5.1-default",
-    "litellm:openrouter:glm-5.1-default",
+    "litellm:zai:glm-5.2",
+    "litellm:openrouter:glm-5.2",
     "litellm:deepseek",
     "litellm",
 ])
