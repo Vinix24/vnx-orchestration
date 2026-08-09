@@ -80,6 +80,151 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Rij-7 (lane-matrix): push+PR-verplichting op de envelope-lanes.
+#
+# Both envelope lanes (run_envelope_plan / run_envelope_headless_plan) create a
+# dispatch worktree and run a worker in it. Until this hook, neither lane bound
+# the push+PR obligation: a worker that committed but never pushed (or pushed
+# but never opened a PR) completed with status="success" and work stranded.
+#
+# The per-state decision is NOT reimplemented here — it lives in the ONE binding
+# site, pr_enforcement.enforce_pr_exists, which the tmux lane already calls. The
+# envelope lanes reuse that same module and the shared classify_path() verdict,
+# so two copies of the decision can never drift (the exact OI-1099 mistake).
+#
+# Runs BEFORE remove_dispatch_worktree (the worktree is the only handle to the
+# local branch) and BEFORE _govern (so a push/PR failure is reflected in the
+# governed report and the EnvelopeResult, not a silent "success").
+# ---------------------------------------------------------------------------
+
+
+def _enforce_push_pr(
+    *,
+    dispatch_id: str,
+    branch: str,
+    wt_path: Path,
+    repo_root: Path,
+    receipts_file: "str | Path",
+    result: "_AdapterResult",
+    base_ref: str = "origin/main",
+) -> "_AdapterResult":
+    """Enforce the rij-7 push+PR obligation on an envelope-lane worktree.
+
+    Classifies the worktree via the shared tmux_worktree.classify_path() and calls
+    pr_enforcement.enforce_pr_exists() — the same module the tmux lane uses. When
+    enforcement is applicable and fails (push or PR), the adapter result is
+    rewritten to status="failure" so the governed EnvelopeResult is non-zero.
+    pr_enforcement appends the corrective receipt itself.
+
+    A non-applicable state (clean/dirty) leaves *result* unchanged. Never raises:
+    an internal error fails open (the worktree is still torn down by the caller's
+    finally block), matching the tmux lane's _enforce_pr_exists contract.
+
+    ``base_ref`` is the ref ``create_dispatch_worktree`` based the branch on
+    (``origin/main`` by default; ``plan.base_ref`` when set). The envelope lanes,
+    unlike the tmux lane, do not carry a WorktreeHandle, so they resolve the base
+    SHA here and pass it to ``classify_path`` — the same value the tmux lane
+    resolves before ``git worktree add`` and threads through
+    ``WorktreeHandle.base_sha``. Without it, ``classify_path`` falls back to
+    ``merge-base origin/main HEAD``, which fails in a shallow PR-clone (CI) where
+    ``origin/main`` is absent — and then misclassifies a clean, commit-less
+    worktree as ``committed``, triggering a false push+PR rejection (OI-1011
+    regression, faler-2 of dispatch 20260809-fix1419-census-headless).
+    """
+    try:
+        base_sha = _resolve_base_sha(repo_root=repo_root, base_ref=base_ref)
+        from tmux_worktree import classify_path  # noqa: PLC0415
+        state = classify_path(
+            wt=wt_path, branch=branch, dispatch_id=dispatch_id, base_sha=base_sha,
+        )
+        from pr_enforcement import enforce_pr_exists  # noqa: PLC0415
+        pr_result = enforce_pr_exists(
+            dispatch_id=dispatch_id,
+            branch=branch,
+            worktree_state=state,
+            repo_root=repo_root,
+            receipts_file=receipts_file,
+            pr_title=f"dispatch({dispatch_id}): auto-created by VNX envelope lane",
+            pr_body=(
+                f"Auto-created by VNX envelope build-dispatch completion "
+                f"(dispatch `{dispatch_id}`) — the worker left this branch "
+                "without an open PR. Please review before merging."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
+        logger.error(
+            "envelope: PR-enforcement guard errored dispatch=%s: %s", dispatch_id, exc,
+        )
+        return result
+
+    if not pr_result.applicable:
+        return result
+    if pr_result.ok:
+        logger.info(
+            "envelope: PR-enforcement OK dispatch=%s state=%s pr=%s created=%s",
+            dispatch_id, state, pr_result.pr_number, pr_result.created,
+        )
+        return result
+
+    logger.warning(
+        "envelope: PR-enforcement REJECTED dispatch=%s state=%s — %s",
+        dispatch_id, state, pr_result.reason,
+    )
+    return _AdapterResult(
+        returncode=1,
+        completion_text=result.completion_text,
+        status="failure",
+        token_usage=result.token_usage,
+        error=f"dispatch_branch_no_pr (state={state}): {pr_result.reason}",
+        session_id=result.session_id,
+        model=result.model,
+    )
+
+
+def _resolve_base_sha(*, repo_root: Path, base_ref: str) -> "str | None":
+    """Resolve the SHA of *base_ref* (``origin/main`` by default) in *repo_root*.
+
+    Mirrors the tmux lane's ``WorktreeHandle.base_sha`` resolution: the commit a
+    dispatch worktree was based on, resolved BEFORE ``git worktree add``. Returns
+    None when the ref cannot be resolved (shallow clone without ``origin/main``,
+    detached checkout, etc.) — ``classify_path`` then falls back to its own
+    merge-base logic and, failing that, to a clean-safe default rather than a
+    false ``committed``. Never raises: a resolve error is logged and treated as
+    "base unknown", which degrades to the conservative clean path.
+    """
+    import subprocess  # noqa: PLC0415
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", base_ref],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 — resolve failure degrades, never crashes
+        logger.warning("envelope: base_sha resolve raised for %s: %s", base_ref, exc)
+        return None
+    if proc.returncode != 0:
+        logger.info(
+            "envelope: base_ref %s unresolvable in %s — classify_path will fall back",
+            base_ref, repo_root,
+        )
+        return None
+    return proc.stdout.strip() or None
+
+
+def _dispatch_branch_name(dispatch_id: str) -> str:
+    """The local branch name create_dispatch_worktree allocates for *dispatch_id*."""
+    from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
+    return f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+
+
+def _receipts_file_for(state_dir: Path) -> Path:
+    """The NDJSON ledger the corrective receipt is appended to — the same path
+    envelope_govern._govern writes the dispatch receipt to
+    (``<state_dir>/t0_receipts.ndjson``), mirroring the tmux lane's
+    self._receipts_file convention."""
+    return Path(state_dir) / "t0_receipts.ndjson"
+
+
+# ---------------------------------------------------------------------------
 # Adapters -- CodexAdapter, ClaudeSubprocessAdapter moved to
 # envelope_adapters_claude.py (dispatch-monolith-split, PR-5 of 6); imported
 # above at bare name so every existing dispatch_envelope.CodexAdapter /
@@ -373,6 +518,20 @@ def run_envelope_plan(
             )
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
+        # Rij-7: enforce push+PR BEFORE the teardown removes the worktree (the only
+        # handle to the local branch). Only when the worker itself reported success —
+        # a failed worker has nothing worth pushing. Reuses pr_enforcement.enforce_pr_exists
+        # (the single per-state decision site) and the shared tmux_worktree.classify_path.
+        if result.status == "success":
+            result = _enforce_push_pr(
+                dispatch_id=plan.dispatch_id,
+                branch=_dispatch_branch_name(plan.dispatch_id),
+                wt_path=wt_path,
+                repo_root=_consumer_project_root,
+                receipts_file=_receipts_file_for(state_dir),
+                result=result,
+                base_ref=plan.base_ref or "origin/main",
+            )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
@@ -544,6 +703,20 @@ def run_envelope_headless_plan(
             )
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
+        # Rij-7: enforce push+PR BEFORE the teardown removes the worktree (the only
+        # handle to the local branch). Only when the worker itself reported success.
+        # Reuses pr_enforcement.enforce_pr_exists and the shared
+        # tmux_worktree.classify_path — never a second copy of the per-state decision.
+        if result.status == "success":
+            result = _enforce_push_pr(
+                dispatch_id=plan.dispatch_id,
+                branch=_dispatch_branch_name(plan.dispatch_id),
+                wt_path=wt_path,
+                repo_root=_consumer_project_root,
+                receipts_file=_receipts_file_for(state_dir),
+                result=result,
+                base_ref=plan.base_ref or "origin/main",
+            )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 

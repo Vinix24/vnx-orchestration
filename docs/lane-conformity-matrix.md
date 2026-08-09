@@ -121,7 +121,7 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 | 4 | Hoofdcheckout-guard (geen stille fallback) | **bindt** | **bindt niet** | **bindt** |
 | 5 | Reap weigert bij ongepushte commits | **bindt** (branch blijft) | **n.v.t.** | **bindt niet** |
 | 6 | Teardown meldt `worktree_state` | **bindt** | **n.v.t.** | **bindt niet** |
-| 7 | Push+PR-verplichting afgedwongen | **bindt** (alleen bij pushed) | **bindt niet** | **bindt niet** |
+| 7 | Push+PR-verplichting afgedwongen | **bindt** (pushed + committed) | **bindt** | **bindt** |
 | 8 | Ringbuffer-teardown (end-of-dispatch) | **bindt niet** | **bindt** | **bindt** |
 | 9 | Canonical receipt path (geen bare-write) | **bindt** | **bindt** | **bindt** |
 | 10 | OI-861 worktree identity guard | **bindt niet** | **n.v.t.** | **bindt** |
@@ -236,22 +236,27 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 
 ### 3.7 Celbewijzen — mechanisme 7: Push+PR-verplichting
 
-**tmux — bindt (alleen voor `worktree_state == "pushed"`)**
-- `_enforce_pr_exists()` (`tmux_interactive_dispatch.py:967-1009`) wordt aangeroepen op regel 2907, vóór `_govern_report()` en vóór `_teardown()`.
-- `enforce_pr_exists()` (`pr_enforcement.py:63-109`) checkt of `worktree_state == "pushed"` (regel 82). Alleen dan wordt PR-creatie afgedwongen.
-- Bij `worktree_state != "pushed"`: `applicable=False, ok=True` — de dispatch gaat door zonder PR.
-- **Beperking**: een dispatch met `worktree_state == "committed"` (wel commits, niet gepusht) passeert deze check. De dispatch slaagt (`exit 0`) zonder dat er iets op origin staat.
-- **OI-1011**: werk was lokaal gecommit, niet gepusht, geen PR. `classify()` gaf "committed", PR enforcement skipte (`applicable=False`), dispatch exit 0.
-- Bewijs: `scripts/lib/pr_enforcement.py:63-109` en `scripts/lib/tmux_interactive_dispatch.py:2905-2918`
+**tmux — bindt (voor `pushed` EN `committed`)**
+- `_enforce_pr_exists()` (`tmux_interactive_dispatch.py:1031-1098`) wordt aangeroepen op regel 2982, vóór `_govern_report()` en vóór `_teardown()`.
+- `enforce_pr_exists()` (`pr_enforcement.py:80-164`) bevat de ENIGE per-staat beslissing: `pushed` → PR afdwingen; `committed` → pushen dan PR afdwingen (rij-7 fix); `clean`/`dirty` → `applicable=False`.
+- Een mislukte push of PR-creatie → `ok=False` → `worker_succeeded = False` (`tmux_interactive_dispatch.py:2989`) → `receipt["status"] = "failed"` + `failure_reason=dispatch_branch_no_pr (state=...)`. Geen `exit 0` met werk lokaal gestrand.
+- De corrective receipt wordt door `pr_enforcement._record_corrective_receipt` zelf geschreven met `autopr_kind` (`push_failed`/`pr_failed`).
+- Bewijs: `scripts/lib/pr_enforcement.py:80-164`, `scripts/lib/tmux_interactive_dispatch.py:2982-3013`
 
-**headless — bindt niet**
-- Geen PR-enforcement code in `run_envelope_headless_plan()` of `_govern()`.
-- De headless lane maakt geen worktree aan en heeft geen push/PR-logica.
-- Bewijs: geen `pr_enforcement` import in `dispatch_envelope.py`, `envelope_govern.py`, of `envelope_adapters_claude.py`
+**headless — bindt**
+- `run_envelope_headless_plan()` (`dispatch_envelope.py:665-672`) roept `_enforce_push_pr()` aan vóór `remove_dispatch_worktree()` (de worktree is de enige handle naar de lokale branch).
+- `_enforce_push_pr()` (`dispatch_envelope.py:101-173`) hergebruikt `pr_enforcement.enforce_pr_exists` en de gedeelde `tmux_worktree.classify_path()` — geen tweede kopie van de beslissing (OI-1099).
+- De headless-lane maakt sinds #1416 wél een worktree aan (`isolation=worktree` gehonoreerd, hard-fail bij creatie, `dispatch_envelope.py:641-660`); de matrix-tekst "maakt geen worktree aan" is daarmee achterhaald.
+- Een mislukte push/PR → `result.status = "failure"` → `EnvelopeResult.returncode = 1`.
+- Bewijs: `scripts/lib/dispatch_envelope.py:101-175,665-672`
 
-**provider — bindt niet**
-- Geen PR-enforcement code in `run_envelope_plan()`, `_govern()`, of `provider_dispatch._emit_governance()`.
-- Bewijs: geen `pr_enforcement` import in `dispatch_envelope.py`, `envelope_govern.py`, of `provider_dispatch.py`
+**provider — bindt**
+- `run_envelope_plan()` (`dispatch_envelope.py:481-488`) roept dezelfde `_enforce_push_pr()` aan, vóór `remove_dispatch_worktree()`.
+- Bewijs: `scripts/lib/dispatch_envelope.py:101-175,481-488`
+
+**Gedeelde classificatie**
+- `classify_path()` (`tmux_worktree.py:211-271`) is de enige canonieke git-staat-classificatie; `classify()` (`tmux_worktree.py:195-208`) delegeert ernaar. De envelope-lanes gebruiken `classify_path()` direct (geen `WorktreeHandle`).
+- Bewijs: `scripts/lib/tmux_worktree.py:195-271`
 
 ### 3.8 Celbewijzen — mechanisme 8: Ringbuffer-teardown
 

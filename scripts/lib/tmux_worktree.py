@@ -193,9 +193,53 @@ def allocate(
 
 
 def classify(handle: WorktreeHandle) -> Literal["clean", "committed", "pushed", "dirty"]:
-    """Determine the state of the worktree at teardown time."""
-    wt = handle.path
+    """Determine the state of the worktree at teardown time.
 
+    Thin wrapper over :func:`classify_path` — the single canonical git-state
+    classification, shared by the tmux lane (which has a WorktreeHandle) and the
+    envelope lanes (which have only a worktree path + branch). The decision logic
+    lives in classify_path so it is never duplicated across lanes.
+    """
+    return classify_path(
+        wt=handle.path,
+        branch=handle.branch,
+        dispatch_id=handle.dispatch_id,
+        base_sha=handle.base_sha,
+    )
+
+
+def classify_path(
+    *,
+    wt: "Path | str",
+    branch: str,
+    dispatch_id: str,
+    base_sha: "str | None" = None,
+) -> Literal["clean", "committed", "pushed", "dirty"]:
+    """Classify a dispatch worktree's git state from a path alone.
+
+    This is the one canonical classification, reused by every lane's PR
+    enforcement (rij-7 of the lane-matrix) so the per-state decision in
+    pr_enforcement.enforce_pr_exists runs against a single verdict source.
+
+    ``base_sha`` is the worktree's base commit (origin/main at allocation time).
+    The envelope lanes resolve it from ``base_ref`` (mirroring the tmux lane's
+    ``WorktreeHandle.base_sha``) and pass it here. When it is still unknown, the
+    worktree's merge-base with origin/main is tried as a fallback. If THAT fails
+    too (shallow PR-clone in CI without a local ``origin/main``), a clean tree is
+    classified ``clean`` rather than guessed ``committed`` — a brand-new dispatch
+    branch always has an empty ``ls-remote`` result, so the old "empty remote →
+    committed" inference turned a commit-less worktree into a false push+PR
+    rejection (OI-1011 regression, faler-2 of dispatch
+    20260809-fix1419-census-headless). A false ``clean`` misses enforcement on
+    stranded work; a false ``committed`` breaks a dispatch that committed nothing.
+    The former is recoverable (T0 salvages), the latter is a hard regression.
+
+    States:
+    - ``dirty``     : uncommitted tracked changes in the worktree.
+    - ``clean``     : no new commits (HEAD == base), or base unresolvable and clean.
+    - ``committed`` : new local commits, not yet on origin (or origin unknown).
+    - ``pushed``    : new commits and the remote dispatch branch matches HEAD.
+    """
     status_result = _run(
         [
             "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
@@ -210,26 +254,44 @@ def classify(handle: WorktreeHandle) -> Literal["clean", "committed", "pushed", 
         return "clean"
     local_sha = local_sha_result.stdout.strip()
 
-    if local_sha == handle.base_sha:
+    ref_sha = base_sha
+    if ref_sha is None:
+        # The envelope lanes normally pass base_sha (resolved from base_ref). When
+        # they do not, fall back to the merge-base: a clean tree's HEAD equals it.
+        mb = _run(
+            ["git", "-C", str(wt), "merge-base", "origin/main", "HEAD"],
+        )
+        ref_sha = mb.stdout.strip() if mb.returncode == 0 else None
+    if ref_sha and local_sha == ref_sha:
+        return "clean"
+    if ref_sha is None:
+        # Base unresolvable (no base_sha passed AND origin/main absent locally).
+        # A clean tree here must NOT be guessed ``committed`` from an empty
+        # ls-remote: every brand-new dispatch branch has an empty remote, so that
+        # inference is a false positive on commit-less worktrees. Treat as clean
+        # and surface the degraded resolution so it is visible, not silent.
+        logger.warning(
+            "classify_path: base unresolvable for dispatch=%s branch=%s "
+            "(no base_sha, origin/main absent) — clean tree classified 'clean' "
+            "(degraded; push+PR enforcement skips). Investigate if work was expected.",
+            dispatch_id, branch,
+        )
         return "clean"
 
-    # New commits exist — determine whether they've been pushed to origin.
+    # New commits exist (HEAD diverged from a known base) — determine whether
+    # they've been pushed to origin.
+    remote_ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
     try:
         ls_result = _run(
-            [
-                "git", "-C", str(wt),
-                "ls-remote", "origin", f"dispatch/{handle.dispatch_id}",
-            ],
+            ["git", "-C", str(wt), "ls-remote", "origin", remote_ref],
             timeout=10,
         )
         remote_output = ls_result.stdout.strip() if ls_result.returncode == 0 else ""
     except subprocess.TimeoutExpired:
-        logger.warning("ls-remote timed out for %s; treating as committed", handle.branch)
+        logger.warning("ls-remote timed out for %s; treating as committed", branch)
         return "committed"
     except Exception as exc:
-        logger.warning(
-            "ls-remote failed for %s (%s); treating as committed", handle.branch, exc
-        )
+        logger.warning("ls-remote failed for %s (%s); treating as committed", branch, exc)
         return "committed"
 
     if not remote_output:

@@ -1253,3 +1253,102 @@ class TestFailClosedBranchNotOnOrigin:
         r = _receipts(state_dir)[0]
         assert r["event_type"] == "task_complete"
         assert r["status"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# OI-1017/OI-1048: converter double-counting guard
+# ---------------------------------------------------------------------------
+
+
+class TestConverterDoubleCountGuard:
+    """When the envelope hot-path already wrote a contract_invalid receipt,
+    the converter must not process the same report again — the NDJSON guard
+    short-circuits before append_receipt_payload."""
+
+    def test_existing_contract_invalid_skips_conversion(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """Pre-populate the NDJSON with a contract_invalid receipt and verify
+        the converter returns None for the same dispatch_id."""
+        import json
+
+        dispatch_id = "20260809-guard-test"
+        receipts_file = state_dir / "t0_receipts.ndjson"
+
+        # Simulate the hot-path having already written a contract_invalid receipt.
+        existing_receipt = json.dumps({
+            "dispatch_id": dispatch_id,
+            "event_type": "report_contract_invalid",
+            "status": "contract_invalid",
+            "provider": "codex",
+            "model": "gpt-test",
+            "terminal": "T1",
+            "receipt_kind": "dispatch",
+            "role": "identity_unresolved",
+            "task_id": "unknown",
+            "timestamp": "2026-08-09T00:00:00Z",
+            "report_path": f"unified_reports/{dispatch_id}.md",
+            "contract_violations": [
+                "## Summary",
+                "## Changes",
+                "## Verification",
+                "## Open Items",
+            ],
+        })
+        receipts_file.write_text(existing_receipt + "\n", encoding="utf-8")
+
+        # Write a report that the converter would normally process.
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(
+            report, dispatch_id, status="success",
+        )
+
+        result = convert_report_to_receipt(
+            report, receipts_file=str(receipts_file),
+        )
+
+        # The guard should have skipped conversion — result is None.
+        assert result is None, (
+            f"expected converter to skip existing contract_invalid receipt, "
+            f"got result={result}"
+        )
+
+        # The NDJSON must still have exactly 1 line (the original).
+        lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1, (
+            f"expected 1 receipt line (original), got {len(lines)}"
+        )
+
+    def test_no_existing_receipt_still_converts(
+        self, tmp_path, state_dir,
+    ):
+        """Without a pre-existing receipt, the converter must still process
+        normally (regression guard — the skip check must not false-positive)."""
+        dispatch_id = "20260809-guard-no-existing"
+        receipts_file = state_dir / "t0_receipts.ndjson"
+
+        # Write a report — no existing receipt in NDJSON.
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260809-guard-no-existing\n"
+            "provider: codex\nmodel: gpt-test\nstatus: unknown\n"
+            "terminal: T1\n---\n\n"
+            "## Summary\n\nNo existing receipt — this should process normally, "
+            "with a summary longer than fifty characters.\n\n"
+            "## Changes\n\nNone.\n\n"
+            "## Verification\n\nNone.\n\n"
+            "## Open Items\n\nNone.\n\n"
+            "**Model**: codex\n",
+            encoding="utf-8",
+        )
+
+        result = convert_report_to_receipt(
+            report, receipts_file=str(receipts_file),
+        )
+
+        # Normal processing — result is not None.
+        assert result is not None, (
+            "converter should process normally when no existing receipt"
+        )
+        lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) >= 1, "expected at least one receipt line"

@@ -431,6 +431,19 @@ def _drift_reason(
                 return f"blocked by dependency: {unmet[0]}"
             return "blocked"
 
+        # OI-1098: a delivery-held track (explicit non-'complete' marking on
+        # a linked PR) must NAME that hold as the drift reason — never let it
+        # read as a generic "dispatches in flight" / "no evidence".
+        track_row = conn.execute(
+            "SELECT pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        hold = track_reconciler._delivery_hold(
+            conn, track_id, project_id, track_row["pr_ref"] if track_row else None
+        )
+        if hold is not None and derived != "done":
+            return hold["reason"]
+
         count = conn.execute(
             "SELECT COUNT(*) FROM dispatches WHERE track = ? AND project_id = ?",
             (track_id, project_id),
@@ -502,6 +515,7 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
         f"  unverified={c.get('unverified', 0)}"
         f"  deferred={c.get('deferred', 0)}"
         f"  reopened_guard={c.get('reopened_guard', 0)}"
+        f"  delivery_hold={c.get('delivery_hold', 0)}"
     )
 
     per_track = summary.get("per_track", [])
@@ -511,7 +525,11 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
             verdict = pt.get("verdict", "?")
             cr = pt.get("close_result", "")
             suffix = f" -> {cr}" if cr else ""
-            print(f"  {pt['track_id']:<32} {verdict}{suffix}  (pr_ref: {pt.get('pr_ref', '-')})")
+            reason = f"  — {pt['reason']}" if pt.get("reason") else ""
+            print(
+                f"  {pt['track_id']:<32} {verdict}{suffix}  (pr_ref: {pt.get('pr_ref', '-')})"
+                f"{reason}"
+            )
 
     if exit_code == 0 and mode == "apply" and c.get("closed", 0):
         print(f"\n  [ok] closed {c['closed']} track(s)")
