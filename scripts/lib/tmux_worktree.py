@@ -193,9 +193,45 @@ def allocate(
 
 
 def classify(handle: WorktreeHandle) -> Literal["clean", "committed", "pushed", "dirty"]:
-    """Determine the state of the worktree at teardown time."""
-    wt = handle.path
+    """Determine the state of the worktree at teardown time.
 
+    Thin wrapper over :func:`classify_path` — the single canonical git-state
+    classification, shared by the tmux lane (which has a WorktreeHandle) and the
+    envelope lanes (which have only a worktree path + branch). The decision logic
+    lives in classify_path so it is never duplicated across lanes.
+    """
+    return classify_path(
+        wt=handle.path,
+        branch=handle.branch,
+        dispatch_id=handle.dispatch_id,
+        base_sha=handle.base_sha,
+    )
+
+
+def classify_path(
+    *,
+    wt: "Path | str",
+    branch: str,
+    dispatch_id: str,
+    base_sha: "str | None" = None,
+) -> Literal["clean", "committed", "pushed", "dirty"]:
+    """Classify a dispatch worktree's git state from a path alone.
+
+    This is the one canonical classification, reused by every lane's PR
+    enforcement (rij-7 of the lane-matrix) so the per-state decision in
+    pr_enforcement.enforce_pr_exists runs against a single verdict source.
+
+    ``base_sha`` is the worktree's base commit (origin/main at allocation time).
+    When it is unknown (the envelope lanes do not record it), the worktree's
+    merge-base with origin/main is used instead — a HEAD equal to the base means
+    "no new commits" (clean) regardless of which SHA represented the base.
+
+    States:
+    - ``dirty``     : uncommitted tracked changes in the worktree.
+    - ``clean``     : no new commits (HEAD == base).
+    - ``committed`` : new local commits, not yet on origin (or origin unknown).
+    - ``pushed``    : new commits and the remote dispatch branch matches HEAD.
+    """
     status_result = _run(
         [
             "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
@@ -210,26 +246,30 @@ def classify(handle: WorktreeHandle) -> Literal["clean", "committed", "pushed", 
         return "clean"
     local_sha = local_sha_result.stdout.strip()
 
-    if local_sha == handle.base_sha:
+    ref_sha = base_sha
+    if ref_sha is None:
+        # The envelope lanes know the base ref (origin/main) but not its SHA at
+        # allocation. Fall back to the merge-base: a clean tree's HEAD equals it.
+        mb = _run(
+            ["git", "-C", str(wt), "merge-base", "origin/main", "HEAD"],
+        )
+        ref_sha = mb.stdout.strip() if mb.returncode == 0 else None
+    if ref_sha and local_sha == ref_sha:
         return "clean"
 
     # New commits exist — determine whether they've been pushed to origin.
+    remote_ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
     try:
         ls_result = _run(
-            [
-                "git", "-C", str(wt),
-                "ls-remote", "origin", f"dispatch/{handle.dispatch_id}",
-            ],
+            ["git", "-C", str(wt), "ls-remote", "origin", remote_ref],
             timeout=10,
         )
         remote_output = ls_result.stdout.strip() if ls_result.returncode == 0 else ""
     except subprocess.TimeoutExpired:
-        logger.warning("ls-remote timed out for %s; treating as committed", handle.branch)
+        logger.warning("ls-remote timed out for %s; treating as committed", branch)
         return "committed"
     except Exception as exc:
-        logger.warning(
-            "ls-remote failed for %s (%s); treating as committed", handle.branch, exc
-        )
+        logger.warning("ls-remote failed for %s (%s); treating as committed", branch, exc)
         return "committed"
 
     if not remote_output:
