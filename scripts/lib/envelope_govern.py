@@ -42,11 +42,12 @@ from envelope_govern_support import (
 
 logger = logging.getLogger(__name__)
 
-# OI-1017/OI-1048 L2: greppable marker for observable body-contract violations
-# on the envelope lanes. The receipt status is NOT changed (binding is a
-# separate, later PR). Consumers filter on the warning code or grep the log
-# for this prefix to distinguish observable from binding violations.
-_CONTRACT_OBSERVE_MARKER = "VNX_CONTRACT_OBSERVE_VIOLATION"
+# OI-1017/OI-1048: greppable marker for binding body-contract violations
+# on the envelope lanes. When validate_body() rejects the report and the
+# adapter claimed success, the receipt status is overridden to
+# "contract_invalid" — the converter already knows this status (404 existing
+# records) and the observable-only L2 phase (#1415, db7a6046) is superseded.
+_CONTRACT_ENFORCE_MARKER = "VNX_CONTRACT_ENFORCE_VIOLATION"
 
 
 # ---------------------------------------------------------------------------
@@ -128,15 +129,18 @@ def _govern(
             exc,
         )
 
-    # OI-1017/OI-1048 L2: observable body-contract validation on envelope lanes.
-    # The tmux lane already binds via dispatch_govern._govern_impl(); the headless
-    # and provider lanes go through here without a validate_body() call. This is
-    # the shared envelope entry point — one fix covers both non-binding lanes.
-    # Observable mode: the receipt status is NOT changed (binding is a separate,
-    # later PR). The violation is logged with a greppable marker and a filterable
-    # warning code appended to the receipt's warnings[] array so the follow-up PR
-    # only needs to flip the switch from observe to enforce.
+    # OI-1017/OI-1048: binding body-contract validation on envelope lanes.
+    # The tmux lane already binds via dispatch_govern._govern_impl() (lines
+    # 533 + 562 — validate_body() before emit, status override on violation).
+    # This is the shared envelope entry point for provider + headless lanes;
+    # one fix covers both.  When validate_body() rejects the report and the
+    # adapter claimed success, the receipt status is overridden to the
+    # existing "contract_invalid" value (404 records in the live ledger, the
+    # converter already produces it) — no new status value, so no consumer
+    # breakage.  The violation is still logged + stamped as a warning for
+    # audit-trail queryability.
     _contract_warnings: List[Dict[str, Any]] = []
+    _effective_status: str = adapter_result.status
     if report_path is not None:
         try:
             from report_body_contract import validate_body  # noqa: PLC0415
@@ -144,7 +148,7 @@ def _govern(
             _body_result = validate_body(_report_text)
             if not _body_result.valid:
                 _violation_msg = (
-                    f"{_CONTRACT_OBSERVE_MARKER}: report body contract "
+                    f"{_CONTRACT_ENFORCE_MARKER}: report body contract "
                     f"violated — missing sections: {', '.join(_body_result.missing)}"
                 )
                 logger.warning(
@@ -156,6 +160,8 @@ def _govern(
                     "severity": "warn",
                     "message": _violation_msg,
                 })
+                if adapter_result.status == "success":
+                    _effective_status = "contract_invalid"
         except OSError:
             pass  # can't read report file — skip validation, don't break receipt
 
@@ -292,8 +298,8 @@ def _govern(
                     provider=spec.provider,
                     model=_cost_model,
                     pr_id=spec.pr_id,
-                    status=adapter_result.status,
-                    completion_pct=100 if adapter_result.status == "success" else 0,
+                    status=_effective_status,
+                    completion_pct=100 if _effective_status == "success" else 0,
                     risk=0.0,
                     findings=[],
                     duration_seconds=duration,
@@ -340,11 +346,11 @@ def _govern(
                     task_class=spec.task_class,
                     tier_from=spec.tier_from,
                     tier_to=spec.tier_to,
-                    # OI-1017/OI-1048 L2: observable body-contract warnings.
+                    # OI-1017/OI-1048: binding body-contract warnings.
                     # None when the report passes or couldn't be read; a list
-                    # with a filterable warning code when violated.  The receipt
-                    # status field is NOT affected (the violation is observable,
-                    # not yet binding — a separate PR makes it binding).
+                    # with a filterable warning code + severity=error when
+                    # violated.  The receipt status field is overridden to
+                    # "contract_invalid" above (binding, not observable).
                     warnings=_contract_warnings or None,
                 )
             except Exception as exc:
@@ -394,6 +400,16 @@ def _govern(
             len(adapter_result.completion_text or ""),
             adapter_result.error or "(no error captured)",
         )
+    elif _effective_status != adapter_result.status:
+        logger.warning(
+            "envelope._govern: dispatch=%s adapter=%s effective=%s (contract override) "
+            "report=%s receipt=%s",
+            spec.dispatch_id,
+            adapter_result.status,
+            _effective_status,
+            report_path,
+            receipt_path,
+        )
     else:
         logger.info(
             "envelope._govern: dispatch=%s status=%s report=%s receipt=%s",
@@ -416,7 +432,7 @@ def _govern(
         record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
             role=spec.role,
-            status=adapter_result.status,
+            status=_effective_status,
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
             worktree_path=None,
             base_sha=None,

@@ -460,8 +460,198 @@ def test_govern_emits_receipt_and_report(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 6: legacy run_envelope unchanged — CodexAdapter still routes correctly
+# Test 5b: OI-1017/OI-1048 — binding report contract on envelope lanes
 # ---------------------------------------------------------------------------
+
+
+VALID_REPORT = """\
+## Summary
+
+This is a valid report with a summary that is longer than fifty characters required.
+
+## Changes
+
+- Changed file A
+- Changed file B
+
+## Verification
+
+All tests pass. 42 passed, 0 failed.
+
+## Open Items
+
+None
+
+**Model**: codex
+**Provider**: openai
+"""
+
+
+def test_govern_contract_violated_yields_contract_invalid(tmp_path, monkeypatch):
+    """A report with no required headings → receipt status=contract_invalid."""
+    import json
+
+    state_dir = tmp_path / "state"
+    data_dir = tmp_path / "data"
+    state_dir.mkdir()
+    data_dir.mkdir()
+
+    dispatch_id = "test-govern-violated-binding"
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="do something",
+        role=None,
+        pr_id=None,
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+    fake_result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    report_path, receipt_path = dispatch_envelope._govern(spec, fake_result, start, end)
+
+    assert receipt_path is not None
+    assert receipt_path.exists()
+
+    # The receipt NDJSON should contain "contract_invalid", not "success".
+    lines = receipt_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) >= 1, "expected at least one receipt line"
+    receipt = json.loads(lines[-1])
+    assert receipt["status"] == "contract_invalid", (
+        f"expected contract_invalid, got {receipt['status']}"
+    )
+    assert receipt["dispatch_id"] == dispatch_id
+
+
+def test_govern_valid_report_keeps_success_status(tmp_path, monkeypatch):
+    """A pre-existing valid report → receipt status stays success."""
+    import json
+
+    state_dir = tmp_path / "state"
+    data_dir = tmp_path / "data"
+    state_dir.mkdir()
+    data_dir.mkdir()
+
+    # Pre-write a valid report so _govern's emit_unified_report sees the
+    # existing file and returns it (idempotent); then validate_body passes.
+    reports_dir = data_dir / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    dispatch_id = "test-govern-valid-binding"
+    report_path = reports_dir / f"{dispatch_id}.md"
+    report_path.write_text(VALID_REPORT, encoding="utf-8")
+
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="do something",
+        role=None,
+        pr_id=None,
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+    fake_result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    got_report, receipt_path = dispatch_envelope._govern(spec, fake_result, start, end)
+
+    assert receipt_path is not None
+    assert receipt_path.exists()
+
+    lines = receipt_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) >= 1
+    receipt = json.loads(lines[-1])
+    assert receipt["status"] == "success", (
+        f"valid report should keep success, got {receipt['status']}"
+    )
+    assert receipt["dispatch_id"] == dispatch_id
+
+
+def test_govern_adapter_failure_not_overridden_by_contract(tmp_path, monkeypatch):
+    """An adapter that already failed → contract_invalid must NOT override the
+    real failure status (a timeout/error is more informative than a missing
+    heading)."""
+    import json
+
+    state_dir = tmp_path / "state"
+    data_dir = tmp_path / "data"
+    state_dir.mkdir()
+    data_dir.mkdir()
+
+    dispatch_id = "test-govern-failed-adapter"
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="do something",
+        role=None,
+        pr_id=None,
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+    fake_result = _AdapterResult(
+        returncode=1, completion_text="timed out", status="timeout",
+        error="deadline exceeded",
+    )
+    start = end = datetime.now(timezone.utc)
+
+    report_path, receipt_path = dispatch_envelope._govern(spec, fake_result, start, end)
+
+    assert receipt_path is not None
+    assert receipt_path.exists()
+
+    lines = receipt_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) >= 1
+    receipt = json.loads(lines[-1])
+    # adapter_result.status="timeout" → the "success" guard in the override
+    # means it stays "timeout", not "contract_invalid".
+    assert receipt["status"] != "contract_invalid", (
+        f"adapter failure must not be overridden to contract_invalid; got {receipt['status']}"
+    )
+
+
+def test_govern_contract_violation_warning_stamped(tmp_path, monkeypatch):
+    """When the contract is violated, the receipt carries a report_contract_
+    violated warning with the missing sections."""
+    import json
+
+    state_dir = tmp_path / "state"
+    data_dir = tmp_path / "data"
+    state_dir.mkdir()
+    data_dir.mkdir()
+
+    dispatch_id = "test-govern-warning-stamped"
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="T1",
+        provider="codex",
+        model="gpt-test",
+        instruction="do something",
+        role=None,
+        pr_id=None,
+        state_dir=state_dir,
+        data_dir=data_dir,
+    )
+    fake_result = _AdapterResult(returncode=0, completion_text="all good", status="success")
+    start = end = datetime.now(timezone.utc)
+
+    report_path, receipt_path = dispatch_envelope._govern(spec, fake_result, start, end)
+
+    assert receipt_path is not None
+    assert receipt_path.exists()
+
+    lines = receipt_path.read_text(encoding="utf-8").strip().splitlines()
+    receipt = json.loads(lines[-1])
+    warnings = receipt.get("warnings") or []
+    violation_codes = [w["code"] for w in warnings]
+    assert "report_contract_violated" in violation_codes, (
+        f"expected report_contract_violated warning, got {violation_codes}"
+    )
 
 
 def test_legacy_run_envelope_unchanged(tmp_path, monkeypatch):
