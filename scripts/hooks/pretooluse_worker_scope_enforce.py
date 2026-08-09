@@ -97,6 +97,31 @@ def _relative_to_cwd(file_path: str, cwd: str) -> str:
     return file_path if rel.startswith("..") else rel
 
 
+def _is_within_report_dir(file_path: str) -> bool:
+    """Return True when *file_path* targets the unified report directory.
+
+    Workers must always be able to write their completion report to
+    $VNX_DATA_DIR/unified_reports/<dispatch_id>.md regardless of
+    file_write_scope. This exemption is scoped narrowly: only the
+    unified_reports/ directory under the resolved data dir, not
+    any other location under VNX_DATA_DIR.
+    """
+    if not file_path or not _DEPS_AVAILABLE:
+        return False
+    try:
+        data_dir = project_root.resolve_data_dir(__file__)
+        reports_dir = (data_dir / "unified_reports").resolve()
+        target = Path(file_path).resolve()
+        # Must be a direct child of reports_dir (not a subdirectory or sibling).
+        try:
+            target.relative_to(reports_dir)
+        except ValueError:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def evaluate(payload: dict) -> "tuple[str, str | None]":
     """Return (decision, reason) for one PreToolUse payload. decision is 'allow' or 'block'."""
     if not _DEPS_AVAILABLE:
@@ -128,6 +153,12 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
     if tool_name in _WRITE_LIKE_TOOLS:
         file_path = tool_input.get("file_path")
         if not isinstance(file_path, str) or not file_path:
+            return "allow", None
+        # Report obligation: a worker must always be able to write its
+        # completion report to $VNX_DATA_DIR/unified_reports/ regardless
+        # of file_write_scope. This exemption is scoped narrowly to the
+        # unified_reports directory only.
+        if _is_within_report_dir(file_path):
             return "allow", None
         cwd = payload.get("cwd")
         cwd = cwd if isinstance(cwd, str) else ""
