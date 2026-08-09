@@ -77,6 +77,21 @@ def _is_known_dispatch(dispatch_id: str, state_dir: Optional[Path] = None) -> bo
     event record whose ``dispatch_id`` field matches.  Fail-open: returns True
     when the register file is missing or unreadable, so a transient I/O error
     never causes a healthy report to be dead-lettered.
+
+    OI-1105: the dispatch register is effectively dead as of 2026-08-09.
+    The last entry is dated 2026-08-08T21:41Z; only
+    ``backfill_pr_merged_receipts.py`` still writes to it.  No dispatch lane
+    (tmux-spawn, subprocess, provider, envelope) adds entries.  Of the nine
+    dispatches that went through the door on 9 August, zero appear in the
+    register.
+
+    The register cross-check is only reached when the report carries no
+    content-side dispatch_id (``not content_id_valid``), which is already a
+    contract violation.  A false negative here dead-letters the report into
+    ``receipt_deadletter/`` — quarantine, not deletion — so the direction is
+    safe.  The register's staleness means the check is structurally permissive
+    (fail-open) rather than restrictive; a reader should not assume it
+    provides a positive confirmation of dispatch existence.
     """
     if state_dir is None:
         try:

@@ -7,8 +7,9 @@ Covers:
   3. Malformed report (no dispatch_id) → skipped with warning, no crash
   4. scan_and_convert() over a directory of mixed reports
   5. Watermark persistence: already-processed reports skipped across calls
-  6. Isolation: converter does NOT read the Bash processor's
-     processed_receipts.txt (separate dedup stores, no format conflation)
+  6. Cross-processor dedup: converter reads AND writes the Bash processor's
+     processed_receipts.txt (OI-1102: shared watermark, see test docstring
+     for why the old separation was abandoned)
   7. Isolation: converter does NOT read/write the processor's mtime
      watermark (receipt_processor_watermark)
 """
@@ -377,15 +378,40 @@ class TestWatermarkPersistence:
         assert stats2.new_count == 0
         assert _count_receipts(state_dir) == 1
 
-    def test_converter_ignores_bash_watermark(self, reports_dir, state_dir):
-        """Pre-populated processed_receipts.txt does NOT block the converter.
+    def test_converter_respects_bash_watermark_cross_processor_dedup(
+        self, reports_dir, state_dir
+    ):
+        """Cross-processor dedup: the converter reads the Bash processor's watermark.
 
-        The converter owns its own dedup store (report_to_receipt_processed.txt).
-        A hash in the Bash processor's processed_receipts.txt is irrelevant
-        to the converter — it must NOT cause the converter to skip a report.
+        The converter and the Bash receipt processor (report_parser.py) both
+        scan unified_reports/ and emit receipts to the same t0_receipts.ndjson.
+        Before OI-1102, each processor maintained its own dedup watermark, so
+        the same report file was processed by both — producing duplicate
+        receipts for the same file (observed 2026-08-09 with dispatch
+        20260809-fix1417-envelope-plan-test: two receipts at 12:38:49 and
+        12:41:23 for the same report file, one from each processor).
+
+        The old separation existed because the Bash processor could mark a
+        report as "processed" before the converter had a chance to validate
+        and enrich it — a half-processed Bash receipt would block the
+        converter from ever seeing that report, leaving a gap in the audit
+        trail.  Three later changes close that gap:
+
+        1. The converter's fail-closed validation gate (OI-1035) ensures
+           every receipt is complete before it is emitted — a half-processed
+           receipt is no longer possible.
+        2. Both processors now share one dedup watermark, so a report
+           processed by either lane is skipped by the other.
+        3. Dead-letter quarantining (OI-1102) routes unverifiable reports to
+           receipt_deadletter/ instead of silently dropping them, preserving
+           forensic access.
+
+        The shared watermark eliminates cross-processor duplicates while the
+        fail-closed gate and dead-letter quarantine together prevent the
+        "silent skip" the old separation was designed to avoid.
         """
-        report = reports_dir / "20260601-ignored-bash.md"
-        _write_frontmatter_report(report, "20260601-ignored-bash")
+        report = reports_dir / "20260601-shared-dedup.md"
+        _write_frontmatter_report(report, "20260601-shared-dedup")
         file_hash = _compute_sha256(report)
 
         # Pre-populate the Bash watermark (processed_receipts.txt) with the
@@ -395,17 +421,35 @@ class TestWatermarkPersistence:
 
         stats = scan_and_convert([reports_dir], state_dir)
 
-        # Converter must NOT skip: it does not read the Bash watermark.
-        assert stats.new_count == 1
+        # Converter skips the report because the Bash processor already processed
+        # it — cross-processor dedup is the intended OI-1102 behavior.
+        assert stats.new_count == 0
+        assert _count_receipts(state_dir) == 0
+
+        # Converter's own watermark is NOT populated: it never converted the
+        # report, so it has nothing to watermark.
+        py_wm = _load_watermark(state_dir / _WATERMARK_FILENAME)
+        assert file_hash not in py_wm
+
+        # Verify the other direction: when the converter processes a report,
+        # it writes to BOTH watermarks so the Bash processor also skips it.
+        report2 = reports_dir / "20260601-shared-dedup-2.md"
+        _write_frontmatter_report(report2, "20260601-shared-dedup-2")
+        file_hash2 = _compute_sha256(report2)
+
+        stats2 = scan_and_convert([reports_dir], state_dir)
+        assert stats2.new_count == 1
         assert _count_receipts(state_dir) == 1
 
-        # Converter's own watermark is now populated.
-        py_wm = _load_watermark(state_dir / _WATERMARK_FILENAME)
-        assert file_hash in py_wm
+        # Both watermarks now contain the new report's hash.
+        py_wm2 = _load_watermark(state_dir / _WATERMARK_FILENAME)
+        bash_wm2 = _load_watermark(state_dir / "processed_receipts.txt")
+        assert file_hash2 in py_wm2
+        assert file_hash2 in bash_wm2
 
-        # Second scan: converter's own watermark prevents re-emission.
-        stats2 = scan_and_convert([reports_dir], state_dir)
-        assert stats2.new_count == 0
+        # Rescan: both watermarks prevent re-emission.
+        stats3 = scan_and_convert([reports_dir], state_dir)
+        assert stats3.new_count == 0
         assert _count_receipts(state_dir) == 1
 
     def test_converter_does_not_read_mtime_watermark(self, reports_dir, state_dir):
