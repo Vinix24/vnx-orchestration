@@ -120,19 +120,42 @@ def _enforce_push_pr(
     an internal error fails open (the worktree is still torn down by the caller's
     finally block), matching the tmux lane's _enforce_pr_exists contract.
 
-    ``base_ref`` is the ref ``create_dispatch_worktree`` based the branch on
-    (``origin/main`` by default; ``plan.base_ref`` when set). The envelope lanes,
-    unlike the tmux lane, do not carry a WorktreeHandle, so they resolve the base
-    SHA here and pass it to ``classify_path`` — the same value the tmux lane
-    resolves before ``git worktree add`` and threads through
-    ``WorktreeHandle.base_sha``. Without it, ``classify_path`` falls back to
-    ``merge-base origin/main HEAD``, which fails in a shallow PR-clone (CI) where
-    ``origin/main`` is absent — and then misclassifies a clean, commit-less
-    worktree as ``committed``, triggering a false push+PR rejection (OI-1011
-    regression, faler-2 of dispatch 20260809-fix1419-census-headless).
+    ``base_ref`` is kept as a last-resort fallback only. The authoritative base
+    SHA is read from the worktree claim ``create_dispatch_worktree`` wrote
+    (``read_worktree_base_sha``) — the SAME source ``remove_dispatch_worktree``
+    uses for L3 reap, so the allocator's recorded base is the single
+    classification input across every lane. Re-deriving ``base_sha`` from
+    ``plan.base_ref`` (the prior behavior) was OI-1106's root cause: the
+    allocator bases the worktree on ``origin/main`` (or
+    ``VNX_BENCH_WORKTREE_BASE_REF``) while ``plan.base_ref`` often names a local
+    ``main`` ref; when the two disagree (a stale local ``main`` behind
+    ``origin/main``, or a PR merge-commit checkout), a commit-less worktree is
+    misclassified ``committed``/``pushed`` and the guard rejects a real success
+    with ``status="failure"``. A guard that flips a different test each run is
+    worse than none, so the base is never re-derived from a lane-local ref when
+    the claim is available. When the claim is absent (test fixture that stubs
+    the allocator), the explicit ``base_ref`` is resolved with a loud
+    degradation log; when even that is unresolvable, ``classify_path`` degrades
+    clean-safe and the degradation is surfaced, never guessed ``committed``.
     """
     try:
-        base_sha = _resolve_base_sha(repo_root=repo_root, base_ref=base_ref)
+        from dispatch_worktree_isolation import (  # noqa: PLC0415
+            read_worktree_base_sha,
+        )
+        base_sha, _claim_reason = read_worktree_base_sha(
+            dispatch_id, project_root=repo_root
+        )
+        if base_sha is None:
+            # Claim unavailable (stubbed allocator in tests, or pre-L3 claim).
+            # Fall back to the explicit base_ref, LOUDLY — never silently guess.
+            base_sha = _resolve_base_sha(repo_root=repo_root, base_ref=base_ref)
+            logger.warning(
+                "envelope: base_sha from claim unavailable for dispatch=%s (%s) — "
+                "falling back to base_ref=%r resolved=%s; classify_path will degrade "
+                "clean-safe if this too is unresolvable.",
+                dispatch_id, _claim_reason, base_ref,
+                base_sha[:12] if base_sha else None,
+            )
         from tmux_worktree import classify_path  # noqa: PLC0415
         state = classify_path(
             wt=wt_path, branch=branch, dispatch_id=dispatch_id, base_sha=base_sha,

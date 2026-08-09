@@ -158,14 +158,26 @@ def test_run_envelope_plan_requires_permit(tmp_path):
     with pytest.raises(PermissionError):
         run_envelope_plan(plan, forged, state_dir=state_dir, data_dir=data_dir)
 
-    # Valid permit: proceed (mock spawn + govern to avoid real I/O)
+    # Valid permit: proceed (mock spawn + allocator + govern to avoid real I/O).
+    # The permit backstop is the assertion; the valid-permit leg only confirms a
+    # good permit reaches execution. That leg still runs the real worktree
+    # allocator unless it is stubbed — and on a CI runner without git/gh/network
+    # a genuine success is rewritten to status="failure", flipping this test red
+    # for a reason unrelated to the permit gate it claims to test. Stub the
+    # allocator in the same form as TestEnvelopeWorktreeIsolation below.
     valid_permit = issue_permit(plan)
     fake_receipt = state_dir / "t0_receipts.ndjson"
     fake_receipt.touch()
 
-    with patch.object(ProviderAdapter, "run", return_value=_fake_adapter_success()):
-        with patch("dispatch_envelope._govern", return_value=(None, fake_receipt)):
-            result = run_envelope_plan(plan, valid_permit, state_dir=state_dir, data_dir=data_dir)
+    _fake_consumer_root = tmp_path / "consumer-root"
+    with patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+               return_value=_fake_consumer_root), \
+         patch("dispatch_worktree_isolation.create_dispatch_worktree",
+               return_value=tmp_path / "fake-wt"), \
+         patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+         patch.object(ProviderAdapter, "run", return_value=_fake_adapter_success()), \
+         patch("dispatch_envelope._govern", return_value=(None, fake_receipt)):
+        result = run_envelope_plan(plan, valid_permit, state_dir=state_dir, data_dir=data_dir)
 
     assert result.status == "success"
     assert result.returncode == 0
@@ -409,7 +421,19 @@ def test_instruction_read_from_file(tmp_path, monkeypatch):
     fake_receipt = state_dir / "t0_receipts.ndjson"
     fake_receipt.touch()
 
-    with patch("dispatch_envelope._govern", return_value=(None, fake_receipt)):
+    # Asserts instruction-from-file propagation to spawn, not push/PR enforcement
+    # (covered in test_pr_enforcement.py + test_lane_matrix_row7_push_pr.py, 27
+    # green). Stub the worktree allocator in the same form as
+    # TestEnvelopeWorktreeIsolation below so the real `git worktree add`/`git
+    # push`/`gh pr create` path cannot rewrite a genuine success to failure on a
+    # CI runner that lacks git/gh/network — the source of this dispatch's CI flake.
+    _fake_consumer_root = tmp_path / "consumer-root"
+    with patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+               return_value=_fake_consumer_root), \
+         patch("dispatch_worktree_isolation.create_dispatch_worktree",
+               return_value=tmp_path / "fake-wt"), \
+         patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+         patch("dispatch_envelope._govern", return_value=(None, fake_receipt)):
         result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
 
     assert result.status == "success"

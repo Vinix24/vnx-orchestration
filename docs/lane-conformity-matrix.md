@@ -6,8 +6,9 @@
 > vastgesteld staan op `ongemeten`.
 
 **Gemeten op commit**: `6157a254` (main, 2026-08-08)
+**Bijgewerkt na**: #1415, #1416, #1417, #1419, #1420 (main, 2026-08-09) — cellen hermeten tegen de gecorrigeerde codepaden
 **Meetmethode**: codepad-trace van dispatch-deur tot mechanisme-aanroep
-**Vier OI-gaten**: OI-1011, OI-1017, OI-1045, OI-1048 — alle vier terug te vinden als `bindt niet`
+**Vier OI-gaten**: OI-1011, OI-1017, OI-1045, OI-1048 — alle vier gefixt; de matrix-cellen zijn bijgewerkt naar de gecorrigeerde werkelijkheid
 
 ---
 
@@ -74,16 +75,17 @@ Eén full-file rewrite (batch, geen append):
 |---|---|---|---|
 | Aanmaken (OI-861 claims) | `create_dispatch_worktree()` | `dispatch_worktree_isolation.py:411` | provider, headless (envelope-pad) |
 | Aanmaken (eigen lock) | `allocate()` | `tmux_worktree.py:109` | tmux |
-| Verwijderen (unconditional) | `remove_dispatch_worktree()` | `dispatch_worktree_isolation.py:508` | provider, headless |
+| Verwijderen (classify + reap) | `remove_dispatch_worktree()` | `dispatch_worktree_isolation.py:508` | provider, headless |
 | Verwijderen (classify + reap) | `reap()` | `tmux_worktree.py:261` | tmux |
 
 ### 2.3 Teardown/reap-classificatie
 
 | Operatie | Functie | Bestand | Gebruikt door |
 |---|---|---|---|
-| Classificatie (git ls-remote) | `classify()` | `tmux_worktree.py:195` | tmux |
+| Classificatie (git ls-remote) | `classify()` | `tmux_worktree.py:195` | tmux, provider, headless (via `remove_dispatch_worktree()`) |
 | Teardown event emit | `_teardown()` | `tmux_interactive_dispatch.py:2291` | tmux |
-| Geen classificatie | `remove_dispatch_worktree()` | `dispatch_worktree_isolation.py:508` | provider, headless |
+| Teardown event emit | `remove_dispatch_worktree()` (L3 block) | `dispatch_worktree_isolation.py:661` | provider, headless |
+| Classificatie + reap | `remove_dispatch_worktree()` (L3 block) | `dispatch_worktree_isolation.py:617,653` | provider, headless |
 
 ### 2.4 Ringbuffer
 
@@ -115,16 +117,16 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 
 | # | Mechanisme | tmux | headless | provider |
 |---|---|---|---|---|
-| 1 | `validate_body()` vóór receipt | **bindt** | **bindt niet** | **bindt niet** |
+| 1 | `validate_body()` vóór receipt | **bindt** | **bindt** | **bindt** |
 | 2 | Fail-closed model/provider-check | **bindt** | **bindt** | **bindt** |
-| 3 | `isolation=worktree` gehonoreerd | **bindt** | **bindt niet** | **bindt** |
-| 4 | Hoofdcheckout-guard (geen stille fallback) | **bindt** | **bindt niet** | **bindt** |
-| 5 | Reap weigert bij ongepushte commits | **bindt** (branch blijft) | **n.v.t.** | **bindt niet** |
-| 6 | Teardown meldt `worktree_state` | **bindt** | **n.v.t.** | **bindt niet** |
+| 3 | `isolation=worktree` gehonoreerd | **bindt** | **bindt** | **bindt** |
+| 4 | Hoofdcheckout-guard (geen stille fallback) | **bindt** | **bindt** | **bindt** |
+| 5 | Reap weigert bij ongepushte commits | **bindt** (branch blijft) | **bindt** | **bindt** |
+| 6 | Teardown meldt `worktree_state` | **bindt** | **bindt** | **bindt** |
 | 7 | Push+PR-verplichting afgedwongen | **bindt** (pushed + committed) | **bindt** | **bindt** |
 | 8 | Ringbuffer-teardown (end-of-dispatch) | **bindt niet** | **bindt** | **bindt** |
 | 9 | Canonical receipt path (geen bare-write) | **bindt** | **bindt** | **bindt** |
-| 10 | OI-861 worktree identity guard | **bindt niet** | **n.v.t.** | **bindt** |
+| 10 | OI-861 worktree identity guard | **bindt niet** | **bindt** | **bindt** |
 
 ### 3.1 Celbewijzen — mechanisme 1: `validate_body()` vóór receipt
 
@@ -133,17 +135,16 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - Bestand: `scripts/lib/dispatch_govern.py:533`, `:562`
 - Het workers-rapport wordt eerst gelezen uit `unified_reports/<dispatch_id>.md`. Als `validate_body()` faalt, valt de governance terug op synthese (`_synthesize()`, regel 548). Als het final body ook faalt, wordt de contract-schending gerapporteerd.
 
-**headless — bindt niet**
-- `run_envelope_headless_plan()` → `_govern()` roept `emit_unified_report()` aan op regel 107 zonder voorafgaande `validate_body()`.
-- `emit_unified_report()` (`governance_emit.py:394-526`) valideert NIET het rapport-body-contract. Het controleert alleen frontmatter-pattern (`_validate_report_frontmatter()`, regel 505), niet de verplichte koppen.
-- Bestand: `scripts/lib/envelope_govern.py:107`, `scripts/lib/governance_emit.py:394-526`
-- **OI-1048**: het rapport had `validate_body() → valid=False` maar `emit_unified_report()` schreef het toch weg, en `emit_dispatch_receipt()` produceerde een receipt met `status=success`.
+**headless — bindt**
+- `_govern()` (`envelope_govern.py:144-164`) roept `validate_body()` aan op het geschreven rapport (regel 148). Als het body-contract faalt én de adapter claimde `status="success"`, wordt de receipt-status overschreven naar `"contract_invalid"` (regel 164).
+- De validatie is **bindend**: een ongeldig rapport produceert geen `status=success` receipt meer.
+- Dit is het gedeelde envelope-pad voor zowel headless als provider — één fix dekt beide lanes (#1415: observe, #1420: binding).
+- Bestand: `scripts/lib/envelope_govern.py:144-164`
 
-**provider — bindt niet**
-- `run_envelope_plan()` → `_govern()` zelfde pad als headless: `emit_unified_report()` op regel 107 zonder `validate_body()`.
-- Ook `provider_dispatch._emit_governance()` (`provider_dispatch.py:859,986`) roept `emit_dispatch_receipt()` en `emit_unified_report()` aan zonder `validate_body()`.
-- Bestand: `scripts/lib/envelope_govern.py:107`, `scripts/lib/provider_dispatch.py:859,986`
-- **OI-1017**: het rapportbestand was de geassembleerde prompt. Nul verplichte koppen. Toch `status=success` receipt.
+**provider — bindt**
+- Zelfde gedeelde `_govern()`-pad als headless: `validate_body()` op regel 148, status-override naar `"contract_invalid"` op regel 164.
+- Ook `provider_dispatch._emit_governance()` (`provider_dispatch.py`) heeft een eigen receipt-pad; dat pad mist `validate_body()` maar wordt alleen gebruikt in niet-envelope scenario's.
+- Bestand: `scripts/lib/envelope_govern.py:144-164`
 
 **Noot over `report_to_receipt_converter.py`**:
 - De converter (`report_to_receipt_converter.py:338`) roept WEL `validate_body()` aan via zijn fail-closed checks (regels 407-429). Maar de converter draait als cron-job (`receipt_processor.sh` elke 30s), niet in de dispatch hot-path. Een ongeldig rapport dat door de converter wordt opgepikt krijgt `status="failure"` of `status="contract_invalid"`, nooit `status="success"`. Maar dit gebeurt buiten de dispatch-executie — de deur is dan al lang `exit 0`.
@@ -166,12 +167,12 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - De tmux-sessie start met deze cwd. De worker draait IN de worktree.
 - Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2193-2200`
 
-**headless — bindt niet**
-- `run_envelope_headless_plan()` roept `ClaudeSubprocessAdapter().run(enriched_spec)` aan (`dispatch_envelope.py:499`) **zonder** `cwd` parameter.
-- `ClaudeSubprocessAdapter.run()` (`envelope_adapters_claude.py:116-134`) accepteert een optionele `cwd` parameter (regel 120) maar de headless lane geeft hem niet mee.
-- `spawn_claude()` krijgt `cwd=None` → erft CWD van het parent-proces → **hoofdcheckout**.
-- Er wordt GEEN worktree aangemaakt in het headless pad.
-- **OI-1045**: spec zette `isolation=worktree`, de deur negeerde het, de worker werkte in de hoofdcheckout. 420 regels ongecommit.
+**headless — bindt**
+- `run_envelope_headless_plan()` (`dispatch_envelope.py:666`) roept `create_dispatch_worktree()` aan — de headless lane maakt sinds #1416 wél een worktree aan.
+- `ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path)` op regel 695 geeft de worktree-pad mee als `cwd` — de worker draait IN de worktree, niet in de hoofdcheckout.
+- Als worktree-aanmaak faalt, wordt de dispatch afgebroken (regels 667-690) — geen stille fallback naar de hoofdcheckout.
+- **OI-1045 gefixt door #1416**: `isolation=worktree` wordt nu gehonoreerd.
+- Bewijs: `scripts/lib/dispatch_envelope.py:666,695` en `scripts/lib/dispatch_worktree_isolation.py:411-505`
 
 **provider — bindt**
 - `run_envelope_plan()` roept `create_dispatch_worktree()` aan (`dispatch_envelope.py:328`) en geeft `cwd=wt_path` mee aan `ProviderAdapter().run()` (`:357`).
@@ -186,9 +187,11 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - Er is geen aparte "guard" die detecteert of de worker in de hoofdcheckout werkt — de worker KAN niet in de hoofdcheckout werken omdat zijn cwd de worktree is.
 - Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2200`
 
-**headless — bindt niet**
-- Geen worktree-aanmaak, geen cwd-override, geen guard. De worker draait in de geërfde CWD.
-- Bewijs: `scripts/lib/dispatch_envelope.py:499` (geen `cwd` parameter)
+**headless — bindt**
+- Sinds #1416 maakt de headless lane een worktree aan (`dispatch_envelope.py:666`) en geeft `cwd=wt_path` mee aan de adapter (regel 695).
+- Als worktree-aanmaak faalt, wordt de dispatch afgebroken met een harde fout (regels 667-690) — geen stille fallback naar de hoofdcheckout.
+- De OI-861 identity check (in `create_dispatch_worktree()`, `dispatch_worktree_isolation.py:479-505`) voorkomt dat twee dispatches dezelfde worktree delen.
+- Bewijs: `scripts/lib/dispatch_envelope.py:666-695`
 
 **provider — bindt**
 - `create_dispatch_worktree()` faalt hard als worktree-aanmaak mislukt. Er is geen fallback naar de hoofdcheckout.
@@ -208,15 +211,21 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - **Beperking**: de worktree-directory wordt altijd verwijderd bij "committed". De branch met commits blijft lokaal bestaan, maar er is geen actief werkbestand meer. De dispatch kan nog steeds `exit 0` terwijl er ongepushte commits zijn.
 - Bewijs: `scripts/lib/tmux_worktree.py:195-358`
 
-**headless — n.v.t.**
-- De headless lane maakt geen worktree aan. Er valt niets te reapen.
+**headless — bindt**
+- `run_envelope_headless_plan()` (`dispatch_envelope.py:721`) roept `remove_dispatch_worktree()` aan in de `finally`-block.
+- `remove_dispatch_worktree()` (`dispatch_worktree_isolation.py:617`) classificeert de worktree vóór reap via de gedeelde `tmux_worktree.classify()`.
+- `reap(handle, classification)` op regel 653 handelt per classificatie: `committed` → branch lokaal behouden, `dirty` → worktree gelockt.
+- Sinds #1416 maakt de headless lane een worktree aan, dus reap is van toepassing.
+- Bewijs: `scripts/lib/dispatch_envelope.py:721`, `scripts/lib/dispatch_worktree_isolation.py:617,653`
 
-**provider — bindt niet**
-- `remove_dispatch_worktree()` (`dispatch_worktree_isolation.py:508-626`) verwijdert de worktree **onvoorwaardelijk** met `git worktree remove --force`.
-- Geen `classify()` stap. Geen push-check. Geen ls-remote.
-- De lokale branch wordt verwijderd met `git branch -D` (force, regel ~615) — geen check of de branch op origin staat.
-- Bewijs: `scripts/lib/dispatch_worktree_isolation.py:508-626`
-- **OI-1011 analogie**: als dit in de provider lane was gebeurd, waren de commits volledig verloren (branch verwijderd met `-D`).
+**provider — bindt**
+- `provider_dispatch.py:1508` roept `remove_dispatch_worktree(dispatch_id, project_root=..., terminal_id=...)` aan.
+- `remove_dispatch_worktree()` (`dispatch_worktree_isolation.py:579-653`) doet **classify vóór reap** (sinds #1417):
+  - Bouwt `WorktreeHandle` uit de OI-861 claim (regels 583-615)
+  - `classify(handle)` op regel 617 — gedeelde `tmux_worktree.classify()`, inclusief `git status --porcelain`, `HEAD == base_sha`, en `git ls-remote origin`
+  - `reap(handle, classification)` op regel 653 — per classificatie: `clean`/`pushed` → verwijderd, `committed` → worktree verwijderd maar **branch lokaal behouden**, `dirty` → gelockt
+- Dezelfde beperking als de tmux-lane: bij `committed` wordt de worktree-directory verwijderd maar de branch met commits blijft lokaal bestaan.
+- Bewijs: `scripts/lib/dispatch_worktree_isolation.py:579-653`, `scripts/lib/provider_dispatch.py:1508`
 
 ### 3.6 Celbewijzen — mechanisme 6: Teardown meldt `worktree_state`
 
@@ -226,13 +235,19 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - Bij `dirty` status: extra `interactive_teardown_preserved` event (`:2341-2347`).
 - Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2321-2347`
 
-**headless — n.v.t.**
-- Geen worktree → geen teardown-classificatie.
+**headless — bindt**
+- `run_envelope_headless_plan()` (`dispatch_envelope.py:721`) roept `remove_dispatch_worktree()` aan met `terminal_id=plan.target_id`.
+- `remove_dispatch_worktree()` (`dispatch_worktree_isolation.py:661-689`) emitteert een `provider_teardown_worktree` event via EventStore met de velden `worktree_state`, `branch_kept_local`, `branch_kept_remote` en `preserved_path`.
+- Bij `dirty` status volgt een extra `provider_teardown_preserved` event.
+- Sinds #1416 maakt de headless lane een worktree aan, dus teardown-rapportage is van toepassing.
+- Bewijs: `scripts/lib/dispatch_envelope.py:721`, `scripts/lib/dispatch_worktree_isolation.py:661-689`
 
-**provider — bindt niet**
-- `remove_dispatch_worktree()` emitteert geen classificatie-events. Het logt alleen "removed worktree".
-- Geen `worktree_state` veld in enig event of log.
-- Bewijs: `scripts/lib/dispatch_worktree_isolation.py:508-626`
+**provider — bindt**
+- `provider_dispatch.py:1508` roept `remove_dispatch_worktree()` aan met `terminal_id` — dezelfde functie als de headless lane.
+- `remove_dispatch_worktree()` (`dispatch_worktree_isolation.py:661-689`) emitteert sinds #1417 een `provider_teardown_worktree` event met de velden `worktree_state` (de classificatie-uitkomst), `branch_kept_local`, `branch_kept_remote` en `preserved_path`.
+- Bij `dirty` status volgt een extra `provider_teardown_preserved` event (regel 682-689).
+- Het event-type heet `provider_teardown_worktree` (niet `interactive_teardown_worktree` zoals bij tmux) maar bevat dezelfde vier velden.
+- Bewijs: `scripts/lib/dispatch_worktree_isolation.py:661-689`, `scripts/lib/provider_dispatch.py:1508`
 
 ### 3.7 Celbewijzen — mechanisme 7: Push+PR-verplichting
 
@@ -244,15 +259,15 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - Bewijs: `scripts/lib/pr_enforcement.py:80-164`, `scripts/lib/tmux_interactive_dispatch.py:2982-3013`
 
 **headless — bindt**
-- `run_envelope_headless_plan()` (`dispatch_envelope.py:665-672`) roept `_enforce_push_pr()` aan vóór `remove_dispatch_worktree()` (de worktree is de enige handle naar de lokale branch).
-- `_enforce_push_pr()` (`dispatch_envelope.py:101-173`) hergebruikt `pr_enforcement.enforce_pr_exists` en de gedeelde `tmux_worktree.classify_path()` — geen tweede kopie van de beslissing (OI-1099).
-- De headless-lane maakt sinds #1416 wél een worktree aan (`isolation=worktree` gehonoreerd, hard-fail bij creatie, `dispatch_envelope.py:641-660`); de matrix-tekst "maakt geen worktree aan" is daarmee achterhaald.
+- `run_envelope_headless_plan()` roept `_enforce_push_pr()` aan (`dispatch_envelope.py:706-719`) vóór `remove_dispatch_worktree()` (de worktree is de enige handle naar de lokale branch).
+- `_enforce_push_pr()` (`dispatch_envelope.py:101-181`) hergebruikt `pr_enforcement.enforce_pr_exists` en de gedeelde `tmux_worktree.classify_path()` — geen tweede kopie van de beslissing (OI-1099).
+- De headless-lane maakt sinds #1416 wél een worktree aan (`isolation=worktree` gehonoreerd, hard-fail bij creatie, `dispatch_envelope.py:664-690`); de matrix-tekst "maakt geen worktree aan" is daarmee achterhaald.
 - Een mislukte push/PR → `result.status = "failure"` → `EnvelopeResult.returncode = 1`.
-- Bewijs: `scripts/lib/dispatch_envelope.py:101-175,665-672`
+- Bewijs: `scripts/lib/dispatch_envelope.py:101-181,706-719`
 
 **provider — bindt**
-- `run_envelope_plan()` (`dispatch_envelope.py:481-488`) roept dezelfde `_enforce_push_pr()` aan, vóór `remove_dispatch_worktree()`.
-- Bewijs: `scripts/lib/dispatch_envelope.py:101-175,481-488`
+- `run_envelope_plan()` roept dezelfde `_enforce_push_pr()` aan (`dispatch_envelope.py:521-534`), vóór `remove_dispatch_worktree()`.
+- Bewijs: `scripts/lib/dispatch_envelope.py:101-181,521-534`
 
 **Gedeelde classificatie**
 - `classify_path()` (`tmux_worktree.py:211-271`) is de enige canonieke git-staat-classificatie; `classify()` (`tmux_worktree.py:195-208`) delegeert ernaar. De envelope-lanes gebruiken `classify_path()` direct (geen `WorktreeHandle`).
@@ -294,8 +309,15 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - De OI-861 guard (`dispatch_worktree_isolation.py:179-214`) is alleen geïntegreerd in `create_dispatch_worktree()`.
 - Bewijs: `scripts/lib/tmux_worktree.py:109-192` (geen OI-861 claims)
 
-**headless — n.v.t.**
-- Geen worktree-aanmaak → geen identity guard nodig.
+**headless — bindt**
+- Sinds #1416 roept de headless lane `create_dispatch_worktree()` aan (`dispatch_envelope.py:666`).
+- `create_dispatch_worktree()` (`dispatch_worktree_isolation.py:479-505`) bevat de volledige OI-861 guard:
+  - `_worktree_lock` (regel 479) — fcntl-exclusieve lock
+  - OI-861 identity check vóór aanmaak: lees bestaande claim, weiger bij andere dispatch-id (regels 484-491)
+  - Na `git worktree add`: herlees claim bij race (regels 507-520)
+  - Schrijf claim atomair via `_write_claim_atomic` (regels 521-532)
+- `remove_dispatch_worktree()` wist de claim bij verwijdering (`_clear_claim`, regel 658).
+- Bewijs: `scripts/lib/dispatch_envelope.py:666`, `scripts/lib/dispatch_worktree_isolation.py:479-532`
 
 **provider — bindt**
 - `create_dispatch_worktree()` (`dispatch_worktree_isolation.py:454-502`):
@@ -357,22 +379,22 @@ Geen. Alle 30 cellen (10 mechanismen × 3 lanes) zijn getraceerd naar het daadwe
 
 | OI | Lane | Mechanisme | Matrix-cel | Status |
 |---|---|---|---|---|
-| OI-1011 | tmux | Commit lokaal, niets gepusht, geen PR, worktree gereapt, exit 0 | Rij 7 (tmux) | `bindt` maar met beperking: PR enforcement dekt alleen `worktree_state == "pushed"`. "committed" valt erbuiten. |
-| OI-1017 | provider | Rapport = prompt, nul koppen, status=success | Rij 1 (provider) | `bindt niet` — bevestigd |
-| OI-1045 | headless | isolation=worktree genegeerd, worker in hoofdcheckout | Rij 3 (headless) | `bindt niet` — bevestigd |
-| OI-1048 | headless | validate_body=False, receipt status=success | Rij 1 (headless) | `bindt niet` — bevestigd |
+| OI-1011 | tmux | Commit lokaal, niets gepusht, geen PR, worktree gereapt, exit 0 | Rij 7 (tmux) | `bindt` — gefixt door #1419: scope verbreed van `pushed` naar `committed` |
+| OI-1017 | provider | Rapport = prompt, nul koppen, status=success | Rij 1 (provider) | `bindt` — gefixt door #1415 (observe) + #1420 (binding) |
+| OI-1045 | headless | isolation=worktree genegeerd, worker in hoofdcheckout | Rij 3 (headless) | `bindt` — gefixt door #1416 |
+| OI-1048 | headless | validate_body=False, receipt status=success | Rij 1 (headless) | `bindt` — gefixt door #1415 (observe) + #1420 (binding) |
 
-**OI-1011 nuancering**: de cel staat op `bindt` omdat het mechanisme bestaat en werkt voor het "pushed but no PR" scenario. Maar OI-1011 toont aan dat het "committed but not pushed" scenario niet gedekt wordt: de dispatch slaagt terwijl er niets op origin staat. Dit is een meetcorrectie ten opzichte van de oorspronkelijke OI-beschrijving: het mechanisme bestaat wel, maar dekt niet het volledige probleem. De vervolg-PR voor rij 7 moet de scope verbreden van "pushed" naar "committed".
+Alle vier OI-gaten zijn gedicht. De matrix-cellen weerspiegelen de gecorrigeerde codepaden.
 
 ---
 
-## 8. Aanbevolen volgorde voor de vier vervolg-PR's
+## 8. Resterende `bindt niet`-cellen
 
-Op basis van de matrix — cellen die op `bindt niet` staan, gerangschikt naar impact:
+Na #1415, #1416, #1417, #1419 en #1420 resteren twee `bindt niet`-cellen in de matrix:
 
-1. **Rij 1 (validate_body) voor provider + headless** (OI-1017, OI-1048): twee lanes missen rapportcontract-validatie. Impact: stille successen op ongeldige rapporten. Dit is de grootste gap.
-2. **Rij 3 (isolation=worktree) voor headless** (OI-1045): headless lane negeert worktree-isolatie. Impact: werk in hoofdcheckout.
-3. **Rij 7 (push+PR) voor headless + provider, en scope-verbreding voor tmux** (OI-1011): twee lanes missen PR-enforcement volledig; de tmux-lane dekt alleen "pushed", niet "committed".
-4. **Rij 5/6 (reap+teardown) voor provider**: provider lane mist push-check bij reap en teardown-classificatie. Impact: werk kan verloren gaan bij worktree-verwijdering.
+| Rij | Lane | Mechanisme | Impact |
+|---|---|---|---|
+| 8 | tmux | Ringbuffer-teardown (end-of-dispatch) | De tmux-lane archiveert events bij de START van de volgende dispatch, niet bij het EIND van de huidige. De laatste dispatch in een serie lekt events in de live file. |
+| 10 | tmux | OI-861 worktree identity guard | `tmux_worktree.allocate()` heeft eigen fcntl-locking maar gebruikt niet de OI-861 O_EXCL claims. Kans op collisie is laag door het branch-naam-mechanisme. |
 
-Rij 8 (ringbuffer voor tmux) en rij 10 (OI-861 voor tmux) zijn lagere prioriteit: de eerste lekt events van de laatste dispatch in een serie, de tweede heeft een lagere kans op collisie door het branch-naam-mechanisme.
+De oorspronkelijke vier vervolgitems (rij 1 voor provider+headless, rij 3 voor headless, rij 7 scope-verbreding, rij 5/6 voor provider) zijn alle vier opgelost in de genoemde PR's.
