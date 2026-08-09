@@ -545,7 +545,11 @@ class TestEnvelopeWorktreeIsolation:
         assert adapter_calls[0]["cwd"] == _FAKE_WT_PATH, (
             f"expected cwd={_FAKE_WT_PATH}, got cwd={adapter_calls[0]['cwd']}"
         )
-        mock_remove.assert_called_once_with("wt-cwd-test", project_root=_fake_consumer_root)
+        # teardown carries terminal_id=plan.target_id (dispatch_envelope.py) —
+        # pin the full call contract, not a hardcoded 'T1' that happens to match.
+        mock_remove.assert_called_once_with(
+            "wt-cwd-test", project_root=_fake_consumer_root, terminal_id=plan.target_id
+        )
 
     def test_worktree_removed_on_spawn_failure(self, tmp_path):
         """remove_dispatch_worktree is called even when ProviderAdapter.run raises."""
@@ -567,7 +571,11 @@ class TestEnvelopeWorktreeIsolation:
             with pytest.raises(RuntimeError, match="spawn exploded"):
                 run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
 
-        mock_remove.assert_called_once_with("wt-rm-fail-test", project_root=_fake_consumer_root)
+        # teardown carries terminal_id=plan.target_id (dispatch_envelope.py) —
+        # pin the full call contract, not a hardcoded 'T1' that happens to match.
+        mock_remove.assert_called_once_with(
+            "wt-rm-fail-test", project_root=_fake_consumer_root, terminal_id=plan.target_id
+        )
 
     def test_worktree_creation_failure_aborts_dispatch(self, tmp_path):
         """Worktree creation failure → dispatch aborts (status=failure, rc!=0), spawn NOT called."""
