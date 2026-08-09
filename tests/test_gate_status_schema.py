@@ -24,6 +24,7 @@ from gate_status import (
     INCOMPLETE_STATES,
     PASS_STATES,
     canonical_status,
+    has_producer_identity,
     is_pass,
     is_terminal,
 )
@@ -158,6 +159,58 @@ def test_pass_states_disjoint_from_fail_and_incomplete() -> None:
     assert PASS_STATES.isdisjoint(FAIL_STATES)
     assert PASS_STATES.isdisjoint(INCOMPLETE_STATES)
     assert FAIL_STATES.isdisjoint(INCOMPLETE_STATES)
+
+
+# ---------------------------------------------------------------------------
+# has_producer_identity (OI-1093): dispatch_id is the sole required field
+# ---------------------------------------------------------------------------
+
+
+def test_has_producer_identity_true_with_dispatch_id() -> None:
+    """A record with a non-empty dispatch_id carries producer identity."""
+    result = {"provider": "kimi", "model": "kimi-k2-7-code", "dispatch_id": "kimi-gate-pr904-1782239641"}
+    assert has_producer_identity(result) is True
+
+
+def test_has_producer_identity_false_without_dispatch_id() -> None:
+    """No dispatch_id at all → no producer identity, even with other fields present.
+
+    Mirrors the three hand-authored mission-control kimi_gate records: they
+    carry contract_hash/report_path/recorded_at/branch but no dispatch_id.
+    """
+    result = {
+        "status": "passed",
+        "contract_hash": "c6c11d38c872a2081495b2dbe326f44c96c1e9742a94ae090e37cbb2a2f2af18",
+        "report_path": "/tmp/report.md",
+        "residual_risk": "None",
+        "recorded_at": "2026-06-23T15:10:51Z",
+        "branch": "golf-a/deadcode-linkedin-engine",
+    }
+    assert has_producer_identity(result) is False
+
+
+def test_has_producer_identity_false_with_empty_dispatch_id() -> None:
+    assert has_producer_identity({"dispatch_id": ""}) is False
+    assert has_producer_identity({"dispatch_id": "   "}) is False
+
+
+def test_has_producer_identity_false_with_non_string_dispatch_id() -> None:
+    assert has_producer_identity({"dispatch_id": None}) is False
+    assert has_producer_identity({"dispatch_id": 12345}) is False
+
+
+def test_has_producer_identity_provider_and_model_alone_are_not_sufficient() -> None:
+    """provider+model without dispatch_id is not identity — both are free-text.
+
+    A hand-authored record can set provider="kimi", model="kimi-k2.7" just as
+    easily as a real writer; only dispatch_id ties back to a real dispatch.
+    """
+    result = {"provider": "kimi", "model": "kimi-k2.7"}
+    assert has_producer_identity(result) is False
+
+
+def test_has_producer_identity_false_on_empty_result() -> None:
+    assert has_producer_identity({}) is False
 
 
 # ---------------------------------------------------------------------------

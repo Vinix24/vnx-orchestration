@@ -440,28 +440,6 @@ def _apply_codex_severity_policy(result: Dict[str, Any]) -> Dict[str, Any]:
     return new_result
 
 
-def _gate_terminal_status(result: Dict[str, Any]) -> str:
-    """Return canonical terminal status ("pass"/"fail") for a gate result, or empty when non-terminal.
-
-    Two persisted formats are recognised so completed Claude reviews cannot bypass enforcement:
-    - Standard gates persist ``{"status": ...}`` or ``{"verdict": ...}``.
-    - claude_github_optional persists ``{"state": "completed", "result_status": "pass"|"fail"}``
-      and does not write top-level ``status``/``verdict``. Without this branch, terminal-failure
-      and report-path enforcement skip a completed Claude review with ``result_status="fail"``.
-    """
-    status = (result.get("status") or "").lower()
-    if status in ("pass", "fail"):
-        return status
-    verdict = (result.get("verdict") or "").lower()
-    if verdict in ("pass", "fail"):
-        return verdict
-    if (result.get("state") or "").lower() == "completed":
-        rs = (result.get("result_status") or "").lower()
-        if rs in ("pass", "fail"):
-            return rs
-    return ""
-
-
 def _check_contract_fields(contract: ReviewContract) -> List[CheckResult]:
     """Validate required contract fields. Returns a single FAIL on missing field (caller should return early), or a PASS."""
     if not contract.pr_id:
@@ -968,8 +946,9 @@ def _detect_gate_report_contradictions(
 
         # Use gate_is_pass so all PASS_STATES (completed, approve, passed, pass)
         # are treated as a positive gate outcome for contradiction purposes.
-        # _gate_terminal_status only returns "pass"/"fail"/""  — it misses
-        # status="completed" and status="approve" which are valid pass states.
+        # A narrower check that only recognises literal "pass"/"fail" would
+        # miss status="completed" and status="approve", which are valid pass
+        # states too.
         passed, _ = gate_is_pass(result)
         gate_blocking = result.get("blocking_count", 0)
         if not isinstance(gate_blocking, int):

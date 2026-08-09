@@ -23,8 +23,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt, utc_now_iso
 from pr_queue_manager import PRQueueManager
-from closure_verifier import verify_closure, _find_gate_result
-from gate_status import is_pass as gate_is_pass
+from closure_verifier import verify_closure, _find_gate_result, _KNOWN_GATES
+from gate_status import is_pass as gate_is_pass, has_producer_identity as gate_has_producer_identity
 from project_scope import current_project_id
 from vnx_worktree import worktree_start
 
@@ -412,6 +412,17 @@ Implement the minimum blocking fix required before the roadmap may advance.
                 if not report_path or not Path(report_path).exists():
                     return True
                 if not contract_hash:
+                    return True
+                # OI-1093: gates in _KNOWN_GATES go through review_gate_manager's
+                # record_result(), which refuses to write a pass/fail result without
+                # contract_hash + report_path already (gate_result_parser._validate_and_
+                # persist_result) — that write-time check is the compensating control
+                # for those four gates. A free-form gate name outside _KNOWN_GATES (e.g.
+                # kimi_gate) has no such writer-side enforcement, so a hand-authored JSON
+                # with a plausible contract_hash and an existing report_path would
+                # otherwise satisfy this check with zero trace of who produced it.
+                # Require producer identity as the compensating control for those.
+                if gate not in _KNOWN_GATES and not gate_has_producer_identity(result):
                     return True
 
         return False
