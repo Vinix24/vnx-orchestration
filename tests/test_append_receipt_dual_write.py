@@ -210,16 +210,21 @@ class TestMirrorReceiptToCentral:
 
         def mirror_worker(dispatch_id):
             try:
-                with patch.object(payload_mod, "resolve_central_data_dir", _patched_resolve):
-                    _mirror_receipt_to_central(_make_receipt(dispatch_id, "test-proj"), primary_path)
+                _mirror_receipt_to_central(_make_receipt(dispatch_id, "test-proj"), primary_path)
             except Exception as e:
                 errors.append(e)
 
-        threads = [threading.Thread(target=mirror_worker, args=(f"d-concurrent-{i}",)) for i in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        # vnx-silent-except: patch.object is NOT thread-safe when applied
+        # inside worker threads — a racy __exit__ can restore the wrong
+        # function and leak the patched value into subsequent tests.
+        # Apply the patch once in the main thread so __enter__ / __exit__
+        # always execute on the same thread.
+        with patch.object(payload_mod, "resolve_central_data_dir", _patched_resolve):
+            threads = [threading.Thread(target=mirror_worker, args=(f"d-concurrent-{i}",)) for i in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         assert not errors, f"Concurrent mirror errors: {errors}"
 
