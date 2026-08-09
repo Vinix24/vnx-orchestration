@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 #   * releasable    — clean (no changes, no local-only commits) or pushed
 
 ReleaseClass = Literal[
-    "releasable", "committable", "unpushed_commits", "both", "unreachable", "error"
+    "releasable", "committable", "unpushed_commits", "both",
+    "detached", "unreachable", "error",
 ]
 
 _UNSAFE_BRANCH_CHARS = re.compile(r"[^A-Za-z0-9._/@-]")
@@ -49,6 +50,12 @@ class ReleaseEntry:
     rescue_branch: str = ""
     rescue_commit: str = ""
     removed: bool = False
+    # OI-1109: the post-removal local branch delete is a separate step from
+    # worktree removal. A worktree can be gone while its branch survives
+    # (e.g. checked out in another worktree). The outcome of that delete MUST
+    # be visible in the entry and the report, not swallowed silently.
+    branch_deleted: bool = False
+    branch_delete_error: str = ""
     error: str = ""
 
 
@@ -152,6 +159,11 @@ def classify_for_release(wt_path: str, branch: str) -> tuple[ReleaseClass, str]:
     - ``committable`` — uncommitted changes but no local-only commits
     - ``unpushed_commits`` — local commits not on origin, working tree clean
     - ``both`` — both uncommitted changes AND local-only commits
+    - ``detached`` — detached HEAD (no branch). The rescue path keys on a
+      branch name; a detached worktree has none, so fabricating a pseudo-branch
+      from a commit prefix would produce a confusing ``vnx-release/refs/heads/<sha8>``
+      rescue name. A detached worktree is reported as such and left for the
+      operator to handle explicitly rather than silently pseudo-branching it.
     - ``unreachable`` — worktree path doesn't exist
     - ``error`` — git operations failed
     """
@@ -162,6 +174,14 @@ def classify_for_release(wt_path: str, branch: str) -> tuple[ReleaseClass, str]:
     # Check if this is a git directory at all
     if not (wt / ".git").exists() and not (wt / ".git").is_file():
         return ("unreachable", "not a git worktree (no .git)")
+
+    # 0. Detached HEAD? The rescue path keys on a branch name; a detached
+    #    worktree has none. Rather than fabricate a pseudo-branch from a commit
+    #    prefix (which produced confusing ``vnx-release/refs/heads/<sha8>``
+    #    rescue names), report it explicitly and leave it for the operator.
+    symref = _run(["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"])
+    if symref.returncode == 0 and symref.stdout.strip() == "HEAD":
+        return ("detached", "detached HEAD — no branch to rescue; handle manually")
 
     # 1. Working tree status — dirty?
     status_result = _run(
@@ -415,9 +435,12 @@ def release_locked_worktrees(
 
     for rec in locked:
         wt_path = rec.get("worktree", "")
+        # A detached worktree carries no branch ref. Previously the code
+        # fabricated ``refs/heads/<sha8>`` from a commit prefix, which produced
+        # a confusing ``vnx-release/refs/heads/<sha8>`` rescue name. Detached
+        # worktrees are now classified explicitly and left for the operator, so
+        # there is no branch name to fabricate here.
         branch = rec.get("branch", "")
-        if not branch:
-            branch = f"refs/heads/{rec.get('HEAD', 'unknown')[:8]}"
 
         entry = ReleaseEntry(
             worktree=wt_path,
@@ -431,8 +454,12 @@ def release_locked_worktrees(
         entry.classification = cls
         entry.detail = detail
 
-        if cls in ("unreachable", "error"):
-            entry.error = detail
+        if cls in ("unreachable", "error", "detached"):
+            # detached/unreachable/error: nothing to rescue or remove here.
+            # detached carries no branch and is left for the operator; the
+            # others already record their reason as the entry error/detail.
+            if cls in ("unreachable", "error"):
+                entry.error = detail
             report.entries.append(entry)
             continue
 
@@ -449,11 +476,7 @@ def release_locked_worktrees(
                 report.entries.append(entry)
                 continue
 
-        # 3. Unlock + remove (unreachable worktrees skip removal)
-        if cls == "unreachable":
-            report.entries.append(entry)
-            continue
-
+        # 3. Unlock + remove (detached/unreachable/error skip removal above)
         if dry_run:
             entry.removed = False  # Would remove
         else:
@@ -466,8 +489,38 @@ def release_locked_worktrees(
             ok, err = _remove_worktree(root, wt_path)
             if ok:
                 entry.removed = True
-                # Delete the local branch too (it's been rescued to origin if needed)
-                _run(["git", "-C", str(root), "branch", "-D", branch])
+                # Delete the local branch too (it's been rescued to origin if
+                # needed). OI-1109: this is a SEPARATE step from worktree
+                # removal — a branch can survive its worktree (e.g. checked out
+                # in another worktree). Read the outcome and record it; never
+                # let a failed branch delete pass silently under removed=True.
+                #
+                # ``git branch -D`` wants the short branch name, but porcelain
+                # reports the full ref (``refs/heads/<name>``). Strip the prefix
+                # — without this, ``-D`` silently failed on every release
+                # (``branch 'refs/heads/...' not found``) and the old code never
+                # noticed because the returncode was never read.
+                branch_to_delete = branch.replace("refs/heads/", "") if branch else ""
+                if not branch_to_delete:
+                    # No branch ref to delete (e.g. a branchless worktree that
+                    # slipped past classification). Record it rather than crash.
+                    entry.branch_deleted = False
+                    entry.branch_delete_error = (
+                        "worktree removed but no branch ref recorded to delete"
+                    )
+                else:
+                    branch_result = _run(
+                        ["git", "-C", str(root), "branch", "-D", branch_to_delete]
+                    )
+                    if branch_result.returncode == 0:
+                        entry.branch_deleted = True
+                    else:
+                        msg = (branch_result.stderr.strip()
+                               or "unknown branch -D error")
+                        entry.branch_deleted = False
+                        entry.branch_delete_error = (
+                            f"worktree removed but branch -D failed: {msg}"
+                        )
             else:
                 entry.error = f"failed to remove: {err}"
 
@@ -494,7 +547,8 @@ def format_report(report: ReleaseReport) -> str:
     # Distribution summary
     counts = report.counts
     lines.append("Classification distribution:")
-    for cls in ("releasable", "committable", "unpushed_commits", "both", "unreachable", "error"):
+    for cls in ("releasable", "committable", "unpushed_commits", "both",
+                "detached", "unreachable", "error"):
         n = counts.get(cls, 0)
         if n > 0:
             lines.append(f"  {cls:<25} {n}")
@@ -502,6 +556,7 @@ def format_report(report: ReleaseReport) -> str:
 
     # Per-worktree detail
     rescued_count = 0
+    partial_count = 0
     for e in report.entries:
         status = _status_char(e)
         lines.append(f"  [{status}] {Path(e.worktree).name}")
@@ -512,8 +567,23 @@ def format_report(report: ReleaseReport) -> str:
             lines.append(f"       rescued:    yes → {e.rescue_branch} ({e.rescue_commit})")
         if e.removed:
             lines.append(f"       removed:    yes")
+        # OI-1109: surface a half-finished cleanup — worktree gone, branch
+        # survived — explicitly rather than letting removed=True hide it.
+        if e.branch_delete_error:
+            partial_count += 1
+            lines.append(f"       removed:    yes (worktree)")
+            lines.append(f"       branch:     NOT deleted — {e.branch_delete_error}")
+        elif e.removed and e.branch_deleted:
+            lines.append(f"       branch:     deleted")
         if e.error:
             lines.append(f"       error:      {e.error}")
+        lines.append("")
+
+    if partial_count:
+        lines.append(
+            f"WARNING: {partial_count} worktree(s) removed but branch delete failed — "
+            "check branch list for survivors."
+        )
         lines.append("")
 
     if rescued_count:
@@ -535,6 +605,10 @@ def _status_char(entry: ReleaseEntry) -> str:
         return " "
     if entry.classification == "unreachable":
         return "?"
+    if entry.classification == "detached":
+        return "D"
+    if entry.branch_delete_error:
+        return "!"  # partial cleanup — worktree gone, branch survived
     if entry.rescued or entry.classification in ("committable", "unpushed_commits", "both"):
         return "~"
     return " "
@@ -625,6 +699,8 @@ Examples:
                     "rescue_branch": e.rescue_branch,
                     "rescue_commit": e.rescue_commit,
                     "removed": e.removed,
+                    "branch_deleted": e.branch_deleted,
+                    "branch_delete_error": e.branch_delete_error,
                     "error": e.error,
                 }
                 for e in report.entries
@@ -636,9 +712,13 @@ Examples:
         if report_path:
             print(f"\nReport written: {report_path}")
 
-    # Return non-zero if any errors
-    errors = sum(1 for e in report.entries if e.error)
-    return 1 if errors > 0 else 0
+    # Return non-zero if any errors OR partial cleanups (OI-1109): a worktree
+    # removed while its branch survived is a half-finished release, not a
+    # success, and must surface as a non-zero exit so callers notice.
+    problems = sum(
+        1 for e in report.entries if e.error or e.branch_delete_error
+    )
+    return 1 if problems > 0 else 0
 
 
 if __name__ == "__main__":

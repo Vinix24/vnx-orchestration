@@ -608,3 +608,183 @@ def test_release_report_counts():
     assert counts["releasable"] == 2
     assert counts["committable"] == 1
     assert counts["unpushed_commits"] == 1
+
+
+# ---------------------------------------------------------------------------
+# OI-1109 — branch-delete outcome must be visible (entry + report)
+# ---------------------------------------------------------------------------
+
+def test_release_apply_clean_records_branch_deleted(tmp_path):
+    """A successful apply records branch_deleted=True (regression guard for OI-1109).
+
+    Before the fix, the ``git branch -D`` returncode was never read and
+    ``branch_deleted`` did not exist, so a clean release left no trace that the
+    branch was (or was not) deleted. This pins that the outcome is recorded.
+    """
+    local = _init_git_repo_with_origin(tmp_path)
+    wt = tmp_path / "branch-deleted-wt"
+    _make_worktree(local, "feature/branch-del-1", wt)
+    _lock_worktree(local, str(wt))
+
+    report = release_locked_worktrees(repo_root=local, dry_run=False)
+
+    assert len(report.entries) == 1
+    entry = report.entries[0]
+    assert entry.removed is True
+    assert entry.branch_deleted is True
+    assert entry.branch_delete_error == ""
+
+    # The local branch must actually be gone.
+    branches = subprocess.check_output(
+        ["git", "-C", str(local), "branch", "--list", "feature/branch-del-1"],
+        text=True,
+    ).strip()
+    assert branches == ""
+
+
+def test_release_apply_branch_delete_failure_is_visible(tmp_path, monkeypatch):
+    """A failed branch -D surfaces in the entry and the report (OI-1109).
+
+    Reproduces the fail scenario: the worktree is removed, but the local branch
+    cannot be deleted (e.g. still referenced elsewhere). Before the fix the code
+    ran ``git branch -D`` with no returncode check, so removed=True was reported
+    with no trace of the half-finished cleanup.
+
+    We drive the real ``release_locked_worktrees`` and only stub the git boundary
+    (``_run``) so the ``branch -D`` call returns non-zero. Everything else —
+    classify, rescue, unlock, remove — runs against the real repo.
+    """
+    import worktree_release as mod
+
+    local = _init_git_repo_with_origin(tmp_path)
+    wt = tmp_path / "partial-wt"
+    _make_worktree(local, "feature/partial-1", wt)
+    _lock_worktree(local, str(wt))
+
+    real_run = mod._run
+
+    def failing_run(args, **kwargs):
+        # Intercept only the branch -D step; let every other git call through.
+        if len(args) >= 4 and args[:3] == ["git", "-C", str(local)] and args[3:5] == ["branch", "-D"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1,
+                stdout="", stderr="error: branch checked out in another worktree",
+            )
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(mod, "_run", failing_run)
+
+    report = release_locked_worktrees(repo_root=local, dry_run=False)
+
+    assert len(report.entries) == 1
+    entry = report.entries[0]
+    # Worktree IS gone...
+    assert entry.removed is True
+    assert not wt.exists()
+    # ...but the branch survived and the failure is recorded, not swallowed.
+    assert entry.branch_deleted is False
+    assert entry.branch_delete_error != ""
+    assert "branch -D failed" in entry.branch_delete_error
+
+    # The local branch must still exist (the delete failed).
+    branches = subprocess.check_output(
+        ["git", "-C", str(local), "branch", "--list", "feature/partial-1"],
+        text=True,
+    ).strip()
+    assert "feature/partial-1" in branches
+
+    # And it must be visible in the human-readable report.
+    text = format_report(report)
+    assert "NOT deleted" in text
+    assert "branch -D failed" in text
+
+
+def test_format_report_shows_branch_delete_warning():
+    """format_report surfaces a WARNING when a branch delete failed (OI-1109)."""
+    report = ReleaseReport(
+        entries=[
+            ReleaseEntry(
+                worktree="/tmp/wt1",
+                branch="feature/survivor-1",
+                locked=True,
+                classification="releasable",
+                detail="clean",
+                removed=True,
+                branch_deleted=False,
+                branch_delete_error=(
+                    "worktree removed but branch -D failed: "
+                    "error: branch checked out elsewhere"
+                ),
+            ),
+        ],
+        dry_run=False,
+        timestamp="2026-01-01T00:00:00Z",
+    )
+    text = format_report(report)
+    assert "WARNING" in text
+    assert "branch delete failed" in text
+    assert "NOT deleted" in text
+
+
+# ---------------------------------------------------------------------------
+# OI-1109 — detached HEAD reported explicitly, not pseudo-branched
+# ---------------------------------------------------------------------------
+
+def test_classify_detached_head(tmp_path):
+    """A detached-HEAD worktree classifies as 'detached', not pseudo-branched."""
+    local = _init_git_repo_with_origin(tmp_path)
+    wt = tmp_path / "detached-wt"
+    # Create a worktree in detached HEAD state.
+    subprocess.run(
+        ["git", "-C", str(local), "fetch", "origin", "main"],
+        check=True, capture_output=True,
+    )
+    main_sha = subprocess.check_output(
+        ["git", "-C", str(local), "rev-parse", "origin/main"], text=True
+    ).strip()
+    subprocess.run(
+        ["git", "-C", str(local), "worktree", "add", "--detach", str(wt), main_sha],
+        check=True, capture_output=True,
+    )
+
+    cls, detail = classify_for_release(str(wt), "")
+    assert cls == "detached"
+    assert "detached" in detail
+
+
+def test_release_detached_head_not_removed_and_no_pseudo_branch(tmp_path):
+    """A locked detached worktree is reported, not removed, and gets no fabricated branch.
+
+    Before the fix the code fabricated ``refs/heads/<sha8>`` for a branchless
+    worktree, which would have produced a confusing ``vnx-release/refs/heads/<sha8>``
+    rescue name. Now it is classified ``detached`` and left for the operator.
+    """
+    local = _init_git_repo_with_origin(tmp_path)
+    wt = tmp_path / "detached-locked-wt"
+    subprocess.run(
+        ["git", "-C", str(local), "fetch", "origin", "main"],
+        check=True, capture_output=True,
+    )
+    main_sha = subprocess.check_output(
+        ["git", "-C", str(local), "rev-parse", "origin/main"], text=True
+    ).strip()
+    subprocess.run(
+        ["git", "-C", str(local), "worktree", "add", "--detach", str(wt), main_sha],
+        check=True, capture_output=True,
+    )
+    _lock_worktree(local, str(wt))
+
+    report = release_locked_worktrees(repo_root=local, dry_run=False)
+
+    detached_entries = [e for e in report.entries if "detached-locked-wt" in e.worktree]
+    assert len(detached_entries) == 1
+    entry = detached_entries[0]
+    assert entry.classification == "detached"
+    assert entry.removed is False
+    # No fabricated refs/heads/<sha8> branch name.
+    assert entry.branch == ""
+    assert not entry.rescue_branch.startswith("vnx-release/refs/heads/")
+
+    # Worktree is still there — not removed.
+    assert wt.exists()
+
