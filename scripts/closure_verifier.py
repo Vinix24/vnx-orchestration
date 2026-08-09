@@ -27,6 +27,7 @@ from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
 from gate_status import is_pass as gate_is_pass, is_terminal as gate_is_terminal
+from dispatch_spec import Gate
 
 
 @dataclass(frozen=True)
@@ -41,12 +42,25 @@ class CheckResult:
 # fail for it, so it is reported as UNVERIFIED and any result file found for it
 # is ignored. This closes the leak where an unknown gate passed on file
 # presence alone.
-_KNOWN_GATES = frozenset({
-    "claude_github_optional",
-    "codex_gate",
-    "gemini_review",
-    "ci_gate",
-})
+#
+# Derived from the canonical Gate enum (scripts/lib/dispatch_spec.py, OI-845),
+# not a second hand-written list. A gate that the enum declares but the closure
+# verifier does not implement lives in _GATES_NOT_IMPLEMENTED_BY_CLOSURE with a
+# reason — a derived subset with a rationale, so the two collections can never
+# silently drift (pinned by test_closure_verifier_gate_enum_drift).
+#
+# wiring_gate is intentionally excluded: it is in the Gate enum (and in
+# gate_request_handler / gate_recorder), but it does not emit a terminal
+# result-record carrying contract_hash + report_path, so the generic known-gate
+# handling could not honestly attest it. Keeping it outside _KNOWN_GATES also
+# preserves OI-1093 (#1422): records for gates NOT in _KNOWN_GATES must carry a
+# producer identity (dispatch_id). Pulling wiring_gate in would drop that
+# requirement. When in doubt, the side with more verification wins.
+_GATES_NOT_IMPLEMENTED_BY_CLOSURE = frozenset({"wiring_gate"})
+_KNOWN_GATES = frozenset(
+    g.value for g in Gate
+    if g.value not in _GATES_NOT_IMPLEMENTED_BY_CLOSURE
+)
 
 
 def _is_test_run_record(data: Dict[str, Any]) -> bool:
@@ -454,6 +468,173 @@ def _check_contract_fields(contract: ReviewContract) -> List[CheckResult]:
     )]
 
 
+def _gate_claude_github_optional(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    gate = "claude_github_optional"
+    # Fallback: explicit-absence state for the optional gate is recorded
+    # in the requests directory by gate_request_handler — not as a
+    # separate result file — so a missing result is not by itself
+    # ambiguous.  Look there before declaring no evidence.
+    if result is None:
+        result = _find_gate_request_payload(gate, contract.pr_id, results_dir, branch=branch)
+    if result is None:
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            f"no evidence for optional gate {gate} — state must be explicit",
+        )
+    if (result.get("state") or "").lower() == "completed":
+        # Completed Claude review: terminal outcome lives in result_status, not status/verdict.
+        # contributed_evidence=true alone must NOT mask a fail outcome or blocking findings.
+        # gate_is_pass() handles state/result_status via gate_status._coerce_status (CFX-12).
+        passed, reason = gate_is_pass(result)
+        if passed:
+            advisory_count = int(result.get("advisory_count") or 0)
+            return CheckResult(
+                f"gate_{gate}",
+                "PASS",
+                f"{gate} completed: pass (0 blocking, {advisory_count} advisory)",
+            )
+        return CheckResult(f"gate_{gate}", "FAIL", f"{gate} completed: {reason}")
+    if result.get("was_intentionally_absent") or result.get("contributed_evidence"):
+        state = result.get("state", "unknown")
+        source = result.get("__source", "result")
+        return CheckResult(
+            f"gate_{gate}",
+            "PASS",
+            f"{gate} state explicit: {state} (source: {source})",
+        )
+    return CheckResult(
+        f"gate_{gate}",
+        "FAIL",
+        f"{gate} state is ambiguous — neither contributed evidence nor intentionally absent",
+    )
+
+
+def _gate_codex_gate(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    gate = "codex_gate"
+    enforcement = enforce_codex_gate(contract)
+    if enforcement.required:
+        if result is None:
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
+            )
+        if gate_is_terminal(result) and not result.get("report_path", ""):
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                "codex_gate result is missing required report_path field",
+            )
+        # CFX-17: demote allowlisted findings before counting blocking.
+        translated = _apply_codex_severity_policy(result)
+        passed, reason = gate_is_pass(translated)
+        demoted = len(translated.get("severity_demotions") or [])
+        if passed:
+            if demoted:
+                return CheckResult(
+                    f"gate_{gate}",
+                    "PASS",
+                    f"codex gate passed after demoting {demoted} finding(s) per severity policy",
+                )
+            return CheckResult(f"gate_{gate}", "PASS", "codex gate passed")
+        return CheckResult(f"gate_{gate}", "FAIL", f"codex gate not passing — {reason}")
+    return CheckResult(f"gate_{gate}", "PASS", "codex gate not required by risk policy")
+
+
+def _gate_gemini_review(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    gate = "gemini_review"
+    if result is None:
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            f"no gate result for required reviewer {gate}",
+        )
+    if gate_is_terminal(result) and not result.get("report_path", ""):
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            "gemini_review result is missing required report_path field",
+        )
+    passed, reason = gate_is_pass(result)
+    advisory_count = result.get("advisory_count", 0)
+    if passed:
+        return CheckResult(
+            f"gate_{gate}",
+            "PASS",
+            f"gemini review passed ({advisory_count} advisory, 0 blocking)",
+        )
+    return CheckResult(f"gate_{gate}", "FAIL", f"gemini review not passing — {reason}")
+
+
+def _gate_ci_gate(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    gate = "ci_gate"
+    if result is None:
+        return CheckResult(f"gate_{gate}", "FAIL", "no ci_gate result found")
+    if not gate_is_terminal(result):
+        status = result.get("status", "unknown")
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            f"ci_gate checks still {status} — incomplete evidence",
+        )
+    contract_hash = result.get("contract_hash", "")
+    report_path = result.get("report_path", "")
+    if not contract_hash:
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            "ci_gate result is missing required contract_hash field",
+        )
+    if not report_path:
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            "ci_gate result is missing required report_path field",
+        )
+    passed, reason = gate_is_pass(result)
+    if passed:
+        advisory_count = result.get("advisory_count", 0)
+        return CheckResult(
+            f"gate_{gate}",
+            "PASS",
+            f"ci_gate passed ({advisory_count} advisory, 0 blocking)",
+        )
+    return CheckResult(f"gate_{gate}", "FAIL", f"ci_gate not passing — {reason}")
+
+
+# Table-driven dispatch: one entry per gate the closure verifier implements.
+# Adding a gate means adding one handler here plus (if excluded) an entry in
+# _GATES_NOT_IMPLEMENTED_BY_CLOSURE — not a new branch in _check_single_gate,
+# which is what made the function grow past its line budget (OI-1094).
+_GATE_HANDLERS: Dict[str, Any] = {
+    "claude_github_optional": _gate_claude_github_optional,
+    "codex_gate": _gate_codex_gate,
+    "gemini_review": _gate_gemini_review,
+    "ci_gate": _gate_ci_gate,
+}
+
+
 def _check_single_gate(
     gate: str,
     contract: ReviewContract,
@@ -482,132 +663,8 @@ def _check_single_gate(
             f"gate {gate} is not implemented by the closure verifier — not decided, cannot pass",
         )
 
-    if gate == "claude_github_optional":
-        # Fallback: explicit-absence state for the optional gate is recorded
-        # in the requests directory by gate_request_handler — not as a
-        # separate result file — so a missing result is not by itself
-        # ambiguous.  Look there before declaring no evidence.
-        if result is None:
-            result = _find_gate_request_payload(gate, contract.pr_id, results_dir, branch=branch)
-        if result is None:
-            return CheckResult(
-                f"gate_{gate}",
-                "FAIL",
-                f"no evidence for optional gate {gate} — state must be explicit",
-            )
-        if (result.get("state") or "").lower() == "completed":
-            # Completed Claude review: terminal outcome lives in result_status, not status/verdict.
-            # contributed_evidence=true alone must NOT mask a fail outcome or blocking findings.
-            # gate_is_pass() handles state/result_status via gate_status._coerce_status (CFX-12).
-            passed, reason = gate_is_pass(result)
-            if passed:
-                advisory_count = int(result.get("advisory_count") or 0)
-                return CheckResult(
-                    f"gate_{gate}",
-                    "PASS",
-                    f"{gate} completed: pass (0 blocking, {advisory_count} advisory)",
-                )
-            return CheckResult(f"gate_{gate}", "FAIL", f"{gate} completed: {reason}")
-        if result.get("was_intentionally_absent") or result.get("contributed_evidence"):
-            state = result.get("state", "unknown")
-            source = result.get("__source", "result")
-            return CheckResult(
-                f"gate_{gate}",
-                "PASS",
-                f"{gate} state explicit: {state} (source: {source})",
-            )
-        return CheckResult(
-            f"gate_{gate}",
-            "FAIL",
-            f"{gate} state is ambiguous — neither contributed evidence nor intentionally absent",
-        )
-
-    if gate == "codex_gate":
-        enforcement = enforce_codex_gate(contract)
-        if enforcement.required:
-            if result is None:
-                return CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
-                )
-            if gate_is_terminal(result) and not result.get("report_path", ""):
-                return CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    "codex_gate result is missing required report_path field",
-                )
-            # CFX-17: demote allowlisted findings before counting blocking.
-            translated = _apply_codex_severity_policy(result)
-            passed, reason = gate_is_pass(translated)
-            demoted = len(translated.get("severity_demotions") or [])
-            if passed:
-                if demoted:
-                    return CheckResult(
-                        f"gate_{gate}",
-                        "PASS",
-                        f"codex gate passed after demoting {demoted} finding(s) per severity policy",
-                    )
-                return CheckResult(f"gate_{gate}", "PASS", "codex gate passed")
-            return CheckResult(f"gate_{gate}", "FAIL", f"codex gate not passing — {reason}")
-        return CheckResult(f"gate_{gate}", "PASS", "codex gate not required by risk policy")
-
-    if gate == "gemini_review":
-        if result is None:
-            return CheckResult(
-                f"gate_{gate}",
-                "FAIL",
-                f"no gate result for required reviewer {gate}",
-            )
-        if gate_is_terminal(result) and not result.get("report_path", ""):
-            return CheckResult(
-                f"gate_{gate}",
-                "FAIL",
-                "gemini_review result is missing required report_path field",
-            )
-        passed, reason = gate_is_pass(result)
-        advisory_count = result.get("advisory_count", 0)
-        if passed:
-            return CheckResult(
-                f"gate_{gate}",
-                "PASS",
-                f"gemini review passed ({advisory_count} advisory, 0 blocking)",
-            )
-        return CheckResult(f"gate_{gate}", "FAIL", f"gemini review not passing — {reason}")
-
-    if gate == "ci_gate":
-        if result is None:
-            return CheckResult(f"gate_{gate}", "FAIL", "no ci_gate result found")
-        if not gate_is_terminal(result):
-            status = result.get("status", "unknown")
-            return CheckResult(
-                f"gate_{gate}",
-                "FAIL",
-                f"ci_gate checks still {status} — incomplete evidence",
-            )
-        contract_hash = result.get("contract_hash", "")
-        report_path = result.get("report_path", "")
-        if not contract_hash:
-            return CheckResult(
-                f"gate_{gate}",
-                "FAIL",
-                "ci_gate result is missing required contract_hash field",
-            )
-        if not report_path:
-            return CheckResult(
-                f"gate_{gate}",
-                "FAIL",
-                "ci_gate result is missing required report_path field",
-            )
-        passed, reason = gate_is_pass(result)
-        if passed:
-            advisory_count = result.get("advisory_count", 0)
-            return CheckResult(
-                f"gate_{gate}",
-                "PASS",
-                f"ci_gate passed ({advisory_count} advisory, 0 blocking)",
-            )
-        return CheckResult(f"gate_{gate}", "FAIL", f"ci_gate not passing — {reason}")
+    handler = _GATE_HANDLERS[gate]
+    return handler(contract, result, results_dir, branch)
 
 
 def _check_contract_hashes(contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
