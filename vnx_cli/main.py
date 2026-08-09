@@ -7,6 +7,70 @@ import sys
 from vnx_cli import __version__
 
 
+# Cross-entrance name-drift mapping (OI-1084 / OI-1060). Same shape as the
+# tables in scripts/lib/vnx_mode.py (the fabric-side mode gate). vnx_mode is
+# the SSOT when importable (it is, via the scripts/lib path injection both
+# entrances share); this local copy is the fallback so a pip install with a
+# broken path injection still names the working form instead of only
+# "invalid choice". Keep these two in sync — vnx_mode.ALIASES/SUB_VERBS is
+# authoritative, this mirrors it.
+_FALLBACK_ALIASES = {
+    "dispatch": "dispatch-agent",
+    "dispatch-agent": "dispatch",
+}
+_FALLBACK_SUB_VERBS = {
+    "plan-gate": "horizon",
+}
+
+
+def _name_drift_tables() -> tuple[dict, dict]:
+    """Return (aliases, sub_verbs), preferring vnx_mode (SSOT) when importable."""
+    try:
+        from vnx_mode import ALIASES, SUB_VERBS  # type: ignore
+        if ALIASES and SUB_VERBS is not None:
+            return dict(ALIASES), dict(SUB_VERBS)
+    except Exception:
+        pass
+    return dict(_FALLBACK_ALIASES), dict(_FALLBACK_SUB_VERBS)
+
+
+def _suggest_working_form(command: str) -> str:
+    """Return a hint naming the working form of a refused command, or "".
+    Mirrors vnx_mode._suggest_working_form so both entrances give the same
+    hint for the same name."""
+    aliases, sub_verbs = _name_drift_tables()
+    if command in sub_verbs:
+        parent = sub_verbs[command]
+        return (f"'{command}' is a sub-verb of 'vnx {parent}' "
+                f"(try: vnx {parent} {command}).")
+    if command in aliases:
+        return (f"'{command}' is spelled '{aliases[command]}' in the other "
+                "VNX entrance (the fabric `bin/vnx` vs the pip `vnx`).")
+    return ""
+
+
+class _SuggestionArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that appends a working-form hint to an invalid-choice
+    error when the refused name is a known alias or sub-verb (OI-1060).
+
+    argparse's default message only lists the valid choices; for a name like
+    ``plan-gate`` or ``dispatch`` that exists under a different spelling, the
+    user is left to guess. This appends ``_suggest_working_form(command)`` to
+    the error line so the working form is named in place."""
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        # argparse formats the invalid-choice line as:
+        #   argument COMMAND: invalid choice: 'plan-gate' (choose from ...)
+        # Augment only that case — leave every other error shape untouched.
+        if message.startswith("argument ") and "invalid choice: " in message:
+            _, _, rest = message.partition("invalid choice: '")
+            cmd, _, _ = rest.partition("'")
+            hint = _suggest_working_form(cmd)
+            if hint:
+                message = f"{message} {hint}"
+        super().error(message)
+
+
 def _register_doctor_subparser(subparsers: argparse.Action) -> None:
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -1121,7 +1185,7 @@ def main() -> None:
 
     maybe_reexec_pinned()
 
-    parser = argparse.ArgumentParser(
+    parser = _SuggestionArgumentParser(
         prog="vnx",
         description="VNX — governance-first multi-agent orchestration for AI CLI workers",
     )
