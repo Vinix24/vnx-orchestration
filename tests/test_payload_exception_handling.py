@@ -184,3 +184,78 @@ def test_state_rebuild_trigger_import_error_is_silent(caplog):
             payload_mod._maybe_trigger_state_rebuild(receipt)
 
     assert not caplog.records, "ImportError path must not log (expected miss)"
+
+
+# ---------------------------------------------------------------------------
+# OI-1080 Guard 2: receipt pin behaviour — resolve_central_data_dir
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_central_data_dir_vnx_state_dir_parent(monkeypatch, tmp_path):
+    """VNX_STATE_DIR pin: the parent of VNX_STATE_DIR is the data dir.
+
+    resolve_central_data_dir is OI-1043's seam: an explicit store pin
+    (VNX_STATE_DIR) means the caller deliberately placed the state
+    directory THERE.  The central data dir resolves via the parent
+    so the dual-write mirror lands in the same pinned tree instead of
+    blindly targeting ~/.vnx-data/<project_id>.
+
+    RED if the VNX_STATE_DIR branch (lines 125-129) is removed from
+    payload.py::resolve_central_data_dir.
+    """
+    state_dir = tmp_path / "pinned" / "state"
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    result = payload_mod.resolve_central_data_dir("test-proj")
+    assert result == state_dir.parent, (
+        f"VNX_STATE_DIR parent mismatch: expected {state_dir.parent}, got {result}"
+    )
+
+
+def test_resolve_central_data_dir_vnx_data_dir_explicit(monkeypatch, tmp_path):
+    """VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR: the data dir is used as-is.
+
+    When VNX_DATA_DIR_EXPLICIT=1 is set (without VNX_STATE_DIR), the
+    central base is VNX_DATA_DIR itself — no parent-of-state derivation.
+    This is the second pin arm; the first (VNX_STATE_DIR) takes
+    precedence when both are set.
+
+    RED if the VNX_DATA_DIR_EXPLICIT branch (lines 130-133) is removed
+    from payload.py::resolve_central_data_dir.
+    """
+    data_dir = tmp_path / "explicit-data"
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+    result = payload_mod.resolve_central_data_dir("test-proj")
+    assert result == data_dir, (
+        f"VNX_DATA_DIR_EXPLICIT mismatch: expected {data_dir}, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OI-1080 Guard 3a: TestIsolationGuardError re-raise in _mirror_receipt_to_central
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_receipt_to_central_reraises_isolation_guard(tmp_path):
+    """_mirror_receipt_to_central must re-raise TestIsolationGuardError.
+
+    OI-1043: a test-isolation violation is not retryable mirror debt —
+    it must fail the test, not be swallowed as a log warning or queued
+    as a pending mirror.  The except-clause that catches the error class
+    and re-raises it is at payload.py lines 227-228.
+
+    RED if the ``except _isolation_guard_error_class(): raise`` block
+    is removed from _mirror_receipt_to_central.
+    """
+    from vnx_paths import TestIsolationGuardError
+
+    receipt = _make_receipt(project_id="proj-guard")
+    primary_path = tmp_path / "primary" / "t0_receipts.ndjson"
+    primary_path.parent.mkdir(parents=True)
+
+    with patch.object(payload_mod, "_mirror_receipt_to_central_or_raise",
+                      side_effect=TestIsolationGuardError("test isolation violation")):
+        with pytest.raises(TestIsolationGuardError, match="test isolation violation"):
+            payload_mod._mirror_receipt_to_central(receipt, primary_path)
