@@ -91,6 +91,14 @@ def _compute_derived_status(
     track_pr_ref = track_row["pr_ref"] if track_row else None
     track_phase = track_row["phase"] if track_row else None
 
+    # OI-1098: delivery hold. One explicit non-'complete' delivery marking on
+    # any currently-linked PR vetoes every PR-EVIDENCE-based 'done' below
+    # (merged coordination event, pr_ref merged-subset). Declared-phase
+    # evidence is NOT vetoed: a human-declared 'done' stays authoritative, and
+    # the no-pr_ref path has nothing to mark. Unmarked legacy PRs (no row)
+    # do not hold — see _delivery_hold for the measured motivation.
+    hold = _delivery_hold(conn, track_id, project_id, track_pr_ref)
+
     # 4. Dispatch state aggregation.
     dispatches = conn.execute(
         "SELECT dispatch_id, state FROM dispatches WHERE track = ? AND project_id = ?",
@@ -105,7 +113,7 @@ def _compute_derived_status(
         # confirmed merged via all evidence sources, derive 'done' without a
         # dispatch match. ALL parsed PRs must be merged; partial merge = not done.
         nums = _parse_pr_numbers(track_pr_ref)
-        if nums and nums <= merged_pr_numbers:
+        if nums and nums <= merged_pr_numbers and hold is None:
             return "done"
         # Absence of evidence is not evidence of queued. Historical dispatches may
         # be archived, so defer to declared phase (2026-06-15 migration panel).
@@ -138,7 +146,7 @@ def _compute_derived_status(
             """,
             dispatch_ids,
         ).fetchone()
-        if merged_event:
+        if merged_event and hold is None:
             return "done"
 
         # Declared-done stability: a declared-done track with all terminal dispatches
@@ -151,10 +159,11 @@ def _compute_derived_status(
         # evidence sources (NDJSON / ROADMAP / git) — same as the no-dispatch path.
         # ALL parsed PRs must be merged; partial merge = not done.
         nums = _parse_pr_numbers(track_pr_ref)
-        if nums and nums <= merged_pr_numbers:
+        if nums and nums <= merged_pr_numbers and hold is None:
             return "done"
 
-        # All dispatches terminal but PR not confirmed merged yet.
+        # All dispatches terminal but PR not confirmed merged yet (or a
+        # delivery hold vetoed the PR-evidence 'done' — OI-1098).
         return "in_progress"
 
     # Some dispatches still in flight.
@@ -171,6 +180,7 @@ def _compute_derived_status(
 from track_reconciler import (  # noqa: E402
     IN_FLIGHT_DISPATCH_STATES,
     TERMINAL_DISPATCH_STATES,
+    _delivery_hold,
     _has_col,
     _parse_pr_numbers,
 )

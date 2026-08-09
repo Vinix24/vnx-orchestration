@@ -1,6 +1,6 @@
-"""Tests for pr_enforcement.py — the tmux-spawn build-dispatch auto-PR enforcement
-chokepoint. gh_pr_ensure and append_receipt are mocked; nothing here touches
-GitHub or a real git repo.
+"""Tests for pr_enforcement.py — the push+PR enforcement chokepoint every lane
+calls (rij-7, lane-matrix). gh_pr_ensure, append_receipt and subprocess.run are
+mocked; nothing here touches GitHub or a real git repo.
 """
 from __future__ import annotations
 
@@ -31,7 +31,12 @@ def _kwargs(**overrides):
 # Out-of-scope worktree states — no gh call at all
 # ---------------------------------------------------------------------------
 
-def test_not_applicable_when_not_pushed(monkeypatch):
+def test_not_applicable_when_clean_or_dirty(monkeypatch):
+    """clean and dirty have nothing deterministically pushable — no gh call at all.
+
+    (committed is no longer in this set: rij-7 binds it to push+PR — see the
+    committed-state tests below.)
+    """
     called = {"n": 0}
 
     def _boom(*a, **kw):
@@ -41,12 +46,96 @@ def test_not_applicable_when_not_pushed(monkeypatch):
     import gh_pr_ensure
     monkeypatch.setattr(gh_pr_ensure, "ensure_pr", _boom)
 
-    for state in ("clean", "committed", "dirty"):
+    for state in ("clean", "dirty"):
         result = pe.enforce_pr_exists(**_kwargs(worktree_state=state))
         assert result.applicable is False
         assert result.ok is True
         assert result.pr_number is None
     assert called["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# committed → push, then PR (rij-7 fix)
+# ---------------------------------------------------------------------------
+
+def _ok_push(monkeypatch):
+    """Mock subprocess.run so `git push -u origin <branch>` succeeds once."""
+    import pr_enforcement
+    calls = {"n": 0}
+
+    def _fake_run(args, **kw):
+        if args[0] == "git" and "push" in args:
+            calls["n"] += 1
+            return _CompletedRC(0)
+        raise AssertionError(f"unexpected subprocess.run call: {args}")
+
+    monkeypatch.setattr(pr_enforcement.subprocess, "run", _fake_run)
+    return calls
+
+
+class _CompletedRC:
+    def __init__(self, rc, out="", err=""):
+        self.returncode = rc
+        self.stdout = out
+        self.stderr = err
+
+
+def test_committed_pushes_then_creates_pr(monkeypatch):
+    import gh_pr_ensure
+    push_calls = _ok_push(monkeypatch)
+
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda *a, **kw: {"pr_number": 202, "created": True, "reason": None},
+    )
+
+    result = pe.enforce_pr_exists(**_kwargs(worktree_state="committed"))
+
+    assert result.applicable is True
+    assert result.ok is True
+    assert result.pushed is True
+    assert result.pr_number == 202
+    assert result.created is True
+    assert push_calls["n"] == 1
+
+
+def test_committed_push_failure_is_loud(monkeypatch, tmp_path):
+    """A failed push must NOT silently resolve as done — ok=False + corrective receipt."""
+    import pr_enforcement
+    monkeypatch.setattr(
+        pr_enforcement.subprocess, "run",
+        lambda *a, **kw: _CompletedRC(128, err="fatal: could not read username"),
+    )
+
+    import gh_pr_ensure
+    gh_called = {"n": 0}
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda *a, **kw: (gh_called.__setitem__("n", gh_called["n"] + 1),
+                          {"pr_number": None, "created": False, "reason": "x"})[1],
+    )
+
+    import append_receipt
+    captured = {}
+    monkeypatch.setattr(
+        append_receipt, "append_receipt_payload",
+        lambda payload, **kw: captured.update(payload=payload),
+    )
+
+    result = pe.enforce_pr_exists(**_kwargs(receipts_file=str(tmp_path / "r.ndjson"), worktree_state="committed"))
+
+    assert result.applicable is True
+    assert result.ok is False
+    assert result.pushed is False
+    assert "git push" in result.reason
+    assert "could not read username" in result.reason
+    # PR creation must never be attempted when the push failed.
+    assert gh_called["n"] == 0
+    payload = captured["payload"]
+    assert payload["status"] == "failed"
+    assert payload["autopr_rejected"] is True
+    assert payload["autopr_kind"] == "push_failed"
+    assert payload["branch"] == "dispatch/d1"
 
 
 # ---------------------------------------------------------------------------

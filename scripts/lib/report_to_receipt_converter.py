@@ -669,6 +669,39 @@ def _convert_one_detailed(
     if receipt is None:
         return None, "malformed"
 
+    # OI-1017/OI-1048 guard: when the envelope hot-path already wrote a
+    # receipt for this dispatch (binding body-contract enforcement landed
+    # before the converter's periodic sweep), skip the append to avoid
+    # redundant work.  The idempotency cache in append_receipt_payload would
+    # catch the duplicate anyway, but this short-circuit saves reading/
+    # parsing/hashing the mapper file and keeps the ScanStats.duplicate_count
+    # honest (the converter didn't build this receipt — the hot-path did).
+    #
+    # The guard fires for ANY existing receipt (not only contract_invalid):
+    # the hot-path's emit_dispatch_receipt writes richer data (token_usage,
+    # cost_usd, session_id) than the converter can reconstruct from the
+    # report, so the hot-path's receipt should always win.  Checking only
+    # for contract_invalid would miss cases where the converter's
+    # fail-closed checks produce a different status (e.g. failure when the
+    # hot-path wrote contract_invalid).
+    _guard_did = receipt.get("dispatch_id")
+    if (
+        _guard_did
+        and receipts_file
+        and Path(receipts_file).exists()
+    ):
+        try:
+            _text = Path(receipts_file).read_text(encoding="utf-8", errors="replace")
+            if f'"dispatch_id": "{_guard_did}"' in _text:
+                logger.info(
+                    "report_to_receipt_converter: skipping dispatch=%s — "
+                    "receipt already exists (hot-path wrote first)",
+                    _guard_did,
+                )
+                return None, "duplicate"
+        except OSError:
+            pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
+
     try:
         result = append_receipt_payload(
             receipt,

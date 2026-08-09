@@ -2967,11 +2967,15 @@ class TmuxInteractiveDispatch:
                 "failed",
                 "blocked",
             )
-            # Auto-PR enforcement: a build worker that committed+pushed its dispatch
-            # branch but never ran `gh pr create` leaves T0 to salvage the PR by hand
-            # every time (lane-fix B). Runs BEFORE govern() so a creation failure is
-            # reflected in the governed report and InteractiveDispatchResult.success —
-            # never a silent "done" with a branch stranded on origin.
+            # Auto-PR enforcement (rij-7, lane-matrix): a build worker that committed
+            # its dispatch branch but never pushed it, OR pushed it but never ran
+            # `gh pr create`, leaves T0 to salvage the work by hand every time. The
+            # per-state decision lives in pr_enforcement.enforce_pr_exists (the ONE
+            # binding site — never duplicated): `committed` → push then PR, `pushed`
+            # → PR, `clean`/`dirty` → not applicable. Runs BEFORE govern() so a push
+            # or creation failure is reflected in the governed report and
+            # InteractiveDispatchResult.success — never a silent "done" with work
+            # stranded locally or on origin.
             _autopr_failure_reason: "str | None" = None
             if worker_succeeded and worktree_handle is not None:
                 _wt_classification[0] = classify(worktree_handle)
@@ -3002,7 +3006,12 @@ class TmuxInteractiveDispatch:
                 session_id=session_uuid,
                 permission_posture=permission_posture,
                 **(
-                    {"failure_reason": f"pushed_branch_no_pr: {_autopr_failure_reason}"}
+                    {
+                        "failure_reason": (
+                            f"dispatch_branch_no_pr "
+                            f"(state={_wt_classification[0]}): {_autopr_failure_reason}"
+                        ),
+                    }
                     if _autopr_failure_reason
                     else {}
                 ),
