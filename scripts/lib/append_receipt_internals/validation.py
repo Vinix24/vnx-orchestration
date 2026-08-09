@@ -336,6 +336,27 @@ _MODEL_EXEMPT_SOURCES = frozenset({
     "pr_enforcement",
 })
 
+# OI-1101: model-name shape guard. Real model names (sonnet, opus, kimi-k3,
+# deepseek-v4-pro, claude-haiku-4-5-20251001) share three properties: no spaces,
+# no backticks, bounded length. A prose sentence that ends up as the model value
+# (measured: 70+ chars with spaces from an echoed dispatch instruction) is
+# structurally not a model name and must be refused fail-closed.
+_MODEL_NAME_MAX_LENGTH = 64
+
+
+def _looks_like_model_name(value: str) -> bool:
+    """Return True when *value* has the structural shape of a model identifier."""
+    v = value.strip()
+    if not v:
+        return False
+    if ' ' in v:
+        return False
+    if '`' in v:
+        return False
+    if len(v) > _MODEL_NAME_MAX_LENGTH:
+        return False
+    return True
+
 
 def _validate_model_present(receipt: Dict[str, Any]) -> None:
     """Fail closed on a dispatch receipt without a real model.
@@ -344,6 +365,11 @@ def _validate_model_present(receipt: Dict[str, Any]) -> None:
     BEFORE anything is written. Sources with no model concept by construction
     (vnx_governance / vnx_state / context_rotation) are exempt — the exemption
     is explicit, never an empty ``model`` value.
+
+    OI-1101: extended from emptiness-check to shape-check. A value that passes
+    the emptiness gate (e.g. a 70-character prose sentence) but does not look
+    like a real model identifier (spaces, backticks, excessive length) is
+    refused fail-closed with code ``invalid_model_shape``.
     """
     receipt_kind = str(receipt.get("receipt_kind") or "").strip()
     if receipt_kind not in _MODEL_REQUIRED_RECEIPT_KINDS:
@@ -362,6 +388,19 @@ def _validate_model_present(receipt: Dict[str, Any]) -> None:
             "model; refusing to write (fail-closed — a worker dispatch receipt "
             "must name the model that ran). Set model, or set source to one of "
             f"{sorted(_MODEL_EXEMPT_SOURCES)} for a model-less producer.",
+        )
+    # OI-1101 shape guard: the emptiness check above rejects ''/unknown/etc.,
+    # but a prose string (e.g. "the real model that ran this dispatch") passes
+    # emptiness and must be caught by shape.
+    model_str = str(model).strip()
+    if not _looks_like_model_name(model_str):
+        raise AppendReceiptError(
+            "invalid_model_shape",
+            EXIT_VALIDATION_ERROR,
+            f"receipt_kind={receipt_kind!r} model={model_str!r} does not look "
+            "like a valid model name (contains spaces, backticks, or exceeds "
+            f"{_MODEL_NAME_MAX_LENGTH} characters); refusing to write "
+            "(fail-closed — prose is not a model identifier).",
         )
 
 

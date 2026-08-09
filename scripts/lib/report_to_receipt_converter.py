@@ -35,9 +35,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -48,6 +50,11 @@ from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
 _WATERMARK_FILENAME = "report_to_receipt_processed.txt"
+# OI-1102: the Bash receipt processor uses a separate watermark file
+# (processed_receipts.txt). The Python converter must also write to it so
+# the two processors share one dedup store — a report processed by the
+# Python converter must be skipped by the Bash processor and vice versa.
+_BASH_WATERMARK_FILENAME = "processed_receipts.txt"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _BOLD_KV_RE = re.compile(r"\*\*([^*]+)\*\*:\s*(.+)", re.MULTILINE)
@@ -57,6 +64,108 @@ _DISPATCH_PLAIN_RE = re.compile(
 _DISPATCH_ID_KEY_RE = re.compile(
     r"^\s*dispatch_id:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
 )
+
+
+# ---------------------------------------------------------------------------
+# OI-1102: dispatch-register cross-check + dead-letter quarantine
+# ---------------------------------------------------------------------------
+
+def _is_known_dispatch(dispatch_id: str, state_dir: Optional[Path] = None) -> bool:
+    """Return True when *dispatch_id* exists in the dispatch register.
+
+    Checks the NDJSON dispatch register (``dispatch_register.ndjson``) for any
+    event record whose ``dispatch_id`` field matches.  Fail-open: returns True
+    when the register file is missing or unreadable, so a transient I/O error
+    never causes a healthy report to be dead-lettered.
+    """
+    if state_dir is None:
+        try:
+            state_dir = _resolve_state_dir()
+        except Exception:
+            return True  # fail-open
+    register_path = state_dir / "dispatch_register.ndjson"
+    if not register_path.exists():
+        return True  # fail-open: no register means no cross-check is possible
+    try:
+        # Simple substring search: the NDJSON line is compact JSON, so
+        # "dispatch_id": "<value>" appears as one contiguous string.
+        needle = f'"dispatch_id": "{dispatch_id}"'
+        content = register_path.read_text(encoding="utf-8")
+        return needle in content
+    except OSError:
+        return True  # fail-open
+
+
+def _deadletter_report(
+    report_path: Path,
+    reason_code: str,
+    state_dir: Path,
+) -> None:
+    """Quarantine *report_path* into the dead-letter directory.
+
+    Uses the same directory layout as ``rp_deadletter.sh`` so both the Bash
+    and Python lanes share one quarantine store.  The report file is moved to
+    ``<state_dir>/receipt_deadletter/<filename>`` and an entry is appended to
+    ``INDEX.txt``.  Best-effort: a failed move logs a warning and leaves the
+    file in place (the next scan retries it).
+
+    Also records the file's SHA-256 hash in the Bash watermark so the Bash
+    receipt processor skips the quarantined file.
+    """
+    deadletter_dir = state_dir / "receipt_deadletter"
+    try:
+        deadletter_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "report_to_receipt_converter: cannot create dead-letter dir %s: %s",
+            deadletter_dir, exc,
+        )
+        return
+
+    report_name = report_path.name
+    target = deadletter_dir / report_name
+    if target.exists():
+        file_hash = _compute_sha256(report_path)
+        target = deadletter_dir / f"{report_path.stem}.{file_hash[:8]}.md"
+
+    try:
+        shutil.move(str(report_path), str(target))
+    except OSError as exc:
+        logger.warning(
+            "report_to_receipt_converter: cannot dead-letter %s: %s",
+            report_path.name, exc,
+        )
+        return
+
+    # Append to INDEX.txt (same format as rp_deadletter.sh).
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        file_hash = _compute_sha256(target)
+        index_line = f"{ts} {file_hash} {reason_code} {report_name}\n"
+        with (deadletter_dir / "INDEX.txt").open("a", encoding="utf-8") as fh:
+            fh.write(index_line)
+    except OSError as exc:
+        logger.warning(
+            "report_to_receipt_converter: cannot write dead-letter INDEX: %s", exc,
+        )
+
+    # Record hash in the Bash watermark so the Bash processor also skips it.
+    bash_watermark = state_dir / _BASH_WATERMARK_FILENAME
+    try:
+        with bash_watermark.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.write(file_hash + "\n")
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    except OSError as exc:
+        logger.warning(
+            "report_to_receipt_converter: cannot update Bash watermark for "
+            "dead-lettered %s: %s", report_name, exc,
+        )
+
+    logger.warning(
+        "report_to_receipt_converter: DEAD-LETTERED %s (reason=%s) -> %s",
+        report_name, reason_code, target,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +467,22 @@ def build_receipt_from_report(
             report_path.name,
         )
         return None
+
+    # OI-1102: when the dispatch_id comes from the filename alone (not from
+    # report content), cross-check it against the dispatch register.  A
+    # filename with a prefix (e.g. "dispatch-<id>.md") produces a phantom
+    # dispatch identity that never existed — the register won't know it,
+    # and it must not enter the grootboek.  Dead-letter the report so no
+    # lane retries it.
+    if not content_id_valid and state_dir is not None:
+        if not _is_known_dispatch(dispatch_id, state_dir):
+            logger.warning(
+                "report_to_receipt_converter: dispatch_id=%r (from filename %s) "
+                "not found in dispatch register — dead-lettering",
+                dispatch_id, report_path.name,
+            )
+            _deadletter_report(report_path, "unknown_dispatch", state_dir)
+            return None
 
     timestamp = (
         merged.get("timestamp")
@@ -668,10 +793,10 @@ def scan_and_convert(
 ) -> ScanStats:
     """Scan report directories and convert unprocessed reports.
 
-    Deduplication uses ONLY the converter's own watermark file
-    (report_to_receipt_processed.txt).  The Bash receipt processor's
-    processed_receipts.txt is intentionally NOT consulted — the two
-    systems own separate dedup stores to avoid format-conflation risk.
+    Deduplication uses both the converter's own watermark file
+    (report_to_receipt_processed.txt) AND the Bash receipt processor's
+    watermark (processed_receipts.txt) — OI-1102 cross-processor dedup
+    so a report processed by either lane is skipped by the other.
 
     Returns a ScanStats with per-outcome counts (new/duplicate/rejected/
     malformed/error) — see ScanStats and _convert_one_detailed()'s outcome
@@ -695,8 +820,12 @@ def scan_and_convert(
     state_dir.mkdir(parents=True, exist_ok=True)
     receipts_file = str(state_dir / "t0_receipts.ndjson")
     watermark_path = state_dir / _WATERMARK_FILENAME
+    # OI-1102: also load the Bash processor's watermark so a report processed
+    # by the Bash lane is skipped here, and vice versa (cross-processor dedup).
+    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
 
     watermark = _load_watermark(watermark_path)
+    bash_watermark = _load_watermark(bash_watermark_path)
 
     new_count = 0
     duplicate_count = 0
@@ -717,8 +846,8 @@ def scan_and_convert(
             except OSError:
                 continue
 
-            # Skip if already in our own watermark
-            if file_hash in watermark:
+            # Skip if already in either watermark (cross-processor dedup: OI-1102).
+            if file_hash in watermark or file_hash in bash_watermark:
                 continue
 
             try:
@@ -742,10 +871,13 @@ def scan_and_convert(
                 continue
 
             if outcome in ("appended", "duplicate"):
-                # Mark as processed — no point re-scanning a report that's
-                # already in the system.
+                # Mark as processed in BOTH watermarks — no point re-scanning
+                # a report that's already in the system (OI-1102 cross-processor
+                # dedup: the Bash processor must also skip it).
                 _mark_processed(file_hash, watermark_path)
                 watermark.add(file_hash)
+                _mark_processed(file_hash, bash_watermark_path)
+                bash_watermark.add(file_hash)
                 if outcome == "appended":
                     new_count += 1
                     logger.info(
