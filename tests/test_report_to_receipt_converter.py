@@ -34,6 +34,7 @@ from report_to_receipt_converter import (
     _WATERMARK_FILENAME,
     _compute_sha256,
     _extract_body_fields,
+    _is_known_dispatch,
     _load_route_decision,
     _load_watermark,
     build_receipt_from_report,
@@ -1313,13 +1314,17 @@ class TestConverterDoubleCountGuard:
         self, tmp_path, state_dir, monkeypatch,
     ):
         """Pre-populate the NDJSON with a contract_invalid receipt and verify
-        the converter returns None for the same dispatch_id."""
+        the converter detects the duplicate and skips new work."""
         import json
 
         dispatch_id = "20260809-guard-test"
         receipts_file = state_dir / "t0_receipts.ndjson"
 
         # Simulate the hot-path having already written a contract_invalid receipt.
+        # Use compact JSON (separators) matching how append_receipt_payload
+        # serialises receipts.  The old test used json.dumps() defaults which
+        # happened to pass the old substring needle — the compact form is the
+        # real format on disk and the parsed-field check handles both.
         existing_receipt = json.dumps({
             "dispatch_id": dispatch_id,
             "event_type": "report_contract_invalid",
@@ -1338,7 +1343,7 @@ class TestConverterDoubleCountGuard:
                 "## Verification",
                 "## Open Items",
             ],
-        })
+        }, separators=(",", ":"))
         receipts_file.write_text(existing_receipt + "\n", encoding="utf-8")
 
         # Write a report that the converter would normally process.
@@ -1351,10 +1356,15 @@ class TestConverterDoubleCountGuard:
             report, receipts_file=str(receipts_file),
         )
 
-        # The guard should have skipped conversion — result is None.
-        assert result is None, (
-            f"expected converter to skip existing contract_invalid receipt, "
-            f"got result={result}"
+        # The guard detected the existing receipt and returned a duplicate
+        # result — semantically correct per the function's contract (OI-1110:
+        # the guard now actually triggers after the needle fix, and returns
+        # a proper AppendResult instead of None).
+        assert result is not None, (
+            "expected converter to return a duplicate result, got None"
+        )
+        assert result.status == "duplicate", (
+            f"expected duplicate status, got {result.status}"
         )
 
         # The NDJSON must still have exactly 1 line (the original).
@@ -1396,3 +1406,109 @@ class TestConverterDoubleCountGuard:
         )
         lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) >= 1, "expected at least one receipt line"
+
+
+# ---------------------------------------------------------------------------
+# Part 12: _is_known_dispatch — dispatch register cross-check (OI-1110)
+# ---------------------------------------------------------------------------
+
+class TestIsKnownDispatch:
+    """_is_known_dispatch reads the NDJSON dispatch register and checks
+    whether a dispatch_id is present.  OI-1110: the original implementation
+    used a raw substring search with ``"dispatch_id": "<value>"`` (space
+    after colon), but the register is written as compact JSON without spaces
+    (``separators=(",", ":")`` in ``register_emit.py``) — so the needle
+    could NEVER match and every lookup returned False.
+    """
+
+    def _write_register(self, state_dir: Path, entries: list) -> Path:
+        """Write a dispatch_register.ndjson with compact JSON (no spaces)."""
+        import json
+        reg = state_dir / "dispatch_register.ndjson"
+        with reg.open("w", encoding="utf-8") as fh:
+            for entry in entries:
+                fh.write(json.dumps(entry, separators=(",", ":"), sort_keys=False))
+                fh.write("\n")
+        return reg
+
+    def test_known_dispatch_returns_true(self, state_dir):
+        """dispatch_id present in the register (compact JSON) -> True."""
+        self._write_register(state_dir, [
+            {"timestamp": "2026-08-09T18:11:01Z", "event": "dispatch_created",
+             "dispatch_id": "20260808-t0-gate-pr1416", "project_id": "vnx-dev"},
+            {"timestamp": "2026-08-09T18:12:00Z", "event": "dispatch_created",
+             "dispatch_id": "20260809e-fix-something", "project_id": "vnx-dev"},
+        ])
+
+        result = _is_known_dispatch("20260808-t0-gate-pr1416", state_dir)
+        assert result is True, (
+            "_is_known_dispatch returned False for a dispatch_id "
+            "that IS in the register (compact JSON)"
+        )
+
+    def test_unknown_dispatch_returns_false(self, state_dir):
+        """dispatch_id NOT in the register -> False."""
+        self._write_register(state_dir, [
+            {"timestamp": "2026-08-09T18:11:01Z", "event": "dispatch_created",
+             "dispatch_id": "d-001", "project_id": "vnx-dev"},
+        ])
+
+        result = _is_known_dispatch("nonexistent-dispatch-id", state_dir)
+        assert result is False, (
+            "_is_known_dispatch returned True for a dispatch_id "
+            "that is NOT in the register"
+        )
+
+    def test_missing_register_file_returns_true_fail_open(self, state_dir):
+        """No register file -> True (fail-open)."""
+        # state_dir is empty — no dispatch_register.ndjson
+        result = _is_known_dispatch("anything", state_dir)
+        assert result is True
+
+    def test_empty_register_returns_false(self, state_dir):
+        """Empty register file -> False (no match possible)."""
+        reg = state_dir / "dispatch_register.ndjson"
+        reg.write_text("", encoding="utf-8")
+
+        result = _is_known_dispatch("anything", state_dir)
+        assert result is False
+
+    def test_dispatch_id_with_special_chars(self, state_dir):
+        """dispatch_id values with hyphens, dots, underscores all match."""
+        did = "20260809-abc.def_ghi-123"
+        self._write_register(state_dir, [
+            {"dispatch_id": did, "event": "dispatch_created"},
+        ])
+
+        result = _is_known_dispatch(did, state_dir)
+        assert result is True
+
+    def test_partial_id_no_false_match(self, state_dir):
+        """A substring of a stored dispatch_id must NOT match."""
+        self._write_register(state_dir, [
+            {"dispatch_id": "20260809-full-id-abc", "event": "dispatch_created"},
+        ])
+
+        # "full-id" is a substring of "20260809-full-id-abc" — must NOT match
+        result = _is_known_dispatch("full-id", state_dir)
+        assert result is False, (
+            "substring of stored dispatch_id must not produce a false match"
+        )
+
+    def test_malformed_line_skipped(self, state_dir):
+        """A malformed NDJSON line is skipped without crashing the scan."""
+        reg = state_dir / "dispatch_register.ndjson"
+        import json
+        good_line = json.dumps(
+            {"dispatch_id": "good-one", "event": "dispatch_created"},
+            separators=(",", ":"),
+        )
+        reg.write_text(
+            good_line + "\n"
+            "this is not valid json\n"
+            + good_line + "\n",
+            encoding="utf-8",
+        )
+
+        result = _is_known_dispatch("good-one", state_dir)
+        assert result is True, "malformed line must not prevent matching a valid record"
