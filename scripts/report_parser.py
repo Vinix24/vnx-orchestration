@@ -19,6 +19,46 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 
+# OI-1101: model-name shape validation. Real model names (sonnet, opus,
+# kimi-k3, deepseek-v4-pro, claude-haiku-4-5-20251001) share three properties:
+# no spaces, no backticks, bounded length. The longest known model name across
+# the wave7 registry is claude-haiku-4-5-20251001 (26 chars); 64 gives generous
+# headroom while rejecting prose-sized strings (70+ chars observed in the wild).
+_MODEL_NAME_MAX_LENGTH = 64
+
+
+def _is_inside_inline_code(text: str, pos: int) -> bool:
+    """Return True when character position *pos* in *text* is inside a
+    backtick-delimited inline code span.
+
+    Counts single backticks before *pos*, excluding triple-backtick code blocks.
+    An odd count means we are inside an inline code span.
+    """
+    before = text[:pos]
+    # Remove triple-backtick fenced code blocks so they don't contribute
+    # to the inline-backtick count.
+    without_blocks = re.sub(r'```.*?```', '', before, flags=re.DOTALL)
+    return without_blocks.count('`') % 2 == 1
+
+
+def _is_valid_model_name(value: str) -> bool:
+    """Return True when *value* looks like a real model identifier.
+
+    A valid model name contains no spaces, no backticks, is non-empty, and
+    does not exceed ``_MODEL_NAME_MAX_LENGTH`` characters.
+    """
+    v = value.strip()
+    if not v:
+        return False
+    if ' ' in v:
+        return False
+    if '`' in v:
+        return False
+    if len(v) > _MODEL_NAME_MAX_LENGTH:
+        return False
+    return True
+
+
 class ReportParser:
     """Extract structured intelligence from markdown reports"""
 
@@ -187,10 +227,17 @@ class ReportParser:
                     continue
                 metadata[key] = value
 
-        # Extract all metadata fields
+        # Extract all metadata fields. OI-1101: skip matches inside inline
+        # code spans (backtick-delimited) — a `**Model**: value` mention
+        # inside prose or code is not a real identity declaration.
+        # Also apply shape validation for model values extracted here.
         for match in self.metadata_pattern.finditer(content[:2000]):  # Check first 2000 chars
+            if _is_inside_inline_code(content, match.start()):
+                continue
             key = _normalize_meta_key(match.group(1))
             value = match.group(2).strip()
+            if key == 'model' and not _is_valid_model_name(value):
+                continue
             metadata[key] = value
 
         # OI-1086 fallback: reports that embed their full dispatch
@@ -202,14 +249,27 @@ class ReportParser:
         # not already provide, so a prose mention later in the body can
         # never override a real header value, and a header value always
         # beats an embedded-instruction copy.
+        #
+        # OI-1101: provider-lane reports echo the full dispatch instruction
+        # in their body. A prose sentence that mentions the model field by
+        # name (e.g. "the **Model**: field names the provider") is matched
+        # by the regex and produces a 70-character prose string as the model
+        # value. Two guards: (a) skip matches inside inline code spans
+        # (backtick-delimited), (b) reject values that don't look like real
+        # model names (spaces, backticks, or longer than 64 characters).
         for _key, _pat in (
             ('model', r'\*\*Model\*\*:\s*(.+)'),
             ('provider', r'\*\*Provider\*\*:\s*(.+)'),
         ):
             if not str(metadata.get(_key) or '').strip():
-                m = re.search(_pat, content)
-                if m:
-                    metadata[_key] = m.group(1).strip()
+                for m in re.finditer(_pat, content):
+                    _value = m.group(1).strip()
+                    if _is_inside_inline_code(content, m.start()):
+                        continue
+                    if _key == 'model' and not _is_valid_model_name(_value):
+                        continue
+                    metadata[_key] = _value
+                    break
 
         # Plain-text header fallback (same convention as the Dispatch-ID
         # plain-text fallback below): reports like the 2026-08-04 triage/m-

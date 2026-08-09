@@ -328,5 +328,428 @@ def test_end_to_end_receipt_without_model_still_refused_fail_closed(tmp_path):
     assert "missing_model" in codes
 
 
+# ---------------------------------------------------------------------------
+# OI-1101: inline code span + shape validation for model/provider extraction
+# ---------------------------------------------------------------------------
+
+# A provider-lane report that echoes the full dispatch instruction. Within the
+# echoed instruction, a prose sentence mentions `**Model**:` inside backticks.
+# The mid-file fallback must NOT extract a model value from inside inline code.
+_ECHOED_INSTRUCTION_WITH_INLINE_CODE_BODY = (
+    "# Completion Report\n"
+    "**Status**: success\n"
+    "**Dispatch-ID**: 20260809-oi1101-echoed\n\n"
+    "## Summary\n"
+    "A provider-lane report that echoes its dispatch instruction in the body, "
+    "with the identity field mentioned inside inline code spans. The summary "
+    "must be longer than fifty non-whitespace characters for body contract.\n\n"
+    "## Changes\n"
+    "- edited scripts/foo.py\n\n"
+    "## Verification\n"
+    "- ran pytest tests/test_foo.py; all green\n\n"
+    "## Open Items\n"
+    "None\n\n"
+    + ("# padding to push the real block past the header window " * 10) + "\n\n"
+    "# Embedded dispatch instruction (echoed by provider lane):\n"
+    "The dispatch uses `**Model**: kimi-k3` and `**Provider**: kimi` for routing.\n"
+    "The worker must stamp its own identity as `**Model**: sonnet` in the report header.\n"
+)
+
+# The same report format, but this time the real identity block IS present
+# mid-file (outside the 2000-char header) and is NOT inside backticks.
+_ECHOED_WITH_REAL_MIDFILE_BLOCK = (
+    "# Completion Report\n"
+    "**Status**: success\n"
+    "**Dispatch-ID**: 20260809-oi1101-echoed-real\n\n"
+    "## Summary\n"
+    "A provider-lane report that echoes its dispatch instruction in prose "
+    "but also carries the real identity block mid-file, un-backticked. "
+    "This summary is comfortably longer than fifty non-whitespace characters.\n\n"
+    "## Changes\n"
+    "- edited scripts/foo.py\n\n"
+    "## Verification\n"
+    "- ran pytest tests/test_foo.py; all green\n\n"
+    "## Open Items\n"
+    "None\n\n"
+    + ("# padding to push the real block past the header window " * 10) + "\n\n"
+    "# Embedded dispatch instruction (echoed by provider lane):\n"
+    "The dispatch uses `**Model**: kimi-k3` for routing.\n\n"
+    "# Real identity block mid-file (NOT inside backticks):\n"
+    "**Model**: deepseek-v4-pro\n"
+    "**Provider**: deepseek\n"
+)
+
+# Mid-file fallback finds a model value with spaces (prose, not a real model).
+_PROSE_MODEL_VALUE_BODY = (
+    "# Completion Report\n"
+    "**Status**: success\n"
+    "**Dispatch-ID**: 20260809-oi1101-prose-model\n\n"
+    "## Summary\n"
+    "A report whose echoed instruction contains a sentence about the model "
+    "field that produces a 70-character prose string as the matched value. "
+    "This summary is comfortably longer than fifty non-whitespace characters.\n\n"
+    "## Changes\n"
+    "- edited scripts/foo.py\n\n"
+    "## Verification\n"
+    "- ran pytest tests/test_foo.py; all green\n\n"
+    "## Open Items\n"
+    "None\n\n"
+    + ("# padding to push the real block past the header window " * 10) + "\n\n"
+    "# The instruction explains that the real model field names the provider:\n"
+    "**Model**: the real model that ran this dispatch is named in the header above\n"
+)
+
+# Mid-file fallback finds a model value with backticks.
+_BACKTICK_MODEL_VALUE_BODY = (
+    "# Completion Report\n"
+    "**Status**: success\n"
+    "**Dispatch-ID**: 20260809-oi1101-backtick-model\n\n"
+    "## Summary\n"
+    "A report whose mid-file fallback matches a model value that contains "
+    "backtick characters, which is structurally not a valid model name. "
+    "This summary is comfortably longer than fifty non-whitespace characters.\n\n"
+    "## Changes\n"
+    "- edited scripts/foo.py\n\n"
+    "## Verification\n"
+    "- ran pytest tests/test_foo.py; all green\n\n"
+    "## Open Items\n"
+    "None\n\n"
+    + ("# padding " * 50) + "\n\n"
+    "**Model**: `sonnet`\n"
+)
+
+
+def test_echoed_instruction_inside_backticks_does_not_produce_model(tmp_path):
+    """When `**Model**: value` appears inside inline code (backticks) in an
+    echoed dispatch instruction, the mid-file fallback must skip it and not
+    extract a model value from it."""
+    r = _parse(tmp_path, _ECHOED_INSTRUCTION_WITH_INLINE_CODE_BODY)
+    # The real model is NOT in the header (pushed past 2000 chars), and the
+    # mid-file match inside backticks is skipped.  Result: no model key.
+    assert "model" not in r
+    assert "provider" not in r
+
+
+def test_real_mid_file_block_still_works_outside_backticks(tmp_path):
+    """The mid-file fallback still recovers a real identity block that is NOT
+    inside backticks, even when an inline-code mention of the same field exists
+    elsewhere in the echoed instruction."""
+    r = _parse(tmp_path, _ECHOED_WITH_REAL_MIDFILE_BLOCK)
+    assert r["model"] == "deepseek-v4-pro"
+    assert r["provider"] == "deepseek"
+
+
+def test_model_value_with_spaces_is_rejected(tmp_path):
+    """A mid-file match whose captured value contains spaces (prose, not a real
+    model name) is rejected by the shape guard and treated as absent."""
+    r = _parse(tmp_path, _PROSE_MODEL_VALUE_BODY)
+    # A prose value with spaces is not a valid model name — the key must be absent.
+    assert "model" not in r
+
+
+def test_model_value_with_backticks_is_rejected(tmp_path):
+    """A mid-file match whose captured value contains backticks (e.g. `sonnet`)
+    is rejected by the shape guard and treated as absent."""
+    r = _parse(tmp_path, _BACKTICK_MODEL_VALUE_BODY)
+    # A value containing backticks is not a valid model name.
+    assert "model" not in r
+
+
+def test_prose_model_rejected_at_extraction_time(tmp_path):
+    """End-to-end: a report whose model field contains spaces is caught by the
+    report_parser's own shape guard at extraction time. The receipt is emitted
+    without a model key, and append_receipt then refuses it as ``missing_model``.
+    The ``invalid_model_shape`` code is the validator's secondary defense for
+    values that reach it — the extraction guard catches them first."""
+    report_body = (
+        "# Completion Report\n"
+        "**Status**: success\n"
+        "**Dispatch-ID**: 20260809-oi1101-shape\n"
+        "**Model**: the real model that ran this dispatch\n"
+        "**Provider**: claude\n\n"
+        "## Summary\n"
+        "This report stamps a prose model value that the fail-closed shape "
+        "guard must refuse before it ever lands in the grootboek.\n\n"
+        "## Changes\n"
+        "- edited scripts/foo.py\n\n"
+        "## Verification\n"
+        "- ran pytest tests/test_foo.py; all green\n\n"
+        "## Open Items\n"
+        "None\n"
+    )
+    # The report_parser must strip the prose model value (spaces = not a model name).
+    receipt = _parse(tmp_path, report_body)
+    assert "model" not in receipt, (
+        f"Prose model value must be stripped at extraction time, got: {receipt.get('model')}"
+    )
+
+    # append_receipt then refuses it as missing_model.
+    report = tmp_path / "report.md"
+    report.write_text(report_body, encoding="utf-8")
+    env = _sandbox_env(tmp_path)
+    parse = subprocess.run(
+        [sys.executable, str(REPORT_PARSER), str(report)],
+        capture_output=True, text=True, env=env,
+    )
+    assert parse.returncode == 0
+    receipt_json = json.loads(parse.stdout)
+    assert "model" not in receipt_json
+
+    append = subprocess.run(
+        [sys.executable, str(APPEND_RECEIPT)],
+        input=json.dumps(receipt_json),
+        capture_output=True, text=True, env=env,
+    )
+    assert append.returncode != 0
+    codes = [
+        json.loads(line).get("code")
+        for line in append.stderr.splitlines()
+        if line.strip().startswith("{")
+    ]
+    assert "missing_model" in codes, (
+        f"Expected missing_model (stripped at extraction), got: {codes}"
+    )
+
+
+def test_invalid_model_shape_rejected_directly_by_validator(tmp_path):
+    """Direct validation test: a receipt with a prose model value that bypasses
+    report_parser extraction is caught by the validator's own shape guard with
+    code ``invalid_model_shape``."""
+    # Build a receipt directly (bypassing report_parser) with a prose model.
+    receipt = {
+        "event_type": "task_complete",
+        "receipt_kind": "dispatch",
+        "dispatch_id": "20260809-oi1101-shape-direct",
+        "task_id": "unknown",
+        "terminal": "unknown",
+        "status": "success",
+        "model": "a 70-character prose sentence that mentions the model field by name",
+        "provider": "claude",
+        "timestamp": "2026-08-09T12:00:00Z",
+    }
+    env = _sandbox_env(tmp_path)
+    append = subprocess.run(
+        [sys.executable, str(APPEND_RECEIPT)],
+        input=json.dumps(receipt),
+        capture_output=True, text=True, env=env,
+    )
+    assert append.returncode != 0
+    codes = [
+        json.loads(line).get("code")
+        for line in append.stderr.splitlines()
+        if line.strip().startswith("{")
+    ]
+    assert "invalid_model_shape" in codes, (
+        f"Expected invalid_model_shape from validator, got: {codes}"
+    )
+
+
+def test_valid_model_passes_shape_guard(tmp_path):
+    """A real model name (sonnet, no spaces, no backticks) still passes
+    validation and the receipt lands in the sandboxed grootboek."""
+    receipt, append = _parser_then_append(tmp_path, _BOLD_MODEL_BODY)
+    assert append.returncode == 0, f"append_receipt refused a healthy receipt: {append.stderr}"
+    assert "invalid_model_shape" not in append.stderr
+    assert receipt["model"] == "opus"
+
+
+# ---------------------------------------------------------------------------
+# OI-1102: dispatch register cross-check + cross-processor dedup
+# ---------------------------------------------------------------------------
+
+# A report file whose filename does not match any dispatch in the register.
+# The converter must cross-check and dead-letter it rather than produce a
+# phantom receipt.  The filename "dispatch-20260809-oi1102-phantom.md" has
+# a "dispatch-" prefix that produces a phantom dispatch_id.
+_PREFIXED_FILENAME_BODY = """# Completion Report
+**Status**: success
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+A report saved with a prefixed filename whose dispatch_id is not in the
+register. Must be dead-lettered, not converted to a receipt.
+
+## Changes
+- none
+
+## Verification
+- none
+
+## Open Items
+None
+"""
+
+
+def _make_sandbox_state_dir(tmp_path: Path) -> Path:
+    """Create a sandbox state dir with a dispatch register for testing."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir
+
+
+def _write_dispatch_register(state_dir: Path, dispatch_ids: list) -> None:
+    """Write a minimal dispatch_register.ndjson with the given dispatch_ids."""
+    import json as _json
+    register = state_dir / "dispatch_register.ndjson"
+    lines = []
+    for did in dispatch_ids:
+        lines.append(_json.dumps({
+            "timestamp": "2026-08-09T12:00:00Z",
+            "event": "dispatch_created",
+            "dispatch_id": did,
+        }))
+    register.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_prefixed_filename_unknown_dispatch_is_dead_lettered(tmp_path: Path):
+    """A report file named ``dispatch-<unknown-id>.md`` whose dispatch_id is
+    NOT in the register must be dead-lettered, not converted to a receipt."""
+    from report_to_receipt_converter import (
+        build_receipt_from_report,
+    )
+
+    state_dir = _make_sandbox_state_dir(tmp_path)
+    # Register knows 20260809-oi1102-known but NOT the phantom ID.
+    _write_dispatch_register(state_dir, ["20260809-oi1102-known"])
+
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    # The filename has a "dispatch-" prefix — the dispatch_id derived from it
+    # is "dispatch-20260809-oi1102-phantom", which is not in the register.
+    report_path = reports_dir / "dispatch-20260809-oi1102-phantom.md"
+    report_path.write_text(_PREFIXED_FILENAME_BODY, encoding="utf-8")
+
+    # The report has NO content-side dispatch_id, so the converter falls back
+    # to the filename.
+    receipt = build_receipt_from_report(
+        report_path,
+        _PREFIXED_FILENAME_BODY,
+        state_dir=state_dir,
+    )
+
+    # Must return None — the phantom ID was dead-lettered.
+    assert receipt is None, f"Expected None (dead-lettered), got receipt with dispatch_id={receipt.get('dispatch_id') if receipt else 'N/A'}"
+
+    # The report file must have been moved to the dead-letter directory.
+    assert not report_path.exists(), "Report file must be moved (dead-lettered)"
+
+    deadletter_dir = state_dir / "receipt_deadletter"
+    assert deadletter_dir.is_dir(), "Dead-letter directory must exist"
+
+    # The quarantined file must be present.
+    dead_files = list(deadletter_dir.glob("dispatch-20260809-oi1102-phantom*"))
+    assert len(dead_files) >= 1, f"No dead-letter file found in {deadletter_dir}"
+
+    # INDEX.txt must contain an entry.
+    index = (deadletter_dir / "INDEX.txt").read_text()
+    assert "unknown_dispatch" in index
+    assert "dispatch-20260809-oi1102-phantom" in index
+
+
+def test_known_dispatch_from_filename_is_not_dead_lettered(tmp_path: Path):
+    """A filename-derived dispatch_id that IS in the register must NOT be
+    dead-lettered — it must proceed to produce a (contract-invalid) receipt,
+    which is the existing behavior for filename-only reports."""
+    from report_to_receipt_converter import (
+        build_receipt_from_report,
+    )
+
+    state_dir = _make_sandbox_state_dir(tmp_path)
+    _write_dispatch_register(state_dir, ["20260809-oi1102-known"])
+
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "20260809-oi1102-known.md"
+    report_path.write_text(_PREFIXED_FILENAME_BODY, encoding="utf-8")
+
+    receipt = build_receipt_from_report(
+        report_path,
+        _PREFIXED_FILENAME_BODY,
+        state_dir=state_dir,
+    )
+
+    # Must NOT be None — the dispatch IS known, so it proceeds.
+    assert receipt is not None, (
+        "Known dispatch from filename must not be dead-lettered"
+    )
+    # The report file must still exist (not dead-lettered).
+    assert report_path.exists(), "Report file for known dispatch must remain in place"
+
+
+def test_cross_processor_dedup_writes_both_watermarks(tmp_path: Path):
+    """After a successful scan-and-convert cycle, both the Python watermark
+    (report_to_receipt_processed.txt) AND the Bash watermark
+    (processed_receipts.txt) must contain the report's hash."""
+    from report_to_receipt_converter import (
+        scan_and_convert, _compute_sha256, _BASH_WATERMARK_FILENAME,
+    )
+
+    state_dir = _make_sandbox_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    # A report with model/provider so it passes validation.
+    report_path = reports_dir / "20260809-oi1102-dedup.md"
+    report_path.write_text(_BOLD_MODEL_BODY, encoding="utf-8")
+
+    stats = scan_and_convert(
+        [reports_dir],
+        state_dir=state_dir,
+        cache_window_seconds=300,
+    )
+
+    assert stats.new_count == 1, f"Expected 1 new receipt, got {stats}"
+
+    file_hash = _compute_sha256(report_path)
+
+    # Python watermark must contain the hash.
+    py_watermark = (state_dir / "report_to_receipt_processed.txt").read_text()
+    assert file_hash in py_watermark, "Python watermark must contain report hash"
+
+    # Bash watermark must also contain the hash (cross-processor dedup).
+    bash_watermark = (state_dir / _BASH_WATERMARK_FILENAME).read_text()
+    assert file_hash in bash_watermark, (
+        "Bash watermark must contain report hash for cross-processor dedup"
+    )
+
+
+def test_bash_watermark_prevents_reconversion(tmp_path: Path):
+    """When a report's hash is already in the Bash watermark (simulating a
+    prior Bash-processor conversion), a subsequent Python scan must skip it."""
+    from report_to_receipt_converter import (
+        scan_and_convert, _compute_sha256, _BASH_WATERMARK_FILENAME,
+    )
+
+    state_dir = _make_sandbox_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "20260809-oi1102-bash-first.md"
+    report_path.write_text(_BOLD_MODEL_BODY, encoding="utf-8")
+
+    # Pre-populate the Bash watermark with the report's hash (simulating
+    # a prior Bash-processor conversion).
+    file_hash = _compute_sha256(report_path)
+    bash_watermark = state_dir / _BASH_WATERMARK_FILENAME
+    bash_watermark.write_text(file_hash + "\n", encoding="utf-8")
+
+    stats = scan_and_convert(
+        [reports_dir],
+        state_dir=state_dir,
+        cache_window_seconds=300,
+    )
+
+    # No new receipts — the file was already in the Bash watermark.
+    assert stats.new_count == 0, (
+        f"Expected 0 new receipts (Bash watermark should prevent re-conversion), got {stats}"
+    )
+    assert stats.attempted_count == 0, (
+        f"Expected 0 attempted conversions, got {stats}"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
