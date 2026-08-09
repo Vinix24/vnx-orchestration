@@ -34,7 +34,7 @@ HOOK_PY = HOOK_DIR / "pretooluse_worker_scope_enforce.py"
 sys.path.insert(0, str(HOOK_DIR))
 import pretooluse_worker_scope_enforce as hook  # noqa: E402
 
-ROLE = "test-engineer"  # bash_deny: git push*; file_write_scope: tests/**, scripts/check_*
+ROLE = "quality-engineer"  # bash_deny: git push*; file_write_scope: tests/**, scripts/check_*
 
 
 def make_payload(
@@ -66,6 +66,10 @@ def run_hook(
     # Deterministic baseline: the gate flag must never leak in from the shell.
     env.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
     env.pop("VNX_WORKER_ROLE", None)
+    # Prevent repo-level env vars from steering YAML resolution to the main
+    # repo instead of the worktree-local .vnx/worker_permissions.yaml.
+    for _steer in ("PROJECT_ROOT", "VNX_PROJECT_ROOT", "VNX_HOME"):
+        env.pop(_steer, None)
     if enforce:
         env["VNX_ENFORCE_WORKER_PERMISSIONS"] = "1"
     if role is not None:
@@ -111,14 +115,17 @@ class TestEnforcementMatrix(HookTestCase):
     """The required 5-case test matrix, end-to-end through the .sh launcher."""
 
     def test_a_bash_deny_command_is_blocked(self):
+        # git push --force is denied by quality-engineer's bash_deny_patterns
+        # (W2 resolution: git push* is NOT denied for this build role — only
+        # git push --force* and git push -f*).
         res = run_hook(
-            make_payload("Bash", {"command": "git push origin main"}),
+            make_payload("Bash", {"command": "git push --force origin main"}),
             enforce=True,
             data_dir=self.data_dir,
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         decision = parse_block(res.stdout)
-        self.assertIn("git push*", decision["reason"])
+        self.assertIn("git push --force*", decision["reason"])
         self.assertIn(ROLE, decision["reason"])
 
     def test_b_out_of_scope_file_write_is_blocked(self):
@@ -186,7 +193,7 @@ class TestEnforcementMatrix(HookTestCase):
 
     def test_e_block_emits_audit_receipt(self):
         res = run_hook(
-            make_payload("Bash", {"command": "git push origin main"}),
+            make_payload("Bash", {"command": "git push --force origin main"}),
             enforce=True,
             data_dir=self.data_dir,
             extra_env={"VNX_CURRENT_DISPATCH_ID": "20260724-test-dispatch"},
@@ -208,7 +215,7 @@ class TestEnforcementMatrix(HookTestCase):
         self.assertEqual(record["tool_name"], "Bash")
         self.assertEqual(record["role"], ROLE)
         self.assertEqual(record["dispatch_id"], "20260724-test-dispatch")
-        self.assertIn("git push*", record["reason"])
+        self.assertIn("git push --force*", record["reason"])
 
 
 class TestEvaluateUnit(HookTestCase):
@@ -218,6 +225,11 @@ class TestEvaluateUnit(HookTestCase):
         env = {
             "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
             "VNX_WORKER_ROLE": ROLE,
+            # Prevent repo-level env vars from steering YAML resolution to the
+            # main repo instead of the worktree-local .vnx/worker_permissions.yaml.
+            "PROJECT_ROOT": "",
+            "VNX_PROJECT_ROOT": "",
+            "VNX_HOME": "",
         }
         env.update(overrides)
         return patch.dict(os.environ, env, clear=False)
@@ -338,6 +350,127 @@ class TestHookContract(HookTestCase):
             )
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertEqual(res.stdout.strip(), "")
+
+
+class TestUnknownRoleFallback(HookTestCase):
+    """Unknown role → fallback code-worker profile with restrictive file_write_scope.
+
+    Proves the fallback is genuinely restrictive on the file-write dimension
+    (depth-limited patterns, no blank-check empty list) while remaining
+    functional for in-scope worktree writes and report-path writes.
+    """
+
+    UNKNOWN = "nonexistent-role-fallback-test"
+
+    def test_out_of_scope_file_write_is_blocked_for_unknown_role(self):
+        """An unknown role must NOT silently allow writes outside the depth-limited scope."""
+        # 7 segments — the deepest pattern is */*/*/*/*/* (6 segments).
+        target = self.wt / "a" / "b" / "c" / "d" / "e" / "f" / "out.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role=self.UNKNOWN,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("file_write_scope", decision["reason"])
+        self.assertIn("code-worker", decision["reason"])
+
+    def test_in_scope_worktree_write_allowed_for_unknown_role(self):
+        """An unknown role can still write within the depth-limited scope."""
+        target = self.wt / "src" / "app.py"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role=self.UNKNOWN,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+    def test_absolute_path_write_blocked_for_unknown_role(self):
+        """An absolute path outside the worktree cannot match depth-limited patterns."""
+        res = run_hook(
+            make_payload("Write", {"file_path": "/etc/passwd"}, cwd=str(self.wt)),
+            enforce=True,
+            role=self.UNKNOWN,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("file_write_scope", decision["reason"])
+
+    def test_report_path_write_exempt_for_unknown_role(self):
+        """A write to VNX_DATA_DIR/unified_reports/ is exempt from scope (report obligation)."""
+        reports_dir = self.data_dir / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        target = reports_dir / "dispatch-X.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role=self.UNKNOWN,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+    def test_fallback_warning_fires_for_unknown_role(self):
+        """The WARNING fires when falling back to code-worker for an unknown role."""
+        res = run_hook(
+            make_payload("Bash", {"command": "pytest -q"}),
+            enforce=True,
+            role=self.UNKNOWN,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("code-worker", res.stderr)
+
+    def test_git_push_not_blocked_by_fallback_no_bash_deny(self):
+        """The fallback profile has no bash_deny_patterns — git push is allowed.
+
+        This is by design: the fallback code-worker needs to push. The restriction
+        is on file_write_scope, not on bash commands.
+        """
+        res = run_hook(
+            make_payload("Bash", {"command": "git push origin main"}),
+            enforce=True,
+            role=self.UNKNOWN,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+
+class TestReportPathExemption(HookTestCase):
+    """Report obligation: writes to $VNX_DATA_DIR/unified_reports/ are exempt from scope."""
+
+    def test_known_role_report_write_exempt(self):
+        """Even with a restrictive file_write_scope, report writes are allowed."""
+        reports_dir = self.data_dir / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        target = reports_dir / "dispatch-X.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role=ROLE,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+    def test_known_role_non_report_outside_scope_still_blocked(self):
+        """The exemption is narrow: non-report writes outside scope are still blocked."""
+        target = self.wt / "docs" / "x.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role=ROLE,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("docs/x.md", decision["reason"])
 
 
 class TestSubprocessLaneMarker(HookTestCase):

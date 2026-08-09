@@ -57,15 +57,15 @@ def _instruction_passed_to_adapter(adapter_mock):
 
 
 class TestRolePassthroughInjection:
-    def test_test_engineer_role_injects_permission_preamble(self, mock_adapter):
+    def test_quality_engineer_role_injects_permission_preamble(self, mock_adapter):
         result = deliver_via_subprocess(
-            "T2", "do work", "sonnet", "d-role-1", role="test-engineer",
+            "T2", "do work", "sonnet", "d-role-1", role="quality-engineer",
         )
 
         assert result.success is True
         instruction = _instruction_passed_to_adapter(mock_adapter)
-        assert "Permission Profile: test-engineer" in instruction, (
-            "test-engineer permission preamble missing — role was dropped"
+        assert "Permission Profile: quality-engineer" in instruction, (
+            "quality-engineer permission preamble missing — role was dropped"
         )
 
     def test_backend_developer_role_injects_distinct_preamble(self, mock_adapter):
@@ -74,13 +74,13 @@ class TestRolePassthroughInjection:
         )
         instruction = _instruction_passed_to_adapter(mock_adapter)
         assert "Permission Profile: backend-developer" in instruction
-        assert "Permission Profile: test-engineer" not in instruction
+        assert "Permission Profile: quality-engineer" not in instruction
 
     def test_no_role_falls_back_to_terminal_assignment(self, mock_adapter):
-        # T2 -> test-engineer per .vnx/worker_permissions.yaml
+        # T2 -> quality-engineer per .vnx/worker_permissions.yaml
         deliver_via_subprocess("T2", "do work", "sonnet", "d-role-3", role=None)
         instruction = _instruction_passed_to_adapter(mock_adapter)
-        assert "Permission Profile: test-engineer" in instruction
+        assert "Permission Profile: quality-engineer" in instruction
 
 
 class TestArgparseRolePassthrough:
@@ -91,7 +91,7 @@ class TestArgparseRolePassthrough:
             "--instruction", "noop",
             "--model", "sonnet",
             "--dispatch-id", "d-argv-1",
-            "--role", "test-engineer",
+            "--role", "quality-engineer",
         ]
         with patch.object(sys, "argv", argv), \
              patch.object(subprocess_dispatch, "deliver_with_recovery") as mock_deliver, \
@@ -109,7 +109,7 @@ class TestArgparseRolePassthrough:
             parser.add_argument("--dispatch-id", required=True)
             parser.add_argument("--role", default=None)
             args = parser.parse_args(argv[1:])
-            assert args.role == "test-engineer"
+            assert args.role == "quality-engineer"
 
 
 class TestBashSubprocessDeliveryRoleArg:
@@ -140,7 +140,7 @@ class TestBashSubprocessDeliveryRoleArg:
             'release_terminal_claim() { :; }\n'
             f'source "{deliver_sh}"\n'
             '_ddt_subprocess_delivery T2 d-bash-1 "PROMPT" sonnet '
-            f'"{tmp_path}/dispatch.md" test-engineer\n'
+            f'"{tmp_path}/dispatch.md" quality-engineer\n'
         )
         proc = _subprocess.run(
             ["bash", "-c", script],
@@ -149,7 +149,7 @@ class TestBashSubprocessDeliveryRoleArg:
         assert proc.returncode == 0, f"stderr: {proc.stderr}"
         argv = capture.read_text().splitlines()
         assert "--role" in argv, f"--role missing from argv: {argv}"
-        assert argv[argv.index("--role") + 1] == "test-engineer"
+        assert argv[argv.index("--role") + 1] == "quality-engineer"
 
     def test_ddt_subprocess_delivery_omits_role_flag_when_unset(self, tmp_path):
         if shutil.which("bash") is None:

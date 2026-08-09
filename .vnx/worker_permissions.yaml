@@ -3,6 +3,21 @@ version: 1
 # VNX worker permission profiles.
 # Project-specific overrides survive rc-cutover via 'vnx regen-worker-permissions --merge'.
 # VNX-managed keys are listed in _vnx_meta.managed_keys below.
+#
+# Role names are the CANONICAL names from the agents/ registry (agents/<role>/) and
+# the role-selection table in .claude/terminals/T0/role-orchestrator.md. A profile
+# exists for every role T0 actually dispatches (backend-developer, code-reviewer,
+# frontend-developer, quality-engineer, research-analyst, security-engineer,
+# system-architect). Legacy names (test-engineer, architect) are NOT carried here:
+# they were old labels for quality-engineer / system-architect and nobody dispatches
+# them. database-engineer / intelligence-engineer are not dispatched either and were
+# dropped for the same reason.
+#
+# deny-vs-duty rule (OI-1100): a role dispatched with the standard footer MUST be
+# able to commit, push, and open a PR — so its profile permits git add/commit/push
+# and Write/Edit. A role that must NOT mutate code (code-reviewer, research-analyst)
+# denies those ops AND is not dispatched with the push-mandatory footer. Each profile
+# below states which side of that line it is on.
 
 _vnx_meta:
   managed_keys:
@@ -22,13 +37,8 @@ _vnx_meta:
 
 profiles:
   backend-developer:
-    # Build-toolchain coverage (OI-104): bare "Bash" already wildcards every
-    # bash invocation, but these explicit Bash(<cmd>:*) entries self-document
-    # the toolchain a headless build worker needs and give redundant, explicit
-    # coverage independent of how a given claude CLI version interprets a bare
-    # tool-name entry. They do NOT bypass Claude Code's own unconditional
-    # dangerous-rm safety gate (see docs/operations/WORKER_PERMISSIONS.md) —
-    # that gate cannot be satisfied by any allow-list entry.
+    # Build role — default_instruction: "commit and push a dispatch branch".
+    # May mutate code and git history.
     allowed_tools:
       - Read
       - Write
@@ -65,24 +75,31 @@ profiles:
       - "tests/**"
       - "dashboard/**"
 
-  test-engineer:
-    allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
-    denied_tools: [WebSearch, WebFetch, MultiEdit]
+  quality-engineer:
+    # Build role — default_instruction: "commit and push a dispatch branch".
+    # Renamed from test-engineer (canonical registry name). May mutate tests and git history.
+    allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch]
     bash_allow_patterns:
       - "pytest*"
       - "python3 -m pytest*"
       - "python3 -m py_compile*"
       - "git add*"
       - "git commit*"
+      - "git push origin*"
     bash_deny_patterns:
       - "rm -rf*"
-      - "git push*"
-      - "git reset*"
+      - "git reset --hard*"
+      - "git push --force*"
+      - "git push -f*"
+      - "curl*anthropic*"
     file_write_scope:
       - "tests/**"
       - "scripts/check_*"
 
   frontend-developer:
+    # Build role — default_instruction: "commit and push a dispatch branch".
+    # May mutate code and git history.
     allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
     denied_tools: [WebSearch, WebFetch]
     bash_allow_patterns:
@@ -91,60 +108,54 @@ profiles:
       - "node*"
       - "git add*"
       - "git commit*"
+      - "git push origin*"
     bash_deny_patterns:
       - "rm -rf*"
       - "git push --force*"
     file_write_scope:
       - "dashboard/**"
 
-  architect:
-    allowed_tools: [Read, Grep, Glob, Bash, WebSearch, WebFetch]
-    denied_tools: [Write, Edit, MultiEdit]
-    bash_allow_patterns:
-      - "git log*"
-      - "git diff*"
-      - "git show*"
-      - "python3 -c*"
-    bash_deny_patterns:
-      - "git add*"
-      - "git commit*"
-      - "git push*"
-      - "rm*"
-    file_write_scope: []
-
-  database-engineer:
-    allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
-    denied_tools: [WebSearch, WebFetch, MultiEdit]
-    bash_allow_patterns:
-      - "pytest*"
-      - "python3*"
-      - "sqlite3*"
-      - "git add*"
-      - "git commit*"
-      - "git push origin*"
-      - "bash -n*"
-    bash_deny_patterns:
-      - "rm -rf*"
-      - "git reset --hard*"
-      - "git push --force*"
-      - "git push -f*"
-      - "curl*anthropic*"
-    file_write_scope:
-      - "schemas/**"
-      - "tests/**"
-      - "scripts/**"
-
-  intelligence-engineer:
+  system-architect:
+    # Build role — default_instruction: "produce the decision record and/or
+    # scaffolding ... commit and push a dispatch branch". Renamed from architect
+    # (canonical registry name). May write ADRs/scaffolding and git history.
+    # The old architect profile denied git add/commit/push and Write/Edit, which
+    # contradicted the push-mandatory dispatch footer — resolved here in favour of duty.
     allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
     denied_tools: [WebSearch, WebFetch]
     bash_allow_patterns:
+      - "git add*"
+      - "git commit*"
+      - "git push origin*"
+      - "python3 -c*"
+      - "python3 -m py_compile*"
+      - "bash -n*"
+    bash_deny_patterns:
+      - "rm -rf*"
+      - "git reset --hard*"
+      - "git push --force*"
+      - "git push -f*"
+    file_write_scope:
+      - "docs/governance/decisions/**"
+      - "scripts/**"
+      - "tests/**"
+
+  security-engineer:
+    # Build role — default_instruction: "fix it, add a regression test ... commit
+    # and push a dispatch branch". The old profile denied git add/commit/push and
+    # Write/Edit, contradicting the push-mandatory footer — resolved here in favour
+    # of duty: a remediation worker must be able to deliver its fix.
+    allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "python3 -c*"
+      - "python3 -m py_compile*"
       - "pytest*"
-      - "python3*"
-      - "sqlite3*"
       - "git add*"
       - "git commit*"
       - "git push origin*"
       - "bash -n*"
+      - "grep*"
     bash_deny_patterns:
       - "rm -rf*"
       - "git reset --hard*"
@@ -153,18 +164,22 @@ profiles:
       - "curl*anthropic*"
     file_write_scope:
       - "scripts/**"
-      - "schemas/**"
       - "tests/**"
 
-  security-engineer:
-    allowed_tools: [Read, Grep, Glob, Bash]
-    denied_tools: [Write, Edit, MultiEdit, WebSearch, WebFetch]
+  # Read roles — default_instruction says "Do not modify code" (code-reviewer) or
+  # carries governance_profile: light (research-analyst). They deny code-mutation
+  # tools and git history mutation, and are NOT dispatched with the push-mandatory
+  # footer. file_write_scope is restricted to the report drop so they can still
+  # deliver their findings report.
+  code-reviewer:
+    allowed_tools: [Read, Write, Grep, Glob, Bash]
+    denied_tools: [Edit, MultiEdit, WebSearch, WebFetch]
     bash_allow_patterns:
-      - "python3 -c*"
-      - "python3 -m py_compile*"
       - "git log*"
       - "git diff*"
       - "git show*"
+      - "python3 -c*"
+      - "python3 -m py_compile*"
       - "bash -n*"
       - "grep*"
     bash_deny_patterns:
@@ -172,9 +187,28 @@ profiles:
       - "git commit*"
       - "git push*"
       - "rm*"
-    file_write_scope: []
+    file_write_scope:
+      - ".vnx-data/unified_reports/**"
+
+  research-analyst:
+    allowed_tools: [Read, Write, Grep, Glob, Bash]
+    denied_tools: [Edit, MultiEdit, WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "git log*"
+      - "git diff*"
+      - "git show*"
+      - "python3 -c*"
+      - "bash -n*"
+      - "grep*"
+    bash_deny_patterns:
+      - "git add*"
+      - "git commit*"
+      - "git push*"
+      - "rm*"
+    file_write_scope:
+      - ".vnx-data/unified_reports/**"
 
 terminal_assignments:
   T1: backend-developer
-  T2: test-engineer
+  T2: quality-engineer
   T3: frontend-developer

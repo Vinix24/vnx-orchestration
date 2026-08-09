@@ -13,18 +13,40 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 from worker_permissions import (
+    DEFAULT_CODE_WORKER_TOOLS,
     EMPTY_MCP_CONFIG,
     PermissionProfile,
     build_claude_scope_args,
     classify_permission_posture,
+    default_code_worker_profile,
     generate_claude_settings,
     generate_permission_preamble,
     load_permissions,
     match_bash_deny,
     match_file_write_scope,
     resolve_role_mcp_config,
+    resolve_worker_profile,
     validate_dispatch_permissions,
 )
+
+# ---------------------------------------------------------------------------
+# Canonical dispatched roles — the seven roles T0 actually dispatches, per the
+# role-selection table in .claude/terminals/T0/role-orchestrator.md. Each MUST
+# have a real profile in .vnx/worker_permissions.yaml (OI-1100). This list is the
+# regression contract: if a role appears here but resolves to the code-worker
+# fallback, the test goes red.
+# ---------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_PERMISSIONS_YAML = REPO_ROOT / ".vnx" / "worker_permissions.yaml"
+CANONICAL_DISPATCH_ROLES = [
+    "backend-developer",
+    "code-reviewer",
+    "frontend-developer",
+    "quality-engineer",
+    "research-analyst",
+    "security-engineer",
+    "system-architect",
+]
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -432,3 +454,148 @@ class TestClassifyPermissionPosture:
         assert "permission_profile" not in posture_off
         assert posture_on["permission_profile"] == "backend-developer"
         assert posture_on["permission_allow_pattern_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# OI-1100 — every canonical dispatched role resolves to a REAL profile, not the
+# code-worker fallback. This test is RED on main (four of the seven roles have no
+# profile and silently inherit the 15-tool permissive fallback) and GREEN on the
+# branch that adds profiles for quality-engineer / system-architect /
+# research-analyst / code-reviewer.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not REPO_PERMISSIONS_YAML.exists(),
+    reason="repo .vnx/worker_permissions.yaml not present in this checkout",
+)
+class TestCanonicalRolesHaveProfiles:
+    """Pin that every dispatched role resolves to a real YAML profile."""
+
+    def test_every_canonical_role_resolves_to_a_real_profile(self) -> None:
+        missing = []
+        fallback = []
+        for role in CANONICAL_DISPATCH_ROLES:
+            profile = resolve_worker_profile(role, REPO_PERMISSIONS_YAML)
+            if profile.is_fallback:
+                fallback.append(role)
+            elif profile.role != role:
+                missing.append((role, profile.role))
+        assert not fallback, (
+            f"canonical roles resolved to the code-worker fallback (no real profile): "
+            f"{fallback}. Each dispatched role MUST have a profile in "
+            f".vnx/worker_permissions.yaml (OI-1100)."
+        )
+        assert not missing, (
+            f"canonical roles resolved to an unexpected profile role: {missing}"
+        )
+
+    def test_canonical_roles_match_agents_registry(self) -> None:
+        """The canonical role names must exist as agents/<role>/ directories —
+        the registry is the SSOT for role names, and the yaml must follow it."""
+        agents_dir = REPO_ROOT / "agents"
+        missing_dirs = [
+            role for role in CANONICAL_DISPATCH_ROLES
+            if not (agents_dir / role).is_dir()
+        ]
+        assert not missing_dirs, (
+            f"canonical roles with no agents/<role>/ directory in the registry: "
+            f"{missing_dirs}. Role names must match the agents/ registry."
+        )
+
+    def test_build_roles_may_commit_and_push(self) -> None:
+        """OI-1100 deny-vs-duty: build roles (default_instruction says
+        'commit and push') must NOT deny git add/commit/push, or the
+        push-mandatory footer cannot be satisfied."""
+        build_roles = [
+            "backend-developer", "frontend-developer", "security-engineer",
+            "system-architect", "quality-engineer",
+        ]
+        offenders = []
+        for role in build_roles:
+            profile = load_permissions(role, REPO_PERMISSIONS_YAML)
+            for pat in profile.bash_deny_patterns:
+                if pat in ("git add*", "git commit*", "git push*"):
+                    offenders.append((role, pat))
+        assert not offenders, (
+            f"build roles deny a git op required by the push-mandatory footer: "
+            f"{offenders}. A role dispatched with the standard footer must be "
+            f"able to commit and push (OI-1100)."
+        )
+
+    def test_read_roles_deny_code_mutation(self) -> None:
+        """OI-1100: read roles (code-reviewer, research-analyst) deny Edit/
+        MultiEdit and git history mutation — they are not dispatched with the
+        push-mandatory footer, so the deny and the duty must agree."""
+        read_roles = ["code-reviewer", "research-analyst"]
+        for role in read_roles:
+            profile = load_permissions(role, REPO_PERMISSIONS_YAML)
+            assert "Edit" in profile.denied_tools, (
+                f"read role {role} must deny Edit (does not modify code)"
+            )
+            assert "MultiEdit" in profile.denied_tools, (
+                f"read role {role} must deny MultiEdit"
+            )
+            deny_set = set(profile.bash_deny_patterns)
+            assert {"git add*", "git commit*", "git push*"} <= deny_set, (
+                f"read role {role} must deny git add/commit/push"
+            )
+
+    def test_legacy_role_names_not_present(self) -> None:
+        """The old names (test-engineer, architect, database-engineer,
+        intelligence-engineer) must NOT carry profiles — they are not dispatched
+        and would otherwise shadow the canonical names via the merge."""
+        from yaml import safe_load
+        data = safe_load(REPO_PERMISSIONS_YAML.read_text()) or {}
+        profiles = data.get("profiles", {})
+        stale = [
+            r for r in ("test-engineer", "architect",
+                        "database-engineer", "intelligence-engineer")
+            if r in profiles
+        ]
+        assert not stale, (
+            f"legacy non-canonical role names still carry profiles: {stale}. "
+            f"Use the canonical registry name instead (OI-1100)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# OI-1100 — unknown role gets the EXPLICIT fallback, not a silent permissive
+# default. The fallback is restrictive (DEFAULT_CODE_WORKER_TOOLS, no MCP,
+# WebSearch/WebFetch denied) AND marked is_fallback=True AND logged.
+# ---------------------------------------------------------------------------
+
+class TestUnknownRoleExplicitFallback:
+    def test_unknown_role_is_marked_fallback(self, yaml_file: Path) -> None:
+        profile = resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
+        assert profile.is_fallback is True, (
+            "unknown role must resolve to the fallback marked is_fallback=True "
+            "(OI-1100), not a silent permissive default"
+        )
+        assert profile.role == "code-worker"
+
+    def test_unknown_role_fallback_is_restrictive(self, yaml_file: Path) -> None:
+        """The fallback carries the code-worker toolset (no MCP, WebSearch/WebFetch
+        denied) — restrictive vs blanket-skip, never silently permissive."""
+        profile = resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
+        assert set(profile.allowed_tools) == set(DEFAULT_CODE_WORKER_TOOLS)
+        assert "WebSearch" in profile.denied_tools
+        assert "WebFetch" in profile.denied_tools
+        assert profile.mcp_servers == []
+
+    def test_unknown_role_logs_warning(self, yaml_file: Path, caplog) -> None:
+        import logging
+        with caplog.at_level(logging.WARNING, logger="worker_permissions"):
+            resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
+        assert any(
+            "code-worker fallback" in rec.getMessage()
+            for rec in caplog.records
+        ), "unknown role must log an explicit warning naming the fallback (OI-1100)"
+
+    def test_none_role_is_marked_fallback(self) -> None:
+        profile = resolve_worker_profile(None)
+        assert profile.is_fallback is True
+
+    def test_known_role_not_marked_fallback(self, yaml_file: Path) -> None:
+        profile = resolve_worker_profile("backend-developer", yaml_file)
+        assert profile.is_fallback is False
+

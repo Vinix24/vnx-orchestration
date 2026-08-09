@@ -56,8 +56,15 @@ WORK_START_NO_PROGRESS = "no_progress"
 # the scoped allow-list only stalls autonomous builds on prompts for
 # un-allow-listed ops). Scoped (empty ambient MCP + acceptEdits + role
 # allow-list) is opt-in via VNX_ENFORCE_WORKER_PERMISSIONS=1 (ADR-012) or the
-# legacy VNX_WORKER_SCOPED=1. Imported defensively; if unavailable the detached
-# branch keeps a minimal inline fallback with the same default.
+# legacy VNX_WORKER_SCOPED=1.
+#
+# OI-1099: the decision predicates worker_scoped_enabled /
+# worker_permission_enforcement_enabled resolve in ONE place — the canonical
+# worker_permissions module. They are NOT re-defined here as a second default
+# that could silently diverge from the real predicate on an import fault. If the
+# sibling import is unavailable the names bind to None and the call site raises
+# (hard-fail) rather than silently picking a posture. Default direction is
+# unchanged: blanket-skip (both predicates default False) unless opted in.
 try:
     from worker_permissions import (  # noqa: E402
         EMPTY_MCP_CONFIG,
@@ -71,6 +78,13 @@ try:
 except Exception:  # pragma: no cover - sibling import is available in-tree
     EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
     _WP_AVAILABLE = False
+    # Predicates are NOT re-defined here (OI-1099): a second inline copy would let
+    # the permission posture silently diverge from worker_permissions on an import
+    # fault. Binding to None makes any call site raise instead of silently choosing
+    # blanket-skip or scoped. The default direction still comes from the real
+    # predicates when the import succeeds (both default False -> blanket-skip).
+    worker_scoped_enabled = None  # type: ignore[assignment]
+    worker_permission_enforcement_enabled = None  # type: ignore[assignment]
 
     def classify_permission_posture(argv, role=None):  # type: ignore[misc]
         # OI-864 fallback: classify from the actual argv tokens, never by
@@ -89,22 +103,6 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
                 "permission_allow_pattern_count": allow_count,
             }
         return {"permission_posture": "attached-interactive"}
-
-    def worker_scoped_enabled() -> bool:  # type: ignore[misc]
-        return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-
-    def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
-        return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
 
     def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False, working_tree_only=False):  # type: ignore[misc]
         args = ["--permission-mode", permission_mode]

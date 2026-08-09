@@ -36,6 +36,14 @@ _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # ADR-012 worker-permission enforcement flag (default OFF). Imported defensively
 # so provider_dispatch remains importable even if worker_permissions is missing.
+#
+# OI-1099: the decision predicates worker_scoped_enabled /
+# worker_permission_enforcement_enabled resolve in ONE place — the canonical
+# worker_permissions module. They are NOT re-defined here as a second default
+# that could silently diverge from the real predicate on an import fault. If the
+# sibling import is unavailable the names bind to None and the call site raises
+# (hard-fail) rather than silently picking a posture. Default direction is
+# unchanged: blanket-skip (both predicates default False) unless opted in.
 try:
     from worker_permissions import (
         worker_permission_enforcement_enabled,
@@ -43,15 +51,13 @@ try:
         classify_permission_posture,
     )
 except Exception:  # pragma: no cover - sibling import is available in-tree
-    def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
-        return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
-            "1", "true", "yes", "on",
-        )
-
-    def worker_scoped_enabled() -> bool:  # type: ignore[misc]
-        return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
-            "1", "true", "yes", "on",
-        )
+    # Predicates are NOT re-defined here (OI-1099): a second inline copy would let
+    # the permission posture silently diverge from worker_permissions on an import
+    # fault. Binding to None makes any call site raise instead of silently choosing
+    # blanket-skip or scoped. Default direction still comes from the real predicates
+    # when the import succeeds (both default False -> blanket-skip).
+    worker_permission_enforcement_enabled = None  # type: ignore[assignment]
+    worker_scoped_enabled = None  # type: ignore[assignment]
 
     def classify_permission_posture(argv, role=None):  # type: ignore[misc]
         # OI-864 fallback: classify from actual argv tokens, not env re-reads.

@@ -52,6 +52,25 @@ DEFAULT_CODE_WORKER_TOOLS = [
     "Bash(pip:*)", "Bash(rm:*)", "Bash(chmod:*)", "Bash(mkdir:*)",
 ]
 
+# Restrictive file_write_scope for the code-worker fallback profile.
+# These are NOT used as fnmatch globs — fnmatch ``*`` matches ``/`` on Unix,
+# so ``*`` through ``*/*/*/*/*/*`` would match every file path at any depth,
+# including absolute paths.  Instead, :func:`match_file_write_scope` detects
+# this fallback list and delegates to :func:`_check_fallback_write_scope`,
+# which counts actual path segments (split on ``/``) and rejects absolute
+# paths with ``os.path.isabs()``.  Maximum depth of 6 segments covers the
+# vast majority of source paths; the report obligation is exempted separately
+# in the hook so a worker can always write its completion report to
+# $VNX_DATA_DIR/unified_reports/.
+FALLBACK_FILE_WRITE_SCOPE = [
+    "*",           # root-level files
+    "*/*",         # 1 level deep
+    "*/*/*",       # 2 levels deep
+    "*/*/*/*",     # 3 levels deep
+    "*/*/*/*/*",   # 4 levels deep
+    "*/*/*/*/*/*",  # 5 levels deep
+]
+
 # Empty ambient-MCP config string handed to `claude --mcp-config`. Paired with
 # `--strict-mcp-config` this makes a worker reach ZERO MCP servers (no Supabase,
 # n8n, Gmail, etc.) — the core security win of the interim capability scoping.
@@ -101,6 +120,13 @@ class PermissionProfile:
     bash_deny_patterns: list[str] = field(default_factory=list)
     file_write_scope: list[str] = field(default_factory=list)
     mcp_servers: list[str] = field(default_factory=list)
+    # True when this profile is the restrictive code-worker fallback rather than a
+    # real YAML profile for *role* (OI-1100). Carried so receipts / posture
+    # classification can surface that an unknown role was dispatched instead of
+    # silently inheriting the permissive-looking default. The fallback IS
+    # restrictive vs blanket-skip (no MCP, WebSearch/WebFetch denied, acceptEdits);
+    # the point is visibility, not looser tools.
+    is_fallback: bool = False
 
 
 def _load_yaml(path: Path) -> dict:
@@ -121,7 +147,9 @@ def load_permissions(role: str, yaml_path: Path | None = None) -> PermissionProf
     set after module import).  Pass an explicit path in tests.
 
     Returns a profile with empty lists (no restrictions) when the role is not
-    found or the YAML cannot be loaded — callers remain functional.
+    found or the YAML cannot be loaded.  Callers (resolve_worker_profile) then
+    fall back to the restrictive code-worker default — this function only
+    reports the miss, it does not choose the fallback itself.
     """
     if yaml_path is None:
         yaml_path = _resolve_permissions_yaml()
@@ -129,7 +157,11 @@ def load_permissions(role: str, yaml_path: Path | None = None) -> PermissionProf
     profiles = data.get("profiles", {})
     raw = profiles.get(role)
     if raw is None:
-        logger.warning("worker_permissions: no profile found for role '%s', using empty profile", role)
+        logger.warning(
+            "worker_permissions: no profile found for role '%s' — caller will fall back "
+            "to the restrictive code-worker default (limited file_write_scope, no MCP)",
+            role,
+        )
         return PermissionProfile(role=role)
 
     return PermissionProfile(
@@ -257,11 +289,22 @@ def default_code_worker_profile() -> PermissionProfile:
     Used when no role-specific profile is available (unknown role, or a role whose
     YAML profile declares no allowed_tools) so the scoped spawn still permits the
     essential code-worker tools — never MCP, never skip-permissions.
+
+    The returned profile is marked ``is_fallback=True`` (OI-1100) so callers and
+    receipt classification can surface that an unknown/empty role was resolved,
+    rather than silently inheriting a profile that looks permissive.
+    Carries a depth-limited file_write_scope (FALLBACK_FILE_WRITE_SCOPE) so the
+    fallback is genuinely restrictive on the file-write dimension: only worktree-
+    relative paths up to 6 levels deep are in scope. Absolute paths (outside the
+    worktree) are excluded. The report obligation is exempted in the hook so a
+    worker can always write its completion report to $VNX_DATA_DIR/unified_reports/.
     """
     return PermissionProfile(
         role="code-worker",
         allowed_tools=list(DEFAULT_CODE_WORKER_TOOLS),
         denied_tools=["WebSearch", "WebFetch"],
+        is_fallback=True,
+        file_write_scope=list(FALLBACK_FILE_WRITE_SCOPE),
     )
 
 
@@ -274,11 +317,37 @@ def resolve_worker_profile(
     A missing/unknown role — or a role whose profile declares no allowed_tools —
     yields :func:`default_code_worker_profile` so capability scoping never strips a
     headless worker of the tools it needs to write code and commit.
+
+    OI-1100: the fallback is now EXPLICIT and logged, not silent. An unknown role
+    name (or a role with an empty profile) emits a WARNING naming the role and the
+    fallback it received, and the returned profile carries ``is_fallback=True``.
+    The fallback is restrictive vs blanket-skip (no MCP, WebSearch/WebFetch denied,
+    acceptEdits); the change is visibility, so an unknown role can no longer hide
+    inside a permissive-looking default. ``load_permissions`` already logs its own
+    warning for a missing profile; this second warning records the resolve-time
+    decision (fallback taken) which load_permissions alone cannot convey.
+    The fallback profile carries a depth-limited file_write_scope
+    (FALLBACK_FILE_WRITE_SCOPE) — genuine restriction on the write dimension, not
+    an empty allow-all.  The report obligation is exempted at the hook layer so a
+    worker can always write its completion report.
     """
     if role:
         profile = load_permissions(role, yaml_path)
         if profile.allowed_tools:
             return profile
+        logger.warning(
+            "resolve_worker_profile: role '%s' has no usable profile "
+            "(absent or empty allowed_tools) — resolving to the restrictive "
+            "code-worker fallback (is_fallback=True). A role dispatched with the "
+            "standard footer must be able to deliver; if '%s' is meant to be a "
+            "dispatch role, add a profile for it in worker_permissions.yaml.",
+            role, role,
+        )
+    else:
+        logger.warning(
+            "resolve_worker_profile: role is None — resolving to the restrictive "
+            "code-worker fallback (is_fallback=True)."
+        )
     return default_code_worker_profile()
 
 
@@ -475,10 +544,37 @@ def match_bash_deny(command: str, profile: PermissionProfile) -> Optional[str]:
     return None
 
 
+def _check_fallback_write_scope(file_path: str, max_depth: int = 6) -> bool:
+    """Check whether *file_path* is within the fallback depth limit.
+
+    Counts path segments (split on ``/``) and allows up to *max_depth* segments.
+    Absolute paths (e.g. ``/etc/passwd``) are always outside scope — they cannot
+    be a relative worktree path.  This function exists because fnmatch ``*``
+    matches ``/`` on Unix and therefore cannot enforce a depth ceiling:
+    ``fnmatch.fnmatch("a/b/c/d/e/f/out.md", "*") == True`` — every entry in
+    FALLBACK_FILE_WRITE_SCOPE matches every file path regardless of depth.
+    """
+    if not file_path:
+        return False
+    if os.path.isabs(file_path):
+        return False  # absolute paths are never within a worktree-relative scope
+    parts = Path(file_path).parts
+    return len(parts) <= max_depth
+
+
 def match_file_write_scope(file_path: str, profile: PermissionProfile) -> bool:
-    """Return True if file_path is within any of the profile's file_write_scope globs."""
+    """Return True if file_path is within any of the profile's file_write_scope globs.
+
+    An empty scope means no restriction (returns True).  The fallback
+    profile's FALLBACK_FILE_WRITE_SCOPE entries are NOT globbed with fnmatch
+    (fnmatch ``*`` matches ``/``, so every entry matches every path) — they are
+    routed through :func:`_check_fallback_write_scope` which counts actual path
+    segments and rejects absolute paths.
+    """
     if not profile.file_write_scope:
         return True
+    if profile.file_write_scope == FALLBACK_FILE_WRITE_SCOPE:
+        return _check_fallback_write_scope(file_path)
     for scope in profile.file_write_scope:
         if fnmatch.fnmatch(file_path, scope):
             return True
