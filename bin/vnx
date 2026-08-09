@@ -326,6 +326,8 @@ Worktree commands:
   worktree-stop      Merge intelligence back to main and clean up
   worktree-refresh   Update intelligence snapshot from main
   worktree-status    Show worktree isolation status
+  worktree-release   Governed release path for locked worktrees (OI-1052)
+                     Dry-run default; --apply to unlock, rescue, and remove
 
 Pool commands (elastic worker pool management):
   pool status [--project <id>] [--pool-id <p>] [--json]  Show pool state
@@ -2468,6 +2470,9 @@ main() {
       ;;
     worktree-status)
       cmd_worktree_status
+      ;;
+    worktree-release)
+      cmd_worktree_release "$@"
       ;;
     snapshot)
       cmd_snapshot "$@"
