@@ -1,9 +1,11 @@
-"""test_envelope_govern_contract_observe.py — OI-1017/OI-1048 L2: observable
+"""test_envelope_govern_contract_enforce.py — OI-1017/OI-1048: binding
 body-contract validation on envelope lanes.
 
 Verifies that _govern() emits a warnings[] entry with a filterable
-code when the emitted unified report fails the body contract, while
-NOT changing the receipt status (observable mode, not yet binding).
+code when the emitted unified report fails the body contract, AND
+overrides the receipt status to "contract_invalid" when the adapter
+claimed success (binding mode — supersedes the observable L2 phase
+from #1415, db7a6046).
 
 Without the fix:
 - _govern() writes a report and receipt without body-contract validation
@@ -14,8 +16,11 @@ With the fix:
 - _govern() validates the report body after emit_unified_report
 - On violation, a warnings[] entry with code="report_contract_violated"
   is appended to the receipt
-- The log carries VNX_CONTRACT_OBSERVE_VIOLATION prefix
-- The receipt status IS NOT changed (binding is a separate PR)
+- The log carries VNX_CONTRACT_ENFORCE_VIOLATION prefix
+- When the adapter claimed success, the receipt status is overridden
+  to "contract_invalid" (binding, not observable)
+- When the adapter already failed, the status stays "failure" (contract
+  violation is logged but the original failure takes precedence)
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ import pytest
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
-from envelope_govern import _CONTRACT_OBSERVE_MARKER, _govern
+from envelope_govern import _CONTRACT_ENFORCE_MARKER, _govern
 from envelope_types import EnvelopeSpec, _AdapterResult
 
 
@@ -146,16 +151,24 @@ def _run_govern_with_mocks(spec, result, *, report_path_override=None):
 
 
 # ---------------------------------------------------------------------------
-# Tests — observable contract validation
+# Tests — binding contract validation
 # ---------------------------------------------------------------------------
 
 
-class TestEnvelopeGovernContractObserve:
-    """OI-1017/OI-1048 L2: observable body-contract validation on envelope lanes."""
+class TestEnvelopeGovernContractEnforce:
+    """OI-1017/OI-1048: binding body-contract validation on envelope lanes.
 
-    def test_invalid_report_produces_warning_in_receipt(self, spec, success_result):
+    Supersedes the observable-only L2 phase (#1415, db7a6046). When
+    validate_body() rejects the report and the adapter claimed success,
+    the receipt status is overridden to "contract_invalid".
+    """
+
+    def test_invalid_report_overrides_status_to_contract_invalid(
+        self, spec, success_result,
+    ):
         """A report without the four mandatory headings must produce a
-        warnings[] entry in the receipt — observable, not binding."""
+        warnings[] entry AND override status to "contract_invalid" when
+        the adapter claimed success — binding, not observable."""
         # Pre-create a deliberately invalid report at the path
         # emit_unified_report will be mocked to return.
         report_path = _write_invalid_report(spec.data_dir, spec.dispatch_id)
@@ -180,14 +193,14 @@ class TestEnvelopeGovernContractObserve:
             f"warning code must be 'report_contract_violated', got {warning.get('code')!r}"
         )
         assert warning["severity"] == "warn"
-        assert _CONTRACT_OBSERVE_MARKER in warning["message"], (
+        assert _CONTRACT_ENFORCE_MARKER in warning["message"], (
             f"warning message must contain the greppable marker "
-            f"{_CONTRACT_OBSERVE_MARKER!r}"
+            f"{_CONTRACT_ENFORCE_MARKER!r}"
         )
-        # Observable mode: receipt status is NOT changed.
-        assert call_kwargs["status"] == "success", (
-            "receipt status must remain 'success' in observable mode "
-            "(binding is a separate PR)"
+        # Binding mode: receipt status IS overridden when adapter claimed success.
+        assert call_kwargs["status"] == "contract_invalid", (
+            "receipt status must be 'contract_invalid' when adapter claimed "
+            "success but the report body violates the contract (binding mode)"
         )
 
     def test_valid_report_produces_no_warning(self, spec, success_result):
@@ -226,7 +239,9 @@ class TestEnvelopeGovernContractObserve:
 
     def test_failure_report_still_validates_contract(self, spec):
         """A failed dispatch with an invalid report must still produce
-        a contract warning — the check runs regardless of status."""
+        a contract warning — the check runs regardless of status.
+        The status stays "failure" (original failure takes precedence
+        over the contract violation)."""
         report_path = _write_invalid_report(spec.data_dir, spec.dispatch_id)
 
         failed_result = _AdapterResult(
@@ -246,7 +261,8 @@ class TestEnvelopeGovernContractObserve:
         )
         warning = call_kwargs["warnings"][0]
         assert warning["code"] == "report_contract_violated"
-        # Status remains "failure" — observable, not binding.
+        # Status remains "failure" — the original failure takes precedence;
+        # contract_invalid override only fires when adapter claimed success.
         assert call_kwargs["status"] == "failure"
 
     def test_warning_is_filterable_by_code(self, spec, success_result):
