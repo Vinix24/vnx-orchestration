@@ -79,25 +79,27 @@ VNX_TEMPLATE: dict[str, Any] = yaml.safe_load(textwrap.dedent("""\
         mcp_servers:
           - "notion"
 
-      test-engineer:
-        allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
-        denied_tools: [WebSearch, WebFetch, MultiEdit]
+      quality-engineer:
+        allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+        denied_tools: [WebSearch, WebFetch]
         bash_allow_patterns:
           - "pytest*"
           - "python3 -m pytest*"
           - "git add*"
           - "git commit*"
+          - "git push origin*"
         bash_deny_patterns:
           - "rm -rf*"
-          - "git push*"
-          - "git reset*"
+          - "git reset --hard*"
+          - "git push --force*"
+          - "git push -f*"
         file_write_scope:
           - "tests/**"
           - "scripts/check_*"
 
     terminal_assignments:
       T1: backend-developer
-      T2: test-engineer
+      T2: quality-engineer
       T3: frontend-developer
 """))
 
@@ -128,25 +130,27 @@ PROJECT_WITH_SRC_SCOPE: dict[str, Any] = yaml.safe_load(textwrap.dedent("""\
           - "dashboard/**"
           - "src/**"
 
-      test-engineer:
-        allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
-        denied_tools: [WebSearch, WebFetch, MultiEdit]
+      quality-engineer:
+        allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+        denied_tools: [WebSearch, WebFetch]
         bash_allow_patterns:
           - "pytest*"
           - "python3 -m pytest*"
           - "git add*"
           - "git commit*"
+          - "git push origin*"
         bash_deny_patterns:
           - "rm -rf*"
-          - "git push*"
-          - "git reset*"
+          - "git reset --hard*"
+          - "git push --force*"
+          - "git push -f*"
         file_write_scope:
           - "tests/**"
           - "scripts/check_*"
 
     terminal_assignments:
       T1: backend-developer
-      T2: test-engineer
+      T2: quality-engineer
       T3: frontend-developer
 """))
 
@@ -311,14 +315,14 @@ class TestTerminalAssignments:
     def test_project_terminal_override_wins(self) -> None:
         project = {
             "profiles": {},
-            "terminal_assignments": {"T1": "seocrawler-extractor", "T2": "test-engineer"},
+            "terminal_assignments": {"T1": "seocrawler-extractor", "T2": "quality-engineer"},
         }
         result = merge_permissions(project, VNX_TEMPLATE)
         ta = result["terminal_assignments"]
         assert ta["T1"] == "seocrawler-extractor", (
             "project terminal override for T1 was overwritten by VNX template"
         )
-        assert ta["T2"] == "test-engineer"   # same value — no conflict
+        assert ta["T2"] == "quality-engineer"   # same value — no conflict
 
     def test_vnx_baseline_terminals_present_when_project_does_not_override(self) -> None:
         project = {"profiles": {}, "terminal_assignments": {}}
@@ -358,7 +362,7 @@ class TestFirstTimeInit:
     def test_full_mode_generates_all_roles(self) -> None:
         result = generate_full_permissions(VNX_TEMPLATE)
         assert "backend-developer" in result["profiles"]
-        assert "test-engineer" in result["profiles"]
+        assert "quality-engineer" in result["profiles"]
 
     def test_full_mode_adds_vnx_meta(self) -> None:
         result = generate_full_permissions(VNX_TEMPLATE)

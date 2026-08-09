@@ -101,6 +101,13 @@ class PermissionProfile:
     bash_deny_patterns: list[str] = field(default_factory=list)
     file_write_scope: list[str] = field(default_factory=list)
     mcp_servers: list[str] = field(default_factory=list)
+    # True when this profile is the restrictive code-worker fallback rather than a
+    # real YAML profile for *role* (OI-1100). Carried so receipts / posture
+    # classification can surface that an unknown role was dispatched instead of
+    # silently inheriting the permissive-looking default. The fallback IS
+    # restrictive vs blanket-skip (no MCP, WebSearch/WebFetch denied, acceptEdits);
+    # the point is visibility, not looser tools.
+    is_fallback: bool = False
 
 
 def _load_yaml(path: Path) -> dict:
@@ -257,11 +264,16 @@ def default_code_worker_profile() -> PermissionProfile:
     Used when no role-specific profile is available (unknown role, or a role whose
     YAML profile declares no allowed_tools) so the scoped spawn still permits the
     essential code-worker tools — never MCP, never skip-permissions.
+
+    The returned profile is marked ``is_fallback=True`` (OI-1100) so callers and
+    receipt classification can surface that an unknown/empty role was resolved,
+    rather than silently inheriting a profile that looks permissive.
     """
     return PermissionProfile(
         role="code-worker",
         allowed_tools=list(DEFAULT_CODE_WORKER_TOOLS),
         denied_tools=["WebSearch", "WebFetch"],
+        is_fallback=True,
     )
 
 
@@ -274,11 +286,33 @@ def resolve_worker_profile(
     A missing/unknown role — or a role whose profile declares no allowed_tools —
     yields :func:`default_code_worker_profile` so capability scoping never strips a
     headless worker of the tools it needs to write code and commit.
+
+    OI-1100: the fallback is now EXPLICIT and logged, not silent. An unknown role
+    name (or a role with an empty profile) emits a WARNING naming the role and the
+    fallback it received, and the returned profile carries ``is_fallback=True``.
+    The fallback is restrictive vs blanket-skip (no MCP, WebSearch/WebFetch denied,
+    acceptEdits); the change is visibility, so an unknown role can no longer hide
+    inside a permissive-looking default. ``load_permissions`` already logs its own
+    warning for a missing profile; this second warning records the resolve-time
+    decision (fallback taken) which load_permissions alone cannot convey.
     """
     if role:
         profile = load_permissions(role, yaml_path)
         if profile.allowed_tools:
             return profile
+        logger.warning(
+            "resolve_worker_profile: role '%s' has no usable profile "
+            "(absent or empty allowed_tools) — resolving to the restrictive "
+            "code-worker fallback (is_fallback=True). A role dispatched with the "
+            "standard footer must be able to deliver; if '%s' is meant to be a "
+            "dispatch role, add a profile for it in worker_permissions.yaml.",
+            role, role,
+        )
+    else:
+        logger.warning(
+            "resolve_worker_profile: role is None — resolving to the restrictive "
+            "code-worker fallback (is_fallback=True)."
+        )
     return default_code_worker_profile()
 
 
